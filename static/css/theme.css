@@ -164,9 +164,9 @@ input[type=range] {
   height: 4px;
   border-radius: 2px;
   outline: none;
-  border: none;
+  border: 1px solid var(--border);
   appearance: none;
-  background: var(--raised);
+  background: var(--bg);
   cursor: pointer;
 }
 input[type=range]::-webkit-slider-thumb {

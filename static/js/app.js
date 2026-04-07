@@ -67,11 +67,14 @@ function defaultPanel(id) {
     showTermBand: true,
 
     // Historical-specific
-    histDte:       30,
-    histDeltas:    [25, 50, 75],
-    histLookback:  180,       // days from current date
-    histFreq:      'daily',   // daily | intraday
-    histStart:     null,      // set on load
+    histMode:        'by_delta',     // by_delta | by_dte
+    histDte:         30,             // single DTE in by_delta mode
+    histDelta:       50,             // single delta in by_dte mode
+    histDeltas:      [25, 50, 75],   // multi-deltas in by_delta mode
+    histDtes:        [7, 30, 90],    // multi-dtes in by_dte mode
+    histLookback:    180,
+    histDteMenuOpen:    false,
+    histDeltaMenuOpen:  false,
 
     // Concavity-specific
     concavDte:         30,
@@ -274,8 +277,13 @@ document.addEventListener('alpine:init', () => {
           const start = this.mode === 'intraday'
             ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
             : offsetDate(end, -(panel.histLookback));
-          p.set('dte',         panel.histDte);
-          p.set('deltas',      panel.histDeltas.join(','));
+          if (panel.histMode === 'by_delta') {
+            p.set('dte',    panel.histDte);
+            p.set('deltas', panel.histDeltas.join(','));
+          } else {
+            p.set('delta', panel.histDelta);
+            p.set('dtes',  panel.histDtes.join(','));
+          }
           p.set('start',       start);
           p.set('end',         end);
           p.set('target_time', this.time);
@@ -347,9 +355,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     _seriesColor(type, s, i) {
-      // Delegate to the same palette charts.js uses so legend matches lines
-      if (s.dte   !== undefined) return dteColor(s.dte);
-      if (s.delta !== undefined) return deltaColor(s.delta);
+      // Historical lines carry both delta and dte (only one varies). Use the
+      // _colorBy hint if set, otherwise prefer delta over dte.
+      if (s._colorBy === 'dte'   && s.dte   != null) return dteColor(s.dte);
+      if (s._colorBy === 'delta' && s.delta != null) return deltaColor(s.delta);
+      if (s.delta != null) return deltaColor(s.delta);
+      if (s.dte   != null) return dteColor(s.dte);
       return dateColor(i);
     },
 
@@ -458,6 +469,13 @@ document.addEventListener('alpine:init', () => {
       const idx = panel.histDeltas.indexOf(delta);
       idx >= 0 ? panel.histDeltas.splice(idx, 1) : panel.histDeltas.push(delta);
       panel.histDeltas.sort((a, b) => a - b);
+      this.loadPanel(panel);
+    },
+
+    toggleHistDte(panel, dte) {
+      const idx = panel.histDtes.indexOf(dte);
+      idx >= 0 ? panel.histDtes.splice(idx, 1) : panel.histDtes.push(dte);
+      panel.histDtes.sort((a, b) => a - b);
       this.loadPanel(panel);
     },
 

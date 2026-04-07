@@ -40,8 +40,10 @@ def _delta_label(pd: int) -> str:
 
 @router.get("")
 async def get_historical(
-    dte:         int = Query(30),
-    deltas:      str = Query("25,50,75", description="Comma-separated put_delta integers"),
+    dte:         Optional[int] = Query(None),
+    dtes:        Optional[str] = Query(None, description="Comma-separated DTEs (multi-DTE mode)"),
+    delta:       Optional[int] = Query(None),
+    deltas:      Optional[str] = Query(None, description="Comma-separated put_deltas (multi-delta mode)"),
     start:       str = Query(..., description="YYYY-MM-DD"),
     end:         str = Query(..., description="YYYY-MM-DD"),
     target_time: str = Query("15:45", description="HH:MM snapshot for daily mode"),
@@ -50,15 +52,30 @@ async def get_historical(
     pool=Depends(get_pool),
 ) -> dict:
     """
-    Time series of a surface metric for a fixed DTE across multiple deltas.
-
-    daily    → one row per trade_date (closest snapshot to target_time).
-    intraday → every snapshot within [start, end]; capped at 90 calendar days.
+    Time series of a surface metric. Either:
+      - Multi-Delta:  one DTE, several put_deltas (one line per delta)
+      - Multi-DTE:    one put_delta, several DTEs (one line per DTE)
     """
-    metric     = _validate_metric(metric)
-    delta_list = _parse_ints(deltas)
-    if not delta_list:
-        raise HTTPException(400, "deltas must not be empty")
+    metric = _validate_metric(metric)
+
+    # Resolve which dimension is the multi-dim
+    if deltas and dte is not None:
+        dimension  = "delta"
+        delta_list = _parse_ints(deltas)
+        dte_list   = [dte]
+        fixed_dte  = dte
+        fixed_delta = None
+    elif dtes and delta is not None:
+        dimension  = "dte"
+        dte_list   = _parse_ints(dtes)
+        delta_list = [delta]
+        fixed_dte  = None
+        fixed_delta = delta
+    else:
+        raise HTTPException(400, "Provide either (dte + deltas) or (delta + dtes)")
+
+    if not delta_list or not dte_list:
+        raise HTTPException(400, "delta/dte lists must not be empty")
 
     start_d = date_type.fromisoformat(start)
     end_d   = date_type.fromisoformat(end)
@@ -76,106 +93,88 @@ async def get_historical(
             rows = await conn.fetch(
                 f"""
                 WITH closest AS (
-                    SELECT DISTINCT ON (trade_date, put_delta)
-                        trade_date,
-                        quote_time,
-                        put_delta,
-                        {metric} AS value
+                    SELECT DISTINCT ON (trade_date, dte, put_delta)
+                        trade_date, quote_time, dte, put_delta,
+                        iv, price, theta, vega, gamma
                     FROM spx_surface
-                    WHERE dte        = $1
+                    WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
                       AND trade_date BETWEEN $3 AND $4
-                    ORDER BY trade_date, put_delta,
+                    ORDER BY trade_date, dte, put_delta,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 )
-                SELECT trade_date, put_delta, value
+                SELECT trade_date, dte, put_delta, iv, price, theta, vega, gamma
                 FROM closest
-                ORDER BY trade_date, put_delta
+                ORDER BY trade_date, dte, put_delta
                 """,
-                dte, delta_list, start_d, end_d, time_type.fromisoformat(target_time),
+                dte_list, delta_list, start_d, end_d, time_type.fromisoformat(target_time),
             )
-            # Labels are dates
-            dates = sorted({str(r["trade_date"]) for r in rows})
-            labels = dates
-
-            by_delta: dict[int, dict[str, float]] = {d: {} for d in delta_list}
-            for r in rows:
-                by_delta[r["put_delta"]][str(r["trade_date"])] = r["value"]
-
-            series = [
-                {
-                    "label":  _delta_label(d),
-                    "delta":  d,
-                    "dte":    dte,
-                    "labels": labels,
-                    "values": [by_delta[d].get(lbl) for lbl in labels],
-                }
-                for d in delta_list
-            ]
-
-        else:  # intraday
+            label_keys = sorted({str(r["trade_date"]) for r in rows})
+            row_key = lambda r: str(r["trade_date"])
+        else:
             rows = await conn.fetch(
-                f"""
-                SELECT trade_date, quote_time, put_delta, {metric} AS value
+                """
+                SELECT trade_date, quote_time, dte, put_delta,
+                       iv, price, theta, vega, gamma
                 FROM spx_surface
-                WHERE dte        = $1
+                WHERE dte        = ANY($1)
                   AND put_delta  = ANY($2)
                   AND trade_date BETWEEN $3 AND $4
-                ORDER BY trade_date, quote_time, put_delta
+                ORDER BY trade_date, quote_time, dte, put_delta
                 """,
-                dte, delta_list, start_d, end_d,
+                dte_list, delta_list, start_d, end_d,
             )
-            # Labels are "YYYY-MM-DD HH:MM"
-            timestamps = sorted({
-                f"{r['trade_date']} {str(r['quote_time'])[:5]}"
-                for r in rows
+            label_keys = sorted({
+                f"{r['trade_date']} {str(r['quote_time'])[:5]}" for r in rows
             })
-            labels = timestamps
+            row_key = lambda r: f"{r['trade_date']} {str(r['quote_time'])[:5]}"
 
-            by_delta = {d: {} for d in delta_list}
-            for r in rows:
-                ts  = f"{r['trade_date']} {str(r['quote_time'])[:5]}"
-                by_delta[r["put_delta"]][ts] = r["value"]
+    # Pull selected metric value out of each row and stash full metric set
+    def _metrics(r):
+        return {"iv": r["iv"], "price": r["price"], "theta": r["theta"],
+                "vega": r["vega"], "gamma": r["gamma"]}
+    metric_value = lambda r: r[metric]
 
-            series = [
-                {
-                    "label":  _delta_label(d),
-                    "delta":  d,
-                    "dte":    dte,
-                    "labels": labels,
-                    "values": [by_delta[d].get(lbl) for lbl in labels],
-                }
-                for d in delta_list
-            ]
-
-    # Summary stats for each series
-    for s in series:
-        vals = [v for v in s["values"] if v is not None]
-        if vals:
-            s["stats"] = {
-                "mean":    round(sum(vals) / len(vals), 4),
-                "minimum": round(min(vals), 4),
-                "maximum": round(max(vals), 4),
-                "current": round(vals[-1], 4),
-            }
-
-    # Top-level stats list (one entry per series) for the panel footer
-    stats = [
-        {
-            "label":   s["label"],
-            "delta":   s["delta"],
-            "current": s.get("stats", {}).get("current"),
-            "mean":    s.get("stats", {}).get("mean"),
-        }
-        for s in series
-    ]
+    # Bucket rows into series — one per (dte, put_delta) combo, but we always
+    # have len(dte_list)*len(delta_list) == len(dte_list)+len(delta_list)-1 == n_lines
+    if dimension == "delta":
+        # one line per delta
+        bucket: dict[int, dict[str, dict]] = {d: {} for d in delta_list}
+        for r in rows:
+            bucket[r["put_delta"]][row_key(r)] = {"value": metric_value(r), **_metrics(r)}
+        series = []
+        for d in delta_list:
+            entries = bucket[d]
+            series.append({
+                "label":   _delta_label(d),
+                "delta":   d,
+                "dte":     fixed_dte,
+                "labels":  label_keys,
+                "values":  [entries.get(k, {}).get("value") for k in label_keys],
+                "metrics": [entries.get(k) for k in label_keys],
+            })
+    else:
+        # one line per dte
+        bucket = {d: {} for d in dte_list}
+        for r in rows:
+            bucket[r["dte"]][row_key(r)] = {"value": metric_value(r), **_metrics(r)}
+        series = []
+        for d in dte_list:
+            entries = bucket[d]
+            series.append({
+                "label":   f"{d}D",
+                "dte":     d,
+                "delta":   fixed_delta,
+                "labels":  label_keys,
+                "values":  [entries.get(k, {}).get("value") for k in label_keys],
+                "metrics": [entries.get(k) for k in label_keys],
+            })
 
     return {
-        "freq":   freq,
-        "dte":    dte,
-        "metric": metric,
-        "start":  start,
-        "end":    end,
-        "series": series,
-        "stats":  stats,
+        "freq":      freq,
+        "dimension": dimension,
+        "metric":    metric,
+        "start":     start,
+        "end":       end,
+        "series":    series,
     }

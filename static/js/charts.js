@@ -384,46 +384,60 @@ function buildTerm(data, pctFmt, yLabel) {
 // ── Historical time series ────────────────────────────────────────────────────
 
 function buildHistorical(data, pctFmt, yLabel) {
-  const { series = [] } = data;
+  const { series = [], dimension } = data;
   if (!series.length) return emptyConfig('No data');
 
-  // All series share the same labels array
+  // All series share the same labels array (real labels, full strings)
   const labels = series[0].labels ?? [];
 
-  // Thin labels for dense time series
-  const maxTicks = 8;
-  const step     = Math.max(1, Math.floor(labels.length / maxTicks));
-  const tickLabels = labels.map((l, i) => (i % step === 0 ? l : ''));
-
   const datasets = series.map((s, i) => {
-    const color = s.delta !== undefined ? deltaColor(s.delta) : dateColor(i);
+    const color = (dimension === 'dte')
+      ? dteColor(s.dte)
+      : deltaColor(s.delta);
     return {
       label:       s.label,
       data:        s.values,
       borderColor: color,
-      backgroundColor: hexToRgba(color, 0.07),
       tension:     0.3,
       pointRadius: 0,
-      fill:        i === 0,    // fill only the first series
+      fill:        false,
       borderWidth: 1.8,
+      _metrics:    s.metrics,
     };
   });
 
+  const plugins = basePlugins();
+  plugins.tooltip = {
+    ...plugins.tooltip,
+    mode: 'index',
+    intersect: false,
+    callbacks: {
+      title: (items) => items.length ? labels[items[0].dataIndex] || '' : '',
+      label: (ctx) => {
+        const m = ctx.dataset._metrics?.[ctx.dataIndex];
+        if (!m) return `${ctx.dataset.label}: ${ctx.parsed.y}`;
+        const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        const ivPct = m.iv == null ? '—' : (m.iv * 100).toFixed(2) + '%';
+        return [
+          `${ctx.dataset.label}`,
+          `  IV:    ${ivPct}`,
+          `  Price: ${fmt(m.price)}`,
+          `  Theta: ${fmt(m.theta, 3)}`,
+          `  Vega:  ${fmt(m.vega, 3)}`,
+          `  Gamma: ${fmt(m.gamma, 5)}`,
+        ];
+      },
+    },
+  };
+
   return {
     type: 'line',
-    data: { labels: tickLabels, datasets },
+    data: { labels, datasets },
     options: {
       responsive:          true,
       maintainAspectRatio: false,
       animation:           false,
-      plugins: {
-        ...basePlugins(),
-        tooltip: {
-          ...basePlugins().tooltip,
-          mode:      'index',
-          intersect: false,
-        },
-      },
+      plugins,
       scales: {
         ...baseScales(yLabel, undefined, undefined, pctFmt),
         x: {

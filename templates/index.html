@@ -280,21 +280,47 @@
           <!-- ── HISTORICAL controls ──────────────────────────────────── -->
           <template x-if="panel.type === 'historical'">
             <div style="display:contents;">
-              <!-- DTE -->
-              <div class="p-dd">
-                <select x-model.number="panel.histDte" @change="loadPanel(panel)">
-                  <template x-for="d in COMMON_DTES" :key="d">
-                    <option :value="d" x-text="d + 'D'"></option>
-                  </template>
-                </select>
+              <!-- Mode toggle: Multi-Δ vs Multi-DTE -->
+              <div class="p-seg">
+                <span :class="{on: panel.histMode==='by_delta'}"
+                      @click="panel.histMode='by_delta'; loadPanel(panel)">Multi-Δ</span>
+                <span :class="{on: panel.histMode==='by_dte'}"
+                      @click="panel.histMode='by_dte'; loadPanel(panel)">Multi-DTE</span>
               </div>
 
-              <!-- Delta chips -->
-              <template x-for="d in COMMON_DELTAS" :key="d">
-                <div class="p-chip"
-                     :class="{on: panel.histDeltas.includes(d)}"
-                     @click="toggleHistDelta(panel, d)"
-                     x-text="deltaLabel(d)">
+              <!-- by_delta: single DTE dropdown + multi-delta popover -->
+              <template x-if="panel.histMode === 'by_delta'">
+                <div style="display:contents;">
+                  <div class="p-dd">
+                    <select x-model.number="panel.histDte" @change="loadPanel(panel)">
+                      <template x-for="d in ALL_DTES" :key="'hd-'+d">
+                        <option :value="d" x-text="d + 'D'"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="p-chip"
+                       @click="panel.histDeltaMenuOpen=!panel.histDeltaMenuOpen"
+                       @click.outside="panel.histDeltaMenuOpen=false">
+                    <span x-text="panel.histDeltas.length + ' Δ ▾'"></span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- by_dte: single delta dropdown + multi-dte popover -->
+              <template x-if="panel.histMode === 'by_dte'">
+                <div style="display:contents;">
+                  <div class="p-dd">
+                    <select x-model.number="panel.histDelta" @change="loadPanel(panel)">
+                      <template x-for="d in ALL_DELTAS" :key="'hdl-'+d">
+                        <option :value="d" x-text="deltaLabel(d)"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="p-chip"
+                       @click="panel.histDteMenuOpen=!panel.histDteMenuOpen"
+                       @click.outside="panel.histDteMenuOpen=false">
+                    <span x-text="panel.histDtes.length + ' DTEs ▾'"></span>
+                  </div>
                 </div>
               </template>
 
@@ -356,6 +382,32 @@
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
             <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
+        </div>
+
+        <!-- Historical delta picker popover -->
+        <div class="p-date-menu" x-show="panel.histDeltaMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select deltas</div>
+          <template x-for="d in ALL_DELTAS" :key="'hdm-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.histDeltas.includes(d)"
+                     @change="toggleHistDelta(panel, d)">
+              <span x-text="deltaLabel(d)"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Historical DTE picker popover -->
+        <div class="p-date-menu" x-show="panel.histDteMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select DTEs</div>
+          <template x-for="d in ALL_DTES" :key="'hdtm-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.histDtes.includes(d)"
+                     @change="toggleHistDte(panel, d)">
+              <span x-text="d + 'D'"></span>
+            </label>
+          </template>
         </div>
 
         <!-- Skew DTE picker popover -->
@@ -515,16 +567,6 @@
                   <div class="ps-lbl">Max</div>
                   <div class="ps-val g" x-text="panel.stats.maximum?.toFixed(2) + 'v'"></div>
                 </div>
-              </div>
-            </template>
-            <template x-if="panel.type === 'historical' && panel.stats">
-              <div style="display:contents;">
-                <template x-for="s in panel.stats" :key="s.label ?? s.delta">
-                  <div class="ps">
-                    <div class="ps-lbl" x-text="s.label ?? '—'"></div>
-                    <div class="ps-val a" x-text="s.current !== undefined ? (s.current * 100).toFixed(1) + '%' : '—'"></div>
-                  </div>
-                </template>
               </div>
             </template>
           </div>
