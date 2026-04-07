@@ -8,7 +8,7 @@ GET /api/historical
 
 Returns IV (or other metric) over time for one DTE and one or more put_deltas.
 """
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, time as time_type, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -92,7 +92,7 @@ async def get_historical(
                 FROM closest
                 ORDER BY trade_date, put_delta
                 """,
-                dte, delta_list, start_d, end_d, target_time,
+                dte, delta_list, start_d, end_d, time_type.fromisoformat(target_time),
             )
             # Labels are dates
             dates = sorted({str(r["trade_date"]) for r in rows})

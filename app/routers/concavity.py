@@ -11,7 +11,7 @@ GET /api/concavity
   start, end, target_time
   freq: daily | intraday
 """
-from datetime import date as date_type
+from datetime import date as date_type, time as time_type
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.db import get_pool
 
@@ -75,7 +75,7 @@ async def get_concavity(
                 WHERE l.put_delta = $8
                 ORDER BY l.trade_date
                 """,
-                dte, needed_deltas, start_d, end_d, target_time,
+                dte, needed_deltas, start_d, end_d, time_type.fromisoformat(target_time),
                 center_delta, right_delta, left_delta,
             )
             labels     = [str(r["label"]) for r in rows]

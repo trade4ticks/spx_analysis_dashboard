@@ -8,7 +8,7 @@ Two modes:
 Optionally include a history percentile band.
 Also supports intraday: single date, multiple times, single put_delta.
 """
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, time as time_type, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -68,7 +68,7 @@ async def term_by_delta(
               AND dte BETWEEN $4 AND $5
             ORDER BY put_delta, dte
             """,
-            date_type.fromisoformat(date), time, delta_list, dte_min, dte_max,
+            date_type.fromisoformat(date), time_type.fromisoformat(time), delta_list, dte_min, dte_max,
         )
 
         band = None
@@ -100,7 +100,7 @@ async def term_by_delta(
                 GROUP BY dte
                 ORDER BY dte
                 """,
-                band_delta, start_d, end_d, dte_min, dte_max, ref_time,
+                band_delta, start_d, end_d, dte_min, dte_max, time_type.fromisoformat(ref_time),
             )
             band = {
                 "delta":  band_delta,
@@ -251,7 +251,7 @@ async def term_intraday(
                 ORDER BY quote_time, dte
                 """,
                 date_type.fromisoformat(date), delta, dte_min, dte_max,
-                [t + ":00" for t in time_list],
+                [time_type.fromisoformat(t) for t in time_list],
             )
         else:
             rows = await conn.fetch(

@@ -9,7 +9,7 @@ Three modes:
 All modes accept ?metric=iv|price|theta|vega|gamma
 by_dte and by_date can include a history percentile band via ?band_days=N
 """
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, time as time_type, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
@@ -66,7 +66,7 @@ async def skew_by_dte(
               AND dte         = ANY($3)
             ORDER BY dte, put_delta
             """,
-            date_type.fromisoformat(date), time, dte_list,
+            date_type.fromisoformat(date), time_type.fromisoformat(time), dte_list,
         )
 
         band = None
@@ -94,7 +94,7 @@ async def skew_by_dte(
                 GROUP BY put_delta
                 ORDER BY put_delta
                 """,
-                dte_list[0], start_d, end_d, ref_time,
+                dte_list[0], start_d, end_d, time_type.fromisoformat(ref_time),
             )
             band = {
                 "put_deltas": [r["put_delta"] for r in band_rows],
@@ -227,7 +227,8 @@ async def skew_intraday(
                   AND quote_time = ANY($3::time[])
                 ORDER BY quote_time, put_delta
                 """,
-                date_type.fromisoformat(date), dte, [t + ":00" for t in time_list],
+                date_type.fromisoformat(date), dte,
+                [time_type.fromisoformat(t) for t in time_list],
             )
         else:
             rows = await conn.fetch(
