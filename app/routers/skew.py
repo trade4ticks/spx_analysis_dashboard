@@ -59,7 +59,9 @@ async def skew_by_dte(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT dte, put_delta, {metric} AS value
+            SELECT dte, put_delta,
+                   {metric} AS value,
+                   iv, price, theta, vega, gamma
             FROM spx_surface
             WHERE trade_date = $1
               AND quote_time  = $2::time
@@ -105,18 +107,27 @@ async def skew_by_dte(
 
     # Group rows by DTE
     by_dte: dict[int, list] = {d: [] for d in dte_list}
+    metrics_by_dte: dict[int, list] = {d: [] for d in dte_list}
     for r in rows:
         by_dte[r["dte"]].append(r["value"])
+        metrics_by_dte[r["dte"]].append({
+            "iv":    r["iv"],
+            "price": r["price"],
+            "theta": r["theta"],
+            "vega":  r["vega"],
+            "gamma": r["gamma"],
+        })
 
     # Collect unique put_deltas (same for every DTE)
     put_deltas = sorted({r["put_delta"] for r in rows})
 
     series = [
         {
-            "label":     f"{d}D",
-            "dte":       d,
+            "label":      f"{d}D",
+            "dte":        d,
             "put_deltas": put_deltas,
-            "values":    by_dte[d],
+            "values":     by_dte[d],
+            "metrics":    metrics_by_dte[d],
         }
         for d in dte_list
         if by_dte[d]

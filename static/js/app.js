@@ -42,8 +42,10 @@ function defaultPanel(id) {
     error:   null,
     stats:   null,
     legend:  [],
-    expanded:     false,
-    typeMenuOpen: false,
+    expanded:      false,
+    typeMenuOpen:  false,
+    dateMenuOpen:  false,
+    intradayBucket: 60,    // 5 | 15 | 30 | 60 minutes
 
     // Skew-specific
     skewMode:   'by_dte',    // by_dte | by_date | intraday
@@ -205,14 +207,15 @@ document.addEventListener('alpine:init', () => {
             p.set('date', this.date);
             p.set('time', this.time);
             p.set('dtes', panel.skewDtes.join(','));
-            if (panel.showBand) {
+            // Band is only meaningful for a single DTE
+            if (panel.showBand && panel.skewDtes.length === 1) {
               p.set('band_days', this.lookbackDays);
               p.set('band_time', this.time);
             }
             return this._get(`/api/skew/by_dte?${p}`);
           }
           if (panel.skewMode === 'by_date') {
-            if (!panel.skewDates.length) panel.skewDates = this.dates.slice(0, 3);
+            if (!panel.skewDates.length) panel.skewDates = this.defaultDatesAnchored(3);
             p.set('dates', panel.skewDates.join(','));
             p.set('times', this.time);
             p.set('dte',   panel.skewDte);
@@ -221,7 +224,8 @@ document.addEventListener('alpine:init', () => {
           // intraday
           p.set('date', this.date);
           p.set('dte',  panel.skewDte);
-          if (panel.skewTimes.length) p.set('times', panel.skewTimes.join(','));
+          const buckets = this.bucketTimes(panel.intradayBucket);
+          if (buckets.length) p.set('times', buckets.join(','));
           return this._get(`/api/skew/intraday?${p}`);
         }
 
@@ -324,6 +328,33 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Control helpers ───────────────────────────────────────────────────────
+    // 3 most-recent dates on or before the currently-selected date
+    defaultDatesAnchored(n) {
+      const idx = this.dates.indexOf(this.date);
+      const start = idx >= 0 ? idx : 0;
+      return this.dates.slice(start, start + n);
+    },
+
+    toggleSkewDate(panel, d) {
+      const idx = panel.skewDates.indexOf(d);
+      if (idx >= 0) panel.skewDates.splice(idx, 1);
+      else          panel.skewDates.push(d);
+      // Sort descending (newest first) to match this.dates order
+      panel.skewDates.sort((a, b) => b.localeCompare(a));
+      this.loadPanel(panel);
+    },
+
+    // Filter this.times down to a bucket: 5=all, 15=:00/:15/:30/:45, 30=:00/:30, 60=:00
+    bucketTimes(bucket) {
+      if (!this.times || !this.times.length) return [];
+      if (bucket === 5)  return this.times.slice();
+      const mod = bucket;   // 15, 30, or 60
+      return this.times.filter(t => {
+        const [h, m] = t.split(':').map(Number);
+        return m % mod === 0;
+      });
+    },
+
     toggleSkewDte(panel, dte) {
       const idx = panel.skewDtes.indexOf(dte);
       idx >= 0 ? panel.skewDtes.splice(idx, 1) : panel.skewDtes.push(dte);
@@ -354,6 +385,8 @@ document.addEventListener('alpine:init', () => {
     // ── Global control handlers ───────────────────────────────────────────────
     async onDateChange() {
       await this.loadTimes();
+      // Reset any panel's multi-date selection so it re-anchors to the new date
+      this.panels.forEach(p => { p.skewDates = []; });
       await this.loadAllPanels();
     },
 

@@ -138,21 +138,11 @@
         <!-- Panel header -->
         <div class="panel-hdr">
 
-          <!-- Type selector — blue button is the actual control (popover) -->
-          <div class="p-type-wrap" @click.outside="panel.typeMenuOpen=false">
-            <div class="p-type-btn"
-                 @click="panel.typeMenuOpen = !panel.typeMenuOpen"
-                 x-text="panel.type.toUpperCase() + ' ▾'">
-            </div>
-            <div class="p-type-menu" x-show="panel.typeMenuOpen" x-cloak>
-              <template x-for="t in ['skew','term','historical','concavity']" :key="t">
-                <div class="p-type-menu-item"
-                     :class="{on: panel.type===t}"
-                     @click="setPanelType(panel, t); panel.typeMenuOpen=false"
-                     x-text="t.toUpperCase()">
-                </div>
-              </template>
-            </div>
+          <!-- Type selector — blue button is the actual control (popover lives outside header) -->
+          <div class="p-type-btn"
+               @click="panel.typeMenuOpen = !panel.typeMenuOpen"
+               @click.outside="panel.typeMenuOpen=false"
+               x-text="panel.type.toUpperCase() + ' ▾'">
           </div>
 
           <!-- ── SKEW controls ────────────────────────────────────────── -->
@@ -173,7 +163,7 @@
               <!-- DTE chips (by_dte mode) -->
               <template x-if="panel.skewMode === 'by_dte'">
                 <div style="display:contents;">
-                  <template x-for="dte in COMMON_DTES" :key="dte">
+                  <template x-for="dte in ALL_DTES" :key="dte">
                     <div class="p-chip"
                          :class="{on: panel.skewDtes.includes(dte)}"
                          @click="toggleSkewDte(panel, dte)"
@@ -187,15 +177,47 @@
               <template x-if="panel.skewMode !== 'by_dte'">
                 <div class="p-dd">
                   <select x-model.number="panel.skewDte" @change="loadPanel(panel)">
-                    <template x-for="d in COMMON_DTES" :key="d">
+                    <template x-for="d in ALL_DTES" :key="d">
                       <option :value="d" x-text="d + 'D'"></option>
                     </template>
                   </select>
                 </div>
               </template>
 
-              <!-- Band toggle -->
-              <template x-if="panel.skewMode === 'by_dte'">
+              <!-- Multi-Date date picker -->
+              <template x-if="panel.skewMode === 'by_date'">
+                <div class="p-type-btn-host" style="position:relative;">
+                  <div class="p-chip" @click="panel.dateMenuOpen=!panel.dateMenuOpen"
+                       @click.outside="panel.dateMenuOpen=false">
+                    <span x-text="panel.skewDates.length + ' dates ▾'"></span>
+                  </div>
+                  <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak>
+                    <div class="p-date-menu-hdr">Select dates</div>
+                    <template x-for="d in dates" :key="d">
+                      <label class="p-date-item">
+                        <input type="checkbox"
+                               :checked="panel.skewDates.includes(d)"
+                               @change="toggleSkewDate(panel, d)">
+                        <span x-text="d"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Intraday time-bucket toggle -->
+              <template x-if="panel.skewMode === 'intraday'">
+                <div class="p-seg">
+                  <template x-for="b in [5,15,30,60]" :key="b">
+                    <span :class="{on: panel.intradayBucket===b}"
+                          @click="panel.intradayBucket=b; loadPanel(panel)"
+                          x-text="b+'m'"></span>
+                  </template>
+                </div>
+              </template>
+
+              <!-- Band toggle (single-DTE only) -->
+              <template x-if="panel.skewMode === 'by_dte' && panel.skewDtes.length === 1">
                 <div class="p-chip" :class="{on: panel.showBand}"
                      @click="panel.showBand=!panel.showBand; loadPanel(panel)">
                   Band
@@ -330,6 +352,17 @@
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
             <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
+        </div>
+
+        <!-- Type popover (sibling of header so it isn't clipped by header overflow) -->
+        <div class="p-type-menu" x-show="panel.typeMenuOpen" x-cloak>
+          <template x-for="t in ['skew','term','historical','concavity']" :key="t">
+            <div class="p-type-menu-item"
+                 :class="{on: panel.type===t}"
+                 @click="setPanelType(panel, t); panel.typeMenuOpen=false"
+                 x-text="t.toUpperCase()">
+            </div>
+          </template>
         </div>
 
         <!-- Legend -->

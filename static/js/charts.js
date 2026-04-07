@@ -188,8 +188,39 @@ function buildSkew(data, pctFmt, yLabel) {
       pointBackgroundColor: color,
       fill:        false,
       borderWidth: 2.2,
+      _metrics:    s.metrics,    // full metric set for tooltip
+      _putDeltas:  s.put_deltas,
     });
   });
+
+  const plugins = basePlugins();
+  plugins.tooltip = {
+    ...plugins.tooltip,
+    mode: 'index',
+    intersect: false,
+    callbacks: {
+      title: (items) => {
+        if (!items.length) return '';
+        const ds = items[0].dataset;
+        const pd = ds._putDeltas?.[items[0].dataIndex];
+        return pd !== undefined ? `${ds.label} · ${deltaLabel(pd)}` : ds.label;
+      },
+      label: (ctx) => {
+        const m = ctx.dataset._metrics?.[ctx.dataIndex];
+        if (!m) return `${ctx.dataset.label}: ${ctx.parsed.y}`;
+        const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        const ivPct = m.iv == null ? '—' : (m.iv * 100).toFixed(2) + '%';
+        return [
+          `${ctx.dataset.label}`,
+          `  IV:    ${ivPct}`,
+          `  Price: ${fmt(m.price)}`,
+          `  Theta: ${fmt(m.theta, 3)}`,
+          `  Vega:  ${fmt(m.vega, 3)}`,
+          `  Gamma: ${fmt(m.gamma, 5)}`,
+        ];
+      },
+    },
+  };
 
   return {
     type: 'line',
@@ -198,7 +229,7 @@ function buildSkew(data, pctFmt, yLabel) {
       responsive:          true,
       maintainAspectRatio: false,
       animation:           false,
-      plugins:             basePlugins(),
+      plugins,
       scales:              baseScales(yLabel, undefined, undefined, pctFmt),
     },
   };
