@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV Dashboard</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+
+  <!-- Alpine.js (defer keeps it from blocking render) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- Chart.js must load before app.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <!-- Our JS (charts must precede app) -->
+  <script src="/static/js/charts.js"></script>
+  <script src="/static/js/app.js"></script>
+</head>
+
+<body x-data="dashboard" x-init="init()">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <div class="topbar-div"></div>
+    <div class="price-block">
+      <span style="font-size:11px;color:var(--dim)">SPX</span>
+      <span class="price-big" id="spx-price">—</span>
+      <span class="price-chg dn" id="spx-chg"></span>
+    </div>
+
+    <!-- Key metric pills (static placeholders — wire to derived table later) -->
+    <div class="topbar-pill">
+      <span class="tp-lbl">VIX</span>
+      <span class="tp-val y">—</span>
+    </div>
+    <div class="topbar-pill">
+      <span class="tp-lbl">30D IV</span>
+      <span class="tp-val a" id="atm-30d">—</span>
+    </div>
+    <div class="topbar-pill">
+      <span class="tp-lbl">25Δ Skew</span>
+      <span class="tp-val y" id="skew-30d">—</span>
+    </div>
+    <div class="topbar-pill">
+      <span class="tp-lbl">VRP</span>
+      <span class="tp-val p">— <span style="font-size:10px;color:var(--dim)">(soon)</span></span>
+    </div>
+
+    <div class="topbar-right" x-text="dateDisplay + ' · ' + timeDisplay + ' ET'"></div>
+  </div>
+
+  <!-- ── Global controls strip ──────────────────────────────────────────── -->
+  <div class="ctrl-strip">
+
+    <!-- Mode toggle -->
+    <span class="ctrl-lbl">Mode</span>
+    <div class="seg">
+      <div class="seg-btn" :class="{on: mode==='daily'}"    @click="onModeChange('daily')">Daily</div>
+      <div class="seg-btn" :class="{on: mode==='intraday'}" @click="onModeChange('intraday')">Intraday</div>
+    </div>
+
+    <div class="ctrl-div"></div>
+
+    <!-- Date -->
+    <span class="ctrl-lbl">Date</span>
+    <div class="dd">
+      <select x-model="date" @change="onDateChange()">
+        <template x-for="d in dates" :key="d">
+          <option :value="d" x-text="d"></option>
+        </template>
+      </select>
+    </div>
+
+    <!-- Time (daily mode only) -->
+    <template x-if="mode === 'daily'">
+      <div style="display:contents;">
+        <span class="ctrl-lbl">Time</span>
+        <div class="dd">
+          <select x-model="time" @change="onTimeChange()">
+            <template x-for="t in times" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+    </template>
+
+    <!-- Intraday window slider -->
+    <template x-if="mode === 'intraday'">
+      <div style="display:contents;">
+        <span class="ctrl-lbl">Window</span>
+        <div class="slider-wrap">
+          <input type="range" min="1" max="90" x-model.number="intradayWindowDays"
+                 @change="loadAllPanels()" style="width:90px;">
+          <span class="slider-val" x-text="intradayWindowDays + 'D'"></span>
+        </div>
+      </div>
+    </template>
+
+    <div class="ctrl-div"></div>
+
+    <!-- Y-axis metric -->
+    <span class="ctrl-lbl">Metric</span>
+    <div class="seg">
+      <template x-for="m in ['iv','price','theta','vega','gamma']" :key="m">
+        <div class="seg-btn" :class="{on: metric===m}"
+             @click="onMetricChange(m)" x-text="m"></div>
+      </template>
+    </div>
+
+    <div class="ctrl-div"></div>
+
+    <!-- Lookback (daily mode) -->
+    <template x-if="mode === 'daily'">
+      <div style="display:contents;">
+        <span class="ctrl-lbl">Lookback</span>
+        <div class="slider-wrap">
+          <input type="range" min="30" max="730" step="30" x-model.number="lookbackDays"
+                 @change="loadAllPanels()" style="width:90px;">
+          <span class="slider-val" x-text="lookbackDays + 'D'"></span>
+        </div>
+      </div>
+    </template>
+
+    <div style="margin-left:auto;display:flex;gap:6px;">
+      <button class="btn" @click="loadAllPanels()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <!-- ── Panel grid ──────────────────────────────────────────────────────── -->
+  <div class="panel-grid">
+    <template x-for="panel in panels" :key="panel.id">
+
+      <div class="panel" :class="{loading: panel.loading}">
+
+        <!-- Panel header -->
+        <div class="panel-hdr">
+
+          <!-- Type selector -->
+          <div class="p-type-btn"
+               @click="$dispatch('open-type-menu', {panelId: panel.id})"
+               x-text="panel.type.toUpperCase() + ' ▾'">
+          </div>
+
+          <!-- Type dropdown (simple select for now) -->
+          <select class="p-dd" style="margin-left:0;"
+                  :value="panel.type"
+                  @change="setPanelType(panel, $event.target.value)">
+            <template x-for="t in ['skew','term','historical','concavity']" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+
+          <!-- ── SKEW controls ────────────────────────────────────────── -->
+          <template x-if="panel.type === 'skew'">
+            <div style="display:contents;">
+              <!-- Mode -->
+              <div class="p-seg">
+                <span :class="{on: panel.skewMode==='by_dte'}"
+                      @click="panel.skewMode='by_dte'; loadPanel(panel)">Multi-DTE</span>
+                <span :class="{on: panel.skewMode==='by_date'}"
+                      @click="panel.skewMode='by_date'; loadPanel(panel)">Multi-Date</span>
+                <template x-if="mode==='intraday'">
+                  <span :class="{on: panel.skewMode==='intraday'}"
+                        @click="panel.skewMode='intraday'; loadPanel(panel)">Intraday</span>
+                </template>
+              </div>
+
+              <!-- DTE chips (by_dte mode) -->
+              <template x-if="panel.skewMode === 'by_dte'">
+                <div style="display:contents;">
+                  <template x-for="dte in COMMON_DTES" :key="dte">
+                    <div class="p-chip"
+                         :class="{on: panel.skewDtes.includes(dte)}"
+                         @click="toggleSkewDte(panel, dte)"
+                         x-text="dte + 'D'">
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- DTE selector (by_date / intraday mode) -->
+              <template x-if="panel.skewMode !== 'by_dte'">
+                <div class="p-dd">
+                  <select x-model.number="panel.skewDte" @change="loadPanel(panel)">
+                    <template x-for="d in COMMON_DTES" :key="d">
+                      <option :value="d" x-text="d + 'D'"></option>
+                    </template>
+                  </select>
+                </div>
+              </template>
+
+              <!-- Band toggle -->
+              <template x-if="panel.skewMode === 'by_dte'">
+                <div class="p-chip" :class="{on: panel.showBand}"
+                     @click="panel.showBand=!panel.showBand; loadPanel(panel)">
+                  Band
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- ── TERM controls ────────────────────────────────────────── -->
+          <template x-if="panel.type === 'term'">
+            <div style="display:contents;">
+              <div class="p-seg">
+                <span :class="{on: panel.termMode==='by_delta'}"
+                      @click="panel.termMode='by_delta'; loadPanel(panel)">Multi-Δ</span>
+                <span :class="{on: panel.termMode==='by_date'}"
+                      @click="panel.termMode='by_date'; loadPanel(panel)">Multi-Date</span>
+                <template x-if="mode==='intraday'">
+                  <span :class="{on: panel.termMode==='intraday'}"
+                        @click="panel.termMode='intraday'; loadPanel(panel)">Intraday</span>
+                </template>
+              </div>
+
+              <!-- Delta chips (by_delta mode) -->
+              <template x-if="panel.termMode === 'by_delta'">
+                <div style="display:contents;">
+                  <template x-for="d in COMMON_DELTAS" :key="d">
+                    <div class="p-chip"
+                         :class="{on: panel.termDeltas.includes(d)}"
+                         @click="toggleTermDelta(panel, d)"
+                         x-text="deltaLabel(d)">
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- DTE range -->
+              <div class="p-dd" style="display:flex;align-items:center;gap:4px;">
+                <span style="font-size:9px;color:var(--dim)">Max DTE</span>
+                <select x-model.number="panel.termDteMax" @change="loadPanel(panel)">
+                  <option value="90">90D</option>
+                  <option value="180">180D</option>
+                  <option value="360" selected>360D</option>
+                </select>
+              </div>
+
+              <!-- Band toggle -->
+              <template x-if="panel.termMode === 'by_delta'">
+                <div class="p-chip" :class="{on: panel.showTermBand}"
+                     @click="panel.showTermBand=!panel.showTermBand; loadPanel(panel)">
+                  Band
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- ── HISTORICAL controls ──────────────────────────────────── -->
+          <template x-if="panel.type === 'historical'">
+            <div style="display:contents;">
+              <!-- DTE -->
+              <div class="p-dd">
+                <select x-model.number="panel.histDte" @change="loadPanel(panel)">
+                  <template x-for="d in COMMON_DTES" :key="d">
+                    <option :value="d" x-text="d + 'D'"></option>
+                  </template>
+                </select>
+              </div>
+
+              <!-- Delta chips -->
+              <template x-for="d in COMMON_DELTAS" :key="d">
+                <div class="p-chip"
+                     :class="{on: panel.histDeltas.includes(d)}"
+                     @click="toggleHistDelta(panel, d)"
+                     x-text="deltaLabel(d)">
+                </div>
+              </template>
+
+              <!-- Lookback -->
+              <div class="slider-wrap" style="margin-left:4px;">
+                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
+                <input type="range" min="30" max="1825" step="30"
+                       x-model.number="panel.histLookback"
+                       @change="loadPanel(panel)" style="width:60px;">
+                <span class="slider-val" x-text="panel.histLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── CONCAVITY controls ───────────────────────────────────── -->
+          <template x-if="panel.type === 'concavity'">
+            <div style="display:contents;">
+              <!-- DTE -->
+              <div class="p-dd">
+                <select x-model.number="panel.concavDte" @change="loadPanel(panel)">
+                  <template x-for="d in COMMON_DTES" :key="d">
+                    <option :value="d" x-text="d + 'D'"></option>
+                  </template>
+                </select>
+              </div>
+
+              <!-- Wing deltas -->
+              <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Wings:</span>
+              <div class="p-seg">
+                <template x-for="d in [10,20,25,35]" :key="d">
+                  <span :class="{on: panel.concavLeft===d}"
+                        @click="panel.concavLeft=d; loadPanel(panel)"
+                        x-text="d+'Δp'"></span>
+                </template>
+              </div>
+              <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Ctr:</span>
+              <div class="p-seg">
+                <template x-for="d in [40,45,50]" :key="d">
+                  <span :class="{on: panel.concavCenter===d}"
+                        @click="panel.concavCenter=d; loadPanel(panel)"
+                        x-text="d===50?'ATM':d+'Δp'"></span>
+                </template>
+              </div>
+
+              <!-- Lookback -->
+              <div class="slider-wrap" style="margin-left:4px;">
+                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
+                <input type="range" min="30" max="1825" step="30"
+                       x-model.number="panel.concavLookback"
+                       @change="loadPanel(panel)" style="width:60px;">
+                <span class="slider-val" x-text="panel.concavLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
+              </div>
+            </div>
+          </template>
+
+          <!-- Panel actions -->
+          <div class="p-actions">
+            <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
+            <button class="icon-btn" title="Expand">⤢</button>
+          </div>
+        </div>
+
+        <!-- Legend -->
+        <div class="panel-legend" x-show="panel.legend.length">
+          <template x-for="item in panel.legend" :key="item.label">
+            <div class="leg">
+              <template x-if="item.band">
+                <div class="leg-band"></div>
+              </template>
+              <template x-if="!item.band">
+                <div class="leg-line" :style="`background:${item.color}`"></div>
+              </template>
+              <span x-text="item.label"></span>
+            </div>
+          </template>
+        </div>
+
+        <!-- Chart body -->
+        <div class="panel-body">
+          <!-- Loading overlay -->
+          <div class="spinner" x-show="panel.loading">
+            <div class="spinner-dot"></div>
+            <span>Loading…</span>
+          </div>
+          <!-- Error overlay -->
+          <div class="panel-error" x-show="panel.error && !panel.loading"
+               x-text="panel.error">
+          </div>
+          <canvas :id="`canvas-${panel.id}`"></canvas>
+        </div>
+
+        <!-- Stats footer -->
+        <template x-if="panel.stats">
+          <div class="panel-stats">
+            <template x-if="panel.type === 'term' && panel.stats">
+              <div style="display:contents;">
+                <div class="ps">
+                  <div class="ps-lbl">Slope</div>
+                  <div class="ps-val" :class="panel.stats.slope > 0 ? 'g' : 'r'"
+                       x-text="(panel.stats.slope > 0 ? '+' : '') + (panel.stats.slope * 100).toFixed(1) + '%'">
+                  </div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl">Structure</div>
+                  <div class="ps-val" :class="panel.stats.structure === 'Contango' ? 'g' : 'y'"
+                       x-text="panel.stats.structure">
+                  </div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl" x-text="panel.stats.short_dte + 'D ATM'"></div>
+                  <div class="ps-val a" x-text="panel.stats.short_iv !== undefined ? (panel.stats.short_iv * 100).toFixed(1) + '%' : '—'"></div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl" x-text="panel.stats.long_dte + 'D ATM'"></div>
+                  <div class="ps-val a" x-text="panel.stats.long_iv !== undefined ? (panel.stats.long_iv * 100).toFixed(1) + '%' : '—'"></div>
+                </div>
+              </div>
+            </template>
+            <template x-if="panel.type === 'concavity' && panel.stats">
+              <div style="display:contents;">
+                <div class="ps">
+                  <div class="ps-lbl">Today</div>
+                  <div class="ps-val" :class="panel.stats.current >= 0 ? 'g' : 'r'"
+                       x-text="panel.stats.current !== null ? panel.stats.current.toFixed(2) + 'v' : '—'">
+                  </div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl">Mean</div>
+                  <div class="ps-val a" x-text="panel.stats.mean?.toFixed(2) + 'v'"></div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl">Min</div>
+                  <div class="ps-val r" x-text="panel.stats.minimum?.toFixed(2) + 'v'"></div>
+                </div>
+                <div class="ps">
+                  <div class="ps-lbl">Max</div>
+                  <div class="ps-val g" x-text="panel.stats.maximum?.toFixed(2) + 'v'"></div>
+                </div>
+              </div>
+            </template>
+            <template x-if="panel.type === 'historical' && panel.stats">
+              <div style="display:contents;">
+                <template x-for="s in panel.stats" :key="s.label ?? s.delta">
+                  <div class="ps">
+                    <div class="ps-lbl" x-text="s.label ?? '—'"></div>
+                    <div class="ps-val a" x-text="s.current !== undefined ? (s.current * 100).toFixed(1) + '%' : '—'"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </template>
+
+      </div><!-- /.panel -->
+    </template>
+  </div><!-- /.panel-grid -->
+
+</body>
+</html>

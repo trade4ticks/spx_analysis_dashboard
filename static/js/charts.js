@@ -1,0 +1,398 @@
+/**
+ * charts.js — Chart.js rendering for each panel type.
+ *
+ * Public API:
+ *   renderPanel(panelId, panelConfig, apiData, metric)
+ *   destroyPanel(panelId)
+ */
+
+'use strict';
+
+// ── Colour palettes ──────────────────────────────────────────────────────────
+
+const DTE_COLORS = {
+  0:   '#95a5a6', 1: '#95a5a6', 2: '#95a5a6', 3: '#95a5a6', 4: '#95a5a6',
+  5:   '#95a5a6', 6: '#95a5a6',
+  7:   '#3498db',
+  8:   '#5dade2', 9: '#5dade2', 10: '#5dade2',
+  14:  '#2ecc71',
+  21:  '#1abc9c',
+  30:  '#f0b429',
+  45:  '#e67e22',
+  60:  '#e74c3c',
+  90:  '#9b59b6',
+  120: '#8e44ad',
+  180: '#c0392b',
+  270: '#d35400',
+  360: '#7f8c8d',
+};
+
+const DELTA_COLORS = {
+  5:  '#c0392b', 10: '#e74c3c', 15: '#e67e22', 20: '#f39c12',
+  25: '#f1c40f', 30: '#d4e157', 35: '#aed581', 40: '#66bb6a',
+  45: '#26a69a', 50: '#3498db',
+  55: '#26c6da', 60: '#42a5f5', 65: '#5c6bc0', 70: '#7e57c2',
+  75: '#ab47bc', 80: '#ec407a', 85: '#ef5350', 90: '#e53935', 95: '#c62828',
+};
+
+// Cycle colours for date-based series
+const DATE_PALETTE = [
+  '#3498db','#2ecc71','#f39c12','#e74c3c','#9b59b6',
+  '#1abc9c','#e67e22','#f1c40f','#5dade2','#a9cce3',
+];
+
+function dteColor(dte)   { return DTE_COLORS[dte]   || '#aaa'; }
+function deltaColor(pd)  { return DELTA_COLORS[pd]  || '#aaa'; }
+function dateColor(i)    { return DATE_PALETTE[i % DATE_PALETTE.length]; }
+
+// ── Chart instance registry ───────────────────────────────────────────────────
+
+const _instances = new Map();   // panelId (int) → Chart
+
+function destroyPanel(panelId) {
+  if (_instances.has(panelId)) {
+    _instances.get(panelId).destroy();
+    _instances.delete(panelId);
+  }
+}
+
+// ── Shared Chart.js defaults ──────────────────────────────────────────────────
+
+Chart.defaults.color          = '#c8c8c8';
+Chart.defaults.borderColor    = 'rgba(255,255,255,0.07)';
+Chart.defaults.font.family    = "'Segoe UI', system-ui, sans-serif";
+Chart.defaults.font.size      = 11;
+
+function baseScales(yLabel = '', yMin = undefined, yMax = undefined, pctFmt = true) {
+  return {
+    x: {
+      grid:  { color: 'rgba(255,255,255,0.06)' },
+      ticks: { maxRotation: 0, font: { size: 10 } },
+    },
+    y: {
+      grid:  { color: 'rgba(255,255,255,0.06)' },
+      ticks: {
+        font: { size: 10 },
+        callback: v => pctFmt ? v.toFixed(1) + '%' : v,
+      },
+      title: yLabel
+        ? { display: true, text: yLabel, color: '#777', font: { size: 9 } }
+        : { display: false },
+      ...(yMin !== undefined ? { min: yMin } : {}),
+      ...(yMax !== undefined ? { max: yMax } : {}),
+    },
+  };
+}
+
+function basePlugins() {
+  return {
+    legend:  { display: false },
+    tooltip: {
+      backgroundColor: '#3a3a3a',
+      borderColor:     '#555',
+      borderWidth:     1,
+      titleFont:       { size: 11 },
+      bodyFont:        { size: 11 },
+    },
+  };
+}
+
+// ── Main render dispatcher ────────────────────────────────────────────────────
+
+/**
+ * @param {number}  panelId   — 0-3
+ * @param {string}  type      — 'skew' | 'term' | 'historical' | 'concavity'
+ * @param {object}  data      — API response JSON
+ * @param {string}  metric    — 'iv' | 'price' | ...
+ */
+function renderPanel(panelId, type, data, metric = 'iv') {
+  const canvas = document.getElementById(`canvas-${panelId}`);
+  if (!canvas) return;
+
+  const pctFmt = (metric === 'iv');
+  const yLabel = metric === 'iv' ? 'Implied Vol (%)' : metric;
+
+  destroyPanel(panelId);
+
+  let config;
+  switch (type) {
+    case 'skew':       config = buildSkew(data, pctFmt, yLabel);       break;
+    case 'term':       config = buildTerm(data, pctFmt, yLabel);       break;
+    case 'historical': config = buildHistorical(data, pctFmt, yLabel); break;
+    case 'concavity':  config = buildConcavity(data);                  break;
+    default:           return;
+  }
+
+  const chart = new Chart(canvas, config);
+  _instances.set(panelId, chart);
+}
+
+// ── Skew ──────────────────────────────────────────────────────────────────────
+
+function buildSkew(data, pctFmt, yLabel) {
+  const { series = [], band } = data;
+
+  // X labels: put_delta values from the first series (all share the same grid)
+  const labels = series[0]?.put_deltas?.map(pd => deltaLabel(pd)) ?? [];
+
+  const datasets = [];
+
+  // History band (filled area between p25 and p75)
+  if (band) {
+    const bandLabels = band.put_deltas.map(pd => deltaLabel(pd));
+    // We rely on the same labels order; dataset fills between p25 and p75
+    datasets.push({
+      label:           'Band Hi',
+      data:            band.p75,
+      borderColor:     'transparent',
+      backgroundColor: 'rgba(255,255,255,0.06)',
+      tension:         0.4,
+      pointRadius:     0,
+      fill:            '+1',
+      borderWidth:     0,
+    });
+    datasets.push({
+      label:           'Band Lo',
+      data:            band.p25,
+      borderColor:     'transparent',
+      backgroundColor: 'transparent',
+      tension:         0.4,
+      pointRadius:     0,
+      fill:            false,
+      borderWidth:     0,
+    });
+  }
+
+  // One line per series (DTE or date)
+  series.forEach((s, i) => {
+    const color = s.dte !== undefined ? dteColor(s.dte) : dateColor(i);
+    datasets.push({
+      label:       s.label,
+      data:        s.values,
+      borderColor: color,
+      tension:     0.4,
+      pointRadius: 3,
+      pointBackgroundColor: color,
+      fill:        false,
+      borderWidth: 2.2,
+    });
+  });
+
+  return {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins:             basePlugins(),
+      scales:              baseScales(yLabel, undefined, undefined, pctFmt),
+    },
+  };
+}
+
+// ── Term structure ────────────────────────────────────────────────────────────
+
+function buildTerm(data, pctFmt, yLabel) {
+  const { series = [], band } = data;
+
+  const labels = series[0]?.dtes?.map(d => d + 'D') ?? [];
+  const datasets = [];
+
+  // History band
+  if (band) {
+    datasets.push({
+      label:           'Band Hi',
+      data:            band.p75,
+      borderColor:     'transparent',
+      backgroundColor: 'rgba(52,152,219,0.08)',
+      tension:         0.4,
+      pointRadius:     0,
+      fill:            '+1',
+      borderWidth:     0,
+    });
+    datasets.push({
+      label:           'Band Lo',
+      data:            band.p25,
+      borderColor:     'transparent',
+      backgroundColor: 'transparent',
+      tension:         0.4,
+      pointRadius:     0,
+      fill:            false,
+      borderWidth:     0,
+    });
+  }
+
+  series.forEach((s, i) => {
+    // Series is coloured by delta if delta field present, else by index
+    const color = s.delta !== undefined ? deltaColor(s.delta) : dateColor(i);
+    const isDashed = (data.mode === 'by_date' && i > 0);
+    datasets.push({
+      label:       s.label,
+      data:        s.values,
+      borderColor: color,
+      tension:     0.4,
+      pointRadius: 3,
+      pointBackgroundColor: color,
+      fill:        false,
+      borderWidth: 2.2,
+      borderDash:  isDashed ? [4, 3] : [],
+    });
+  });
+
+  return {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins:             basePlugins(),
+      scales:              baseScales(yLabel, undefined, undefined, pctFmt),
+    },
+  };
+}
+
+// ── Historical time series ────────────────────────────────────────────────────
+
+function buildHistorical(data, pctFmt, yLabel) {
+  const { series = [] } = data;
+  if (!series.length) return emptyConfig('No data');
+
+  // All series share the same labels array
+  const labels = series[0].labels ?? [];
+
+  // Thin labels for dense time series
+  const maxTicks = 8;
+  const step     = Math.max(1, Math.floor(labels.length / maxTicks));
+  const tickLabels = labels.map((l, i) => (i % step === 0 ? l : ''));
+
+  const datasets = series.map((s, i) => {
+    const color = s.delta !== undefined ? deltaColor(s.delta) : dateColor(i);
+    return {
+      label:       s.label,
+      data:        s.values,
+      borderColor: color,
+      backgroundColor: hexToRgba(color, 0.07),
+      tension:     0.3,
+      pointRadius: 0,
+      fill:        i === 0,    // fill only the first series
+      borderWidth: 1.8,
+    };
+  });
+
+  return {
+    type: 'line',
+    data: { labels: tickLabels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins: {
+        ...basePlugins(),
+        tooltip: {
+          ...basePlugins().tooltip,
+          mode:      'index',
+          intersect: false,
+        },
+      },
+      scales: {
+        ...baseScales(yLabel, undefined, undefined, pctFmt),
+        x: {
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 8 },
+        },
+      },
+    },
+  };
+}
+
+// ── Concavity ─────────────────────────────────────────────────────────────────
+
+function buildConcavity(data) {
+  const { labels = [], concavity = [] } = data;
+
+  const step       = Math.max(1, Math.floor(labels.length / 8));
+  const tickLabels = labels.map((l, i) => (i % step === 0 ? l : ''));
+
+  // Color bars green (positive = smile) / red (negative = skew dominates)
+  const barColors = concavity.map(v =>
+    v >= 0 ? 'rgba(46,204,113,0.55)' : 'rgba(231,76,60,0.55)'
+  );
+  const barBorders = concavity.map(v =>
+    v >= 0 ? '#2ecc71' : '#e74c3c'
+  );
+
+  return {
+    type: 'bar',
+    data: {
+      labels: tickLabels,
+      datasets: [
+        {
+          label:           'Concavity',
+          data:            concavity,
+          backgroundColor: barColors,
+          borderColor:     barBorders,
+          borderWidth:     1,
+        },
+        {
+          // Zero line as a line dataset
+          type:        'line',
+          label:       'Zero',
+          data:        Array(labels.length).fill(0),
+          borderColor: 'rgba(255,255,255,0.25)',
+          borderWidth: 1,
+          borderDash:  [4, 4],
+          pointRadius: 0,
+        },
+      ],
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins: {
+        ...basePlugins(),
+        tooltip: {
+          ...basePlugins().tooltip,
+          callbacks: {
+            label: ctx => `${ctx.parsed.y.toFixed(2)}v`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 8 },
+        },
+        y: {
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 }, callback: v => v.toFixed(1) + 'v' },
+          title: { display: true, text: 'Concavity (vols)', color: '#777', font: { size: 9 } },
+        },
+      },
+    },
+  };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function emptyConfig(msg = 'No data') {
+  return {
+    type: 'line',
+    data: { labels: [msg], datasets: [] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false },
+  };
+}
+
+function hexToRgba(hex, alpha) {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!result) return `rgba(128,128,128,${alpha})`;
+  return `rgba(${parseInt(result[1],16)},${parseInt(result[2],16)},${parseInt(result[3],16)},${alpha})`;
+}
+
+function deltaLabel(pd) {
+  if (pd === 50) return 'ATM';
+  if (pd < 50)   return `${pd}Δp`;
+  return `${100 - pd}Δc`;
+}
