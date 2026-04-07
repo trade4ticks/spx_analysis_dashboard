@@ -20,8 +20,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SPX IV Dashboard", lifespan=lifespan)
 
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
-templates = Jinja2Templates(directory=BASE_DIR / "templates")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 app.include_router(meta.router,       prefix="/api/meta")
 app.include_router(skew.router,       prefix="/api/skew")
