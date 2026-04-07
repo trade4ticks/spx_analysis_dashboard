@@ -253,40 +253,47 @@ function buildSkew(data, pctFmt, yLabel) {
 function buildTerm(data, pctFmt, yLabel) {
   const { series = [], band } = data;
 
-  const labels = series[0]?.dtes?.map(d => d + 'D') ?? [];
+  // Convert a DTE to its sqrt-scale x position (sqrt(0)=0, sqrt(360)≈19)
+  const xOf = (dte) => Math.sqrt(dte);
   const datasets = [];
 
-  // History band
-  if (band) {
+  // History band: outer min/max faint, inner IQR stronger, dashed median
+  if (band && band.dtes && band.dtes.length) {
+    const bandPts = (arr) => band.dtes.map((d, i) => ({ x: xOf(d), y: arr[i] }));
     datasets.push({
-      label:           'Band Hi',
-      data:            band.p75,
-      borderColor:     'transparent',
-      backgroundColor: 'rgba(52,152,219,0.08)',
-      tension:         0.4,
-      pointRadius:     0,
-      fill:            '+1',
-      borderWidth:     0,
+      label: 'Band Max', data: bandPts(band.pmax),
+      borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.04)',
+      tension: 0.4, pointRadius: 0, fill: '+1', borderWidth: 0,
     });
     datasets.push({
-      label:           'Band Lo',
-      data:            band.p25,
-      borderColor:     'transparent',
-      backgroundColor: 'transparent',
-      tension:         0.4,
-      pointRadius:     0,
-      fill:            false,
-      borderWidth:     0,
+      label: 'Band Min', data: bandPts(band.pmin),
+      borderColor: 'transparent', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 0,
+    });
+    datasets.push({
+      label: 'Band p75', data: bandPts(band.p75),
+      borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.10)',
+      tension: 0.4, pointRadius: 0, fill: '+1', borderWidth: 0,
+    });
+    datasets.push({
+      label: 'Band p25', data: bandPts(band.p25),
+      borderColor: 'transparent', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 0,
+    });
+    datasets.push({
+      label: 'Band Median', data: bandPts(band.p50),
+      borderColor: 'rgba(255,255,255,0.45)', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 1, borderDash: [4, 3],
     });
   }
 
   series.forEach((s, i) => {
-    // Series is coloured by delta if delta field present, else by index
     const color = s.delta !== undefined ? deltaColor(s.delta) : dateColor(i);
     const isDashed = (data.mode === 'by_date' && i > 0);
+    const pts = (s.dtes || []).map((d, j) => ({ x: xOf(d), y: s.values[j] }));
     datasets.push({
       label:       s.label,
-      data:        s.values,
+      data:        pts,
       borderColor: color,
       tension:     0.4,
       pointRadius: 3,
@@ -294,18 +301,66 @@ function buildTerm(data, pctFmt, yLabel) {
       fill:        false,
       borderWidth: 2.2,
       borderDash:  isDashed ? [4, 3] : [],
+      _dtes:       s.dtes,
     });
   });
 
+  // Tick label set: prefer the union of all series DTEs (already filtered client-side)
+  const tickDtes = Array.from(new Set(
+    series.flatMap(s => s.dtes || [])
+  )).sort((a, b) => a - b);
+  const tickValues = tickDtes.map(xOf);
+
+  const plugins = basePlugins();
+  plugins.tooltip = {
+    ...plugins.tooltip,
+    mode: 'nearest',
+    intersect: false,
+    callbacks: {
+      title: (items) => {
+        if (!items.length) return '';
+        // Round-trip x → dte
+        const x = items[0].parsed.x;
+        const dte = Math.round(x * x);
+        return `${dte}D`;
+      },
+    },
+  };
+
   return {
     type: 'line',
-    data: { labels, datasets },
+    data: { datasets },
     options: {
       responsive:          true,
       maintainAspectRatio: false,
       animation:           false,
-      plugins:             basePlugins(),
-      scales:              baseScales(yLabel, undefined, undefined, pctFmt),
+      plugins,
+      scales: {
+        x: {
+          type: 'linear',
+          min: 0,
+          max: xOf(360),
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: {
+            font: { size: 10 },
+            autoSkip: false,
+            callback: (val) => {
+              // Only label values that correspond to a real DTE in our set
+              const dte = Math.round(val * val);
+              return tickValues.some(tv => Math.abs(tv - val) < 1e-9)
+                ? dte + 'D' : '';
+            },
+          },
+          afterBuildTicks: (axis) => {
+            axis.ticks = tickValues.map(v => ({ value: v }));
+          },
+        },
+        y: {
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 }, callback: v => pctFmt ? v.toFixed(1) + '%' : v },
+          title: yLabel ? { display: true, text: yLabel, color: '#777', font: { size: 9 } } : { display: false },
+        },
+      },
     },
   };
 }

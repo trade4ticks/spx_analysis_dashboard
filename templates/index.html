@@ -227,31 +227,57 @@
                 </template>
               </div>
 
-              <!-- Delta chips (by_delta mode) -->
+              <!-- Delta selector: chip popover (any delta from ALL_DELTAS) -->
               <template x-if="panel.termMode === 'by_delta'">
-                <div style="display:contents;">
-                  <template x-for="d in COMMON_DELTAS" :key="d">
-                    <div class="p-chip"
-                         :class="{on: panel.termDeltas.includes(d)}"
-                         @click="toggleTermDelta(panel, d)"
-                         x-text="deltaLabel(d)">
-                    </div>
+                <div class="p-chip"
+                     @click="panel.termDeltaMenuOpen=!panel.termDeltaMenuOpen"
+                     @click.outside="panel.termDeltaMenuOpen=false">
+                  <span x-text="panel.termDeltas.length + ' Δ ▾'"></span>
+                </div>
+              </template>
+              <template x-if="panel.termMode !== 'by_delta'">
+                <div class="p-dd">
+                  <select x-model.number="panel.termDeltas[0]" @change="loadPanel(panel)">
+                    <template x-for="d in ALL_DELTAS" :key="d">
+                      <option :value="d" x-text="deltaLabel(d)"></option>
+                    </template>
+                  </select>
+                </div>
+              </template>
+
+              <!-- DTE chips (which DTEs to show on x-axis) -->
+              <template x-for="dte in ALL_DTES" :key="'tdte-'+dte">
+                <div class="p-chip"
+                     :class="{on: panel.termDtes.includes(dte)}"
+                     @click="toggleTermDte(panel, dte)"
+                     x-text="dte + 'D'">
+                </div>
+              </template>
+              <div class="p-chip"
+                   :class="{on: panel.termDtes.length === ALL_DTES.length}"
+                   @click="toggleAllTermDtes(panel)">All</div>
+
+              <!-- Multi-Date chip -->
+              <template x-if="panel.termMode === 'by_date'">
+                <div class="p-chip" @click="panel.termDateMenuOpen=!panel.termDateMenuOpen"
+                     @click.outside="panel.termDateMenuOpen=false">
+                  <span x-text="panel.termDates.length + ' dates ▾'"></span>
+                </div>
+              </template>
+
+              <!-- Intraday time-bucket toggle -->
+              <template x-if="panel.termMode === 'intraday'">
+                <div class="p-seg">
+                  <template x-for="b in [5,15,30,60]" :key="'tb-'+b">
+                    <span :class="{on: panel.intradayBucket===b}"
+                          @click="panel.intradayBucket=b; loadPanel(panel)"
+                          x-text="b+'m'"></span>
                   </template>
                 </div>
               </template>
 
-              <!-- DTE range -->
-              <div class="p-dd" style="display:flex;align-items:center;gap:4px;">
-                <span style="font-size:9px;color:var(--dim)">Max DTE</span>
-                <select x-model.number="panel.termDteMax" @change="loadPanel(panel)">
-                  <option value="90">90D</option>
-                  <option value="180">180D</option>
-                  <option value="360" selected>360D</option>
-                </select>
-              </div>
-
-              <!-- Band toggle -->
-              <template x-if="panel.termMode === 'by_delta'">
+              <!-- Band toggle (single-delta only) -->
+              <template x-if="panel.termMode === 'by_delta' && panel.termDeltas.length === 1">
                 <div class="p-chip" :class="{on: panel.showTermBand}"
                      @click="panel.showTermBand=!panel.showTermBand; loadPanel(panel)">
                   Band
@@ -341,7 +367,33 @@
           </div>
         </div>
 
-        <!-- Date picker popover (sibling of header to avoid clipping) -->
+        <!-- Term delta picker popover -->
+        <div class="p-date-menu" x-show="panel.termDeltaMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select deltas</div>
+          <template x-for="d in ALL_DELTAS" :key="'tdm-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.termDeltas.includes(d)"
+                     @change="toggleTermDelta(panel, d)">
+              <span x-text="deltaLabel(d)"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Term date picker popover -->
+        <div class="p-date-menu" x-show="panel.termDateMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select dates</div>
+          <template x-for="d in dates" :key="'tdate-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.termDates.includes(d)"
+                     @change="toggleTermDate(panel, d)">
+              <span x-text="d"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Skew date picker popover (sibling of header to avoid clipping) -->
         <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak>
           <div class="p-date-menu-hdr">Select dates</div>
           <template x-for="d in dates" :key="d">

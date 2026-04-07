@@ -93,9 +93,11 @@ async def term_by_delta(
                 )
                 SELECT
                     dte,
+                    MIN(value) AS pmin,
                     PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY value) AS p25,
                     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
-                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75
+                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75,
+                    MAX(value) AS pmax
                 FROM daily
                 GROUP BY dte
                 ORDER BY dte
@@ -106,9 +108,11 @@ async def term_by_delta(
                 "delta":  band_delta,
                 "label":  _delta_label(band_delta),
                 "dtes":   [r["dte"] for r in band_rows],
-                "p25":    [r["p25"] for r in band_rows],
-                "p50":    [r["p50"] for r in band_rows],
-                "p75":    [r["p75"] for r in band_rows],
+                "pmin":   [r["pmin"] for r in band_rows],
+                "p25":    [r["p25"]  for r in band_rows],
+                "p50":    [r["p50"]  for r in band_rows],
+                "p75":    [r["p75"]  for r in band_rows],
+                "pmax":   [r["pmax"] for r in band_rows],
             }
 
     # Group by put_delta

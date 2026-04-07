@@ -56,11 +56,12 @@ function defaultPanel(id) {
     showBand:   true,
 
     // Term-specific
-    termMode:    'by_delta',
-    termDeltas:  [25, 50, 75],
-    termDtes:    [],          // populated from API
-    termDteMin:  0,
-    termDteMax:  360,
+    termMode:        'by_delta',
+    termDeltas:      [25, 50, 75],
+    termDtes:        [0, 7, 14, 30, 60, 90, 180, 360],
+    termDates:       [],
+    termDeltaMenuOpen: false,
+    termDateMenuOpen:  false,
     showTermBand: true,
 
     // Historical-specific
@@ -231,34 +232,38 @@ document.addEventListener('alpine:init', () => {
 
         // ── Term structure ────────────────────────────────────────────────
         case 'term': {
+          let raw;
           if (panel.termMode === 'by_delta') {
             p.set('date',    this.date);
             p.set('time',    this.time);
             p.set('deltas',  panel.termDeltas.join(','));
-            p.set('dte_min', panel.termDteMin);
-            p.set('dte_max', panel.termDteMax);
-            if (panel.showTermBand) {
+            p.set('dte_min', 0);
+            p.set('dte_max', 360);
+            // Band only meaningful for a single delta
+            if (panel.showTermBand && panel.termDeltas.length === 1) {
               p.set('band_days', this.lookbackDays);
               p.set('band_time', this.time);
             }
-            return this._get(`/api/term/by_delta?${p}`);
-          }
-          if (panel.termMode === 'by_date') {
-            if (!panel.skewDates.length) panel.skewDates = this.dates.slice(0, 3);
-            p.set('dates',   panel.skewDates.join(','));
+            raw = await this._get(`/api/term/by_delta?${p}`);
+          } else if (panel.termMode === 'by_date') {
+            if (!panel.termDates.length) panel.termDates = this.defaultDatesAnchored(3);
+            p.set('dates',   panel.termDates.join(','));
             p.set('times',   this.time);
             p.set('delta',   panel.termDeltas[0] ?? 50);
-            p.set('dte_min', panel.termDteMin);
-            p.set('dte_max', panel.termDteMax);
-            return this._get(`/api/term/by_date?${p}`);
+            p.set('dte_min', 0);
+            p.set('dte_max', 360);
+            raw = await this._get(`/api/term/by_date?${p}`);
+          } else {
+            // intraday
+            p.set('date',    this.date);
+            const buckets = this.bucketTimes(panel.intradayBucket);
+            if (buckets.length) p.set('times', buckets.join(','));
+            p.set('delta',   panel.termDeltas[0] ?? 50);
+            p.set('dte_min', 0);
+            p.set('dte_max', 360);
+            raw = await this._get(`/api/term/intraday?${p}`);
           }
-          // intraday
-          p.set('date',    this.date);
-          if (panel.skewTimes.length) p.set('times', panel.skewTimes.join(','));
-          p.set('delta',   panel.termDeltas[0] ?? 50);
-          p.set('dte_min', panel.termDteMin);
-          p.set('dte_max', panel.termDteMax);
-          return this._get(`/api/term/intraday?${p}`);
+          return this.filterTermDtes(raw, panel.termDtes);
         }
 
         // ── Historical ────────────────────────────────────────────────────
@@ -311,11 +316,9 @@ document.addEventListener('alpine:init', () => {
       if (!data.series) return items;
       // Skew renders the band as 5 datasets before the series (max, min, p75, p25, median).
       // Term still renders it as 2. Historical/concavity have no band.
+      // Both skew and term render the layered band as 5 datasets before the series
       let bandOffset = 0;
-      if (data.band) {
-        if (type === 'skew') bandOffset = 5;
-        else if (type === 'term') bandOffset = 2;
-      }
+      if (data.band && (type === 'skew' || type === 'term')) bandOffset = 5;
       data.series.forEach((s, i) => {
         items.push({
           label:        s.label,
@@ -383,6 +386,58 @@ document.addEventListener('alpine:init', () => {
       this.loadPanel(panel);
     },
 
+    // Filter a term API response to only the selected DTEs (client-side)
+    filterTermDtes(data, selectedDtes) {
+      if (!data || !data.series) return data;
+      const sel = new Set(selectedDtes);
+      const filterArr = (dtes, vals) => {
+        const outD = [], outV = [];
+        for (let i = 0; i < dtes.length; i++) {
+          if (sel.has(dtes[i])) { outD.push(dtes[i]); outV.push(vals[i]); }
+        }
+        return { dtes: outD, values: outV };
+      };
+      const series = data.series.map(s => {
+        const f = filterArr(s.dtes, s.values);
+        return { ...s, dtes: f.dtes, values: f.values };
+      }).filter(s => s.dtes.length);
+      let band = data.band;
+      if (band && band.dtes) {
+        const keepIdx = [];
+        band.dtes.forEach((d, i) => { if (sel.has(d)) keepIdx.push(i); });
+        const pick = (arr) => keepIdx.map(i => arr[i]);
+        band = {
+          ...band,
+          dtes: pick(band.dtes),
+          pmin: pick(band.pmin), p25: pick(band.p25),
+          p50:  pick(band.p50),  p75: pick(band.p75),
+          pmax: pick(band.pmax),
+        };
+      }
+      return { ...data, series, band };
+    },
+
+    toggleTermDte(panel, dte) {
+      const idx = panel.termDtes.indexOf(dte);
+      if (idx >= 0) panel.termDtes.splice(idx, 1);
+      else          panel.termDtes.push(dte);
+      panel.termDtes.sort((a, b) => a - b);
+      this.loadPanel(panel);
+    },
+
+    toggleAllTermDtes(panel) {
+      panel.termDtes = (panel.termDtes.length === ALL_DTES.length) ? [] : ALL_DTES.slice();
+      this.loadPanel(panel);
+    },
+
+    toggleTermDate(panel, d) {
+      const idx = panel.termDates.indexOf(d);
+      if (idx >= 0) panel.termDates.splice(idx, 1);
+      else          panel.termDates.push(d);
+      panel.termDates.sort((a, b) => b.localeCompare(a));
+      this.loadPanel(panel);
+    },
+
     toggleTermDelta(panel, delta) {
       const idx = panel.termDeltas.indexOf(delta);
       idx >= 0 ? panel.termDeltas.splice(idx, 1) : panel.termDeltas.push(delta);
@@ -407,7 +462,7 @@ document.addEventListener('alpine:init', () => {
     async onDateChange() {
       await this.loadTimes();
       // Reset any panel's multi-date selection so it re-anchors to the new date
-      this.panels.forEach(p => { p.skewDates = []; });
+      this.panels.forEach(p => { p.skewDates = []; p.termDates = []; });
       await this.loadAllPanels();
     },
 
