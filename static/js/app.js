@@ -309,9 +309,13 @@ document.addEventListener('alpine:init', () => {
     buildLegend(type, data) {
       const items = [];
       if (!data.series) return items;
-      // Skew/term render the band as 2 datasets BEFORE the series → series start at index 2.
-      // Historical/concavity have no band, series starts at 0.
-      const bandOffset = (data.band && (type === 'skew' || type === 'term')) ? 2 : 0;
+      // Skew renders the band as 5 datasets before the series (max, min, p75, p25, median).
+      // Term still renders it as 2. Historical/concavity have no band.
+      let bandOffset = 0;
+      if (data.band) {
+        if (type === 'skew') bandOffset = 5;
+        else if (type === 'term') bandOffset = 2;
+      }
       data.series.forEach((s, i) => {
         items.push({
           label:        s.label,

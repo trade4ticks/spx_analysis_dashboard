@@ -157,29 +157,35 @@ function buildSkew(data, pctFmt, yLabel) {
 
   const datasets = [];
 
-  // History band (filled area between p25 and p75)
+  // History band: outer (min-max) faint, inner (IQR) stronger, median dashed
   if (band) {
-    const bandLabels = band.put_deltas.map(pd => deltaLabel(pd));
-    // We rely on the same labels order; dataset fills between p25 and p75
+    // Outer max → fills down to outer min (next dataset)
     datasets.push({
-      label:           'Band Hi',
-      data:            band.p75,
-      borderColor:     'transparent',
-      backgroundColor: 'rgba(255,255,255,0.06)',
-      tension:         0.4,
-      pointRadius:     0,
-      fill:            '+1',
-      borderWidth:     0,
+      label: 'Band Max', data: band.pmax,
+      borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.04)',
+      tension: 0.4, pointRadius: 0, fill: '+1', borderWidth: 0,
     });
     datasets.push({
-      label:           'Band Lo',
-      data:            band.p25,
-      borderColor:     'transparent',
-      backgroundColor: 'transparent',
-      tension:         0.4,
-      pointRadius:     0,
-      fill:            false,
-      borderWidth:     0,
+      label: 'Band Min', data: band.pmin,
+      borderColor: 'transparent', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 0,
+    });
+    // Inner p75 → fills down to p25 (next dataset)
+    datasets.push({
+      label: 'Band p75', data: band.p75,
+      borderColor: 'transparent', backgroundColor: 'rgba(255,255,255,0.10)',
+      tension: 0.4, pointRadius: 0, fill: '+1', borderWidth: 0,
+    });
+    datasets.push({
+      label: 'Band p25', data: band.p25,
+      borderColor: 'transparent', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 0,
+    });
+    // Median dashed centerline
+    datasets.push({
+      label: 'Band Median', data: band.p50,
+      borderColor: 'rgba(255,255,255,0.45)', backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 0, fill: false, borderWidth: 1, borderDash: [4, 3],
     });
   }
 

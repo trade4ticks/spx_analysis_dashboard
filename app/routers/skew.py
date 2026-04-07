@@ -89,9 +89,11 @@ async def skew_by_dte(
                 )
                 SELECT
                     put_delta,
+                    MIN(value) AS pmin,
                     PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY value) AS p25,
                     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
-                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75
+                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75,
+                    MAX(value) AS pmax
                 FROM daily
                 GROUP BY put_delta
                 ORDER BY put_delta
@@ -100,9 +102,11 @@ async def skew_by_dte(
             )
             band = {
                 "put_deltas": [r["put_delta"] for r in band_rows],
-                "p25": [r["p25"] for r in band_rows],
-                "p50": [r["p50"] for r in band_rows],
-                "p75": [r["p75"] for r in band_rows],
+                "pmin": [r["pmin"] for r in band_rows],
+                "p25":  [r["p25"]  for r in band_rows],
+                "p50":  [r["p50"]  for r in band_rows],
+                "p75":  [r["p75"]  for r in band_rows],
+                "pmax": [r["pmax"] for r in band_rows],
             }
 
     # Group rows by DTE
