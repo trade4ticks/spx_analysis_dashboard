@@ -1,9 +1,9 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from app.db import init_pool, close_pool
 from app.routers import meta, skew, term, historical, concavity
@@ -21,7 +21,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SPX IV Dashboard", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 app.include_router(meta.router,       prefix="/api/meta")
 app.include_router(skew.router,       prefix="/api/skew")
@@ -31,5 +30,5 @@ app.include_router(concavity.router,  prefix="/api/concavity")
 
 
 @app.get("/")
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index():
+    return FileResponse(str(BASE_DIR / "templates" / "index.html"))
