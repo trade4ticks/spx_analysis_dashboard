@@ -66,7 +66,7 @@ async def skew_by_dte(
               AND dte         = ANY($3)
             ORDER BY dte, put_delta
             """,
-            date, time, dte_list,
+            date_type.fromisoformat(date), time, dte_list,
         )
 
         band = None
@@ -94,7 +94,7 @@ async def skew_by_dte(
                 GROUP BY put_delta
                 ORDER BY put_delta
                 """,
-                dte_list[0], str(start_d), str(end_d), ref_time,
+                dte_list[0], start_d, end_d, ref_time,
             )
             band = {
                 "put_deltas": [r["put_delta"] for r in band_rows],
@@ -227,7 +227,7 @@ async def skew_intraday(
                   AND quote_time = ANY($3::time[])
                 ORDER BY quote_time, put_delta
                 """,
-                date, dte, [t + ":00" for t in time_list],
+                date_type.fromisoformat(date), dte, [t + ":00" for t in time_list],
             )
         else:
             rows = await conn.fetch(
@@ -238,7 +238,7 @@ async def skew_intraday(
                   AND dte        = $2
                 ORDER BY quote_time, put_delta
                 """,
-                date, dte,
+                date_type.fromisoformat(date), dte,
             )
 
     grouped: dict[str, list] = {}

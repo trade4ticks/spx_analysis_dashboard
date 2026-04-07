@@ -2,6 +2,8 @@
 Meta endpoints — available dates, quote times, and surface grid constants.
 Used by the frontend to populate dropdowns and chip selectors.
 """
+from datetime import date as date_type
+
 from fastapi import APIRouter, Depends, Query
 from app.db import get_pool
 
@@ -32,7 +34,7 @@ async def get_quote_times(
             WHERE trade_date = $1
             ORDER BY quote_time
             """,
-            date,
+            date_type.fromisoformat(date),
         )
     # Return HH:MM strings
     return [str(r["quote_time"])[:5] for r in rows]

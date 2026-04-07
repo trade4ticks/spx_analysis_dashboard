@@ -92,7 +92,7 @@ async def get_historical(
                 FROM closest
                 ORDER BY trade_date, put_delta
                 """,
-                dte, delta_list, str(start_d), str(end_d), target_time,
+                dte, delta_list, start_d, end_d, target_time,
             )
             # Labels are dates
             dates = sorted({str(r["trade_date"]) for r in rows})
@@ -123,7 +123,7 @@ async def get_historical(
                   AND trade_date BETWEEN $3 AND $4
                 ORDER BY trade_date, quote_time, put_delta
                 """,
-                dte, delta_list, str(start_d), str(end_d),
+                dte, delta_list, start_d, end_d,
             )
             # Labels are "YYYY-MM-DD HH:MM"
             timestamps = sorted({

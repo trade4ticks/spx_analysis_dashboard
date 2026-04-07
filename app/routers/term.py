@@ -68,7 +68,7 @@ async def term_by_delta(
               AND dte BETWEEN $4 AND $5
             ORDER BY put_delta, dte
             """,
-            date, time, delta_list, dte_min, dte_max,
+            date_type.fromisoformat(date), time, delta_list, dte_min, dte_max,
         )
 
         band = None
@@ -100,7 +100,7 @@ async def term_by_delta(
                 GROUP BY dte
                 ORDER BY dte
                 """,
-                band_delta, str(start_d), str(end_d), dte_min, dte_max, ref_time,
+                band_delta, start_d, end_d, dte_min, dte_max, ref_time,
             )
             band = {
                 "delta":  band_delta,
@@ -250,7 +250,7 @@ async def term_intraday(
                   AND quote_time = ANY($5::time[])
                 ORDER BY quote_time, dte
                 """,
-                date, delta, dte_min, dte_max,
+                date_type.fromisoformat(date), delta, dte_min, dte_max,
                 [t + ":00" for t in time_list],
             )
         else:
@@ -263,7 +263,7 @@ async def term_intraday(
                   AND dte BETWEEN $3 AND $4
                 ORDER BY quote_time, dte
                 """,
-                date, delta, dte_min, dte_max,
+                date_type.fromisoformat(date), delta, dte_min, dte_max,
             )
 
     by_time: dict[str, dict[int, float]] = {}

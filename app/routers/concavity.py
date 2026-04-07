@@ -75,7 +75,7 @@ async def get_concavity(
                 WHERE l.put_delta = $8
                 ORDER BY l.trade_date
                 """,
-                dte, needed_deltas, str(start_d), str(end_d), target_time,
+                dte, needed_deltas, start_d, end_d, target_time,
                 center_delta, right_delta, left_delta,
             )
             labels     = [str(r["label"]) for r in rows]
@@ -106,7 +106,7 @@ async def get_concavity(
                 WHERE l.put_delta = $7
                 ORDER BY l.trade_date, l.quote_time
                 """,
-                dte, needed_deltas, str(start_d), str(end_d),
+                dte, needed_deltas, start_d, end_d,
                 center_delta, right_delta, left_delta,
             )
             labels = [r["label"] for r in rows]
