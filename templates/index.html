@@ -184,24 +184,11 @@
                 </div>
               </template>
 
-              <!-- Multi-Date date picker -->
+              <!-- Multi-Date date picker (popover lives outside header) -->
               <template x-if="panel.skewMode === 'by_date'">
-                <div class="p-type-btn-host" style="position:relative;">
-                  <div class="p-chip" @click="panel.dateMenuOpen=!panel.dateMenuOpen"
-                       @click.outside="panel.dateMenuOpen=false">
-                    <span x-text="panel.skewDates.length + ' dates ▾'"></span>
-                  </div>
-                  <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak>
-                    <div class="p-date-menu-hdr">Select dates</div>
-                    <template x-for="d in dates" :key="d">
-                      <label class="p-date-item">
-                        <input type="checkbox"
-                               :checked="panel.skewDates.includes(d)"
-                               @change="toggleSkewDate(panel, d)">
-                        <span x-text="d"></span>
-                      </label>
-                    </template>
-                  </div>
+                <div class="p-chip" @click="panel.dateMenuOpen=!panel.dateMenuOpen"
+                     @click.outside="panel.dateMenuOpen=false">
+                  <span x-text="panel.skewDates.length + ' dates ▾'"></span>
                 </div>
               </template>
 
@@ -354,6 +341,19 @@
           </div>
         </div>
 
+        <!-- Date picker popover (sibling of header to avoid clipping) -->
+        <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select dates</div>
+          <template x-for="d in dates" :key="d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.skewDates.includes(d)"
+                     @change="toggleSkewDate(panel, d)">
+              <span x-text="d"></span>
+            </label>
+          </template>
+        </div>
+
         <!-- Type popover (sibling of header so it isn't clipped by header overflow) -->
         <div class="p-type-menu" x-show="panel.typeMenuOpen" x-cloak>
           <template x-for="t in ['skew','term','historical','concavity']" :key="t">
@@ -365,10 +365,11 @@
           </template>
         </div>
 
-        <!-- Legend -->
+        <!-- Legend (click items to toggle series visibility) -->
         <div class="panel-legend" x-show="panel.legend.length">
-          <template x-for="item in panel.legend" :key="item.label">
-            <div class="leg">
+          <template x-for="(item, i) in panel.legend" :key="item.label">
+            <div class="leg" :class="{off: item.hidden}"
+                 @click="toggleLegendItem(panel, i)">
               <template x-if="item.band">
                 <div class="leg-band"></div>
               </template>

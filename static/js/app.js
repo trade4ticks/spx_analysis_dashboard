@@ -309,22 +309,39 @@ document.addEventListener('alpine:init', () => {
     buildLegend(type, data) {
       const items = [];
       if (!data.series) return items;
+      // Skew/term render the band as 2 datasets BEFORE the series → series start at index 2.
+      // Historical/concavity have no band, series starts at 0.
+      const bandOffset = (data.band && (type === 'skew' || type === 'term')) ? 2 : 0;
       data.series.forEach((s, i) => {
-        items.push({ label: s.label, color: this._seriesColor(type, s, i) });
+        items.push({
+          label:        s.label,
+          color:        this._seriesColor(type, s, i),
+          datasetIndex: bandOffset + i,
+          hidden:       false,
+        });
       });
       if (data.band) {
-        items.push({ label: `${this.lookbackDays}D Band`, band: true });
+        items.push({ label: `${this.lookbackDays}D Band`, band: true, datasetIndex: -1, hidden: false });
       }
       return items;
     },
 
+    toggleLegendItem(panel, i) {
+      const item = panel.legend[i];
+      if (!item || item.datasetIndex < 0) return;     // band toggle not supported here
+      const chart = getChart(panel.id);
+      if (!chart) return;
+      const visible = chart.isDatasetVisible(item.datasetIndex);
+      chart.setDatasetVisibility(item.datasetIndex, !visible);
+      chart.update();
+      item.hidden = visible;
+    },
+
     _seriesColor(type, s, i) {
-      const DTE_C   = { 7:'#3498db',14:'#2ecc71',21:'#1abc9c',30:'#f0b429',45:'#e67e22',60:'#e74c3c',90:'#9b59b6',120:'#8e44ad',180:'#c0392b',270:'#d35400',360:'#7f8c8d' };
-      const DELTA_C = { 10:'#e74c3c',25:'#f1c40f',35:'#aed581',50:'#3498db',65:'#5c6bc0',75:'#ab47bc',90:'#e53935' };
-      const PAL     = ['#3498db','#2ecc71','#f39c12','#e74c3c','#9b59b6','#1abc9c','#e67e22'];
-      if (s.dte   !== undefined) return DTE_C[s.dte]   ?? PAL[i % PAL.length];
-      if (s.delta !== undefined) return DELTA_C[s.delta] ?? PAL[i % PAL.length];
-      return PAL[i % PAL.length];
+      // Delegate to the same palette charts.js uses so legend matches lines
+      if (s.dte   !== undefined) return dteColor(s.dte);
+      if (s.delta !== undefined) return deltaColor(s.delta);
+      return dateColor(i);
     },
 
     // ── Control helpers ───────────────────────────────────────────────────────

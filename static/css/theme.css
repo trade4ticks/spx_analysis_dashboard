@@ -215,6 +215,7 @@ input[type=range]::-webkit-slider-thumb {
   border-radius: 6px;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   position: relative;
 }
@@ -279,8 +280,8 @@ input[type=range]::-webkit-slider-thumb {
 /* Date picker popover */
 .p-date-menu {
   position: absolute;
-  top: 24px;
-  left: 0;
+  top: 38px;
+  left: 8px;
   background: var(--raised);
   border: 1px solid var(--accent);
   border-radius: 4px;
@@ -374,7 +375,9 @@ input[type=range]::-webkit-slider-thumb {
   display: flex; gap: 8px; flex-wrap: wrap;
   padding: 4px 10px 0; flex-shrink: 0;
 }
-.leg { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
+.leg { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); cursor: pointer; user-select: none; transition: opacity .12s; }
+.leg:hover { opacity: .75; }
+.leg.off { opacity: .35; text-decoration: line-through; }
 .leg-line { width: 16px; height: 2px; border-radius: 1px; }
 .leg-band { width: 18px; height: 8px; border-radius: 2px; background: rgba(255,255,255,.08); }
 
