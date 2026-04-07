@@ -10,6 +10,9 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <!-- Chart.js must load before app.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <!-- Hammer.js + zoom plugin (pinch/wheel zoom + drag pan) -->
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <!-- Our JS (charts must precede app) -->
   <script src="/static/js/charts.js"></script>
   <script src="/static/js/app.js"></script>
@@ -130,25 +133,27 @@
   <div class="panel-grid">
     <template x-for="panel in panels" :key="panel.id">
 
-      <div class="panel" :class="{loading: panel.loading}">
+      <div class="panel" :class="{loading: panel.loading, expanded: panel.expanded}">
 
         <!-- Panel header -->
         <div class="panel-hdr">
 
-          <!-- Type selector -->
-          <div class="p-type-btn"
-               @click="$dispatch('open-type-menu', {panelId: panel.id})"
-               x-text="panel.type.toUpperCase() + ' ▾'">
+          <!-- Type selector — blue button is the actual control (popover) -->
+          <div class="p-type-wrap" @click.outside="panel.typeMenuOpen=false">
+            <div class="p-type-btn"
+                 @click="panel.typeMenuOpen = !panel.typeMenuOpen"
+                 x-text="panel.type.toUpperCase() + ' ▾'">
+            </div>
+            <div class="p-type-menu" x-show="panel.typeMenuOpen" x-cloak>
+              <template x-for="t in ['skew','term','historical','concavity']" :key="t">
+                <div class="p-type-menu-item"
+                     :class="{on: panel.type===t}"
+                     @click="setPanelType(panel, t); panel.typeMenuOpen=false"
+                     x-text="t.toUpperCase()">
+                </div>
+              </template>
+            </div>
           </div>
-
-          <!-- Type dropdown (simple select for now) -->
-          <select class="p-dd" style="margin-left:0;"
-                  :value="panel.type"
-                  @change="setPanelType(panel, $event.target.value)">
-            <template x-for="t in ['skew','term','historical','concavity']" :key="t">
-              <option :value="t" x-text="t"></option>
-            </template>
-          </select>
 
           <!-- ── SKEW controls ────────────────────────────────────────── -->
           <template x-if="panel.type === 'skew'">
@@ -321,8 +326,9 @@
 
           <!-- Panel actions -->
           <div class="p-actions">
+            <button class="icon-btn" @click="resetPanelZoom(panel)" title="Reset zoom">⟲</button>
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
-            <button class="icon-btn" title="Expand">⤢</button>
+            <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
         </div>
 

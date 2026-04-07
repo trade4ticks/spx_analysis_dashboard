@@ -56,6 +56,10 @@ function destroyPanel(panelId) {
   }
 }
 
+function getChart(panelId) {
+  return _instances.get(panelId);
+}
+
 // ── Shared Chart.js defaults ──────────────────────────────────────────────────
 
 Chart.defaults.color          = '#c8c8c8';
@@ -93,6 +97,15 @@ function basePlugins() {
       borderWidth:     1,
       titleFont:       { size: 11 },
       bodyFont:        { size: 11 },
+    },
+    zoom: {
+      pan:  { enabled: true, mode: 'xy', modifierKey: 'shift' },
+      zoom: {
+        wheel:  { enabled: true },
+        pinch:  { enabled: true },
+        drag:   { enabled: true, backgroundColor: 'rgba(52,152,219,0.15)', borderColor: '#3498db', borderWidth: 1 },
+        mode:   'xy',
+      },
     },
   };
 }

@@ -42,6 +42,8 @@ function defaultPanel(id) {
     error:   null,
     stats:   null,
     legend:  [],
+    expanded:     false,
+    typeMenuOpen: false,
 
     // Skew-specific
     skewMode:   'by_dte',    // by_dte | by_date | intraday
@@ -107,7 +109,27 @@ document.addEventListener('alpine:init', () => {
     // ── Initialise ──────────────────────────────────────────────────────────
     async init() {
       await this.loadDates();
-      // panels load after dates/times are ready
+      // Esc collapses any expanded panel
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          const p = this.panels.find(p => p.expanded);
+          if (p) { p.expanded = false; this.$nextTick(() => this.loadPanel(p)); }
+        }
+      });
+    },
+
+    toggleExpand(panel) {
+      panel.expanded = !panel.expanded;
+      // Chart.js needs a resize after the container changes size
+      this.$nextTick(() => {
+        const inst = getChart(panel.id);
+        if (inst) inst.resize();
+      });
+    },
+
+    resetPanelZoom(panel) {
+      const inst = getChart(panel.id);
+      if (inst && inst.resetZoom) inst.resetZoom();
     },
 
     async loadDates() {
