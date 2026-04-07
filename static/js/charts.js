@@ -84,7 +84,7 @@ function baseScales(yLabel = '', yMin = undefined, yMax = undefined, pctFmt = tr
       grid:  { color: 'rgba(255,255,255,0.06)' },
       ticks: {
         font: { size: 10 },
-        callback: v => pctFmt ? v.toFixed(1) + '%' : v,
+        callback: v => pctFmt ? v.toFixed(2) + '%' : v,
       },
       title: yLabel
         ? { display: true, text: yLabel, color: '#777', font: { size: 9 } }
@@ -302,6 +302,7 @@ function buildTerm(data, pctFmt, yLabel) {
       borderWidth: 2.2,
       borderDash:  isDashed ? [4, 3] : [],
       _dtes:       s.dtes,
+      _metrics:    s.metrics,
     });
   });
 
@@ -314,15 +315,28 @@ function buildTerm(data, pctFmt, yLabel) {
   const plugins = basePlugins();
   plugins.tooltip = {
     ...plugins.tooltip,
-    mode: 'nearest',
+    mode: 'index',
     intersect: false,
     callbacks: {
       title: (items) => {
         if (!items.length) return '';
-        // Round-trip x → dte
         const x = items[0].parsed.x;
         const dte = Math.round(x * x);
         return `${dte}D`;
+      },
+      label: (ctx) => {
+        const m = ctx.dataset._metrics?.[ctx.dataIndex];
+        if (!m) return `${ctx.dataset.label}: ${ctx.parsed.y}`;
+        const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        const ivPct = m.iv == null ? '—' : (m.iv * 100).toFixed(2) + '%';
+        return [
+          `${ctx.dataset.label}`,
+          `  IV:    ${ivPct}`,
+          `  Price: ${fmt(m.price)}`,
+          `  Theta: ${fmt(m.theta, 3)}`,
+          `  Vega:  ${fmt(m.vega, 3)}`,
+          `  Gamma: ${fmt(m.gamma, 5)}`,
+        ];
       },
     },
   };
@@ -357,7 +371,7 @@ function buildTerm(data, pctFmt, yLabel) {
         },
         y: {
           grid:  { color: 'rgba(255,255,255,0.06)' },
-          ticks: { font: { size: 10 }, callback: v => pctFmt ? v.toFixed(1) + '%' : v },
+          ticks: { font: { size: 10 }, callback: v => pctFmt ? v.toFixed(2) + '%' : v },
           title: yLabel ? { display: true, text: yLabel, color: '#777', font: { size: 9 } } : { display: false },
         },
       },

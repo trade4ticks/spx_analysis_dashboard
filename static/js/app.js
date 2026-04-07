@@ -42,10 +42,12 @@ function defaultPanel(id) {
     error:   null,
     stats:   null,
     legend:  [],
-    expanded:      false,
-    typeMenuOpen:  false,
-    dateMenuOpen:  false,
-    intradayBucket: 60,    // 5 | 15 | 30 | 60 minutes
+    expanded:           false,
+    typeMenuOpen:       false,
+    dateMenuOpen:       false,
+    skewDteMenuOpen:    false,
+    termDteMenuOpen:    false,
+    intradayBucket:     60,    // 5 | 15 | 30 | 60 minutes
 
     // Skew-specific
     skewMode:   'by_dte',    // by_dte | by_date | intraday
@@ -386,20 +388,27 @@ document.addEventListener('alpine:init', () => {
       this.loadPanel(panel);
     },
 
+    toggleAllSkewDtes(panel) {
+      panel.skewDtes = (panel.skewDtes.length === ALL_DTES.length) ? [] : ALL_DTES.slice();
+      this.loadPanel(panel);
+    },
+
     // Filter a term API response to only the selected DTEs (client-side)
     filterTermDtes(data, selectedDtes) {
       if (!data || !data.series) return data;
       const sel = new Set(selectedDtes);
-      const filterArr = (dtes, vals) => {
-        const outD = [], outV = [];
-        for (let i = 0; i < dtes.length; i++) {
-          if (sel.has(dtes[i])) { outD.push(dtes[i]); outV.push(vals[i]); }
-        }
-        return { dtes: outD, values: outV };
-      };
       const series = data.series.map(s => {
-        const f = filterArr(s.dtes, s.values);
-        return { ...s, dtes: f.dtes, values: f.values };
+        const outD = [], outV = [], outM = [];
+        for (let i = 0; i < s.dtes.length; i++) {
+          if (sel.has(s.dtes[i])) {
+            outD.push(s.dtes[i]);
+            outV.push(s.values[i]);
+            if (s.metrics) outM.push(s.metrics[i]);
+          }
+        }
+        const out = { ...s, dtes: outD, values: outV };
+        if (s.metrics) out.metrics = outM;
+        return out;
       }).filter(s => s.dtes.length);
       let band = data.band;
       if (band && band.dtes) {

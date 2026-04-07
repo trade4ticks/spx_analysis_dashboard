@@ -160,16 +160,12 @@
                 </template>
               </div>
 
-              <!-- DTE chips (by_dte mode) -->
+              <!-- DTE picker (by_dte mode) — popover -->
               <template x-if="panel.skewMode === 'by_dte'">
-                <div style="display:contents;">
-                  <template x-for="dte in ALL_DTES" :key="dte">
-                    <div class="p-chip"
-                         :class="{on: panel.skewDtes.includes(dte)}"
-                         @click="toggleSkewDte(panel, dte)"
-                         x-text="dte + 'D'">
-                    </div>
-                  </template>
+                <div class="p-chip"
+                     @click="panel.skewDteMenuOpen=!panel.skewDteMenuOpen"
+                     @click.outside="panel.skewDteMenuOpen=false">
+                  <span x-text="panel.skewDtes.length + ' DTEs ▾'"></span>
                 </div>
               </template>
 
@@ -245,25 +241,20 @@
                 </div>
               </template>
 
-              <!-- DTE chips (which DTEs to show on x-axis) -->
-              <template x-for="dte in ALL_DTES" :key="'tdte-'+dte">
-                <div class="p-chip"
-                     :class="{on: panel.termDtes.includes(dte)}"
-                     @click="toggleTermDte(panel, dte)"
-                     x-text="dte + 'D'">
-                </div>
-              </template>
-              <div class="p-chip"
-                   :class="{on: panel.termDtes.length === ALL_DTES.length}"
-                   @click="toggleAllTermDtes(panel)">All</div>
-
-              <!-- Multi-Date chip -->
+              <!-- Multi-Date chip (placed before DTE picker) -->
               <template x-if="panel.termMode === 'by_date'">
                 <div class="p-chip" @click="panel.termDateMenuOpen=!panel.termDateMenuOpen"
                      @click.outside="panel.termDateMenuOpen=false">
                   <span x-text="panel.termDates.length + ' dates ▾'"></span>
                 </div>
               </template>
+
+              <!-- DTE picker — popover -->
+              <div class="p-chip"
+                   @click="panel.termDteMenuOpen=!panel.termDteMenuOpen"
+                   @click.outside="panel.termDteMenuOpen=false">
+                <span x-text="panel.termDtes.length + ' DTEs ▾'"></span>
+              </div>
 
               <!-- Intraday time-bucket toggle -->
               <template x-if="panel.termMode === 'intraday'">
@@ -365,6 +356,36 @@
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
             <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
+        </div>
+
+        <!-- Skew DTE picker popover -->
+        <div class="p-date-menu" x-show="panel.skewDteMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">
+            <a href="#" @click.prevent="toggleAllSkewDtes(panel)" style="color:var(--accent);text-decoration:none;">All / None</a>
+          </div>
+          <template x-for="d in ALL_DTES" :key="'sdte-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.skewDtes.includes(d)"
+                     @change="toggleSkewDte(panel, d)">
+              <span x-text="d + 'D'"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Term DTE picker popover -->
+        <div class="p-date-menu" x-show="panel.termDteMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">
+            <a href="#" @click.prevent="toggleAllTermDtes(panel)" style="color:var(--accent);text-decoration:none;">All / None</a>
+          </div>
+          <template x-for="d in ALL_DTES" :key="'tdte-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.termDtes.includes(d)"
+                     @change="toggleTermDte(panel, d)">
+              <span x-text="d + 'D'"></span>
+            </label>
+          </template>
         </div>
 
         <!-- Term delta picker popover -->

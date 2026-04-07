@@ -60,7 +60,9 @@ async def term_by_delta(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT dte, put_delta, {metric} AS value
+            SELECT dte, put_delta,
+                   {metric} AS value,
+                   iv, price, theta, vega, gamma
             FROM spx_surface
             WHERE trade_date = $1
               AND quote_time  = $2::time
@@ -117,17 +119,23 @@ async def term_by_delta(
 
     # Group by put_delta
     by_delta: dict[int, dict[int, float]] = {d: {} for d in delta_list}
+    metrics_by_delta: dict[int, dict[int, dict]] = {d: {} for d in delta_list}
     for r in rows:
         by_delta[r["put_delta"]][r["dte"]] = r["value"]
+        metrics_by_delta[r["put_delta"]][r["dte"]] = {
+            "iv": r["iv"], "price": r["price"], "theta": r["theta"],
+            "vega": r["vega"], "gamma": r["gamma"],
+        }
 
     dtes = sorted({r["dte"] for r in rows})
 
     series = [
         {
-            "label":  _delta_label(d),
-            "delta":  d,
-            "dtes":   dtes,
-            "values": [by_delta[d].get(dte) for dte in dtes],
+            "label":   _delta_label(d),
+            "delta":   d,
+            "dtes":    dtes,
+            "values":  [by_delta[d].get(dte) for dte in dtes],
+            "metrics": [metrics_by_delta[d].get(dte) for dte in dtes],
         }
         for d in delta_list
         if by_delta[d]
