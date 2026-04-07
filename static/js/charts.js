@@ -84,7 +84,7 @@ function baseScales(yLabel = '', yMin = undefined, yMax = undefined, pctFmt = tr
       grid:  { color: 'rgba(255,255,255,0.06)' },
       ticks: {
         font: { size: 10 },
-        callback: v => pctFmt ? v.toFixed(2) + '%' : v,
+        callback: v => pctFmt ? (v * 100).toFixed(2) + '%' : v,
       },
       title: yLabel
         ? { display: true, text: yLabel, color: '#777', font: { size: 9 } }
@@ -211,6 +211,7 @@ function buildSkew(data, pctFmt, yLabel) {
     ...plugins.tooltip,
     mode: 'index',
     intersect: false,
+    filter: (item) => !String(item.dataset.label || '').startsWith('Band'),
     callbacks: {
       title: (items) => {
         if (!items.length) return '';
@@ -317,6 +318,7 @@ function buildTerm(data, pctFmt, yLabel) {
     ...plugins.tooltip,
     mode: 'index',
     intersect: false,
+    filter: (item) => !String(item.dataset.label || '').startsWith('Band'),
     callbacks: {
       title: (items) => {
         if (!items.length) return '';
@@ -371,7 +373,7 @@ function buildTerm(data, pctFmt, yLabel) {
         },
         y: {
           grid:  { color: 'rgba(255,255,255,0.06)' },
-          ticks: { font: { size: 10 }, callback: v => pctFmt ? v.toFixed(2) + '%' : v },
+          ticks: { font: { size: 10 }, callback: v => pctFmt ? (v * 100).toFixed(2) + '%' : v },
           title: yLabel ? { display: true, text: yLabel, color: '#777', font: { size: 9 } } : { display: false },
         },
       },
