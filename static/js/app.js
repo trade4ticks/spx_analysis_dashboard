@@ -324,15 +324,16 @@ document.addEventListener('alpine:init', () => {
     buildLegend(type, data) {
       const items = [];
       if (!data.series) return items;
-      // Skew renders the band as 5 datasets before the series (max, min, p75, p25, median).
-      // Term still renders it as 2. Historical/concavity have no band.
       // Both skew and term render the layered band as 5 datasets before the series
       let bandOffset = 0;
       if (data.band && (type === 'skew' || type === 'term')) bandOffset = 5;
+      // For historical the API tells us which dimension is varying
+      const colorBy = data.dimension;   // 'dte' | 'delta' | undefined
       data.series.forEach((s, i) => {
+        const stagged = colorBy ? { ...s, _colorBy: colorBy } : s;
         items.push({
           label:        s.label,
-          color:        this._seriesColor(type, s, i),
+          color:        this._seriesColor(type, stagged, i),
           datasetIndex: bandOffset + i,
           hidden:       false,
         });
