@@ -1,10 +1,18 @@
 """
 Convexity (formerly concavity) endpoint.
 
-Convexity = (IV_left + IV_right) / 2 - IV_center
+Weighted curvature against the chord at the center delta:
 
-Positive  -> wings averaged higher than center (smile / convex up)
-Negative  -> center higher than the average of the wings (frown)
+    w_left  = (d_right  - d_center) / (d_right - d_left)
+    w_right = (d_center - d_left  ) / (d_right - d_left)
+    convexity = (w_left * IV_left + w_right * IV_right) - IV_center
+
+This is the linear interpolation of left/right at the center delta
+minus the actual center IV. Reduces to (IV_left+IV_right)/2 - IV_center
+when wings are evenly spaced, but stays correct when they aren't.
+
+Positive  -> wings interpolated above center (smile / convex up)
+Negative  -> center above the chord (frown)
 
 GET /api/convexity
   dte           single DTE      (mutually exclusive with dtes)
@@ -51,6 +59,13 @@ async def get_convexity(
     if not dte_list:
         raise HTTPException(400, "DTE list must not be empty")
 
+    if not (left_delta < center_delta < right_delta):
+        raise HTTPException(400, "Require left_delta < center_delta < right_delta")
+
+    span    = right_delta - left_delta
+    w_left  = (right_delta  - center_delta) / span
+    w_right = (center_delta - left_delta)   / span
+
     start_d = date_type.fromisoformat(start)
     end_d   = date_type.fromisoformat(end)
 
@@ -78,7 +93,7 @@ async def get_convexity(
                        l.iv                                      AS iv_left,
                        c.iv                                      AS iv_center,
                        r.iv                                      AS iv_right,
-                       (l.iv + r.iv) / 2.0 - c.iv                AS convexity
+                       (l.iv * $9 + r.iv * $10) - c.iv           AS convexity
                 FROM closest l
                 JOIN closest c USING (trade_date, dte)
                 JOIN closest r USING (trade_date, dte)
@@ -90,6 +105,7 @@ async def get_convexity(
                 dte_list, needed_deltas, start_d, end_d,
                 time_type.fromisoformat(target_time),
                 left_delta, center_delta, right_delta,
+                w_left, w_right,
             )
         else:
             rows = await conn.fetch(
@@ -106,7 +122,7 @@ async def get_convexity(
                        l.iv  AS iv_left,
                        c.iv  AS iv_center,
                        r.iv  AS iv_right,
-                       (l.iv + r.iv) / 2.0 - c.iv AS convexity
+                       (l.iv * $8 + r.iv * $9) - c.iv AS convexity
                 FROM base l
                 JOIN base c USING (trade_date, quote_time, dte)
                 JOIN base r USING (trade_date, quote_time, dte)
@@ -117,6 +133,7 @@ async def get_convexity(
                 """,
                 dte_list, needed_deltas, start_d, end_d,
                 left_delta, center_delta, right_delta,
+                w_left, w_right,
             )
 
     # Distinct labels in order seen

@@ -139,9 +139,9 @@ function renderPanel(panelId, type, data, metric = 'iv') {
     case 'skew':       config = buildSkew(data, pctFmt, yLabel);       break;
     case 'term':       config = buildTerm(data, pctFmt, yLabel);       break;
     case 'historical': config = buildHistorical(data, pctFmt, yLabel); break;
-    case 'convexity':  config = buildHistorical(data, false, 'Convexity', 'convexity'); break;
-    case 'skew_slope': config = buildHistorical(data, false, 'Skew slope (ΔIV/Δdelta)', 'slope'); break;
-    case 'term_slope': config = buildHistorical(data, false, 'Term slope (ΔIV/ΔDTE)', 'slope'); break;
+    case 'convexity':  config = buildHistorical(data, true, 'Convexity', 'convexity');                       break;
+    case 'skew_slope': config = buildHistorical(data, true, 'Skew (sqrt(T)·ΔIV/Δlnk)', 'skew_slope_q');     break;
+    case 'term_slope': config = buildHistorical(data, true, 'Forward vol (annualized)', 'forward_vol');     break;
     default:           return;
   }
 
@@ -430,14 +430,25 @@ function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
             `  IV right:  ${pct(m.iv_right)}`,
           ];
         }
-        if (flavor === 'slope') {
-          if (!m) return `${ctx.dataset.label}: ${fmt(y, 5)}`;
+        if (flavor === 'skew_slope_q') {
           const pct = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+          if (!m) return `${ctx.dataset.label}: ${pct(y)}`;
           return [
             `${ctx.dataset.label}`,
-            `  Slope: ${fmt(y, 5)}`,
-            `  IV a:  ${pct(m.iv_a)}`,
-            `  IV b:  ${pct(m.iv_b)}`,
+            `  Skew: ${pct(y)}`,
+            `  IV a: ${pct(m.iv_a)}    K a: ${m.k_a == null ? '—' : Math.round(m.k_a)}`,
+            `  IV b: ${pct(m.iv_b)}    K b: ${m.k_b == null ? '—' : Math.round(m.k_b)}`,
+          ];
+        }
+        if (flavor === 'forward_vol') {
+          const pct = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+          if (!m) return `${ctx.dataset.label}: ${pct(y)}`;
+          return [
+            `${ctx.dataset.label}`,
+            `  Fwd vol: ${pct(y)}`,
+            `  Fwd var: ${m.fwd_var == null ? '—' : m.fwd_var.toFixed(5)}`,
+            `  IV a:    ${pct(m.iv_a)}`,
+            `  IV b:    ${pct(m.iv_b)}`,
           ];
         }
         // historical flavor

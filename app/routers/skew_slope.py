@@ -1,13 +1,14 @@
 """
 Skew slope endpoint.
 
-For a fixed DTE and two put_deltas (a < b), plots the IV slope between
-those two nodes over time:
+Standard quant convention — IV slope per unit log-moneyness, scaled
+by sqrt(T) so different maturities are comparable:
 
-    slope_t = (IV_b(t) - IV_a(t)) / (b - a)
+    slope_t = sqrt(DTE/365) * (IV_b - IV_a) / ln(K_b / K_a)
 
-Supports daily and intraday frequencies and a multi-DTE mode (one
-line per DTE) so the user can compare slope across maturities.
+Sign is preserved (negative = put skew, positive = call skew).
+Requires the strike column on spx_surface (rows missing strike
+return null slope).
 
 GET /api/skew_slope
   dte | dtes
@@ -56,8 +57,7 @@ async def get_skew_slope(
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
 
-    pair    = [delta_a, delta_b]
-    divisor = float(delta_b - delta_a)
+    pair = [delta_a, delta_b]
 
     async with pool.acquire() as conn:
         if freq == "daily":
@@ -65,7 +65,7 @@ async def get_skew_slope(
                 """
                 WITH closest AS (
                     SELECT DISTINCT ON (trade_date, dte, put_delta)
-                        trade_date, dte, put_delta, iv
+                        trade_date, dte, put_delta, iv, strike
                     FROM spx_surface
                     WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
@@ -75,7 +75,11 @@ async def get_skew_slope(
                 )
                 SELECT trade_date::text AS label, dte,
                        a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / $8 AS slope
+                       a.strike AS k_a, b.strike AS k_b,
+                       SQRT(dte::float / 365.0)
+                         * (b.iv - a.iv)
+                         / NULLIF(LN(NULLIF(b.strike,0)::float / NULLIF(a.strike,0)), 0)
+                       AS slope
                 FROM closest a
                 JOIN closest b USING (trade_date, dte)
                 WHERE a.put_delta = $6 AND b.put_delta = $7
@@ -83,13 +87,13 @@ async def get_skew_slope(
                 """,
                 dte_list, pair, start_d, end_d,
                 time_type.fromisoformat(target_time),
-                delta_a, delta_b, divisor,
+                delta_a, delta_b,
             )
         else:
             rows = await conn.fetch(
                 """
                 WITH base AS (
-                    SELECT trade_date, quote_time, dte, put_delta, iv
+                    SELECT trade_date, quote_time, dte, put_delta, iv, strike
                     FROM spx_surface
                     WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
@@ -97,13 +101,17 @@ async def get_skew_slope(
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.dte, a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / $7 AS slope
+                       a.strike AS k_a, b.strike AS k_b,
+                       SQRT(a.dte::float / 365.0)
+                         * (b.iv - a.iv)
+                         / NULLIF(LN(NULLIF(b.strike,0)::float / NULLIF(a.strike,0)), 0)
+                       AS slope
                 FROM base a
                 JOIN base b USING (trade_date, quote_time, dte)
                 WHERE a.put_delta = $5 AND b.put_delta = $6
                 ORDER BY trade_date, quote_time, dte
                 """,
-                dte_list, pair, start_d, end_d, delta_a, delta_b, divisor,
+                dte_list, pair, start_d, end_d, delta_a, delta_b,
             )
 
     seen = []
@@ -115,7 +123,9 @@ async def get_skew_slope(
     bucket: dict[int, dict[str, dict]] = {d: {} for d in dte_list}
     for r in rows:
         bucket[r["dte"]][r["label"]] = {
-            "value": r["slope"], "iv_a": r["iv_a"], "iv_b": r["iv_b"],
+            "value": r["slope"],
+            "iv_a":  r["iv_a"],  "iv_b": r["iv_b"],
+            "k_a":   r["k_a"],   "k_b":  r["k_b"],
         }
 
     series = []
@@ -130,6 +140,8 @@ async def get_skew_slope(
                 ({
                     "iv_a":  entries.get(k, {}).get("iv_a"),
                     "iv_b":  entries.get(k, {}).get("iv_b"),
+                    "k_a":   entries.get(k, {}).get("k_a"),
+                    "k_b":   entries.get(k, {}).get("k_b"),
                 } if entries.get(k) else None)
                 for k in seen
             ],

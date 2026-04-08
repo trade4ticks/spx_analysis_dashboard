@@ -1,18 +1,18 @@
 """
-Term slope endpoint.
+Term slope endpoint — annualized forward volatility.
 
-For a fixed put_delta and two DTEs (a < b), plots the IV slope along
-the term structure between those two maturities over time:
+For a fixed put_delta and two DTEs (a < b), the forward variance
+between the two maturities is
 
-    slope_t = (IV_b(t) - IV_a(t)) / (b - a)
+    fwd_var = (IV_b^2 * T_b - IV_a^2 * T_a) / (T_b - T_a)
 
-Supports daily and intraday frequencies and a multi-delta mode (one
-line per delta).
+where T = DTE / 365. The annualized forward vol is sqrt(fwd_var).
+This is the implied vol the market is pricing for the period
+*between* the two expirations, in the same units as IV everywhere
+else in the dashboard.
 
-GET /api/term_slope
-  delta | deltas
-  dte_a, dte_b
-  start, end, target_time, freq
+Returns null when forward variance comes out negative (arbitrage
+violation between the two quoted IVs).
 """
 from datetime import date as date_type, time as time_type
 from typing import Optional
@@ -64,8 +64,10 @@ async def get_term_slope(
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
 
-    pair    = [dte_a, dte_b]
-    divisor = float(dte_b - dte_a)
+    pair = [dte_a, dte_b]
+    T_a  = dte_a / 365.0
+    T_b  = dte_b / 365.0
+    dT   = T_b - T_a
 
     async with pool.acquire() as conn:
         if freq == "daily":
@@ -83,7 +85,10 @@ async def get_term_slope(
                 )
                 SELECT trade_date::text AS label, put_delta,
                        a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / $8 AS slope
+                       (b.iv * b.iv * $9 - a.iv * a.iv * $8) / $10 AS fwd_var,
+                       CASE WHEN (b.iv * b.iv * $9 - a.iv * a.iv * $8) / $10 > 0
+                            THEN SQRT((b.iv * b.iv * $9 - a.iv * a.iv * $8) / $10)
+                            ELSE NULL END AS fwd_vol
                 FROM closest a
                 JOIN closest b USING (trade_date, put_delta)
                 WHERE a.dte = $6 AND b.dte = $7
@@ -91,7 +96,7 @@ async def get_term_slope(
                 """,
                 pair, delta_list, start_d, end_d,
                 time_type.fromisoformat(target_time),
-                dte_a, dte_b, divisor,
+                dte_a, dte_b, T_a, T_b, dT,
             )
         else:
             rows = await conn.fetch(
@@ -105,13 +110,16 @@ async def get_term_slope(
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.put_delta, a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / $7 AS slope
+                       (b.iv * b.iv * $8 - a.iv * a.iv * $7) / $9 AS fwd_var,
+                       CASE WHEN (b.iv * b.iv * $8 - a.iv * a.iv * $7) / $9 > 0
+                            THEN SQRT((b.iv * b.iv * $8 - a.iv * a.iv * $7) / $9)
+                            ELSE NULL END AS fwd_vol
                 FROM base a
                 JOIN base b USING (trade_date, quote_time, put_delta)
                 WHERE a.dte = $5 AND b.dte = $6
                 ORDER BY trade_date, quote_time, put_delta
                 """,
-                pair, delta_list, start_d, end_d, dte_a, dte_b, divisor,
+                pair, delta_list, start_d, end_d, dte_a, dte_b, T_a, T_b, dT,
             )
 
     seen = []
@@ -123,7 +131,10 @@ async def get_term_slope(
     bucket: dict[int, dict[str, dict]] = {d: {} for d in delta_list}
     for r in rows:
         bucket[r["put_delta"]][r["label"]] = {
-            "value": r["slope"], "iv_a": r["iv_a"], "iv_b": r["iv_b"],
+            "value":   r["fwd_vol"],
+            "fwd_var": r["fwd_var"],
+            "iv_a":    r["iv_a"],
+            "iv_b":    r["iv_b"],
         }
 
     series = []
@@ -136,8 +147,9 @@ async def get_term_slope(
             "values":  [entries.get(k, {}).get("value") for k in seen],
             "metrics": [
                 ({
-                    "iv_a": entries.get(k, {}).get("iv_a"),
-                    "iv_b": entries.get(k, {}).get("iv_b"),
+                    "iv_a":    entries.get(k, {}).get("iv_a"),
+                    "iv_b":    entries.get(k, {}).get("iv_b"),
+                    "fwd_var": entries.get(k, {}).get("fwd_var"),
                 } if entries.get(k) else None)
                 for k in seen
             ],
