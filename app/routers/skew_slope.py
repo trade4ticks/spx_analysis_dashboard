@@ -56,7 +56,8 @@ async def get_skew_slope(
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
 
-    pair = [delta_a, delta_b]
+    pair    = [delta_a, delta_b]
+    divisor = float(delta_b - delta_a)
 
     async with pool.acquire() as conn:
         if freq == "daily":
@@ -74,7 +75,7 @@ async def get_skew_slope(
                 )
                 SELECT trade_date::text AS label, dte,
                        a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / NULLIF(($7 - $6)::float, 0) AS slope
+                       (b.iv - a.iv) / $8 AS slope
                 FROM closest a
                 JOIN closest b USING (trade_date, dte)
                 WHERE a.put_delta = $6 AND b.put_delta = $7
@@ -82,7 +83,7 @@ async def get_skew_slope(
                 """,
                 dte_list, pair, start_d, end_d,
                 time_type.fromisoformat(target_time),
-                delta_a, delta_b,
+                delta_a, delta_b, divisor,
             )
         else:
             rows = await conn.fetch(
@@ -96,13 +97,13 @@ async def get_skew_slope(
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.dte, a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / NULLIF(($6 - $5)::float, 0) AS slope
+                       (b.iv - a.iv) / $7 AS slope
                 FROM base a
                 JOIN base b USING (trade_date, quote_time, dte)
                 WHERE a.put_delta = $5 AND b.put_delta = $6
                 ORDER BY trade_date, quote_time, dte
                 """,
-                dte_list, pair, start_d, end_d, delta_a, delta_b,
+                dte_list, pair, start_d, end_d, delta_a, delta_b, divisor,
             )
 
     seen = []

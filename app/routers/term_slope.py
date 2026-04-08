@@ -64,7 +64,8 @@ async def get_term_slope(
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
 
-    pair = [dte_a, dte_b]
+    pair    = [dte_a, dte_b]
+    divisor = float(dte_b - dte_a)
 
     async with pool.acquire() as conn:
         if freq == "daily":
@@ -82,7 +83,7 @@ async def get_term_slope(
                 )
                 SELECT trade_date::text AS label, put_delta,
                        a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / NULLIF(($7 - $6)::float, 0) AS slope
+                       (b.iv - a.iv) / $8 AS slope
                 FROM closest a
                 JOIN closest b USING (trade_date, put_delta)
                 WHERE a.dte = $6 AND b.dte = $7
@@ -90,7 +91,7 @@ async def get_term_slope(
                 """,
                 pair, delta_list, start_d, end_d,
                 time_type.fromisoformat(target_time),
-                dte_a, dte_b,
+                dte_a, dte_b, divisor,
             )
         else:
             rows = await conn.fetch(
@@ -104,13 +105,13 @@ async def get_term_slope(
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.put_delta, a.iv AS iv_a, b.iv AS iv_b,
-                       (b.iv - a.iv) / NULLIF(($6 - $5)::float, 0) AS slope
+                       (b.iv - a.iv) / $7 AS slope
                 FROM base a
                 JOIN base b USING (trade_date, quote_time, put_delta)
                 WHERE a.dte = $5 AND b.dte = $6
                 ORDER BY trade_date, quote_time, put_delta
                 """,
-                pair, delta_list, start_d, end_d, dte_a, dte_b,
+                pair, delta_list, start_d, end_d, dte_a, dte_b, divisor,
             )
 
     seen = []
