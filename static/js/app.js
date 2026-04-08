@@ -15,7 +15,7 @@ const ALL_DELTAS  = [5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95];
 const COMMON_DTES = [7,14,30,45,60,90,120,180];
 const COMMON_DELTAS = [10,25,35,50,65,75,90];
 
-const PANEL_TYPES = ['skew', 'term', 'historical', 'concavity'];
+const PANEL_TYPES = ['skew', 'term', 'historical', 'convexity', 'skew_slope', 'term_slope'];
 
 function deltaLabel(pd) {
   if (pd === 50) return 'ATM';
@@ -32,7 +32,7 @@ function offsetDate(dateStr, days) {
 // ── Default panel configs ─────────────────────────────────────────────────────
 
 function defaultPanel(id) {
-  const types = ['skew', 'term', 'historical', 'concavity'];
+  const types = ['skew', 'term', 'historical', 'skew_slope', 'term_slope', 'convexity'];
   const type  = types[id] ?? 'skew';
 
   return {
@@ -76,13 +76,27 @@ function defaultPanel(id) {
     histDteMenuOpen:    false,
     histDeltaMenuOpen:  false,
 
-    // Concavity-specific
-    concavDte:         30,
-    concavLeft:        25,
-    concavCenter:      50,
-    concavRight:       75,
-    concavLookback:    180,
-    concavFreq:        'daily',
+    // Convexity-specific
+    convexDtes:        [30],
+    convexLeft:        25,
+    convexCenter:      50,
+    convexRight:       75,
+    convexLookback:    180,
+    convexDteMenuOpen: false,
+
+    // Skew slope (single DTE OR multi-DTE)
+    ssDtes:            [30],
+    ssDeltaA:          25,
+    ssDeltaB:          50,
+    ssLookback:        180,
+    ssDteMenuOpen:     false,
+
+    // Term slope
+    tsDeltas:          [50],
+    tsDteA:            7,
+    tsDteB:            30,
+    tsLookback:        180,
+    tsDeltaMenuOpen:   false,
   };
 }
 
@@ -107,7 +121,7 @@ document.addEventListener('alpine:init', () => {
     intradayEnd:   null,
     intradayWindowDays: 90,
 
-    panels: [0,1,2,3].map(defaultPanel),
+    panels: [0,1,2,3,4,5].map(defaultPanel),
 
     COMMON_DTES,
     COMMON_DELTAS,
@@ -291,19 +305,53 @@ document.addEventListener('alpine:init', () => {
           return this._get(`/api/historical?${p}`);
         }
 
-        // ── Concavity ─────────────────────────────────────────────────────
-        case 'concavity': {
+        // ── Convexity ─────────────────────────────────────────────────────
+        case 'convexity': {
           const end   = this.date;
-          const start = offsetDate(end, -(panel.concavLookback));
-          p.set('dte',          panel.concavDte);
-          p.set('left_delta',   panel.concavLeft);
-          p.set('center_delta', panel.concavCenter);
-          p.set('right_delta',  panel.concavRight);
+          const start = this.mode === 'intraday'
+            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            : offsetDate(end, -(panel.convexLookback));
+          p.set('dtes',         panel.convexDtes.join(','));
+          p.set('left_delta',   panel.convexLeft);
+          p.set('center_delta', panel.convexCenter);
+          p.set('right_delta',  panel.convexRight);
           p.set('start',        start);
           p.set('end',          end);
           p.set('target_time',  this.time);
           p.set('freq',         this.mode === 'intraday' ? 'intraday' : 'daily');
-          return this._get(`/api/concavity?${p}`);
+          return this._get(`/api/convexity?${p}`);
+        }
+
+        // ── Skew slope (multi-DTE) ────────────────────────────────────────
+        case 'skew_slope': {
+          const end   = this.date;
+          const start = this.mode === 'intraday'
+            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            : offsetDate(end, -(panel.ssLookback));
+          p.set('dtes',        panel.ssDtes.join(','));
+          p.set('delta_a',     panel.ssDeltaA);
+          p.set('delta_b',     panel.ssDeltaB);
+          p.set('start',       start);
+          p.set('end',         end);
+          p.set('target_time', this.time);
+          p.set('freq',        this.mode === 'intraday' ? 'intraday' : 'daily');
+          return this._get(`/api/skew_slope?${p}`);
+        }
+
+        // ── Term slope (multi-delta) ──────────────────────────────────────
+        case 'term_slope': {
+          const end   = this.date;
+          const start = this.mode === 'intraday'
+            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            : offsetDate(end, -(panel.tsLookback));
+          p.set('deltas',      panel.tsDeltas.join(','));
+          p.set('dte_a',       panel.tsDteA);
+          p.set('dte_b',       panel.tsDteB);
+          p.set('start',       start);
+          p.set('end',         end);
+          p.set('target_time', this.time);
+          p.set('freq',        this.mode === 'intraday' ? 'intraday' : 'daily');
+          return this._get(`/api/term_slope?${p}`);
         }
 
         default:
@@ -477,6 +525,27 @@ document.addEventListener('alpine:init', () => {
       const idx = panel.histDtes.indexOf(dte);
       idx >= 0 ? panel.histDtes.splice(idx, 1) : panel.histDtes.push(dte);
       panel.histDtes.sort((a, b) => a - b);
+      this.loadPanel(panel);
+    },
+
+    toggleConvexDte(panel, dte) {
+      const idx = panel.convexDtes.indexOf(dte);
+      idx >= 0 ? panel.convexDtes.splice(idx, 1) : panel.convexDtes.push(dte);
+      panel.convexDtes.sort((a, b) => a - b);
+      this.loadPanel(panel);
+    },
+
+    toggleSsDte(panel, dte) {
+      const idx = panel.ssDtes.indexOf(dte);
+      idx >= 0 ? panel.ssDtes.splice(idx, 1) : panel.ssDtes.push(dte);
+      panel.ssDtes.sort((a, b) => a - b);
+      this.loadPanel(panel);
+    },
+
+    toggleTsDelta(panel, delta) {
+      const idx = panel.tsDeltas.indexOf(delta);
+      idx >= 0 ? panel.tsDeltas.splice(idx, 1) : panel.tsDeltas.push(delta);
+      panel.tsDeltas.sort((a, b) => a - b);
       this.loadPanel(panel);
     },
 

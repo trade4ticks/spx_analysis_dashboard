@@ -1,51 +1,61 @@
 """
-Concavity / convexity endpoint.
+Convexity (formerly concavity) endpoint.
 
-Concavity = (IV_left + IV_right) / 2 − IV_center
+Convexity = (IV_left + IV_right) / 2 - IV_center
 
-Positive → smile (wings elevated vs center)
-Negative → one-sided skew dominates
+Positive  -> wings averaged higher than center (smile / convex up)
+Negative  -> center higher than the average of the wings (frown)
 
-GET /api/concavity
-  dte, left_delta, center_delta, right_delta
+GET /api/convexity
+  dte           single DTE      (mutually exclusive with dtes)
+  dtes          comma DTEs      (multi-DTE mode)
+  left_delta, center_delta, right_delta
   start, end, target_time
-  freq: daily | intraday
+  freq          daily | intraday
 """
 from datetime import date as date_type, time as time_type
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.db import get_pool
 
-router = APIRouter(tags=["concavity"])
+router = APIRouter(tags=["convexity"])
 
 INTRADAY_MAX_DAYS = 90
 
 
+def _parse_ints(s: str) -> list[int]:
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
 @router.get("")
-async def get_concavity(
-    dte:          int = Query(30),
-    left_delta:   int = Query(25,  description="OTM put side put_delta"),
-    center_delta: int = Query(50,  description="Center (ATM) put_delta"),
-    right_delta:  int = Query(75,  description="OTM call side put_delta"),
+async def get_convexity(
+    dte:          Optional[int] = Query(None),
+    dtes:         Optional[str] = Query(None, description="Comma DTEs (multi-DTE mode)"),
+    left_delta:   int = Query(25),
+    center_delta: int = Query(50),
+    right_delta:  int = Query(75),
     start:        str = Query(...),
     end:          str = Query(...),
     target_time:  str = Query("15:45"),
     freq:         str = Query("daily"),
     pool=Depends(get_pool),
 ) -> dict:
-    """
-    Time series of skew concavity for a fixed DTE.
+    if dtes:
+        dte_list = _parse_ints(dtes)
+    elif dte is not None:
+        dte_list = [dte]
+    else:
+        raise HTTPException(400, "Provide dte or dtes")
 
-    Queries the three delta levels (left, center, right) and returns
-    concavity = (IV_left + IV_right) / 2 − IV_center at each timestamp.
-    """
+    if not dte_list:
+        raise HTTPException(400, "DTE list must not be empty")
+
     start_d = date_type.fromisoformat(start)
     end_d   = date_type.fromisoformat(end)
 
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
-        raise HTTPException(
-            400,
-            f"Intraday mode limited to {INTRADAY_MAX_DAYS} days."
-        )
+        raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
 
     needed_deltas = [left_delta, center_delta, right_delta]
 
@@ -54,86 +64,101 @@ async def get_concavity(
             rows = await conn.fetch(
                 """
                 WITH closest AS (
-                    SELECT DISTINCT ON (trade_date, put_delta)
-                        trade_date, put_delta, iv
+                    SELECT DISTINCT ON (trade_date, dte, put_delta)
+                        trade_date, dte, put_delta, iv
                     FROM spx_surface
-                    WHERE dte        = $1
+                    WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
                       AND trade_date BETWEEN $3 AND $4
-                    ORDER BY trade_date, put_delta,
+                    ORDER BY trade_date, dte, put_delta,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 )
-                SELECT
-                    l.trade_date                           AS label,
-                    (l.iv + r.iv) / 2.0 - c.iv           AS concavity,
-                    l.iv                                   AS iv_left,
-                    c.iv                                   AS iv_center,
-                    r.iv                                   AS iv_right
+                SELECT trade_date::text                          AS label,
+                       dte,
+                       l.iv                                      AS iv_left,
+                       c.iv                                      AS iv_center,
+                       r.iv                                      AS iv_right,
+                       (l.iv + r.iv) / 2.0 - c.iv                AS convexity
                 FROM closest l
-                JOIN closest c ON c.trade_date = l.trade_date AND c.put_delta = $6
-                JOIN closest r ON r.trade_date = l.trade_date AND r.put_delta = $7
-                WHERE l.put_delta = $8
-                ORDER BY l.trade_date
+                JOIN closest c USING (trade_date, dte)
+                JOIN closest r USING (trade_date, dte)
+                WHERE l.put_delta = $6
+                  AND c.put_delta = $7
+                  AND r.put_delta = $8
+                ORDER BY trade_date, dte
                 """,
-                dte, needed_deltas, start_d, end_d, time_type.fromisoformat(target_time),
-                center_delta, right_delta, left_delta,
+                dte_list, needed_deltas, start_d, end_d,
+                time_type.fromisoformat(target_time),
+                left_delta, center_delta, right_delta,
             )
-            labels     = [str(r["label"]) for r in rows]
-
-        else:  # intraday
+        else:
             rows = await conn.fetch(
                 """
                 WITH base AS (
-                    SELECT trade_date, quote_time, put_delta, iv
+                    SELECT trade_date, quote_time, dte, put_delta, iv
                     FROM spx_surface
-                    WHERE dte        = $1
+                    WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
                       AND trade_date BETWEEN $3 AND $4
                 )
-                SELECT
-                    l.trade_date || ' ' || LEFT(l.quote_time::text, 5) AS label,
-                    (l.iv + r.iv) / 2.0 - c.iv AS concavity,
-                    l.iv  AS iv_left,
-                    c.iv  AS iv_center,
-                    r.iv  AS iv_right
+                SELECT (l.trade_date::text || ' ' || LEFT(l.quote_time::text, 5)) AS label,
+                       l.dte,
+                       l.iv  AS iv_left,
+                       c.iv  AS iv_center,
+                       r.iv  AS iv_right,
+                       (l.iv + r.iv) / 2.0 - c.iv AS convexity
                 FROM base l
-                JOIN base c ON c.trade_date = l.trade_date
-                           AND c.quote_time = l.quote_time
-                           AND c.put_delta  = $5
-                JOIN base r ON r.trade_date = l.trade_date
-                           AND r.quote_time = l.quote_time
-                           AND r.put_delta  = $6
-                WHERE l.put_delta = $7
-                ORDER BY l.trade_date, l.quote_time
+                JOIN base c USING (trade_date, quote_time, dte)
+                JOIN base r USING (trade_date, quote_time, dte)
+                WHERE l.put_delta = $5
+                  AND c.put_delta = $6
+                  AND r.put_delta = $7
+                ORDER BY l.trade_date, l.quote_time, l.dte
                 """,
-                dte, needed_deltas, start_d, end_d,
-                center_delta, right_delta, left_delta,
+                dte_list, needed_deltas, start_d, end_d,
+                left_delta, center_delta, right_delta,
             )
-            labels = [r["label"] for r in rows]
 
-    concavity_vals = [r["concavity"] for r in rows]
+    # Distinct labels in order seen
+    seen = []
+    seen_set = set()
+    for r in rows:
+        if r["label"] not in seen_set:
+            seen.append(r["label"]); seen_set.add(r["label"])
 
-    # Stats
-    valid = [v for v in concavity_vals if v is not None]
-    stats = None
-    if valid:
-        stats = {
-            "current": round(valid[-1], 4) if valid else None,
-            "mean":    round(sum(valid) / len(valid), 4),
-            "minimum": round(min(valid), 4),
-            "maximum": round(max(valid), 4),
+    # Bucket per DTE
+    bucket: dict[int, dict[str, dict]] = {d: {} for d in dte_list}
+    for r in rows:
+        bucket[r["dte"]][r["label"]] = {
+            "value":  r["convexity"],
+            "left":   r["iv_left"],
+            "center": r["iv_center"],
+            "right":  r["iv_right"],
         }
+
+    series = []
+    for d in dte_list:
+        entries = bucket[d]
+        series.append({
+            "label":   f"{d}D",
+            "dte":     d,
+            "labels":  seen,
+            "values":  [entries.get(k, {}).get("value") for k in seen],
+            "metrics": [
+                ({
+                    "iv_left":   entries.get(k, {}).get("left"),
+                    "iv_center": entries.get(k, {}).get("center"),
+                    "iv_right":  entries.get(k, {}).get("right"),
+                } if entries.get(k) else None)
+                for k in seen
+            ],
+        })
 
     return {
         "freq":         freq,
-        "dte":          dte,
+        "dimension":    "dte",
         "left_delta":   left_delta,
         "center_delta": center_delta,
         "right_delta":  right_delta,
-        "labels":       labels,
-        "concavity":    concavity_vals,
-        "iv_left":      [r["iv_left"]   for r in rows],
-        "iv_center":    [r["iv_center"] for r in rows],
-        "iv_right":     [r["iv_right"]  for r in rows],
-        "stats":        stats,
+        "series":       series,
     }

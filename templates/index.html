@@ -335,43 +335,114 @@
             </div>
           </template>
 
-          <!-- ── CONCAVITY controls ───────────────────────────────────── -->
-          <template x-if="panel.type === 'concavity'">
+          <!-- ── CONVEXITY controls ───────────────────────────────────── -->
+          <template x-if="panel.type === 'convexity'">
             <div style="display:contents;">
-              <!-- DTE -->
+              <!-- DTE multi-pick -->
+              <div class="p-chip"
+                   @click="panel.convexDteMenuOpen=!panel.convexDteMenuOpen"
+                   @click.outside="panel.convexDteMenuOpen=false">
+                <span x-text="panel.convexDtes.length + ' DTEs ▾'"></span>
+              </div>
+              <!-- Three delta dropdowns: left / center / right -->
+              <span style="font-size:9px;color:var(--dim);">L</span>
               <div class="p-dd">
-                <select x-model.number="panel.concavDte" @change="loadPanel(panel)">
-                  <template x-for="d in COMMON_DTES" :key="d">
+                <select x-model.number="panel.convexLeft" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DELTAS" :key="'cl-'+d">
+                    <option :value="d" x-text="deltaLabel(d)"></option>
+                  </template>
+                </select>
+              </div>
+              <span style="font-size:9px;color:var(--dim);">C</span>
+              <div class="p-dd">
+                <select x-model.number="panel.convexCenter" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DELTAS" :key="'cc-'+d">
+                    <option :value="d" x-text="deltaLabel(d)"></option>
+                  </template>
+                </select>
+              </div>
+              <span style="font-size:9px;color:var(--dim);">R</span>
+              <div class="p-dd">
+                <select x-model.number="panel.convexRight" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DELTAS" :key="'cr-'+d">
+                    <option :value="d" x-text="deltaLabel(d)"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="slider-wrap" style="margin-left:4px;">
+                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
+                <input type="range" min="30" max="1825" step="30"
+                       x-model.number="panel.convexLookback"
+                       @change="loadPanel(panel)" style="width:60px;">
+                <span class="slider-val" x-text="panel.convexLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── SKEW SLOPE controls ──────────────────────────────────── -->
+          <template x-if="panel.type === 'skew_slope'">
+            <div style="display:contents;">
+              <div class="p-chip"
+                   @click="panel.ssDteMenuOpen=!panel.ssDteMenuOpen"
+                   @click.outside="panel.ssDteMenuOpen=false">
+                <span x-text="panel.ssDtes.length + ' DTEs ▾'"></span>
+              </div>
+              <span style="font-size:9px;color:var(--dim);">A</span>
+              <div class="p-dd">
+                <select x-model.number="panel.ssDeltaA" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DELTAS" :key="'ssa-'+d">
+                    <option :value="d" x-text="deltaLabel(d)"></option>
+                  </template>
+                </select>
+              </div>
+              <span style="font-size:9px;color:var(--dim);">B</span>
+              <div class="p-dd">
+                <select x-model.number="panel.ssDeltaB" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DELTAS" :key="'ssb-'+d">
+                    <option :value="d" x-text="deltaLabel(d)"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="slider-wrap" style="margin-left:4px;">
+                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
+                <input type="range" min="30" max="1825" step="30"
+                       x-model.number="panel.ssLookback"
+                       @change="loadPanel(panel)" style="width:60px;">
+                <span class="slider-val" x-text="panel.ssLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── TERM SLOPE controls ──────────────────────────────────── -->
+          <template x-if="panel.type === 'term_slope'">
+            <div style="display:contents;">
+              <div class="p-chip"
+                   @click="panel.tsDeltaMenuOpen=!panel.tsDeltaMenuOpen"
+                   @click.outside="panel.tsDeltaMenuOpen=false">
+                <span x-text="panel.tsDeltas.length + ' Δ ▾'"></span>
+              </div>
+              <span style="font-size:9px;color:var(--dim);">A</span>
+              <div class="p-dd">
+                <select x-model.number="panel.tsDteA" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DTES" :key="'tsa-'+d">
                     <option :value="d" x-text="d + 'D'"></option>
                   </template>
                 </select>
               </div>
-
-              <!-- Wing deltas -->
-              <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Wings:</span>
-              <div class="p-seg">
-                <template x-for="d in [10,20,25,35]" :key="d">
-                  <span :class="{on: panel.concavLeft===d}"
-                        @click="panel.concavLeft=d; loadPanel(panel)"
-                        x-text="d+'Δp'"></span>
-                </template>
+              <span style="font-size:9px;color:var(--dim);">B</span>
+              <div class="p-dd">
+                <select x-model.number="panel.tsDteB" @change="loadPanel(panel)">
+                  <template x-for="d in ALL_DTES" :key="'tsb-'+d">
+                    <option :value="d" x-text="d + 'D'"></option>
+                  </template>
+                </select>
               </div>
-              <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Ctr:</span>
-              <div class="p-seg">
-                <template x-for="d in [40,45,50]" :key="d">
-                  <span :class="{on: panel.concavCenter===d}"
-                        @click="panel.concavCenter=d; loadPanel(panel)"
-                        x-text="d===50?'ATM':d+'Δp'"></span>
-                </template>
-              </div>
-
-              <!-- Lookback -->
               <div class="slider-wrap" style="margin-left:4px;">
                 <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
                 <input type="range" min="30" max="1825" step="30"
-                       x-model.number="panel.concavLookback"
+                       x-model.number="panel.tsLookback"
                        @change="loadPanel(panel)" style="width:60px;">
-                <span class="slider-val" x-text="panel.concavLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
+                <span class="slider-val" x-text="panel.tsLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
               </div>
             </div>
           </template>
@@ -382,6 +453,42 @@
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
             <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
+        </div>
+
+        <!-- Convexity DTE picker popover -->
+        <div class="p-date-menu" x-show="panel.convexDteMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select DTEs</div>
+          <template x-for="d in ALL_DTES" :key="'cxd-'+d">
+            <label class="p-date-item">
+              <input type="checkbox" :checked="panel.convexDtes.includes(d)"
+                     @change="toggleConvexDte(panel, d)">
+              <span x-text="d + 'D'"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Skew slope DTE picker popover -->
+        <div class="p-date-menu" x-show="panel.ssDteMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select DTEs</div>
+          <template x-for="d in ALL_DTES" :key="'ssd-'+d">
+            <label class="p-date-item">
+              <input type="checkbox" :checked="panel.ssDtes.includes(d)"
+                     @change="toggleSsDte(panel, d)">
+              <span x-text="d + 'D'"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Term slope delta picker popover -->
+        <div class="p-date-menu" x-show="panel.tsDeltaMenuOpen" x-cloak>
+          <div class="p-date-menu-hdr">Select deltas</div>
+          <template x-for="d in ALL_DELTAS" :key="'tsdm-'+d">
+            <label class="p-date-item">
+              <input type="checkbox" :checked="panel.tsDeltas.includes(d)"
+                     @change="toggleTsDelta(panel, d)">
+              <span x-text="deltaLabel(d)"></span>
+            </label>
+          </template>
         </div>
 
         <!-- Historical delta picker popover -->
@@ -481,11 +588,11 @@
 
         <!-- Type popover (sibling of header so it isn't clipped by header overflow) -->
         <div class="p-type-menu" x-show="panel.typeMenuOpen" x-cloak>
-          <template x-for="t in ['skew','term','historical','concavity']" :key="t">
+          <template x-for="t in ['skew','term','historical','skew_slope','term_slope','convexity']" :key="t">
             <div class="p-type-menu-item"
                  :class="{on: panel.type===t}"
                  @click="setPanelType(panel, t); panel.typeMenuOpen=false"
-                 x-text="t.toUpperCase()">
+                 x-text="t.replace('_',' ').toUpperCase()">
             </div>
           </template>
         </div>
@@ -544,28 +651,6 @@
                 <div class="ps">
                   <div class="ps-lbl" x-text="panel.stats.long_dte + 'D ATM'"></div>
                   <div class="ps-val a" x-text="panel.stats.long_iv !== undefined ? (panel.stats.long_iv * 100).toFixed(1) + '%' : '—'"></div>
-                </div>
-              </div>
-            </template>
-            <template x-if="panel.type === 'concavity' && panel.stats">
-              <div style="display:contents;">
-                <div class="ps">
-                  <div class="ps-lbl">Today</div>
-                  <div class="ps-val" :class="panel.stats.current >= 0 ? 'g' : 'r'"
-                       x-text="panel.stats.current !== null ? panel.stats.current.toFixed(2) + 'v' : '—'">
-                  </div>
-                </div>
-                <div class="ps">
-                  <div class="ps-lbl">Mean</div>
-                  <div class="ps-val a" x-text="panel.stats.mean?.toFixed(2) + 'v'"></div>
-                </div>
-                <div class="ps">
-                  <div class="ps-lbl">Min</div>
-                  <div class="ps-val r" x-text="panel.stats.minimum?.toFixed(2) + 'v'"></div>
-                </div>
-                <div class="ps">
-                  <div class="ps-lbl">Max</div>
-                  <div class="ps-val g" x-text="panel.stats.maximum?.toFixed(2) + 'v'"></div>
                 </div>
               </div>
             </template>

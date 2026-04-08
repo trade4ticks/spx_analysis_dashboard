@@ -201,10 +201,10 @@ input[type=range]::-webkit-slider-thumb {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
   gap: 8px;
   padding: 8px;
-  overflow: hidden;
+  overflow: auto;
   min-height: 0;
 }
 

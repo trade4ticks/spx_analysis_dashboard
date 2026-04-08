@@ -139,7 +139,9 @@ function renderPanel(panelId, type, data, metric = 'iv') {
     case 'skew':       config = buildSkew(data, pctFmt, yLabel);       break;
     case 'term':       config = buildTerm(data, pctFmt, yLabel);       break;
     case 'historical': config = buildHistorical(data, pctFmt, yLabel); break;
-    case 'concavity':  config = buildConcavity(data);                  break;
+    case 'convexity':  config = buildHistorical(data, false, 'Convexity', 'convexity'); break;
+    case 'skew_slope': config = buildHistorical(data, false, 'Skew slope (ΔIV/Δdelta)', 'slope'); break;
+    case 'term_slope': config = buildHistorical(data, false, 'Term slope (ΔIV/ΔDTE)', 'slope'); break;
     default:           return;
   }
 
@@ -383,7 +385,7 @@ function buildTerm(data, pctFmt, yLabel) {
 
 // ── Historical time series ────────────────────────────────────────────────────
 
-function buildHistorical(data, pctFmt, yLabel) {
+function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
   const { series = [], dimension } = data;
   if (!series.length) return emptyConfig('No data');
 
@@ -415,8 +417,31 @@ function buildHistorical(data, pctFmt, yLabel) {
       title: (items) => items.length ? labels[items[0].dataIndex] || '' : '',
       label: (ctx) => {
         const m = ctx.dataset._metrics?.[ctx.dataIndex];
-        if (!m) return `${ctx.dataset.label}: ${ctx.parsed.y}`;
+        const y = ctx.parsed.y;
         const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        if (flavor === 'convexity') {
+          if (!m) return `${ctx.dataset.label}: ${y == null ? '—' : (y*100).toFixed(2)+'%'}`;
+          const pct = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+          return [
+            `${ctx.dataset.label}`,
+            `  Convexity: ${y == null ? '—' : (y*100).toFixed(2)+'%'}`,
+            `  IV left:   ${pct(m.iv_left)}`,
+            `  IV center: ${pct(m.iv_center)}`,
+            `  IV right:  ${pct(m.iv_right)}`,
+          ];
+        }
+        if (flavor === 'slope') {
+          if (!m) return `${ctx.dataset.label}: ${fmt(y, 5)}`;
+          const pct = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+          return [
+            `${ctx.dataset.label}`,
+            `  Slope: ${fmt(y, 5)}`,
+            `  IV a:  ${pct(m.iv_a)}`,
+            `  IV b:  ${pct(m.iv_b)}`,
+          ];
+        }
+        // historical flavor
+        if (!m) return `${ctx.dataset.label}: ${y}`;
         const ivPct = m.iv == null ? '—' : (m.iv * 100).toFixed(2) + '%';
         return [
           `${ctx.dataset.label}`,
@@ -430,6 +455,11 @@ function buildHistorical(data, pctFmt, yLabel) {
     },
   };
 
+  // For convexity show y-axis as percent (multiplied) too
+  const yTickCb = (flavor === 'convexity')
+    ? (v) => (v * 100).toFixed(2) + '%'
+    : (v) => pctFmt ? (v * 100).toFixed(2) + '%' : v;
+
   return {
     type: 'line',
     data: { labels, datasets },
@@ -439,78 +469,14 @@ function buildHistorical(data, pctFmt, yLabel) {
       animation:           false,
       plugins,
       scales: {
-        ...baseScales(yLabel, undefined, undefined, pctFmt),
-        x: {
-          grid:  { color: 'rgba(255,255,255,0.06)' },
-          ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 8 },
-        },
-      },
-    },
-  };
-}
-
-// ── Concavity ─────────────────────────────────────────────────────────────────
-
-function buildConcavity(data) {
-  const { labels = [], concavity = [] } = data;
-
-  const step       = Math.max(1, Math.floor(labels.length / 8));
-  const tickLabels = labels.map((l, i) => (i % step === 0 ? l : ''));
-
-  // Color bars green (positive = smile) / red (negative = skew dominates)
-  const barColors = concavity.map(v =>
-    v >= 0 ? 'rgba(46,204,113,0.55)' : 'rgba(231,76,60,0.55)'
-  );
-  const barBorders = concavity.map(v =>
-    v >= 0 ? '#2ecc71' : '#e74c3c'
-  );
-
-  return {
-    type: 'bar',
-    data: {
-      labels: tickLabels,
-      datasets: [
-        {
-          label:           'Concavity',
-          data:            concavity,
-          backgroundColor: barColors,
-          borderColor:     barBorders,
-          borderWidth:     1,
-        },
-        {
-          // Zero line as a line dataset
-          type:        'line',
-          label:       'Zero',
-          data:        Array(labels.length).fill(0),
-          borderColor: 'rgba(255,255,255,0.25)',
-          borderWidth: 1,
-          borderDash:  [4, 4],
-          pointRadius: 0,
-        },
-      ],
-    },
-    options: {
-      responsive:          true,
-      maintainAspectRatio: false,
-      animation:           false,
-      plugins: {
-        ...basePlugins(),
-        tooltip: {
-          ...basePlugins().tooltip,
-          callbacks: {
-            label: ctx => `${ctx.parsed.y.toFixed(2)}v`,
-          },
-        },
-      },
-      scales: {
         x: {
           grid:  { color: 'rgba(255,255,255,0.06)' },
           ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 8 },
         },
         y: {
-          grid:  { color: 'rgba(255,255,255,0.06)' },
-          ticks: { font: { size: 10 }, callback: v => v.toFixed(1) + 'v' },
-          title: { display: true, text: 'Concavity (vols)', color: '#777', font: { size: 9 } },
+          grid: { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 }, callback: yTickCb },
+          title: yLabel ? { display: true, text: yLabel, color: '#777', font: { size: 9 } } : { display: false },
         },
       },
     },
