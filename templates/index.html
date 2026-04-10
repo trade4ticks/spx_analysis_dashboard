@@ -87,18 +87,6 @@
       </div>
     </template>
 
-    <!-- Intraday window slider -->
-    <template x-if="mode === 'intraday'">
-      <div style="display:contents;">
-        <span class="ctrl-lbl">Window</span>
-        <div class="slider-wrap">
-          <input type="range" min="1" max="90" x-model.number="intradayWindowDays"
-                 @change="loadAllPanels()" style="width:90px;">
-          <span class="slider-val" x-text="intradayWindowDays + 'D'"></span>
-        </div>
-      </div>
-    </template>
-
     <div class="ctrl-div"></div>
 
     <!-- Y-axis metric -->
@@ -112,19 +100,34 @@
 
     <div class="ctrl-div"></div>
 
-    <!-- Lookback (daily mode) -->
-    <template x-if="mode === 'daily'">
+    <!-- Lookback (always visible) -->
+    <span class="ctrl-lbl">Lookback</span>
+    <div class="slider-wrap">
+      <input type="range" min="30" max="1825" step="30" x-model.number="lookbackDays"
+             @change="loadAllPanels()" style="width:220px;">
+      <span class="slider-val" x-text="lookbackDays + 'D'"></span>
+    </div>
+
+    <!-- Intraday window slider (same position in both modes) -->
+    <template x-if="mode === 'intraday'">
       <div style="display:contents;">
-        <span class="ctrl-lbl">Lookback</span>
+        <div class="ctrl-div"></div>
+        <span class="ctrl-lbl">Window</span>
         <div class="slider-wrap">
-          <input type="range" min="30" max="730" step="30" x-model.number="lookbackDays"
-                 @change="loadAllPanels()" style="width:90px;">
-          <span class="slider-val" x-text="lookbackDays + 'D'"></span>
+          <input type="range" min="1" max="90" x-model.number="intradayWindowDays"
+                 @change="loadAllPanels()" style="width:180px;">
+          <span class="slider-val" x-text="intradayWindowDays + 'D'"></span>
         </div>
       </div>
     </template>
 
     <div style="margin-left:auto;display:flex;gap:6px;">
+      <div class="seg" style="margin-right:6px;">
+        <div class="seg-btn" :class="{on: showTooltips}"
+             @click="showTooltips=true; loadAllPanels()">Tips</div>
+        <div class="seg-btn" :class="{on: !showTooltips}"
+             @click="showTooltips=false; loadAllPanels()">Off</div>
+      </div>
       <button class="btn" @click="loadAllPanels()">↺ Refresh</button>
     </div>
   </div>
@@ -172,7 +175,8 @@
               <!-- DTE selector (by_date / intraday mode) -->
               <template x-if="panel.skewMode !== 'by_dte'">
                 <div class="p-dd">
-                  <select x-model.number="panel.skewDte" @change="loadPanel(panel)">
+                  <select x-model.number="panel.skewDte" @change="loadPanel(panel)"
+                          x-init="$nextTick(() => $el.value = panel.skewDte)">
                     <template x-for="d in ALL_DTES" :key="d">
                       <option :value="d" x-text="d + 'D'"></option>
                     </template>
@@ -292,7 +296,8 @@
               <template x-if="panel.histMode === 'by_delta'">
                 <div style="display:contents;">
                   <div class="p-dd">
-                    <select x-model.number="panel.histDte" @change="loadPanel(panel)">
+                    <select x-model.number="panel.histDte" @change="loadPanel(panel)"
+                            x-init="$nextTick(() => $el.value = panel.histDte)">
                       <template x-for="d in ALL_DTES" :key="'hd-'+d">
                         <option :value="d" x-text="d + 'D'"></option>
                       </template>
@@ -310,7 +315,8 @@
               <template x-if="panel.histMode === 'by_dte'">
                 <div style="display:contents;">
                   <div class="p-dd">
-                    <select x-model.number="panel.histDelta" @change="loadPanel(panel)">
+                    <select x-model.number="panel.histDelta" @change="loadPanel(panel)"
+                            x-init="$nextTick(() => $el.value = panel.histDelta)">
                       <template x-for="d in ALL_DELTAS" :key="'hdl-'+d">
                         <option :value="d" x-text="deltaLabel(d)"></option>
                       </template>
@@ -324,14 +330,6 @@
                 </div>
               </template>
 
-              <!-- Lookback -->
-              <div class="slider-wrap" style="margin-left:4px;">
-                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
-                <input type="range" min="30" max="1825" step="30"
-                       x-model.number="panel.histLookback"
-                       @change="loadPanel(panel)" style="width:60px;">
-                <span class="slider-val" x-text="panel.histLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
-              </div>
             </div>
           </template>
 
@@ -347,7 +345,8 @@
               <!-- Three delta dropdowns: left / center / right -->
               <span style="font-size:9px;color:var(--dim);">L</span>
               <div class="p-dd">
-                <select x-model.number="panel.convexLeft" @change="loadPanel(panel)">
+                <select x-model.number="panel.convexLeft" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.convexLeft)">
                   <template x-for="d in ALL_DELTAS" :key="'cl-'+d">
                     <option :value="d" x-text="deltaLabel(d)"></option>
                   </template>
@@ -355,7 +354,8 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">C</span>
               <div class="p-dd">
-                <select x-model.number="panel.convexCenter" @change="loadPanel(panel)">
+                <select x-model.number="panel.convexCenter" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.convexCenter)">
                   <template x-for="d in ALL_DELTAS" :key="'cc-'+d">
                     <option :value="d" x-text="deltaLabel(d)"></option>
                   </template>
@@ -363,18 +363,12 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">R</span>
               <div class="p-dd">
-                <select x-model.number="panel.convexRight" @change="loadPanel(panel)">
+                <select x-model.number="panel.convexRight" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.convexRight)">
                   <template x-for="d in ALL_DELTAS" :key="'cr-'+d">
                     <option :value="d" x-text="deltaLabel(d)"></option>
                   </template>
                 </select>
-              </div>
-              <div class="slider-wrap" style="margin-left:4px;">
-                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
-                <input type="range" min="30" max="1825" step="30"
-                       x-model.number="panel.convexLookback"
-                       @change="loadPanel(panel)" style="width:60px;">
-                <span class="slider-val" x-text="panel.convexLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
               </div>
             </div>
           </template>
@@ -389,7 +383,8 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">A</span>
               <div class="p-dd">
-                <select x-model.number="panel.ssDeltaA" @change="loadPanel(panel)">
+                <select x-model.number="panel.ssDeltaA" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.ssDeltaA)">
                   <template x-for="d in ALL_DELTAS" :key="'ssa-'+d">
                     <option :value="d" x-text="deltaLabel(d)"></option>
                   </template>
@@ -397,18 +392,12 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">B</span>
               <div class="p-dd">
-                <select x-model.number="panel.ssDeltaB" @change="loadPanel(panel)">
+                <select x-model.number="panel.ssDeltaB" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.ssDeltaB)">
                   <template x-for="d in ALL_DELTAS" :key="'ssb-'+d">
                     <option :value="d" x-text="deltaLabel(d)"></option>
                   </template>
                 </select>
-              </div>
-              <div class="slider-wrap" style="margin-left:4px;">
-                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
-                <input type="range" min="30" max="1825" step="30"
-                       x-model.number="panel.ssLookback"
-                       @change="loadPanel(panel)" style="width:60px;">
-                <span class="slider-val" x-text="panel.ssLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
               </div>
             </div>
           </template>
@@ -423,7 +412,8 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">A</span>
               <div class="p-dd">
-                <select x-model.number="panel.tsDteA" @change="loadPanel(panel)">
+                <select x-model.number="panel.tsDteA" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.tsDteA)">
                   <template x-for="d in ALL_DTES" :key="'tsa-'+d">
                     <option :value="d" x-text="d + 'D'"></option>
                   </template>
@@ -431,18 +421,12 @@
               </div>
               <span style="font-size:9px;color:var(--dim);">B</span>
               <div class="p-dd">
-                <select x-model.number="panel.tsDteB" @change="loadPanel(panel)">
+                <select x-model.number="panel.tsDteB" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.tsDteB)">
                   <template x-for="d in ALL_DTES" :key="'tsb-'+d">
                     <option :value="d" x-text="d + 'D'"></option>
                   </template>
                 </select>
-              </div>
-              <div class="slider-wrap" style="margin-left:4px;">
-                <span style="font-size:9px;color:var(--dim);white-space:nowrap;">Back</span>
-                <input type="range" min="30" max="1825" step="30"
-                       x-model.number="panel.tsLookback"
-                       @change="loadPanel(panel)" style="width:60px;">
-                <span class="slider-val" x-text="panel.tsLookback + 'D'" style="font-size:10px;min-width:36px;"></span>
               </div>
             </div>
           </template>
@@ -456,7 +440,7 @@
         </div>
 
         <!-- Convexity DTE picker popover -->
-        <div class="p-date-menu" x-show="panel.convexDteMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.convexDteMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select DTEs</div>
           <template x-for="d in ALL_DTES" :key="'cxd-'+d">
             <label class="p-date-item">
@@ -468,7 +452,7 @@
         </div>
 
         <!-- Skew slope DTE picker popover -->
-        <div class="p-date-menu" x-show="panel.ssDteMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.ssDteMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select DTEs</div>
           <template x-for="d in ALL_DTES" :key="'ssd-'+d">
             <label class="p-date-item">
@@ -480,7 +464,7 @@
         </div>
 
         <!-- Term slope delta picker popover -->
-        <div class="p-date-menu" x-show="panel.tsDeltaMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.tsDeltaMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select deltas</div>
           <template x-for="d in ALL_DELTAS" :key="'tsdm-'+d">
             <label class="p-date-item">
@@ -492,7 +476,7 @@
         </div>
 
         <!-- Historical delta picker popover -->
-        <div class="p-date-menu" x-show="panel.histDeltaMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.histDeltaMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select deltas</div>
           <template x-for="d in ALL_DELTAS" :key="'hdm-'+d">
             <label class="p-date-item">
@@ -505,7 +489,7 @@
         </div>
 
         <!-- Historical DTE picker popover -->
-        <div class="p-date-menu" x-show="panel.histDteMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.histDteMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select DTEs</div>
           <template x-for="d in ALL_DTES" :key="'hdtm-'+d">
             <label class="p-date-item">
@@ -518,7 +502,7 @@
         </div>
 
         <!-- Skew DTE picker popover -->
-        <div class="p-date-menu" x-show="panel.skewDteMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.skewDteMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">
             <a href="#" @click.prevent="toggleAllSkewDtes(panel)" style="color:var(--accent);text-decoration:none;">All / None</a>
           </div>
@@ -533,7 +517,7 @@
         </div>
 
         <!-- Term DTE picker popover -->
-        <div class="p-date-menu" x-show="panel.termDteMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.termDteMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">
             <a href="#" @click.prevent="toggleAllTermDtes(panel)" style="color:var(--accent);text-decoration:none;">All / None</a>
           </div>
@@ -548,7 +532,7 @@
         </div>
 
         <!-- Term delta picker popover -->
-        <div class="p-date-menu" x-show="panel.termDeltaMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.termDeltaMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select deltas</div>
           <template x-for="d in ALL_DELTAS" :key="'tdm-'+d">
             <label class="p-date-item">
@@ -561,7 +545,7 @@
         </div>
 
         <!-- Term date picker popover -->
-        <div class="p-date-menu" x-show="panel.termDateMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.termDateMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select dates</div>
           <template x-for="d in dates" :key="'tdate-'+d">
             <label class="p-date-item">
@@ -574,7 +558,7 @@
         </div>
 
         <!-- Skew date picker popover (sibling of header to avoid clipping) -->
-        <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak>
+        <div class="p-date-menu" x-show="panel.dateMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select dates</div>
           <template x-for="d in dates" :key="d">
             <label class="p-date-item">

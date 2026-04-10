@@ -55,6 +55,7 @@ function dateColor(i)    { return DATE_PALETTE[i % DATE_PALETTE.length]; }
 // ── Chart instance registry ───────────────────────────────────────────────────
 
 const _instances = new Map();   // panelId (int) → Chart
+let _showTooltips = true;       // toggled by renderPanel caller
 
 function destroyPanel(panelId) {
   if (_instances.has(panelId)) {
@@ -99,6 +100,7 @@ function basePlugins() {
   return {
     legend:  { display: false },
     tooltip: {
+      enabled:         _showTooltips,
       backgroundColor: '#3a3a3a',
       borderColor:     '#555',
       borderWidth:     1,
@@ -125,7 +127,7 @@ function basePlugins() {
  * @param {object}  data      — API response JSON
  * @param {string}  metric    — 'iv' | 'price' | ...
  */
-function renderPanel(panelId, type, data, metric = 'iv') {
+function renderPanel(panelId, type, data, metric = 'iv', showTooltips = true) {
   const canvas = document.getElementById(`canvas-${panelId}`);
   if (!canvas) return;
 
@@ -133,6 +135,7 @@ function renderPanel(panelId, type, data, metric = 'iv') {
   const yLabel = metric === 'iv' ? 'Implied Vol (%)' : metric;
 
   destroyPanel(panelId);
+  _showTooltips = showTooltips;
 
   let config;
   switch (type) {

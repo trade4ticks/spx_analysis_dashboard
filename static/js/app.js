@@ -111,7 +111,8 @@ document.addEventListener('alpine:init', () => {
     date:          null,
     time:          '15:45',
     metric:        'iv',
-    lookbackDays:  90,
+    lookbackDays:  180,
+    showTooltips:  true,
 
     dates:         [],           // all available trade_dates
     times:         [],           // available quote_times for selected date
@@ -208,7 +209,7 @@ document.addEventListener('alpine:init', () => {
         panel.stats  = data.stats  ?? null;
         panel.legend = this.buildLegend(panel.type, data);
         // Chart renders after Alpine reacts (canvas must be in DOM)
-        this.$nextTick(() => renderPanel(panel.id, panel.type, data, this.metric));
+        this.$nextTick(() => renderPanel(panel.id, panel.type, data, this.metric, this.showTooltips));
       } catch(e) {
         panel.error = e.message ?? 'Request failed';
         console.error(`Panel ${panel.id} error`, e);
@@ -290,7 +291,7 @@ document.addEventListener('alpine:init', () => {
           const end   = this.date;
           const start = this.mode === 'intraday'
             ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
-            : offsetDate(end, -(panel.histLookback));
+            : offsetDate(end, -this.lookbackDays);
           if (panel.histMode === 'by_delta') {
             p.set('dte',    panel.histDte);
             p.set('deltas', panel.histDeltas.join(','));
@@ -310,7 +311,7 @@ document.addEventListener('alpine:init', () => {
           const end   = this.date;
           const start = this.mode === 'intraday'
             ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
-            : offsetDate(end, -(panel.convexLookback));
+            : offsetDate(end, -this.lookbackDays);
           p.set('dtes',         panel.convexDtes.join(','));
           p.set('left_delta',   panel.convexLeft);
           p.set('center_delta', panel.convexCenter);
@@ -327,7 +328,7 @@ document.addEventListener('alpine:init', () => {
           const end   = this.date;
           const start = this.mode === 'intraday'
             ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
-            : offsetDate(end, -(panel.ssLookback));
+            : offsetDate(end, -this.lookbackDays);
           p.set('dtes',        panel.ssDtes.join(','));
           p.set('delta_a',     panel.ssDeltaA);
           p.set('delta_b',     panel.ssDeltaB);
@@ -343,7 +344,7 @@ document.addEventListener('alpine:init', () => {
           const end   = this.date;
           const start = this.mode === 'intraday'
             ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
-            : offsetDate(end, -(panel.tsLookback));
+            : offsetDate(end, -this.lookbackDays);
           p.set('deltas',      panel.tsDeltas.join(','));
           p.set('dte_a',       panel.tsDteA);
           p.set('dte_b',       panel.tsDteB);
