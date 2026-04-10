@@ -139,8 +139,8 @@ function renderPanel(panelId, type, data, metric = 'iv', showTooltips = true) {
 
   let config;
   switch (type) {
-    case 'skew':       config = buildSkew(data, pctFmt, yLabel);       break;
-    case 'term':       config = buildTerm(data, pctFmt, yLabel);       break;
+    case 'skew':       config = data.mode === 'raw_skew' ? buildRawSkew(data) : buildSkew(data, pctFmt, yLabel); break;
+    case 'term':       config = data.mode === 'raw_term' ? buildRawTerm(data) : buildTerm(data, pctFmt, yLabel); break;
     case 'historical': config = buildHistorical(data, pctFmt, yLabel); break;
     case 'convexity':  config = buildHistorical(data, true, 'Convexity', 'convexity');                       break;
     case 'skew_slope': config = buildHistorical(data, true, 'Skew (sqrt(T)·ΔIV/Δlnk)', 'skew_slope_q');     break;
@@ -491,6 +491,199 @@ function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
           grid: { color: 'rgba(255,255,255,0.06)' },
           ticks: { font: { size: 10 }, callback: yTickCb },
           title: yLabel ? { display: true, text: yLabel, color: '#777', font: { size: 9 } } : { display: false },
+        },
+      },
+    },
+  };
+}
+
+// ── Raw skew (IV vs strike) ──────────────────────────────────────────────────
+
+function buildRawSkew(data) {
+  const { series = [], x_axis } = data;
+  if (!series.length) return emptyConfig('No data');
+
+  const useMoney = (x_axis === 'moneyness');
+  const datasets = [];
+
+  series.forEach((s, i) => {
+    const color = dateColor(i);
+    const xArr  = useMoney ? s.moneyness : s.strikes;
+    const pts   = xArr.map((x, j) => ({ x, y: s.values[j] }));
+    datasets.push({
+      label:       s.label,
+      data:        pts,
+      borderColor: color,
+      tension:     0.3,
+      pointRadius: 1.5,
+      pointBackgroundColor: color,
+      fill:        false,
+      borderWidth: 2,
+      _metrics:    s.metrics,
+      _strikes:    s.strikes,
+      _rights:     s.rights,
+    });
+  });
+
+  const plugins = basePlugins();
+  plugins.tooltip = {
+    ...plugins.tooltip,
+    mode: 'nearest',
+    intersect: true,
+    callbacks: {
+      title: (items) => {
+        if (!items.length) return '';
+        const ds  = items[0].dataset;
+        const idx = items[0].dataIndex;
+        const k   = ds._strikes?.[idx];
+        const r   = ds._rights?.[idx];
+        return `${ds.label} · ${k} ${r}`;
+      },
+      label: (ctx) => {
+        const m = ctx.dataset._metrics?.[ctx.dataIndex];
+        if (!m) return '';
+        const pct = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
+        const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        return [
+          `  IV: ${pct(m.iv)}`,
+          `  Delta: ${fmt(m.delta, 3)}`,
+          `  Mid: ${fmt(m.mid_price)}`,
+          `  Bid/Ask: ${fmt(m.bid)}/${fmt(m.ask)}`,
+          `  Theta: ${fmt(m.theta, 3)}`,
+          `  Vega: ${fmt(m.vega, 3)}`,
+          `  Gamma: ${fmt(m.gamma, 5)}`,
+        ];
+      },
+    },
+  };
+
+  // Underlying marker via annotation is optional; skip for v1
+  const underlying = series[0]?.underlying;
+
+  return {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins,
+      scales: {
+        x: {
+          type:  'linear',
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 }, maxRotation: 0 },
+          title: { display: true,
+                   text: useMoney ? 'Moneyness (K/S)' : 'Strike',
+                   color: '#777', font: { size: 9 } },
+        },
+        y: {
+          grid:  { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 },
+                   callback: v => (v * 100).toFixed(2) + '%' },
+          title: { display: true, text: 'Implied Vol (%)',
+                   color: '#777', font: { size: 9 } },
+        },
+      },
+    },
+  };
+}
+
+// ── Raw term structure (IV vs expiration / DTE) ──────────────────────────────
+
+function buildRawTerm(data) {
+  const { series = [], expirations = [] } = data;
+  if (!series.length) return emptyConfig('No data');
+
+  const xOf = dte => Math.sqrt(dte);
+  const datasets = [];
+
+  series.forEach((s, i) => {
+    const color = dateColor(i);
+    const pts   = [];
+    for (let j = 0; j < s.dtes.length; j++) {
+      if (s.values[j] != null && s.dtes[j] != null) {
+        pts.push({ x: xOf(s.dtes[j]), y: s.values[j] });
+      }
+    }
+    datasets.push({
+      label:       s.label,
+      data:        pts,
+      borderColor: color,
+      tension:     0.4,
+      pointRadius: 3,
+      pointBackgroundColor: color,
+      fill:        false,
+      borderWidth: 2.2,
+      _metrics:    s.metrics,
+      _dtes:       s.dtes,
+      _exps:       expirations,
+    });
+  });
+
+  const allDtes = [...new Set(
+    series.flatMap(s => s.dtes.filter(d => d != null))
+  )].sort((a, b) => a - b);
+  const tickValues = allDtes.map(xOf);
+
+  const plugins = basePlugins();
+  plugins.tooltip = {
+    ...plugins.tooltip,
+    mode: 'nearest',
+    intersect: true,
+    callbacks: {
+      title: (items) => {
+        if (!items.length) return '';
+        const x   = items[0].parsed.x;
+        const dte = Math.round(x * x);
+        const ds  = items[0].dataset;
+        const idx = items[0].dataIndex;
+        const exp = ds._exps?.[idx];
+        return `${ds.label} · ${dte}D${exp ? ' (' + exp + ')' : ''}`;
+      },
+      label: (ctx) => {
+        const m = ctx.dataset._metrics?.[ctx.dataIndex];
+        if (!m) return '';
+        const pct = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
+        const fmt = (v, p=2) => v == null ? '—' : v.toFixed(p);
+        return [
+          `  IV: ${pct(m.iv)}`,
+          `  Delta: ${fmt(m.delta, 3)}`,
+          `  Mid: ${fmt(m.mid_price)}`,
+          `  Theta: ${fmt(m.theta, 3)}`,
+          `  Vega: ${fmt(m.vega, 3)}`,
+        ];
+      },
+    },
+  };
+
+  return {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins,
+      scales: {
+        x: {
+          type: 'linear',
+          min: 0,
+          grid: { color: 'rgba(255,255,255,0.06)' },
+          ticks: {
+            font: { size: 10 }, autoSkip: false,
+            callback: val => {
+              const dte = Math.round(val * val);
+              return tickValues.some(tv => Math.abs(tv - val) < 1e-9)
+                ? dte + 'D' : '';
+            },
+          },
+          afterBuildTicks: axis => {
+            axis.ticks = tickValues.map(v => ({ value: v }));
+          },
+        },
+        y: {
+          grid: { color: 'rgba(255,255,255,0.06)' },
+          ticks: { font: { size: 10 },
+                   callback: v => (v * 100).toFixed(2) + '%' },
+          title: { display: true, text: 'Implied Vol (%)',
+                   color: '#777', font: { size: 9 } },
         },
       },
     },

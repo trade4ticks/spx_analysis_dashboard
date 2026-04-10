@@ -149,8 +149,18 @@
                x-text="panel.type.toUpperCase() + ' ▾'">
           </div>
 
-          <!-- ── SKEW controls ────────────────────────────────────────── -->
-          <template x-if="panel.type === 'skew'">
+          <!-- Raw / Interp toggle (skew + term only) -->
+          <template x-if="panel.type === 'skew' || panel.type === 'term'">
+            <div class="p-seg">
+              <span :class="{on: !panel.rawMode}"
+                    @click="panel.rawMode=false; loadPanel(panel)">Interp</span>
+              <span :class="{on: panel.rawMode}"
+                    @click="toggleRawMode(panel)">Raw</span>
+            </div>
+          </template>
+
+          <!-- ── SKEW controls (interpolated) ────────────────────────────── -->
+          <template x-if="panel.type === 'skew' && !panel.rawMode">
             <div style="display:contents;">
               <!-- Mode -->
               <div class="p-seg">
@@ -214,8 +224,35 @@
             </div>
           </template>
 
-          <!-- ── TERM controls ────────────────────────────────────────── -->
-          <template x-if="panel.type === 'term'">
+          <!-- ── RAW SKEW controls ──────────────────────────────────────── -->
+          <template x-if="panel.type === 'skew' && panel.rawMode">
+            <div style="display:contents;">
+              <div class="p-chip"
+                   @click="panel.rawExpMenuOpen=!panel.rawExpMenuOpen"
+                   @click.outside="panel.rawExpMenuOpen=false">
+                <span x-text="panel.rawExpirations.length + ' Exp ▾'"></span>
+              </div>
+              <div class="p-seg">
+                <span :class="{on: panel.rawSettlement==='PM'}"
+                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                <span :class="{on: panel.rawSettlement==='AM'}"
+                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+              </div>
+              <div class="p-seg">
+                <span :class="{on: panel.rawXAxis==='strike'}"
+                      @click="panel.rawXAxis='strike'; loadPanel(panel)">Strike</span>
+                <span :class="{on: panel.rawXAxis==='moneyness'}"
+                      @click="panel.rawXAxis='moneyness'; loadPanel(panel)">K/S</span>
+              </div>
+              <div class="p-chip" :class="{on: panel.rawFilterFlags}"
+                   @click="panel.rawFilterFlags=!panel.rawFilterFlags; loadPanel(panel)">
+                Filter
+              </div>
+            </div>
+          </template>
+
+          <!-- ── TERM controls (interpolated) ────────────────────────────── -->
+          <template x-if="panel.type === 'term' && !panel.rawMode">
             <div style="display:contents;">
               <div class="p-seg">
                 <span :class="{on: panel.termMode==='by_delta'}"
@@ -280,6 +317,30 @@
                   Band
                 </div>
               </template>
+            </div>
+          </template>
+
+          <!-- ── RAW TERM controls ──────────────────────────────────────── -->
+          <template x-if="panel.type === 'term' && panel.rawMode">
+            <div style="display:contents;">
+              <div class="p-dd" style="min-width:100px;">
+                <input type="text" x-model="panel.rawStrikeInput"
+                       @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
+                       @blur="parseRawStrikes(panel)"
+                       placeholder="Strikes..."
+                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:90px;">
+              </div>
+              <div class="p-chip" @click="setATMStrike(panel); loadPanel(panel)">ATM</div>
+              <div class="p-seg">
+                <span :class="{on: panel.rawSettlement==='PM'}"
+                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                <span :class="{on: panel.rawSettlement==='AM'}"
+                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+              </div>
+              <div class="p-chip" :class="{on: panel.rawFilterFlags}"
+                   @click="panel.rawFilterFlags=!panel.rawFilterFlags; loadPanel(panel)">
+                Filter
+              </div>
             </div>
           </template>
 
@@ -439,6 +500,19 @@
             <button class="icon-btn" @click="loadPanel(panel)" title="Refresh">↺</button>
             <button class="icon-btn" @click="toggleExpand(panel)" :title="panel.expanded ? 'Collapse' : 'Expand'" x-text="panel.expanded ? '⤡' : '⤢'"></button>
           </div>
+        </div>
+
+        <!-- Raw expiration picker popover -->
+        <div class="p-date-menu" x-show="panel.rawExpMenuOpen" x-cloak @click.stop>
+          <div class="p-date-menu-hdr">Select Expirations</div>
+          <template x-for="e in panel.rawAvailableExps" :key="'rexp-'+e.expiration">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.rawExpirations.includes(e.expiration)"
+                     @change="toggleRawExpiration(panel, e.expiration)">
+              <span x-text="e.expiration + ' (' + e.dte + 'D)'"></span>
+            </label>
+          </template>
         </div>
 
         <!-- Convexity DTE picker popover -->

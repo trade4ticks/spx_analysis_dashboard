@@ -98,6 +98,18 @@ function defaultPanel(id) {
     tsDteB:            30,
     tsLookback:        180,
     tsDeltaMenuOpen:   false,
+
+    // Raw mode (skew + term only)
+    rawMode:             false,
+    rawAvailableExps:    [],
+    rawExpirations:      [],
+    rawSettlement:       'PM',
+    rawFilterFlags:      true,
+    rawXAxis:            'strike',
+    rawStrikes:          [],
+    rawStrikeInput:      '',
+    rawUnderlying:       null,
+    rawExpMenuOpen:      false,
   };
 }
 
@@ -225,6 +237,18 @@ document.addEventListener('alpine:init', () => {
 
         // ── Skew ─────────────────────────────────────────────────────────
         case 'skew': {
+          if (panel.rawMode) {
+            if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
+            if (!panel.rawExpirations.length) return { mode: 'raw_skew', series: [] };
+            const rp = new URLSearchParams();
+            rp.set('date',         this.date);
+            rp.set('expirations',  panel.rawExpirations.join(','));
+            rp.set('time',         this.time);
+            rp.set('settlement',   panel.rawSettlement);
+            rp.set('filter_flags', panel.rawFilterFlags);
+            rp.set('x_axis',       panel.rawXAxis);
+            return this._get(`/api/raw/skew?${rp}`);
+          }
           if (panel.skewMode === 'by_dte') {
             p.set('date', this.date);
             p.set('time', this.time);
@@ -253,6 +277,17 @@ document.addEventListener('alpine:init', () => {
 
         // ── Term structure ────────────────────────────────────────────────
         case 'term': {
+          if (panel.rawMode) {
+            if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
+            if (!panel.rawStrikes.length) return { mode: 'raw_term', series: [] };
+            const rp = new URLSearchParams();
+            rp.set('date',         this.date);
+            rp.set('strikes',     panel.rawStrikes.join(','));
+            rp.set('time',         this.time);
+            rp.set('settlement',   panel.rawSettlement);
+            rp.set('filter_flags', panel.rawFilterFlags);
+            return this._get(`/api/raw/term?${rp}`);
+          }
           let raw;
           if (panel.termMode === 'by_delta') {
             p.set('date',    this.date);
@@ -379,11 +414,12 @@ document.addEventListener('alpine:init', () => {
       if (data.band && (type === 'skew' || type === 'term')) bandOffset = 5;
       // For historical the API tells us which dimension is varying
       const colorBy = data.dimension;   // 'dte' | 'delta' | undefined
+      const isRaw   = (data.mode === 'raw_skew' || data.mode === 'raw_term');
       data.series.forEach((s, i) => {
         const stagged = colorBy ? { ...s, _colorBy: colorBy } : s;
         items.push({
           label:        s.label,
-          color:        this._seriesColor(type, stagged, i),
+          color:        isRaw ? dateColor(i) : this._seriesColor(type, stagged, i),
           datasetIndex: bandOffset + i,
           hidden:       false,
         });
@@ -551,6 +587,59 @@ document.addEventListener('alpine:init', () => {
       this.loadPanel(panel);
     },
 
+    // ── Raw mode helpers ────────────────────────────────────────────────────
+    async toggleRawMode(panel) {
+      panel.rawMode = true;
+      await this.loadRawExpirations(panel);
+      this.loadPanel(panel);
+    },
+
+    async loadRawExpirations(panel) {
+      try {
+        const res  = await fetch(`/api/raw/expirations?date=${this.date}`);
+        const data = await res.json();
+        panel.rawAvailableExps = data.expirations || [];
+        panel.rawUnderlying    = data.underlying;
+        // Auto-select first 3 expirations if none chosen
+        if (!panel.rawExpirations.length && panel.rawAvailableExps.length) {
+          panel.rawExpirations = panel.rawAvailableExps
+            .slice(0, 3).map(e => e.expiration);
+        }
+        // Auto-set ATM strike for term
+        if (panel.rawUnderlying && !panel.rawStrikes.length) {
+          const atm = Math.round(panel.rawUnderlying / 25) * 25;
+          panel.rawStrikes     = [atm];
+          panel.rawStrikeInput = String(atm);
+        }
+      } catch(e) {
+        console.error('loadRawExpirations failed', e);
+      }
+    },
+
+    toggleRawExpiration(panel, exp) {
+      const idx = panel.rawExpirations.indexOf(exp);
+      idx >= 0 ? panel.rawExpirations.splice(idx, 1)
+               : panel.rawExpirations.push(exp);
+      panel.rawExpirations.sort();
+      this.loadPanel(panel);
+    },
+
+    parseRawStrikes(panel) {
+      const parts = panel.rawStrikeInput.split(',')
+        .map(s => s.trim()).filter(s => s);
+      panel.rawStrikes     = parts.map(Number).filter(n => !isNaN(n) && n > 0);
+      panel.rawStrikeInput = panel.rawStrikes.join(', ');
+    },
+
+    async setATMStrike(panel) {
+      if (!panel.rawUnderlying) await this.loadRawExpirations(panel);
+      if (panel.rawUnderlying) {
+        const atm = Math.round(panel.rawUnderlying / 25) * 25;
+        panel.rawStrikes     = [atm];
+        panel.rawStrikeInput = String(atm);
+      }
+    },
+
     setPanelType(panel, type) {
       destroyPanel(panel.id);
       Object.assign(panel, defaultPanel(panel.id), { type });
@@ -561,7 +650,11 @@ document.addEventListener('alpine:init', () => {
     async onDateChange() {
       await this.loadTimes();
       // Reset any panel's multi-date selection so it re-anchors to the new date
-      this.panels.forEach(p => { p.skewDates = []; p.termDates = []; });
+      this.panels.forEach(p => {
+        p.skewDates = []; p.termDates = [];
+        p.rawAvailableExps = []; p.rawExpirations = [];
+        p.rawStrikes = []; p.rawStrikeInput = '';
+      });
       await this.loadAllPanels();
     },
 
