@@ -184,7 +184,7 @@ async def get_raw_skew(
                              (quote_time - CAST('{time_str}' AS TIME))))
                 LIMIT 1
             )
-            SELECT strike, right, implied_vol, delta, mid_price,
+            SELECT strike, "right", implied_vol, delta, mid_price,
                    theta, vega, gamma, underlying_price,
                    moneyness, log_moneyness, bid, ask, spread_pct,
                    CAST(quote_time AS VARCHAR) AS qt
@@ -271,15 +271,15 @@ async def get_raw_term(
             regexp_extract(
                 filename, '(\\d{{8}})/[^/]+\\.parquet$', 1
             ) AS exp_folder,
-            strike, right, implied_vol, delta, mid_price,
+            strike, "right", implied_vol, delta, mid_price,
             theta, vega, gamma, underlying_price, bid, ask
         FROM read_parquet('{glob_pat}', filename=true)
         WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
           AND strike IN ({strike_csv})
           AND implied_vol IS NOT NULL
           AND implied_vol > 0
-          AND ((right = 'P' AND strike < underlying_price)
-            OR (right = 'C' AND strike >= underlying_price))
+          AND (("right" = 'P' AND strike < underlying_price)
+            OR ("right" = 'C' AND strike >= underlying_price))
           {flag_sql}
         ORDER BY exp_folder, strike
     """)
@@ -373,14 +373,14 @@ async def get_raw_historical(
                     filename, '(\\d{{8}})/\\d{{8}}/[^/]+\\.parquet$', 1
                 ) AS td,
                 CAST(quote_time AS TIME) AS qt,
-                strike, right, implied_vol, delta, mid_price,
+                strike, "right", implied_vol, delta, mid_price,
                 theta, vega, gamma, underlying_price, bid, ask
             FROM read_parquet('{glob_pat}', filename=true)
             WHERE strike IN ({strike_csv})
               AND implied_vol IS NOT NULL
               AND implied_vol > 0
-              AND ((right = 'P' AND strike < underlying_price)
-                OR (right = 'C' AND strike >= underlying_price))
+              AND (("right" = 'P' AND strike < underlying_price)
+                OR ("right" = 'C' AND strike >= underlying_price))
               {flag_sql}
         ),
         ranged AS (
@@ -392,7 +392,7 @@ async def get_raw_historical(
             FROM base
             WHERE td BETWEEN '{start_f}' AND '{end_f}'
         )
-        SELECT td, strike, right, implied_vol, delta, mid_price,
+        SELECT td, strike, "right", implied_vol, delta, mid_price,
                theta, vega, gamma, underlying_price, bid, ask
         FROM ranged WHERE rn = 1
         ORDER BY td, strike
