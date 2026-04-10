@@ -60,6 +60,7 @@ function defaultPanel(id) {
     // Term-specific
     termMode:        'by_delta',
     termDeltas:      [25, 50, 75],
+    termSingleDelta: 50,          // used in by_date / intraday (single-delta modes)
     termDtes:        [0, 7, 14, 30, 60, 90, 180, 360],
     termDates:       [],
     termDeltaMenuOpen: false,
@@ -269,7 +270,7 @@ document.addEventListener('alpine:init', () => {
             if (!panel.termDates.length) panel.termDates = this.defaultDatesAnchored(3);
             p.set('dates',   panel.termDates.join(','));
             p.set('times',   this.time);
-            p.set('delta',   panel.termDeltas[0] ?? 50);
+            p.set('delta',   panel.termSingleDelta);
             p.set('dte_min', 0);
             p.set('dte_max', 360);
             raw = await this._get(`/api/term/by_date?${p}`);
@@ -278,7 +279,7 @@ document.addEventListener('alpine:init', () => {
             p.set('date',    this.date);
             const buckets = this.bucketTimes(panel.intradayBucket);
             if (buckets.length) p.set('times', buckets.join(','));
-            p.set('delta',   panel.termDeltas[0] ?? 50);
+            p.set('delta',   panel.termSingleDelta);
             p.set('dte_min', 0);
             p.set('dte_max', 360);
             raw = await this._get(`/api/term/intraday?${p}`);
@@ -290,7 +291,7 @@ document.addEventListener('alpine:init', () => {
         case 'historical': {
           const end   = this.date;
           const start = this.mode === 'intraday'
-            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            ? offsetDate(end, -this.intradayWindowDays)
             : offsetDate(end, -this.lookbackDays);
           if (panel.histMode === 'by_delta') {
             p.set('dte',    panel.histDte);
@@ -310,7 +311,7 @@ document.addEventListener('alpine:init', () => {
         case 'convexity': {
           const end   = this.date;
           const start = this.mode === 'intraday'
-            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            ? offsetDate(end, -this.intradayWindowDays)
             : offsetDate(end, -this.lookbackDays);
           p.set('dtes',         panel.convexDtes.join(','));
           p.set('left_delta',   panel.convexLeft);
@@ -327,7 +328,7 @@ document.addEventListener('alpine:init', () => {
         case 'skew_slope': {
           const end   = this.date;
           const start = this.mode === 'intraday'
-            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            ? offsetDate(end, -this.intradayWindowDays)
             : offsetDate(end, -this.lookbackDays);
           p.set('dtes',        panel.ssDtes.join(','));
           p.set('delta_a',     panel.ssDeltaA);
@@ -343,7 +344,7 @@ document.addEventListener('alpine:init', () => {
         case 'term_slope': {
           const end   = this.date;
           const start = this.mode === 'intraday'
-            ? (this.intradayStart ?? offsetDate(end, -this.intradayWindowDays))
+            ? offsetDate(end, -this.intradayWindowDays)
             : offsetDate(end, -this.lookbackDays);
           p.set('deltas',      panel.tsDeltas.join(','));
           p.set('dte_a',       panel.tsDteA);

@@ -238,7 +238,8 @@
               </template>
               <template x-if="panel.termMode !== 'by_delta'">
                 <div class="p-dd">
-                  <select x-model.number="panel.termDeltas[0]" @change="loadPanel(panel)">
+                  <select x-model.number="panel.termSingleDelta" @change="loadPanel(panel)"
+                          x-init="$nextTick(() => $el.value = panel.termSingleDelta)">
                     <template x-for="d in ALL_DELTAS" :key="d">
                       <option :value="d" x-text="deltaLabel(d)"></option>
                     </template>
