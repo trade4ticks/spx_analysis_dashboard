@@ -100,22 +100,23 @@
 
     <div class="ctrl-div"></div>
 
-    <!-- Lookback (always visible) -->
-    <span class="ctrl-lbl">Lookback</span>
-    <div class="slider-wrap">
-      <input type="range" min="30" max="1825" step="30" x-model.number="lookbackDays"
-             @change="loadAllPanels()" style="width:220px;">
-      <span class="slider-val" x-text="lookbackDays + 'D'"></span>
-    </div>
-
-    <!-- Intraday window slider (same position in both modes) -->
+    <!-- Lookback (daily) / Window (intraday) — same position, only one visible -->
+    <template x-if="mode === 'daily'">
+      <div style="display:contents;">
+        <span class="ctrl-lbl">Lookback</span>
+        <div class="slider-wrap">
+          <input type="range" min="30" max="1825" step="30" x-model.number="lookbackDays"
+                 @change="loadAllPanels()" style="width:220px;">
+          <span class="slider-val" x-text="lookbackDays + 'D'"></span>
+        </div>
+      </div>
+    </template>
     <template x-if="mode === 'intraday'">
       <div style="display:contents;">
-        <div class="ctrl-div"></div>
         <span class="ctrl-lbl">Window</span>
         <div class="slider-wrap">
           <input type="range" min="1" max="90" x-model.number="intradayWindowDays"
-                 @change="loadAllPanels()" style="width:180px;">
+                 @change="loadAllPanels()" style="width:220px;">
           <span class="slider-val" x-text="intradayWindowDays + 'D'"></span>
         </div>
       </div>
