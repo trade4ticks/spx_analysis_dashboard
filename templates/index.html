@@ -150,7 +150,7 @@
           </div>
 
           <!-- Raw / Interp toggle (skew + term only) -->
-          <template x-if="panel.type === 'skew' || panel.type === 'term'">
+          <template x-if="panel.type === 'skew' || panel.type === 'term' || panel.type === 'historical'">
             <div class="p-seg">
               <span :class="{on: !panel.rawMode}"
                     @click="panel.rawMode=false; loadPanel(panel)">Interp</span>
@@ -344,8 +344,8 @@
             </div>
           </template>
 
-          <!-- ── HISTORICAL controls ──────────────────────────────────── -->
-          <template x-if="panel.type === 'historical'">
+          <!-- ── HISTORICAL controls (interpolated) ─────────────────────── -->
+          <template x-if="panel.type === 'historical' && !panel.rawMode">
             <div style="display:contents;">
               <!-- Mode toggle: Multi-Δ vs Multi-DTE -->
               <div class="p-seg">
@@ -393,6 +393,43 @@
                 </div>
               </template>
 
+            </div>
+          </template>
+
+          <!-- ── RAW HISTORICAL controls ────────────────────────────────── -->
+          <template x-if="panel.type === 'historical' && panel.rawMode">
+            <div style="display:contents;">
+              <!-- Expiration (single select) -->
+              <div class="p-dd">
+                <select x-model="panel.rawHistExpiration" @change="loadPanel(panel)"
+                        x-init="$nextTick(() => $el.value = panel.rawHistExpiration)">
+                  <template x-for="e in panel.rawAvailableExps" :key="'rhe-'+e.expiration">
+                    <option :value="e.expiration"
+                            x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
+                  </template>
+                </select>
+              </div>
+              <!-- Strike input -->
+              <div class="p-dd" style="min-width:100px;">
+                <input type="text" x-model="panel.rawStrikeInput"
+                       @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
+                       @blur="parseRawStrikes(panel)"
+                       placeholder="Strikes..."
+                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:90px;">
+              </div>
+              <div class="p-chip" @click="setATMStrike(panel); loadPanel(panel)">ATM</div>
+              <!-- Settlement -->
+              <div class="p-seg">
+                <span :class="{on: panel.rawSettlement==='PM'}"
+                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                <span :class="{on: panel.rawSettlement==='AM'}"
+                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+              </div>
+              <!-- Filter flags -->
+              <div class="p-chip" :class="{on: panel.rawFilterFlags}"
+                   @click="panel.rawFilterFlags=!panel.rawFilterFlags; loadPanel(panel)">
+                Filter
+              </div>
             </div>
           </template>
 

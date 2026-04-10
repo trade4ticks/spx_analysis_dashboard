@@ -141,7 +141,7 @@ function renderPanel(panelId, type, data, metric = 'iv', showTooltips = true) {
   switch (type) {
     case 'skew':       config = data.mode === 'raw_skew' ? buildRawSkew(data) : buildSkew(data, pctFmt, yLabel); break;
     case 'term':       config = data.mode === 'raw_term' ? buildRawTerm(data) : buildTerm(data, pctFmt, yLabel); break;
-    case 'historical': config = buildHistorical(data, pctFmt, yLabel); break;
+    case 'historical': config = data.mode === 'raw_historical' ? buildHistorical(data, true, 'Implied Vol (%)', 'raw_historical') : buildHistorical(data, pctFmt, yLabel); break;
     case 'convexity':  config = buildHistorical(data, true, 'Convexity', 'convexity');                       break;
     case 'skew_slope': config = buildHistorical(data, true, 'Skew (sqrt(T)·ΔIV/Δlnk)', 'skew_slope_q');     break;
     case 'term_slope': config = buildHistorical(data, true, 'Forward vol (annualized)', 'forward_vol');     break;
@@ -452,6 +452,19 @@ function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
             `  Fwd var: ${m.fwd_var == null ? '—' : m.fwd_var.toFixed(5)}`,
             `  IV a:    ${pct(m.iv_a)}`,
             `  IV b:    ${pct(m.iv_b)}`,
+          ];
+        }
+        if (flavor === 'raw_historical') {
+          const pct = (v) => v == null ? '—' : (v * 100).toFixed(2) + '%';
+          if (!m) return `${ctx.dataset.label}: ${pct(y)}`;
+          return [
+            `${ctx.dataset.label}`,
+            `  IV: ${pct(m.iv)}`,
+            `  Delta: ${fmt(m.delta, 3)}`,
+            `  Mid: ${fmt(m.mid_price)}`,
+            `  Bid/Ask: ${fmt(m.bid)}/${fmt(m.ask)}`,
+            `  Theta: ${fmt(m.theta, 3)}`,
+            `  Vega:  ${fmt(m.vega, 3)}`,
           ];
         }
         // historical flavor

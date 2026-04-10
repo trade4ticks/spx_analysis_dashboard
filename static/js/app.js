@@ -110,6 +110,7 @@ function defaultPanel(id) {
     rawStrikeInput:      '',
     rawUnderlying:       null,
     rawExpMenuOpen:      false,
+    rawHistExpiration:   '',     // single expiration for raw historical
   };
 }
 
@@ -324,6 +325,20 @@ document.addEventListener('alpine:init', () => {
 
         // ── Historical ────────────────────────────────────────────────────
         case 'historical': {
+          if (panel.rawMode) {
+            if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
+            if (!panel.rawHistExpiration || !panel.rawStrikes.length)
+              return { mode: 'raw_historical', series: [] };
+            const rp = new URLSearchParams();
+            rp.set('expiration',   panel.rawHistExpiration);
+            rp.set('strikes',     panel.rawStrikes.join(','));
+            rp.set('start',       offsetDate(this.date, -this.lookbackDays));
+            rp.set('end',         this.date);
+            rp.set('time',        this.time);
+            rp.set('settlement',  panel.rawSettlement);
+            rp.set('filter_flags', panel.rawFilterFlags);
+            return this._get(`/api/raw/historical?${rp}`);
+          }
           const end   = this.date;
           const start = this.mode === 'intraday'
             ? offsetDate(end, -this.intradayWindowDays)
@@ -414,7 +429,7 @@ document.addEventListener('alpine:init', () => {
       if (data.band && (type === 'skew' || type === 'term')) bandOffset = 5;
       // For historical the API tells us which dimension is varying
       const colorBy = data.dimension;   // 'dte' | 'delta' | undefined
-      const isRaw   = (data.mode === 'raw_skew' || data.mode === 'raw_term');
+      const isRaw   = data.mode && data.mode.startsWith('raw_');
       data.series.forEach((s, i) => {
         const stagged = colorBy ? { ...s, _colorBy: colorBy } : s;
         items.push({
@@ -600,10 +615,16 @@ document.addEventListener('alpine:init', () => {
         const data = await res.json();
         panel.rawAvailableExps = data.expirations || [];
         panel.rawUnderlying    = data.underlying;
-        // Auto-select first 3 expirations if none chosen
+        // Auto-select first 3 expirations if none chosen (skew)
         if (!panel.rawExpirations.length && panel.rawAvailableExps.length) {
           panel.rawExpirations = panel.rawAvailableExps
             .slice(0, 3).map(e => e.expiration);
+        }
+        // Auto-select ~30-day expiration for historical
+        if (!panel.rawHistExpiration && panel.rawAvailableExps.length) {
+          const near30 = panel.rawAvailableExps.find(e => e.dte >= 25 && e.dte <= 35)
+                      || panel.rawAvailableExps[Math.min(2, panel.rawAvailableExps.length - 1)];
+          panel.rawHistExpiration = near30.expiration;
         }
         // Auto-set ATM strike for term
         if (panel.rawUnderlying && !panel.rawStrikes.length) {
@@ -654,6 +675,7 @@ document.addEventListener('alpine:init', () => {
         p.skewDates = []; p.termDates = [];
         p.rawAvailableExps = []; p.rawExpirations = [];
         p.rawStrikes = []; p.rawStrikeInput = '';
+        p.rawHistExpiration = '';
       });
       await this.loadAllPanels();
     },
