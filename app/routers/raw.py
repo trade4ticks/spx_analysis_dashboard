@@ -180,8 +180,8 @@ async def get_raw_skew(
                 SELECT quote_time
                 FROM (SELECT DISTINCT CAST(quote_time AS TIME) AS quote_time
                       FROM read_parquet('{pq}'))
-                ORDER BY ABS(EXTRACT(EPOCH FROM
-                             (quote_time - CAST('{time_str}' AS TIME))))
+                ORDER BY ABS(EXTRACT(EPOCH FROM quote_time)
+                           - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
                 LIMIT 1
             )
             SELECT strike, "right", implied_vol, delta, mid_price,
@@ -386,8 +386,8 @@ async def get_raw_historical(
         ranged AS (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY td, strike
-                ORDER BY ABS(EXTRACT(EPOCH FROM
-                             (qt - CAST('{time_str}' AS TIME))))
+                ORDER BY ABS(EXTRACT(EPOCH FROM qt)
+                           - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
             ) AS rn
             FROM base
             WHERE td BETWEEN '{start_f}' AND '{end_f}'
