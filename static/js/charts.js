@@ -394,11 +394,13 @@ function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
 
   // All series share the same labels array (real labels, full strings)
   const labels = series[0].labels ?? [];
+  const isRaw  = data.mode && data.mode.startsWith('raw_');
 
   const datasets = series.map((s, i) => {
-    const color = (dimension === 'dte')
-      ? dteColor(s.dte)
-      : deltaColor(s.delta);
+    let color;
+    if (isRaw)                  color = dateColor(i);
+    else if (dimension === 'dte') color = dteColor(s.dte);
+    else                          color = deltaColor(s.delta);
     return {
       label:       s.label,
       data:        s.values,

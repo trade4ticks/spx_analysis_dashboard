@@ -644,14 +644,27 @@ document.addEventListener('alpine:init', () => {
       return 'multi_exp';
     },
 
+    closeAllRawPopovers(panel) {
+      panel.rawExpMenuOpen  = false;
+      panel.rawDateMenuOpen = false;
+    },
+
     async toggleRawMode(panel) {
+      this.closeAllRawPopovers(panel);
       panel.rawMode    = true;
       panel.rawSubMode = this.defaultRawSubMode(panel.type);
       await this.loadRawExpirations(panel);
       this.loadPanel(panel);
     },
 
+    leaveRawMode(panel) {
+      this.closeAllRawPopovers(panel);
+      panel.rawMode = false;
+      this.loadPanel(panel);
+    },
+
     setRawSubMode(panel, sub) {
+      this.closeAllRawPopovers(panel);
       panel.rawSubMode = sub;
       // Ensure varying-dim arrays have sensible defaults
       if (sub === 'multi_date' && !panel.rawDates.length) {
@@ -748,6 +761,15 @@ document.addEventListener('alpine:init', () => {
         panel.rawStrikes     = [atm];
         panel.rawStrikeInput = String(atm);
       }
+    },
+
+    async setStrikeOffsets(panel, offsets) {
+      if (!panel.rawUnderlying) await this.loadRawExpirations(panel);
+      if (!panel.rawUnderlying) return;
+      const atm = Math.round(panel.rawUnderlying / 25) * 25;
+      panel.rawStrikes     = offsets.map(o => atm + o);
+      panel.rawStrikeInput = panel.rawStrikes.join(', ');
+      this.loadPanel(panel);
     },
 
     setPanelType(panel, type) {

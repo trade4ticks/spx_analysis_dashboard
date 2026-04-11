@@ -153,7 +153,7 @@
           <template x-if="panel.type === 'skew' || panel.type === 'term' || panel.type === 'historical'">
             <div class="p-seg">
               <span :class="{on: !panel.rawMode}"
-                    @click="panel.rawMode=false; loadPanel(panel)">Interp</span>
+                    @click="leaveRawMode(panel)">Interp</span>
               <span :class="{on: panel.rawMode}"
                     @click="toggleRawMode(panel)">Raw</span>
             </div>
@@ -245,6 +245,7 @@
               <!-- Multi-Date: single expiration dropdown + date multi-picker -->
               <template x-if="panel.rawSubMode === 'multi_date'">
                 <div style="display:contents;">
+                  <span style="font-size:9px;color:var(--dim);">EXP</span>
                   <div class="p-dd">
                     <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
                             x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
@@ -363,14 +364,17 @@
                       @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
               </div>
               <!-- Strike text input (always visible) -->
-              <div class="p-dd" style="min-width:100px;">
+              <div class="p-dd" style="min-width:120px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
-                       @blur="parseRawStrikes(panel)"
-                       placeholder="Strikes..."
-                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:90px;">
+                       @blur="parseRawStrikes(panel); loadPanel(panel)"
+                       placeholder="e.g. 6300,6350"
+                       title="Comma-separated strikes"
+                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:110px;">
               </div>
-              <div class="p-chip" @click="setATMStrike(panel); loadPanel(panel)">ATM</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [0])">ATM</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [-50,0,50])">±50</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [-100,0,100])">±100</div>
               <!-- Multi-Date: date multi-picker -->
               <template x-if="panel.rawSubMode === 'multi_date'">
                 <div class="p-chip"
@@ -458,14 +462,17 @@
               </div>
               <!-- Multi-K: single expiration dropdown -->
               <template x-if="panel.rawSubMode === 'multi_strike'">
-                <div class="p-dd">
-                  <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
-                          x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
-                    <template x-for="e in filteredRawExps(panel)" :key="'rhe-'+e.expiration">
-                      <option :value="e.expiration"
-                              x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
-                    </template>
-                  </select>
+                <div style="display:contents;">
+                  <span style="font-size:9px;color:var(--dim);">EXP</span>
+                  <div class="p-dd">
+                    <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
+                            x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
+                      <template x-for="e in filteredRawExps(panel)" :key="'rhe-'+e.expiration">
+                        <option :value="e.expiration"
+                                x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
+                      </template>
+                    </select>
+                  </div>
                 </div>
               </template>
               <!-- Multi-Exp: expiration multi-picker -->
@@ -477,14 +484,17 @@
                 </div>
               </template>
               <!-- Strike input (always shown) -->
-              <div class="p-dd" style="min-width:100px;">
+              <div class="p-dd" style="min-width:120px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
-                       @blur="parseRawStrikes(panel)"
-                       placeholder="Strikes..."
-                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:90px;">
+                       @blur="parseRawStrikes(panel); loadPanel(panel)"
+                       placeholder="e.g. 6300,6350"
+                       title="Comma-separated strikes"
+                       style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:110px;">
               </div>
-              <div class="p-chip" @click="setATMStrike(panel); loadPanel(panel)">ATM</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [0])">ATM</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [-50,0,50])">±50</div>
+              <div class="p-chip" @click="setStrikeOffsets(panel, [-100,0,100])">±100</div>
               <!-- Settlement -->
               <div class="p-seg">
                 <span :class="{on: panel.rawSettlement==='PM'}"
