@@ -266,6 +266,7 @@ document.addEventListener('alpine:init', () => {
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
             rp.set('x_axis',       panel.rawXAxis);
+            rp.set('metric',       this.metric);
             return this._get(`/api/raw/skew?${rp}`);
           }
           if (panel.skewMode === 'by_dte') {
@@ -313,6 +314,7 @@ document.addEventListener('alpine:init', () => {
             rp.set('time',         this.time);
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
+            rp.set('metric',       this.metric);
             return this._get(`/api/raw/term?${rp}`);
           }
           let raw;
@@ -371,6 +373,7 @@ document.addEventListener('alpine:init', () => {
             rp.set('time',        this.time);
             rp.set('settlement',  panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
+            rp.set('metric',      this.metric);
             return this._get(`/api/raw/historical?${rp}`);
           }
           const end   = this.date;

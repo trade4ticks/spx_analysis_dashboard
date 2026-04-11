@@ -79,6 +79,15 @@ def _strike_label(s: float) -> str:
     return str(int(s)) if s == int(s) else str(s)
 
 
+VALID_METRICS = {"iv", "price", "theta", "vega", "gamma"}
+
+
+def _validate_metric(m: str) -> str:
+    if m not in VALID_METRICS:
+        raise HTTPException(400, f"metric must be one of {VALID_METRICS}")
+    return m
+
+
 def _duckdb_query(sql: str):
     """Run a DuckDB query, return rows. Errors → HTTP 500 with detail."""
     con = duckdb.connect()
@@ -160,11 +169,15 @@ async def get_raw_skew(
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
     x_axis:       str  = Query("strike", description="strike | moneyness"),
+    metric:       str  = Query("iv"),
 ) -> dict:
-    """IV vs strike (OTM puts + calls) for each (date, expiration) combo."""
+    """OTM puts + calls vs strike for each (date, expiration) combo."""
     _require_duckdb()
     settlement = _validate_settlement(settlement)
     time_str   = _validate_time(time)
+    metric     = _validate_metric(metric)
+    # Map dashboard metric to result column index in the SELECT below
+    midx = {"iv": 2, "price": 4, "theta": 5, "vega": 6, "gamma": 7}[metric]
     date_list  = _split_csv(dates)
     exp_list   = _split_csv(expirations)
     if not date_list or not exp_list:
@@ -247,7 +260,7 @@ async def get_raw_skew(
                 "forward":    forward,
                 "strikes":    [r[0] for r in otm],
                 "moneyness":  [round(r[9], 6) if r[9] else None for r in otm],
-                "values":     [r[2] for r in otm],
+                "values":     [r[midx] for r in otm],
                 "rights":     [r[1] for r in otm],
                 "metrics": [{
                     "iv": r[2], "delta": r[3], "mid_price": r[4],
@@ -259,6 +272,7 @@ async def get_raw_skew(
     return {
         "mode":   "raw_skew",
         "x_axis": x_axis,
+        "metric": metric,
         "series": series,
     }
 
@@ -272,15 +286,20 @@ async def get_raw_term(
     time:         str  = Query("15:45"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
+    metric:       str  = Query("iv"),
 ) -> dict:
-    """IV vs DTE for each (date, strike) combo (auto-OTM)."""
+    """Selected metric vs DTE for each (date, strike) combo (auto-OTM)."""
     _require_duckdb()
     settlement  = _validate_settlement(settlement)
     time_str    = _validate_time(time)
+    metric      = _validate_metric(metric)
     date_list   = _split_csv(dates)
     strike_list = _parse_strikes(strikes)
     if not date_list:
         raise HTTPException(400, "dates required")
+    # Map metric to term endpoint's bucket key
+    metric_key = {"iv": "iv", "price": "mid_price",
+                  "theta": "theta", "vega": "vega", "gamma": "gamma"}[metric]
 
     multi_date   = len(date_list) > 1
     multi_strike = len(strike_list) > 1
@@ -371,12 +390,12 @@ async def get_raw_term(
                 "date":        date_str,
                 "expirations": all_exps,
                 "dtes":   [entries.get(e, {}).get("dte") for e in all_exps],
-                "values": [entries.get(e, {}).get("iv") for e in all_exps],
+                "values": [entries.get(e, {}).get(metric_key) for e in all_exps],
                 "metrics": [entries[e] if e in entries else None
                             for e in all_exps],
             })
 
-    return {"mode": "raw_term", "series": series}
+    return {"mode": "raw_term", "metric": metric, "series": series}
 
 
 # ── Raw historical (IV time-series per (exp, strike) across trade dates) ────
@@ -390,17 +409,21 @@ async def get_raw_historical(
     time:         str  = Query("15:45"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
+    metric:       str  = Query("iv"),
 ) -> dict:
-    """IV time-series for each (expiration, strike) combo."""
+    """Selected metric time-series for each (expiration, strike) combo."""
     _require_duckdb()
     settlement  = _validate_settlement(settlement)
     time_str    = _validate_time(time)
+    metric      = _validate_metric(metric)
     exp_list    = _split_csv(expirations)
     strike_list = _parse_strikes(strikes)
     start_f     = _validate_date_folder(start)
     end_f       = _validate_date_folder(end)
     if not exp_list:
         raise HTTPException(400, "expirations required")
+    metric_key = {"iv": "iv", "price": "mid_price",
+                  "theta": "theta", "vega": "vega", "gamma": "gamma"}[metric]
 
     multi_exp    = len(exp_list) > 1
     multi_strike = len(strike_list) > 1
@@ -512,13 +535,14 @@ async def get_raw_historical(
                 "strike":     strike,
                 "expiration": exp_str,
                 "labels":     all_dates,
-                "values":     [entries.get(d, {}).get("iv") for d in all_dates],
+                "values":     [entries.get(d, {}).get(metric_key) for d in all_dates],
                 "metrics":    [entries[d] if d in entries else None
                                for d in all_dates],
             })
 
     return {
         "mode":       "raw_historical",
+        "metric":     metric,
         "underlying": underlying,
         "series":     series,
     }

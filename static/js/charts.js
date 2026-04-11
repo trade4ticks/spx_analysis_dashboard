@@ -139,9 +139,9 @@ function renderPanel(panelId, type, data, metric = 'iv', showTooltips = true) {
 
   let config;
   switch (type) {
-    case 'skew':       config = data.mode === 'raw_skew' ? buildRawSkew(data) : buildSkew(data, pctFmt, yLabel); break;
-    case 'term':       config = data.mode === 'raw_term' ? buildRawTerm(data) : buildTerm(data, pctFmt, yLabel); break;
-    case 'historical': config = data.mode === 'raw_historical' ? buildHistorical(data, true, 'Implied Vol (%)', 'raw_historical') : buildHistorical(data, pctFmt, yLabel); break;
+    case 'skew':       config = data.mode === 'raw_skew' ? buildRawSkew(data, pctFmt, yLabel) : buildSkew(data, pctFmt, yLabel); break;
+    case 'term':       config = data.mode === 'raw_term' ? buildRawTerm(data, pctFmt, yLabel) : buildTerm(data, pctFmt, yLabel); break;
+    case 'historical': config = buildHistorical(data, pctFmt, yLabel, data.mode === 'raw_historical' ? 'raw_historical' : 'historical'); break;
     case 'convexity':  config = buildHistorical(data, true, 'Convexity', 'convexity');                       break;
     case 'skew_slope': config = buildHistorical(data, true, 'Skew (sqrt(T)·ΔIV/Δlnk)', 'skew_slope_q');     break;
     case 'term_slope': config = buildHistorical(data, true, 'Forward vol (annualized)', 'forward_vol');     break;
@@ -514,7 +514,7 @@ function buildHistorical(data, pctFmt, yLabel, flavor = 'historical') {
 
 // ── Raw skew (IV vs strike) ──────────────────────────────────────────────────
 
-function buildRawSkew(data) {
+function buildRawSkew(data, pctFmt = true, yLabel = 'Implied Vol (%)') {
   const { series = [], x_axis } = data;
   if (!series.length) return emptyConfig('No data');
 
@@ -593,8 +593,8 @@ function buildRawSkew(data) {
         y: {
           grid:  { color: 'rgba(255,255,255,0.06)' },
           ticks: { font: { size: 10 },
-                   callback: v => (v * 100).toFixed(2) + '%' },
-          title: { display: true, text: 'Implied Vol (%)',
+                   callback: v => pctFmt ? (v * 100).toFixed(2) + '%' : v },
+          title: { display: true, text: yLabel,
                    color: '#777', font: { size: 9 } },
         },
       },
@@ -602,9 +602,9 @@ function buildRawSkew(data) {
   };
 }
 
-// ── Raw term structure (IV vs expiration / DTE) ──────────────────────────────
+// ── Raw term structure (selected metric vs DTE) ──────────────────────────────
 
-function buildRawTerm(data) {
+function buildRawTerm(data, pctFmt = true, yLabel = 'Implied Vol (%)') {
   const { series = [], expirations = [] } = data;
   if (!series.length) return emptyConfig('No data');
 
@@ -699,8 +699,8 @@ function buildRawTerm(data) {
         y: {
           grid: { color: 'rgba(255,255,255,0.06)' },
           ticks: { font: { size: 10 },
-                   callback: v => (v * 100).toFixed(2) + '%' },
-          title: { display: true, text: 'Implied Vol (%)',
+                   callback: v => pctFmt ? (v * 100).toFixed(2) + '%' : v },
+          title: { display: true, text: yLabel,
                    color: '#777', font: { size: 9 } },
         },
       },
