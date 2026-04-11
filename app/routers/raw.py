@@ -10,6 +10,7 @@ GET /api/raw/term         — IV vs DTE for (date, strike) combos
 GET /api/raw/historical   — IV time-series for (expiration, strike) combos
 """
 import glob as globmod
+import math
 import os
 import re
 from datetime import date as date_type
@@ -208,12 +209,27 @@ async def get_raw_skew(
                 continue
 
             underlying = rows[0][8]
-            otm = [r for r in rows
-                   if (r[1] == "P" and r[0] < underlying)
-                   or (r[1] == "C" and r[0] >= underlying)]
-
             exp_d = _to_date(exp_folder)
             dte = (exp_d - trade_d).days
+
+            # Implied forward via put-call parity at the strike closest to spot.
+            # F = K + (C - P) * exp(rT). Using F (not spot) as the OTM switch
+            # point eliminates the put-call IV jump because P_F = C_F by parity.
+            puts_by_k  = {r[0]: r for r in rows if r[1] == "P"}
+            calls_by_k = {r[0]: r for r in rows if r[1] == "C"}
+            both = sorted(set(puts_by_k) & set(calls_by_k))
+            forward = underlying
+            if both:
+                k_atm = min(both, key=lambda k: abs(k - underlying))
+                p_mid = puts_by_k[k_atm][4]
+                c_mid = calls_by_k[k_atm][4]
+                if p_mid is not None and c_mid is not None:
+                    T = max(dte, 1) / 365.0
+                    forward = k_atm + (c_mid - p_mid) * math.exp(0.045 * T)
+
+            otm = [r for r in rows
+                   if (r[1] == "P" and r[0] < forward)
+                   or (r[1] == "C" and r[0] >= forward)]
 
             if multi_date and multi_exp:
                 label = f"{date_str} · {exp_str}"
@@ -228,6 +244,7 @@ async def get_raw_skew(
                 "date":       date_str,
                 "dte":        dte,
                 "underlying": underlying,
+                "forward":    forward,
                 "strikes":    [r[0] for r in otm],
                 "moneyness":  [round(r[9], 6) if r[9] else None for r in otm],
                 "values":     [r[2] for r in otm],
@@ -277,24 +294,42 @@ async def get_raw_term(
 
         glob_pat = os.path.join(PARQUET_BASE, date_folder, "*",
                                 f"{settlement}.parquet")
-        if not globmod.glob(glob_pat):
+        all_files = sorted(globmod.glob(glob_pat))
+        if not all_files:
             continue
 
-        rows = _duckdb_query(f"""
-            SELECT
-                regexp_extract(filename, '(\\d{{8}})/[^/]+\\.parquet$', 1) AS exp_folder,
-                strike, "right", implied_vol, delta, mid_price,
-                theta, vega, gamma, underlying_price, bid, ask
-            FROM read_parquet('{glob_pat}', filename=true)
-            WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
-              AND strike IN ({strike_csv})
-              AND implied_vol IS NOT NULL
-              AND implied_vol > 0
-              AND (("right" = 'P' AND strike < underlying_price)
-                OR ("right" = 'C' AND strike >= underlying_price))
-              {flag_sql}
-            ORDER BY exp_folder, strike
-        """)
+        # Parse expiration folder from each file path in Python.
+        # Path: .../<date>/<exp>/<settlement>.parquet → parts[-2] is exp
+        valid = []
+        for f in all_files:
+            parts = f.replace("\\", "/").split("/")
+            if len(parts) < 2:
+                continue
+            exp_f = parts[-2]
+            if re.match(r"^\d{8}$", exp_f):
+                valid.append((f, exp_f))
+
+        if not valid:
+            continue
+
+        # Build a UNION ALL query with the expiration hardcoded per file
+        union_parts = []
+        for f, exp_f in valid:
+            union_parts.append(f"""
+                SELECT '{exp_f}' AS exp_folder,
+                       strike, "right", implied_vol, delta, mid_price,
+                       theta, vega, gamma, underlying_price, bid, ask
+                FROM read_parquet('{f}')
+                WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
+                  AND strike IN ({strike_csv})
+                  AND implied_vol IS NOT NULL
+                  AND implied_vol > 0
+                  AND (("right" = 'P' AND strike < underlying_price)
+                    OR ("right" = 'C' AND strike >= underlying_price))
+                  {flag_sql}
+            """)
+        union_sql = " UNION ALL ".join(union_parts)
+        rows = _duckdb_query(union_sql + " ORDER BY exp_folder, strike")
 
         if not rows:
             continue
@@ -380,34 +415,54 @@ async def get_raw_historical(
         exp_folder = _validate_date_folder(exp_str)
         glob_pat = os.path.join(PARQUET_BASE, "*", exp_folder,
                                 f"{settlement}.parquet")
-        if not globmod.glob(glob_pat):
+        all_files = sorted(globmod.glob(glob_pat))
+        if not all_files:
             continue
 
-        rows = _duckdb_query(f"""
-            WITH base AS (
-                SELECT
-                    regexp_extract(
-                        filename, '(\\d{{8}})/\\d{{8}}/[^/]+\\.parquet$', 1
-                    ) AS td,
-                    CAST(quote_time AS TIME) AS qt,
-                    strike, "right", implied_vol, delta, mid_price,
-                    theta, vega, gamma, underlying_price, bid, ask
-                FROM read_parquet('{glob_pat}', filename=true)
+        # Parse trade_date from each file path in Python (skip regex_extract
+        # which has DuckDB version quirks). Path: .../YYYYMMDD/EXP/PM.parquet
+        valid = []
+        for f in all_files:
+            parts = f.replace("\\", "/").split("/")
+            if len(parts) < 3:
+                continue
+            td_folder = parts[-3]
+            if not re.match(r"^\d{8}$", td_folder):
+                continue
+            if not (start_f <= td_folder <= end_f):
+                continue
+            valid.append((f, td_folder))
+
+        if not valid:
+            continue
+
+        # Build a UNION ALL query with the trade_date hardcoded per file
+        union_parts = []
+        for f, td_folder in valid:
+            union_parts.append(f"""
+                SELECT '{td_folder}' AS td,
+                       CAST(quote_time AS TIME) AS qt,
+                       strike, "right", implied_vol, delta, mid_price,
+                       theta, vega, gamma, underlying_price, bid, ask
+                FROM read_parquet('{f}')
                 WHERE strike IN ({strike_csv})
                   AND implied_vol IS NOT NULL
                   AND implied_vol > 0
                   AND (("right" = 'P' AND strike < underlying_price)
                     OR ("right" = 'C' AND strike >= underlying_price))
                   {flag_sql}
-            ),
-            ranged AS (
+            """)
+        union_sql = " UNION ALL ".join(union_parts)
+
+        rows = _duckdb_query(f"""
+            WITH base AS ({union_sql}),
+            ranked AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY td, strike
                     ORDER BY ABS(EXTRACT(EPOCH FROM qt)
                                - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
                 ) AS rn
                 FROM base
-                WHERE td BETWEEN '{start_f}' AND '{end_f}'
             )
             SELECT td, strike, "right", implied_vol, delta, mid_price,
                    theta, vega, gamma, underlying_price, bid, ask
@@ -421,10 +476,10 @@ async def get_raw_historical(
             underlying = rows[0][9]
 
         for r in rows:
-            td_f, strike = r[0], r[1]
+            td_str, strike = r[0], r[1]
             if strike not in strike_list:
                 continue
-            td_iso = _to_iso(td_f)
+            td_iso = _to_iso(td_str)
             key = (exp_str, strike)
             all_data.setdefault(key, {})[td_iso] = {
                 "iv": r[3], "delta": r[4], "mid_price": r[5],

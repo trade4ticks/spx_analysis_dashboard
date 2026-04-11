@@ -364,6 +364,7 @@
                       @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
               </div>
               <!-- Strike text input (always visible) -->
+              <span style="font-size:9px;color:var(--dim);">COMMA SEP</span>
               <div class="p-dd" style="min-width:120px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
@@ -373,8 +374,6 @@
                        style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:110px;">
               </div>
               <div class="p-chip" @click="setStrikeOffsets(panel, [0])">ATM</div>
-              <div class="p-chip" @click="setStrikeOffsets(panel, [-50,0,50])">±50</div>
-              <div class="p-chip" @click="setStrikeOffsets(panel, [-100,0,100])">±100</div>
               <!-- Multi-Date: date multi-picker -->
               <template x-if="panel.rawSubMode === 'multi_date'">
                 <div class="p-chip"
@@ -484,6 +483,7 @@
                 </div>
               </template>
               <!-- Strike input (always shown) -->
+              <span style="font-size:9px;color:var(--dim);">COMMA SEP</span>
               <div class="p-dd" style="min-width:120px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
@@ -493,8 +493,6 @@
                        style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:110px;">
               </div>
               <div class="p-chip" @click="setStrikeOffsets(panel, [0])">ATM</div>
-              <div class="p-chip" @click="setStrikeOffsets(panel, [-50,0,50])">±50</div>
-              <div class="p-chip" @click="setStrikeOffsets(panel, [-100,0,100])">±100</div>
               <!-- Settlement -->
               <div class="p-seg">
                 <span :class="{on: panel.rawSettlement==='PM'}"
