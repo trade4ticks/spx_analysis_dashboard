@@ -227,23 +227,55 @@
           <!-- ── RAW SKEW controls ──────────────────────────────────────── -->
           <template x-if="panel.type === 'skew' && panel.rawMode">
             <div style="display:contents;">
-              <div class="p-chip"
-                   @click="panel.rawExpMenuOpen=!panel.rawExpMenuOpen"
-                   @click.outside="panel.rawExpMenuOpen=false">
-                <span x-text="panel.rawExpirations.length + ' Exp ▾'"></span>
+              <!-- Sub-mode toggle -->
+              <div class="p-seg">
+                <span :class="{on: panel.rawSubMode==='multi_exp'}"
+                      @click="setRawSubMode(panel, 'multi_exp')">Multi-Exp</span>
+                <span :class="{on: panel.rawSubMode==='multi_date'}"
+                      @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
               </div>
+              <!-- Multi-Exp: expiration multi-picker -->
+              <template x-if="panel.rawSubMode === 'multi_exp'">
+                <div class="p-chip"
+                     @click="panel.rawExpMenuOpen=!panel.rawExpMenuOpen"
+                     @click.outside="panel.rawExpMenuOpen=false">
+                  <span x-text="panel.rawExpirations.length + ' Exp ▾'"></span>
+                </div>
+              </template>
+              <!-- Multi-Date: single expiration dropdown + date multi-picker -->
+              <template x-if="panel.rawSubMode === 'multi_date'">
+                <div style="display:contents;">
+                  <div class="p-dd">
+                    <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
+                            x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
+                      <template x-for="e in filteredRawExps(panel)" :key="'rse-'+e.expiration">
+                        <option :value="e.expiration"
+                                x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="p-chip"
+                       @click="panel.rawDateMenuOpen=!panel.rawDateMenuOpen"
+                       @click.outside="panel.rawDateMenuOpen=false">
+                    <span x-text="panel.rawDates.length + ' Dates ▾'"></span>
+                  </div>
+                </div>
+              </template>
+              <!-- Settlement -->
               <div class="p-seg">
                 <span :class="{on: panel.rawSettlement==='PM'}"
-                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                      @click="onRawSettlementChange(panel, 'PM')">PM</span>
                 <span :class="{on: panel.rawSettlement==='AM'}"
-                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+                      @click="onRawSettlementChange(panel, 'AM')">AM</span>
               </div>
+              <!-- X-axis -->
               <div class="p-seg">
                 <span :class="{on: panel.rawXAxis==='strike'}"
                       @click="panel.rawXAxis='strike'; loadPanel(panel)">Strike</span>
                 <span :class="{on: panel.rawXAxis==='moneyness'}"
                       @click="panel.rawXAxis='moneyness'; loadPanel(panel)">K/S</span>
               </div>
+              <!-- Filter -->
               <div class="p-chip" :class="{on: panel.rawFilterFlags}"
                    @click="panel.rawFilterFlags=!panel.rawFilterFlags; loadPanel(panel)">
                 Filter
@@ -323,6 +355,14 @@
           <!-- ── RAW TERM controls ──────────────────────────────────────── -->
           <template x-if="panel.type === 'term' && panel.rawMode">
             <div style="display:contents;">
+              <!-- Sub-mode toggle -->
+              <div class="p-seg">
+                <span :class="{on: panel.rawSubMode==='multi_strike'}"
+                      @click="setRawSubMode(panel, 'multi_strike')">Multi-K</span>
+                <span :class="{on: panel.rawSubMode==='multi_date'}"
+                      @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
+              </div>
+              <!-- Strike text input (always visible) -->
               <div class="p-dd" style="min-width:100px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
@@ -331,12 +371,22 @@
                        style="background:transparent;border:none;color:var(--muted);font-size:10px;outline:none;width:90px;">
               </div>
               <div class="p-chip" @click="setATMStrike(panel); loadPanel(panel)">ATM</div>
+              <!-- Multi-Date: date multi-picker -->
+              <template x-if="panel.rawSubMode === 'multi_date'">
+                <div class="p-chip"
+                     @click="panel.rawDateMenuOpen=!panel.rawDateMenuOpen"
+                     @click.outside="panel.rawDateMenuOpen=false">
+                  <span x-text="panel.rawDates.length + ' Dates ▾'"></span>
+                </div>
+              </template>
+              <!-- Settlement -->
               <div class="p-seg">
                 <span :class="{on: panel.rawSettlement==='PM'}"
-                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                      @click="onRawSettlementChange(panel, 'PM')">PM</span>
                 <span :class="{on: panel.rawSettlement==='AM'}"
-                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+                      @click="onRawSettlementChange(panel, 'AM')">AM</span>
               </div>
+              <!-- Filter -->
               <div class="p-chip" :class="{on: panel.rawFilterFlags}"
                    @click="panel.rawFilterFlags=!panel.rawFilterFlags; loadPanel(panel)">
                 Filter
@@ -399,17 +449,34 @@
           <!-- ── RAW HISTORICAL controls ────────────────────────────────── -->
           <template x-if="panel.type === 'historical' && panel.rawMode">
             <div style="display:contents;">
-              <!-- Expiration (single select) -->
-              <div class="p-dd">
-                <select x-model="panel.rawHistExpiration" @change="loadPanel(panel)"
-                        x-init="$nextTick(() => $el.value = panel.rawHistExpiration)">
-                  <template x-for="e in panel.rawAvailableExps" :key="'rhe-'+e.expiration">
-                    <option :value="e.expiration"
-                            x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
-                  </template>
-                </select>
+              <!-- Sub-mode toggle -->
+              <div class="p-seg">
+                <span :class="{on: panel.rawSubMode==='multi_strike'}"
+                      @click="setRawSubMode(panel, 'multi_strike')">Multi-K</span>
+                <span :class="{on: panel.rawSubMode==='multi_exp'}"
+                      @click="setRawSubMode(panel, 'multi_exp')">Multi-Exp</span>
               </div>
-              <!-- Strike input -->
+              <!-- Multi-K: single expiration dropdown -->
+              <template x-if="panel.rawSubMode === 'multi_strike'">
+                <div class="p-dd">
+                  <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
+                          x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
+                    <template x-for="e in filteredRawExps(panel)" :key="'rhe-'+e.expiration">
+                      <option :value="e.expiration"
+                              x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
+                    </template>
+                  </select>
+                </div>
+              </template>
+              <!-- Multi-Exp: expiration multi-picker -->
+              <template x-if="panel.rawSubMode === 'multi_exp'">
+                <div class="p-chip"
+                     @click="panel.rawExpMenuOpen=!panel.rawExpMenuOpen"
+                     @click.outside="panel.rawExpMenuOpen=false">
+                  <span x-text="panel.rawExpirations.length + ' Exp ▾'"></span>
+                </div>
+              </template>
+              <!-- Strike input (always shown) -->
               <div class="p-dd" style="min-width:100px;">
                 <input type="text" x-model="panel.rawStrikeInput"
                        @keydown.enter="parseRawStrikes(panel); loadPanel(panel)"
@@ -421,9 +488,9 @@
               <!-- Settlement -->
               <div class="p-seg">
                 <span :class="{on: panel.rawSettlement==='PM'}"
-                      @click="panel.rawSettlement='PM'; loadPanel(panel)">PM</span>
+                      @click="onRawSettlementChange(panel, 'PM')">PM</span>
                 <span :class="{on: panel.rawSettlement==='AM'}"
-                      @click="panel.rawSettlement='AM'; loadPanel(panel)">AM</span>
+                      @click="onRawSettlementChange(panel, 'AM')">AM</span>
               </div>
               <!-- Filter flags -->
               <div class="p-chip" :class="{on: panel.rawFilterFlags}"
@@ -539,15 +606,28 @@
           </div>
         </div>
 
-        <!-- Raw expiration picker popover -->
+        <!-- Raw expiration picker popover (filtered by settlement) -->
         <div class="p-date-menu" x-show="panel.rawExpMenuOpen" x-cloak @click.stop>
           <div class="p-date-menu-hdr">Select Expirations</div>
-          <template x-for="e in panel.rawAvailableExps" :key="'rexp-'+e.expiration">
+          <template x-for="e in filteredRawExps(panel)" :key="'rexp-'+e.expiration">
             <label class="p-date-item">
               <input type="checkbox"
                      :checked="panel.rawExpirations.includes(e.expiration)"
                      @change="toggleRawExpiration(panel, e.expiration)">
               <span x-text="e.expiration + ' (' + e.dte + 'D)'"></span>
+            </label>
+          </template>
+        </div>
+
+        <!-- Raw date picker popover (multi-date modes) -->
+        <div class="p-date-menu" x-show="panel.rawDateMenuOpen" x-cloak @click.stop>
+          <div class="p-date-menu-hdr">Select Dates</div>
+          <template x-for="d in dates" :key="'rdate-'+d">
+            <label class="p-date-item">
+              <input type="checkbox"
+                     :checked="panel.rawDates.includes(d)"
+                     @change="toggleRawDate(panel, d)">
+              <span x-text="d"></span>
             </label>
           </template>
         </div>

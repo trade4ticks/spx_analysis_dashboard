@@ -4,10 +4,10 @@ Raw (non-interpolated) data endpoints.
 Reads parquet files directly via DuckDB from the options data folder.
 Folder structure: {PARQUET_BASE}/{trade_date_YYYYMMDD}/{expiration_YYYYMMDD}/{settlement}.parquet
 
-GET /api/raw/expirations   — available expirations for a trade date
-GET /api/raw/skew          — IV vs strike for one or more expirations (OTM puts + calls)
-GET /api/raw/term          — IV vs expiration for selected strikes (auto-OTM)
-GET /api/raw/historical    — IV time-series across trade dates for a fixed expiration + strikes
+GET /api/raw/expirations  — available expirations for a trade date
+GET /api/raw/skew         — IV vs strike for (date, expiration) combos
+GET /api/raw/term         — IV vs DTE for (date, strike) combos
+GET /api/raw/historical   — IV time-series for (expiration, strike) combos
 """
 import glob as globmod
 import os
@@ -32,7 +32,7 @@ def _require_duckdb():
 
 
 def _validate_date_folder(d: str) -> str:
-    """Accept YYYY-MM-DD or YYYYMMDD, return YYYYMMDD for folder lookup."""
+    """Accept YYYY-MM-DD or YYYYMMDD, return YYYYMMDD."""
     clean = d.replace("-", "")
     if not re.match(r"^\d{8}$", clean):
         raise HTTPException(400, f"Invalid date: {d}")
@@ -40,12 +40,10 @@ def _validate_date_folder(d: str) -> str:
 
 
 def _to_iso(d: str) -> str:
-    """YYYYMMDD -> YYYY-MM-DD."""
     return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
 
 
 def _to_date(d: str) -> date_type:
-    """YYYYMMDD -> date."""
     return date_type(int(d[:4]), int(d[4:6]), int(d[6:8]))
 
 
@@ -72,8 +70,16 @@ def _parse_strikes(s: str) -> list[float]:
     return out
 
 
+def _split_csv(s: str) -> list[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _strike_label(s: float) -> str:
+    return str(int(s)) if s == int(s) else str(s)
+
+
 def _duckdb_query(sql: str):
-    """Run a DuckDB query, return rows. Translates errors to 500 with detail."""
+    """Run a DuckDB query, return rows. Errors → HTTP 500 with detail."""
     con = duckdb.connect()
     try:
         return con.execute(sql).fetchall()
@@ -138,7 +144,7 @@ async def get_expirations(
             if rows:
                 underlying = rows[0][0]
         except Exception:
-            pass  # non-critical — just means ATM button won't pre-fill
+            pass
 
     return {"date": date, "expirations": results, "underlying": underlying}
 
@@ -147,94 +153,96 @@ async def get_expirations(
 
 @router.get("/skew")
 async def get_raw_skew(
-    date:         str  = Query(...),
-    expirations:  str  = Query(..., description="Comma-separated YYYY-MM-DD"),
+    dates:        str  = Query(..., description="Comma-separated trade dates"),
+    expirations:  str  = Query(..., description="Comma-separated expirations"),
     time:         str  = Query("15:45"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
     x_axis:       str  = Query("strike", description="strike | moneyness"),
 ) -> dict:
-    """IV vs strike (OTM puts + calls) for selected expirations."""
+    """IV vs strike (OTM puts + calls) for each (date, expiration) combo."""
     _require_duckdb()
-    date_folder = _validate_date_folder(date)
-    settlement  = _validate_settlement(settlement)
-    time_str    = _validate_time(time)
-    exp_list    = [e.strip() for e in expirations.split(",") if e.strip()]
-    if not exp_list:
-        raise HTTPException(400, "expirations required")
+    settlement = _validate_settlement(settlement)
+    time_str   = _validate_time(time)
+    date_list  = _split_csv(dates)
+    exp_list   = _split_csv(expirations)
+    if not date_list or not exp_list:
+        raise HTTPException(400, "dates and expirations required")
 
-    trade_d = _to_date(date_folder)
+    multi_date = len(date_list) > 1
+    multi_exp  = len(exp_list) > 1
+    flag_sql   = "AND flag_any = false" if filter_flags else ""
+
     series = []
+    for date_str in date_list:
+        date_folder = _validate_date_folder(date_str)
+        trade_d = _to_date(date_folder)
+        for exp_str in exp_list:
+            exp_folder = _validate_date_folder(exp_str)
+            pq = os.path.join(PARQUET_BASE, date_folder, exp_folder,
+                              f"{settlement}.parquet")
+            if not os.path.isfile(pq):
+                continue
 
-    for exp_str in exp_list:
-        exp_folder = _validate_date_folder(exp_str)
-        pq = os.path.join(PARQUET_BASE, date_folder, exp_folder,
-                          f"{settlement}.parquet")
-        if not os.path.isfile(pq):
-            continue
+            rows = _duckdb_query(f"""
+                WITH snap AS (
+                    SELECT quote_time
+                    FROM (SELECT DISTINCT CAST(quote_time AS TIME) AS quote_time
+                          FROM read_parquet('{pq}'))
+                    ORDER BY ABS(EXTRACT(EPOCH FROM quote_time)
+                               - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
+                    LIMIT 1
+                )
+                SELECT strike, "right", implied_vol, delta, mid_price,
+                       theta, vega, gamma, underlying_price,
+                       moneyness, log_moneyness, bid, ask, spread_pct
+                FROM read_parquet('{pq}')
+                WHERE CAST(quote_time AS TIME) = (SELECT quote_time FROM snap)
+                  AND implied_vol IS NOT NULL
+                  AND implied_vol > 0
+                  {flag_sql}
+                ORDER BY strike
+            """)
 
-        flag_sql = "AND flag_any = false" if filter_flags else ""
+            if not rows:
+                continue
 
-        rows = _duckdb_query(f"""
-            WITH snap AS (
-                SELECT quote_time
-                FROM (SELECT DISTINCT CAST(quote_time AS TIME) AS quote_time
-                      FROM read_parquet('{pq}'))
-                ORDER BY ABS(EXTRACT(EPOCH FROM quote_time)
-                           - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
-                LIMIT 1
-            )
-            SELECT strike, "right", implied_vol, delta, mid_price,
-                   theta, vega, gamma, underlying_price,
-                   moneyness, log_moneyness, bid, ask, spread_pct,
-                   CAST(quote_time AS VARCHAR) AS qt
-            FROM read_parquet('{pq}')
-            WHERE CAST(quote_time AS TIME) = (SELECT quote_time FROM snap)
-              AND implied_vol IS NOT NULL
-              AND implied_vol > 0
-              {flag_sql}
-            ORDER BY strike
-        """)
+            underlying = rows[0][8]
+            otm = [r for r in rows
+                   if (r[1] == "P" and r[0] < underlying)
+                   or (r[1] == "C" and r[0] >= underlying)]
 
-        if not rows:
-            continue
+            exp_d = _to_date(exp_folder)
+            dte = (exp_d - trade_d).days
 
-        underlying   = rows[0][8]
-        matched_time = str(rows[0][14])[:5]
+            if multi_date and multi_exp:
+                label = f"{date_str} · {exp_str}"
+            elif multi_date:
+                label = date_str
+            else:
+                label = f"{exp_str} ({dte}D)"
 
-        # OTM: puts below spot, calls at/above
-        otm = [r for r in rows
-               if (r[1] == "P" and r[0] < underlying)
-               or (r[1] == "C" and r[0] >= underlying)]
-
-        exp_d = _to_date(exp_folder)
-        dte = (exp_d - trade_d).days
-
-        series.append({
-            "expiration":     exp_str,
-            "dte":            dte,
-            "label":          f"{exp_str} ({dte}D)",
-            "underlying":     underlying,
-            "matched_time":   matched_time,
-            "strikes":        [r[0] for r in otm],
-            "moneyness":      [round(r[9], 6) if r[9] else None for r in otm],
-            "log_moneyness":  [round(r[10], 6) if r[10] else None for r in otm],
-            "values":         [r[2] for r in otm],
-            "rights":         [r[1] for r in otm],
-            "metrics": [{
-                "iv": r[2], "delta": r[3], "mid_price": r[4],
-                "theta": r[5], "vega": r[6], "gamma": r[7],
-                "bid": r[11], "ask": r[12], "spread_pct": r[13],
-            } for r in otm],
-        })
+            series.append({
+                "label":      label,
+                "expiration": exp_str,
+                "date":       date_str,
+                "dte":        dte,
+                "underlying": underlying,
+                "strikes":    [r[0] for r in otm],
+                "moneyness":  [round(r[9], 6) if r[9] else None for r in otm],
+                "values":     [r[2] for r in otm],
+                "rights":     [r[1] for r in otm],
+                "metrics": [{
+                    "iv": r[2], "delta": r[3], "mid_price": r[4],
+                    "theta": r[5], "vega": r[6], "gamma": r[7],
+                    "bid": r[11], "ask": r[12], "spread_pct": r[13],
+                } for r in otm],
+            })
 
     return {
-        "mode":       "raw_skew",
-        "date":       date,
-        "time":       time,
-        "settlement": settlement,
-        "x_axis":     x_axis,
-        "series":     series,
+        "mode":   "raw_skew",
+        "x_axis": x_axis,
+        "series": series,
     }
 
 
@@ -242,201 +250,220 @@ async def get_raw_skew(
 
 @router.get("/term")
 async def get_raw_term(
-    date:         str  = Query(...),
+    dates:        str  = Query(..., description="Comma-separated trade dates"),
     strikes:      str  = Query(..., description="Comma-separated strike prices"),
     time:         str  = Query("15:45"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
 ) -> dict:
-    """IV vs expiration for selected strikes (auto-OTM)."""
+    """IV vs DTE for each (date, strike) combo (auto-OTM)."""
     _require_duckdb()
-    date_folder = _validate_date_folder(date)
     settlement  = _validate_settlement(settlement)
     time_str    = _validate_time(time)
+    date_list   = _split_csv(dates)
     strike_list = _parse_strikes(strikes)
+    if not date_list:
+        raise HTTPException(400, "dates required")
 
-    # Check glob has files before querying
-    glob_pat = os.path.join(PARQUET_BASE, date_folder, "*",
-                            f"{settlement}.parquet")
-    if not globmod.glob(glob_pat):
-        return {"mode": "raw_term", "series": [], "expirations": [],
-                "underlying": None}
-
-    strike_csv = ", ".join(str(s) for s in strike_list)
-    flag_sql   = "AND flag_any = false" if filter_flags else ""
-    trade_d    = _to_date(date_folder)
-
-    rows = _duckdb_query(f"""
-        SELECT
-            regexp_extract(
-                filename, '(\\d{{8}})/[^/]+\\.parquet$', 1
-            ) AS exp_folder,
-            strike, "right", implied_vol, delta, mid_price,
-            theta, vega, gamma, underlying_price, bid, ask
-        FROM read_parquet('{glob_pat}', filename=true)
-        WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
-          AND strike IN ({strike_csv})
-          AND implied_vol IS NOT NULL
-          AND implied_vol > 0
-          AND (("right" = 'P' AND strike < underlying_price)
-            OR ("right" = 'C' AND strike >= underlying_price))
-          {flag_sql}
-        ORDER BY exp_folder, strike
-    """)
-
-    if not rows:
-        return {"mode": "raw_term", "series": [], "expirations": [],
-                "underlying": None}
-
-    underlying = rows[0][9]
-
-    bucket: dict[float, dict] = {s: {} for s in strike_list}
-    for r in rows:
-        exp_f, strike = r[0], r[1]
-        if strike not in bucket:
-            continue
-        exp_iso = _to_iso(exp_f)
-        exp_d = _to_date(exp_f)
-        dte = (exp_d - trade_d).days
-        if dte < 0:
-            continue
-        bucket[strike][exp_iso] = {
-            "dte": dte, "iv": r[3],
-            "delta": r[4], "mid_price": r[5],
-            "theta": r[6], "vega": r[7], "gamma": r[8],
-            "bid": r[10], "ask": r[11],
-        }
-
-    all_exps = sorted({e for sd in bucket.values() for e in sd})
+    multi_date   = len(date_list) > 1
+    multi_strike = len(strike_list) > 1
+    flag_sql     = "AND flag_any = false" if filter_flags else ""
+    strike_csv   = ", ".join(str(s) for s in strike_list)
 
     series = []
-    for strike in strike_list:
-        entries = bucket[strike]
-        if not entries:
+    for date_str in date_list:
+        date_folder = _validate_date_folder(date_str)
+        trade_d = _to_date(date_folder)
+
+        glob_pat = os.path.join(PARQUET_BASE, date_folder, "*",
+                                f"{settlement}.parquet")
+        if not globmod.glob(glob_pat):
             continue
-        label = str(int(strike)) if strike == int(strike) else str(strike)
-        series.append({
-            "label":       label,
-            "strike":      strike,
-            "expirations": all_exps,
-            "dtes":   [entries.get(e, {}).get("dte") for e in all_exps],
-            "values": [entries.get(e, {}).get("iv") for e in all_exps],
-            "metrics": [entries[e] if e in entries else None
-                        for e in all_exps],
-        })
 
-    return {
-        "mode":        "raw_term",
-        "date":        date,
-        "time":        time,
-        "settlement":  settlement,
-        "underlying":  underlying,
-        "expirations": all_exps,
-        "series":      series,
-    }
-
-
-# ── Raw historical (IV time-series per strike across trade dates) ────────────
-
-@router.get("/historical")
-async def get_raw_historical(
-    expiration:   str  = Query(..., description="Expiration date YYYY-MM-DD"),
-    strikes:      str  = Query(..., description="Comma-separated strike prices"),
-    start:        str  = Query(..., description="YYYY-MM-DD"),
-    end:          str  = Query(..., description="YYYY-MM-DD"),
-    time:         str  = Query("15:45"),
-    settlement:   str  = Query("PM"),
-    filter_flags: bool = Query(True),
-) -> dict:
-    """IV time-series: one line per strike across trade dates for a fixed expiration."""
-    _require_duckdb()
-    exp_folder  = _validate_date_folder(expiration)
-    settlement  = _validate_settlement(settlement)
-    time_str    = _validate_time(time)
-    strike_list = _parse_strikes(strikes)
-    start_f     = _validate_date_folder(start)
-    end_f       = _validate_date_folder(end)
-
-    # Glob across all trade dates for this expiration
-    glob_pat = os.path.join(PARQUET_BASE, "*", exp_folder,
-                            f"{settlement}.parquet")
-    if not globmod.glob(glob_pat):
-        return {"mode": "raw_historical", "series": [], "underlying": None}
-
-    strike_csv = ", ".join(str(s) for s in strike_list)
-    flag_sql   = "AND flag_any = false" if filter_flags else ""
-
-    rows = _duckdb_query(f"""
-        WITH base AS (
+        rows = _duckdb_query(f"""
             SELECT
-                regexp_extract(
-                    filename, '(\\d{{8}})/\\d{{8}}/[^/]+\\.parquet$', 1
-                ) AS td,
-                CAST(quote_time AS TIME) AS qt,
+                regexp_extract(filename, '(\\d{{8}})/[^/]+\\.parquet$', 1) AS exp_folder,
                 strike, "right", implied_vol, delta, mid_price,
                 theta, vega, gamma, underlying_price, bid, ask
             FROM read_parquet('{glob_pat}', filename=true)
-            WHERE strike IN ({strike_csv})
+            WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
+              AND strike IN ({strike_csv})
               AND implied_vol IS NOT NULL
               AND implied_vol > 0
               AND (("right" = 'P' AND strike < underlying_price)
                 OR ("right" = 'C' AND strike >= underlying_price))
               {flag_sql}
-        ),
-        ranged AS (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY td, strike
-                ORDER BY ABS(EXTRACT(EPOCH FROM qt)
-                           - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
-            ) AS rn
-            FROM base
-            WHERE td BETWEEN '{start_f}' AND '{end_f}'
-        )
-        SELECT td, strike, "right", implied_vol, delta, mid_price,
-               theta, vega, gamma, underlying_price, bid, ask
-        FROM ranged WHERE rn = 1
-        ORDER BY td, strike
-    """)
+            ORDER BY exp_folder, strike
+        """)
 
-    if not rows:
+        if not rows:
+            continue
+
+        bucket: dict[float, dict] = {s: {} for s in strike_list}
+        for r in rows:
+            exp_f, strike = r[0], r[1]
+            if strike not in bucket:
+                continue
+            exp_iso = _to_iso(exp_f)
+            exp_d = _to_date(exp_f)
+            dte = (exp_d - trade_d).days
+            if dte < 0:
+                continue
+            bucket[strike][exp_iso] = {
+                "dte": dte, "iv": r[3],
+                "delta": r[4], "mid_price": r[5],
+                "theta": r[6], "vega": r[7], "gamma": r[8],
+                "bid": r[10], "ask": r[11],
+            }
+
+        all_exps = sorted({e for sd in bucket.values() for e in sd})
+
+        for strike in strike_list:
+            entries = bucket[strike]
+            if not entries:
+                continue
+            klabel = _strike_label(strike)
+            if multi_date and multi_strike:
+                label = f"{date_str} · K{klabel}"
+            elif multi_date:
+                label = date_str
+            else:
+                label = klabel
+
+            series.append({
+                "label":       label,
+                "strike":      strike,
+                "date":        date_str,
+                "expirations": all_exps,
+                "dtes":   [entries.get(e, {}).get("dte") for e in all_exps],
+                "values": [entries.get(e, {}).get("iv") for e in all_exps],
+                "metrics": [entries[e] if e in entries else None
+                            for e in all_exps],
+            })
+
+    return {"mode": "raw_term", "series": series}
+
+
+# ── Raw historical (IV time-series per (exp, strike) across trade dates) ────
+
+@router.get("/historical")
+async def get_raw_historical(
+    expirations:  str  = Query(..., description="Comma-separated expirations"),
+    strikes:      str  = Query(..., description="Comma-separated strike prices"),
+    start:        str  = Query(...),
+    end:          str  = Query(...),
+    time:         str  = Query("15:45"),
+    settlement:   str  = Query("PM"),
+    filter_flags: bool = Query(True),
+) -> dict:
+    """IV time-series for each (expiration, strike) combo."""
+    _require_duckdb()
+    settlement  = _validate_settlement(settlement)
+    time_str    = _validate_time(time)
+    exp_list    = _split_csv(expirations)
+    strike_list = _parse_strikes(strikes)
+    start_f     = _validate_date_folder(start)
+    end_f       = _validate_date_folder(end)
+    if not exp_list:
+        raise HTTPException(400, "expirations required")
+
+    multi_exp    = len(exp_list) > 1
+    multi_strike = len(strike_list) > 1
+    flag_sql     = "AND flag_any = false" if filter_flags else ""
+    strike_csv   = ", ".join(str(s) for s in strike_list)
+
+    # Collect all data: (exp_str, strike) -> {date_iso: metrics}
+    all_data: dict[tuple, dict] = {}
+    underlying = None
+
+    for exp_str in exp_list:
+        exp_folder = _validate_date_folder(exp_str)
+        glob_pat = os.path.join(PARQUET_BASE, "*", exp_folder,
+                                f"{settlement}.parquet")
+        if not globmod.glob(glob_pat):
+            continue
+
+        rows = _duckdb_query(f"""
+            WITH base AS (
+                SELECT
+                    regexp_extract(
+                        filename, '(\\d{{8}})/\\d{{8}}/[^/]+\\.parquet$', 1
+                    ) AS td,
+                    CAST(quote_time AS TIME) AS qt,
+                    strike, "right", implied_vol, delta, mid_price,
+                    theta, vega, gamma, underlying_price, bid, ask
+                FROM read_parquet('{glob_pat}', filename=true)
+                WHERE strike IN ({strike_csv})
+                  AND implied_vol IS NOT NULL
+                  AND implied_vol > 0
+                  AND (("right" = 'P' AND strike < underlying_price)
+                    OR ("right" = 'C' AND strike >= underlying_price))
+                  {flag_sql}
+            ),
+            ranged AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY td, strike
+                    ORDER BY ABS(EXTRACT(EPOCH FROM qt)
+                               - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
+                ) AS rn
+                FROM base
+                WHERE td BETWEEN '{start_f}' AND '{end_f}'
+            )
+            SELECT td, strike, "right", implied_vol, delta, mid_price,
+                   theta, vega, gamma, underlying_price, bid, ask
+            FROM ranged WHERE rn = 1
+            ORDER BY td, strike
+        """)
+
+        if not rows:
+            continue
+        if underlying is None:
+            underlying = rows[0][9]
+
+        for r in rows:
+            td_f, strike = r[0], r[1]
+            if strike not in strike_list:
+                continue
+            td_iso = _to_iso(td_f)
+            key = (exp_str, strike)
+            all_data.setdefault(key, {})[td_iso] = {
+                "iv": r[3], "delta": r[4], "mid_price": r[5],
+                "theta": r[6], "vega": r[7], "gamma": r[8],
+                "bid": r[10], "ask": r[11],
+            }
+
+    if not all_data:
         return {"mode": "raw_historical", "series": [], "underlying": None}
 
-    underlying = rows[0][9]
-
-    # Bucket by strike -> { trade_date_iso: {iv, metrics…} }
-    bucket: dict[float, dict] = {s: {} for s in strike_list}
-    for r in rows:
-        td_f, strike = r[0], r[1]
-        if strike not in bucket:
-            continue
-        td_iso = _to_iso(td_f)
-        bucket[strike][td_iso] = {
-            "iv": r[3], "delta": r[4], "mid_price": r[5],
-            "theta": r[6], "vega": r[7], "gamma": r[8],
-            "bid": r[10], "ask": r[11],
-        }
-
-    all_dates = sorted({d for sd in bucket.values() for d in sd})
+    # Unified date axis across all series
+    all_dates = sorted({d for v in all_data.values() for d in v})
 
     series = []
-    for strike in strike_list:
-        entries = bucket[strike]
-        if not entries:
-            continue
-        label = str(int(strike)) if strike == int(strike) else str(strike)
-        series.append({
-            "label":   label,
-            "strike":  strike,
-            "labels":  all_dates,
-            "values":  [entries.get(d, {}).get("iv") for d in all_dates],
-            "metrics": [entries[d] if d in entries else None
-                        for d in all_dates],
-        })
+    for exp_str in exp_list:
+        for strike in strike_list:
+            entries = all_data.get((exp_str, strike))
+            if not entries:
+                continue
+            klabel = _strike_label(strike)
+            if multi_exp and multi_strike:
+                label = f"{exp_str} · K{klabel}"
+            elif multi_exp:
+                label = exp_str
+            else:
+                label = klabel
+
+            series.append({
+                "label":      label,
+                "strike":     strike,
+                "expiration": exp_str,
+                "labels":     all_dates,
+                "values":     [entries.get(d, {}).get("iv") for d in all_dates],
+                "metrics":    [entries[d] if d in entries else None
+                               for d in all_dates],
+            })
 
     return {
-        "mode":        "raw_historical",
-        "expiration":  expiration,
-        "settlement":  settlement,
-        "underlying":  underlying,
-        "series":      series,
+        "mode":       "raw_historical",
+        "underlying": underlying,
+        "series":     series,
     }

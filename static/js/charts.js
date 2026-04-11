@@ -680,15 +680,18 @@ function buildRawTerm(data) {
           min: 0,
           grid: { color: 'rgba(255,255,255,0.06)' },
           ticks: {
-            font: { size: 10 }, autoSkip: false,
-            callback: val => {
-              const dte = Math.round(val * val);
-              return tickValues.some(tv => Math.abs(tv - val) < 1e-9)
-                ? dte + 'D' : '';
-            },
+            font: { size: 10 },
+            callback: val => Math.round(val * val) + 'D',
           },
           afterBuildTicks: axis => {
-            axis.ticks = tickValues.map(v => ({ value: v }));
+            // Show ~8 evenly-spaced DTE labels (subset of all DTEs)
+            const target = 8;
+            const step   = Math.max(1, Math.ceil(allDtes.length / target));
+            const subset = [];
+            for (let i = 0; i < allDtes.length; i += step) subset.push(allDtes[i]);
+            const last = allDtes[allDtes.length - 1];
+            if (subset[subset.length - 1] !== last) subset.push(last);
+            axis.ticks = subset.map(d => ({ value: xOf(d) }));
           },
         },
         y: {

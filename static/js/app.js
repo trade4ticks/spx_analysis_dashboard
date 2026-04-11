@@ -99,18 +99,28 @@ function defaultPanel(id) {
     tsLookback:        180,
     tsDeltaMenuOpen:   false,
 
-    // Raw mode (skew + term only)
-    rawMode:             false,
-    rawAvailableExps:    [],
-    rawExpirations:      [],
-    rawSettlement:       'PM',
-    rawFilterFlags:      true,
-    rawXAxis:            'strike',
-    rawStrikes:          [],
-    rawStrikeInput:      '',
-    rawUnderlying:       null,
-    rawExpMenuOpen:      false,
-    rawHistExpiration:   '',     // single expiration for raw historical
+    // Raw mode (skew/term/historical)
+    rawMode:           false,
+    // Sub-mode meaning depends on panel.type:
+    //   skew:       'multi_exp'    | 'multi_date'
+    //   term:       'multi_strike' | 'multi_date'
+    //   historical: 'multi_strike' | 'multi_exp'
+    rawSubMode:        '',
+    rawAvailableExps:  [],
+    rawUnderlying:     null,
+    rawSettlement:     'PM',
+    rawFilterFlags:    true,
+    rawXAxis:          'strike',
+    // Multi-value slots (varying dimension)
+    rawExpirations:    [],
+    rawDates:          [],
+    rawStrikes:        [],
+    rawStrikeInput:    '',
+    // Single-value slot (fixed dimension)
+    rawSingleExp:      '',
+    // Popovers
+    rawExpMenuOpen:    false,
+    rawDateMenuOpen:   false,
   };
 }
 
@@ -240,10 +250,18 @@ document.addEventListener('alpine:init', () => {
         case 'skew': {
           if (panel.rawMode) {
             if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
-            if (!panel.rawExpirations.length) return { mode: 'raw_skew', series: [] };
+            let dates, exps;
+            if (panel.rawSubMode === 'multi_date') {
+              dates = panel.rawDates.length ? panel.rawDates : [this.date];
+              exps  = panel.rawSingleExp ? [panel.rawSingleExp] : [];
+            } else {
+              dates = [this.date];
+              exps  = panel.rawExpirations;
+            }
+            if (!dates.length || !exps.length) return { mode: 'raw_skew', series: [] };
             const rp = new URLSearchParams();
-            rp.set('date',         this.date);
-            rp.set('expirations',  panel.rawExpirations.join(','));
+            rp.set('dates',        dates.join(','));
+            rp.set('expirations',  exps.join(','));
             rp.set('time',         this.time);
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
@@ -280,10 +298,18 @@ document.addEventListener('alpine:init', () => {
         case 'term': {
           if (panel.rawMode) {
             if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
-            if (!panel.rawStrikes.length) return { mode: 'raw_term', series: [] };
+            let dates, strikes;
+            if (panel.rawSubMode === 'multi_date') {
+              dates   = panel.rawDates.length ? panel.rawDates : [this.date];
+              strikes = panel.rawStrikes.length ? [panel.rawStrikes[0]] : [];
+            } else {
+              dates   = [this.date];
+              strikes = panel.rawStrikes;
+            }
+            if (!dates.length || !strikes.length) return { mode: 'raw_term', series: [] };
             const rp = new URLSearchParams();
-            rp.set('date',         this.date);
-            rp.set('strikes',     panel.rawStrikes.join(','));
+            rp.set('dates',        dates.join(','));
+            rp.set('strikes',     strikes.join(','));
             rp.set('time',         this.time);
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
@@ -327,11 +353,19 @@ document.addEventListener('alpine:init', () => {
         case 'historical': {
           if (panel.rawMode) {
             if (!panel.rawAvailableExps.length) await this.loadRawExpirations(panel);
-            if (!panel.rawHistExpiration || !panel.rawStrikes.length)
+            let exps, strikes;
+            if (panel.rawSubMode === 'multi_exp') {
+              exps    = panel.rawExpirations;
+              strikes = panel.rawStrikes.length ? [panel.rawStrikes[0]] : [];
+            } else {
+              exps    = panel.rawSingleExp ? [panel.rawSingleExp] : [];
+              strikes = panel.rawStrikes;
+            }
+            if (!exps.length || !strikes.length)
               return { mode: 'raw_historical', series: [] };
             const rp = new URLSearchParams();
-            rp.set('expiration',   panel.rawHistExpiration);
-            rp.set('strikes',     panel.rawStrikes.join(','));
+            rp.set('expirations',  exps.join(','));
+            rp.set('strikes',     strikes.join(','));
             rp.set('start',       offsetDate(this.date, -this.lookbackDays));
             rp.set('end',         this.date);
             rp.set('time',        this.time);
@@ -603,10 +637,40 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Raw mode helpers ────────────────────────────────────────────────────
+    defaultRawSubMode(type) {
+      if (type === 'skew')       return 'multi_exp';
+      if (type === 'term')       return 'multi_strike';
+      if (type === 'historical') return 'multi_strike';
+      return 'multi_exp';
+    },
+
     async toggleRawMode(panel) {
-      panel.rawMode = true;
+      panel.rawMode    = true;
+      panel.rawSubMode = this.defaultRawSubMode(panel.type);
       await this.loadRawExpirations(panel);
       this.loadPanel(panel);
+    },
+
+    setRawSubMode(panel, sub) {
+      panel.rawSubMode = sub;
+      // Ensure varying-dim arrays have sensible defaults
+      if (sub === 'multi_date' && !panel.rawDates.length) {
+        panel.rawDates = [this.date];
+      }
+      if (sub === 'multi_exp' && !panel.rawExpirations.length) {
+        const filtered = this.filteredRawExps(panel);
+        panel.rawExpirations = filtered.slice(0, 3).map(e => e.expiration);
+      }
+      if (sub === 'multi_strike' && !panel.rawStrikes.length) {
+        this.setATMStrike(panel);
+      }
+      this.loadPanel(panel);
+    },
+
+    filteredRawExps(panel) {
+      return panel.rawAvailableExps.filter(e =>
+        e.settlements && e.settlements.includes(panel.rawSettlement)
+      );
     },
 
     async loadRawExpirations(panel) {
@@ -615,18 +679,20 @@ document.addEventListener('alpine:init', () => {
         const data = await res.json();
         panel.rawAvailableExps = data.expirations || [];
         panel.rawUnderlying    = data.underlying;
-        // Auto-select first 3 expirations if none chosen (skew)
-        if (!panel.rawExpirations.length && panel.rawAvailableExps.length) {
-          panel.rawExpirations = panel.rawAvailableExps
-            .slice(0, 3).map(e => e.expiration);
+
+        const filtered = this.filteredRawExps(panel);
+
+        // Auto-select first 3 (multi-exp varying dim)
+        if (!panel.rawExpirations.length && filtered.length) {
+          panel.rawExpirations = filtered.slice(0, 3).map(e => e.expiration);
         }
-        // Auto-select ~30-day expiration for historical
-        if (!panel.rawHistExpiration && panel.rawAvailableExps.length) {
-          const near30 = panel.rawAvailableExps.find(e => e.dte >= 25 && e.dte <= 35)
-                      || panel.rawAvailableExps[Math.min(2, panel.rawAvailableExps.length - 1)];
-          panel.rawHistExpiration = near30.expiration;
+        // Auto-select ~30-day single expiration (multi_strike, multi_date fixed dim)
+        if (!panel.rawSingleExp && filtered.length) {
+          const near30 = filtered.find(e => e.dte >= 25 && e.dte <= 35)
+                      || filtered[Math.min(2, filtered.length - 1)];
+          panel.rawSingleExp = near30.expiration;
         }
-        // Auto-set ATM strike for term
+        // Auto-set ATM strike
         if (panel.rawUnderlying && !panel.rawStrikes.length) {
           const atm = Math.round(panel.rawUnderlying / 25) * 25;
           panel.rawStrikes     = [atm];
@@ -637,11 +703,34 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    onRawSettlementChange(panel, newSettlement) {
+      panel.rawSettlement = newSettlement;
+      const filtered = this.filteredRawExps(panel);
+      const valid = new Set(filtered.map(e => e.expiration));
+      // Drop invalid selections
+      if (panel.rawSingleExp && !valid.has(panel.rawSingleExp)) {
+        panel.rawSingleExp = filtered.length ? filtered[0].expiration : '';
+      }
+      panel.rawExpirations = panel.rawExpirations.filter(e => valid.has(e));
+      if (!panel.rawExpirations.length && filtered.length) {
+        panel.rawExpirations = filtered.slice(0, 3).map(e => e.expiration);
+      }
+      this.loadPanel(panel);
+    },
+
     toggleRawExpiration(panel, exp) {
       const idx = panel.rawExpirations.indexOf(exp);
       idx >= 0 ? panel.rawExpirations.splice(idx, 1)
                : panel.rawExpirations.push(exp);
       panel.rawExpirations.sort();
+      this.loadPanel(panel);
+    },
+
+    toggleRawDate(panel, d) {
+      const idx = panel.rawDates.indexOf(d);
+      idx >= 0 ? panel.rawDates.splice(idx, 1)
+               : panel.rawDates.push(d);
+      panel.rawDates.sort((a, b) => b.localeCompare(a));
       this.loadPanel(panel);
     },
 
@@ -674,8 +763,8 @@ document.addEventListener('alpine:init', () => {
       this.panels.forEach(p => {
         p.skewDates = []; p.termDates = [];
         p.rawAvailableExps = []; p.rawExpirations = [];
+        p.rawDates = []; p.rawSingleExp = '';
         p.rawStrikes = []; p.rawStrikeInput = '';
-        p.rawHistExpiration = '';
       });
       await this.loadAllPanels();
     },
