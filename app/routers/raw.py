@@ -466,7 +466,7 @@ async def get_raw_historical(
             )
             SELECT td, strike, "right", implied_vol, delta, mid_price,
                    theta, vega, gamma, underlying_price, bid, ask
-            FROM ranged WHERE rn = 1
+            FROM ranked WHERE rn = 1
             ORDER BY td, strike
         """)
 
