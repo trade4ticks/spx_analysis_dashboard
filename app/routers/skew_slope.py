@@ -76,11 +76,11 @@ async def get_skew_slope(
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 atm AS (
-                    SELECT DISTINCT ON (trade_date)
-                        trade_date, atm_iv, atm_strike
+                    SELECT DISTINCT ON (trade_date, dte)
+                        trade_date, dte, atm_iv, atm_strike
                     FROM spx_atm
                     WHERE trade_date BETWEEN $3 AND $4
-                    ORDER BY trade_date,
+                    ORDER BY trade_date, dte,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 closest AS (
@@ -92,7 +92,7 @@ async def get_skew_slope(
                                 THEN COALESCE(a.atm_strike, c.strike)
                                 ELSE c.strike END AS strike
                     FROM closest_raw c
-                    LEFT JOIN atm a ON a.trade_date = c.trade_date
+                    LEFT JOIN atm a ON a.trade_date = c.trade_date AND a.dte = c.dte
                 )
                 SELECT trade_date::text AS label, dte,
                        a.iv AS iv_a, b.iv AS iv_b,
@@ -130,7 +130,9 @@ async def get_skew_slope(
                                 ELSE r.strike END AS strike
                     FROM base_raw r
                     LEFT JOIN spx_atm a
-                           ON a.trade_date = r.trade_date AND a.quote_time = r.quote_time
+                           ON a.trade_date = r.trade_date
+                          AND a.quote_time = r.quote_time
+                          AND a.dte        = r.dte
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.dte, a.iv AS iv_a, b.iv AS iv_b,

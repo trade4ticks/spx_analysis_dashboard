@@ -71,7 +71,9 @@ async def term_by_delta(
                    s.price, s.theta, s.vega, s.gamma
             FROM spx_surface s
             LEFT JOIN spx_atm a
-                   ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                   ON a.trade_date = s.trade_date
+                  AND a.quote_time = s.quote_time
+                  AND a.dte        = s.dte
             WHERE s.trade_date = $1
               AND s.quote_time  = $2::time
               AND s.put_delta   = ANY($3)
@@ -103,18 +105,18 @@ async def term_by_delta(
                                  ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
                     ),
                     atm AS (
-                        SELECT DISTINCT ON (trade_date)
-                            trade_date, atm_iv
+                        SELECT DISTINCT ON (trade_date, dte)
+                            trade_date, dte, atm_iv
                         FROM spx_atm
                         WHERE trade_date BETWEEN $2 AND $3
-                        ORDER BY trade_date,
+                        ORDER BY trade_date, dte,
                                  ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
                     ),
                     daily AS (
                         SELECT d.trade_date, d.dte,
                                COALESCE(a.atm_iv, d.raw_iv) AS value
                         FROM daily_raw d
-                        LEFT JOIN atm a ON a.trade_date = d.trade_date
+                        LEFT JOIN atm a ON a.trade_date = d.trade_date AND a.dte = d.dte
                     )
                     SELECT
                         dte,
@@ -249,7 +251,9 @@ async def term_by_date(
             SELECT s.trade_date, s.quote_time, s.dte, {value_expr} AS value
             FROM spx_surface s
             LEFT JOIN spx_atm a
-                   ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                   ON a.trade_date = s.trade_date
+                  AND a.quote_time = s.quote_time
+                  AND a.dte        = s.dte
             WHERE s.put_delta = $1
               AND s.dte BETWEEN $2 AND $3
               AND (s.trade_date::text, s.quote_time::text) = ANY(
@@ -318,7 +322,9 @@ async def term_intraday(
                 SELECT s.quote_time, s.dte, {value_expr} AS value
                 FROM spx_surface s
                 LEFT JOIN spx_atm a
-                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                       ON a.trade_date = s.trade_date
+                      AND a.quote_time = s.quote_time
+                      AND a.dte        = s.dte
                 WHERE s.trade_date = $1
                   AND s.put_delta  = $2
                   AND s.dte BETWEEN $3 AND $4
@@ -334,7 +340,9 @@ async def term_intraday(
                 SELECT s.quote_time, s.dte, {value_expr} AS value
                 FROM spx_surface s
                 LEFT JOIN spx_atm a
-                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                       ON a.trade_date = s.trade_date
+                      AND a.quote_time = s.quote_time
+                      AND a.dte        = s.dte
                 WHERE s.trade_date = $1
                   AND s.put_delta  = $2
                   AND s.dte BETWEEN $3 AND $4

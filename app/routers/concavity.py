@@ -90,11 +90,11 @@ async def get_convexity(
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 atm AS (
-                    SELECT DISTINCT ON (trade_date)
-                        trade_date, atm_iv
+                    SELECT DISTINCT ON (trade_date, dte)
+                        trade_date, dte, atm_iv
                     FROM spx_atm
                     WHERE trade_date BETWEEN $3 AND $4
-                    ORDER BY trade_date,
+                    ORDER BY trade_date, dte,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 closest AS (
@@ -103,7 +103,7 @@ async def get_convexity(
                                 THEN COALESCE(a.atm_iv, c.iv)
                                 ELSE c.iv END AS iv
                     FROM closest_raw c
-                    LEFT JOIN atm a ON a.trade_date = c.trade_date
+                    LEFT JOIN atm a ON a.trade_date = c.trade_date AND a.dte = c.dte
                 )
                 SELECT trade_date::text                          AS label,
                        dte,
@@ -141,7 +141,9 @@ async def get_convexity(
                                 ELSE r.iv END AS iv
                     FROM base_raw r
                     LEFT JOIN spx_atm a
-                           ON a.trade_date = r.trade_date AND a.quote_time = r.quote_time
+                           ON a.trade_date = r.trade_date
+                          AND a.quote_time = r.quote_time
+                          AND a.dte        = r.dte
                 )
                 SELECT (l.trade_date::text || ' ' || LEFT(l.quote_time::text, 5)) AS label,
                        l.dte,

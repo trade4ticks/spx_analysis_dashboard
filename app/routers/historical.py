@@ -104,11 +104,11 @@ async def get_historical(
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 atm AS (
-                    SELECT DISTINCT ON (trade_date)
-                        trade_date, atm_iv
+                    SELECT DISTINCT ON (trade_date, dte)
+                        trade_date, dte, atm_iv
                     FROM spx_atm
                     WHERE trade_date BETWEEN $3 AND $4
-                    ORDER BY trade_date,
+                    ORDER BY trade_date, dte,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
                 ),
                 closest AS (
@@ -118,7 +118,7 @@ async def get_historical(
                                 ELSE c.iv END AS iv,
                            c.price, c.theta, c.vega, c.gamma
                     FROM closest_raw c
-                    LEFT JOIN atm a ON a.trade_date = c.trade_date
+                    LEFT JOIN atm a ON a.trade_date = c.trade_date AND a.dte = c.dte
                 )
                 SELECT trade_date, dte, put_delta, iv, price, theta, vega, gamma
                 FROM closest
@@ -138,7 +138,9 @@ async def get_historical(
                        s.price, s.theta, s.vega, s.gamma
                 FROM spx_surface s
                 LEFT JOIN spx_atm a
-                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                       ON a.trade_date = s.trade_date
+                      AND a.quote_time = s.quote_time
+                      AND a.dte        = s.dte
                 WHERE s.dte        = ANY($1)
                   AND s.put_delta  = ANY($2)
                   AND s.trade_date BETWEEN $3 AND $4
