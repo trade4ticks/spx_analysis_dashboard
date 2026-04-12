@@ -133,7 +133,7 @@ document.addEventListener('alpine:init', () => {
     // ── Global state ────────────────────────────────────────────────────────
     mode:          'daily',      // 'daily' | 'intraday'
     date:          null,
-    time:          '15:45',
+    time:          null,         // set by loadTimes() after available times are fetched
     metric:        'iv',
     lookbackDays:  180,
     showTooltips:  true,
@@ -198,10 +198,9 @@ document.addEventListener('alpine:init', () => {
       try {
         const res   = await fetch(`/api/meta/quote_times?date=${this.date}`);
         this.times  = await res.json();
-        // Snap to closest available time to target
-        if (!this.times.includes(this.time)) {
-          this.time = this.closestTime(this.times, this.time);
-        }
+        // Always assign this.time (even if unchanged) so the <select> re-syncs
+        // when options are populated after the initial null state.
+        this.time = this.closestTime(this.times, this.time ?? '15:45');
       } catch(e) {
         console.error('Failed to load times', e);
       }

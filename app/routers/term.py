@@ -57,18 +57,26 @@ async def term_by_delta(
     if not delta_list:
         raise HTTPException(400, "deltas must not be empty")
 
+    # When delta=50 is requested and metric is iv, use true forward ATM IV from spx_atm
+    # instead of the 50-delta row from spx_surface.
+    iv_expr    = "CASE WHEN s.put_delta = 50 THEN COALESCE(a.atm_iv, s.iv) ELSE s.iv END"
+    value_expr = iv_expr if metric == "iv" else f"s.{metric}"
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT dte, put_delta,
-                   {metric} AS value,
-                   iv, price, theta, vega, gamma
-            FROM spx_surface
-            WHERE trade_date = $1
-              AND quote_time  = $2::time
-              AND put_delta   = ANY($3)
-              AND dte BETWEEN $4 AND $5
-            ORDER BY put_delta, dte
+            SELECT s.dte, s.put_delta,
+                   {value_expr} AS value,
+                   {iv_expr}    AS iv,
+                   s.price, s.theta, s.vega, s.gamma
+            FROM spx_surface s
+            LEFT JOIN spx_atm a
+                   ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+            WHERE s.trade_date = $1
+              AND s.quote_time  = $2::time
+              AND s.put_delta   = ANY($3)
+              AND s.dte BETWEEN $4 AND $5
+            ORDER BY s.put_delta, s.dte
             """,
             date_type.fromisoformat(date), time_type.fromisoformat(time), delta_list, dte_min, dte_max,
         )
@@ -81,31 +89,72 @@ async def term_by_delta(
             # Band is built for each delta independently; return the ATM (pd=50)
             # band or the first delta if 50 not selected
             band_delta = 50 if 50 in delta_list else delta_list[0]
-            band_rows = await conn.fetch(
-                f"""
-                WITH daily AS (
-                    SELECT DISTINCT ON (trade_date, dte)
-                        trade_date, dte, {metric} AS value
-                    FROM spx_surface
-                    WHERE put_delta    = $1
-                      AND trade_date   BETWEEN $2 AND $3
-                      AND dte          BETWEEN $4 AND $5
-                    ORDER BY trade_date, dte,
-                             ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
+            if metric == "iv" and band_delta == 50:
+                band_rows = await conn.fetch(
+                    """
+                    WITH daily_raw AS (
+                        SELECT DISTINCT ON (trade_date, dte)
+                            trade_date, dte, iv AS raw_iv
+                        FROM spx_surface
+                        WHERE put_delta    = $1
+                          AND trade_date   BETWEEN $2 AND $3
+                          AND dte          BETWEEN $4 AND $5
+                        ORDER BY trade_date, dte,
+                                 ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
+                    ),
+                    atm AS (
+                        SELECT DISTINCT ON (trade_date)
+                            trade_date, atm_iv
+                        FROM spx_atm
+                        WHERE trade_date BETWEEN $2 AND $3
+                        ORDER BY trade_date,
+                                 ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
+                    ),
+                    daily AS (
+                        SELECT d.trade_date, d.dte,
+                               COALESCE(a.atm_iv, d.raw_iv) AS value
+                        FROM daily_raw d
+                        LEFT JOIN atm a ON a.trade_date = d.trade_date
+                    )
+                    SELECT
+                        dte,
+                        MIN(value) AS pmin,
+                        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY value) AS p25,
+                        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
+                        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75,
+                        MAX(value) AS pmax
+                    FROM daily
+                    GROUP BY dte
+                    ORDER BY dte
+                    """,
+                    band_delta, start_d, end_d, dte_min, dte_max, time_type.fromisoformat(ref_time),
                 )
-                SELECT
-                    dte,
-                    MIN(value) AS pmin,
-                    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY value) AS p25,
-                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
-                    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75,
-                    MAX(value) AS pmax
-                FROM daily
-                GROUP BY dte
-                ORDER BY dte
-                """,
-                band_delta, start_d, end_d, dte_min, dte_max, time_type.fromisoformat(ref_time),
-            )
+            else:
+                band_rows = await conn.fetch(
+                    f"""
+                    WITH daily AS (
+                        SELECT DISTINCT ON (trade_date, dte)
+                            trade_date, dte, {metric} AS value
+                        FROM spx_surface
+                        WHERE put_delta    = $1
+                          AND trade_date   BETWEEN $2 AND $3
+                          AND dte          BETWEEN $4 AND $5
+                        ORDER BY trade_date, dte,
+                                 ABS(EXTRACT(EPOCH FROM (quote_time - $6::time)))
+                    )
+                    SELECT
+                        dte,
+                        MIN(value) AS pmin,
+                        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY value) AS p25,
+                        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY value) AS p50,
+                        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY value) AS p75,
+                        MAX(value) AS pmax
+                    FROM daily
+                    GROUP BY dte
+                    ORDER BY dte
+                    """,
+                    band_delta, start_d, end_d, dte_min, dte_max, time_type.fromisoformat(ref_time),
+                )
             band = {
                 "delta":  band_delta,
                 "label":  _delta_label(band_delta),
@@ -189,18 +238,25 @@ async def term_by_date(
     if len(time_list) != len(date_list):
         raise HTTPException(400, "times must have 1 entry or one per date")
 
+    value_expr = (
+        "CASE WHEN s.put_delta = 50 THEN COALESCE(a.atm_iv, s.iv) ELSE s.iv END"
+        if metric == "iv" else f"s.{metric}"
+    )
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""
-            SELECT trade_date, quote_time, dte, {metric} AS value
-            FROM spx_surface
-            WHERE put_delta = $1
-              AND dte BETWEEN $2 AND $3
-              AND (trade_date::text, quote_time::text) = ANY(
+            SELECT s.trade_date, s.quote_time, s.dte, {value_expr} AS value
+            FROM spx_surface s
+            LEFT JOIN spx_atm a
+                   ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+            WHERE s.put_delta = $1
+              AND s.dte BETWEEN $2 AND $3
+              AND (s.trade_date::text, s.quote_time::text) = ANY(
                   SELECT x.d, x.t
                   FROM unnest($4::text[], $5::text[]) AS x(d, t)
               )
-            ORDER BY trade_date, dte
+            ORDER BY s.trade_date, s.dte
             """,
             delta, dte_min, dte_max,
             date_list,
@@ -250,17 +306,24 @@ async def term_intraday(
     metric    = _validate_metric(metric)
     time_list = [t.strip() for t in times.split(",") if t.strip()] if times else []
 
+    value_expr = (
+        "CASE WHEN s.put_delta = 50 THEN COALESCE(a.atm_iv, s.iv) ELSE s.iv END"
+        if metric == "iv" else f"s.{metric}"
+    )
+
     async with pool.acquire() as conn:
         if time_list:
             rows = await conn.fetch(
                 f"""
-                SELECT quote_time, dte, {metric} AS value
-                FROM spx_surface
-                WHERE trade_date = $1
-                  AND put_delta  = $2
-                  AND dte BETWEEN $3 AND $4
-                  AND quote_time = ANY($5::time[])
-                ORDER BY quote_time, dte
+                SELECT s.quote_time, s.dte, {value_expr} AS value
+                FROM spx_surface s
+                LEFT JOIN spx_atm a
+                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                WHERE s.trade_date = $1
+                  AND s.put_delta  = $2
+                  AND s.dte BETWEEN $3 AND $4
+                  AND s.quote_time = ANY($5::time[])
+                ORDER BY s.quote_time, s.dte
                 """,
                 date_type.fromisoformat(date), delta, dte_min, dte_max,
                 [time_type.fromisoformat(t) for t in time_list],
@@ -268,12 +331,14 @@ async def term_intraday(
         else:
             rows = await conn.fetch(
                 f"""
-                SELECT quote_time, dte, {metric} AS value
-                FROM spx_surface
-                WHERE trade_date = $1
-                  AND put_delta  = $2
-                  AND dte BETWEEN $3 AND $4
-                ORDER BY quote_time, dte
+                SELECT s.quote_time, s.dte, {value_expr} AS value
+                FROM spx_surface s
+                LEFT JOIN spx_atm a
+                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                WHERE s.trade_date = $1
+                  AND s.put_delta  = $2
+                  AND s.dte BETWEEN $3 AND $4
+                ORDER BY s.quote_time, s.dte
                 """,
                 date_type.fromisoformat(date), delta, dte_min, dte_max,
             )

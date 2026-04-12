@@ -158,7 +158,8 @@ function buildSkew(data, pctFmt, yLabel) {
   const { series = [], band } = data;
 
   // X labels: put_delta values from the first series (all share the same grid)
-  const labels = series[0]?.put_deltas?.map(pd => deltaLabel(pd)) ?? [];
+  // delta=50 is labelled "50" (not "ATM") — true forward ATM comes from spx_atm, not delta 50
+  const labels = series[0]?.put_deltas?.map(pd => pd === 50 ? '50' : deltaLabel(pd)) ?? [];
 
   const datasets = [];
 

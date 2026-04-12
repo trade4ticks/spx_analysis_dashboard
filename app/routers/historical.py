@@ -91,8 +91,8 @@ async def get_historical(
     async with pool.acquire() as conn:
         if freq == "daily":
             rows = await conn.fetch(
-                f"""
-                WITH closest AS (
+                """
+                WITH closest_raw AS (
                     SELECT DISTINCT ON (trade_date, dte, put_delta)
                         trade_date, quote_time, dte, put_delta,
                         iv, price, theta, vega, gamma
@@ -102,6 +102,23 @@ async def get_historical(
                       AND trade_date BETWEEN $3 AND $4
                     ORDER BY trade_date, dte, put_delta,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
+                ),
+                atm AS (
+                    SELECT DISTINCT ON (trade_date)
+                        trade_date, atm_iv
+                    FROM spx_atm
+                    WHERE trade_date BETWEEN $3 AND $4
+                    ORDER BY trade_date,
+                             ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
+                ),
+                closest AS (
+                    SELECT c.trade_date, c.dte, c.put_delta,
+                           CASE WHEN c.put_delta = 50
+                                THEN COALESCE(a.atm_iv, c.iv)
+                                ELSE c.iv END AS iv,
+                           c.price, c.theta, c.vega, c.gamma
+                    FROM closest_raw c
+                    LEFT JOIN atm a ON a.trade_date = c.trade_date
                 )
                 SELECT trade_date, dte, put_delta, iv, price, theta, vega, gamma
                 FROM closest
@@ -114,13 +131,18 @@ async def get_historical(
         else:
             rows = await conn.fetch(
                 """
-                SELECT trade_date, quote_time, dte, put_delta,
-                       iv, price, theta, vega, gamma
-                FROM spx_surface
-                WHERE dte        = ANY($1)
-                  AND put_delta  = ANY($2)
-                  AND trade_date BETWEEN $3 AND $4
-                ORDER BY trade_date, quote_time, dte, put_delta
+                SELECT s.trade_date, s.quote_time, s.dte, s.put_delta,
+                       CASE WHEN s.put_delta = 50
+                            THEN COALESCE(a.atm_iv, s.iv)
+                            ELSE s.iv END AS iv,
+                       s.price, s.theta, s.vega, s.gamma
+                FROM spx_surface s
+                LEFT JOIN spx_atm a
+                       ON a.trade_date = s.trade_date AND a.quote_time = s.quote_time
+                WHERE s.dte        = ANY($1)
+                  AND s.put_delta  = ANY($2)
+                  AND s.trade_date BETWEEN $3 AND $4
+                ORDER BY s.trade_date, s.quote_time, s.dte, s.put_delta
                 """,
                 dte_list, delta_list, start_d, end_d,
             )

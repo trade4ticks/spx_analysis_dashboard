@@ -69,11 +69,12 @@ async def get_term_slope(
     T_b  = dte_b / 365.0
     dT   = T_b - T_a
 
+    # For delta=50, substitute true forward ATM IV from spx_atm.
     async with pool.acquire() as conn:
         if freq == "daily":
             rows = await conn.fetch(
                 """
-                WITH closest AS (
+                WITH closest_raw AS (
                     SELECT DISTINCT ON (trade_date, dte, put_delta)
                         trade_date, dte, put_delta, iv
                     FROM spx_surface
@@ -82,6 +83,22 @@ async def get_term_slope(
                       AND trade_date BETWEEN $3 AND $4
                     ORDER BY trade_date, dte, put_delta,
                              ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
+                ),
+                atm AS (
+                    SELECT DISTINCT ON (trade_date)
+                        trade_date, atm_iv
+                    FROM spx_atm
+                    WHERE trade_date BETWEEN $3 AND $4
+                    ORDER BY trade_date,
+                             ABS(EXTRACT(EPOCH FROM (quote_time - $5::time)))
+                ),
+                closest AS (
+                    SELECT c.trade_date, c.dte, c.put_delta,
+                           CASE WHEN c.put_delta = 50
+                                THEN COALESCE(a.atm_iv, c.iv)
+                                ELSE c.iv END AS iv
+                    FROM closest_raw c
+                    LEFT JOIN atm a ON a.trade_date = c.trade_date
                 )
                 SELECT trade_date::text AS label, put_delta,
                        a.iv AS iv_a, b.iv AS iv_b,
@@ -101,12 +118,21 @@ async def get_term_slope(
         else:
             rows = await conn.fetch(
                 """
-                WITH base AS (
+                WITH base_raw AS (
                     SELECT trade_date, quote_time, dte, put_delta, iv
                     FROM spx_surface
                     WHERE dte        = ANY($1)
                       AND put_delta  = ANY($2)
                       AND trade_date BETWEEN $3 AND $4
+                ),
+                base AS (
+                    SELECT r.trade_date, r.quote_time, r.dte, r.put_delta,
+                           CASE WHEN r.put_delta = 50
+                                THEN COALESCE(a.atm_iv, r.iv)
+                                ELSE r.iv END AS iv
+                    FROM base_raw r
+                    LEFT JOIN spx_atm a
+                           ON a.trade_date = r.trade_date AND a.quote_time = r.quote_time
                 )
                 SELECT (a.trade_date::text || ' ' || LEFT(a.quote_time::text, 5)) AS label,
                        a.put_delta, a.iv AS iv_a, b.iv AS iv_b,
