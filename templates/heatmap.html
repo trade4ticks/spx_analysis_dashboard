@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Heatmap</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    /* ── Heatmap-specific layout ───────────────────────────────────────────── */
+    .hm-body {
+      flex: 1;
+      overflow: auto;
+      padding: 14px;
+    }
+
+    /* ── Table ─────────────────────────────────────────────────────────────── */
+    .hm-table {
+      border-collapse: collapse;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .hm-table th,
+    .hm-table td {
+      border: 1px solid #111;
+      padding: 5px 7px;
+      text-align: center;
+      min-width: 52px;
+      height: 26px;
+    }
+    .hm-table thead th {
+      background: #2d2d2d;
+      color: #aaa;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .hm-dte-hdr {
+      position: sticky !important;
+      left: 0;
+      z-index: 3 !important;
+      background: #2d2d2d !important;
+    }
+    .hm-dte-cell {
+      position: sticky;
+      left: 0;
+      background: #2a2a2a;
+      color: #888;
+      font-size: 10px;
+      font-weight: 700;
+      z-index: 1;
+    }
+    .hm-empty {
+      color: var(--dim);
+      font-size: 13px;
+      padding: 40px 0;
+      text-align: center;
+    }
+
+    /* ── Loading overlay ───────────────────────────────────────────────────── */
+    .hm-loading {
+      color: var(--dim);
+      font-size: 13px;
+      text-align: center;
+      padding: 40px 0;
+    }
+    .hm-error {
+      color: var(--danger);
+      font-size: 13px;
+      text-align: center;
+      padding: 40px 0;
+    }
+  </style>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/heatmap.js"></script>
+</head>
+
+<body x-data="heatmap" x-init="init()">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link on" href="/heatmap">Heatmap</a>
+    </nav>
+    <div class="topbar-div"></div>
+    <div class="topbar-right" x-text="dateDisplay + ' · ' + timeDisplay + ' ET'"></div>
+  </div>
+
+  <!-- ── Controls ───────────────────────────────────────────────────────── -->
+  <div class="ctrl-strip">
+
+    <!-- Mode toggle -->
+    <span class="ctrl-lbl">Mode</span>
+    <div class="seg">
+      <div class="seg-btn" :class="{on: mode==='iv'}"   @click="onModeChange('iv')">IV</div>
+      <div class="seg-btn" :class="{on: mode==='skew'}" @click="onModeChange('skew')">Skew</div>
+      <div class="seg-btn" :class="{on: mode==='term'}" @click="onModeChange('term')">Term</div>
+    </div>
+
+    <div class="ctrl-div"></div>
+
+    <!-- Raw / 1D Change -->
+    <span class="ctrl-lbl">View</span>
+    <div class="seg">
+      <div class="seg-btn" :class="{on: submode==='raw'}"    @click="onSubmodeChange('raw')">Raw</div>
+      <div class="seg-btn" :class="{on: submode==='change'}" @click="onSubmodeChange('change')">1D Chg</div>
+    </div>
+
+    <div class="ctrl-div"></div>
+
+    <!-- Date -->
+    <span class="ctrl-lbl">Date</span>
+    <div class="dd">
+      <select x-model="date" @change="onDateChange()">
+        <template x-for="d in dates" :key="d">
+          <option :value="d" x-text="d"></option>
+        </template>
+      </select>
+    </div>
+
+    <!-- Time -->
+    <span class="ctrl-lbl">Time</span>
+    <div class="dd">
+      <select x-model="time" @change="onTimeChange()">
+        <template x-for="t in times" :key="t">
+          <option :value="t" x-text="t"></option>
+        </template>
+      </select>
+    </div>
+
+    <div style="margin-left:auto;">
+      <button class="btn" @click="loadGrid()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <!-- ── Heatmap body ────────────────────────────────────────────────────── -->
+  <div class="hm-body">
+    <div x-show="loading" class="hm-loading">Loading…</div>
+    <div x-show="error && !loading" class="hm-error" x-text="error"></div>
+    <div x-show="!loading && !error" id="heatmap-container"></div>
+  </div>
+
+</body>
+</html>

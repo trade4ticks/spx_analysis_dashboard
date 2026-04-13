@@ -67,6 +67,14 @@ body {
 .tp-val.t { color: var(--teal); }
 .tp-val.g { color: var(--success); }
 .topbar-right { margin-left: auto; font-size: 11px; color: var(--dim); }
+.topbar-nav { display: flex; gap: 2px; }
+.nav-link {
+  padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600;
+  color: var(--dim); text-decoration: none; cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.nav-link:hover { color: var(--text); background: var(--surface); }
+.nav-link.on { color: var(--accent); }
 
 /* ── Global controls strip ───────────────────────────────────────────────── */
 .ctrl-strip {
