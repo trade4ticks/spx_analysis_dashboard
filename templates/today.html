@@ -72,6 +72,17 @@
       <a class="nav-link on" href="/today">Today</a>
     </nav>
     <div class="topbar-div"></div>
+
+    <!-- SPX spot price -->
+    <div class="price-block">
+      <span style="font-size:11px;color:var(--dim)">SPX</span>
+      <span class="price-big" x-text="latestSpotFmt"></span>
+      <span class="price-chg" :class="spotChgClass" x-text="spotChgFmt"></span>
+    </div>
+
+    <!-- Intraday sparkline -->
+    <div x-html="sparklineSvg" style="align-self:center;line-height:0;"></div>
+
     <div class="topbar-right" x-text="dateDisplay + ' · ' + selectedLabel"></div>
   </div>
 
@@ -100,9 +111,9 @@
     <!-- Expiration -->
     <span class="ctrl-lbl">Expiration</span>
     <div class="dd">
-      <select x-model.number="selectedDte" @change="onExpirationChange()">
-        <template x-for="e in expirations" :key="e.dte">
-          <option :value="e.dte" x-text="e.label"></option>
+      <select x-model="selectedExp" @change="onExpirationChange()">
+        <template x-for="e in expirations" :key="e.expiration">
+          <option :value="e.expiration" x-text="e.label"></option>
         </template>
       </select>
     </div>

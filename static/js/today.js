@@ -1,28 +1,32 @@
 /**
  * today.js — Alpine component for the intraday strike IV heatmap.
  *
- * Rows    = time slices 09:35 → 16:00 in 5-min steps (78 rows)
- * Columns = 15 strikes anchored to the opening ATM (10 below, 5 above, ×100)
+ * Data source: raw parquet files via /api/raw/expirations + /api/today/iv_grid
+ *
+ * Grid layout
+ * -----------
+ * Rows    = time slices 09:35 → 16:00 in 5-min steps (78 slots)
+ * Columns = 15 strikes anchored to opening spot (10 below, 5 above, ×100)
  *
  * Modes
  * -----
- * IV      — raw IV per cell, displayed as percentage (e.g. 18.25)
- *           neutral dark background, no gradient
+ * IV      — raw IV, displayed as percentage (e.g. 18.25)
+ *           neutral dark background
  *
- * 5min Chg — change vs the prior 5-min slice (09:35 uses prev-day 16:00)
+ * 5min Chg — IV change vs prior 5-min slice (09:35 uses prev-day 16:00)
  *            displayed in percentage points (e.g. +0.22)
- *            pink  #ff1a8c → positive
+ *            pink  #ff1a8c → positive  (IV rose)
  *            dark  #2a2a2a → zero
- *            blue  #1a8cff → negative
+ *            blue  #1a8cff → negative  (IV fell)
  *            range ±1.0 pp
  */
 
-// ── Color constants ────────────────────────────────────────────────────────────
-const COLOR_LOW_T  = [255, 26, 140];  // #ff1a8c  pink   (positive change / low IV)
-const COLOR_MID_T  = [42,  42,  42];  // #2a2a2a  dark
-const COLOR_HIGH_T = [26, 140, 255];  // #1a8cff  blue   (negative change / high IV)
+// ── Color helpers ─────────────────────────────────────────────────────────────
+const _C_LOW  = [255, 26, 140];  // #ff1a8c  pink
+const _C_MID  = [42,  42,  42];  // #2a2a2a  dark gray
+const _C_HIGH = [26, 140, 255];  // #1a8cff  blue
 
-function lerpRGB_T(a, b, t) {
+function _lerp(a, b, t) {
     t = Math.max(0, Math.min(1, t));
     return [
         Math.round(a[0] + (b[0] - a[0]) * t),
@@ -30,69 +34,60 @@ function lerpRGB_T(a, b, t) {
         Math.round(a[2] + (b[2] - a[2]) * t),
     ];
 }
-
-function toHex_T([r, g, b]) {
+function _hex([r, g, b]) {
     return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
 }
-
-function threeStop_T(t) {
+function _three(t) {
     t = Math.max(0, Math.min(1, t));
-    if (t <= 0.5) return lerpRGB_T(COLOR_LOW_T, COLOR_MID_T, t * 2);
-    return lerpRGB_T(COLOR_MID_T, COLOR_HIGH_T, (t - 0.5) * 2);
+    return t <= 0.5 ? _lerp(_C_LOW, _C_MID, t * 2) : _lerp(_C_MID, _C_HIGH, (t - 0.5) * 2);
 }
-
 /** positive → pink, zero → dark, negative → blue */
-function changeColor(v_pp, range = 1.0) {
-    const t = 0.5 - 0.5 * Math.max(-1, Math.min(1, v_pp / range));
-    return toHex_T(threeStop_T(t));
+function chgColor(v_pp, range = 1.0) {
+    return _hex(_three(0.5 - 0.5 * Math.max(-1, Math.min(1, v_pp / range))));
 }
-
-function contrastColor_T(hex) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.45 ? '#111' : '#ddd';
+function contrast(hex) {
+    const r = parseInt(hex.slice(1,3), 16);
+    const g = parseInt(hex.slice(3,5), 16);
+    const b = parseInt(hex.slice(5,7), 16);
+    return (0.299*r + 0.587*g + 0.114*b) / 255 > 0.45 ? '#111' : '#ddd';
 }
 
 // ── Time grid ─────────────────────────────────────────────────────────────────
 function allTimeSlots() {
     const slots = [];
-    // 09:35 – 09:55
     for (let m = 35; m <= 55; m += 5)
         slots.push(`09:${String(m).padStart(2, '0')}`);
-    // 10:00 – 15:55
     for (let h = 10; h <= 15; h++)
         for (let m = 0; m <= 55; m += 5)
             slots.push(`${h}:${String(m).padStart(2, '0')}`);
-    // 16:00
     slots.push('16:00');
-    return slots;  // 78 entries
+    return slots;   // 78 entries
 }
-
-/** Subtract 5 minutes from HH:MM string. Returns null if underflows. */
 function prevSlot(t) {
     const [h, m] = t.split(':').map(Number);
-    const total  = h * 60 + m - 5;
-    if (total < 0) return null;
-    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+    const tot = h * 60 + m - 5;
+    if (tot < 0) return null;
+    return `${String(Math.floor(tot/60)).padStart(2,'0')}:${String(tot%60).padStart(2,'0')}`;
 }
 
 // ── Alpine component ──────────────────────────────────────────────────────────
 document.addEventListener('alpine:init', () => {
     Alpine.data('today', () => ({
         // Controls
-        mode:        'iv',   // iv | change
-        dates:       [],
-        date:        null,
-        expirations: [],     // [{dte, expiry, label}]
-        selectedDte: null,
+        mode: 'iv',           // iv | change
+        dates: [],
+        date:  null,
+        expirations: [],      // [{expiration, dte, label, settlements}]
+        selectedExp: null,    // "YYYY-MM-DD"
+        selectedSettlement: 'PM',
 
         // Data
-        loading: false,
-        error:   null,
-        strikes: [],         // [5900, 6000, …]  (integers)
-        rows:    [],         // [{time:'09:35', data:{'5900':0.1825, …}}, …]
-        prev:    {},         // {'5900':0.1810, …}  prev-day 16:00
+        loading:    false,
+        error:      null,
+        strikes:    [],       // [5900, 6000, …]
+        rows:       [],       // [{time, data:{strike_str: iv}}, …]
+        prev:       {},       // {strike_str: iv}  prev-day 16:00
+        spotSeries: [],       // [{time, price}, …]
 
         ALL_TIMES: allTimeSlots(),
 
@@ -119,37 +114,58 @@ document.addEventListener('alpine:init', () => {
         async loadExpirations() {
             if (!this.date) return;
             try {
-                const res        = await fetch(`/api/today/expirations?date=${this.date}`);
-                this.expirations = await res.json();
+                // Use raw parquet expirations — actual expiration folders on disk
+                const res  = await fetch(`/api/raw/expirations?date=${this.date}`);
+                const data = await res.json();
+                this.expirations = data.expirations ?? [];
+
+                if (!this.expirations.length) {
+                    this.error = `No raw parquet data found for ${this.date}`;
+                    return;
+                }
+                this.error = null;
 
                 // Default: expiration closest to 30 DTE
-                if (this.expirations.length) {
-                    const closest = this.expirations.reduce((best, e) =>
-                        Math.abs(e.dte - 30) < Math.abs(best.dte - 30) ? e : best
-                    );
-                    this.selectedDte = closest.dte;
-                    await this.loadGrid();
-                }
-            } catch(e) { this.error = 'Failed to load expirations'; }
+                const best = this.expirations.reduce((b, e) =>
+                    Math.abs(e.dte - 30) < Math.abs(b.dte - 30) ? e : b
+                );
+                this.selectedExp        = best.expiration;
+                this.selectedSettlement = best.settlements.includes('PM') ? 'PM' : best.settlements[0];
+                await this.loadGrid();
+            } catch(e) {
+                this.error = 'Failed to load expirations';
+                console.error(e);
+            }
         },
 
         async onExpirationChange() {
+            // Update settlement to match the newly selected expiration
+            const exp = this.expirations.find(e => e.expiration === this.selectedExp);
+            if (exp) {
+                this.selectedSettlement = exp.settlements.includes('PM') ? 'PM' : exp.settlements[0];
+            }
             await this.loadGrid();
         },
 
         async loadGrid() {
-            if (!this.date || this.selectedDte == null) return;
+            if (!this.date || !this.selectedExp) return;
             this.loading = true;
             this.error   = null;
             try {
-                const res    = await fetch(`/api/today/iv_grid?date=${this.date}&dte=${this.selectedDte}`);
-                const data   = await res.json();
-                this.strikes = data.strikes;
-                this.rows    = data.rows;
-                this.prev    = data.prev;
+                const url = `/api/today/iv_grid?date=${this.date}&expiration=${this.selectedExp}&settlement=${this.selectedSettlement}`;
+                const res  = await fetch(url);
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail ?? `HTTP ${res.status}`);
+                }
+                const data      = await res.json();
+                this.strikes    = data.strikes;
+                this.rows       = data.rows;
+                this.prev       = data.prev;
+                this.spotSeries = data.spot_series ?? [];
                 this.renderGrid();
             } catch(e) {
-                this.error = 'Failed to load grid';
+                this.error = `Failed to load grid: ${e.message}`;
                 console.error(e);
             } finally {
                 this.loading = false;
@@ -165,13 +181,11 @@ document.addEventListener('alpine:init', () => {
         renderGrid() {
             const container = document.getElementById('today-container');
             if (!container) return;
-
             if (!this.strikes.length) {
                 container.innerHTML = '<div class="hm-empty">No data for this selection.</div>';
                 return;
             }
 
-            // Build lookup: time → {strikeStr → iv}
             const dataMap = {};
             for (const row of this.rows) dataMap[row.time] = row.data;
 
@@ -188,14 +202,12 @@ document.addEventListener('alpine:init', () => {
                 html += `<tr><td class="today-time-cell">${t}</td>`;
 
                 const rowData  = dataMap[t] || {};
-                const prevTime = prevSlot(t);
-                const prevData = (prevTime && dataMap[prevTime]) ? dataMap[prevTime]
-                               : (t === '09:35') ? prev
-                               : {};
+                const prevData = t === '09:35' ? prev
+                               : (dataMap[prevSlot(t)] || {});
 
                 for (const s of strikes) {
-                    const sk  = String(s);
-                    const iv  = rowData[sk];
+                    const sk = String(s);
+                    const iv = rowData[sk];
 
                     let bg = '#1e1e1e', fg = '#555', display = '', title = '';
 
@@ -208,18 +220,17 @@ document.addEventListener('alpine:init', () => {
                         } else {
                             const prevIv = prevData[sk];
                             if (prevIv != null) {
-                                const chg_pp = (iv - prevIv) * 100;
-                                bg      = changeColor(chg_pp, 1.0);
-                                fg      = contrastColor_T(bg);
-                                const sign = chg_pp >= 0 ? '+' : '';
-                                display = sign + chg_pp.toFixed(2);
-                                title   = `${t}  K=${s}\nChg: ${display} pp\nIV now: ${(iv*100).toFixed(2)}%\nIV prev: ${(prevIv*100).toFixed(2)}%`;
+                                const chg = (iv - prevIv) * 100;   // pp
+                                bg        = chgColor(chg, 1.0);
+                                fg        = contrast(bg);
+                                display   = (chg >= 0 ? '+' : '') + chg.toFixed(2);
+                                title     = `${t}  K=${s}\nChg: ${display} pp\nIV: ${(iv*100).toFixed(2)}%  Prev: ${(prevIv*100).toFixed(2)}%`;
                             } else {
-                                // Have current IV but no prior — show IV with dim style
+                                // IV exists but no prior slice — dim display
                                 bg      = '#252525';
                                 fg      = '#555';
                                 display = (iv * 100).toFixed(2);
-                                title   = `${t}  K=${s}\nIV: ${display}% (no prior slice)`;
+                                title   = `${t}  K=${s}\nIV: ${display}% (no prior)`;
                             }
                         }
                     }
@@ -227,7 +238,6 @@ document.addEventListener('alpine:init', () => {
                     const esc = title.replace(/"/g, '&quot;');
                     html += `<td style="background:${bg};color:${fg}" title="${esc}">${display}</td>`;
                 }
-
                 html += '</tr>';
             }
 
@@ -235,10 +245,53 @@ document.addEventListener('alpine:init', () => {
             container.innerHTML = html;
         },
 
-        // ── Helpers ───────────────────────────────────────────────────────────
+        // ── SPX sparkline ─────────────────────────────────────────────────────
+        get latestSpot() {
+            return this.spotSeries.length
+                ? this.spotSeries[this.spotSeries.length - 1].price
+                : null;
+        },
+        get openSpot() {
+            return this.spotSeries.length ? this.spotSeries[0].price : null;
+        },
+        get latestSpotFmt() {
+            const s = this.latestSpot;
+            if (!s) return '—';
+            return s.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        },
+        get spotChgFmt() {
+            if (!this.latestSpot || !this.openSpot) return '';
+            const chg = this.latestSpot - this.openSpot;
+            return (chg >= 0 ? '+' : '') + chg.toFixed(2);
+        },
+        get spotChgClass() {
+            if (!this.latestSpot || !this.openSpot) return '';
+            return this.latestSpot >= this.openSpot ? 'up' : 'dn';
+        },
+        get sparklineSvg() {
+            const pts = this.spotSeries;
+            if (pts.length < 2) return '';
+            const W = 160, H = 28, PAD = 2;
+            const prices = pts.map(p => p.price);
+            const lo  = Math.min(...prices);
+            const hi  = Math.max(...prices);
+            const rng = hi - lo || 1;
+            const n   = prices.length;
+            const xf  = i => (PAD + (i / (n - 1)) * (W - 2*PAD)).toFixed(1);
+            const yf  = p => (PAD + (1 - (p - lo) / rng) * (H - 2*PAD)).toFixed(1);
+            const path = prices.map((p, i) => `${i === 0 ? 'M' : 'L'}${xf(i)} ${yf(p)}`).join(' ');
+            const lx = xf(n-1), ly = yf(prices[n-1]);
+            const clr = (this.latestSpot ?? 0) >= (this.openSpot ?? 0) ? '#2ecc71' : '#e74c3c';
+            return `<svg width="${W}" height="${H}" style="display:block">` +
+                `<path d="${path}" fill="none" stroke="${clr}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>` +
+                `<circle cx="${lx}" cy="${ly}" r="2.5" fill="${clr}"/>` +
+                `</svg>`;
+        },
+
+        // ── Misc ──────────────────────────────────────────────────────────────
         get dateDisplay() { return this.date ?? '—'; },
         get selectedLabel() {
-            const e = this.expirations.find(x => x.dte === this.selectedDte);
+            const e = this.expirations.find(x => x.expiration === this.selectedExp);
             return e ? e.label : '—';
         },
     }));
