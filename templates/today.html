@@ -3,32 +3,32 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SPX IV — Heatmap</title>
+  <title>SPX IV — Today</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
-    /* ── Heatmap-specific layout ───────────────────────────────────────────── */
-    .hm-body {
+    /* ── Today-specific layout ─────────────────────────────────────────────── */
+    .today-body {
       flex: 1;
       overflow: auto;
       padding: 14px;
     }
 
     /* ── Table ─────────────────────────────────────────────────────────────── */
-    .hm-table {
+    .today-table {
       border-collapse: collapse;
       font-size: 11px;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
-    .hm-table th,
-    .hm-table td {
+    .today-table th,
+    .today-table td {
       border: 1px solid #111;
-      padding: 5px 7px;
+      padding: 4px 6px;
       text-align: center;
-      min-width: 52px;
-      height: 26px;
+      min-width: 58px;
+      height: 24px;
     }
-    .hm-table thead th {
+    .today-table thead th {
       background: #2d2d2d;
       color: #aaa;
       font-size: 10px;
@@ -38,13 +38,14 @@
       top: 0;
       z-index: 2;
     }
-    .hm-dte-hdr {
+    .today-time-hdr {
       position: sticky !important;
       left: 0;
       z-index: 3 !important;
       background: #2d2d2d !important;
+      min-width: 46px;
     }
-    .hm-dte-cell {
+    .today-time-cell {
       position: sticky;
       left: 0;
       background: #2a2a2a;
@@ -52,46 +53,36 @@
       font-size: 10px;
       font-weight: 700;
       z-index: 1;
+      min-width: 46px;
     }
-    /* .hm-empty / .hm-loading / .hm-error — defined in theme.css */
   </style>
 
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/heatmap.js"></script>
+  <script src="/static/js/today.js"></script>
 </head>
 
-<body x-data="heatmap" x-init="init()">
+<body x-data="today" x-init="init()">
 
   <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
   <div class="topbar">
     <div class="brand">SPX <em>IV</em></div>
     <nav class="topbar-nav">
       <a class="nav-link" href="/">Dashboard</a>
-      <a class="nav-link on" href="/heatmap">Heatmap</a>
-      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link on" href="/today">Today</a>
     </nav>
     <div class="topbar-div"></div>
-    <div class="topbar-right" x-text="dateDisplay + ' · ' + timeDisplay + ' ET'"></div>
+    <div class="topbar-right" x-text="dateDisplay + ' · ' + selectedLabel"></div>
   </div>
 
   <!-- ── Controls ───────────────────────────────────────────────────────── -->
   <div class="ctrl-strip">
 
     <!-- Mode toggle -->
-    <span class="ctrl-lbl">Mode</span>
-    <div class="seg">
-      <div class="seg-btn" :class="{on: mode==='iv'}"   @click="onModeChange('iv')">IV</div>
-      <div class="seg-btn" :class="{on: mode==='skew'}" @click="onModeChange('skew')">Skew</div>
-      <div class="seg-btn" :class="{on: mode==='term'}" @click="onModeChange('term')">Term</div>
-    </div>
-
-    <div class="ctrl-div"></div>
-
-    <!-- Raw / 1D Change -->
     <span class="ctrl-lbl">View</span>
     <div class="seg">
-      <div class="seg-btn" :class="{on: submode==='raw'}"    @click="onSubmodeChange('raw')">Raw</div>
-      <div class="seg-btn" :class="{on: submode==='change'}" @click="onSubmodeChange('change')">1D Chg</div>
+      <div class="seg-btn" :class="{on: mode==='iv'}"     @click="onModeChange('iv')">IV</div>
+      <div class="seg-btn" :class="{on: mode==='change'}" @click="onModeChange('change')">5min Chg</div>
     </div>
 
     <div class="ctrl-div"></div>
@@ -106,12 +97,12 @@
       </select>
     </div>
 
-    <!-- Time -->
-    <span class="ctrl-lbl">Time</span>
+    <!-- Expiration -->
+    <span class="ctrl-lbl">Expiration</span>
     <div class="dd">
-      <select x-model="time" @change="onTimeChange()">
-        <template x-for="t in times" :key="t">
-          <option :value="t" x-text="t"></option>
+      <select x-model.number="selectedDte" @change="onExpirationChange()">
+        <template x-for="e in expirations" :key="e.dte">
+          <option :value="e.dte" x-text="e.label"></option>
         </template>
       </select>
     </div>
@@ -121,11 +112,11 @@
     </div>
   </div>
 
-  <!-- ── Heatmap body ────────────────────────────────────────────────────── -->
-  <div class="hm-body">
+  <!-- ── Grid body ──────────────────────────────────────────────────────── -->
+  <div class="today-body">
     <div x-show="loading" class="hm-loading">Loading…</div>
     <div x-show="error && !loading" class="hm-error" x-text="error"></div>
-    <div x-show="!loading && !error" id="heatmap-container"></div>
+    <div x-show="!loading && !error" id="today-container"></div>
   </div>
 
 </body>

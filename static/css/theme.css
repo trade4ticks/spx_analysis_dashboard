@@ -204,6 +204,11 @@ input[type=range]::-webkit-slider-thumb {
 .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .btn.primary:hover { background: #2980b9; }
 
+/* ── Shared page helpers (heatmap, today, …) ─────────────────────────────── */
+.hm-loading { color: var(--dim);    font-size: 13px; text-align: center; padding: 40px 0; }
+.hm-error   { color: var(--danger); font-size: 13px; text-align: center; padding: 40px 0; }
+.hm-empty   { color: var(--dim);    font-size: 13px; text-align: center; padding: 40px 0; }
+
 /* ── Panel grid ──────────────────────────────────────────────────────────── */
 .panel-grid {
   flex: 1;
