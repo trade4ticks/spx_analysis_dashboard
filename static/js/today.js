@@ -117,7 +117,11 @@ document.addEventListener('alpine:init', () => {
                 // Use raw parquet expirations — actual expiration folders on disk
                 const res  = await fetch(`/api/raw/expirations?date=${this.date}`);
                 const data = await res.json();
-                this.expirations = data.expirations ?? [];
+                // Raw API returns {expiration, dte, settlements} — add label here
+                this.expirations = (data.expirations ?? []).map(e => ({
+                    ...e,
+                    label: `${e.expiration}  (${e.dte} DTE)`,
+                }));
 
                 if (!this.expirations.length) {
                     this.error = `No raw parquet data found for ${this.date}`;

@@ -56,7 +56,7 @@ async def get_iv_grid(
     date:         str  = Query(..., description="Trade date YYYY-MM-DD"),
     expiration:   str  = Query(..., description="Expiration date YYYY-MM-DD"),
     settlement:   str  = Query("PM"),
-    filter_flags: bool = Query(True),
+    filter_flags: bool = Query(False),
 ) -> dict:
     duck       = _duckdb()
     settlement = settlement.upper()
