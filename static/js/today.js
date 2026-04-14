@@ -193,6 +193,10 @@ document.addEventListener('alpine:init', () => {
             const dataMap = {};
             for (const row of this.rows) dataMap[row.time] = row.data;
 
+            // For vs-Open mode: use 09:35 slice (or earliest available)
+            const openData = dataMap['09:35']
+                          ?? (this.rows.length ? this.rows[0].data : {});
+
             const mode    = this.mode;
             const prev    = this.prev;
             const strikes = this.strikes;
@@ -221,20 +225,40 @@ document.addEventListener('alpine:init', () => {
                             fg      = '#ccc';
                             display = (iv * 100).toFixed(2);
                             title   = `${t}  K=${s}\nIV: ${display}%`;
-                        } else {
+                        } else if (mode === 'change') {
                             const prevIv = prevData[sk];
                             if (prevIv != null) {
-                                const chg = (iv - prevIv) * 100;   // pp
-                                bg        = chgColor(chg, 1.0);
-                                fg        = contrast(bg);
-                                display   = (chg >= 0 ? '+' : '') + chg.toFixed(2);
-                                title     = `${t}  K=${s}\nChg: ${display} pp\nIV: ${(iv*100).toFixed(2)}%  Prev: ${(prevIv*100).toFixed(2)}%`;
+                                const chg = (iv - prevIv) * 100;
+                                bg      = chgColor(chg, 1.0);
+                                fg      = contrast(bg);
+                                display = (chg >= 0 ? '+' : '') + chg.toFixed(2);
+                                title   = `${t}  K=${s}\nChg: ${display} pp\nIV: ${(iv*100).toFixed(2)}%  Prev: ${(prevIv*100).toFixed(2)}%`;
                             } else {
-                                // IV exists but no prior slice — dim display
                                 bg      = '#252525';
                                 fg      = '#555';
                                 display = (iv * 100).toFixed(2);
                                 title   = `${t}  K=${s}\nIV: ${display}% (no prior)`;
+                            }
+                        } else {
+                            // open_chg: vs 09:35
+                            const openIv = openData[sk];
+                            if (openIv != null && t !== '09:35') {
+                                const chg = (iv - openIv) * 100;
+                                bg      = chgColor(chg, 2.0);
+                                fg      = contrast(bg);
+                                display = (chg >= 0 ? '+' : '') + chg.toFixed(2);
+                                title   = `${t}  K=${s}\nVs Open: ${display} pp\nIV: ${(iv*100).toFixed(2)}%  Open: ${(openIv*100).toFixed(2)}%`;
+                            } else if (openIv != null && t === '09:35') {
+                                // reference row — show IV, no color
+                                bg      = '#252525';
+                                fg      = '#777';
+                                display = (iv * 100).toFixed(2);
+                                title   = `${t}  K=${s}\nIV (open reference): ${display}%`;
+                            } else {
+                                bg      = '#252525';
+                                fg      = '#555';
+                                display = (iv * 100).toFixed(2);
+                                title   = `${t}  K=${s}\nIV: ${display}% (no open ref)`;
                             }
                         }
                     }

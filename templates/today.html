@@ -92,8 +92,9 @@
     <!-- Mode toggle -->
     <span class="ctrl-lbl">View</span>
     <div class="seg">
-      <div class="seg-btn" :class="{on: mode==='iv'}"     @click="onModeChange('iv')">IV</div>
-      <div class="seg-btn" :class="{on: mode==='change'}" @click="onModeChange('change')">5min Chg</div>
+      <div class="seg-btn" :class="{on: mode==='iv'}"        @click="onModeChange('iv')">IV</div>
+      <div class="seg-btn" :class="{on: mode==='change'}"    @click="onModeChange('change')">5min Chg</div>
+      <div class="seg-btn" :class="{on: mode==='open_chg'}"  @click="onModeChange('open_chg')">vs Open</div>
     </div>
 
     <div class="ctrl-div"></div>
