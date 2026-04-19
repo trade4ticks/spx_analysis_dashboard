@@ -24,7 +24,16 @@ from fastapi import APIRouter, Query, HTTPException
 
 router = APIRouter(tags=["raw"])
 
-PARQUET_BASE = os.getenv("PARQUET_BASE", "/data/spx_options")
+def _init_parquet_bases() -> list[str]:
+    env = os.getenv("PARQUET_BASES", "")
+    if env:
+        return [p.strip() for p in env.split(",") if p.strip()]
+    single = os.getenv("PARQUET_BASE", "")
+    if single:
+        return [single]
+    return ["/mnt/volume1/spx_options", "/mnt/volume2/spx_options"]
+
+PARQUET_BASES = _init_parquet_bases()
 
 
 def _require_duckdb():
@@ -99,6 +108,42 @@ def _duckdb_query(sql: str):
         con.close()
 
 
+def _find_parquet(*rel_parts: str) -> str | None:
+    """Return the full path of the first existing parquet file across all bases."""
+    for base in PARQUET_BASES:
+        path = os.path.join(base, *rel_parts)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _find_dir(*rel_parts: str) -> str | None:
+    """Return the full path of the first existing directory across all bases."""
+    for base in PARQUET_BASES:
+        path = os.path.join(base, *rel_parts)
+        if os.path.isdir(path):
+            return path
+    return None
+
+
+def _listdir_merged(*rel_parts: str) -> list[str]:
+    """Return sorted unique directory entries merged across all bases."""
+    seen: set[str] = set()
+    for base in PARQUET_BASES:
+        d = os.path.join(base, *rel_parts)
+        if os.path.isdir(d):
+            seen.update(os.listdir(d))
+    return sorted(seen)
+
+
+def _glob_multi(rel_pattern: str) -> list[str]:
+    """Glob a relative pattern across all bases, returning sorted unique paths."""
+    results = []
+    for base in PARQUET_BASES:
+        results.extend(globmod.glob(os.path.join(base, rel_pattern)))
+    return sorted(results)
+
+
 # ── Expirations ──────────────────────────────────────────────────────────────
 
 @router.get("/expirations")
@@ -108,18 +153,16 @@ async def get_expirations(
     """List available expirations, settlements, and underlying price."""
     _require_duckdb()
     date_folder = _validate_date_folder(date)
-    base = os.path.join(PARQUET_BASE, date_folder)
-
-    if not os.path.isdir(base):
-        return {"date": date, "expirations": [], "underlying": None}
 
     trade_d = _to_date(date_folder)
     results = []
     first_file = None
 
-    for name in sorted(os.listdir(base)):
-        path = os.path.join(base, name)
-        if not os.path.isdir(path) or not re.match(r"^\d{8}$", name):
+    for name in _listdir_merged(date_folder):
+        if not re.match(r"^\d{8}$", name):
+            continue
+        path = _find_dir(date_folder, name)
+        if path is None:
             continue
         settlements = sorted(
             f.replace(".parquet", "")
@@ -193,9 +236,8 @@ async def get_raw_skew(
         trade_d = _to_date(date_folder)
         for exp_str in exp_list:
             exp_folder = _validate_date_folder(exp_str)
-            pq = os.path.join(PARQUET_BASE, date_folder, exp_folder,
-                              f"{settlement}.parquet")
-            if not os.path.isfile(pq):
+            pq = _find_parquet(date_folder, exp_folder, f"{settlement}.parquet")
+            if pq is None:
                 continue
 
             rows = _duckdb_query(f"""
@@ -311,9 +353,8 @@ async def get_raw_term(
         date_folder = _validate_date_folder(date_str)
         trade_d = _to_date(date_folder)
 
-        glob_pat = os.path.join(PARQUET_BASE, date_folder, "*",
-                                f"{settlement}.parquet")
-        all_files = sorted(globmod.glob(glob_pat))
+        all_files = _glob_multi(
+            os.path.join(date_folder, "*", f"{settlement}.parquet"))
         if not all_files:
             continue
 
@@ -436,9 +477,8 @@ async def get_raw_historical(
 
     for exp_str in exp_list:
         exp_folder = _validate_date_folder(exp_str)
-        glob_pat = os.path.join(PARQUET_BASE, "*", exp_folder,
-                                f"{settlement}.parquet")
-        all_files = sorted(globmod.glob(glob_pat))
+        all_files = _glob_multi(
+            os.path.join("*", exp_folder, f"{settlement}.parquet"))
         if not all_files:
             continue
 

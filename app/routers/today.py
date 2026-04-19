@@ -22,7 +22,25 @@ from fastapi import APIRouter, Query, HTTPException
 
 router = APIRouter(tags=["today"])
 
-PARQUET_BASE = os.getenv("PARQUET_BASE", "/data/spx_options")
+def _init_parquet_bases() -> list[str]:
+    env = os.getenv("PARQUET_BASES", "")
+    if env:
+        return [p.strip() for p in env.split(",") if p.strip()]
+    single = os.getenv("PARQUET_BASE", "")
+    if single:
+        return [single]
+    return ["/mnt/volume1/spx_options", "/mnt/volume2/spx_options"]
+
+PARQUET_BASES = _init_parquet_bases()
+
+
+def _find_parquet(*rel_parts: str) -> str | None:
+    """Return the full path of the first existing parquet file across all bases."""
+    for base in PARQUET_BASES:
+        path = os.path.join(base, *rel_parts)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def _duckdb():
@@ -67,8 +85,8 @@ async def get_iv_grid(
     exp_folder  = _validate_date(expiration)
     flag_sql    = "AND flag_any = false" if filter_flags else ""
 
-    pq = os.path.join(PARQUET_BASE, date_folder, exp_folder, f"{settlement}.parquet")
-    if not os.path.isfile(pq):
+    pq = _find_parquet(date_folder, exp_folder, f"{settlement}.parquet")
+    if pq is None:
         raise HTTPException(404, f"No parquet data for {date} / {expiration} / {settlement}")
 
     # ── 1. Load all intraday rows ─────────────────────────────────────────────
@@ -113,14 +131,17 @@ async def get_iv_grid(
     # ── 4. Previous trading day 16:00 reference ───────────────────────────────
     prev_data: dict[str, float] = {}
     try:
-        prev_dirs = sorted(
-            f for f in os.listdir(PARQUET_BASE)
-            if re.match(r"^\d{8}$", f) and f < date_folder
-        )
+        all_prev: set[str] = set()
+        for _base in PARQUET_BASES:
+            if os.path.isdir(_base):
+                all_prev.update(
+                    f for f in os.listdir(_base)
+                    if re.match(r"^\d{8}$", f) and f < date_folder
+                )
+        prev_dirs = sorted(all_prev)
         if prev_dirs:
-            prev_pq = os.path.join(PARQUET_BASE, prev_dirs[-1], exp_folder,
-                                   f"{settlement}.parquet")
-            if os.path.isfile(prev_pq):
+            prev_pq = _find_parquet(prev_dirs[-1], exp_folder, f"{settlement}.parquet")
+            if prev_pq is not None:
                 prev_rows = _query(duck, f"""
                     WITH times AS (
                         SELECT DISTINCT CAST(quote_time AS TIME) AS qt
