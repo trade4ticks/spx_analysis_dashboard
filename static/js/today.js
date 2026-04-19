@@ -70,6 +70,9 @@ function prevSlot(t) {
     return `${String(Math.floor(tot/60)).padStart(2,'0')}:${String(tot%60).padStart(2,'0')}`;
 }
 
+// ── Scatter chart instance (outside Alpine to avoid reactive proxy issues) ────
+let _scatterChart = null;
+
 // ── Alpine component ──────────────────────────────────────────────────────────
 document.addEventListener('alpine:init', () => {
     Alpine.data('today', () => ({
@@ -89,11 +92,16 @@ document.addEventListener('alpine:init', () => {
         prev:       {},       // {strike_str: iv}  prev-day 16:00
         spotSeries: [],       // [{time, price}, …]
 
+        // Scatter
+        scatterDays:   30,
+        scatterY:      'vix',   // vix | vix9d | vix3m
+        scatterPoints: [],
+
         ALL_TIMES: allTimeSlots(),
 
         // ── Init ─────────────────────────────────────────────────────────────
         async init() {
-            await this.loadDates();
+            await Promise.all([this.loadDates(), this.loadScatter()]);
         },
 
         async loadDates() {
@@ -271,6 +279,128 @@ document.addEventListener('alpine:init', () => {
 
             html += '</tbody></table>';
             container.innerHTML = html;
+        },
+
+        // ── Scatter ───────────────────────────────────────────────────────────
+        async loadScatter() {
+            try {
+                const res  = await fetch(`/api/today/scatter?days=${this.scatterDays}`);
+                const data = await res.json();
+                this.scatterPoints = data.points ?? [];
+                this.renderScatter();
+            } catch(e) {
+                console.error('scatter load failed', e);
+            }
+        },
+
+        setScatterDays(d) {
+            this.scatterDays = d;
+            this.loadScatter();
+        },
+
+        setScatterY(y) {
+            this.scatterY = y;
+            this.renderScatter();
+        },
+
+        renderScatter() {
+            const canvas = document.getElementById('scatter-canvas');
+            if (!canvas) return;
+
+            const yKey  = this.scatterY + '_change';
+            const allPts = this.scatterPoints;
+
+            // Filter to points that have valid data for both axes
+            const filtered = allPts
+                .map((p, i) => ({ ...p, origIdx: i }))
+                .filter(p => p.spx_return != null && p[yKey] != null);
+
+            if (_scatterChart) { _scatterChart.destroy(); _scatterChart = null; }
+            if (!filtered.length) return;
+
+            const n      = allPts.length;
+            const data   = filtered.map(p => ({
+                x: +(p.spx_return * 100).toFixed(3),
+                y: +p[yKey].toFixed(3),
+            }));
+            // Most recent dot = full accent blue; oldest = very faint
+            const colors = filtered.map(p => {
+                const alpha = n > 1 ? 0.1 + (p.origIdx / (n - 1)) * 0.9 : 1;
+                return `rgba(52,152,219,${alpha.toFixed(3)})`;
+            });
+            const radii  = filtered.map((_, i) => i === filtered.length - 1 ? 6 : 4);
+            const dates  = filtered.map(p => p.date);
+
+            const yLabel = { vix: 'VIX Δ', vix9d: 'VIX9D Δ', vix3m: 'VIX3M Δ' }[this.scatterY];
+
+            // Zero-line color helper for both axes
+            const gridColor = ctx => ctx.tick.value === 0
+                ? 'rgba(255,255,255,0.20)'
+                : 'rgba(255,255,255,0.05)';
+            const gridWidth = ctx => ctx.tick.value === 0 ? 1 : 0.5;
+
+            _scatterChart = new Chart(canvas, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        data,
+                        backgroundColor:  colors,
+                        pointRadius:      radii,
+                        pointHoverRadius: 8,
+                        borderWidth:      0,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(20,20,20,0.92)',
+                            titleColor:      '#999',
+                            bodyColor:       '#ddd',
+                            borderColor:     '#444',
+                            borderWidth:     1,
+                            callbacks: {
+                                title: ctx => dates[ctx[0].dataIndex],
+                                label: ctx => [
+                                    `SPX: ${ctx.parsed.x >= 0 ? '+' : ''}${ctx.parsed.x.toFixed(2)}%`,
+                                    `${yLabel}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}`,
+                                ],
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text:    'SPX Return (%)',
+                                color:   '#555',
+                                font:    { size: 10 },
+                            },
+                            ticks: {
+                                color: '#555',
+                                font:  { size: 9 },
+                                callback: v => v + '%',
+                            },
+                            grid:   { color: gridColor, lineWidth: gridWidth },
+                            border: { color: 'transparent' },
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text:    yLabel,
+                                color:   '#555',
+                                font:    { size: 10 },
+                            },
+                            ticks: { color: '#555', font: { size: 9 } },
+                            grid:   { color: gridColor, lineWidth: gridWidth },
+                            border: { color: 'transparent' },
+                        },
+                    },
+                },
+            });
         },
 
         // ── SPX sparkline ─────────────────────────────────────────────────────

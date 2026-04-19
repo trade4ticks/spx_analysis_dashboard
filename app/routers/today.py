@@ -18,7 +18,8 @@ GET /api/today/iv_grid?date=YYYY-MM-DD&expiration=YYYY-MM-DD&settlement=PM
 import os
 import re
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
+from app.db import get_pool
 
 router = APIRouter(tags=["today"])
 
@@ -178,3 +179,70 @@ async def get_iv_grid(
         "rows":        [{"time": t, "data": time_map[t]} for t in sorted(time_map)],
         "prev":        prev_data,
     }
+
+
+# ── SPX / VIX scatter ────────────────────────────────────────────────────────
+
+@router.get("/scatter")
+async def get_spx_vix_scatter(
+    days: int = Query(30, ge=10, le=90),
+    pool=Depends(get_pool),
+) -> dict:
+    """
+    SPX daily return and VIX/VIX9D/VIX3M daily change for the last N days.
+    Uses the latest intraday snapshot for the most recent date; the last
+    available quote_time for all prior dates (typically 16:00 close).
+    Returns points in ascending date order (oldest first) for gradient rendering.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH daily AS (
+                SELECT DISTINCT ON (trade_date)
+                    trade_date,
+                    spx_close,
+                    vix_close,
+                    vix9d_close,
+                    vix3m_close
+                FROM index_ohlc
+                ORDER BY trade_date, quote_time DESC
+            ),
+            lagged AS (
+                SELECT *,
+                    LAG(spx_close)   OVER (ORDER BY trade_date) AS prev_spx,
+                    LAG(vix_close)   OVER (ORDER BY trade_date) AS prev_vix,
+                    LAG(vix9d_close) OVER (ORDER BY trade_date) AS prev_vix9d,
+                    LAG(vix3m_close) OVER (ORDER BY trade_date) AS prev_vix3m
+                FROM daily
+            ),
+            returns AS (
+                SELECT
+                    trade_date,
+                    CASE WHEN prev_spx > 0
+                         THEN (spx_close - prev_spx) / prev_spx
+                         ELSE NULL END                         AS spx_return,
+                    vix_close   - prev_vix                     AS vix_change,
+                    vix9d_close - prev_vix9d                   AS vix9d_change,
+                    vix3m_close - prev_vix3m                   AS vix3m_change
+                FROM lagged
+                WHERE prev_spx IS NOT NULL
+            )
+            SELECT trade_date, spx_return, vix_change, vix9d_change, vix3m_change
+            FROM returns
+            ORDER BY trade_date DESC
+            LIMIT $1
+            """,
+            days,
+        )
+
+    points = [
+        {
+            "date":         str(r["trade_date"]),
+            "spx_return":   float(r["spx_return"])   if r["spx_return"]   is not None else None,
+            "vix_change":   float(r["vix_change"])   if r["vix_change"]   is not None else None,
+            "vix9d_change": float(r["vix9d_change"]) if r["vix9d_change"] is not None else None,
+            "vix3m_change": float(r["vix3m_change"]) if r["vix3m_change"] is not None else None,
+        }
+        for r in rows
+    ]
+    return {"points": list(reversed(points))}  # oldest-first for gradient
