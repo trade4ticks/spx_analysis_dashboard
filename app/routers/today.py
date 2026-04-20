@@ -208,6 +208,7 @@ async def get_spx_vix_scatter(
                         SELECT 1 FROM index_ohlc i
                         WHERE i.trade_date = s.trade_date
                           AND i.quote_time  = TIME '15:45:00'
+                          AND i.spx_close   > 0
                     )
                     UNION
                     SELECT MAX(trade_date) FROM index_ohlc
