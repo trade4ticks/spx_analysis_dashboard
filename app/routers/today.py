@@ -190,22 +190,33 @@ async def get_spx_vix_scatter(
 ) -> dict:
     """
     SPX daily return and VIX/VIX9D/VIX3M daily change for the last N days.
-    Uses the latest intraday snapshot for the most recent date; the last
-    available quote_time for all prior dates (typically 16:00 close).
+    Most recent date: latest available snapshot (intraday-friendly).
+    All prior dates: snapshot closest to 15:45 (avoids bad 16:00 data).
     Returns points in ascending date order (oldest first) for gradient rendering.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            WITH daily AS (
-                SELECT DISTINCT ON (trade_date)
+            WITH latest_date AS (
+                SELECT MAX(trade_date) AS d FROM index_ohlc
+            ),
+            ranked AS (
+                SELECT
                     trade_date,
-                    spx_close,
-                    vix_close,
-                    vix9d_close,
-                    vix3m_close
+                    spx_close, vix_close, vix9d_close, vix3m_close,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY trade_date
+                        ORDER BY
+                            CASE WHEN trade_date = (SELECT d FROM latest_date)
+                                 THEN -EXTRACT(EPOCH FROM quote_time)
+                                 ELSE ABS(EXTRACT(EPOCH FROM (quote_time - TIME '15:45:00')))
+                            END
+                    ) AS rn
                 FROM index_ohlc
-                ORDER BY trade_date, quote_time DESC
+            ),
+            daily AS (
+                SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
+                FROM ranked WHERE rn = 1
             ),
             lagged AS (
                 SELECT *,
