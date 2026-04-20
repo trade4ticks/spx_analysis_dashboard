@@ -97,6 +97,7 @@ document.addEventListener('alpine:init', () => {
         scatterY:        'vix',   // vix | vix9d | vix3m
         scatterPoints:   [],
         scatterExpanded: false,
+        scatterEndDate:  null,    // null = no ceiling (uses most recent weekday in index_ohlc)
 
         ALL_TIMES: allTimeSlots(),
 
@@ -118,6 +119,7 @@ document.addEventListener('alpine:init', () => {
 
         async onDateChange() {
             await this.loadExpirations();
+            this.scatterEndDate = this.date;  // scatter follows the selected date
             this.loadScatter();
         },
 
@@ -287,7 +289,7 @@ document.addEventListener('alpine:init', () => {
         async loadScatter() {
             try {
                 const params = new URLSearchParams({ days: this.scatterDays });
-                if (this.date) params.set('end_date', this.date);
+                if (this.scatterEndDate) params.set('end_date', this.scatterEndDate);
                 const res  = await fetch(`/api/today/scatter?${params}`);
                 const data = await res.json();
                 this.scatterPoints = data.points ?? [];

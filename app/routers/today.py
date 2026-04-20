@@ -208,56 +208,43 @@ async def get_spx_vix_scatter(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            WITH trade_dates AS (
-                -- Prior days: in spx_surface (trading calendar), <= end_date,
-                -- and must have a valid 15:45 row in index_ohlc.
-                -- Current/end day: most recent spx_surface trading day <= end_date
-                -- that has ANY index_ohlc data (no 15:45 requirement — may be intraday).
-                SELECT trade_date FROM (
-                    SELECT DISTINCT s.trade_date
-                    FROM spx_surface s
-                    WHERE s.trade_date <= $2
-                      AND EXISTS (
-                          SELECT 1 FROM index_ohlc i
-                          WHERE i.trade_date = s.trade_date
-                            AND i.quote_time  = TIME '15:45:00'
-                            AND i.spx_close   > 0
-                      )
-                    UNION
-                    SELECT MAX(s2.trade_date)
-                    FROM spx_surface s2
-                    WHERE s2.trade_date <= $2
-                      AND EXISTS (
-                          SELECT 1 FROM index_ohlc i2
-                          WHERE i2.trade_date = s2.trade_date
-                      )
-                ) td
-                ORDER BY trade_date DESC
+            WITH current_day AS (
+                -- Most recent weekday in index_ohlc at or before end_date.
+                -- Uses index_ohlc directly so holidays that appear there
+                -- (e.g. Good Friday with VIX data) are included.
+                SELECT MAX(trade_date) AS d
+                FROM index_ohlc
+                WHERE EXTRACT(DOW FROM trade_date) NOT IN (0, 6)
+                  AND trade_date <= $2
+            ),
+            trade_dates AS (
+                -- Prior days: dates that have an exact 15:45 row with spx_close > 0.
+                -- Current day: always include (may be intraday, no 15:45 yet).
+                SELECT DISTINCT trade_date
+                FROM index_ohlc
+                WHERE quote_time = TIME '15:45:00'
+                  AND spx_close  > 0
+                  AND trade_date <= $2
+                UNION
+                SELECT d FROM current_day
+                ORDER BY 1 DESC
                 LIMIT $1 + 1
             ),
-            current_day AS (
-                SELECT MAX(trade_date) AS d FROM trade_dates
-            ),
-            ranked AS (
-                SELECT
-                    i.trade_date,
-                    i.spx_close, i.vix_close, i.vix9d_close, i.vix3m_close,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY i.trade_date
-                        ORDER BY
-                            CASE WHEN i.trade_date = (SELECT d FROM current_day)
-                                 THEN -EXTRACT(EPOCH FROM i.quote_time)
-                                 ELSE ABS(EXTRACT(EPOCH FROM (i.quote_time - TIME '15:45:00')))
-                            END
-                    ) AS rn
-                FROM index_ohlc i
-                WHERE i.trade_date IN (SELECT trade_date FROM trade_dates)
-                  -- Current day: skip snapshots where VIX hasn't arrived yet (vix_close = 0)
-                  AND (i.trade_date != (SELECT d FROM current_day) OR i.vix_close > 0)
-            ),
             daily AS (
+                -- Prior days: grab the 15:45 row directly (one row per date).
                 SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
-                FROM ranked WHERE rn = 1
+                FROM index_ohlc
+                WHERE trade_date IN (SELECT trade_date FROM trade_dates)
+                  AND trade_date != (SELECT d FROM current_day)
+                  AND quote_time  = TIME '15:45:00'
+                UNION ALL
+                -- Current day: latest snapshot where vix_close > 0.
+                SELECT DISTINCT ON (trade_date)
+                    trade_date, spx_close, vix_close, vix9d_close, vix3m_close
+                FROM index_ohlc
+                WHERE trade_date = (SELECT d FROM current_day)
+                  AND vix_close  > 0
+                ORDER BY trade_date, quote_time DESC
             ),
             lagged AS (
                 SELECT *,
