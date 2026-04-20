@@ -9,20 +9,20 @@
     /* ── Page body ─────────────────────────────────────────────────────────── */
     .today-body {
       flex: 1;
-      overflow: hidden;
+      overflow: auto;
       display: flex;
       flex-direction: row;
       min-height: 0;
     }
     .today-grid-wrap {
-      flex: 1;
-      overflow: auto;
+      flex: 0 0 auto;   /* shrink to table width — no blank gap */
+      overflow: visible;
       padding: 14px;
     }
 
     /* ── Scatter panel ──────────────────────────────────────────────────────── */
     .today-scatter-wrap {
-      width: 300px;
+      width: 420px;
       flex-shrink: 0;
       border-left: 1px solid #333;
       display: flex;
