@@ -197,22 +197,32 @@ async def get_spx_vix_scatter(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            WITH latest_date AS (
-                SELECT MAX(trade_date) AS d FROM index_ohlc
+            WITH trade_dates AS (
+                -- Real trading days have many intraday snapshots; weekends/holidays
+                -- have at most 1 stale row. Always include the latest date (today
+                -- may have few snapshots early in the session).
+                SELECT trade_date
+                FROM index_ohlc
+                GROUP BY trade_date
+                HAVING COUNT(DISTINCT quote_time) >= 10
+                    OR trade_date = (SELECT MAX(trade_date) FROM index_ohlc)
+                ORDER BY trade_date DESC
+                LIMIT $1 + 1
             ),
             ranked AS (
                 SELECT
-                    trade_date,
-                    spx_close, vix_close, vix9d_close, vix3m_close,
+                    i.trade_date,
+                    i.spx_close, i.vix_close, i.vix9d_close, i.vix3m_close,
                     ROW_NUMBER() OVER (
-                        PARTITION BY trade_date
+                        PARTITION BY i.trade_date
                         ORDER BY
-                            CASE WHEN trade_date = (SELECT d FROM latest_date)
-                                 THEN -EXTRACT(EPOCH FROM quote_time)
-                                 ELSE ABS(EXTRACT(EPOCH FROM (quote_time - TIME '15:45:00')))
+                            CASE WHEN i.trade_date = (SELECT MAX(trade_date) FROM trade_dates)
+                                 THEN -EXTRACT(EPOCH FROM i.quote_time)
+                                 ELSE ABS(EXTRACT(EPOCH FROM (i.quote_time - TIME '15:45:00')))
                             END
                     ) AS rn
-                FROM index_ohlc
+                FROM index_ohlc i
+                WHERE i.trade_date IN (SELECT trade_date FROM trade_dates)
             ),
             daily AS (
                 SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
