@@ -348,23 +348,98 @@ document.addEventListener('alpine:init', () => {
 
             const yLabel = { vix: 'VIX Δ', vix9d: 'VIX9D Δ', vix3m: 'VIX3M Δ' }[this.scatterY];
 
+            // ── Linear regression (least-squares) ───────────────────────
+            let regLine = [];
+            if (data.length >= 2) {
+                let sx = 0, sy = 0, sxx = 0, sxy = 0;
+                for (const p of data) { sx += p.x; sy += p.y; sxx += p.x * p.x; sxy += p.x * p.y; }
+                const nn = data.length;
+                const slope = (nn * sxy - sx * sy) / (nn * sxx - sx * sx);
+                const inter = (sy - slope * sx) / nn;
+                const xs = data.map(p => p.x);
+                const xMin = Math.min(...xs), xMax = Math.max(...xs);
+                regLine = [{ x: xMin, y: inter + slope * xMin },
+                           { x: xMax, y: inter + slope * xMax }];
+            }
+
+            // ── Chronological connector line (faint) ────────────────────
+            const connectorData = data.slice();  // same order as filtered (oldest→newest)
+
             // Zero-line color helper for both axes
             const gridColor = ctx => ctx.tick.value === 0
                 ? 'rgba(255,255,255,0.20)'
                 : 'rgba(255,255,255,0.05)';
             const gridWidth = ctx => ctx.tick.value === 0 ? 1 : 0.5;
 
+            // ── Hover highlight plugin: brighten segments touching hovered point
+            const hoverSegPlugin = {
+                id: 'hoverSegHighlight',
+                afterDatasetsDraw(chart) {
+                    const tooltip = chart.tooltip;
+                    if (!tooltip || !tooltip.dataPoints || !tooltip.dataPoints.length) return;
+                    const hIdx = tooltip.dataPoints[0].dataIndex;
+                    // connector is dataset index 1
+                    const connDs = chart.getDatasetMeta(1);
+                    if (!connDs || !connDs.data) return;
+                    const ctx2 = chart.ctx;
+                    ctx2.save();
+                    ctx2.strokeStyle = 'rgba(255,255,255,0.45)';
+                    ctx2.lineWidth   = 1.5;
+                    // Draw segment before hovered point
+                    if (hIdx > 0) {
+                        const a = connDs.data[hIdx - 1], b = connDs.data[hIdx];
+                        ctx2.beginPath(); ctx2.moveTo(a.x, a.y); ctx2.lineTo(b.x, b.y); ctx2.stroke();
+                    }
+                    // Draw segment after hovered point
+                    if (hIdx < connDs.data.length - 1) {
+                        const a = connDs.data[hIdx], b = connDs.data[hIdx + 1];
+                        ctx2.beginPath(); ctx2.moveTo(a.x, a.y); ctx2.lineTo(b.x, b.y); ctx2.stroke();
+                    }
+                    ctx2.restore();
+                },
+            };
+
             _scatterChart = new Chart(canvas, {
                 type: 'scatter',
                 data: {
-                    datasets: [{
-                        data,
-                        backgroundColor:  colors,
-                        pointRadius:      radii,
-                        pointHoverRadius: 8,
-                        borderWidth:      0,
-                    }],
+                    datasets: [
+                        // 0 — scatter points
+                        {
+                            data,
+                            backgroundColor:  colors,
+                            pointRadius:      radii,
+                            pointHoverRadius: 8,
+                            borderWidth:      0,
+                            order: 1,
+                        },
+                        // 1 — chronological connector (faint line, no points)
+                        {
+                            type:        'line',
+                            data:        connectorData,
+                            borderColor: 'rgba(255,255,255,0.08)',
+                            borderWidth: 1,
+                            pointRadius: 0,
+                            pointHitRadius: 0,
+                            fill:        false,
+                            tension:     0,
+                            order: 2,
+                        },
+                        // 2 — regression line
+                        {
+                            type:        'line',
+                            data:        regLine,
+                            borderColor: 'rgba(231,76,60,0.35)',
+                            borderWidth: 1.5,
+                            borderDash:  [6, 4],
+                            pointRadius: 0,
+                            pointHitRadius: 0,
+                            fill:        false,
+                            tension:     0,
+                            order: 3,
+                        },
+                    ],
                 },
+                plugins: [hoverSegPlugin],
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
@@ -377,8 +452,8 @@ document.addEventListener('alpine:init', () => {
                             bodyColor:       '#ddd',
                             borderColor:     '#444',
                             borderWidth:     1,
+                            filter: item => item.datasetIndex === 0,
                             callbacks: {
-                                // Suppress shared title — each item renders its own date
                                 title: () => null,
                                 label: ctx => {
                                     const date = dates[ctx.dataIndex];
@@ -390,7 +465,7 @@ document.addEventListener('alpine:init', () => {
                                         `  ${yLabel}: ${vix >= 0 ? '+' : ''}${vix.toFixed(2)}`,
                                     ];
                                 },
-                                afterLabel: () => '',   // blank spacer between points
+                                afterLabel: () => '',
                             },
                         },
                     },
