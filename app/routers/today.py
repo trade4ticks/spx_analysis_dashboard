@@ -209,47 +209,51 @@ async def get_spx_vix_scatter(
         rows = await conn.fetch(
             """
             WITH current_day AS (
-                -- Most recent weekday in index_ohlc at or before end_date.
-                -- Uses index_ohlc directly so holidays that appear there
-                -- (e.g. Good Friday with VIX data) are included.
+                -- Most recent weekday in index_ohlc at or before end_date
                 SELECT MAX(trade_date) AS d
                 FROM index_ohlc
                 WHERE EXTRACT(DOW FROM trade_date) NOT IN (0, 6)
                   AND trade_date <= $2
             ),
-            trade_dates AS (
-                -- Prior days: dates that have an exact 15:45 row with spx_close > 0.
-                -- Current day: always include (may be intraday, no 15:45 yet).
+            valid_prior AS (
+                -- Every date (including current day if it's complete) that has
+                -- a 15:45 row with valid SPX data
                 SELECT DISTINCT trade_date
                 FROM index_ohlc
-                WHERE quote_time = TIME '15:45:00'
-                  AND spx_close  > 0
+                WHERE quote_time::time = TIME '15:45:00'
+                  AND spx_close > 0
                   AND trade_date <= $2
+            ),
+            trade_dates AS (
+                -- N+1 most recent qualifying dates
+                SELECT trade_date FROM valid_prior
                 UNION
-                SELECT d FROM current_day
+                SELECT d FROM current_day   -- ensures today is always included
                 ORDER BY 1 DESC
                 LIMIT $1 + 1
             ),
             daily AS (
-                -- Prior days: grab the 15:45 row directly (one row per date).
-                SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
-                FROM index_ohlc
-                WHERE trade_date IN (SELECT trade_date FROM trade_dates)
-                  AND trade_date != (SELECT d FROM current_day)
-                  AND quote_time  = TIME '15:45:00'
+                -- Any date in trade_dates that has a valid 15:45 row uses it.
+                -- This covers completed days AND current day once 15:45 arrives.
+                SELECT i.trade_date, i.spx_close, i.vix_close, i.vix9d_close, i.vix3m_close
+                FROM index_ohlc i
+                WHERE i.trade_date IN (SELECT trade_date FROM trade_dates)
+                  AND i.trade_date IN (SELECT trade_date FROM valid_prior)
+                  AND i.quote_time::time = TIME '15:45:00'
                 UNION ALL
-                -- Current day: latest snapshot where vix_close > 0.
-                -- Wrapped in a subquery so ORDER BY is scoped to DISTINCT ON,
-                -- not applied to the entire UNION (PostgreSQL restriction).
+                -- Current day only when 15:45 hasn't happened yet (true intraday):
+                -- use the latest snapshot where VIX has already arrived
                 SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
                 FROM (
                     SELECT DISTINCT ON (trade_date)
                         trade_date, spx_close, vix_close, vix9d_close, vix3m_close
                     FROM index_ohlc
                     WHERE trade_date = (SELECT d FROM current_day)
-                      AND vix_close  > 0
+                      AND trade_date NOT IN (SELECT trade_date FROM valid_prior)
+                      AND vix_close > 0
+                      AND spx_close > 0
                     ORDER BY trade_date, quote_time DESC
-                ) AS current_snap
+                ) intraday_snap
             ),
             lagged AS (
                 SELECT *,
