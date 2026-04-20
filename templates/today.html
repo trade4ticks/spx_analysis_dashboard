@@ -54,6 +54,14 @@
       width: calc(100% - 16px) !important;
       height: calc(100% - 16px) !important;
     }
+    .today-scatter-wrap.expanded {
+      position: fixed;
+      top: 8px; left: 8px; right: 8px; bottom: 8px;
+      width: auto;
+      height: auto;
+      z-index: 200;
+      box-shadow: 0 8px 32px rgba(0,0,0,.7);
+    }
 
     /* ── Table ─────────────────────────────────────────────────────────────── */
     .today-table {
@@ -178,7 +186,7 @@
     </div>
 
     <!-- Right: SPX vs VIX scatter -->
-    <div class="today-scatter-wrap">
+    <div class="today-scatter-wrap" :class="{expanded: scatterExpanded}">
       <div class="scatter-hdr">
         <span class="ctrl-lbl" style="white-space:nowrap">SPX vs</span>
         <div class="p-seg">
@@ -186,10 +194,14 @@
           <span :class="{on: scatterY==='vix9d'}" @click="setScatterY('vix9d')">VIX9D</span>
           <span :class="{on: scatterY==='vix3m'}" @click="setScatterY('vix3m')">VIX3M</span>
         </div>
-        <div class="p-seg" style="margin-left:auto">
+        <div class="p-seg">
           <span :class="{on: scatterDays===30}" @click="setScatterDays(30)">30D</span>
           <span :class="{on: scatterDays===90}" @click="setScatterDays(90)">90D</span>
         </div>
+        <button class="icon-btn" style="margin-left:auto" @click="toggleScatterExpand()"
+                :title="scatterExpanded ? 'Collapse' : 'Expand'">
+          <span x-text="scatterExpanded ? '✕' : '⤢'"></span>
+        </button>
       </div>
       <div class="scatter-body">
         <canvas id="scatter-canvas"></canvas>

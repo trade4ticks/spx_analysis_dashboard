@@ -198,11 +198,17 @@ async def get_spx_vix_scatter(
         rows = await conn.fetch(
             """
             WITH trade_dates AS (
-                -- Use spx_surface as the authoritative trading calendar.
-                -- Also include the latest date in index_ohlc in case today's
-                -- surface data hasn't been written yet (intraday).
+                -- Prior days: must be a known trade date (spx_surface) AND have
+                -- a 15:45 snapshot in index_ohlc (guards against incomplete days).
+                -- Today: always include the latest date even if 15:45 hasn't hit.
                 SELECT trade_date FROM (
-                    SELECT DISTINCT trade_date FROM spx_surface
+                    SELECT DISTINCT s.trade_date
+                    FROM spx_surface s
+                    WHERE EXISTS (
+                        SELECT 1 FROM index_ohlc i
+                        WHERE i.trade_date = s.trade_date
+                          AND i.quote_time  = TIME '15:45:00'
+                    )
                     UNION
                     SELECT MAX(trade_date) FROM index_ohlc
                 ) td

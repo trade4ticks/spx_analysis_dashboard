@@ -93,9 +93,10 @@ document.addEventListener('alpine:init', () => {
         spotSeries: [],       // [{time, price}, …]
 
         // Scatter
-        scatterDays:   30,
-        scatterY:      'vix',   // vix | vix9d | vix3m
-        scatterPoints: [],
+        scatterDays:     30,
+        scatterY:        'vix',   // vix | vix9d | vix3m
+        scatterPoints:   [],
+        scatterExpanded: false,
 
         ALL_TIMES: allTimeSlots(),
 
@@ -301,6 +302,12 @@ document.addEventListener('alpine:init', () => {
         setScatterY(y) {
             this.scatterY = y;
             this.renderScatter();
+        },
+
+        toggleScatterExpand() {
+            this.scatterExpanded = !this.scatterExpanded;
+            // Re-render after CSS transition so Chart.js sees the correct size
+            setTimeout(() => this.renderScatter(), 50);
         },
 
         renderScatter() {
