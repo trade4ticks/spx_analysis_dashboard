@@ -378,11 +378,19 @@ document.addEventListener('alpine:init', () => {
                             borderColor:     '#444',
                             borderWidth:     1,
                             callbacks: {
-                                title: ctx => dates[ctx[0].dataIndex],
-                                label: ctx => [
-                                    `SPX: ${ctx.parsed.x >= 0 ? '+' : ''}${ctx.parsed.x.toFixed(2)}%`,
-                                    `${yLabel}: ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toFixed(2)}`,
-                                ],
+                                // Suppress shared title — each item renders its own date
+                                title: () => null,
+                                label: ctx => {
+                                    const date = dates[ctx.dataIndex];
+                                    const spx  = ctx.parsed.x;
+                                    const vix  = ctx.parsed.y;
+                                    return [
+                                        date,
+                                        `  SPX: ${spx >= 0 ? '+' : ''}${spx.toFixed(2)}%`,
+                                        `  ${yLabel}: ${vix >= 0 ? '+' : ''}${vix.toFixed(2)}`,
+                                    ];
+                                },
+                                afterLabel: () => '',   // blank spacer between points
                             },
                         },
                     },
@@ -391,11 +399,11 @@ document.addEventListener('alpine:init', () => {
                             title: {
                                 display: true,
                                 text:    'SPX Return (%)',
-                                color:   '#555',
+                                color:   '#aaa',
                                 font:    { size: 10 },
                             },
                             ticks: {
-                                color: '#555',
+                                color: '#888',
                                 font:  { size: 9 },
                                 callback: v => v + '%',
                             },
@@ -406,10 +414,10 @@ document.addEventListener('alpine:init', () => {
                             title: {
                                 display: true,
                                 text:    yLabel,
-                                color:   '#555',
+                                color:   '#aaa',
                                 font:    { size: 10 },
                             },
-                            ticks: { color: '#555', font: { size: 9 } },
+                            ticks: { color: '#888', font: { size: 9 } },
                             grid:   { color: gridColor, lineWidth: gridWidth },
                             border: { color: 'transparent' },
                         },
