@@ -239,12 +239,17 @@ async def get_spx_vix_scatter(
                   AND quote_time  = TIME '15:45:00'
                 UNION ALL
                 -- Current day: latest snapshot where vix_close > 0.
-                SELECT DISTINCT ON (trade_date)
-                    trade_date, spx_close, vix_close, vix9d_close, vix3m_close
-                FROM index_ohlc
-                WHERE trade_date = (SELECT d FROM current_day)
-                  AND vix_close  > 0
-                ORDER BY trade_date, quote_time DESC
+                -- Wrapped in a subquery so ORDER BY is scoped to DISTINCT ON,
+                -- not applied to the entire UNION (PostgreSQL restriction).
+                SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
+                FROM (
+                    SELECT DISTINCT ON (trade_date)
+                        trade_date, spx_close, vix_close, vix9d_close, vix3m_close
+                    FROM index_ohlc
+                    WHERE trade_date = (SELECT d FROM current_day)
+                      AND vix_close  > 0
+                    ORDER BY trade_date, quote_time DESC
+                ) AS current_snap
             ),
             lagged AS (
                 SELECT *,
