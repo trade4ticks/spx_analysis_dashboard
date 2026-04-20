@@ -250,8 +250,8 @@ async def get_spx_vix_scatter(
                     FROM index_ohlc
                     WHERE trade_date = (SELECT d FROM current_day)
                       AND trade_date NOT IN (SELECT trade_date FROM valid_prior)
-                      AND vix_close > 0
-                      AND spx_close > 0
+                      AND vix_close > 0 AND vix_close != 'NaN'::float8
+                      AND spx_close > 0 AND spx_close != 'NaN'::float8
                     ORDER BY trade_date, quote_time DESC
                 ) intraday_snap
             ),
