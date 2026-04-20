@@ -118,6 +118,7 @@ document.addEventListener('alpine:init', () => {
 
         async onDateChange() {
             await this.loadExpirations();
+            this.loadScatter();
         },
 
         async loadExpirations() {
@@ -285,7 +286,9 @@ document.addEventListener('alpine:init', () => {
         // ── Scatter ───────────────────────────────────────────────────────────
         async loadScatter() {
             try {
-                const res  = await fetch(`/api/today/scatter?days=${this.scatterDays}`);
+                const params = new URLSearchParams({ days: this.scatterDays });
+                if (this.date) params.set('end_date', this.date);
+                const res  = await fetch(`/api/today/scatter?${params}`);
                 const data = await res.json();
                 this.scatterPoints = data.points ?? [];
                 this.renderScatter();

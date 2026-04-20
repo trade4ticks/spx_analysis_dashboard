@@ -17,6 +17,7 @@ GET /api/today/iv_grid?date=YYYY-MM-DD&expiration=YYYY-MM-DD&settlement=PM
 """
 import os
 import re
+from datetime import date as date_type
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.db import get_pool
@@ -185,36 +186,57 @@ async def get_iv_grid(
 
 @router.get("/scatter")
 async def get_spx_vix_scatter(
-    days: int = Query(30, ge=10, le=90),
+    days:     int = Query(30, ge=10, le=90),
+    end_date: str = Query(None, description="End date YYYY-MM-DD; defaults to most recent trading day"),
     pool=Depends(get_pool),
 ) -> dict:
     """
-    SPX daily return and VIX/VIX9D/VIX3M daily change for the last N days.
-    Most recent date: latest available snapshot (intraday-friendly).
-    All prior dates: snapshot closest to 15:45 (avoids bad 16:00 data).
-    Returns points in ascending date order (oldest first) for gradient rendering.
+    SPX daily return and VIX/VIX9D/VIX3M daily change for the last N trading days
+    up to end_date.
+    End/current date: latest snapshot where vix_close > 0 (handles VIX API lag).
+    Prior dates: 15:45 snapshot; skipped if that slice is missing or spx_close = 0.
+    Returns points oldest-first for gradient rendering.
     """
+    if end_date:
+        try:
+            end_dt = date_type.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(400, f"Invalid end_date: {end_date}")
+    else:
+        end_dt = date_type(9999, 12, 31)   # no upper bound
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             WITH trade_dates AS (
-                -- Prior days: must be a known trade date (spx_surface) AND have
-                -- a 15:45 snapshot in index_ohlc (guards against incomplete days).
-                -- Today: always include the latest date even if 15:45 hasn't hit.
+                -- Prior days: in spx_surface (trading calendar), <= end_date,
+                -- and must have a valid 15:45 row in index_ohlc.
+                -- Current/end day: most recent spx_surface trading day <= end_date
+                -- that has ANY index_ohlc data (no 15:45 requirement — may be intraday).
                 SELECT trade_date FROM (
                     SELECT DISTINCT s.trade_date
                     FROM spx_surface s
-                    WHERE EXISTS (
-                        SELECT 1 FROM index_ohlc i
-                        WHERE i.trade_date = s.trade_date
-                          AND i.quote_time  = TIME '15:45:00'
-                          AND i.spx_close   > 0
-                    )
+                    WHERE s.trade_date <= $2
+                      AND EXISTS (
+                          SELECT 1 FROM index_ohlc i
+                          WHERE i.trade_date = s.trade_date
+                            AND i.quote_time  = TIME '15:45:00'
+                            AND i.spx_close   > 0
+                      )
                     UNION
-                    SELECT MAX(trade_date) FROM index_ohlc
+                    SELECT MAX(s2.trade_date)
+                    FROM spx_surface s2
+                    WHERE s2.trade_date <= $2
+                      AND EXISTS (
+                          SELECT 1 FROM index_ohlc i2
+                          WHERE i2.trade_date = s2.trade_date
+                      )
                 ) td
                 ORDER BY trade_date DESC
                 LIMIT $1 + 1
+            ),
+            current_day AS (
+                SELECT MAX(trade_date) AS d FROM trade_dates
             ),
             ranked AS (
                 SELECT
@@ -223,13 +245,15 @@ async def get_spx_vix_scatter(
                     ROW_NUMBER() OVER (
                         PARTITION BY i.trade_date
                         ORDER BY
-                            CASE WHEN i.trade_date = (SELECT MAX(trade_date) FROM trade_dates)
+                            CASE WHEN i.trade_date = (SELECT d FROM current_day)
                                  THEN -EXTRACT(EPOCH FROM i.quote_time)
                                  ELSE ABS(EXTRACT(EPOCH FROM (i.quote_time - TIME '15:45:00')))
                             END
                     ) AS rn
                 FROM index_ohlc i
                 WHERE i.trade_date IN (SELECT trade_date FROM trade_dates)
+                  -- Current day: skip snapshots where VIX hasn't arrived yet (vix_close = 0)
+                  AND (i.trade_date != (SELECT d FROM current_day) OR i.vix_close > 0)
             ),
             daily AS (
                 SELECT trade_date, spx_close, vix_close, vix9d_close, vix3m_close
@@ -261,6 +285,7 @@ async def get_spx_vix_scatter(
             LIMIT $1
             """,
             days,
+            end_dt,
         )
 
     points = [
