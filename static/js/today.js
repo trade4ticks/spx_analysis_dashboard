@@ -306,12 +306,15 @@ document.addEventListener('alpine:init', () => {
 
         toggleScatterExpand() {
             this.scatterExpanded = !this.scatterExpanded;
-            // Re-render after CSS transition so Chart.js sees the correct size
+            // Destroy chart on the old canvas; re-render into the new canvas
+            // after Alpine reveals/hides the overlay (one animation frame).
+            if (_scatterChart) { _scatterChart.destroy(); _scatterChart = null; }
             setTimeout(() => this.renderScatter(), 50);
         },
 
         renderScatter() {
-            const canvas = document.getElementById('scatter-canvas');
+            const canvasId = this.scatterExpanded ? 'scatter-canvas-fs' : 'scatter-canvas';
+            const canvas = document.getElementById(canvasId);
             if (!canvas) return;
 
             const yKey  = this.scatterY + '_change';

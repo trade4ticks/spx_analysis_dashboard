@@ -54,13 +54,27 @@
       width: calc(100% - 16px) !important;
       height: calc(100% - 16px) !important;
     }
-    .today-scatter-wrap.expanded {
+    /* ── Fullscreen scatter overlay (sibling to body children, avoids overflow clip) */
+    .scatter-fs {
       position: fixed;
-      top: 8px; left: 8px; right: 8px; bottom: 8px;
-      width: auto;
-      height: auto;
+      inset: 0;
       z-index: 200;
-      box-shadow: 0 8px 32px rgba(0,0,0,.7);
+      background: #262626;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0,0,0,.8);
+    }
+    .scatter-fs-body {
+      flex: 1;
+      padding: 12px;
+      position: relative;
+      min-height: 0;
+    }
+    .scatter-fs-body canvas {
+      position: absolute;
+      inset: 12px;
+      width: calc(100% - 24px) !important;
+      height: calc(100% - 24px) !important;
     }
 
     /* ── Table ─────────────────────────────────────────────────────────────── */
@@ -186,7 +200,7 @@
     </div>
 
     <!-- Right: SPX vs VIX scatter -->
-    <div class="today-scatter-wrap" :class="{expanded: scatterExpanded}">
+    <div class="today-scatter-wrap">
       <div class="scatter-hdr">
         <span class="ctrl-lbl" style="white-space:nowrap">SPX vs</span>
         <div class="p-seg">
@@ -198,16 +212,34 @@
           <span :class="{on: scatterDays===30}" @click="setScatterDays(30)">30D</span>
           <span :class="{on: scatterDays===90}" @click="setScatterDays(90)">90D</span>
         </div>
-        <button class="icon-btn" style="margin-left:auto" @click="toggleScatterExpand()"
-                :title="scatterExpanded ? 'Collapse' : 'Expand'">
-          <span x-text="scatterExpanded ? '✕' : '⤢'"></span>
-        </button>
+        <button class="icon-btn" style="margin-left:auto" @click="toggleScatterExpand()" title="Expand">⤢</button>
       </div>
       <div class="scatter-body">
         <canvas id="scatter-canvas"></canvas>
       </div>
     </div>
 
+  </div>
+
+  <!-- ── Fullscreen scatter overlay ───────────────────────────────────────── -->
+  <!-- Placed at body level so it's never clipped by ancestor overflow:hidden -->
+  <div x-show="scatterExpanded" x-cloak class="scatter-fs">
+    <div class="scatter-hdr">
+      <span class="ctrl-lbl" style="white-space:nowrap">SPX vs</span>
+      <div class="p-seg">
+        <span :class="{on: scatterY==='vix'}"   @click="setScatterY('vix')">VIX</span>
+        <span :class="{on: scatterY==='vix9d'}" @click="setScatterY('vix9d')">VIX9D</span>
+        <span :class="{on: scatterY==='vix3m'}" @click="setScatterY('vix3m')">VIX3M</span>
+      </div>
+      <div class="p-seg">
+        <span :class="{on: scatterDays===30}" @click="setScatterDays(30)">30D</span>
+        <span :class="{on: scatterDays===90}" @click="setScatterDays(90)">90D</span>
+      </div>
+      <button class="icon-btn" style="margin-left:auto" @click="toggleScatterExpand()" title="Collapse">✕</button>
+    </div>
+    <div class="scatter-fs-body">
+      <canvas id="scatter-canvas-fs"></canvas>
+    </div>
   </div>
 
 </body>
