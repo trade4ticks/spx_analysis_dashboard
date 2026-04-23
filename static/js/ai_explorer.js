@@ -93,6 +93,16 @@ function renderTurnChart(idx, chartType, columns, rows) {
                 titleColor: '#999', bodyColor: '#ddd',
                 borderColor: '#444', borderWidth: 1,
             },
+            zoom: {
+                pan:  { enabled: true, mode: 'xy', modifierKey: 'shift' },
+                zoom: {
+                    wheel: { enabled: true },
+                    pinch: { enabled: true },
+                    drag:  { enabled: true, backgroundColor: 'rgba(52,152,219,0.15)',
+                             borderColor: '#3498db', borderWidth: 1 },
+                    mode:  'xy',
+                },
+            },
         },
     };
 
@@ -171,6 +181,7 @@ document.addEventListener('alpine:init', () => {
         question: '',
         loading:  false,
         history:  [],   // [{question, sql, columns, rows, summary, error, chartType, done}]
+        expandedChartIdx: null,
 
         fmtCell(val) {
             if (val === null || val === undefined) return '—';
@@ -191,6 +202,28 @@ document.addEventListener('alpine:init', () => {
                 delete _explorerCharts[k];
             });
             this.history = [];
+        },
+
+        resetChartZoom(key) {
+            const chart = _explorerCharts[key];
+            if (chart && chart.resetZoom) chart.resetZoom();
+        },
+
+        expandChart(idx) {
+            const turn = this.history[idx];
+            if (!turn) return;
+            this.expandedChartIdx = idx;
+            this.$nextTick(() => {
+                renderTurnChart('fs', turn.chartType, turn.columns, turn.rows);
+            });
+        },
+
+        collapseChart() {
+            if (_explorerCharts['fs']) {
+                _explorerCharts['fs'].destroy();
+                delete _explorerCharts['fs'];
+            }
+            this.expandedChartIdx = null;
         },
 
         _scrollToBottom() {

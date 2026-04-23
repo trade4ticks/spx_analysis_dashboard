@@ -193,6 +193,38 @@
       width:  calc(100% - 24px) !important;
       height: calc(100% - 24px) !important;
     }
+    .ai-chart-actions {
+      position: absolute; top: 6px; right: 8px; display: flex; gap: 4px; z-index: 5;
+    }
+    .ai-chart-actions button {
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1);
+      border-radius: 3px; padding: 2px 6px; font-size: 11px; color: var(--dim);
+      cursor: pointer;
+    }
+    .ai-chart-actions button:hover { background: rgba(255,255,255,.12); color: var(--muted); }
+    /* Fullscreen overlay */
+    .ai-chart-fs-overlay {
+      position: fixed; inset: 0; z-index: 500;
+      background: rgba(10,10,10,.92);
+      display: flex; flex-direction: column;
+    }
+    .ai-chart-fs-bar {
+      display: flex; align-items: center; justify-content: flex-end;
+      padding: 10px 16px; gap: 8px; flex-shrink: 0;
+    }
+    .ai-chart-fs-bar button {
+      background: var(--raised); border: 1px solid var(--border); border-radius: 4px;
+      padding: 5px 12px; font-size: 11px; color: var(--muted); cursor: pointer;
+    }
+    .ai-chart-fs-bar button:hover { background: var(--border); color: var(--text); }
+    .ai-chart-fs-body {
+      flex: 1; position: relative; padding: 12px;
+    }
+    .ai-chart-fs-body canvas {
+      position: absolute; inset: 12px;
+      width:  calc(100% - 24px) !important;
+      height: calc(100% - 24px) !important;
+    }
 
     /* ── Data table ────────────────────────────────────────────────────────── */
     .ai-table-wrap {
@@ -252,6 +284,8 @@
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/ai_explorer.js"></script>
 </head>
@@ -370,6 +404,10 @@
         <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0">
           <div class="ai-card-hdr" x-text="chartLabel(turn.chartType)"></div>
           <div class="ai-chart-wrap">
+            <div class="ai-chart-actions">
+              <button @click="resetChartZoom(idx)" title="Reset zoom">⟲</button>
+              <button @click="expandChart(idx)" title="Fullscreen">⤢</button>
+            </div>
             <canvas :id="'explorer-chart-' + idx"></canvas>
           </div>
         </div>
@@ -406,6 +444,19 @@
     </template>
 
   </div><!-- /.ai-response -->
+
+  <!-- Fullscreen chart overlay -->
+  <template x-if="expandedChartIdx !== null">
+    <div class="ai-chart-fs-overlay" @keydown.escape.window="collapseChart()">
+      <div class="ai-chart-fs-bar">
+        <button @click="resetChartZoom('fs')">⟲ Reset Zoom</button>
+        <button @click="collapseChart()">✕ Close</button>
+      </div>
+      <div class="ai-chart-fs-body">
+        <canvas id="explorer-chart-fs"></canvas>
+      </div>
+    </div>
+  </template>
 
 </body>
 </html>
