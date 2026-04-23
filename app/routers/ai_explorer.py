@@ -57,8 +57,16 @@ _ALL_COLUMNS = """
 
 _SCHEMA_TEXT = f"""You are a PostgreSQL assistant for an SPX implied volatility dashboard.
 Generate a single valid SELECT query for the table described below.
-Output ONLY the raw SQL — no markdown fences, no explanation, no comments.
-Allowed: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, aggregates, CTEs, subqueries.
+
+Output format — exactly two lines, no markdown fences, no explanation:
+  Line 1: chart_type hint — one of: line, bar, scatter, none
+  Line 2+: the raw SQL query
+
+Example output:
+scatter
+SELECT col_a, col_b FROM surface_metrics_core LIMIT 300
+
+Allowed SQL: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, aggregates, CTEs, subqueries.
 Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE, EXECUTE, COPY.
 Always include LIMIT (max 300).
 
@@ -113,9 +121,14 @@ CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
   string label column (e.g. 'metric') plus one or more numeric value columns.
   Example shape: (metric TEXT, min FLOAT, max FLOAT, mean FLOAT, p25 FLOAT, p75 FLOAT)
 - For time series: return (trade_date, quote_time if intraday) + one or more numeric columns,
-  ordered by time — the chart detector maps date/time + numeric → line chart automatically.
+  ordered by time. Use chart_type hint: line
+- For scatterplots: return exactly the numeric columns needed (x, y, and optionally a third for
+  color). Do NOT include trade_date or quote_time — those cause the chart to render as a line
+  instead of scatter. Use chart_type hint: scatter
+- For bar charts: return one category text column + numeric column(s). Use chart_type hint: bar
 - For a single distribution stat (e.g. "just show me the mean"): returning a two-column result
-  (label, value) is still better than a one-column scalar.
+  (label, value) is still better than a one-column scalar. Use chart_type hint: bar
+- If the question does not need a chart, use chart_type hint: none
 """
 
 _SYSTEM_SQL = [
@@ -248,7 +261,18 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             system=_SYSTEM_SQL,
             messages=messages,
         )
-        raw_sql = _strip_fences(sql_msg.content[0].text)
+        raw_text = _strip_fences(sql_msg.content[0].text)
+
+        # Parse chart_type hint from first line (if present)
+        chart_hint = None
+        lines = raw_text.strip().split('\n', 1)
+        if len(lines) == 2 and lines[0].strip().lower() in ('line', 'bar', 'scatter', 'none'):
+            chart_hint = lines[0].strip().lower()
+            if chart_hint == 'none':
+                chart_hint = None
+            raw_sql = lines[1].strip()
+        else:
+            raw_sql = raw_text.strip()
 
         # 2. Validate + enforce row cap
         try:
@@ -287,7 +311,8 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         )
         summary = summary_msg.content[0].text.strip()
 
-        return {"sql": sql, "error": None, "columns": columns, "rows": rows, "summary": summary}
+        return {"sql": sql, "error": None, "columns": columns, "rows": rows,
+                "summary": summary, "chart_hint": chart_hint}
 
     except Exception as e:
         # Catch-all: always return JSON so the frontend can display the real error.

@@ -150,13 +150,33 @@ function renderTurnChart(idx, chartType, columns, rows) {
     } else if (chartType === 'scatter') {
         const xCol = numericCols[0];
         const yCol = numericCols[1];
+        const colorCol = numericCols.length >= 3 ? numericCols[2] : null;
+
+        let bgColors;
+        if (colorCol) {
+            // Gradient from red (negative) → gray (zero) → green (positive)
+            const cVals = rows.map(r => r[colorCol]).filter(v => v != null);
+            const cMin  = Math.min(...cVals), cMax = Math.max(...cVals);
+            const cRng  = Math.max(Math.abs(cMin), Math.abs(cMax)) || 1;
+            bgColors = rows.map(r => {
+                const v = r[colorCol];
+                if (v == null) return 'rgba(128,128,128,0.5)';
+                const t = v / cRng;  // -1 to +1
+                if (t >= 0) return `rgba(${Math.round(46 + (1-t)*80)},${Math.round(204 - (1-t)*80)},${Math.round(113 - (1-t)*40)},0.75)`;
+                const a = -t;
+                return `rgba(${Math.round(231 - (1-a)*80)},${Math.round(76 + (1-a)*80)},${Math.round(60 + (1-a)*40)},0.75)`;
+            });
+        } else {
+            bgColors = '#3498dbaa';
+        }
+
         _explorerCharts[idx] = new Chart(canvas, {
             type: 'scatter',
             data: {
                 datasets: [{
                     label:           `${xCol} vs ${yCol}`,
                     data:            rows.map(r => ({ x: r[xCol], y: r[yCol] })),
-                    backgroundColor: '#3498dbaa',
+                    backgroundColor: bgColors,
                     pointRadius:     4,
                     pointHoverRadius: 6,
                     borderWidth:     0,
@@ -164,6 +184,23 @@ function renderTurnChart(idx, chartType, columns, rows) {
             },
             options: {
                 ...baseOpts,
+                plugins: {
+                    ...baseOpts.plugins,
+                    tooltip: {
+                        ...baseOpts.plugins.tooltip,
+                        callbacks: {
+                            label: ctx => {
+                                const r = rows[ctx.dataIndex];
+                                const parts = [
+                                    `${xCol}: ${r[xCol]?.toFixed(4) ?? '—'}`,
+                                    `${yCol}: ${r[yCol]?.toFixed(4) ?? '—'}`,
+                                ];
+                                if (colorCol) parts.push(`${colorCol}: ${r[colorCol]?.toFixed(4) ?? '—'}`);
+                                return parts;
+                            },
+                        },
+                    },
+                },
                 scales: {
                     x: { ...baseScales.x, title: { display: true, text: xCol, color: '#aaa', font: { size: 10 } } },
                     y: { ...baseScales.y, title: { display: true, text: yCol, color: '#aaa', font: { size: 10 } } },
@@ -283,9 +320,16 @@ document.addEventListener('alpine:init', () => {
                     return;
                 }
 
-                const ct = (!data.error && data.rows?.length)
-                    ? detectChartType(data.columns ?? [], data.rows)
-                    : null;
+                let ct = null;
+                if (!data.error && data.rows?.length) {
+                    // Prefer the LLM's chart_hint; fall back to auto-detection
+                    const hint = data.chart_hint;
+                    if (hint && ['line', 'bar', 'scatter'].includes(hint)) {
+                        ct = hint;
+                    } else {
+                        ct = detectChartType(data.columns ?? [], data.rows);
+                    }
+                }
 
                 this._updateTurn(idx, {
                     sql:       data.sql      ?? null,
