@@ -331,7 +331,15 @@ def _compute_regime_stats(lookback_rows, full_rows):
     import statistics as st
     if not lookback_rows:
         return []
+    # Use the most recent row that has IV data populated (today's row might
+    # have spot but no surface metrics yet if the pipeline hasn't run).
     cur = lookback_rows[-1]
+    iv_check_col = "iv_30d_atm"
+    if cur.get(iv_check_col) is None:
+        for r in reversed(lookback_rows):
+            if r.get(iv_check_col) is not None:
+                cur = r
+                break
     out = []
     for col, label in _REGIME_METRICS:
         cv = cur.get(col)
@@ -460,7 +468,7 @@ def _build_regime_charts(lookback_rows, stats):
     return charts
 
 
-async def _regime_narrative(client, stats, question):
+async def _regime_narrative(client, stats, question, stats_date=""):
     stats_text = json.dumps(stats, indent=2)
     msg = await client.messages.create(
         model="claude-sonnet-4-6",
@@ -469,7 +477,7 @@ async def _regime_narrative(client, stats, question):
             "role": "user",
             "content": (
                 f"User asked: {question!r}\n\n"
-                f"Current SPX IV surface regime statistics (daily close, changes vs "
+                f"SPX IV surface regime statistics as of {stats_date} (daily close, changes vs "
                 f"1 week / 1 month ago, historical percentile rank, z-score):\n\n"
                 f"{stats_text}\n\n"
                 "Provide a concise 3-5 sentence regime summary. Cover:\n"
@@ -497,9 +505,17 @@ async def _handle_regime_analysis(client, question, pool) -> dict:
         return {"response_type": "analysis", "error": "No data in surface_metrics_core",
                 "summary": None, "stats": [], "charts": []}
 
-    stats     = _compute_regime_stats(lb_rows, full_rows)
-    narrative = await _regime_narrative(client, stats, question)
-    charts    = _build_regime_charts(lb_rows, stats)
+    stats      = _compute_regime_stats(lb_rows, full_rows)
+    # Include the snapshot date in the stats payload for Claude
+    stats_date = lb_rows[-1].get("trade_date", "unknown")
+    # Find actual stats date (may differ if latest row lacks IV)
+    iv_check = "iv_30d_atm"
+    for r in reversed(lb_rows):
+        if r.get(iv_check) is not None:
+            stats_date = r.get("trade_date", stats_date)
+            break
+    narrative  = await _regime_narrative(client, stats, question, stats_date)
+    charts     = _build_regime_charts(lb_rows, stats)
 
     return {
         "response_type": "analysis",
