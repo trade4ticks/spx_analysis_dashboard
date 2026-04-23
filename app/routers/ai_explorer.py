@@ -58,17 +58,27 @@ _ALL_COLUMNS = """
 _SCHEMA_TEXT = f"""You are a PostgreSQL assistant for an SPX implied volatility dashboard.
 Generate a single valid SELECT query for the table described below.
 
-Output format — exactly two lines, no markdown fences, no explanation:
-  Line 1: chart_type hint — one of: line, bar, scatter, none
-  Line 2+: the raw SQL query
+Output format — one of two modes:
 
-Example output:
+MODE A — Data query (most requests):
+  Line 1: chart_type hint — one of: line, bar, scatter, none
+  Line 2+: the raw SQL query (no markdown fences)
+  Allowed SQL: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, aggregates, CTEs, subqueries.
+  Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE, EXECUTE, COPY.
+  Always include LIMIT (max 300).
+
+MODE B — Text response (for follow-up questions, clarifications, explanations):
+  If the user asks a question that doesn't need a data query (e.g. "why did you...",
+  "can you explain...", "what does X mean"), respond with plain text. Do NOT wrap it
+  in SQL. Start your response with "TEXT:" on the first line, then your explanation.
+
+Example Mode A:
 scatter
 SELECT col_a, col_b FROM surface_metrics_core LIMIT 300
 
-Allowed SQL: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, aggregates, CTEs, subqueries.
-Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE, EXECUTE, COPY.
-Always include LIMIT (max 300).
+Example Mode B:
+TEXT:
+The previous query used 30-day metrics because they are the most liquid tenor...
 
 TABLE: surface_metrics_core
 Primary key: (trade_date, quote_time)
@@ -286,11 +296,15 @@ async def _classify_request(client, question: str) -> str:
 # ── Regime analysis pipeline ─────────────────────────────────────────────────
 
 _REGIME_METRICS = [
-    ("iv_30d_atm",              "30D ATM IV"),
     ("iv_7d_atm",               "7D ATM IV"),
-    ("skew_30d_25p_atm",        "30D Put Skew"),
+    ("iv_30d_atm",              "30D ATM IV"),
+    ("iv_90d_atm",              "90D ATM IV"),
+    ("iv_180d_atm",             "180D ATM IV"),
     ("skew_7d_25p_atm",         "7D Put Skew"),
+    ("skew_30d_25p_atm",        "30D Put Skew"),
+    ("skew_90d_25p_atm",        "90D Put Skew"),
     ("term_slope_7_30_atm",     "7-30D Term Slope"),
+    ("term_slope_30_90_atm",    "30-90D Term Slope"),
     ("term_ratio_7d_30d",       "Term Ratio 7/30"),
     ("convex_30d_25p_atm_25c",  "30D Butterfly"),
     ("spot",                    "SPX Spot"),
@@ -380,50 +394,63 @@ def _build_regime_charts(lookback_rows, stats):
     ts_cols = ["trade_date"] + [c for c, _ in _REGIME_METRICS]
     charts = []
 
-    # Chart 1: ATM IV
+    # Chart 1: ATM IV across tenors
     charts.append({
         "title": "ATM Implied Volatility",
         "rows": lookback_rows, "columns": ts_cols,
         "chart_config": {
             "type": "line",
             "datasets": [
-                {"label": "30D ATM IV", "labelsColumn": "trade_date", "yColumn": "iv_30d_atm",
-                 "borderColor": "#3498db", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
-                {"label": "7D ATM IV", "labelsColumn": "trade_date", "yColumn": "iv_7d_atm",
+                {"label": "7D", "labelsColumn": "trade_date", "yColumn": "iv_7d_atm",
                  "borderColor": "#2ecc71", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "30D", "labelsColumn": "trade_date", "yColumn": "iv_30d_atm",
+                 "borderColor": "#3498db", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "90D", "labelsColumn": "trade_date", "yColumn": "iv_90d_atm",
+                 "borderColor": "#9b59b6", "borderWidth": 1.2, "pointRadius": 0, "tension": 0.1,
+                 "borderDash": [4, 3]},
+                {"label": "180D", "labelsColumn": "trade_date", "yColumn": "iv_180d_atm",
+                 "borderColor": "#e67e22", "borderWidth": 1.2, "pointRadius": 0, "tension": 0.1,
+                 "borderDash": [4, 3]},
             ],
             "options": {"scales": {"y": {"title": {"display": True, "text": "IV (decimal)"}}}},
         },
     })
 
-    # Chart 2: Put Skew
+    # Chart 2: Put Skew across tenors
     charts.append({
         "title": "Put Skew (25P - ATM)",
         "rows": lookback_rows, "columns": ts_cols,
         "chart_config": {
             "type": "line",
             "datasets": [
-                {"label": "30D Put Skew", "labelsColumn": "trade_date", "yColumn": "skew_30d_25p_atm",
-                 "borderColor": "#e74c3c", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
-                {"label": "7D Put Skew", "labelsColumn": "trade_date", "yColumn": "skew_7d_25p_atm",
+                {"label": "7D", "labelsColumn": "trade_date", "yColumn": "skew_7d_25p_atm",
                  "borderColor": "#f39c12", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "30D", "labelsColumn": "trade_date", "yColumn": "skew_30d_25p_atm",
+                 "borderColor": "#e74c3c", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "90D", "labelsColumn": "trade_date", "yColumn": "skew_90d_25p_atm",
+                 "borderColor": "#9b59b6", "borderWidth": 1.2, "pointRadius": 0, "tension": 0.1,
+                 "borderDash": [4, 3]},
             ],
             "options": {"scales": {"y": {"title": {"display": True, "text": "Skew (IV diff)"}}}},
         },
     })
 
-    # Chart 3: Term Structure
+    # Chart 3: Term Structure (two slope pairs + ratio)
     charts.append({
         "title": "Term Structure",
         "rows": lookback_rows, "columns": ts_cols,
         "chart_config": {
             "type": "line",
             "datasets": [
-                {"label": "7-30D Term Slope", "labelsColumn": "trade_date",
+                {"label": "7-30D Slope", "labelsColumn": "trade_date",
                  "yColumn": "term_slope_7_30_atm",
                  "borderColor": "#9b59b6", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1,
                  "yAxisID": "y"},
-                {"label": "Term Ratio 7/30", "labelsColumn": "trade_date",
+                {"label": "30-90D Slope", "labelsColumn": "trade_date",
+                 "yColumn": "term_slope_30_90_atm",
+                 "borderColor": "#e74c3c", "borderWidth": 1.2, "pointRadius": 0, "tension": 0.1,
+                 "borderDash": [4, 3], "yAxisID": "y"},
+                {"label": "Ratio 7/30", "labelsColumn": "trade_date",
                  "yColumn": "term_ratio_7d_30d",
                  "borderColor": "#1abc9c", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1,
                  "yAxisID": "y1"},
@@ -540,6 +567,50 @@ class QueryRequest(BaseModel):
     history:  list[HistoryTurn] = []
 
 
+# ── Query log ────────────────────────────────────────────────────────────────
+
+_log_table_ready = False
+
+
+async def _ensure_log_table(pool):
+    global _log_table_ready
+    if _log_table_ready:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_explorer_log (
+                    id          SERIAL PRIMARY KEY,
+                    ts          TIMESTAMPTZ DEFAULT NOW(),
+                    question    TEXT NOT NULL,
+                    response_type TEXT,
+                    sql         TEXT,
+                    summary     TEXT,
+                    error       TEXT
+                )
+            """)
+        _log_table_ready = True
+    except Exception:
+        pass
+
+
+async def _log_query(pool, question, response):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO ai_explorer_log
+                   (question, response_type, sql, summary, error)
+                   VALUES ($1, $2, $3, $4, $5)""",
+                question,
+                response.get("response_type"),
+                response.get("sql"),
+                response.get("summary"),
+                response.get("error"),
+            )
+    except Exception:
+        pass  # logging must never break the response
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/query")
@@ -552,10 +623,14 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
     sql = None  # kept in scope so catch-all can return it
 
     try:
+        await _ensure_log_table(pool)
+
         # 0. Classify: broad analysis vs direct SQL query
         req_type = await _classify_request(client, question)
         if req_type == "analysis":
-            return await _handle_regime_analysis(client, question, pool)
+            result = await _handle_regime_analysis(client, question, pool)
+            await _log_query(pool, question, result)
+            return result
 
         # ── Direct path (existing, unchanged) ────────────────────────
 
@@ -569,6 +644,8 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
                 asst = f"Generated SQL:\n```sql\n{turn.sql}\n```\n\nResult: {turn.summary}"
             elif turn.sql:
                 asst = f"Generated SQL:\n```sql\n{turn.sql}\n```"
+            elif turn.summary:
+                asst = f"Analysis result: {turn.summary}"
             else:
                 asst = "No result."
             messages.append({"role": "assistant", "content": asst})
@@ -582,6 +659,13 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             messages=messages,
         )
         raw_text = _strip_fences(sql_msg.content[0].text)
+
+        # Check for text-only response (MODE B: follow-ups, explanations)
+        if raw_text.strip().upper().startswith('TEXT:'):
+            text_body = raw_text.strip()[5:].strip()
+            return {"response_type": "direct", "sql": None, "error": None,
+                    "columns": [], "rows": [], "summary": text_body,
+                    "chart_hint": None, "chart_config": None}
 
         # Parse: line 1 = chart hint, then SQL, then optional ---CHART--- config
         chart_hint = None
@@ -604,16 +688,24 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             try:
                 chart_config = json.loads(config_text)
             except json.JSONDecodeError:
-                pass  # invalid JSON — fall back to auto-detect
+                pass
         else:
             raw_sql = rest.strip()
 
         # 2. Validate + enforce row cap
+        # If Claude produced text instead of SQL (without TEXT: prefix), return as summary
         try:
             sql = _validate_sql(raw_sql)
             sql = _enforce_limit(sql)
-        except ValueError as e:
-            return {"response_type": "direct", "sql": raw_sql, "error": str(e), "columns": [], "rows": [], "summary": None}
+        except ValueError:
+            if not re.match(r'^\s*(?:WITH\b|SELECT\b)', raw_sql, re.IGNORECASE):
+                # Not SQL at all — return Claude's response as text
+                return {"response_type": "direct", "sql": None, "error": None,
+                        "columns": [], "rows": [],
+                        "summary": raw_text.strip(),
+                        "chart_hint": None, "chart_config": None}
+            return {"response_type": "direct", "sql": raw_sql, "error": "Query validation failed",
+                    "columns": [], "rows": [], "summary": None}
 
         # 3. Execute in a read-only transaction
         try:
@@ -645,14 +737,18 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         )
         summary = summary_msg.content[0].text.strip()
 
-        return {"response_type": "direct", "sql": sql, "error": None,
-                "columns": columns, "rows": rows, "summary": summary,
-                "chart_hint": chart_hint, "chart_config": chart_config}
+        result = {"response_type": "direct", "sql": sql, "error": None,
+                  "columns": columns, "rows": rows, "summary": summary,
+                  "chart_hint": chart_hint, "chart_config": chart_config}
+        await _log_query(pool, question, result)
+        return result
 
     except Exception as e:
-        return {
+        result = {
             "response_type": "direct",
             "sql": sql,
             "error": f"{type(e).__name__}: {e}",
             "columns": [], "rows": [], "summary": None,
         }
+        await _log_query(pool, question, result)
+        return result
