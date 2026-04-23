@@ -38,6 +38,13 @@
     }
     .ai-textarea:focus { border-color: var(--accent); }
     .ai-textarea::placeholder { color: var(--dim); }
+    .ai-input-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      color: var(--dim);
+    }
     .ai-examples {
       display: flex;
       flex-wrap: wrap;
@@ -57,8 +64,42 @@
       padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 0;
       min-height: 0;
+    }
+
+    /* ── Conversation turn ─────────────────────────────────────────────────── */
+    .ai-turn {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-bottom: 20px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .ai-turn:last-child { border-bottom: none; }
+
+    /* Question row */
+    .ai-q-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      padding: 4px 0 2px;
+    }
+    .ai-q-label {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .ai-q-text {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     /* ── Cards ─────────────────────────────────────────────────────────────── */
@@ -87,7 +128,6 @@
       font-weight: 400;
       text-transform: none;
       letter-spacing: 0;
-      color: var(--dim);
     }
 
     /* ── Summary ───────────────────────────────────────────────────────────── */
@@ -108,10 +148,8 @@
       word-break: break-word;
     }
 
-    /* ── SQL debug (collapsible <details>) ─────────────────────────────────── */
-    .ai-sql-details {
-      border: none;
-    }
+    /* ── SQL debug ─────────────────────────────────────────────────────────── */
+    .ai-sql-details { border: none; }
     .ai-sql-details summary {
       cursor: pointer;
       padding: 7px 12px;
@@ -137,8 +175,10 @@
       font-size: 11px;
       line-height: 1.6;
       padding: 12px 16px;
-      white-space: pre-wrap;
-      word-break: break-all;
+      white-space: pre;     /* preserve formatting; scroll horizontally */
+      overflow-x: auto;
+      overflow-y: auto;
+      max-height: 280px;    /* scroll vertically for long queries */
     }
 
     /* ── Chart ─────────────────────────────────────────────────────────────── */
@@ -156,7 +196,7 @@
 
     /* ── Data table ────────────────────────────────────────────────────────── */
     .ai-table-wrap {
-      max-height: 380px;
+      max-height: 340px;
       overflow: auto;
     }
     .ai-table {
@@ -189,7 +229,7 @@
     .ai-table td:first-child { color: var(--text); font-weight: 600; }
     .ai-table tr:hover td   { background: rgba(255,255,255,.03); }
 
-    /* ── Loading spinner (inline) ──────────────────────────────────────────── */
+    /* ── Loading spinner ───────────────────────────────────────────────────── */
     .ai-spin {
       display: inline-block;
       width: 13px; height: 13px;
@@ -201,7 +241,7 @@
       margin-right: 6px;
     }
 
-    /* ── Welcome / empty state ─────────────────────────────────────────────── */
+    /* ── Welcome state ─────────────────────────────────────────────────────── */
     .ai-welcome {
       color: var(--dim);
       font-size: 12px;
@@ -238,18 +278,22 @@
       <textarea
         class="ai-textarea"
         rows="3"
-        placeholder="Ask a question about the SPX surface metrics… (Ctrl+Enter to submit)"
+        placeholder="Ask a question… (Ctrl+Enter to submit)"
         x-model="question"
         @keydown="onKeydown($event)"
         :disabled="loading"
       ></textarea>
 
-      <!-- Example chips (shown only before first query) -->
-      <div class="ai-examples" x-show="!hasResult && !loading">
+      <!-- Show turn count + clear when there's history; examples when empty -->
+      <div class="ai-input-meta" x-show="history.length > 0">
+        <span x-text="history.length + ' turn' + (history.length === 1 ? '' : 's')"></span>
+        <button class="btn" style="padding:2px 10px; font-size:10px;" @click="clearHistory()">Clear</button>
+      </div>
+      <div class="ai-examples" x-show="history.length === 0 && !loading">
         <span class="ai-ex-lbl">Examples:</span>
-        <span class="chip" @click="question='Show the 30-day ATM IV for each trading day in the last 2 weeks, using end-of-day quotes'; submit()">30D ATM IV last 2 weeks</span>
-        <span class="chip" @click="question='What was the highest vix_30d reading this year and on what date?'; submit()">Peak VIX 30 this year</span>
-        <span class="chip" @click="question='Show the intraday term ratio 7d/30d for the most recent trading day'; submit()">Intraday term ratio today</span>
+        <span class="chip" @click="question='Show 30-day ATM IV for each trading day in the last 2 weeks, end of day'; submit()">30D ATM IV last 2 weeks</span>
+        <span class="chip" @click="question='What was the highest vix_30d reading this year and on what date?'; submit()">Peak VIX 30</span>
+        <span class="chip" @click="question='Show intraday term ratio 7d/30d for the most recent trading day'; submit()">Intraday term ratio today</span>
         <span class="chip" @click="question='Show daily skew_30d_25p_atm for the last 30 trading days at end of day'; submit()">30D skew history</span>
         <span class="chip" @click="question='Show iv_30d_atm vs vix_30d for the last 60 end-of-day readings'; submit()">IV vs VIX scatter</span>
       </div>
@@ -266,97 +310,100 @@
     </button>
   </div>
 
-  <!-- ── Response area ──────────────────────────────────────────────────── -->
+  <!-- ── Conversation area ───────────────────────────────────────────────── -->
   <div class="ai-response">
 
-    <!-- Loading state -->
-    <div class="ai-card" x-show="loading">
-      <div class="ai-summary" style="color:var(--dim);">
-        <span class="ai-spin"></span>
-        Generating SQL and querying database…
-      </div>
-    </div>
-
-    <!-- Error card -->
-    <div class="ai-card" x-show="!loading && !!error" style="border-color: rgba(231,76,60,.3);">
-      <div class="ai-card-hdr" style="color:var(--danger);">
-        ✕ Error
-      </div>
-      <div class="ai-error-body" x-text="error"></div>
-
-      <!-- Show generated SQL even on error so user can diagnose -->
-      <template x-if="sql">
-        <details class="ai-sql-details">
-          <summary>▶ Generated SQL</summary>
-          <div class="ai-sql-code" x-text="sql"></div>
-        </details>
-      </template>
-    </div>
-
-    <!-- Summary card -->
-    <div class="ai-card" x-show="!loading && !error && !!summary">
-      <div class="ai-card-hdr">
-        <span style="color:var(--accent);">✦</span> Summary
-        <span class="hdr-count" x-text="rowCount + ' row' + (rowCount === 1 ? '' : 's') + ' returned'"></span>
-      </div>
-      <div class="ai-summary" x-text="summary"></div>
-    </div>
-
-    <!-- SQL debug (collapsible) -->
-    <div class="ai-card" x-show="!loading && !!sql && !error">
-      <details class="ai-sql-details">
-        <summary>
-          <span x-text="$el.parentElement.open ? '▾' : '▶'"></span>
-          SQL Debug
-        </summary>
-        <div class="ai-sql-code" x-text="sql"></div>
-      </details>
-    </div>
-
-    <!-- Chart card -->
-    <div class="ai-card" x-show="!loading && !error && !!chartType && rowCount > 0">
-      <div class="ai-card-hdr" x-text="chartLabel"></div>
-      <div class="ai-chart-wrap">
-        <canvas id="explorer-chart"></canvas>
-      </div>
-    </div>
-
-    <!-- Data table card -->
-    <div class="ai-card" x-show="!loading && !error && rowCount > 0">
-      <div class="ai-card-hdr">
-        Data
-        <span class="hdr-count" x-text="rowCount + (rowCount === 300 ? ' (capped at 300)' : '')"></span>
-      </div>
-      <div class="ai-table-wrap">
-        <table class="ai-table">
-          <thead>
-            <tr>
-              <template x-for="col in columns" :key="col">
-                <th x-text="col"></th>
-              </template>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="(row, ri) in rows" :key="ri">
-              <tr>
-                <template x-for="col in columns" :key="col">
-                  <td x-text="fmtCell(row[col])"></td>
-                </template>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
     <!-- Welcome / empty state -->
-    <div class="ai-welcome" x-show="!loading && !hasResult">
+    <div class="ai-welcome" x-show="history.length === 0">
       <p>Ask any question about SPX implied volatility surface metrics.</p>
       <p style="font-size:11px;">
-        The <strong>surface_metrics_core</strong> table contains intraday IV, skew, term structure,
-        convexity, and VIX-equivalent metrics for multiple tenors.
+        Conversation context carries forward — ask follow-up questions to refine results.
       </p>
     </div>
+
+    <!-- Conversation turns -->
+    <template x-for="(turn, idx) in history" :key="idx">
+      <div class="ai-turn">
+
+        <!-- Question -->
+        <div class="ai-q-row">
+          <span class="ai-q-label">Q</span>
+          <div class="ai-q-text" x-text="turn.question"></div>
+        </div>
+
+        <!-- Loading (this turn not yet complete) -->
+        <div class="ai-card" x-show="!turn.done">
+          <div class="ai-summary" style="color:var(--dim);">
+            <span class="ai-spin"></span>
+            Generating SQL and querying database…
+          </div>
+        </div>
+
+        <!-- Error card -->
+        <div class="ai-card" x-show="turn.done && !!turn.error" style="border-color:rgba(231,76,60,.3);">
+          <div class="ai-card-hdr" style="color:var(--danger);">✕ Error</div>
+          <div class="ai-error-body" x-text="turn.error"></div>
+          <details class="ai-sql-details" x-show="!!turn.sql">
+            <summary>▶ Generated SQL</summary>
+            <div class="ai-sql-code" x-text="turn.sql"></div>
+          </details>
+        </div>
+
+        <!-- Summary card -->
+        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.summary">
+          <div class="ai-card-hdr">
+            <span style="color:var(--accent);">✦</span> Summary
+            <span class="hdr-count" x-text="turn.rows.length + ' row' + (turn.rows.length === 1 ? '' : 's') + ' returned'"></span>
+          </div>
+          <div class="ai-summary" x-text="turn.summary"></div>
+        </div>
+
+        <!-- SQL debug (collapsible) -->
+        <div class="ai-card" x-show="turn.done && !!turn.sql && !turn.error">
+          <details class="ai-sql-details">
+            <summary>▶ SQL</summary>
+            <div class="ai-sql-code" x-text="turn.sql"></div>
+          </details>
+        </div>
+
+        <!-- Chart card -->
+        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0">
+          <div class="ai-card-hdr" x-text="chartLabel(turn.chartType)"></div>
+          <div class="ai-chart-wrap">
+            <canvas :id="'explorer-chart-' + idx"></canvas>
+          </div>
+        </div>
+
+        <!-- Data table -->
+        <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0">
+          <div class="ai-card-hdr">
+            Data
+            <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 300 ? ' (capped at 300)' : '')"></span>
+          </div>
+          <div class="ai-table-wrap">
+            <table class="ai-table">
+              <thead>
+                <tr>
+                  <template x-for="col in turn.columns" :key="col">
+                    <th x-text="col"></th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(row, ri) in turn.rows" :key="ri">
+                  <tr>
+                    <template x-for="col in turn.columns" :key="col">
+                      <td x-text="fmtCell(row[col])"></td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </template>
 
   </div><!-- /.ai-response -->
 

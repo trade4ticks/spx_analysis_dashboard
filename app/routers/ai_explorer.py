@@ -189,10 +189,18 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-# ── Request model ─────────────────────────────────────────────────────────────
+# ── Request models ────────────────────────────────────────────────────────────
+
+class HistoryTurn(BaseModel):
+    question: str
+    sql:      Optional[str] = None
+    summary:  Optional[str] = None
+    error:    Optional[str] = None
+
 
 class QueryRequest(BaseModel):
     question: str
+    history:  list[HistoryTurn] = []
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -207,12 +215,27 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
     sql = None  # kept in scope so catch-all can return it
 
     try:
-        # 1. Generate SQL via Claude Sonnet (system prompt is cached)
+        # 1. Build conversation messages (last 6 turns for context)
+        messages = []
+        for turn in req.history[-6:]:
+            messages.append({"role": "user", "content": turn.question})
+            if turn.error:
+                asst = f"Error: {turn.error}"
+            elif turn.sql and turn.summary:
+                asst = f"Generated SQL:\n```sql\n{turn.sql}\n```\n\nResult: {turn.summary}"
+            elif turn.sql:
+                asst = f"Generated SQL:\n```sql\n{turn.sql}\n```"
+            else:
+                asst = "No result."
+            messages.append({"role": "assistant", "content": asst})
+        messages.append({"role": "user", "content": question})
+
+        # 2. Generate SQL via Claude Sonnet (system prompt is cached)
         sql_msg = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
             system=_SYSTEM_SQL,
-            messages=[{"role": "user", "content": question}],
+            messages=messages,
         )
         raw_sql = _strip_fences(sql_msg.content[0].text)
 
