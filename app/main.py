@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db import init_pool, close_pool
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer
 
 BASE_DIR = Path(__file__).parent.parent  # project root
 
@@ -30,8 +30,9 @@ app.include_router(concavity.router,  prefix="/api/convexity")
 app.include_router(skew_slope.router, prefix="/api/skew_slope")
 app.include_router(term_slope.router, prefix="/api/term_slope")
 app.include_router(raw.router,        prefix="/api/raw")
-app.include_router(heatmap.router,    prefix="/api/heatmap")
-app.include_router(today.router,      prefix="/api/today")
+app.include_router(heatmap.router,      prefix="/api/heatmap")
+app.include_router(today.router,        prefix="/api/today")
+app.include_router(ai_explorer.router,  prefix="/api/ai-explorer")
 
 
 @app.get("/today")
@@ -42,6 +43,11 @@ async def today_page():
 @app.get("/heatmap")
 async def heatmap_page():
     return FileResponse(str(BASE_DIR / "templates" / "heatmap.html"))
+
+
+@app.get("/ai-explorer")
+async def ai_explorer_page():
+    return FileResponse(str(BASE_DIR / "templates" / "ai_explorer.html"))
 
 
 @app.get("/")
