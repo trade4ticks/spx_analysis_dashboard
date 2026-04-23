@@ -225,12 +225,21 @@ document.addEventListener('alpine:init', () => {
             if (_explorerChart) { _explorerChart.destroy(); _explorerChart = null; }
 
             try {
-                const res  = await fetch('/api/ai-explorer/query', {
+                const res = await fetch('/api/ai-explorer/query', {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body:    JSON.stringify({ question: q }),
                 });
-                const data = await res.json();
+
+                // Parse defensively — a server crash may return plain-text, not JSON
+                let data;
+                try {
+                    data = await res.json();
+                } catch {
+                    const text = await res.text().catch(() => '');
+                    this.error = `Server returned a non-JSON response (HTTP ${res.status}):\n${text.slice(0, 300)}`;
+                    return;
+                }
 
                 if (!res.ok) {
                     this.error = data.detail ?? `HTTP ${res.status}`;

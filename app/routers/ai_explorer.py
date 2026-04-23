@@ -188,75 +188,64 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         raise HTTPException(400, "question must not be empty")
 
     client = _get_client()
+    sql = None  # kept in scope so catch-all can return it
 
-    # 1. Generate SQL via Claude Sonnet (system prompt is cached)
-    sql_msg = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=_SYSTEM_SQL,
-        messages=[{"role": "user", "content": question}],
-    )
-    raw_sql = _strip_fences(sql_msg.content[0].text)
-
-    # 2. Validate + enforce row cap
     try:
-        sql = _validate_sql(raw_sql)
-        sql = _enforce_limit(sql)
-    except ValueError as e:
+        # 1. Generate SQL via Claude Sonnet (system prompt is cached)
+        sql_msg = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=_SYSTEM_SQL,
+            messages=[{"role": "user", "content": question}],
+        )
+        raw_sql = _strip_fences(sql_msg.content[0].text)
+
+        # 2. Validate + enforce row cap
+        try:
+            sql = _validate_sql(raw_sql)
+            sql = _enforce_limit(sql)
+        except ValueError as e:
+            return {"sql": raw_sql, "error": str(e), "columns": [], "rows": [], "summary": None}
+
+        # 3. Execute in a read-only transaction
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction(readonly=True):
+                    pg_rows = await conn.fetch(sql)
+        except asyncpg.PostgresError as e:
+            return {"sql": sql, "error": f"Database error: {e}", "columns": [], "rows": [], "summary": None}
+
+        columns, rows = _serialize(pg_rows)
+
+        if not rows:
+            return {"sql": sql, "error": None, "columns": columns, "rows": [], "summary": "The query returned no results."}
+
+        # 4. Summarize via Claude Haiku
+        preview = json.dumps(rows[:15], default=str)
+        summary_msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"User asked: {question!r}\n\n"
+                    f"The SQL returned {len(rows)} row(s). First rows (JSON):\n{preview}\n\n"
+                    "Write a concise 1–3 sentence plain English summary of the key insight. "
+                    "Use financial terminology. Do not describe the data format or JSON structure."
+                ),
+            }],
+        )
+        summary = summary_msg.content[0].text.strip()
+
+        return {"sql": sql, "error": None, "columns": columns, "rows": rows, "summary": summary}
+
+    except Exception as e:
+        # Catch-all: always return JSON so the frontend can display the real error.
+        # Common causes: Anthropic API auth/network error, table doesn't exist yet.
         return {
-            "sql": raw_sql,
-            "error": str(e),
+            "sql": sql,
+            "error": f"{type(e).__name__}: {e}",
             "columns": [],
             "rows": [],
             "summary": None,
         }
-
-    # 3. Execute in a read-only transaction
-    try:
-        async with pool.acquire() as conn:
-            async with conn.transaction(readonly=True):
-                pg_rows = await conn.fetch(sql)
-    except asyncpg.PostgresError as e:
-        return {
-            "sql": sql,
-            "error": f"Database error: {e}",
-            "columns": [],
-            "rows": [],
-            "summary": None,
-        }
-
-    columns, rows = _serialize(pg_rows)
-
-    if not rows:
-        return {
-            "sql": sql,
-            "error": None,
-            "columns": columns,
-            "rows": [],
-            "summary": "The query returned no results.",
-        }
-
-    # 4. Summarize via Claude Haiku (fast, no caching needed — unique each time)
-    preview = json.dumps(rows[:15], default=str)
-    summary_msg = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=256,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"User asked: {question!r}\n\n"
-                f"The SQL returned {len(rows)} row(s). First rows (JSON):\n{preview}\n\n"
-                "Write a concise 1–3 sentence plain English summary of the key insight. "
-                "Use financial terminology. Do not describe the data format or JSON structure."
-            ),
-        }],
-    )
-    summary = summary_msg.content[0].text.strip()
-
-    return {
-        "sql": sql,
-        "error": None,
-        "columns": columns,
-        "rows": rows,
-        "summary": summary,
-    }
