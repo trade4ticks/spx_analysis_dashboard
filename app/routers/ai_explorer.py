@@ -133,14 +133,30 @@ def _validate_sql(sql: str) -> str:
     return s
 
 
+_FETCH_RE = re.compile(
+    r'\bFETCH\s+(?:FIRST|NEXT)\s+(\d+)\s+ROWS?\s+(?:ONLY|WITH\s+TIES)\b',
+    re.IGNORECASE,
+)
+
 def _enforce_limit(sql: str) -> str:
+    # Handle standard LIMIT n syntax
     limit_re = re.compile(r'\bLIMIT\s+(\d+)', re.IGNORECASE)
     m = limit_re.search(sql)
     if m:
         if int(m.group(1)) > ROW_CAP:
             sql = limit_re.sub(f'LIMIT {ROW_CAP}', sql)
-    else:
-        sql = sql.rstrip().rstrip(';') + f'\nLIMIT {ROW_CAP}'
+        return sql
+
+    # Handle SQL-standard FETCH FIRST n ROWS ONLY — replace with LIMIT so
+    # we don't end up appending LIMIT after it (syntax error in Postgres).
+    mf = _FETCH_RE.search(sql)
+    if mf:
+        cap = min(int(mf.group(1)), ROW_CAP)
+        sql = _FETCH_RE.sub(f'LIMIT {cap}', sql)
+        return sql
+
+    # No row cap found — append one
+    sql = sql.rstrip().rstrip(';') + f'\nLIMIT {ROW_CAP}'
     return sql
 
 
