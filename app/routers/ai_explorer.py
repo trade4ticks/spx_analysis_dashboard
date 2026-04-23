@@ -244,6 +244,272 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+# ── Request classifier ────────────────────────────────────────────────────────
+
+_CLASSIFIER_PROMPT = """You classify user questions about SPX implied volatility data.
+
+Respond with exactly one word:
+- "analysis" — if the user asks about the current vol regime, market conditions,
+  regime summary, overall state of volatility, or a broad "what's happening" question
+  that needs multiple charts/perspectives to answer properly.
+- "direct" — if the user asks a specific data query, wants a particular chart, or
+  requests something concrete (show me X, what was Y, plot Z, compare A vs B).
+
+Examples:
+  "What's the current vol regime?" → analysis
+  "Summarize the IV surface" → analysis
+  "Describe market conditions" → analysis
+  "What stands out right now?" → analysis
+  "Take a look at the metrics and tell me what's going on" → analysis
+  "Show 30D ATM IV for last 2 weeks" → direct
+  "What was the peak VIX reading this month?" → direct
+  "Create a scatterplot of skew vs IV" → direct
+  "Compare 7D vs 30D term slopes" → direct
+"""
+
+
+async def _classify_request(client, question: str) -> str:
+    """Return 'analysis' or 'direct'. Falls back to 'direct' on any issue."""
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=16,
+            messages=[{"role": "user", "content": question}],
+            system=[{"type": "text", "text": _CLASSIFIER_PROMPT}],
+        )
+        result = msg.content[0].text.strip().lower()
+        return result if result in ("analysis", "direct") else "direct"
+    except Exception:
+        return "direct"
+
+
+# ── Regime analysis pipeline ─────────────────────────────────────────────────
+
+_REGIME_METRICS = [
+    ("iv_30d_atm",              "30D ATM IV"),
+    ("iv_7d_atm",               "7D ATM IV"),
+    ("skew_30d_25p_atm",        "30D Put Skew"),
+    ("skew_7d_25p_atm",         "7D Put Skew"),
+    ("term_slope_7_30_atm",     "7-30D Term Slope"),
+    ("term_ratio_7d_30d",       "Term Ratio 7/30"),
+    ("convex_30d_25p_atm_25c",  "30D Butterfly"),
+    ("spot",                    "SPX Spot"),
+]
+
+_REGIME_COLS = ", ".join(col for col, _ in _REGIME_METRICS)
+
+
+def _regime_ts_sql(lookback: int = 90) -> str:
+    return f"""
+        SELECT trade_date, {_REGIME_COLS}
+        FROM (
+            SELECT DISTINCT ON (trade_date) trade_date, {_REGIME_COLS}
+            FROM surface_metrics_core
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '{lookback} days'
+            ORDER BY trade_date, quote_time DESC
+        ) daily ORDER BY trade_date
+    """
+
+
+def _regime_full_sql() -> str:
+    return f"""
+        SELECT trade_date, {_REGIME_COLS}
+        FROM (
+            SELECT DISTINCT ON (trade_date) trade_date, {_REGIME_COLS}
+            FROM surface_metrics_core
+            ORDER BY trade_date, quote_time DESC
+        ) daily ORDER BY trade_date
+    """
+
+
+def _val_n_back(rows, col, n):
+    idx = max(0, len(rows) - 1 - n)
+    return rows[idx].get(col)
+
+
+def _compute_regime_stats(lookback_rows, full_rows):
+    import statistics as st
+    if not lookback_rows:
+        return []
+    cur = lookback_rows[-1]
+    out = []
+    for col, label in _REGIME_METRICS:
+        cv = cur.get(col)
+        if cv is None:
+            continue
+        v1w = _val_n_back(lookback_rows, col, 5)
+        v1m = _val_n_back(lookback_rows, col, 21)
+        c1w = (cv - v1w) if v1w is not None else None
+        c1m = (cv - v1m) if v1m is not None else None
+        vals = [r[col] for r in full_rows if r.get(col) is not None]
+        if vals:
+            pct = sum(1 for v in vals if v <= cv) / len(vals)
+            mean = st.mean(vals)
+            sd = st.pstdev(vals)
+            z = (cv - mean) / sd if sd > 0 else 0.0
+        else:
+            pct, z = None, None
+        out.append({
+            "metric": col, "label": label,
+            "current":    round(cv, 6),
+            "change_1w":  round(c1w, 6) if c1w is not None else None,
+            "change_1m":  round(c1m, 6) if c1m is not None else None,
+            "percentile": round(pct * 100, 1) if pct is not None else None,
+            "z_score":    round(z, 2) if z is not None else None,
+        })
+    return out
+
+
+def _pct_color(pct):
+    if pct >= 80 or pct <= 20:
+        return "rgba(231,76,60,0.7)"
+    if pct >= 65 or pct <= 35:
+        return "rgba(243,156,18,0.7)"
+    return "rgba(52,152,219,0.7)"
+
+
+def _build_regime_charts(lookback_rows, stats):
+    ts_cols = ["trade_date"] + [c for c, _ in _REGIME_METRICS]
+    charts = []
+
+    # Chart 1: ATM IV
+    charts.append({
+        "title": "ATM Implied Volatility",
+        "rows": lookback_rows, "columns": ts_cols,
+        "chart_config": {
+            "type": "line",
+            "datasets": [
+                {"label": "30D ATM IV", "labelsColumn": "trade_date", "yColumn": "iv_30d_atm",
+                 "borderColor": "#3498db", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "7D ATM IV", "labelsColumn": "trade_date", "yColumn": "iv_7d_atm",
+                 "borderColor": "#2ecc71", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+            ],
+            "options": {"scales": {"y": {"title": {"display": True, "text": "IV (decimal)"}}}},
+        },
+    })
+
+    # Chart 2: Put Skew
+    charts.append({
+        "title": "Put Skew (25P - ATM)",
+        "rows": lookback_rows, "columns": ts_cols,
+        "chart_config": {
+            "type": "line",
+            "datasets": [
+                {"label": "30D Put Skew", "labelsColumn": "trade_date", "yColumn": "skew_30d_25p_atm",
+                 "borderColor": "#e74c3c", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+                {"label": "7D Put Skew", "labelsColumn": "trade_date", "yColumn": "skew_7d_25p_atm",
+                 "borderColor": "#f39c12", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1},
+            ],
+            "options": {"scales": {"y": {"title": {"display": True, "text": "Skew (IV diff)"}}}},
+        },
+    })
+
+    # Chart 3: Term Structure
+    charts.append({
+        "title": "Term Structure",
+        "rows": lookback_rows, "columns": ts_cols,
+        "chart_config": {
+            "type": "line",
+            "datasets": [
+                {"label": "7-30D Term Slope", "labelsColumn": "trade_date",
+                 "yColumn": "term_slope_7_30_atm",
+                 "borderColor": "#9b59b6", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1,
+                 "yAxisID": "y"},
+                {"label": "Term Ratio 7/30", "labelsColumn": "trade_date",
+                 "yColumn": "term_ratio_7d_30d",
+                 "borderColor": "#1abc9c", "borderWidth": 1.5, "pointRadius": 0, "tension": 0.1,
+                 "yAxisID": "y1"},
+            ],
+            "options": {"scales": {
+                "y":  {"title": {"display": True, "text": "Term Slope"}, "position": "left"},
+                "y1": {"title": {"display": True, "text": "Term Ratio"}, "position": "right",
+                       "grid": {"drawOnChartArea": False}},
+            }},
+        },
+    })
+
+    # Chart 4: Percentile bar chart
+    pct_data = [
+        {"metric": s["label"], "percentile": s["percentile"]}
+        for s in stats if s["percentile"] is not None and s["metric"] != "spot"
+    ]
+    charts.append({
+        "title": "Current Percentile Rank (vs Full History)",
+        "rows": pct_data,
+        "columns": ["metric", "percentile"],
+        "chart_config": {
+            "type": "bar",
+            "datasets": [{
+                "label": "Percentile",
+                "labelsColumn": "metric", "yColumn": "percentile",
+                "backgroundColor": [
+                    _pct_color(s["percentile"]) for s in stats
+                    if s["percentile"] is not None and s["metric"] != "spot"
+                ],
+                "borderWidth": 0,
+            }],
+            "options": {
+                "scales": {
+                    "y": {"title": {"display": True, "text": "Percentile"}, "min": 0, "max": 100},
+                },
+                "indexAxis": "y",
+            },
+        },
+    })
+
+    return charts
+
+
+async def _regime_narrative(client, stats, question):
+    stats_text = json.dumps(stats, indent=2)
+    msg = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"User asked: {question!r}\n\n"
+                f"Current SPX IV surface regime statistics (daily close, changes vs "
+                f"1 week / 1 month ago, historical percentile rank, z-score):\n\n"
+                f"{stats_text}\n\n"
+                "Provide a concise 3-5 sentence regime summary. Cover:\n"
+                "1. Overall vol level (high/low/normal) with percentile context\n"
+                "2. Skew dynamics (steep/flat, tightening/widening)\n"
+                "3. Term structure shape (contango/backwardation, steepening/flattening)\n"
+                "4. Any notable moves in the past week\n"
+                "Use professional vol trading language. Interpret — do not list raw numbers."
+            ),
+        }],
+    )
+    return msg.content[0].text.strip()
+
+
+async def _handle_regime_analysis(client, question, pool) -> dict:
+    async with pool.acquire() as conn:
+        async with conn.transaction(readonly=True):
+            lb_pg   = await conn.fetch(_regime_ts_sql(90))
+            full_pg = await conn.fetch(_regime_full_sql())
+
+    _, lb_rows   = _serialize(lb_pg)
+    _, full_rows = _serialize(full_pg)
+
+    if not lb_rows:
+        return {"response_type": "analysis", "error": "No data in surface_metrics_core",
+                "summary": None, "stats": [], "charts": []}
+
+    stats     = _compute_regime_stats(lb_rows, full_rows)
+    narrative = await _regime_narrative(client, stats, question)
+    charts    = _build_regime_charts(lb_rows, stats)
+
+    return {
+        "response_type": "analysis",
+        "error":   None,
+        "summary": narrative,
+        "stats":   stats,
+        "charts":  charts,
+    }
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 
 class HistoryTurn(BaseModel):
@@ -270,6 +536,13 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
     sql = None  # kept in scope so catch-all can return it
 
     try:
+        # 0. Classify: broad analysis vs direct SQL query
+        req_type = await _classify_request(client, question)
+        if req_type == "analysis":
+            return await _handle_regime_analysis(client, question, pool)
+
+        # ── Direct path (existing, unchanged) ────────────────────────
+
         # 1. Build conversation messages (last 6 turns for context)
         messages = []
         for turn in req.history[-6:]:
@@ -324,7 +597,7 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             sql = _validate_sql(raw_sql)
             sql = _enforce_limit(sql)
         except ValueError as e:
-            return {"sql": raw_sql, "error": str(e), "columns": [], "rows": [], "summary": None}
+            return {"response_type": "direct", "sql": raw_sql, "error": str(e), "columns": [], "rows": [], "summary": None}
 
         # 3. Execute in a read-only transaction
         try:
@@ -332,12 +605,12 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
                 async with conn.transaction(readonly=True):
                     pg_rows = await conn.fetch(sql)
         except asyncpg.PostgresError as e:
-            return {"sql": sql, "error": f"Database error: {e}", "columns": [], "rows": [], "summary": None}
+            return {"response_type": "direct", "sql": sql, "error": f"Database error: {e}", "columns": [], "rows": [], "summary": None}
 
         columns, rows = _serialize(pg_rows)
 
         if not rows:
-            return {"sql": sql, "error": None, "columns": columns, "rows": [], "summary": "The query returned no results."}
+            return {"response_type": "direct", "sql": sql, "error": None, "columns": columns, "rows": [], "summary": "The query returned no results."}
 
         # 4. Summarize via Claude Haiku
         preview = json.dumps(rows[:15], default=str)
@@ -356,17 +629,14 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         )
         summary = summary_msg.content[0].text.strip()
 
-        return {"sql": sql, "error": None, "columns": columns, "rows": rows,
-                "summary": summary, "chart_hint": chart_hint,
-                "chart_config": chart_config}
+        return {"response_type": "direct", "sql": sql, "error": None,
+                "columns": columns, "rows": rows, "summary": summary,
+                "chart_hint": chart_hint, "chart_config": chart_config}
 
     except Exception as e:
-        # Catch-all: always return JSON so the frontend can display the real error.
-        # Common causes: Anthropic API auth/network error, table doesn't exist yet.
         return {
+            "response_type": "direct",
             "sql": sql,
             "error": f"{type(e).__name__}: {e}",
-            "columns": [],
-            "rows": [],
-            "summary": None,
+            "columns": [], "rows": [], "summary": None,
         }

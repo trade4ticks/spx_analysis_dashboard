@@ -400,8 +400,8 @@
           </details>
         </div>
 
-        <!-- Chart card -->
-        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0">
+        <!-- Chart card (direct only) -->
+        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0 && turn.responseType !== 'analysis'">
           <div class="ai-card-hdr" x-text="chartLabel(turn.chartType)"></div>
           <div class="ai-chart-wrap">
             <div class="ai-chart-actions">
@@ -412,8 +412,51 @@
           </div>
         </div>
 
-        <!-- Data table -->
-        <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0">
+        <!-- ── Analysis: stats table ──────────────────────────────────── -->
+        <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis' && turn.stats.length > 0">
+          <div class="ai-card-hdr">Regime Metrics</div>
+          <div class="ai-table-wrap">
+            <table class="ai-table">
+              <thead>
+                <tr>
+                  <th>Metric</th><th>Current</th><th>1W Chg</th>
+                  <th>1M Chg</th><th>Pctile</th><th>Z</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="s in turn.stats" :key="s.metric">
+                  <tr>
+                    <td x-text="s.label"></td>
+                    <td x-text="fmtStat(s.current, s.metric)"></td>
+                    <td :style="s.change_1w > 0 ? 'color:var(--danger)' : s.change_1w < 0 ? 'color:var(--success)' : ''"
+                        x-text="fmtChange(s.change_1w)"></td>
+                    <td :style="s.change_1m > 0 ? 'color:var(--danger)' : s.change_1m < 0 ? 'color:var(--success)' : ''"
+                        x-text="fmtChange(s.change_1m)"></td>
+                    <td x-text="s.percentile != null ? s.percentile + '%' : '—'"></td>
+                    <td x-text="s.z_score != null ? s.z_score.toFixed(2) : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ── Analysis: multi-chart cards ────────────────────────────── -->
+        <template x-for="(chart, ci) in turn.charts" :key="'ac-'+ci">
+          <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis'">
+            <div class="ai-card-hdr" x-text="chart.title"></div>
+            <div class="ai-chart-wrap">
+              <div class="ai-chart-actions">
+                <button @click="resetAnalysisChartZoom(idx, ci)" title="Reset zoom">⟲</button>
+                <button @click="expandAnalysisChart(idx, ci)" title="Fullscreen">⤢</button>
+              </div>
+              <canvas :id="'explorer-chart-' + idx + '-a-' + ci"></canvas>
+            </div>
+          </div>
+        </template>
+
+        <!-- Data table (direct only) -->
+        <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0 && turn.responseType !== 'analysis'">
           <div class="ai-card-hdr">
             Data
             <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 300 ? ' (capped at 300)' : '')"></span>

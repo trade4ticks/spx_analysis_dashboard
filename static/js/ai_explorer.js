@@ -298,10 +298,12 @@ function renderFromConfig(idx, config, columns, rows) {
              grid:{color:'rgba(255,255,255,0.05)'}, border:{color:'transparent'} },
     };
     const scales = {};
-    for (const ax of ['x','y']) {
-        scales[ax] = { ...baseS[ax], ...(uo.scales?.[ax]||{}) };
-        scales[ax].ticks = { ...baseS[ax].ticks, ...(uo.scales?.[ax]?.ticks||{}) };
-        scales[ax].grid  = { ...baseS[ax].grid,  ...(uo.scales?.[ax]?.grid||{}) };
+    const allAxes = new Set(['x', 'y', ...Object.keys(uo.scales || {})]);
+    for (const ax of allAxes) {
+        const base = baseS[ax] || baseS.y;  // extra axes (y1, y2) inherit y defaults
+        scales[ax] = { ...base, ...(uo.scales?.[ax]||{}) };
+        scales[ax].ticks = { ...(base.ticks||{}), ...(uo.scales?.[ax]?.ticks||{}) };
+        scales[ax].grid  = { ...(base.grid||{}),  ...(uo.scales?.[ax]?.grid||{}) };
         if (uo.scales?.[ax]?.title) scales[ax].title = uo.scales[ax].title;
     }
 
@@ -375,6 +377,32 @@ document.addEventListener('alpine:init', () => {
             this.history = [];
         },
 
+        fmtStat(val, metric) {
+            if (val == null) return '—';
+            if (metric === 'spot') return val.toFixed(2);
+            return typeof val === 'number' ? val.toFixed(4) : String(val);
+        },
+
+        fmtChange(val) {
+            if (val == null) return '—';
+            return (val >= 0 ? '+' : '') + val.toFixed(4);
+        },
+
+        resetAnalysisChartZoom(turnIdx, chartIdx) {
+            const chart = _explorerCharts[`${turnIdx}-a-${chartIdx}`];
+            if (chart && chart.resetZoom) chart.resetZoom();
+        },
+
+        expandAnalysisChart(turnIdx, chartIdx) {
+            const turn = this.history[turnIdx];
+            if (!turn || !turn.charts[chartIdx]) return;
+            const chart = turn.charts[chartIdx];
+            this.expandedChartIdx = `${turnIdx}-a-${chartIdx}`;
+            this.$nextTick(() => {
+                renderFromConfig('fs', chart.chart_config, chart.columns, chart.rows);
+            });
+        },
+
         resetChartZoom(key) {
             const chart = _explorerCharts[key];
             if (chart && chart.resetZoom) chart.resetZoom();
@@ -430,6 +458,7 @@ document.addEventListener('alpine:init', () => {
                 question: q,
                 sql: null, columns: [], rows: [],
                 summary: null, error: null, chartType: null, chartConfig: null,
+                responseType: 'direct', stats: [], charts: [],
                 done: false,
             }];
             const idx = this.history.length - 1;
@@ -458,6 +487,25 @@ document.addEventListener('alpine:init', () => {
                     return;
                 }
 
+                // ── Analysis response: multi-chart + stats ──────────────
+                if (data.response_type === 'analysis') {
+                    this._updateTurn(idx, {
+                        responseType: 'analysis',
+                        summary:      data.summary ?? null,
+                        error:        data.error ?? null,
+                        stats:        data.stats ?? [],
+                        charts:       data.charts ?? [],
+                        done:         true,
+                    });
+                    await this.$nextTick();
+                    (data.charts ?? []).forEach((chart, ci) => {
+                        const key = `${idx}-a-${ci}`;
+                        renderFromConfig(key, chart.chart_config, chart.columns, chart.rows);
+                    });
+                    return;
+                }
+
+                // ── Direct response: existing single-chart path ─────────
                 let ct = null;
                 const cc = data.chart_config ?? null;
                 if (!data.error && data.rows?.length) {
