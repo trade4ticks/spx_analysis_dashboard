@@ -191,12 +191,12 @@ function renderTurnChart(idx, chartType, columns, rows) {
                         callbacks: {
                             label: ctx => {
                                 const r = rows[ctx.dataIndex];
-                                const parts = [
-                                    `${xCol}: ${r[xCol]?.toFixed(4) ?? '—'}`,
-                                    `${yCol}: ${r[yCol]?.toFixed(4) ?? '—'}`,
-                                ];
-                                if (colorCol) parts.push(`${colorCol}: ${r[colorCol]?.toFixed(4) ?? '—'}`);
-                                return parts;
+                                return columns.map(col => {
+                                    const v = r[col];
+                                    if (v == null) return `${col}: —`;
+                                    if (typeof v === 'number') return `${col}: ${Number.isInteger(v) ? v : v.toFixed(4)}`;
+                                    return `${col}: ${v}`;
+                                });
                             },
                         },
                     },
