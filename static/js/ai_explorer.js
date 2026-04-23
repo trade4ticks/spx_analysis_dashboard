@@ -198,6 +198,11 @@ document.addEventListener('alpine:init', () => {
             if (el) el.scrollTop = el.scrollHeight;
         },
 
+        _updateTurn(idx, patch) {
+            // splice triggers Alpine's array Proxy reliably; direct index mutation does not
+            this.history.splice(idx, 1, { ...this.history[idx], ...patch });
+        },
+
         async submit() {
             const q = this.question.trim();
             if (!q || this.loading) return;
@@ -205,7 +210,6 @@ document.addEventListener('alpine:init', () => {
             this.loading  = true;
             this.question = '';
 
-            // Build history payload for the backend (no row data — just metadata)
             const historyPayload = this.history.map(t => ({
                 question: t.question,
                 sql:      t.sql     || null,
@@ -213,13 +217,13 @@ document.addEventListener('alpine:init', () => {
                 error:    t.error   || null,
             }));
 
-            // Push a pending turn immediately so the loading card renders
-            this.history.push({
+            // Array reassignment (not push) guarantees Alpine detects the change
+            this.history = [...this.history, {
                 question: q,
                 sql: null, columns: [], rows: [],
                 summary: null, error: null, chartType: null,
                 done: false,
-            });
+            }];
             const idx = this.history.length - 1;
 
             await this.$nextTick();
@@ -237,37 +241,36 @@ document.addEventListener('alpine:init', () => {
                     data = await res.json();
                 } catch {
                     const text = await res.text().catch(() => '');
-                    this.history[idx].error = `Server error (HTTP ${res.status}): ${text.slice(0, 300)}`;
-                    this.history[idx].done  = true;
+                    this._updateTurn(idx, { error: `Server error (HTTP ${res.status}): ${text.slice(0, 300)}`, done: true });
                     return;
                 }
 
                 if (!res.ok) {
-                    this.history[idx].error = data.detail ?? `HTTP ${res.status}`;
-                    this.history[idx].done  = true;
+                    this._updateTurn(idx, { error: data.detail ?? `HTTP ${res.status}`, done: true });
                     return;
                 }
 
-                // Mutate the turn in-place — Alpine's proxy picks up the changes
-                this.history[idx].sql     = data.sql     ?? null;
-                this.history[idx].columns = data.columns ?? [];
-                this.history[idx].rows    = data.rows    ?? [];
-                this.history[idx].summary = data.summary ?? null;
-                this.history[idx].error   = data.error   ?? null;
-                this.history[idx].done    = true;
+                const ct = (!data.error && data.rows?.length)
+                    ? detectChartType(data.columns ?? [], data.rows)
+                    : null;
 
-                if (!data.error && data.rows?.length) {
-                    const ct = detectChartType(data.columns, data.rows);
-                    this.history[idx].chartType = ct;
-                    if (ct) {
-                        await this.$nextTick();
-                        renderTurnChart(idx, ct, data.columns, data.rows);
-                    }
+                this._updateTurn(idx, {
+                    sql:       data.sql      ?? null,
+                    columns:   data.columns  ?? [],
+                    rows:      data.rows     ?? [],
+                    summary:   data.summary  ?? null,
+                    error:     data.error    ?? null,
+                    chartType: ct,
+                    done:      true,
+                });
+
+                if (ct) {
+                    await this.$nextTick();
+                    renderTurnChart(idx, ct, data.columns, data.rows);
                 }
 
             } catch (e) {
-                this.history[idx].error = e.message ?? 'Request failed';
-                this.history[idx].done  = true;
+                this._updateTurn(idx, { error: e.message ?? 'Request failed', done: true });
             } finally {
                 this.loading = false;
                 await this.$nextTick();
