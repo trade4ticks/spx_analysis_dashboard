@@ -15,6 +15,7 @@ Flow:
 import os
 import re
 import json
+from typing import Optional
 
 import asyncpg
 from anthropic import AsyncAnthropic
