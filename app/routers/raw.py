@@ -292,7 +292,7 @@ async def get_raw_skew(
                     SELECT strike, "right", implied_vol, delta, mid_price,
                            theta, vega, gamma, underlying_price,
                            moneyness, log_moneyness, bid, ask, spread_pct,
-                           CAST(quote_time AS VARCHAR) AS qt
+                           SUBSTR(CAST(CAST(quote_time AS TIME) AS VARCHAR), 1, 5) AS qt
                     FROM read_parquet('{pq}')
                     WHERE CAST(quote_time AS TIME) IN ({times_sql})
                       AND implied_vol IS NOT NULL AND implied_vol > 0
@@ -301,10 +301,10 @@ async def get_raw_skew(
                 """)
                 if not rows:
                     continue
-                # Group by time
+                # Group by time (qt is guaranteed "HH:MM" format from SQL)
                 groups: dict[str, list] = {}
                 for r in rows:
-                    groups.setdefault(str(r[14])[:5], []).append(r)
+                    groups.setdefault(str(r[14]), []).append(r)
                 for t_key in sorted(groups):
                     s = _otm_series(groups[t_key], dte, midx, t_key,
                                     exp_str, date_str)
