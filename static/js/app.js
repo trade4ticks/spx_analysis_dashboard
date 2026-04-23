@@ -266,7 +266,8 @@ document.addEventListener('alpine:init', () => {
             rp.set('expirations',  exps.join(','));
             if (panel.rawSubMode === 'intraday') {
               const buckets = this.bucketTimes(panel.intradayBucket);
-              if (buckets.length) rp.set('times', buckets.join(','));
+              rp.set(buckets.length ? 'times' : 'time',
+                     buckets.length ? buckets.join(',') : this.time);
             } else {
               rp.set('time', this.time);
             }
@@ -323,7 +324,8 @@ document.addEventListener('alpine:init', () => {
             rp.set('strikes',     strikes.join(','));
             if (panel.rawSubMode === 'intraday') {
               const buckets = this.bucketTimes(panel.intradayBucket);
-              if (buckets.length) rp.set('times', buckets.join(','));
+              rp.set(buckets.length ? 'times' : 'time',
+                     buckets.length ? buckets.join(',') : this.time);
             } else {
               rp.set('time', this.time);
             }
@@ -694,6 +696,19 @@ document.addEventListener('alpine:init', () => {
       }
       if (sub === 'multi_strike' && !panel.rawStrikes.length) {
         this.setATMStrike(panel);
+      }
+      if (sub === 'intraday') {
+        // Intraday needs rawSingleExp (for skew) and rawStrikes (for term)
+        if (!panel.rawSingleExp) {
+          const filtered = this.filteredRawExps(panel);
+          if (filtered.length) {
+            const near = filtered.find(e => e.dte >= 25) || filtered[0];
+            panel.rawSingleExp = near.expiration;
+          }
+        }
+        if (!panel.rawStrikes.length) {
+          this.setATMStrike(panel);
+        }
       }
       this.loadPanel(panel);
     },
