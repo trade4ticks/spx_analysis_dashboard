@@ -239,6 +239,8 @@
                       @click="setRawSubMode(panel, 'multi_exp')">Multi-Exp</span>
                 <span :class="{on: panel.rawSubMode==='multi_date'}"
                       @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
+                <span :class="{on: panel.rawSubMode==='intraday'}"
+                      @click="setRawSubMode(panel, 'intraday')">Intraday</span>
               </div>
               <!-- Multi-Exp: expiration multi-picker -->
               <template x-if="panel.rawSubMode === 'multi_exp'">
@@ -265,6 +267,28 @@
                        @click="panel.rawDateMenuOpen=!panel.rawDateMenuOpen"
                        @click.outside="panel.rawDateMenuOpen=false">
                     <span x-text="panel.rawDates.length + ' Dates ▾'"></span>
+                  </div>
+                </div>
+              </template>
+              <!-- Intraday: single expiration + time bucket selector -->
+              <template x-if="panel.rawSubMode === 'intraday'">
+                <div style="display:contents;">
+                  <span style="font-size:9px;color:var(--dim);">EXP</span>
+                  <div class="p-dd">
+                    <select x-model="panel.rawSingleExp" @change="loadPanel(panel)"
+                            x-init="$nextTick(() => $el.value = panel.rawSingleExp)">
+                      <template x-for="e in filteredRawExps(panel)" :key="'rie-'+e.expiration">
+                        <option :value="e.expiration"
+                                x-text="e.expiration + ' (' + e.dte + 'D)'"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="p-seg">
+                    <template x-for="b in [5,15,30,60]" :key="'rb-'+b">
+                      <span :class="{on: panel.intradayBucket===b}"
+                            @click="panel.intradayBucket=b; loadPanel(panel)"
+                            x-text="b+'m'"></span>
+                    </template>
                   </div>
                 </div>
               </template>
@@ -368,6 +392,8 @@
                       @click="setRawSubMode(panel, 'multi_strike')">Multi-K</span>
                 <span :class="{on: panel.rawSubMode==='multi_date'}"
                       @click="setRawSubMode(panel, 'multi_date')">Multi-Date</span>
+                <span :class="{on: panel.rawSubMode==='intraday'}"
+                      @click="setRawSubMode(panel, 'intraday')">Intraday</span>
               </div>
               <!-- Strike text input (always visible) -->
               <span style="font-size:9px;color:var(--dim);">COMMA SEP</span>
@@ -386,6 +412,16 @@
                      @click="panel.rawDateMenuOpen=!panel.rawDateMenuOpen"
                      @click.outside="panel.rawDateMenuOpen=false">
                   <span x-text="panel.rawDates.length + ' Dates ▾'"></span>
+                </div>
+              </template>
+              <!-- Intraday: time bucket selector -->
+              <template x-if="panel.rawSubMode === 'intraday'">
+                <div class="p-seg">
+                  <template x-for="b in [5,15,30,60]" :key="'rtb-'+b">
+                    <span :class="{on: panel.intradayBucket===b}"
+                          @click="panel.intradayBucket=b; loadPanel(panel)"
+                          x-text="b+'m'"></span>
+                  </template>
                 </div>
               </template>
               <!-- Settlement -->

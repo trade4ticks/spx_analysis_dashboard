@@ -14,6 +14,7 @@ import math
 import os
 import re
 from datetime import date as date_type
+from typing import Optional
 
 try:
     import duckdb
@@ -202,6 +203,43 @@ async def get_expirations(
     return {"date": date, "expirations": results, "underlying": underlying}
 
 
+# ── Skew helpers ─────────────────────────────────────────────────────────────
+
+
+def _otm_series(rows, dte, midx, label, exp_str, date_str):
+    """Compute implied forward, OTM-filter rows, and build one series entry."""
+    if not rows:
+        return None
+    underlying = rows[0][8]
+    puts_by_k  = {r[0]: r for r in rows if r[1] == "P"}
+    calls_by_k = {r[0]: r for r in rows if r[1] == "C"}
+    both = sorted(set(puts_by_k) & set(calls_by_k))
+    forward = underlying
+    if both:
+        k_atm = min(both, key=lambda k: abs(k - underlying))
+        p_mid, c_mid = puts_by_k[k_atm][4], calls_by_k[k_atm][4]
+        if p_mid is not None and c_mid is not None:
+            T = max(dte, 1) / 365.0
+            forward = k_atm + (c_mid - p_mid) * math.exp(0.045 * T)
+    otm = [r for r in rows
+           if (r[1] == "P" and r[0] < forward)
+           or (r[1] == "C" and r[0] >= forward)]
+    if not otm:
+        return None
+    return {
+        "label": label, "expiration": exp_str, "date": date_str,
+        "dte": dte, "underlying": underlying, "forward": forward,
+        "strikes":   [r[0] for r in otm],
+        "moneyness": [round(r[9], 6) if r[9] else None for r in otm],
+        "values":    [r[midx] for r in otm],
+        "rights":    [r[1] for r in otm],
+        "metrics": [{"iv": r[2], "delta": r[3], "mid_price": r[4],
+                     "theta": r[5], "vega": r[6], "gamma": r[7],
+                     "bid": r[11], "ask": r[12], "spread_pct": r[13]}
+                    for r in otm],
+    }
+
+
 # ── Raw skew ─────────────────────────────────────────────────────────────────
 
 @router.get("/skew")
@@ -209,23 +247,28 @@ async def get_raw_skew(
     dates:        str  = Query(..., description="Comma-separated trade dates"),
     expirations:  str  = Query(..., description="Comma-separated expirations"),
     time:         str  = Query("15:45"),
+    times:        Optional[str] = Query(None, description="Comma-separated HH:MM for intraday"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
     x_axis:       str  = Query("strike", description="strike | moneyness"),
     metric:       str  = Query("iv"),
 ) -> dict:
-    """OTM puts + calls vs strike for each (date, expiration) combo."""
+    """OTM puts + calls vs strike for each (date, expiration[, time]) combo."""
     _require_duckdb()
     settlement = _validate_settlement(settlement)
-    time_str   = _validate_time(time)
     metric     = _validate_metric(metric)
-    # Map dashboard metric to result column index in the SELECT below
     midx = {"iv": 2, "price": 4, "theta": 5, "vega": 6, "gamma": 7}[metric]
     date_list  = _split_csv(dates)
     exp_list   = _split_csv(expirations)
     if not date_list or not exp_list:
         raise HTTPException(400, "dates and expirations required")
 
+    # Build time list: multiple → intraday, single → closest-match
+    if times:
+        time_list = [_validate_time(t.strip()) for t in times.split(",") if t.strip()]
+    else:
+        time_list = [_validate_time(time)]
+    multi_time = len(time_list) > 1
     multi_date = len(date_list) > 1
     multi_exp  = len(exp_list) > 1
     flag_sql   = "AND flag_any = false" if filter_flags else ""
@@ -239,77 +282,66 @@ async def get_raw_skew(
             pq = _find_parquet(date_folder, exp_folder, f"{settlement}.parquet")
             if pq is None:
                 continue
-
-            rows = _duckdb_query(f"""
-                WITH snap AS (
-                    SELECT quote_time
-                    FROM (SELECT DISTINCT CAST(quote_time AS TIME) AS quote_time
-                          FROM read_parquet('{pq}'))
-                    ORDER BY ABS(EXTRACT(EPOCH FROM quote_time)
-                               - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
-                    LIMIT 1
-                )
-                SELECT strike, "right", implied_vol, delta, mid_price,
-                       theta, vega, gamma, underlying_price,
-                       moneyness, log_moneyness, bid, ask, spread_pct
-                FROM read_parquet('{pq}')
-                WHERE CAST(quote_time AS TIME) = (SELECT quote_time FROM snap)
-                  AND implied_vol IS NOT NULL
-                  AND implied_vol > 0
-                  {flag_sql}
-                ORDER BY strike
-            """)
-
-            if not rows:
-                continue
-
-            underlying = rows[0][8]
             exp_d = _to_date(exp_folder)
             dte = (exp_d - trade_d).days
 
-            # Implied forward via put-call parity at the strike closest to spot.
-            # F = K + (C - P) * exp(rT). Using F (not spot) as the OTM switch
-            # point eliminates the put-call IV jump because P_F = C_F by parity.
-            puts_by_k  = {r[0]: r for r in rows if r[1] == "P"}
-            calls_by_k = {r[0]: r for r in rows if r[1] == "C"}
-            both = sorted(set(puts_by_k) & set(calls_by_k))
-            forward = underlying
-            if both:
-                k_atm = min(both, key=lambda k: abs(k - underlying))
-                p_mid = puts_by_k[k_atm][4]
-                c_mid = calls_by_k[k_atm][4]
-                if p_mid is not None and c_mid is not None:
-                    T = max(dte, 1) / 365.0
-                    forward = k_atm + (c_mid - p_mid) * math.exp(0.045 * T)
-
-            otm = [r for r in rows
-                   if (r[1] == "P" and r[0] < forward)
-                   or (r[1] == "C" and r[0] >= forward)]
-
-            if multi_date and multi_exp:
-                label = f"{date_str} · {exp_str}"
-            elif multi_date:
-                label = date_str
+            if multi_time:
+                # ── Intraday: all requested times in one query, group by time
+                times_sql = ", ".join(f"CAST('{t}' AS TIME)" for t in time_list)
+                rows = _duckdb_query(f"""
+                    SELECT strike, "right", implied_vol, delta, mid_price,
+                           theta, vega, gamma, underlying_price,
+                           moneyness, log_moneyness, bid, ask, spread_pct,
+                           CAST(quote_time AS VARCHAR) AS qt
+                    FROM read_parquet('{pq}')
+                    WHERE CAST(quote_time AS TIME) IN ({times_sql})
+                      AND implied_vol IS NOT NULL AND implied_vol > 0
+                      {flag_sql}
+                    ORDER BY qt, strike
+                """)
+                if not rows:
+                    continue
+                # Group by time
+                groups: dict[str, list] = {}
+                for r in rows:
+                    groups.setdefault(str(r[14])[:5], []).append(r)
+                for t_key in sorted(groups):
+                    s = _otm_series(groups[t_key], dte, midx, t_key,
+                                    exp_str, date_str)
+                    if s:
+                        series.append(s)
             else:
-                label = f"{exp_str} ({dte}D)"
-
-            series.append({
-                "label":      label,
-                "expiration": exp_str,
-                "date":       date_str,
-                "dte":        dte,
-                "underlying": underlying,
-                "forward":    forward,
-                "strikes":    [r[0] for r in otm],
-                "moneyness":  [round(r[9], 6) if r[9] else None for r in otm],
-                "values":     [r[midx] for r in otm],
-                "rights":     [r[1] for r in otm],
-                "metrics": [{
-                    "iv": r[2], "delta": r[3], "mid_price": r[4],
-                    "theta": r[5], "vega": r[6], "gamma": r[7],
-                    "bid": r[11], "ask": r[12], "spread_pct": r[13],
-                } for r in otm],
-            })
+                # ── Single time: closest-match (existing behavior)
+                time_str = time_list[0]
+                rows = _duckdb_query(f"""
+                    WITH snap AS (
+                        SELECT quote_time
+                        FROM (SELECT DISTINCT CAST(quote_time AS TIME) AS quote_time
+                              FROM read_parquet('{pq}'))
+                        ORDER BY ABS(EXTRACT(EPOCH FROM quote_time)
+                                   - EXTRACT(EPOCH FROM CAST('{time_str}' AS TIME)))
+                        LIMIT 1
+                    )
+                    SELECT strike, "right", implied_vol, delta, mid_price,
+                           theta, vega, gamma, underlying_price,
+                           moneyness, log_moneyness, bid, ask, spread_pct
+                    FROM read_parquet('{pq}')
+                    WHERE CAST(quote_time AS TIME) = (SELECT quote_time FROM snap)
+                      AND implied_vol IS NOT NULL AND implied_vol > 0
+                      {flag_sql}
+                    ORDER BY strike
+                """)
+                if not rows:
+                    continue
+                if multi_date and multi_exp:
+                    label = f"{date_str} · {exp_str}"
+                elif multi_date:
+                    label = date_str
+                else:
+                    label = f"{exp_str} ({dte}D)"
+                s = _otm_series(rows, dte, midx, label, exp_str, date_str)
+                if s:
+                    series.append(s)
 
     return {
         "mode":   "raw_skew",
@@ -326,23 +358,27 @@ async def get_raw_term(
     dates:        str  = Query(..., description="Comma-separated trade dates"),
     strikes:      str  = Query(..., description="Comma-separated strike prices"),
     time:         str  = Query("15:45"),
+    times:        Optional[str] = Query(None, description="Comma-separated HH:MM for intraday"),
     settlement:   str  = Query("PM"),
     filter_flags: bool = Query(True),
     metric:       str  = Query("iv"),
 ) -> dict:
-    """Selected metric vs DTE for each (date, strike) combo (auto-OTM)."""
+    """Selected metric vs DTE for each (date, strike[, time]) combo (auto-OTM)."""
     _require_duckdb()
     settlement  = _validate_settlement(settlement)
-    time_str    = _validate_time(time)
     metric      = _validate_metric(metric)
     date_list   = _split_csv(dates)
     strike_list = _parse_strikes(strikes)
     if not date_list:
         raise HTTPException(400, "dates required")
-    # Map metric to term endpoint's bucket key
     metric_key = {"iv": "iv", "price": "mid_price",
                   "theta": "theta", "vega": "vega", "gamma": "gamma"}[metric]
 
+    if times:
+        time_list = [_validate_time(t.strip()) for t in times.split(",") if t.strip()]
+    else:
+        time_list = [_validate_time(time)]
+    multi_time   = len(time_list) > 1
     multi_date   = len(date_list) > 1
     multi_strike = len(strike_list) > 1
     flag_sql     = "AND flag_any = false" if filter_flags else ""
@@ -358,8 +394,6 @@ async def get_raw_term(
         if not all_files:
             continue
 
-        # Parse expiration folder from each file path in Python.
-        # Path: .../<date>/<exp>/<settlement>.parquet → parts[-2] is exp
         valid = []
         for f in all_files:
             parts = f.replace("\\", "/").split("/")
@@ -368,72 +402,79 @@ async def get_raw_term(
             exp_f = parts[-2]
             if re.match(r"^\d{8}$", exp_f):
                 valid.append((f, exp_f))
-
         if not valid:
             continue
 
-        # Build a UNION ALL query with the expiration hardcoded per file
-        union_parts = []
-        for f, exp_f in valid:
-            union_parts.append(f"""
-                SELECT '{exp_f}' AS exp_folder,
-                       strike, "right", implied_vol, delta, mid_price,
-                       theta, vega, gamma, underlying_price, bid, ask
-                FROM read_parquet('{f}')
-                WHERE CAST(quote_time AS TIME) = CAST('{time_str}' AS TIME)
-                  AND strike IN ({strike_csv})
-                  AND implied_vol IS NOT NULL
-                  AND implied_vol > 0
-                  AND (("right" = 'P' AND strike < underlying_price)
-                    OR ("right" = 'C' AND strike >= underlying_price))
-                  {flag_sql}
-            """)
-        union_sql = " UNION ALL ".join(union_parts)
-        rows = _duckdb_query(union_sql + " ORDER BY exp_folder, strike")
-
-        if not rows:
-            continue
-
-        bucket: dict[float, dict] = {s: {} for s in strike_list}
-        for r in rows:
-            exp_f, strike = r[0], r[1]
-            if strike not in bucket:
-                continue
-            exp_iso = _to_iso(exp_f)
-            exp_d = _to_date(exp_f)
-            dte = (exp_d - trade_d).days
-            if dte < 0:
-                continue
-            bucket[strike][exp_iso] = {
-                "dte": dte, "iv": r[3],
-                "delta": r[4], "mid_price": r[5],
-                "theta": r[6], "vega": r[7], "gamma": r[8],
-                "bid": r[10], "ask": r[11],
-            }
-
-        all_exps = sorted({e for sd in bucket.values() for e in sd})
-
-        for strike in strike_list:
-            entries = bucket[strike]
-            if not entries:
-                continue
-            klabel = _strike_label(strike)
-            if multi_date and multi_strike:
-                label = f"{date_str} · K{klabel}"
-            elif multi_date:
-                label = date_str
+        # Build per-time queries
+        for t_str in time_list:
+            if multi_time:
+                # Intraday: exact time match
+                time_filter = f"CAST(quote_time AS TIME) = CAST('{t_str}' AS TIME)"
             else:
-                label = klabel
+                time_filter = f"CAST(quote_time AS TIME) = CAST('{t_str}' AS TIME)"
 
-            series.append({
-                "label":       label,
-                "strike":      strike,
-                "date":        date_str,
-                "expirations": all_exps,
-                "dtes":   [entries.get(e, {}).get("dte") for e in all_exps],
-                "values": [entries.get(e, {}).get(metric_key) for e in all_exps],
-                "metrics": [entries[e] if e in entries else None
-                            for e in all_exps],
+            union_parts = []
+            for f, exp_f in valid:
+                union_parts.append(f"""
+                    SELECT '{exp_f}' AS exp_folder,
+                           strike, "right", implied_vol, delta, mid_price,
+                           theta, vega, gamma, underlying_price, bid, ask
+                    FROM read_parquet('{f}')
+                    WHERE {time_filter}
+                      AND strike IN ({strike_csv})
+                      AND implied_vol IS NOT NULL AND implied_vol > 0
+                      AND (("right" = 'P' AND strike < underlying_price)
+                        OR ("right" = 'C' AND strike >= underlying_price))
+                      {flag_sql}
+                """)
+            union_sql = " UNION ALL ".join(union_parts)
+            rows = _duckdb_query(union_sql + " ORDER BY exp_folder, strike")
+            if not rows:
+                continue
+
+            bucket: dict[float, dict] = {s: {} for s in strike_list}
+            for r in rows:
+                exp_f, strike = r[0], r[1]
+                if strike not in bucket:
+                    continue
+                exp_iso = _to_iso(exp_f)
+                exp_d = _to_date(exp_f)
+                dte = (exp_d - trade_d).days
+                if dte < 0:
+                    continue
+                bucket[strike][exp_iso] = {
+                    "dte": dte, "iv": r[3],
+                    "delta": r[4], "mid_price": r[5],
+                    "theta": r[6], "vega": r[7], "gamma": r[8],
+                    "bid": r[10], "ask": r[11],
+                }
+
+            all_exps = sorted({e for sd in bucket.values() for e in sd})
+
+            for strike in strike_list:
+                entries = bucket[strike]
+                if not entries:
+                    continue
+                klabel = _strike_label(strike)
+                t_label = t_str[:5]
+                if multi_time:
+                    label = t_label if not multi_strike else f"{t_label} · K{klabel}"
+                elif multi_date and multi_strike:
+                    label = f"{date_str} · K{klabel}"
+                elif multi_date:
+                    label = date_str
+                else:
+                    label = klabel
+
+                series.append({
+                    "label":       label,
+                    "strike":      strike,
+                    "date":        date_str,
+                    "expirations": all_exps,
+                    "dtes":   [entries.get(e, {}).get("dte") for e in all_exps],
+                    "values": [entries.get(e, {}).get(metric_key) for e in all_exps],
+                    "metrics": [entries[e] if e in entries else None
+                                for e in all_exps],
             })
 
     return {"mode": "raw_term", "metric": metric, "series": series}

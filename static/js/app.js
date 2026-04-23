@@ -253,6 +253,9 @@ document.addEventListener('alpine:init', () => {
             if (panel.rawSubMode === 'multi_date') {
               dates = panel.rawDates.length ? panel.rawDates : [this.date];
               exps  = panel.rawSingleExp ? [panel.rawSingleExp] : [];
+            } else if (panel.rawSubMode === 'intraday') {
+              dates = [this.date];
+              exps  = panel.rawSingleExp ? [panel.rawSingleExp] : [];
             } else {
               dates = [this.date];
               exps  = panel.rawExpirations;
@@ -261,7 +264,12 @@ document.addEventListener('alpine:init', () => {
             const rp = new URLSearchParams();
             rp.set('dates',        dates.join(','));
             rp.set('expirations',  exps.join(','));
-            rp.set('time',         this.time);
+            if (panel.rawSubMode === 'intraday') {
+              const buckets = this.bucketTimes(panel.intradayBucket);
+              if (buckets.length) rp.set('times', buckets.join(','));
+            } else {
+              rp.set('time', this.time);
+            }
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
             rp.set('x_axis',       panel.rawXAxis);
@@ -302,6 +310,9 @@ document.addEventListener('alpine:init', () => {
             if (panel.rawSubMode === 'multi_date') {
               dates   = panel.rawDates.length ? panel.rawDates : [this.date];
               strikes = panel.rawStrikes.length ? [panel.rawStrikes[0]] : [];
+            } else if (panel.rawSubMode === 'intraday') {
+              dates   = [this.date];
+              strikes = panel.rawStrikes.length ? [panel.rawStrikes[0]] : [];
             } else {
               dates   = [this.date];
               strikes = panel.rawStrikes;
@@ -310,7 +321,12 @@ document.addEventListener('alpine:init', () => {
             const rp = new URLSearchParams();
             rp.set('dates',        dates.join(','));
             rp.set('strikes',     strikes.join(','));
-            rp.set('time',         this.time);
+            if (panel.rawSubMode === 'intraday') {
+              const buckets = this.bucketTimes(panel.intradayBucket);
+              if (buckets.length) rp.set('times', buckets.join(','));
+            } else {
+              rp.set('time', this.time);
+            }
             rp.set('settlement',   panel.rawSettlement);
             rp.set('filter_flags', panel.rawFilterFlags);
             rp.set('metric',       this.metric);
