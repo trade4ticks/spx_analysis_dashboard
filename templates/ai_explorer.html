@@ -389,7 +389,7 @@
             <span style="color:var(--accent);">✦</span> Summary
             <span class="hdr-count" x-text="turn.rows.length + ' row' + (turn.rows.length === 1 ? '' : 's') + ' returned'"></span>
           </div>
-          <div class="ai-summary" x-text="turn.summary"></div>
+          <div class="ai-summary" x-html="renderMd(turn.summary)"></div>
         </div>
 
         <!-- SQL debug (collapsible) -->

@@ -507,12 +507,15 @@ async def _regime_narrative(client, stats, question, stats_date=""):
                 f"SPX IV surface regime statistics as of {stats_date} (daily close, changes vs "
                 f"1 week / 1 month ago, historical percentile rank, z-score):\n\n"
                 f"{stats_text}\n\n"
-                "Provide a concise 3-5 sentence regime summary. Cover:\n"
+                "Provide a concise 3-5 sentence regime summary as a single paragraph. Cover:\n"
                 "1. Overall vol level (high/low/normal) with percentile context\n"
                 "2. Skew dynamics (steep/flat, tightening/widening)\n"
                 "3. Term structure shape (contango/backwardation, steepening/flattening)\n"
                 "4. Any notable moves in the past week\n"
-                "Use professional vol trading language. Interpret — do not list raw numbers."
+                "Use professional vol trading language. Interpret — do not list raw numbers.\n"
+                "Do NOT include markdown headers, tables, horizontal rules, or charts.\n"
+                "Do NOT repeat the raw stats data — a stats table is shown separately.\n"
+                "Just write flowing prose interpreting the regime."
             ),
         }],
     )

@@ -346,6 +346,31 @@ function renderFromConfig(idx, config, columns, rows) {
     _explorerCharts[idx] = new Chart(canvas, { type: chartType, data: chartData, options: opts });
 }
 
+// ── Lightweight Markdown → HTML ───────────────────────────────────────────────
+
+function mdToHtml(text) {
+    if (!text) return '';
+    let html = text
+        // Escape HTML entities first
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        // Headers: ### → h4, ## → h3 (keep small for card context)
+        .replace(/^### (.+)$/gm, '<h4 style="margin:10px 0 4px;font-size:13px;color:var(--accent);">$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3 style="margin:12px 0 6px;font-size:14px;color:var(--text);">$1</h3>')
+        // Bold: **text**
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        // Italic: *text*
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // Horizontal rule: --- or ***
+        .replace(/^[-*]{3,}\s*$/gm, '<hr style="border:none;border-top:1px solid var(--border);margin:8px 0;">')
+        // Bullet lists: - item
+        .replace(/^- (.+)$/gm, '<li style="margin-left:16px;list-style:disc;">$1</li>')
+        // Paragraphs: double newline
+        .replace(/\n\n/g, '</p><p>')
+        // Single newlines within a paragraph
+        .replace(/\n/g, '<br>');
+    return '<p>' + html + '</p>';
+}
+
 // ── Alpine component ──────────────────────────────────────────────────────────
 
 document.addEventListener('alpine:init', () => {
@@ -363,6 +388,8 @@ document.addEventListener('alpine:init', () => {
             }
             return String(val);
         },
+
+        renderMd(text) { return mdToHtml(text); },
 
         chartLabel(chartType) {
             if (!chartType) return '';
