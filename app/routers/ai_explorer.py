@@ -105,6 +105,16 @@ QUERY GUIDANCE:
   or GROUP BY trade_date with appropriate aggregates.
 - IV values are decimals — mention this in context but do NOT auto-multiply in SQL unless asked.
 - Always include LIMIT (max 300). Put LIMIT at the very end of the query.
+
+CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
+- Never return a wide single-row pivot (many metric columns, one row). Charts cannot render that shape.
+- For comparisons across tenors or metrics: use UNION ALL to produce one row per item with a
+  string label column (e.g. 'metric') plus one or more numeric value columns.
+  Example shape: (metric TEXT, min FLOAT, max FLOAT, mean FLOAT, p25 FLOAT, p75 FLOAT)
+- For time series: return (trade_date, quote_time if intraday) + one or more numeric columns,
+  ordered by time — the chart detector maps date/time + numeric → line chart automatically.
+- For a single distribution stat (e.g. "just show me the mean"): returning a two-column result
+  (label, value) is still better than a one-column scalar.
 """
 
 _SYSTEM_SQL = [
