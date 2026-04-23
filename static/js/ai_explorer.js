@@ -210,6 +210,140 @@ function renderTurnChart(idx, chartType, columns, rows) {
     }
 }
 
+// ── Config-driven chart renderer (Claude provides Chart.js spec) ─────────────
+
+function renderFromConfig(idx, config, columns, rows) {
+    const canvasId = `explorer-chart-${idx}`;
+    const canvas   = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    if (_explorerCharts[idx]) { _explorerCharts[idx].destroy(); delete _explorerCharts[idx]; }
+    if (!rows.length || !config.datasets?.length) return;
+
+    const chartType  = config.type || 'line';
+    const configDs   = config.datasets;
+    const datasets   = [];
+    let labels       = null;
+
+    for (const ds of configDs) {
+        const out = {};
+
+        if (ds.regression) {
+            // ── Compute least-squares regression ──────────────────────
+            const pairs = rows
+                .map(r => [r[ds.xSource], r[ds.ySource]])
+                .filter(([a, b]) => a != null && b != null);
+            if (pairs.length >= 2) {
+                let sx=0,sy=0,sxx=0,sxy=0;
+                for (const [a,b] of pairs) { sx+=a; sy+=b; sxx+=a*a; sxy+=a*b; }
+                const n=pairs.length, slope=(n*sxy-sx*sy)/(n*sxx-sx*sx), inter=(sy-slope*sx)/n;
+                const xs=pairs.map(p=>p[0]), xMin=Math.min(...xs), xMax=Math.max(...xs);
+                out.data = [{x:xMin,y:inter+slope*xMin},{x:xMax,y:inter+slope*xMax}];
+            } else {
+                out.data = [];
+            }
+            out.type = ds.type || 'line';
+
+        } else if (ds.xColumn && ds.yColumn) {
+            // ── Scatter x/y ──────────────────────────────────────────
+            out.data = rows.map(r => ({ x: r[ds.xColumn], y: r[ds.yColumn] }));
+
+            if (ds.colorColumn) {
+                const cVals = rows.map(r => r[ds.colorColumn]).filter(v => v != null);
+                const cMax  = Math.max(Math.abs(Math.min(...cVals)), Math.abs(Math.max(...cVals))) || 1;
+                out.backgroundColor = rows.map(r => {
+                    const v = r[ds.colorColumn];
+                    if (v == null) return 'rgba(128,128,128,0.5)';
+                    const t = v / cMax;
+                    if (t >= 0) return `rgba(${Math.round(46+(1-t)*80)},${Math.round(204-(1-t)*80)},${Math.round(113-(1-t)*40)},0.75)`;
+                    const a = -t;
+                    return `rgba(${Math.round(231-(1-a)*80)},${Math.round(76+(1-a)*80)},${Math.round(60+(1-a)*40)},0.75)`;
+                });
+            }
+
+        } else if (ds.labelsColumn && ds.yColumn) {
+            // ── Line/bar with label column ───────────────────────────
+            if (!labels) labels = rows.map(r => String(r[ds.labelsColumn] ?? ''));
+            out.data = rows.map(r => r[ds.yColumn]);
+
+        } else if (ds.yColumn) {
+            out.data = rows.map(r => r[ds.yColumn]);
+        }
+
+        // Copy all standard Chart.js props from the spec (skip our custom keys)
+        const skip = new Set(['xColumn','yColumn','labelsColumn','colorColumn',
+                              'regression','xSource','ySource']);
+        for (const [k, v] of Object.entries(ds)) {
+            if (!skip.has(k) && !(k in out)) out[k] = v;
+        }
+        datasets.push(out);
+    }
+
+    // Auto-detect labels for line/bar if none came from labelsColumn
+    if (!labels && chartType !== 'scatter') {
+        const s = rows[0];
+        const dc = columns.filter(c => _isDatelike(s[c]));
+        const tc = columns.filter(c => _isTimelike(s[c]));
+        if (dc.length && tc.length) labels = rows.map(r => `${r[dc[0]]} ${String(r[tc[0]]).substring(0,5)}`);
+        else if (dc.length)         labels = rows.map(r => r[dc[0]]);
+        else if (tc.length)         labels = rows.map(r => String(r[tc[0]]).substring(0,5));
+    }
+
+    // Merge user options with dark-theme defaults
+    const uo = config.options || {};
+    const baseS = {
+        x: { ticks:{color:'#888',font:{size:9},maxTicksLimit:12,maxRotation:45},
+             grid:{color:'rgba(255,255,255,0.05)'}, border:{color:'transparent'} },
+        y: { ticks:{color:'#888',font:{size:9}},
+             grid:{color:'rgba(255,255,255,0.05)'}, border:{color:'transparent'} },
+    };
+    const scales = {};
+    for (const ax of ['x','y']) {
+        scales[ax] = { ...baseS[ax], ...(uo.scales?.[ax]||{}) };
+        scales[ax].ticks = { ...baseS[ax].ticks, ...(uo.scales?.[ax]?.ticks||{}) };
+        scales[ax].grid  = { ...baseS[ax].grid,  ...(uo.scales?.[ax]?.grid||{}) };
+        if (uo.scales?.[ax]?.title) scales[ax].title = uo.scales[ax].title;
+    }
+
+    const opts = {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+            legend: { display: datasets.length > 1,
+                      labels: {color:'#aaa',font:{size:10},boxWidth:14,padding:10} },
+            tooltip: {
+                backgroundColor: 'rgba(20,20,20,0.92)',
+                titleColor: '#999', bodyColor: '#ddd',
+                borderColor: '#444', borderWidth: 1,
+                filter: item => !configDs[item.datasetIndex]?.regression,
+                callbacks: {
+                    label: ctx => {
+                        const r = rows[ctx.dataIndex];
+                        if (!r) return `${ctx.dataset.label ?? ''}: ${ctx.parsed.y}`;
+                        return columns.map(col => {
+                            const v = r[col];
+                            if (v == null) return `${col}: —`;
+                            if (typeof v === 'number') return `${col}: ${Number.isInteger(v)?v:v.toFixed(4)}`;
+                            return `${col}: ${v}`;
+                        });
+                    },
+                },
+            },
+            zoom: {
+                pan:  { enabled: true, mode: 'xy', modifierKey: 'shift' },
+                zoom: { wheel:{enabled:true}, pinch:{enabled:true},
+                        drag:{enabled:true,backgroundColor:'rgba(52,152,219,0.15)',
+                              borderColor:'#3498db',borderWidth:1}, mode:'xy' },
+            },
+        },
+        scales,
+    };
+
+    const chartData = { datasets };
+    if (labels) chartData.labels = labels;
+
+    _explorerCharts[idx] = new Chart(canvas, { type: chartType, data: chartData, options: opts });
+}
+
 // ── Alpine component ──────────────────────────────────────────────────────────
 
 document.addEventListener('alpine:init', () => {
@@ -251,7 +385,11 @@ document.addEventListener('alpine:init', () => {
             if (!turn) return;
             this.expandedChartIdx = idx;
             this.$nextTick(() => {
-                renderTurnChart('fs', turn.chartType, turn.columns, turn.rows);
+                if (turn.chartConfig) {
+                    renderFromConfig('fs', turn.chartConfig, turn.columns, turn.rows);
+                } else {
+                    renderTurnChart('fs', turn.chartType, turn.columns, turn.rows);
+                }
             });
         },
 
@@ -291,7 +429,7 @@ document.addEventListener('alpine:init', () => {
             this.history = [...this.history, {
                 question: q,
                 sql: null, columns: [], rows: [],
-                summary: null, error: null, chartType: null,
+                summary: null, error: null, chartType: null, chartConfig: null,
                 done: false,
             }];
             const idx = this.history.length - 1;
@@ -321,29 +459,35 @@ document.addEventListener('alpine:init', () => {
                 }
 
                 let ct = null;
+                const cc = data.chart_config ?? null;
                 if (!data.error && data.rows?.length) {
-                    // Prefer the LLM's chart_hint; fall back to auto-detection
-                    const hint = data.chart_hint;
-                    if (hint && ['line', 'bar', 'scatter'].includes(hint)) {
-                        ct = hint;
+                    if (cc && cc.type) {
+                        ct = cc.type;
+                    } else if (data.chart_hint && ['line','bar','scatter'].includes(data.chart_hint)) {
+                        ct = data.chart_hint;
                     } else {
                         ct = detectChartType(data.columns ?? [], data.rows);
                     }
                 }
 
                 this._updateTurn(idx, {
-                    sql:       data.sql      ?? null,
-                    columns:   data.columns  ?? [],
-                    rows:      data.rows     ?? [],
-                    summary:   data.summary  ?? null,
-                    error:     data.error    ?? null,
-                    chartType: ct,
-                    done:      true,
+                    sql:         data.sql      ?? null,
+                    columns:     data.columns  ?? [],
+                    rows:        data.rows     ?? [],
+                    summary:     data.summary  ?? null,
+                    error:       data.error    ?? null,
+                    chartType:   ct,
+                    chartConfig: cc,
+                    done:        true,
                 });
 
-                if (ct) {
+                if (ct && data.rows?.length) {
                     await this.$nextTick();
-                    renderTurnChart(idx, ct, data.columns, data.rows);
+                    if (cc) {
+                        renderFromConfig(idx, cc, data.columns, data.rows);
+                    } else {
+                        renderTurnChart(idx, ct, data.columns, data.rows);
+                    }
                 }
 
             } catch (e) {

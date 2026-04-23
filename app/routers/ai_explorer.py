@@ -119,16 +119,47 @@ CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
 - Never return a wide single-row pivot (many metric columns, one row). Charts cannot render that shape.
 - For comparisons across tenors or metrics: use UNION ALL to produce one row per item with a
   string label column (e.g. 'metric') plus one or more numeric value columns.
-  Example shape: (metric TEXT, min FLOAT, max FLOAT, mean FLOAT, p25 FLOAT, p75 FLOAT)
-- For time series: return (trade_date, quote_time if intraday) + one or more numeric columns,
-  ordered by time. Use chart_type hint: line
-- For scatterplots: return exactly the numeric columns needed (x, y, and optionally a third for
-  color). Do NOT include trade_date or quote_time — those cause the chart to render as a line
-  instead of scatter. Use chart_type hint: scatter
-- For bar charts: return one category text column + numeric column(s). Use chart_type hint: bar
-- For a single distribution stat (e.g. "just show me the mean"): returning a two-column result
-  (label, value) is still better than a one-column scalar. Use chart_type hint: bar
+- For a single distribution stat: returning (label, value) is better than a one-column scalar.
 - If the question does not need a chart, use chart_type hint: none
+- For scatterplots: include date/time columns if the user wants them in the tooltip/table,
+  the chart config controls what gets plotted (not the SQL columns).
+
+CHART CONFIG (optional — append after SQL to customize rendering):
+After the SQL, you may append a ---CHART--- section with a JSON Chart.js config.
+Our renderer will populate data from query results using column references.
+
+Special dataset keys (resolved by renderer):
+  xColumn / yColumn    — column names for scatter x,y
+  labelsColumn         — column name for x-axis labels (line/bar)
+  colorColumn          — scatter color gradient column (red=negative, green=positive)
+  regression: true     — compute & overlay regression line (set xSource, ySource)
+
+All standard Chart.js dataset properties are supported (borderColor, borderDash,
+borderWidth, pointRadius, tension, fill, type, label, order, backgroundColor, etc.).
+Set axis labels under options.scales.x.title / y.title.
+
+Example — scatter with regression and color-by:
+---CHART---
+{{"type":"scatter","datasets":[
+  {{"xColumn":"iv_30d_atm","yColumn":"skew_30d_25p_atm","colorColumn":"spot_return",
+    "pointRadius":4,"borderWidth":0}},
+  {{"regression":true,"xSource":"iv_30d_atm","ySource":"skew_30d_25p_atm",
+    "borderColor":"rgba(231,76,60,0.5)","borderDash":[6,4],"borderWidth":1.5,
+    "pointRadius":0,"label":"Regression","type":"line"}}
+],"options":{{"scales":{{"x":{{"title":{{"display":true,"text":"30D ATM IV"}}}},
+"y":{{"title":{{"display":true,"text":"Put Skew"}}}}}}}}}}
+
+Example — multi-line time series:
+---CHART---
+{{"type":"line","datasets":[
+  {{"labelsColumn":"trade_date","yColumn":"iv_30d_atm","label":"30D ATM",
+    "borderColor":"#3498db","borderWidth":1.5,"pointRadius":0}},
+  {{"labelsColumn":"trade_date","yColumn":"iv_7d_atm","label":"7D ATM",
+    "borderColor":"#2ecc71","borderWidth":1.5,"pointRadius":0}}
+],"options":{{"scales":{{"y":{{"title":{{"display":true,"text":"IV"}}}}}}}}}}
+
+Include ---CHART--- whenever the user asks for specific styling, regression,
+custom axis labels, or any visual customization. Omit it for basic auto-rendered charts.
 """
 
 _SYSTEM_SQL = [
@@ -257,22 +288,36 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         # 2. Generate SQL via Claude Sonnet (system prompt is cached)
         sql_msg = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1024,
+            max_tokens=2048,
             system=_SYSTEM_SQL,
             messages=messages,
         )
         raw_text = _strip_fences(sql_msg.content[0].text)
 
-        # Parse chart_type hint from first line (if present)
+        # Parse: line 1 = chart hint, then SQL, then optional ---CHART--- config
         chart_hint = None
+        chart_config = None
         lines = raw_text.strip().split('\n', 1)
         if len(lines) == 2 and lines[0].strip().lower() in ('line', 'bar', 'scatter', 'none'):
             chart_hint = lines[0].strip().lower()
             if chart_hint == 'none':
                 chart_hint = None
-            raw_sql = lines[1].strip()
+            rest = lines[1]
         else:
-            raw_sql = raw_text.strip()
+            rest = raw_text.strip()
+
+        if '---CHART---' in rest:
+            parts = rest.split('---CHART---', 1)
+            raw_sql = parts[0].strip()
+            config_text = parts[1].strip()
+            config_text = re.sub(r'^```(?:json)?\n?', '', config_text)
+            config_text = re.sub(r'\n?```\s*$', '', config_text)
+            try:
+                chart_config = json.loads(config_text)
+            except json.JSONDecodeError:
+                pass  # invalid JSON — fall back to auto-detect
+        else:
+            raw_sql = rest.strip()
 
         # 2. Validate + enforce row cap
         try:
@@ -312,7 +357,8 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         summary = summary_msg.content[0].text.strip()
 
         return {"sql": sql, "error": None, "columns": columns, "rows": rows,
-                "summary": summary, "chart_hint": chart_hint}
+                "summary": summary, "chart_hint": chart_hint,
+                "chart_config": chart_config}
 
     except Exception as e:
         # Catch-all: always return JSON so the frontend can display the real error.
