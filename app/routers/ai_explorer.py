@@ -754,19 +754,17 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         )
         raw_text = _strip_fences(sql_msg.content[0].text)
 
-        # Check for text-only response (MODE B: follow-ups, explanations)
-        if raw_text.strip().upper().startswith('TEXT:'):
-            text_body = raw_text.strip()[5:].strip()
-            return {"response_type": "direct", "sql": None, "error": None,
-                    "columns": [], "rows": [], "summary": text_body,
-                    "chart_hint": None, "chart_config": None}
+        # Strip optional TEXT: prefix (MODE B hint) but still scan for SQL below.
+        # Claude sometimes prepends TEXT: to analytical responses that also contain SQL.
+        parse_text = raw_text.strip()
+        if parse_text.upper().startswith('TEXT:'):
+            parse_text = parse_text[5:].strip()
 
-        # Parse: scan forward to find chart hint or SQL start, skipping any
-        # preamble prose Claude may have prepended.
+        # Scan forward to find chart hint or SQL start, skipping any preamble prose.
         chart_hint = None
         chart_config = None
-        all_lines = raw_text.strip().split('\n')
-        sql_start = 0
+        all_lines = parse_text.split('\n')
+        sql_start = None
         for i, line in enumerate(all_lines):
             sl = line.strip().lower()
             if sl in ('line', 'bar', 'scatter', 'none'):
@@ -776,6 +774,12 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             if re.match(r'^\s*(?:with|select)\b', line, re.IGNORECASE):
                 sql_start = i
                 break
+
+        # No SQL found anywhere → genuine text-only response
+        if sql_start is None:
+            return {"response_type": "direct", "sql": None, "error": None,
+                    "columns": [], "rows": [], "summary": parse_text,
+                    "chart_hint": None, "chart_config": None}
 
         rest = '\n'.join(all_lines[sql_start:]).strip()
 
