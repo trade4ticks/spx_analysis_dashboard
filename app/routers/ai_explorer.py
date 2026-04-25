@@ -761,17 +761,23 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
                     "columns": [], "rows": [], "summary": text_body,
                     "chart_hint": None, "chart_config": None}
 
-        # Parse: line 1 = chart hint, then SQL, then optional ---CHART--- config
+        # Parse: scan forward to find chart hint or SQL start, skipping any
+        # preamble prose Claude may have prepended.
         chart_hint = None
         chart_config = None
-        lines = raw_text.strip().split('\n', 1)
-        if len(lines) == 2 and lines[0].strip().lower() in ('line', 'bar', 'scatter', 'none'):
-            chart_hint = lines[0].strip().lower()
-            if chart_hint == 'none':
-                chart_hint = None
-            rest = lines[1]
-        else:
-            rest = raw_text.strip()
+        all_lines = raw_text.strip().split('\n')
+        sql_start = 0
+        for i, line in enumerate(all_lines):
+            sl = line.strip().lower()
+            if sl in ('line', 'bar', 'scatter', 'none'):
+                chart_hint = None if sl == 'none' else sl
+                sql_start = i + 1
+                break
+            if re.match(r'^\s*(?:with|select)\b', line, re.IGNORECASE):
+                sql_start = i
+                break
+
+        rest = '\n'.join(all_lines[sql_start:]).strip()
 
         if '---CHART---' in rest:
             parts = rest.split('---CHART---', 1)
