@@ -182,8 +182,9 @@ JOIN GUIDANCE for open_interest tables:
 - option_oi_surface joins to daily_features on (ticker, trade_date)
 - These 3 tables are in a SEPARATE database from surface_metrics_core.
   Do NOT join them with surface_metrics_core in a single query.
-- Always filter by ticker (e.g. WHERE ticker = 'SPX') since these tables
-  support multiple tickers.
+- These tables contain multiple tickers (SPY, QQQ, IWM, etc.). Always
+  include a WHERE ticker = '...' filter based on what the user asks about.
+  If the user doesn't specify a ticker, ask or default to 'SPY'.
 - option_oi_surface can be large — always include LIMIT and WHERE filters
   on trade_date, dte, or moneyness to keep queries fast.
 
