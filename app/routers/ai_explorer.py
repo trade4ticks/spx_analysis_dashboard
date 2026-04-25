@@ -357,6 +357,10 @@ Examples:
   "What was the peak VIX reading this month?" → direct
   "Create a scatterplot of skew vs IV" → direct
   "Compare 7D vs 30D term slopes" → direct
+  "Show me open interest for AAPL" → direct
+  "What's the put/call ratio for SPY?" → direct
+  "Plot OI changes over time" → direct
+  Any question about open interest, OI, put/call ratio, strikes, expirations, or specific tickers other than broad SPX vol regime → direct
 """
 
 
