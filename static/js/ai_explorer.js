@@ -376,10 +376,27 @@ function mdToHtml(text) {
 document.addEventListener('alpine:init', () => {
     Alpine.data('aiExplorer', () => ({
 
+        // ── Conversation state ────────────────────────────────────────────────
         question: '',
         loading:  false,
-        history:  [],   // [{question, sql, columns, rows, summary, error, chartType, done}]
+        history:  [],   // [{question, sql, columns, rows, summary, error, chartType, done, ...}]
         expandedChartIdx: null,
+
+        // ── Session state ─────────────────────────────────────────────────────
+        sessionId:      null,
+        sessionName:    null,
+        sessions:       [],
+        sidebarOpen:    true,
+        editingNameId:  null,
+        editingNameVal: '',
+
+        // ── Lifecycle ─────────────────────────────────────────────────────────
+
+        async init() {
+            await this.loadSessions();
+        },
+
+        // ── Formatters ────────────────────────────────────────────────────────
 
         fmtCell(val) {
             if (val === null || val === undefined) return '—';
@@ -396,14 +413,6 @@ document.addEventListener('alpine:init', () => {
             return chartType.charAt(0).toUpperCase() + chartType.slice(1) + ' Chart';
         },
 
-        clearHistory() {
-            Object.keys(_explorerCharts).forEach(k => {
-                _explorerCharts[k].destroy();
-                delete _explorerCharts[k];
-            });
-            this.history = [];
-        },
-
         fmtStat(val, metric) {
             if (val == null) return '—';
             if (metric === 'spot') return val.toFixed(2);
@@ -414,6 +423,20 @@ document.addEventListener('alpine:init', () => {
             if (val == null) return '—';
             return (val >= 0 ? '+' : '') + val.toFixed(4);
         },
+
+        fmtSessionDate(ts) {
+            if (!ts) return '';
+            const d = new Date(ts);
+            const diff = Date.now() - d.getTime();
+            if (diff < 60000)     return 'just now';
+            if (diff < 3600000)   return Math.floor(diff / 60000) + 'm ago';
+            if (diff < 86400000)  return Math.floor(diff / 3600000) + 'h ago';
+            if (diff < 172800000) return 'yesterday';
+            if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        },
+
+        // ── Chart helpers ─────────────────────────────────────────────────────
 
         resetAnalysisChartZoom(turnIdx, chartIdx) {
             const chart = _explorerCharts[`${turnIdx}-a-${chartIdx}`];
@@ -456,15 +479,165 @@ document.addEventListener('alpine:init', () => {
             this.expandedChartIdx = null;
         },
 
+        // ── Session methods ───────────────────────────────────────────────────
+
+        async loadSessions() {
+            try {
+                const res = await fetch('/api/ai-explorer/sessions');
+                if (res.ok) this.sessions = await res.json();
+            } catch { /* non-fatal */ }
+        },
+
+        _serializeTurn(turn) {
+            return {
+                question:     turn.question,
+                sql:          turn.sql          || null,
+                summary:      turn.summary      || null,
+                error:        turn.error        || null,
+                columns:      turn.columns      || [],
+                rows:         (turn.rows        || []).slice(0, 500),
+                chartType:    turn.chartType    || null,
+                chartConfig:  turn.chartConfig  || null,
+                responseType: turn.responseType || 'direct',
+                stats:        turn.stats        || [],
+                charts: (turn.charts || []).map(c => ({
+                    title:        c.title,
+                    columns:      c.columns || [],
+                    rows:         (c.rows   || []).slice(0, 500),
+                    chart_config: c.chart_config || null,
+                })),
+                done: true,
+            };
+        },
+
+        async _autoSave() {
+            if (!this.history.length) return;
+            const serialized = this.history.map(t => this._serializeTurn(t));
+            try {
+                if (!this.sessionId) {
+                    const res = await fetch('/api/ai-explorer/sessions', {
+                        method:  'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body:    JSON.stringify({ history: serialized }),
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        this.sessionId   = data.id;
+                        this.sessionName = data.name;
+                        await this.loadSessions();
+                    }
+                } else {
+                    await fetch(`/api/ai-explorer/sessions/${this.sessionId}`, {
+                        method:  'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body:    JSON.stringify({ history: serialized }),
+                    });
+                    await this.loadSessions();
+                }
+            } catch { /* non-fatal */ }
+        },
+
+        async loadSession(id) {
+            if (id === this.sessionId) return;
+            try {
+                const res = await fetch(`/api/ai-explorer/sessions/${id}`);
+                if (!res.ok) return;
+                const data = await res.json();
+
+                // Destroy existing charts
+                Object.keys(_explorerCharts).forEach(k => {
+                    _explorerCharts[k].destroy();
+                    delete _explorerCharts[k];
+                });
+
+                this.sessionId        = data.id;
+                this.sessionName      = data.name;
+                this.history          = data.history || [];
+                this.expandedChartIdx = null;
+
+                // Wait for Alpine to render the new turns before drawing charts
+                await this.$nextTick();
+                await this.$nextTick();
+
+                this.history.forEach((turn, idx) => {
+                    if (!turn.done || turn.error) return;
+                    if (turn.responseType === 'analysis') {
+                        (turn.charts || []).forEach((chart, ci) => {
+                            if (chart.chart_config) {
+                                renderFromConfig(`${idx}-a-${ci}`, chart.chart_config,
+                                    chart.columns || [], chart.rows || []);
+                            }
+                        });
+                    } else if (turn.chartType && turn.rows?.length) {
+                        if (turn.chartConfig) {
+                            renderFromConfig(idx, turn.chartConfig,
+                                turn.columns || [], turn.rows || []);
+                        } else {
+                            renderTurnChart(idx, turn.chartType,
+                                turn.columns || [], turn.rows || []);
+                        }
+                    }
+                });
+
+                this._scrollToBottom();
+            } catch { /* ignore */ }
+        },
+
+        async deleteSession(id) {
+            try {
+                await fetch(`/api/ai-explorer/sessions/${id}`, { method: 'DELETE' });
+                if (this.sessionId === id) this.newConversation();
+                await this.loadSessions();
+            } catch { /* ignore */ }
+        },
+
+        startRename(id, currentName) {
+            this.editingNameId  = id;
+            this.editingNameVal = currentName;
+        },
+
+        async commitRename(id) {
+            const name = this.editingNameVal.trim();
+            this.editingNameId = null;
+            if (!name) return;
+            try {
+                await fetch(`/api/ai-explorer/sessions/${id}`, {
+                    method:  'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({ name }),
+                });
+                if (this.sessionId === id) this.sessionName = name;
+                await this.loadSessions();
+            } catch { /* ignore */ }
+        },
+
+        newConversation() {
+            Object.keys(_explorerCharts).forEach(k => {
+                _explorerCharts[k].destroy();
+                delete _explorerCharts[k];
+            });
+            this.history          = [];
+            this.sessionId        = null;
+            this.sessionName      = null;
+            this.expandedChartIdx = null;
+            this.editingNameId    = null;
+        },
+
+        // ── Scroll helper ─────────────────────────────────────────────────────
+
         _scrollToBottom() {
             const el = document.querySelector('.ai-response');
             if (el) el.scrollTop = el.scrollHeight;
         },
 
+        // ── Alpine reactivity helper ──────────────────────────────────────────
+
         _updateTurn(idx, patch) {
             // splice triggers Alpine's array Proxy reliably; direct index mutation does not
             this.history.splice(idx, 1, { ...this.history[idx], ...patch });
         },
+
+        // ── Submit ────────────────────────────────────────────────────────────
 
         async submit() {
             const q = this.question.trim();
@@ -569,6 +742,7 @@ document.addEventListener('alpine:init', () => {
                 this._updateTurn(idx, { error: e.message ?? 'Request failed', done: true });
             } finally {
                 this.loading = false;
+                await this._autoSave();
                 await this.$nextTick();
                 this._scrollToBottom();
             }

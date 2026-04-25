@@ -661,7 +661,15 @@ class QueryRequest(BaseModel):
     history:  list[HistoryTurn] = []
 
 
-# ── Query log ────────────────────────────────────────────────────────────────
+class SessionCreate(BaseModel):
+    history: list[dict]
+
+class SessionPatch(BaseModel):
+    name:    Optional[str]       = None
+    history: Optional[list[dict]] = None
+
+
+# ── Query log + session tables ────────────────────────────────────────────────
 
 _log_table_ready = False
 
@@ -681,6 +689,15 @@ async def _ensure_log_table(pool):
                     sql         TEXT,
                     summary     TEXT,
                     error       TEXT
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_explorer_sessions (
+                    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name       TEXT NOT NULL DEFAULT 'Untitled',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    history    JSONB NOT NULL DEFAULT '[]'::jsonb
                 )
             """)
         _log_table_ready = True
@@ -867,3 +884,121 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         }
         await _log_query(pool, question, result)
         return result
+
+
+# ── Session name generation ───────────────────────────────────────────────────
+
+async def _generate_session_name(client: AsyncAnthropic, first_question: str) -> str:
+    try:
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Generate a short 3–6 word title for a financial data analysis "
+                    f"conversation whose first question is: {first_question[:200]!r}\n"
+                    "Respond with only the title. No quotes, no trailing punctuation."
+                ),
+            }],
+        )
+        return msg.content[0].text.strip().strip('"\'').rstrip('.')
+    except Exception:
+        return first_question[:50].strip()
+
+
+# ── Session endpoints ─────────────────────────────────────────────────────────
+
+@router.get("/sessions")
+async def list_sessions(pool=Depends(get_pool)) -> list[dict]:
+    await _ensure_log_table(pool)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id::text, name, created_at, updated_at,
+                       jsonb_array_length(history) AS turn_count
+                FROM ai_explorer_sessions
+                ORDER BY updated_at DESC LIMIT 100
+            """)
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@router.post("/sessions")
+async def create_session(body: SessionCreate, pool=Depends(get_pool)) -> dict:
+    await _ensure_log_table(pool)
+    client = _get_client()
+    first_q = body.history[0].get("question", "New conversation") if body.history else "New conversation"
+    name = await _generate_session_name(client, first_q)
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO ai_explorer_sessions (name, history) "
+                "VALUES ($1, $2::jsonb) "
+                "RETURNING id::text, name, created_at, updated_at",
+                name, json.dumps(body.history),
+            )
+        return dict(row)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to create session: {e}")
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str, pool=Depends(get_pool)) -> dict:
+    await _ensure_log_table(pool)
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id::text, name, created_at, updated_at, history "
+                "FROM ai_explorer_sessions WHERE id = $1::uuid",
+                session_id,
+            )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    if not row:
+        raise HTTPException(404, "Session not found")
+    d = dict(row)
+    h = d.get("history")
+    d["history"] = json.loads(h) if isinstance(h, str) else (h or [])
+    return d
+
+
+@router.patch("/sessions/{session_id}")
+async def patch_session(session_id: str, body: SessionPatch, pool=Depends(get_pool)) -> dict:
+    await _ensure_log_table(pool)
+    parts, params, i = [], [], 1
+    if body.name is not None:
+        parts.append(f"name = ${i}"); params.append(body.name); i += 1
+    if body.history is not None:
+        parts.append(f"history = ${i}::jsonb"); params.append(json.dumps(body.history)); i += 1
+    if not parts:
+        raise HTTPException(400, "Nothing to update")
+    parts.append("updated_at = NOW()")
+    params.append(session_id)
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"UPDATE ai_explorer_sessions SET {', '.join(parts)} "
+                f"WHERE id = ${i}::uuid "
+                f"RETURNING id::text, name, updated_at",
+                *params,
+            )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    if not row:
+        raise HTTPException(404, "Session not found")
+    return dict(row)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session_ep(session_id: str, pool=Depends(get_pool)):
+    await _ensure_log_table(pool)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM ai_explorer_sessions WHERE id = $1::uuid",
+                session_id,
+            )
+    except Exception as e:
+        raise HTTPException(500, str(e))

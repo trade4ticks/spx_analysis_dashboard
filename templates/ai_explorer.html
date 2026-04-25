@@ -6,6 +6,158 @@
   <title>SPX IV — AI Explorer</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
+    /* ── Layout ────────────────────────────────────────────────────────────── */
+    .ai-container {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .ai-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    /* ── Sidebar ───────────────────────────────────────────────────────────── */
+    .ai-sidebar {
+      width: 220px;
+      flex-shrink: 0;
+      background: #1a1a1a;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: width .15s ease;
+    }
+    .ai-sidebar.collapsed { width: 36px; }
+    .ai-sidebar-hdr {
+      display: flex;
+      align-items: center;
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      min-height: 36px;
+      gap: 6px;
+    }
+    .ai-sidebar-toggle {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 15px;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+      line-height: 1;
+      padding: 0;
+    }
+    .ai-sidebar-toggle:hover { background: rgba(255,255,255,.08); color: var(--muted); }
+    .ai-sidebar-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      color: var(--dim);
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .ai-sidebar-new {
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .ai-sidebar-new button {
+      width: 100%;
+      background: rgba(52,152,219,.1);
+      border: 1px solid rgba(52,152,219,.2);
+      border-radius: 4px;
+      color: var(--accent);
+      font-size: 11px;
+      padding: 5px 8px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ai-sidebar-new button:hover { background: rgba(52,152,219,.2); }
+
+    .ai-session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    .ai-session-item {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      padding: 6px 10px;
+      cursor: pointer;
+      border-radius: 4px;
+      margin: 1px 4px;
+    }
+    .ai-session-item:hover { background: rgba(255,255,255,.05); }
+    .ai-session-item.active { background: rgba(52,152,219,.15); }
+    .ai-session-name {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 156px;
+      padding-right: 36px; /* leave room for action buttons */
+    }
+    .ai-session-item.active .ai-session-name { color: var(--text); }
+    .ai-session-meta {
+      font-size: 9px;
+      color: var(--dim);
+      margin-top: 2px;
+      white-space: nowrap;
+    }
+    .ai-session-btns {
+      position: absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      gap: 2px;
+    }
+    .ai-session-item:hover .ai-session-btns { display: flex; }
+    .ai-session-btns button {
+      background: none;
+      border: none;
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      line-height: 1;
+    }
+    .ai-session-btns button:hover { background: rgba(255,255,255,.1); color: var(--muted); }
+    .ai-session-rename {
+      width: 100%;
+      background: var(--raised);
+      border: 1px solid var(--accent);
+      border-radius: 3px;
+      color: var(--text);
+      font-size: 11px;
+      padding: 3px 6px;
+      outline: none;
+      font-family: inherit;
+    }
+    .ai-sidebar-empty {
+      padding: 16px 12px;
+      font-size: 11px;
+      color: var(--dim);
+      text-align: center;
+    }
+
     /* ── Input bar ─────────────────────────────────────────────────────────── */
     .ai-input-bar {
       background: var(--surface);
@@ -44,6 +196,14 @@
       align-items: center;
       font-size: 10px;
       color: var(--dim);
+    }
+    .ai-session-label {
+      font-size: 10px;
+      color: var(--dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 320px;
     }
     .ai-examples {
       display: flex;
@@ -290,7 +450,7 @@
   <script src="/static/js/ai_explorer.js"></script>
 </head>
 
-<body x-data="aiExplorer">
+<body x-data="aiExplorer" x-init="init()">
 
   <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
   <div class="topbar">
@@ -306,189 +466,264 @@
     </div>
   </div>
 
-  <!-- ── Question input bar ─────────────────────────────────────────────── -->
-  <div class="ai-input-bar">
-    <div class="ai-input-col">
-      <textarea
-        class="ai-textarea"
-        rows="3"
-        placeholder="Ask a question… (Ctrl+Enter to submit)"
-        x-model="question"
-        @keydown="onKeydown($event)"
-        :disabled="loading"
-      ></textarea>
+  <!-- ── Main container: sidebar + content ─────────────────────────────── -->
+  <div class="ai-container">
 
-      <!-- Show turn count + clear when there's history; examples when empty -->
-      <div class="ai-input-meta" x-show="history.length > 0">
-        <span x-text="history.length + ' turn' + (history.length === 1 ? '' : 's')"></span>
-        <button class="btn" style="padding:2px 10px; font-size:10px;" @click="clearHistory()">Clear</button>
+    <!-- Left sidebar: saved sessions -->
+    <div class="ai-sidebar" :class="{ collapsed: !sidebarOpen }">
+
+      <div class="ai-sidebar-hdr">
+        <button class="ai-sidebar-toggle"
+                @click="sidebarOpen = !sidebarOpen"
+                :title="sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'">
+          <span x-show="sidebarOpen">‹</span>
+          <span x-show="!sidebarOpen" x-cloak>›</span>
+        </button>
+        <span class="ai-sidebar-title">Sessions</span>
       </div>
-      <div class="ai-examples" x-show="history.length === 0 && !loading">
-        <span class="ai-ex-lbl">Examples:</span>
-        <span class="chip" @click="question='Show 30-day ATM IV for each trading day in the last 2 weeks, end of day'; submit()">30D ATM IV last 2 weeks</span>
-        <span class="chip" @click="question='What was the highest vix_30d reading this year and on what date?'; submit()">Peak VIX 30</span>
-        <span class="chip" @click="question='Show intraday term ratio 7d/30d for the most recent trading day'; submit()">Intraday term ratio today</span>
-        <span class="chip" @click="question='Show daily skew_30d_25p_atm for the last 30 trading days at end of day'; submit()">30D skew history</span>
-        <span class="chip" @click="question='Show iv_30d_atm vs vix_30d for the last 60 end-of-day readings'; submit()">IV vs VIX scatter</span>
-      </div>
-    </div>
 
-    <button
-      class="btn primary"
-      style="height:56px; min-width:72px; font-size:13px;"
-      @click="submit()"
-      :disabled="loading"
-    >
-      <span x-show="!loading">Ask ↵</span>
-      <span x-show="loading" x-cloak>···</span>
-    </button>
-  </div>
-
-  <!-- ── Conversation area ───────────────────────────────────────────────── -->
-  <div class="ai-response">
-
-    <!-- Welcome / empty state -->
-    <div class="ai-welcome" x-show="history.length === 0">
-      <p>Ask any question about SPX implied volatility surface metrics.</p>
-      <p style="font-size:11px;">
-        Conversation context carries forward — ask follow-up questions to refine results.
-      </p>
-    </div>
-
-    <!-- Conversation turns -->
-    <template x-for="(turn, idx) in history" :key="idx">
-      <div class="ai-turn">
-
-        <!-- Question -->
-        <div class="ai-q-row">
-          <span class="ai-q-label">Q</span>
-          <div class="ai-q-text" x-text="turn.question"></div>
+      <div x-show="sidebarOpen" x-cloak style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;">
+        <div class="ai-sidebar-new">
+          <button @click="newConversation()">+ New Conversation</button>
         </div>
 
-        <!-- Loading (this turn not yet complete) -->
-        <div class="ai-card" x-show="!turn.done">
-          <div class="ai-summary" style="color:var(--dim);">
-            <span class="ai-spin"></span>
-            Generating SQL and querying database…
-          </div>
-        </div>
+        <div class="ai-session-list">
 
-        <!-- Error card -->
-        <div class="ai-card" x-show="turn.done && !!turn.error" style="border-color:rgba(231,76,60,.3);">
-          <div class="ai-card-hdr" style="color:var(--danger);">✕ Error</div>
-          <div class="ai-error-body" x-text="turn.error"></div>
-          <details class="ai-sql-details" x-show="!!turn.sql">
-            <summary>▶ Generated SQL</summary>
-            <div class="ai-sql-code" x-text="turn.sql"></div>
-          </details>
-        </div>
+          <template x-for="s in sessions" :key="s.id">
+            <div class="ai-session-item"
+                 :class="{ active: sessionId === s.id }"
+                 @click="loadSession(s.id)">
 
-        <!-- Summary card -->
-        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.summary">
-          <div class="ai-card-hdr">
-            <span style="color:var(--accent);">✦</span> Summary
-            <span class="hdr-count" x-text="turn.rows.length + ' row' + (turn.rows.length === 1 ? '' : 's') + ' returned'"></span>
-          </div>
-          <div class="ai-summary" x-html="renderMd(turn.summary)"></div>
-        </div>
+              <!-- Rename input (shown when editing) -->
+              <template x-if="editingNameId === s.id">
+                <input class="ai-session-rename"
+                       x-model="editingNameVal"
+                       @click.stop
+                       @keydown.enter.prevent="commitRename(s.id)"
+                       @keydown.escape="editingNameId = null"
+                       @blur="commitRename(s.id)"
+                       x-init="$el.focus(); $el.select()" />
+              </template>
 
-        <!-- SQL debug (collapsible) -->
-        <div class="ai-card" x-show="turn.done && !!turn.sql && !turn.error">
-          <details class="ai-sql-details">
-            <summary>▶ SQL</summary>
-            <div class="ai-sql-code" x-text="turn.sql"></div>
-          </details>
-        </div>
+              <!-- Session name (normal state) -->
+              <template x-if="editingNameId !== s.id">
+                <span class="ai-session-name" x-text="s.name"></span>
+              </template>
 
-        <!-- Chart card (direct only) -->
-        <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0 && turn.responseType !== 'analysis'">
-          <div class="ai-card-hdr" x-text="chartLabel(turn.chartType)"></div>
-          <div class="ai-chart-wrap">
-            <div class="ai-chart-actions">
-              <button @click="resetChartZoom(idx)" title="Reset zoom">⟲</button>
-              <button @click="expandChart(idx)" title="Fullscreen">⤢</button>
-            </div>
-            <canvas :id="'explorer-chart-' + idx"></canvas>
-          </div>
-        </div>
+              <span class="ai-session-meta"
+                    x-text="fmtSessionDate(s.updated_at) + (s.turn_count ? ' · ' + s.turn_count + (s.turn_count === 1 ? ' turn' : ' turns') : '')">
+              </span>
 
-        <!-- ── Analysis: stats table ──────────────────────────────────── -->
-        <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis' && turn.stats.length > 0">
-          <div class="ai-card-hdr">Regime Metrics</div>
-          <div class="ai-table-wrap">
-            <table class="ai-table">
-              <thead>
-                <tr>
-                  <th>Metric</th><th>Current</th><th>1W Chg</th>
-                  <th>1M Chg</th><th>Pctile</th><th>Z</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="s in turn.stats" :key="s.metric">
-                  <tr>
-                    <td x-text="s.label"></td>
-                    <td x-text="fmtStat(s.current, s.metric)"></td>
-                    <td :style="s.change_1w > 0 ? 'color:var(--danger)' : s.change_1w < 0 ? 'color:var(--success)' : ''"
-                        x-text="fmtChange(s.change_1w)"></td>
-                    <td :style="s.change_1m > 0 ? 'color:var(--danger)' : s.change_1m < 0 ? 'color:var(--success)' : ''"
-                        x-text="fmtChange(s.change_1m)"></td>
-                    <td x-text="s.percentile != null ? s.percentile + '%' : '—'"></td>
-                    <td x-text="s.z_score != null ? s.z_score.toFixed(2) : '—'"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- ── Analysis: multi-chart cards ────────────────────────────── -->
-        <template x-for="(chart, ci) in turn.charts" :key="'ac-'+ci">
-          <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis'">
-            <div class="ai-card-hdr" x-text="chart.title"></div>
-            <div class="ai-chart-wrap">
-              <div class="ai-chart-actions">
-                <button @click="resetAnalysisChartZoom(idx, ci)" title="Reset zoom">⟲</button>
-                <button @click="expandAnalysisChart(idx, ci)" title="Fullscreen">⤢</button>
+              <!-- Rename + delete buttons (appear on hover) -->
+              <div class="ai-session-btns">
+                <button @click.stop="startRename(s.id, s.name)" title="Rename">✎</button>
+                <button @click.stop="deleteSession(s.id)" title="Delete"
+                        style="color:var(--danger);">✕</button>
               </div>
-              <canvas :id="'explorer-chart-' + idx + '-a-' + ci"></canvas>
+
             </div>
+          </template>
+
+          <div class="ai-sidebar-empty" x-show="sessions.length === 0">
+            No saved sessions
+          </div>
+
+        </div>
+      </div>
+    </div><!-- /.ai-sidebar -->
+
+    <!-- Right: main content -->
+    <div class="ai-main">
+
+      <!-- ── Question input bar ────────────────────────────────────────── -->
+      <div class="ai-input-bar">
+        <div class="ai-input-col">
+          <textarea
+            class="ai-textarea"
+            rows="3"
+            placeholder="Ask a question… (Ctrl+Enter to submit)"
+            x-model="question"
+            @keydown="onKeydown($event)"
+            :disabled="loading"
+          ></textarea>
+
+          <!-- When there's a session: show its name + clear; when empty: show examples -->
+          <div class="ai-input-meta" x-show="history.length > 0">
+            <span class="ai-session-label"
+                  x-text="sessionName ? '⬡ ' + sessionName : history.length + ' turn' + (history.length === 1 ? '' : 's')">
+            </span>
+            <button class="btn" style="padding:2px 10px; font-size:10px;" @click="newConversation()">New</button>
+          </div>
+          <div class="ai-examples" x-show="history.length === 0 && !loading">
+            <span class="ai-ex-lbl">Examples:</span>
+            <span class="chip" @click="question='Show 30-day ATM IV for each trading day in the last 2 weeks, end of day'; submit()">30D ATM IV last 2 weeks</span>
+            <span class="chip" @click="question='What was the highest vix_30d reading this year and on what date?'; submit()">Peak VIX 30</span>
+            <span class="chip" @click="question='Show intraday term ratio 7d/30d for the most recent trading day'; submit()">Intraday term ratio today</span>
+            <span class="chip" @click="question='Show daily skew_30d_25p_atm for the last 30 trading days at end of day'; submit()">30D skew history</span>
+            <span class="chip" @click="question='Show iv_30d_atm vs vix_30d for the last 60 end-of-day readings'; submit()">IV vs VIX scatter</span>
+          </div>
+        </div>
+
+        <button
+          class="btn primary"
+          style="height:56px; min-width:72px; font-size:13px;"
+          @click="submit()"
+          :disabled="loading"
+        >
+          <span x-show="!loading">Ask ↵</span>
+          <span x-show="loading" x-cloak>···</span>
+        </button>
+      </div>
+
+      <!-- ── Conversation area ─────────────────────────────────────────── -->
+      <div class="ai-response">
+
+        <!-- Welcome / empty state -->
+        <div class="ai-welcome" x-show="history.length === 0">
+          <p>Ask any question about SPX implied volatility surface metrics.</p>
+          <p style="font-size:11px;">
+            Conversation context carries forward — ask follow-up questions to refine results.
+          </p>
+        </div>
+
+        <!-- Conversation turns -->
+        <template x-for="(turn, idx) in history" :key="idx">
+          <div class="ai-turn">
+
+            <!-- Question -->
+            <div class="ai-q-row">
+              <span class="ai-q-label">Q</span>
+              <div class="ai-q-text" x-text="turn.question"></div>
+            </div>
+
+            <!-- Loading (this turn not yet complete) -->
+            <div class="ai-card" x-show="!turn.done">
+              <div class="ai-summary" style="color:var(--dim);">
+                <span class="ai-spin"></span>
+                Generating SQL and querying database…
+              </div>
+            </div>
+
+            <!-- Error card -->
+            <div class="ai-card" x-show="turn.done && !!turn.error" style="border-color:rgba(231,76,60,.3);">
+              <div class="ai-card-hdr" style="color:var(--danger);">✕ Error</div>
+              <div class="ai-error-body" x-text="turn.error"></div>
+              <details class="ai-sql-details" x-show="!!turn.sql">
+                <summary>▶ Generated SQL</summary>
+                <div class="ai-sql-code" x-text="turn.sql"></div>
+              </details>
+            </div>
+
+            <!-- Summary card -->
+            <div class="ai-card" x-show="turn.done && !turn.error && !!turn.summary">
+              <div class="ai-card-hdr">
+                <span style="color:var(--accent);">✦</span> Summary
+                <span class="hdr-count" x-text="turn.rows.length + ' row' + (turn.rows.length === 1 ? '' : 's') + ' returned'"></span>
+              </div>
+              <div class="ai-summary" x-html="renderMd(turn.summary)"></div>
+            </div>
+
+            <!-- SQL debug (collapsible) -->
+            <div class="ai-card" x-show="turn.done && !!turn.sql && !turn.error">
+              <details class="ai-sql-details">
+                <summary>▶ SQL</summary>
+                <div class="ai-sql-code" x-text="turn.sql"></div>
+              </details>
+            </div>
+
+            <!-- Chart card (direct only) -->
+            <div class="ai-card" x-show="turn.done && !turn.error && !!turn.chartType && turn.rows.length > 0 && turn.responseType !== 'analysis'">
+              <div class="ai-card-hdr" x-text="chartLabel(turn.chartType)"></div>
+              <div class="ai-chart-wrap">
+                <div class="ai-chart-actions">
+                  <button @click="resetChartZoom(idx)" title="Reset zoom">⟲</button>
+                  <button @click="expandChart(idx)" title="Fullscreen">⤢</button>
+                </div>
+                <canvas :id="'explorer-chart-' + idx"></canvas>
+              </div>
+            </div>
+
+            <!-- ── Analysis: stats table ──────────────────────────────── -->
+            <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis' && turn.stats.length > 0">
+              <div class="ai-card-hdr">Regime Metrics</div>
+              <div class="ai-table-wrap">
+                <table class="ai-table">
+                  <thead>
+                    <tr>
+                      <th>Metric</th><th>Current</th><th>1W Chg</th>
+                      <th>1M Chg</th><th>Pctile</th><th>Z</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="s in turn.stats" :key="s.metric">
+                      <tr>
+                        <td x-text="s.label"></td>
+                        <td x-text="fmtStat(s.current, s.metric)"></td>
+                        <td :style="s.change_1w > 0 ? 'color:var(--danger)' : s.change_1w < 0 ? 'color:var(--success)' : ''"
+                            x-text="fmtChange(s.change_1w)"></td>
+                        <td :style="s.change_1m > 0 ? 'color:var(--danger)' : s.change_1m < 0 ? 'color:var(--success)' : ''"
+                            x-text="fmtChange(s.change_1m)"></td>
+                        <td x-text="s.percentile != null ? s.percentile + '%' : '—'"></td>
+                        <td x-text="s.z_score != null ? s.z_score.toFixed(2) : '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- ── Analysis: multi-chart cards ────────────────────────── -->
+            <template x-for="(chart, ci) in turn.charts" :key="'ac-'+ci">
+              <div class="ai-card" x-show="turn.done && turn.responseType === 'analysis'">
+                <div class="ai-card-hdr" x-text="chart.title"></div>
+                <div class="ai-chart-wrap">
+                  <div class="ai-chart-actions">
+                    <button @click="resetAnalysisChartZoom(idx, ci)" title="Reset zoom">⟲</button>
+                    <button @click="expandAnalysisChart(idx, ci)" title="Fullscreen">⤢</button>
+                  </div>
+                  <canvas :id="'explorer-chart-' + idx + '-a-' + ci"></canvas>
+                </div>
+              </div>
+            </template>
+
+            <!-- Data table (direct only) -->
+            <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0 && turn.responseType !== 'analysis'">
+              <div class="ai-card-hdr">
+                Data
+                <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 5000 ? ' (capped at 5000)' : '')"></span>
+              </div>
+              <div class="ai-table-wrap">
+                <table class="ai-table">
+                  <thead>
+                    <tr>
+                      <template x-for="col in turn.columns" :key="col">
+                        <th x-text="col"></th>
+                      </template>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(row, ri) in turn.rows" :key="ri">
+                      <tr>
+                        <template x-for="col in turn.columns" :key="col">
+                          <td x-text="fmtCell(row[col])"></td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
           </div>
         </template>
 
-        <!-- Data table (direct only) -->
-        <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0 && turn.responseType !== 'analysis'">
-          <div class="ai-card-hdr">
-            Data
-            <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 5000 ? ' (capped at 5000)' : '')"></span>
-          </div>
-          <div class="ai-table-wrap">
-            <table class="ai-table">
-              <thead>
-                <tr>
-                  <template x-for="col in turn.columns" :key="col">
-                    <th x-text="col"></th>
-                  </template>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="(row, ri) in turn.rows" :key="ri">
-                  <tr>
-                    <template x-for="col in turn.columns" :key="col">
-                      <td x-text="fmtCell(row[col])"></td>
-                    </template>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-        </div>
+      </div><!-- /.ai-response -->
 
-      </div>
-    </template>
+    </div><!-- /.ai-main -->
 
-  </div><!-- /.ai-response -->
+  </div><!-- /.ai-container -->
 
-  <!-- Fullscreen chart overlay -->
+  <!-- Fullscreen chart overlay (at body level to avoid overflow clip) -->
   <template x-if="expandedChartIdx !== null">
     <div class="ai-chart-fs-overlay" @keydown.escape.window="collapseChart()">
       <div class="ai-chart-fs-bar">
