@@ -275,7 +275,12 @@ def _validate_sql(sql: str) -> str:
     s = sql.strip()
     if not re.match(r'^\s*(?:WITH\b|SELECT\b)', s, re.IGNORECASE):
         raise ValueError("Only SELECT queries (including CTEs) are allowed")
-    if _BLOCKED_RE.search(s):
+    # Strip string literals and comments before keyword check so that values
+    # like option_type = 'CALL' or comments like -- CALL OI don't false-positive.
+    s_clean = re.sub(r"'[^']*'", "''", s, flags=re.DOTALL)
+    s_clean = re.sub(r'--[^\n]*', '', s_clean)
+    s_clean = re.sub(r'/\*.*?\*/', '', s_clean, flags=re.DOTALL)
+    if _BLOCKED_RE.search(s_clean):
         raise ValueError("Query contains a disallowed keyword")
     return s
 
