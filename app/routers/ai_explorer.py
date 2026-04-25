@@ -22,7 +22,7 @@ from anthropic import AsyncAnthropic
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.db import get_pool
+from app.db import get_pool, get_oi_pool
 
 router = APIRouter(tags=["ai_explorer"])
 
@@ -80,10 +80,14 @@ Example Mode B:
 TEXT:
 The previous query used 30-day metrics because they are the most liquid tenor...
 
+You have access to two databases. Pick the right table(s) for the question.
+Do NOT cross-join tables from different databases.
+
+─── DATABASE 1: spx_interpolated ───
+
 TABLE: surface_metrics_core
 Primary key: (trade_date, quote_time)
 One row per intraday snapshot — every 5 min from 09:35 to 16:00 on each trading day.
-ONLY query surface_metrics_core — do not reference any other tables.
 
 COLUMNS (all lowercase):
   trade_date              DATE     — trading date (YYYY-MM-DD)
@@ -117,12 +121,77 @@ COLUMNS (all lowercase):
 
 FULL COLUMN LIST:{_ALL_COLUMNS}
 
+─── DATABASE 2: open_interest ───
+
+TABLE: daily_features
+Primary key: (ticker, trade_date)
+One row per ticker per trade_date. Derived daily OI metrics.
+COLUMNS:
+  ticker                  TEXT     — e.g. 'SPX'
+  trade_date              DATE
+  spot_close              FLOAT   — underlying close price
+  total_oi                BIGINT  — total open interest across all strikes/expirations
+  call_oi                 BIGINT  — total call OI
+  put_oi                  BIGINT  — total put OI
+  put_call_oi_ratio       FLOAT   — put_oi / call_oi
+  max_oi_strike_call      FLOAT   — strike with highest call OI
+  max_oi_strike_put       FLOAT   — strike with highest put OI
+  oi_weighted_strike_call FLOAT   — OI-weighted average call strike
+  oi_weighted_strike_put  FLOAT   — OI-weighted average put strike
+  oi_weighted_strike_all  FLOAT   — OI-weighted average strike (all options)
+  oi_within_5pct          BIGINT  — OI within 5% of spot
+  oi_within_10pct         BIGINT  — OI within 10% of spot
+  pct_oi_in_front_expiry  FLOAT   — fraction of OI in the nearest expiration
+  d1_total_oi_change      BIGINT  — 1-day change in total OI
+  d5_total_oi_change      BIGINT  — 5-day change in total OI
+  d20_total_oi_change     BIGINT  — 20-day change in total OI
+  rv_5d                   FLOAT   — 5-day realized volatility
+  rv_20d                  FLOAT   — 20-day realized volatility
+  ret_1d_fwd              FLOAT   — 1-day forward return
+  ret_5d_fwd              FLOAT   — 5-day forward return
+  ret_20d_fwd             FLOAT   — 20-day forward return
+
+TABLE: option_oi_surface
+Primary key: (ticker, trade_date, expiration, strike, option_type)
+One row per ticker × trade_date × expiration × strike × option_type. The full OI surface.
+COLUMNS:
+  ticker                  TEXT     — e.g. 'SPX'
+  trade_date              DATE
+  expiration              DATE    — option expiration date
+  dte                     SMALLINT — days to expiration
+  strike                  FLOAT
+  option_type             CHAR(1) — 'P' or 'C'
+  open_interest           BIGINT
+  spot_close              FLOAT   — underlying close on trade_date
+  moneyness               FLOAT   — strike / spot_close
+
+TABLE: underlying_ohlc
+Primary key: (ticker, trade_date)
+One row per ticker per trade_date. Daily OHLCV for the underlying.
+COLUMNS:
+  ticker                  TEXT
+  trade_date              DATE
+  open, high, low, close  FLOAT
+  adj_close               FLOAT
+  volume                  BIGINT
+  dividends               FLOAT
+  splits                  FLOAT
+
+JOIN GUIDANCE for open_interest tables:
+- daily_features and underlying_ohlc join on (ticker, trade_date)
+- option_oi_surface joins to daily_features on (ticker, trade_date)
+- These 3 tables are in a SEPARATE database from surface_metrics_core.
+  Do NOT join them with surface_metrics_core in a single query.
+- Always filter by ticker (e.g. WHERE ticker = 'SPX') since these tables
+  support multiple tickers.
+- option_oi_surface can be large — always include LIMIT and WHERE filters
+  on trade_date, dte, or moneyness to keep queries fast.
+
 QUERY GUIDANCE:
-- Default behavior: return ALL intraday rows (include quote_time in SELECT, no GROUP BY date).
-- For "daily", "per day", "end of day", "closing" questions:
-    DISTINCT ON (trade_date) ORDER BY trade_date, quote_time DESC
-  or GROUP BY trade_date with appropriate aggregates.
-- IV values are decimals — mention this in context but do NOT auto-multiply in SQL unless asked.
+- For surface_metrics_core: default is ALL intraday rows (include quote_time, no GROUP BY date).
+  For "daily"/"end of day" questions: DISTINCT ON (trade_date) ORDER BY trade_date, quote_time DESC.
+- For open_interest tables: data is already daily, no intraday component.
+- IV values are decimals — do NOT auto-multiply in SQL unless asked.
 - Always include LIMIT (max 300). Put LIMIT at the very end of the query.
 
 CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
@@ -187,6 +256,18 @@ _BLOCKED_RE = re.compile(
     re.IGNORECASE,
 )
 ROW_CAP = 300
+
+
+_OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
+
+
+def _detect_database(sql: str) -> str:
+    """Return 'oi' if the query references open_interest tables, else 'iv'."""
+    sql_lower = sql.lower()
+    for t in _OI_TABLES:
+        if t in sql_lower:
+            return "oi"
+    return "iv"
 
 
 def _validate_sql(sql: str) -> str:
@@ -710,9 +791,20 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
             return {"response_type": "direct", "sql": raw_sql, "error": "Query validation failed",
                     "columns": [], "rows": [], "summary": None}
 
-        # 3. Execute in a read-only transaction
+        # 3. Execute in a read-only transaction (route to correct database)
+        target_db = _detect_database(sql)
+        if target_db == "oi":
+            oi_pool = await get_oi_pool()
+            if oi_pool is None:
+                return {"response_type": "direct", "sql": sql,
+                        "error": "Open interest database not configured (set OI_DATABASE_URL in .env)",
+                        "columns": [], "rows": [], "summary": None}
+            exec_pool = oi_pool
+        else:
+            exec_pool = pool
+
         try:
-            async with pool.acquire() as conn:
+            async with exec_pool.acquire() as conn:
                 async with conn.transaction(readonly=True):
                     pg_rows = await conn.fetch(sql)
         except asyncpg.PostgresError as e:
