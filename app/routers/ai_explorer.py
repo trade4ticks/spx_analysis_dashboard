@@ -65,7 +65,7 @@ MODE A — Data query (most requests):
   Line 2+: the raw SQL query (no markdown fences)
   Allowed SQL: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, aggregates, CTEs, subqueries.
   Forbidden: INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, GRANT, REVOKE, EXECUTE, COPY.
-  Always include LIMIT (max 300).
+  Always include LIMIT (max 5000).
 
 MODE B — Text response (for follow-up questions, clarifications, explanations):
   If the user asks a question that doesn't need a data query (e.g. "why did you...",
@@ -74,7 +74,7 @@ MODE B — Text response (for follow-up questions, clarifications, explanations)
 
 Example Mode A:
 scatter
-SELECT col_a, col_b FROM surface_metrics_core LIMIT 300
+SELECT col_a, col_b FROM surface_metrics_core LIMIT 5000
 
 Example Mode B:
 TEXT:
@@ -193,7 +193,7 @@ QUERY GUIDANCE:
   For "daily"/"end of day" questions: DISTINCT ON (trade_date) ORDER BY trade_date, quote_time DESC.
 - For open_interest tables: data is already daily, no intraday component.
 - IV values are decimals — do NOT auto-multiply in SQL unless asked.
-- Always include LIMIT (max 300). Put LIMIT at the very end of the query.
+- Always include LIMIT (max 5000). Put LIMIT at the very end of the query.
 
 CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
 - Never return a wide single-row pivot (many metric columns, one row). Charts cannot render that shape.
@@ -256,7 +256,7 @@ _BLOCKED_RE = re.compile(
     r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|REVOKE|EXECUTE|EXEC|CALL|COPY)\b',
     re.IGNORECASE,
 )
-ROW_CAP = 300
+ROW_CAP = 5000
 
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}

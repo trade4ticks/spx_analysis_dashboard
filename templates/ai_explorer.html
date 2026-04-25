@@ -459,7 +459,7 @@
         <div class="ai-card" x-show="turn.done && !turn.error && turn.rows.length > 0 && turn.responseType !== 'analysis'">
           <div class="ai-card-hdr">
             Data
-            <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 300 ? ' (capped at 300)' : '')"></span>
+            <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 5000 ? ' (capped at 5000)' : '')"></span>
           </div>
           <div class="ai-table-wrap">
             <table class="ai-table">
