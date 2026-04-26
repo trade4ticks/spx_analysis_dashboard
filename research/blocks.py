@@ -351,3 +351,262 @@ async def compute_regression(
         "x_cols":       x_cols,
         "ticker":       ticker,
     }
+
+
+# ── Row-cache analysis (operates on pre-fetched list[dict] data) ──────────────
+# Mirrors the SQL functions above but uses in-memory data to avoid DB round-trips.
+# Cache format: {ticker_key: list[dict]}  where each dict is one row from the DB.
+
+from collections import defaultdict
+
+
+def _pairs(rows: list[dict], *cols: str):
+    """Return rows where all specified columns are non-None, as list of tuples."""
+    return [
+        tuple(r[c] for c in cols)
+        for r in rows
+        if all(r.get(c) is not None for c in cols)
+    ]
+
+
+def _ntile(values: list[float], n: int) -> list[int]:
+    """Assign 1-based decile labels to a sorted list of values."""
+    total = len(values)
+    labels = []
+    for i, _ in enumerate(values):
+        labels.append(min(int(i / total * n) + 1, n))
+    return labels
+
+
+def _decile_buckets(rows: list[dict], feature_col: str, outcome_col: str,
+                    n_deciles: int) -> list[list[float]]:
+    """Sort by feature, bucket by ntile, return list of outcome lists per decile."""
+    pairs = sorted(_pairs(rows, feature_col, outcome_col), key=lambda p: p[0])
+    if not pairs:
+        return []
+    labels = _ntile([p[0] for p in pairs], n_deciles)
+    buckets: dict[int, list[float]] = defaultdict(list)
+    for (_, ret), lbl in zip(pairs, labels):
+        buckets[lbl].append(float(ret))
+    return [buckets.get(i, []) for i in range(1, n_deciles + 1)]
+
+
+def correlation_from_rows(rows: list[dict], x_col: str, y_col: str,
+                           ticker: Optional[str] = None) -> dict:
+    p = _pairs(rows, x_col, y_col)
+    if len(p) < 10:
+        return {"error": "insufficient data", "n": len(p),
+                "x_col": x_col, "y_col": y_col, "ticker": ticker}
+    xa = np.array([v[0] for v in p], dtype=float)
+    ya = np.array([v[1] for v in p], dtype=float)
+    pr, pp = stats.pearsonr(xa, ya)
+    sr, sp = stats.spearmanr(xa, ya)
+    return {
+        "pearson_r":  round(float(pr), 4),
+        "pearson_p":  round(float(pp), 6),
+        "spearman_r": round(float(sr), 4),
+        "spearman_p": round(float(sp), 6),
+        "n":          len(p),
+        "x_col":      x_col,
+        "y_col":      y_col,
+        "ticker":     ticker,
+    }
+
+
+def decile_analysis_from_rows(rows: list[dict], feature_col: str, outcome_col: str,
+                               n_deciles: int = 10,
+                               ticker: Optional[str] = None) -> dict:
+    buckets = _decile_buckets(rows, feature_col, outcome_col, n_deciles)
+    if not buckets or sum(len(b) for b in buckets) < n_deciles * 3:
+        return {"error": "insufficient data",
+                "feature_col": feature_col, "outcome_col": outcome_col, "ticker": ticker}
+
+    deciles = []
+    for i, bucket in enumerate(buckets):
+        if not bucket:
+            continue
+        a = np.array(bucket)
+        deciles.append({
+            "decile":   i + 1,
+            "n":        len(bucket),
+            "avg_ret":  round(float(a.mean()), 6),
+            "med_ret":  round(float(np.median(a)), 6),
+            "win_rate": round(float((a > 0).mean()), 4),
+            "std_dev":  round(float(a.std()), 6),
+        })
+
+    if len(deciles) < 2:
+        return {"error": "not enough decile groups", "deciles": deciles}
+
+    spread = round(deciles[-1]["avg_ret"] - deciles[0]["avg_ret"], 6)
+    return {
+        "deciles":           deciles,
+        "top_bottom_spread": spread,
+        "n_deciles":         n_deciles,
+        "feature_col":       feature_col,
+        "outcome_col":       outcome_col,
+        "ticker":            ticker,
+    }
+
+
+def yearly_consistency_from_rows(rows: list[dict], feature_col: str, outcome_col: str,
+                                  n_deciles: int = 10,
+                                  ticker: Optional[str] = None) -> dict:
+    by_year: dict[int, list[dict]] = defaultdict(list)
+    for r in rows:
+        if r.get(feature_col) is None or r.get(outcome_col) is None:
+            continue
+        d = r.get("trade_date")
+        yr = d.year if hasattr(d, "year") else int(str(d)[:4])
+        by_year[yr].append(r)
+
+    years, wins = [], 0
+    for yr in sorted(by_year.keys()):
+        yr_rows = by_year[yr]
+        if len(yr_rows) < n_deciles * 2:
+            continue
+        buckets = _decile_buckets(yr_rows, feature_col, outcome_col, n_deciles)
+        if not buckets:
+            continue
+        top = buckets[-1]
+        bot = buckets[0]
+        t = float(np.mean(top)) if top else None
+        b = float(np.mean(bot)) if bot else None
+        beats = t is not None and b is not None and t > b
+        if beats:
+            wins += 1
+        years.append({
+            "year":      yr,
+            "top_avg":   round(t, 6) if t is not None else None,
+            "bot_avg":   round(b, 6) if b is not None else None,
+            "top_n":     len(top),
+            "bot_n":     len(bot),
+            "top_beats": beats,
+        })
+
+    return {
+        "years":           years,
+        "consistency_pct": round(wins / len(years) * 100, 1) if years else None,
+        "wins":            wins,
+        "total_years":     len(years),
+        "feature_col":     feature_col,
+        "outcome_col":     outcome_col,
+        "ticker":          ticker,
+    }
+
+
+def equity_curve_from_rows(rows: list[dict], feature_col: str, outcome_col: str,
+                            which: str = "top", n_deciles: int = 10,
+                            ticker: Optional[str] = None) -> dict:
+    horizon = _parse_horizon(outcome_col)
+    buckets = _decile_buckets(rows, feature_col, outcome_col, n_deciles)
+    if not buckets:
+        return {"error": "insufficient data", "points": [],
+                "feature_col": feature_col, "outcome_col": outcome_col, "ticker": ticker}
+
+    target_bucket_idx = -1 if which == "top" else 0
+
+    # Rebuild sorted pairs to get dates for non-overlapping logic
+    pairs_with_date = sorted(
+        [(r["trade_date"], r[feature_col], r[outcome_col])
+         for r in rows
+         if r.get(feature_col) is not None and r.get(outcome_col) is not None],
+        key=lambda x: x[0],
+    )
+    if not pairs_with_date:
+        return {"error": "no data", "points": [], "ticker": ticker}
+
+    # Assign decile labels
+    feature_vals = [p[1] for p in pairs_with_date]
+    labels = _ntile(sorted(feature_vals), n_deciles)
+    # Map sorted feature value → decile
+    sorted_vals = sorted(feature_vals)
+    val_to_decile = {v: l for v, l in zip(sorted_vals, labels)}
+
+    target_label = n_deciles if which == "top" else 1
+    target_rows = [
+        (p[0], float(p[2]))
+        for p in pairs_with_date
+        if val_to_decile.get(p[1]) == target_label
+    ]
+
+    trades, last_date = [], None
+    for date, ret in target_rows:
+        d = date.date() if hasattr(date, "date") else date
+        if last_date is None or (d - last_date).days >= horizon:
+            trades.append((d, ret))
+            last_date = d
+
+    if not trades:
+        return {"error": "no non-overlapping trades", "points": [], "ticker": ticker}
+
+    equity, peak, max_dd = 1.0, 1.0, 0.0
+    points = []
+    for date, ret in trades:
+        equity *= (1.0 + ret)
+        peak = max(peak, equity)
+        max_dd = min(max_dd, (equity - peak) / peak)
+        points.append({"date": str(date), "value": round(equity, 6)})
+
+    n = len(trades)
+    return {
+        "points":       points,
+        "n_trades":     n,
+        "final_equity": round(equity, 4),
+        "max_drawdown": round(max_dd, 4),
+        "avg_ret":      round(sum(r for _, r in trades) / n, 6),
+        "win_rate":     round(sum(1 for _, r in trades if r > 0) / n, 4),
+        "horizon":      horizon,
+        "which":        which,
+        "feature_col":  feature_col,
+        "outcome_col":  outcome_col,
+        "ticker":       ticker,
+    }
+
+
+def scatter_sample_from_rows(rows: list[dict], x_col: str, y_col: str,
+                              limit: int = 2000,
+                              ticker: Optional[str] = None) -> dict:
+    valid = sorted(
+        [(r["trade_date"], float(r[x_col]), float(r[y_col]))
+         for r in rows
+         if r.get(x_col) is not None and r.get(y_col) is not None],
+        key=lambda x: x[0],
+    )
+    if len(valid) > limit:
+        step = len(valid) // limit
+        valid = valid[::step][:limit]
+    return {
+        "points": [{"date": str(d), "x": x, "y": y} for d, x, y in valid],
+        "n":      len(valid),
+        "x_col":  x_col,
+        "y_col":  y_col,
+        "ticker": ticker,
+    }
+
+
+def regression_from_rows(rows: list[dict], x_cols: list[str], y_col: str,
+                          ticker: Optional[str] = None) -> dict:
+    valid = [r for r in rows
+             if all(r.get(c) is not None for c in x_cols + [y_col])]
+    if len(valid) < len(x_cols) + 5:
+        return {"error": "insufficient data", "n": len(valid)}
+    X = np.array([[float(r[c]) for c in x_cols] for r in valid])
+    y = np.array([float(r[y_col]) for r in valid])
+    X_int = np.column_stack([np.ones(len(X)), X])
+    coeffs, *_ = np.linalg.lstsq(X_int, y, rcond=None)
+    y_pred = X_int @ coeffs
+    ss_res = float(np.sum((y - y_pred) ** 2))
+    ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    coeff_dict = {"intercept": round(float(coeffs[0]), 6)}
+    for i, col in enumerate(x_cols):
+        coeff_dict[col] = round(float(coeffs[i + 1]), 6)
+    return {
+        "coefficients": coeff_dict,
+        "r_squared":    round(r2, 4),
+        "n":            len(valid),
+        "y_col":        y_col,
+        "x_cols":       x_cols,
+        "ticker":       ticker,
+    }
