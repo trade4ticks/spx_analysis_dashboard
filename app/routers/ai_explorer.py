@@ -195,15 +195,15 @@ One row per analysis result (correlation, decile, equity_curve, regression, year
   run_id UUID, ticker TEXT, x_col TEXT, y_col TEXT,
   analysis_type TEXT, result JSONB, created_at TIMESTAMPTZ
   -- result JSONB structure varies by analysis_type:
-  --   correlation: {pearson_r, pearson_p, spearman_r, spearman_p, n}
-  --   decile:      {deciles:[{decile,n,avg_ret,med_ret,win_rate,std_dev}], top_bottom_spread}
-  --   equity_curve_top/bottom: {n_trades, final_equity, max_drawdown, avg_ret, win_rate}
-  --   yearly_consistency: {years:[{year,top_avg,bot_avg,top_beats}], consistency_pct}
+  --   correlation: {{pearson_r, pearson_p, spearman_r, spearman_p, n}}
+  --   decile:      {{deciles:[{{decile,n,avg_ret,med_ret,win_rate,std_dev}}], top_bottom_spread}}
+  --   equity_curve_top/bottom: {{n_trades, final_equity, max_drawdown, avg_ret, win_rate}}
+  --   yearly_consistency: {{years:[{{year,top_avg,bot_avg,top_beats}}], consistency_pct}}
 
 TABLE: research_series
 Time-series data from research runs (equity curves, rolling stats).
   run_id UUID, ticker TEXT, x_col TEXT, y_col TEXT,
-  series_name TEXT, data JSONB -- [{date, value}, ...]
+  series_name TEXT, data JSONB -- [{{date, value}}, ...]
 
 JOIN GUIDANCE for open_interest tables:
 - daily_features and underlying_ohlc join on (ticker, trade_date)
