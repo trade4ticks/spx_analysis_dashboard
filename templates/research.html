@@ -102,11 +102,11 @@
 
     /* Summary card */
     .summary-card {
-      background: #0e1e2e; border: 1px solid #1a5a8a; border-radius: 6px;
+      background: #242424; border: 1px solid #484848; border-radius: 6px;
       padding: 16px 18px;
     }
     .summary-card p {
-      font-size: 13px; color: #ddd; line-height: 1.8; margin: 0 0 10px;
+      font-size: 13px; color: #e0e0e0; line-height: 1.8; margin: 0 0 10px;
       white-space: pre-wrap;
     }
     .summary-card p:last-child { margin-bottom: 0; }
@@ -157,6 +157,13 @@
     }
     .chart-card img:hover { opacity: 0.9; }
 
+    /* Fullscreen button on chart card headers */
+    .fs-btn {
+      background: none; border: none; cursor: pointer; color: #555;
+      font-size: 15px; padding: 0 2px; line-height: 1; flex-shrink: 0;
+    }
+    .fs-btn:hover { color: #aaa; }
+
     /* Section headers */
     .section-hdr {
       font-size: 11px; color: #aaa; font-weight: 700; letter-spacing: .4px;
@@ -170,12 +177,12 @@
     /* ── Lightbox ────────────────────────────────────────────────────────── */
     .lightbox-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(0,0,0,0.92); z-index: 9999;
+      background: rgba(0,0,0,0.93); z-index: 9999;
       display: flex; align-items: center; justify-content: center;
       cursor: zoom-out;
     }
     .lightbox-overlay img {
-      max-width: 95vw; max-height: 93vh;
+      width: 95vw; height: 93vh;
       object-fit: contain; border-radius: 4px;
       box-shadow: 0 0 40px rgba(0,0,0,0.8);
     }
@@ -187,7 +194,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js?v=6"></script>
+  <script src="/static/js/research.js?v=7"></script>
 </head>
 
 <body x-data="research" x-init="init()">
@@ -438,19 +445,40 @@
               <div class="charts-grid" style="margin-top:10px">
                 <template x-for="r in deciles" :key="r.id">
                   <div class="chart-card">
-                    <div class="chart-card-hdr">
+                    <div class="chart-card-hdr" style="display:flex;align-items:center">
                       <span class="chart-type-badge">Decile</span>
-                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <span style="flex:1;overflow:hidden;text-overflow:ellipsis"
+                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <button class="fs-btn" @click.stop="openChartFullscreen('c-decile-' + r.id)"
+                              title="Fullscreen">⛶</button>
                     </div>
                     <div class="chart-canvas-wrap">
                       <canvas :id="'c-decile-' + r.id"></canvas>
                     </div>
-                    <div x-show="r.result?.top_bottom_spread != null"
-                         style="padding:4px 10px 6px;font-size:10px;color:#666">
-                      D10–D1 spread:
-                      <span :class="(r.result?.top_bottom_spread||0)>0?'val-pos':'val-neg'"
-                            x-text="pct(r.result?.top_bottom_spread)"></span>
-                    </div>
+                    <!-- Per-decile stats table -->
+                    <template x-if="r.result?.deciles?.length">
+                      <div style="overflow-x:auto;padding:0 8px 8px">
+                        <table class="res-table" style="font-size:10px">
+                          <thead>
+                            <tr><th>D</th><th>N</th><th>Avg Ret%</th><th>Median%</th><th>Win%</th><th>Std%</th></tr>
+                          </thead>
+                          <tbody>
+                            <template x-for="d in r.result.deciles" :key="d.decile">
+                              <tr>
+                                <td class="num" x-text="d.decile"></td>
+                                <td class="num" x-text="d.n"></td>
+                                <td class="num" :class="(d.avg_ret||0)>0?'val-pos':'val-neg'"
+                                    x-text="pct(d.avg_ret)"></td>
+                                <td class="num" :class="(d.med_ret||0)>0?'val-pos':'val-neg'"
+                                    x-text="pct(d.med_ret)"></td>
+                                <td class="num" x-text="d.win_rate!=null?(d.win_rate*100).toFixed(1)+'%':'—'"></td>
+                                <td class="num" x-text="d.std_dev!=null?(d.std_dev*100).toFixed(3)+'%':'—'"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
@@ -465,9 +493,12 @@
               <div class="charts-grid" style="margin-top:10px">
                 <template x-for="r in results.filter(x => x.analysis_type === 'equity_curve_top')" :key="r.id">
                   <div class="chart-card">
-                    <div class="chart-card-hdr">
+                    <div class="chart-card-hdr" style="display:flex;align-items:center">
                       <span class="chart-type-badge">Equity</span>
-                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <span style="flex:1;overflow:hidden;text-overflow:ellipsis"
+                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <button class="fs-btn" @click.stop="openChartFullscreen('c-equity-' + r.id)"
+                              title="Fullscreen">⛶</button>
                     </div>
                     <div class="chart-canvas-wrap" style="height:300px">
                       <canvas :id="'c-equity-' + r.id"></canvas>
@@ -493,9 +524,12 @@
               <div class="charts-grid" style="margin-top:10px">
                 <template x-for="r in yearlyConsistency" :key="r.id">
                   <div class="chart-card">
-                    <div class="chart-card-hdr">
+                    <div class="chart-card-hdr" style="display:flex;align-items:center">
                       <span class="chart-type-badge">Yearly</span>
-                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <span style="flex:1;overflow:hidden;text-overflow:ellipsis"
+                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <button class="fs-btn" @click.stop="openChartFullscreen('c-yearly-' + r.id)"
+                              title="Fullscreen">⛶</button>
                     </div>
                     <div class="chart-canvas-wrap">
                       <canvas :id="'c-yearly-' + r.id"></canvas>
@@ -522,9 +556,12 @@
               <div class="charts-grid" style="margin-top:10px">
                 <template x-for="chart in staticCharts" :key="chart.id">
                   <div class="chart-card">
-                    <div class="chart-card-hdr">
+                    <div class="chart-card-hdr" style="display:flex;align-items:center">
                       <span class="chart-type-badge" x-text="chart.chart_type === 'correlation_heatmap' ? 'Heatmap' : 'Scatter'"></span>
-                      <span x-text="chart.title || chart.chart_type"></span>
+                      <span style="flex:1;overflow:hidden;text-overflow:ellipsis"
+                            x-text="chart.title || chart.chart_type"></span>
+                      <button class="fs-btn" @click.stop="openLightbox(chartUrl(chart.id))"
+                              title="Fullscreen">⛶</button>
                     </div>
                     <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy"
                          @click="openLightbox(chartUrl(chart.id))">

@@ -27,29 +27,29 @@ def _dark_style():
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "ResTitle", parent=styles["Title"],
-        fontSize=20, spaceAfter=6, textColor=colors.HexColor("#3498db"),
+        fontSize=20, spaceAfter=6, textColor=colors.HexColor("#1a5276"),
     )
     h1 = ParagraphStyle(
         "ResH1", parent=styles["Heading1"],
-        fontSize=14, spaceAfter=4, textColor=colors.HexColor("#3498db"),
+        fontSize=14, spaceAfter=4, textColor=colors.HexColor("#1a5276"),
     )
     h2 = ParagraphStyle(
         "ResH2", parent=styles["Heading2"],
-        fontSize=11, spaceAfter=3, textColor=colors.HexColor("#cccccc"),
+        fontSize=11, spaceAfter=3, textColor=colors.HexColor("#111111"),
     )
     body = ParagraphStyle(
         "ResBody", parent=styles["Normal"],
-        fontSize=9, spaceAfter=4, textColor=colors.HexColor("#cccccc"),
-        leading=13,
+        fontSize=9, spaceAfter=4, textColor=colors.HexColor("#111111"),
+        leading=14,
     )
     dim = ParagraphStyle(
         "ResDim", parent=styles["Normal"],
-        fontSize=8, spaceAfter=2, textColor=colors.HexColor("#888888"),
+        fontSize=8, spaceAfter=2, textColor=colors.HexColor("#444444"),
     )
     return {"title": title_style, "h1": h1, "h2": h2, "body": body, "dim": dim}
 
 
-def _png_image(png_bytes: bytes, max_width=6.5 * 72, max_height=4 * 72) -> Optional[Image]:
+def _png_image(png_bytes: bytes, max_width=6.5 * 72, max_height=4.5 * 72) -> Optional[Image]:
     if not png_bytes:
         return None
     buf = io.BytesIO(png_bytes)
@@ -77,13 +77,13 @@ def _decile_table(decile_result: dict, styles):
         ])
     t = Table(rows, colWidths=[50, 45, 65, 65, 70, 65])
     t.setStyle(TableStyle([
-        ("BACKGROUND",  (0, 0), (-1, 0),  colors.HexColor("#2d2d2d")),
-        ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.HexColor("#3498db")),
-        ("TEXTCOLOR",   (0, 1), (-1, -1), colors.HexColor("#cccccc")),
+        ("BACKGROUND",  (0, 0), (-1, 0),  colors.HexColor("#dce9f5")),
+        ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.HexColor("#1a5276")),
+        ("TEXTCOLOR",   (0, 1), (-1, -1), colors.HexColor("#111111")),
         ("FONTSIZE",    (0, 0), (-1, -1), 8),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-         [colors.HexColor("#1e1e1e"), colors.HexColor("#262626")]),
-        ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#444")),
+         [colors.HexColor("#ffffff"), colors.HexColor("#f4f7fb")]),
+        ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#aaaaaa")),
         ("ALIGN",       (0, 0), (-1, -1), "CENTER"),
     ]))
     return t
@@ -233,13 +233,13 @@ def _build(run: dict, results: list[dict], chart_rows: list[dict], dest):
         if len(rows) > 1:
             t = Table(rows, colWidths=[45, 130, 85, 55, 55, 60, 40])
             t.setStyle(TableStyle([
-                ("BACKGROUND",  (0, 0), (-1, 0),  colors.HexColor("#2d2d2d")),
-                ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.HexColor("#3498db")),
-                ("TEXTCOLOR",   (0, 1), (-1, -1), colors.HexColor("#cccccc")),
+                ("BACKGROUND",  (0, 0), (-1, 0),  colors.HexColor("#dce9f5")),
+                ("TEXTCOLOR",   (0, 0), (-1, 0),  colors.HexColor("#1a5276")),
+                ("TEXTCOLOR",   (0, 1), (-1, -1), colors.HexColor("#111111")),
                 ("FONTSIZE",    (0, 0), (-1, -1), 7),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-                 [colors.HexColor("#1e1e1e"), colors.HexColor("#262626")]),
-                ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#444")),
+                 [colors.HexColor("#ffffff"), colors.HexColor("#f4f7fb")]),
+                ("GRID",        (0, 0), (-1, -1), 0.3, colors.HexColor("#aaaaaa")),
                 ("ALIGN",       (3, 0), (-1, -1), "CENTER"),
             ]))
             story.append(t)

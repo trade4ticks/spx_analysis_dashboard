@@ -32,10 +32,21 @@ document.addEventListener('alpine:init', () => {
 
     // ── Init ───────────────────────────────────────────────────────────────
     async init() {
-      // Chart.js global dark theme defaults
       if (typeof Chart !== 'undefined') {
         Chart.defaults.color = '#ccc';
         Chart.defaults.borderColor = '#333';
+        // Fill canvas background so toDataURL captures dark BG correctly
+        Chart.register({
+          id: 'darkBackground',
+          beforeDraw: (chart) => {
+            const ctx = chart.canvas.getContext('2d');
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = '#1e1e1e';
+            ctx.fillRect(0, 0, chart.width, chart.height);
+            ctx.restore();
+          },
+        });
       }
       await this.loadRuns();
       this._loadTickers();
@@ -196,8 +207,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Lightbox ───────────────────────────────────────────────────────────
-    openLightbox(url) { this.lightboxUrl = url; },
-    closeLightbox()   { this.lightboxUrl = null; },
+    openLightbox(url)        { this.lightboxUrl = url; },
+    closeLightbox()          { this.lightboxUrl = null; },
+    openChartFullscreen(id)  {
+      const el = document.getElementById(id);
+      if (el) this.lightboxUrl = el.toDataURL('image/png');
+    },
 
     // ── Chart.js interactive charts ────────────────────────────────────────
     async _renderInteractiveCharts() {
