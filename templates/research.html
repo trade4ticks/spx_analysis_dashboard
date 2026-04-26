@@ -66,7 +66,6 @@
     .form-row-h { display: flex; gap: 12px; }
     .form-row-h .form-row { flex: 1; }
 
-    /* Ticker chips */
     .ticker-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .ticker-chip {
       font-size: 10px; padding: 2px 7px; border-radius: 10px;
@@ -74,7 +73,6 @@
     }
     .ticker-chip:hover { background: #1a3a5c; color: #3498db; border-color: #3498db; }
 
-    /* Preset buttons */
     .preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
     .preset-btn {
       font-size: 10px; padding: 3px 10px; border-radius: 3px;
@@ -88,22 +86,34 @@
     .run-question { font-size: 12px; color: #888; font-style: italic; margin-top: 2px; }
 
     /* Progress */
+    .progress-wrap { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; padding: 12px 14px; }
+    .progress-meta { display: flex; justify-content: space-between; font-size: 11px; color: #f1c40f; margin-bottom: 8px; }
     .progress-bar {
-      background: #2a2a2a; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px;
+      background: #2a2a2a; border-radius: 4px; height: 8px; overflow: hidden;
     }
     .progress-fill {
-      height: 100%; background: var(--accent); border-radius: 4px;
+      height: 100%; border-radius: 4px; background: var(--accent);
+      transition: width 1s ease;
+    }
+    .progress-fill.pulse {
       animation: pulse 1.5s ease-in-out infinite;
     }
     @keyframes pulse { 0%,100%{opacity:.6} 50%{opacity:1} }
 
     /* Summary card */
     .summary-card {
-      background: #1a2a3a; border: 1px solid #1a4a6a; border-radius: 6px;
-      padding: 14px 16px;
+      background: #0e1e2e; border: 1px solid #1a5a8a; border-radius: 6px;
+      padding: 16px 18px;
     }
-    .summary-card p { font-size: 12px; color: #ccc; line-height: 1.7; margin: 0 0 8px; }
+    .summary-card p {
+      font-size: 13px; color: #ddd; line-height: 1.8; margin: 0 0 10px;
+      white-space: pre-wrap;
+    }
     .summary-card p:last-child { margin-bottom: 0; }
+    .summary-missing {
+      background: #1e1e1e; border: 1px solid #333; border-radius: 6px;
+      padding: 12px 16px; color: #555; font-size: 12px; font-style: italic;
+    }
 
     /* Results summary table */
     .res-table { border-collapse: collapse; font-size: 11px; width: 100%; }
@@ -118,20 +128,34 @@
     .val-pos { color: #2ecc71; }
     .val-neg { color: #e74c3c; }
 
-    /* Charts grid */
+    /* ── Interactive chart cards ─────────────────────────────────────────── */
     .charts-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
     }
+    @media (max-width: 1300px) { .charts-grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 800px)  { .charts-grid { grid-template-columns: 1fr; } }
+
     .chart-card {
       background: #1e1e1e; border: 1px solid #333; border-radius: 6px; overflow: hidden;
     }
     .chart-card-hdr {
-      padding: 6px 10px; background: #2d2d2d; font-size: 10px; color: #888;
+      padding: 7px 10px; background: #2d2d2d; font-size: 11px; color: #aaa;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .chart-card img { width: 100%; height: auto; display: block; }
+    .chart-card-hdr .chart-type-badge {
+      font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+      background: #1a3a5c; color: #3498db; margin-right: 5px; vertical-align: middle;
+    }
+    .chart-canvas-wrap { position: relative; height: 280px; padding: 8px; }
+    .chart-canvas-wrap canvas { width: 100% !important; }
+
+    /* PNG chart cards (scatter / heatmap) */
+    .chart-card img {
+      width: 100%; height: auto; display: block; cursor: zoom-in;
+    }
+    .chart-card img:hover { opacity: 0.9; }
 
     /* Section headers */
     .section-hdr {
@@ -142,12 +166,38 @@
     /* Empty state */
     .empty-state { text-align: center; padding: 60px 20px; color: #555; font-size: 13px; }
     .empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+
+    /* ── Lightbox ────────────────────────────────────────────────────────── */
+    .lightbox-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.92); z-index: 9999;
+      display: flex; align-items: center; justify-content: center;
+      cursor: zoom-out;
+    }
+    .lightbox-overlay img {
+      max-width: 95vw; max-height: 93vh;
+      object-fit: contain; border-radius: 4px;
+      box-shadow: 0 0 40px rgba(0,0,0,0.8);
+    }
+    .lightbox-close {
+      position: absolute; top: 16px; right: 20px;
+      font-size: 28px; color: #aaa; cursor: pointer; line-height: 1;
+    }
+    .lightbox-close:hover { color: #fff; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js"></script>
+  <script src="/static/js/research.js?v=6"></script>
 </head>
 
 <body x-data="research" x-init="init()">
+
+  <!-- ── Lightbox ──────────────────────────────────────────────────────── -->
+  <div x-show="lightboxUrl" class="lightbox-overlay"
+       @click.self="closeLightbox()" @keydown.window.escape="closeLightbox()">
+    <span class="lightbox-close" @click="closeLightbox()">✕</span>
+    <img :src="lightboxUrl" alt="Chart fullscreen">
+  </div>
 
   <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
   <div class="topbar">
@@ -297,18 +347,21 @@
               <button class="btn" style="margin-left:auto;font-size:10px;color:#888"
                       @click="exportPdf(selectedRun.id)">↓ PDF</button>
               <button class="btn" style="font-size:10px;color:#e74c3c"
-                      @click="deleteRun(selectedRun.id)">✕</button>
+                      @click="deleteRun(selectedRun.id)">✕ Delete</button>
             </div>
             <div class="run-question" x-text="selectedRun.question"></div>
           </div>
 
           <!-- Running progress -->
           <template x-if="selectedRun.status === 'running'">
-            <div>
-              <div style="font-size:11px;color:#f1c40f;margin-bottom:6px">
-                ⚙ Running… <span x-text="selectedRun.result_count || 0"></span> analyses saved so far
+            <div class="progress-wrap">
+              <div class="progress-meta">
+                <span x-text="progressLabel"></span>
+                <span x-text="progressPct + '%'"></span>
               </div>
-              <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
+              <div class="progress-bar">
+                <div class="progress-fill pulse" :style="'width:' + Math.max(4, progressPct) + '%'"></div>
+              </div>
             </div>
           </template>
 
@@ -323,22 +376,27 @@
             <div style="color:#888;font-size:12px">Loading results…</div>
           </template>
 
-          <!-- AI Summary -->
-          <template x-if="selectedRun.ai_summary">
+          <!-- AI Summary — always shown for complete/error runs -->
+          <template x-if="selectedRun.status === 'complete' || selectedRun.status === 'error'">
             <div>
-              <div class="section-hdr">AI FINDINGS SUMMARY</div>
-              <div class="summary-card" style="margin-top:8px">
-                <template x-for="para in selectedRun.ai_summary.split('\n\n')" :key="para">
-                  <p x-show="para.trim()" x-text="para.trim()"></p>
-                </template>
-              </div>
+              <div class="section-hdr" style="margin-bottom:8px">AI FINDINGS SUMMARY</div>
+              <template x-if="selectedRun.ai_summary">
+                <div class="summary-card">
+                  <template x-for="(para, i) in selectedRun.ai_summary.split(/\n{2,}/)" :key="i">
+                    <p x-show="para.trim()" x-text="para.trim()"></p>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!selectedRun.ai_summary">
+                <div class="summary-missing">No AI summary was generated for this run.</div>
+              </template>
             </div>
           </template>
 
           <!-- Summary table -->
           <template x-if="summaryRows.length > 0">
             <div>
-              <div class="section-hdr">RESULTS SUMMARY — sorted by decile spread</div>
+              <div class="section-hdr">SIGNAL SCORECARD — sorted by decile spread</div>
               <div style="overflow-x:auto;margin-top:8px">
                 <table class="res-table">
                   <thead>
@@ -371,15 +429,105 @@
             </div>
           </template>
 
-          <!-- Charts -->
-          <template x-if="charts.length > 0">
+          <!-- ── Interactive Chart.js charts ──────────────────────────── -->
+          <template x-if="deciles.length > 0">
             <div>
-              <div class="section-hdr">CHARTS (<span x-text="charts.length"></span>)</div>
-              <div class="charts-grid" style="margin-top:8px">
-                <template x-for="chart in charts" :key="chart.id">
+              <div class="section-hdr">DECILE ANALYSIS
+                <span style="color:#555;font-weight:400;font-size:10px"> — hover for details</span>
+              </div>
+              <div class="charts-grid" style="margin-top:10px">
+                <template x-for="r in deciles" :key="r.id">
                   <div class="chart-card">
-                    <div class="chart-card-hdr" x-text="chart.title || chart.chart_type"></div>
-                    <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy">
+                    <div class="chart-card-hdr">
+                      <span class="chart-type-badge">Decile</span>
+                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                    </div>
+                    <div class="chart-canvas-wrap">
+                      <canvas :id="'c-decile-' + r.id"></canvas>
+                    </div>
+                    <div x-show="r.result?.top_bottom_spread != null"
+                         style="padding:4px 10px 6px;font-size:10px;color:#666">
+                      D10–D1 spread:
+                      <span :class="(r.result?.top_bottom_spread||0)>0?'val-pos':'val-neg'"
+                            x-text="pct(r.result?.top_bottom_spread)"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="results.some(r => r.analysis_type === 'equity_curve_top')">
+            <div>
+              <div class="section-hdr">EQUITY CURVES
+                <span style="color:#555;font-weight:400;font-size:10px"> — hover for date / value</span>
+              </div>
+              <div class="charts-grid" style="margin-top:10px">
+                <template x-for="r in results.filter(x => x.analysis_type === 'equity_curve_top')" :key="r.id">
+                  <div class="chart-card">
+                    <div class="chart-card-hdr">
+                      <span class="chart-type-badge">Equity</span>
+                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                    </div>
+                    <div class="chart-canvas-wrap" style="height:300px">
+                      <canvas :id="'c-equity-' + r.id"></canvas>
+                    </div>
+                    <div style="padding:4px 10px 6px;font-size:10px;color:#666;display:flex;gap:14px">
+                      <span>Trades: <span style="color:#ccc" x-text="r.result?.n_trades || '—'"></span></span>
+                      <span>Final: <span :class="(r.result?.final_equity||1)>=1?'val-pos':'val-neg'"
+                            x-text="r.result?.final_equity ? r.result.final_equity.toFixed(3)+'x' : '—'"></span></span>
+                      <span>MaxDD: <span class="val-neg"
+                            x-text="r.result?.max_drawdown != null ? pct(r.result.max_drawdown) : '—'"></span></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="yearlyConsistency.length > 0">
+            <div>
+              <div class="section-hdr">YEARLY CONSISTENCY
+                <span style="color:#555;font-weight:400;font-size:10px"> — hover for year detail</span>
+              </div>
+              <div class="charts-grid" style="margin-top:10px">
+                <template x-for="r in yearlyConsistency" :key="r.id">
+                  <div class="chart-card">
+                    <div class="chart-card-hdr">
+                      <span class="chart-type-badge">Yearly</span>
+                      <span x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                    </div>
+                    <div class="chart-canvas-wrap">
+                      <canvas :id="'c-yearly-' + r.id"></canvas>
+                    </div>
+                    <div x-show="r.result?.consistency_pct != null"
+                         style="padding:4px 10px 6px;font-size:10px;color:#666">
+                      Top beats bottom:
+                      <span style="color:#ccc" x-text="(r.result?.consistency_pct || 0) + '%'"></span>
+                      of years
+                      <span x-text="'(' + (r.result?.wins || 0) + '/' + (r.result?.total_years || 0) + ')'"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Static PNG charts (scatter + heatmap) ────────────────── -->
+          <template x-if="staticCharts.length > 0">
+            <div>
+              <div class="section-hdr">SCATTER &amp; HEATMAP
+                <span style="color:#555;font-weight:400;font-size:10px"> — click to fullscreen</span>
+              </div>
+              <div class="charts-grid" style="margin-top:10px">
+                <template x-for="chart in staticCharts" :key="chart.id">
+                  <div class="chart-card">
+                    <div class="chart-card-hdr">
+                      <span class="chart-type-badge" x-text="chart.chart_type === 'correlation_heatmap' ? 'Heatmap' : 'Scatter'"></span>
+                      <span x-text="chart.title || chart.chart_type"></span>
+                    </div>
+                    <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy"
+                         @click="openLightbox(chartUrl(chart.id))">
                   </div>
                 </template>
               </div>

@@ -92,6 +92,9 @@ async def get_run(run_id: str, pool=Depends(get_pool)):
             "SELECT COUNT(*) FROM research_results WHERE run_id = $1::uuid", run_id)
         chart_count = await conn.fetchval(
             "SELECT COUNT(*) FROM research_charts WHERE run_id = $1::uuid", run_id)
+    cfg = run.get("config")
+    if isinstance(cfg, str):
+        run = {**run, "config": json.loads(cfg)}
     return {**run, "result_count": int(result_count), "chart_count": int(chart_count)}
 
 

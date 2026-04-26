@@ -10,6 +10,8 @@ document.addEventListener('alpine:init', () => {
     loading:     false,
     error:       null,
     pollTimer:   null,
+    lightboxUrl: null,
+    _chartInstances: {},
 
     // New-run form
     form: {
@@ -30,6 +32,11 @@ document.addEventListener('alpine:init', () => {
 
     // ── Init ───────────────────────────────────────────────────────────────
     async init() {
+      // Chart.js global dark theme defaults
+      if (typeof Chart !== 'undefined') {
+        Chart.defaults.color = '#ccc';
+        Chart.defaults.borderColor = '#333';
+      }
       await this.loadRuns();
       this._loadTickers();
     },
@@ -56,12 +63,14 @@ document.addEventListener('alpine:init', () => {
       this.charts      = [];
       this.error       = null;
       this._stopPoll();
+      this._destroyCharts();
       await this._loadRunDetail(run.id);
       if (run.status === 'running') this._startPoll(run.id);
     },
 
     async _loadRunDetail(runId) {
       this.loading = true;
+      this._destroyCharts();
       try {
         const [runRes, resultsRes, chartsRes] = await Promise.all([
           fetch(`/api/research/run/${runId}`),
@@ -71,6 +80,7 @@ document.addEventListener('alpine:init', () => {
         if (runRes.ok)     this.selectedRun = await runRes.json();
         if (resultsRes.ok) this.results     = await resultsRes.json();
         if (chartsRes.ok)  this.charts      = await chartsRes.json();
+        await this._renderInteractiveCharts();
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -78,7 +88,7 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    // ── Polling (for running jobs) ─────────────────────────────────────────
+    // ── Polling ────────────────────────────────────────────────────────────
     _startPoll(runId) {
       this.pollTimer = setInterval(async () => {
         try {
@@ -86,7 +96,6 @@ document.addEventListener('alpine:init', () => {
           if (!r.ok) return;
           const data = await r.json();
           this.selectedRun = data;
-          // Update status in sidebar list
           const idx = this.runs.findIndex(x => x.id === runId);
           if (idx >= 0) this.runs[idx] = { ...this.runs[idx], status: data.status };
           if (data.status !== 'running') {
@@ -186,6 +195,198 @@ document.addEventListener('alpine:init', () => {
       window.location.href = `/api/research/run/${runId}/pdf`;
     },
 
+    // ── Lightbox ───────────────────────────────────────────────────────────
+    openLightbox(url) { this.lightboxUrl = url; },
+    closeLightbox()   { this.lightboxUrl = null; },
+
+    // ── Chart.js interactive charts ────────────────────────────────────────
+    async _renderInteractiveCharts() {
+      if (typeof Chart === 'undefined') return;
+      await this.$nextTick();
+      this._destroyCharts();
+
+      const darkScales = {
+        x: { ticks: { color: '#ccc', font: { size: 11 } }, grid: { color: '#333' } },
+        y: { ticks: { color: '#ccc', font: { size: 11 } }, grid: { color: '#333' } },
+      };
+
+      // ── Decile bar charts ────────────────────────────────────────────────
+      for (const r of this.deciles) {
+        const el = document.getElementById('c-decile-' + r.id);
+        if (!el || !r.result?.deciles) continue;
+        const d = r.result.deciles;
+        const vals = d.map(x => +((x.avg_ret || 0) * 100).toFixed(4));
+        this._chartInstances['c-decile-' + r.id] = new Chart(el, {
+          type: 'bar',
+          data: {
+            labels: d.map(x => 'D' + x.decile),
+            datasets: [{
+              label: 'Avg Ret %',
+              data: vals,
+              backgroundColor: vals.map(v => v >= 0 ? 'rgba(46,204,113,0.75)' : 'rgba(231,76,60,0.75)'),
+              borderColor:     vals.map(v => v >= 0 ? '#2ecc71' : '#e74c3c'),
+              borderWidth: 1,
+            }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: ctx => {
+                    const dec = d[ctx.dataIndex];
+                    return [
+                      `Avg Ret:  ${(dec.avg_ret*100).toFixed(3)}%`,
+                      `Median:   ${(dec.med_ret*100).toFixed(3)}%`,
+                      `Win Rate: ${(dec.win_rate*100).toFixed(1)}%`,
+                      `N: ${dec.n}`,
+                    ];
+                  }
+                }
+              },
+            },
+            scales: darkScales,
+          },
+        });
+      }
+
+      // ── Equity curves (render top + bottom together) ─────────────────────
+      const topResults = this.results.filter(r => r.analysis_type === 'equity_curve_top');
+      for (const r of topResults) {
+        const el = document.getElementById('c-equity-' + r.id);
+        if (!el || !r.result?.points) continue;
+        const pts = r.result.points;
+        const datasets = [{
+          label: 'Top Decile',
+          data:  pts.map(p => p.value),
+          borderColor: '#2ecc71', backgroundColor: 'transparent',
+          borderWidth: 2, pointRadius: 0, tension: 0.1,
+        }];
+        const botResult = this.results.find(x =>
+          x.analysis_type === 'equity_curve_bottom' &&
+          x.ticker === r.ticker && x.x_col === r.x_col && x.y_col === r.y_col
+        );
+        if (botResult?.result?.points) {
+          datasets.push({
+            label: 'Bottom Decile',
+            data:  botResult.result.points.map(p => p.value),
+            borderColor: '#e74c3c', backgroundColor: 'transparent',
+            borderWidth: 2, pointRadius: 0, tension: 0.1,
+          });
+        }
+        const finalEq = r.result.final_equity;
+        const maxDD   = r.result.max_drawdown;
+        this._chartInstances['c-equity-' + r.id] = new Chart(el, {
+          type: 'line',
+          data: { labels: pts.map(p => p.date), datasets },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: {
+                labels: { color: '#ccc', boxWidth: 12, font: { size: 11 } }
+              },
+              tooltip: {
+                callbacks: {
+                  label: ctx => `${ctx.dataset.label}: ${ctx.raw.toFixed(3)}x`,
+                  footer: () => finalEq != null
+                    ? [`Final: ${finalEq.toFixed(3)}x  |  MaxDD: ${(maxDD*100).toFixed(1)}%`]
+                    : [],
+                }
+              },
+            },
+            scales: {
+              x: { ticks: { color: '#ccc', font: { size: 10 }, maxTicksLimit: 8, maxRotation: 30 }, grid: { color: '#333' } },
+              y: { ticks: { color: '#ccc', font: { size: 11 } }, grid: { color: '#333' } },
+            },
+          },
+        });
+      }
+
+      // ── Yearly consistency bar charts ────────────────────────────────────
+      for (const r of this.yearlyConsistency) {
+        const el = document.getElementById('c-yearly-' + r.id);
+        if (!el || !r.result?.years) continue;
+        const yrs = r.result.years;
+        this._chartInstances['c-yearly-' + r.id] = new Chart(el, {
+          type: 'bar',
+          data: {
+            labels: yrs.map(y => String(y.year)),
+            datasets: [
+              {
+                label: 'Top Decile',
+                data: yrs.map(y => +((y.top_avg || 0)*100).toFixed(4)),
+                backgroundColor: 'rgba(46,204,113,0.75)', borderColor: '#2ecc71', borderWidth: 1,
+              },
+              {
+                label: 'Bottom Decile',
+                data: yrs.map(y => +((y.bot_avg || 0)*100).toFixed(4)),
+                backgroundColor: 'rgba(231,76,60,0.75)', borderColor: '#e74c3c', borderWidth: 1,
+              },
+            ],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { labels: { color: '#ccc', boxWidth: 12, font: { size: 11 } } },
+              tooltip: {
+                callbacks: {
+                  label: ctx => `${ctx.dataset.label}: ${ctx.raw.toFixed(3)}%`,
+                  afterBody: (items) => {
+                    const yr = yrs[items[0]?.dataIndex];
+                    return yr ? [`Top beats bottom: ${yr.top_beats ? 'Yes' : 'No'}  N: ${yr.n}`] : [];
+                  },
+                }
+              },
+            },
+            scales: darkScales,
+          },
+        });
+      }
+    },
+
+    _destroyCharts() {
+      for (const c of Object.values(this._chartInstances)) {
+        try { c.destroy(); } catch (_) {}
+      }
+      this._chartInstances = {};
+    },
+
+    // ── Progress ───────────────────────────────────────────────────────────
+    get runConfig() {
+      const cfg = this.selectedRun?.config;
+      if (!cfg) return {};
+      return typeof cfg === 'string' ? JSON.parse(cfg) : cfg;
+    },
+
+    get expectedTotal() {
+      const cfg = this.runConfig;
+      const tickers  = Math.max(1, (cfg.tickers || []).length);
+      const xCols    = (cfg.x_columns || []).length || 1;
+      const yCols    = (cfg.y_columns || []).length || 1;
+      const maxCalls = cfg.max_tool_calls || 60;
+      return tickers * xCols * yCols + maxCalls;
+    },
+
+    get progressPct() {
+      if (!this.selectedRun || this.selectedRun.status !== 'running') return 100;
+      const cnt = this.selectedRun.result_count || 0;
+      return Math.min(94, Math.round(cnt / this.expectedTotal * 100));
+    },
+
+    get progressLabel() {
+      const cnt = this.selectedRun?.result_count || 0;
+      const cfg = this.runConfig;
+      const t   = Math.max(1, (cfg.tickers  || []).length);
+      const x   = (cfg.x_columns || []).length || 1;
+      const y   = (cfg.y_columns || []).length || 1;
+      const p1  = t * x * y;
+      if (cnt <= p1) return `Phase 1: ${cnt} / ${p1} correlations`;
+      return `Phase 2: ${cnt - p1} AI analyses complete`;
+    },
+
     // ── Helpers ────────────────────────────────────────────────────────────
     statusClass(status) {
       return { complete: 'badge-green', running: 'badge-yellow', error: 'badge-red' }[status] || 'badge-dim';
@@ -200,7 +401,7 @@ document.addEventListener('alpine:init', () => {
       return `/api/research/chart/${chartId}.png`;
     },
 
-    // Results helpers
+    // ── Results helpers ────────────────────────────────────────────────────
     get correlations() {
       return this.results.filter(r => r.analysis_type === 'correlation');
     },
@@ -214,7 +415,21 @@ document.addEventListener('alpine:init', () => {
       return this.results.filter(r => r.analysis_type === 'yearly_consistency');
     },
 
-    // Summary table: join correlation + decile + equity_curve by (ticker, x_col, y_col)
+    // PNG charts that aren't covered by Chart.js (scatter + heatmap)
+    get staticCharts() {
+      return this.charts.filter(c =>
+        c.chart_type === 'scatter' || c.chart_type === 'correlation_heatmap'
+      );
+    },
+
+    // Interactive chart sections (types that have structured result data)
+    get hasInteractiveCharts() {
+      return this.deciles.length > 0 ||
+             this.results.some(r => r.analysis_type === 'equity_curve_top') ||
+             this.yearlyConsistency.length > 0;
+    },
+
+    // Summary table
     get summaryRows() {
       const key = (ticker, x, y) => `${ticker}||${x}||${y}`;
       const map = {};

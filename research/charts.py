@@ -17,22 +17,22 @@ _RED     = "#e74c3c"
 _YELLOW  = "#f1c40f"
 
 
-def _base_fig(figsize=(10, 5), title: str = ""):
+def _base_fig(figsize=(13, 6), title: str = ""):
     fig, ax = plt.subplots(figsize=figsize, facecolor=_BG)
     ax.set_facecolor(_SURFACE)
     for spine in ax.spines.values():
         spine.set_edgecolor("#444")
-    ax.tick_params(colors=_TEXT, labelsize=8)
+    ax.tick_params(colors=_TEXT, labelsize=11)
     ax.xaxis.label.set_color(_TEXT)
     ax.yaxis.label.set_color(_TEXT)
     if title:
-        ax.set_title(title, color=_TEXT, fontsize=10, pad=8)
+        ax.set_title(title, color=_TEXT, fontsize=13, pad=10)
     return fig, ax
 
 
 def _to_png(fig) -> bytes:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
@@ -71,12 +71,12 @@ def decile_bar_chart(result: dict) -> bytes:
                 val * 100 + offset * 100,
                 f"{val*100:.2f}%",
                 ha="center", va="bottom" if val >= 0 else "top",
-                color=_TEXT, fontsize=7)
+                color=_TEXT, fontsize=9)
 
     spread = result.get("top_bottom_spread")
     if spread is not None:
         ax.text(0.02, 0.97, f"D10–D1 spread: {spread*100:.2f}%",
-                transform=ax.transAxes, color=_DIM, fontsize=8, va="top")
+                transform=ax.transAxes, color=_DIM, fontsize=10, va="top")
     return _to_png(fig)
 
 
@@ -106,14 +106,14 @@ def equity_curve_chart(top: dict, bottom: Optional[dict] = None) -> bytes:
 
     ax.axhline(1.0, color="#555", linewidth=0.6, linestyle="--")
     ax.set_ylabel("Equity (start = 1.0)", color=_TEXT)
-    ax.legend(facecolor=_SURFACE, edgecolor="#444", labelcolor=_TEXT, fontsize=8)
+    ax.legend(facecolor=_SURFACE, edgecolor="#444", labelcolor=_TEXT, fontsize=10)
 
     dd = top.get("max_drawdown")
     n = top.get("n_trades")
     final = top.get("final_equity")
     if n is not None:
         info = f"Trades: {n}  |  Final: {final:.2f}x  |  MaxDD: {dd*100:.1f}%"
-        ax.text(0.02, 0.04, info, transform=ax.transAxes, color=_DIM, fontsize=8)
+        ax.text(0.02, 0.04, info, transform=ax.transAxes, color=_DIM, fontsize=10)
     return _to_png(fig)
 
 
@@ -136,14 +136,14 @@ def yearly_consistency_chart(result: dict) -> bytes:
     ax.bar(x + w / 2, bot_vals, w, label="Bottom Decile", color=_RED, alpha=0.8)
     ax.axhline(0, color="#555", linewidth=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, fontsize=8)
+    ax.set_xticklabels(labels, rotation=30, fontsize=10)
     ax.set_ylabel("Avg Return (%)", color=_TEXT)
-    ax.legend(facecolor=_SURFACE, edgecolor="#444", labelcolor=_TEXT, fontsize=8)
+    ax.legend(facecolor=_SURFACE, edgecolor="#444", labelcolor=_TEXT, fontsize=10)
 
     pct = result.get("consistency_pct")
     if pct is not None:
         ax.text(0.02, 0.97, f"Top beats bottom: {pct:.0f}% of years",
-                transform=ax.transAxes, color=_DIM, fontsize=8, va="top")
+                transform=ax.transAxes, color=_DIM, fontsize=10, va="top")
     return _to_png(fig)
 
 
@@ -168,7 +168,7 @@ def scatter_chart(result: dict) -> bytes:
     ax.set_xlabel(result.get("x_col", ""), color=_TEXT)
     ax.set_ylabel(result.get("y_col", ""), color=_TEXT)
     ax.text(0.02, 0.97, f"n={len(pts)}", transform=ax.transAxes,
-            color=_DIM, fontsize=8, va="top")
+            color=_DIM, fontsize=10, va="top")
     return _to_png(fig)
 
 
@@ -209,14 +209,14 @@ def correlation_heatmap(
                         color=fc, fontsize=8)
 
     ax.set_xticks(range(len(combos)))
-    ax.set_xticklabels(combo_labels, rotation=0, fontsize=7, color=_TEXT)
+    ax.set_xticklabels(combo_labels, rotation=0, fontsize=9, color=_TEXT)
     ax.set_yticks(range(len(tickers)))
-    ax.set_yticklabels(tickers, fontsize=9, color=_TEXT)
-    ax.set_title("Pearson Correlation Heatmap", color=_TEXT, fontsize=11, pad=10)
+    ax.set_yticklabels(tickers, fontsize=11, color=_TEXT)
+    ax.set_title("Pearson Correlation Heatmap", color=_TEXT, fontsize=13, pad=10)
 
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.ax.tick_params(colors=_TEXT, labelsize=8)
-    cbar.set_label("Pearson r", color=_TEXT, fontsize=8)
+    cbar.ax.tick_params(colors=_TEXT, labelsize=10)
+    cbar.set_label("Pearson r", color=_TEXT, fontsize=10)
 
     plt.tight_layout()
     return _to_png(fig)
