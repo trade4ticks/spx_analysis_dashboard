@@ -352,18 +352,23 @@ def _strip_fences(text: str) -> str:
 _CLASSIFIER_PROMPT = """You classify user questions about SPX implied volatility data.
 
 Respond with exactly one word:
-- "analysis" — if the user asks about the current vol regime, market conditions,
-  regime summary, overall state of volatility, or a broad "what's happening" question
-  that needs multiple charts/perspectives to answer properly.
-- "direct" — if the user asks a specific data query, wants a particular chart, or
-  requests something concrete (show me X, what was Y, plot Z, compare A vs B).
+- "analysis" — ONLY if the user explicitly asks about the current SPX vol regime,
+  market conditions, regime summary, overall state of volatility, or a broad
+  "what's happening" question that needs multiple charts/perspectives.
+- "direct" — everything else: specific data queries, chart requests, follow-up
+  questions, modifications to prior results, P&L calculations, trade simulations,
+  or anything referencing a prior query result.
+
+IMPORTANT: Any follow-up or continuation of a prior query is ALWAYS "direct",
+even if it mentions financial terms like P&L, profit, loss, returns, or trades.
 
 Examples:
   "What's the current vol regime?" → analysis
   "Summarize the IV surface" → analysis
   "Describe market conditions" → analysis
-  "What stands out right now?" → analysis
+  "What stands out right now in vol?" → analysis
   "Take a look at the metrics and tell me what's going on" → analysis
+
   "Show 30D ATM IV for last 2 weeks" → direct
   "What was the peak VIX reading this month?" → direct
   "Create a scatterplot of skew vs IV" → direct
@@ -371,7 +376,15 @@ Examples:
   "Show me open interest for AAPL" → direct
   "What's the put/call ratio for SPY?" → direct
   "Plot OI changes over time" → direct
-  Any question about open interest, OI, put/call ratio, strikes, expirations, or specific tickers other than broad SPX vol regime → direct
+  "Can you add a column for cumulative P&L?" → direct
+  "Can you graph that?" → direct
+  "Can you graph cumulative P&L?" → direct
+  "Repeat that query but filter to just calls" → direct
+  "Show the same data but sorted differently" → direct
+  "Add a running total to that table" → direct
+  "Can you now do the same for puts?" → direct
+  Any question about open interest, OI, P&L, trades, returns, put/call ratio,
+  strikes, expirations, or specific tickers → direct
 """
 
 
