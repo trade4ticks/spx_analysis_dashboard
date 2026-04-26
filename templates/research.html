@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Research</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    .research-body {
+      flex: 1; display: flex; flex-direction: row; min-height: 0; overflow: hidden;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────────── */
+    .res-sidebar {
+      width: 260px; flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid #333;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .res-sidebar-hdr {
+      padding: 10px 10px 8px;
+      border-bottom: 1px solid #333;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .res-sidebar-hdr span { flex: 1; color: #aaa; font-size: 11px; font-weight: 700; letter-spacing: .4px; }
+    .res-run-list { flex: 1; overflow-y: auto; }
+    .res-run-item {
+      padding: 9px 10px;
+      border-bottom: 1px solid #222;
+      cursor: pointer;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .res-run-item:hover { background: #2a2a2a; }
+    .res-run-item.active { background: #1a3a5c; border-left: 2px solid var(--accent); }
+    .res-run-name { font-size: 11px; color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .res-run-meta { font-size: 10px; color: #666; display: flex; gap: 6px; align-items: center; }
+
+    /* ── Badges ──────────────────────────────────────────────────────────── */
+    .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
+    .badge-green  { background: #1a4a2a; color: #2ecc71; }
+    .badge-yellow { background: #4a3a10; color: #f1c40f; }
+    .badge-red    { background: #4a1a1a; color: #e74c3c; }
+    .badge-dim    { background: #333; color: #888; }
+
+    /* ── Main area ───────────────────────────────────────────────────────── */
+    .res-main {
+      flex: 1; overflow-y: auto; padding: 16px 20px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+
+    /* ── New run form ────────────────────────────────────────────────────── */
+    .form-section { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
+    .form-row { display: flex; flex-direction: column; gap: 4px; }
+    .form-row label { font-size: 11px; color: #aaa; font-weight: 700; letter-spacing: .3px; }
+    .form-row input, .form-row textarea, .form-row select {
+      background: #2a2a2a; border: 1px solid #444; color: #ddd;
+      padding: 6px 8px; border-radius: 4px; font-size: 12px; width: 100%;
+    }
+    .form-row textarea { resize: vertical; min-height: 70px; font-family: inherit; }
+    .form-row input:focus, .form-row textarea:focus, .form-row select:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .form-hint { font-size: 10px; color: #666; margin-top: 2px; }
+    .form-row-h { display: flex; gap: 12px; }
+    .form-row-h .form-row { flex: 1; }
+
+    /* Ticker chips */
+    .ticker-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .ticker-chip {
+      font-size: 10px; padding: 2px 7px; border-radius: 10px;
+      background: #333; color: #aaa; cursor: pointer; border: 1px solid #444;
+    }
+    .ticker-chip:hover { background: #1a3a5c; color: #3498db; border-color: #3498db; }
+
+    /* Preset buttons */
+    .preset-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .preset-btn {
+      font-size: 10px; padding: 3px 10px; border-radius: 3px;
+      background: #2a2a2a; color: #aaa; border: 1px solid #444; cursor: pointer;
+    }
+    .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Run detail ──────────────────────────────────────────────────────── */
+    .run-hdr { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+    .run-title { font-size: 16px; color: #ddd; font-weight: 700; }
+    .run-question { font-size: 12px; color: #888; font-style: italic; margin-top: 2px; }
+
+    /* Progress */
+    .progress-bar {
+      background: #2a2a2a; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px;
+    }
+    .progress-fill {
+      height: 100%; background: var(--accent); border-radius: 4px;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:.6} 50%{opacity:1} }
+
+    /* Summary card */
+    .summary-card {
+      background: #1a2a3a; border: 1px solid #1a4a6a; border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .summary-card p { font-size: 12px; color: #ccc; line-height: 1.7; margin: 0 0 8px; }
+    .summary-card p:last-child { margin-bottom: 0; }
+
+    /* Results summary table */
+    .res-table { border-collapse: collapse; font-size: 11px; width: 100%; }
+    .res-table th {
+      background: #2a2a2a; color: #aaa; font-size: 10px; font-weight: 700;
+      padding: 5px 8px; text-align: left; border: 1px solid #333;
+      white-space: nowrap;
+    }
+    .res-table td { padding: 4px 8px; border: 1px solid #222; color: #ccc; }
+    .res-table tr:hover td { background: #252525; }
+    .res-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .val-pos { color: #2ecc71; }
+    .val-neg { color: #e74c3c; }
+
+    /* Charts grid */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+      gap: 12px;
+    }
+    .chart-card {
+      background: #1e1e1e; border: 1px solid #333; border-radius: 6px; overflow: hidden;
+    }
+    .chart-card-hdr {
+      padding: 6px 10px; background: #2d2d2d; font-size: 10px; color: #888;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .chart-card img { width: 100%; height: auto; display: block; }
+
+    /* Section headers */
+    .section-hdr {
+      font-size: 11px; color: #aaa; font-weight: 700; letter-spacing: .4px;
+      padding-bottom: 6px; border-bottom: 1px solid #333;
+    }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 60px 20px; color: #555; font-size: 13px; }
+    .empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/research.js"></script>
+</head>
+
+<body x-data="research" x-init="init()">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link on" href="/research">Research</a>
+    </nav>
+    <div class="topbar-right">Research Runner</div>
+  </div>
+
+  <!-- ── Body ──────────────────────────────────────────────────────────── -->
+  <div class="research-body">
+
+    <!-- Sidebar -->
+    <div class="res-sidebar">
+      <div class="res-sidebar-hdr">
+        <span>RESEARCH RUNS</span>
+        <button class="btn" style="padding:2px 8px;font-size:10px" @click="newRun()">+ New</button>
+      </div>
+      <div class="res-run-list">
+        <template x-if="runs.length === 0">
+          <div style="padding:16px;color:#555;font-size:11px;text-align:center">No runs yet</div>
+        </template>
+        <template x-for="run in runs" :key="run.id">
+          <div class="res-run-item" :class="{active: selectedRun?.id === run.id}"
+               @click="selectRun(run)">
+            <div class="res-run-name" x-text="run.name"></div>
+            <div class="res-run-meta">
+              <span class="badge" :class="statusClass(run.status)" x-text="run.status"></span>
+              <span x-text="fmtDate(run.created_at)"></span>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="res-main">
+
+      <!-- ── Empty / welcome ──────────────────────────────────────────── -->
+      <template x-if="view === 'list'">
+        <div class="empty-state">
+          <div class="icon">🔬</div>
+          <div>Select a run from the sidebar or start a new one.</div>
+        </div>
+      </template>
+
+      <!-- ── New run form ─────────────────────────────────────────────── -->
+      <template x-if="view === 'new'">
+        <div class="form-section">
+          <div style="font-size:15px;color:#ddd;font-weight:700">New Research Run</div>
+
+          <div class="form-row">
+            <label>RUN NAME</label>
+            <input type="text" x-model="form.name" placeholder="e.g. OI_study_Apr26">
+          </div>
+
+          <div class="form-row">
+            <label>RESEARCH QUESTION</label>
+            <textarea x-model="form.question"
+              placeholder="Describe what you want to explore. The AI agent will decide which analyses to run.&#10;&#10;Example: Analyze whether OI-weighted metrics predict forward returns across tickers. Identify the strongest signals and check year-over-year consistency."></textarea>
+          </div>
+
+          <div class="form-row">
+            <label>SOURCE TABLE</label>
+            <div class="preset-row" style="margin-bottom:4px">
+              <button class="preset-btn" @click="setTablePreset('daily_features')">OI / daily_features</button>
+              <button class="preset-btn" @click="setTablePreset('surface_metrics_core')">SPX Surface / surface_metrics_core</button>
+            </div>
+            <input type="text" x-model="form.table">
+          </div>
+
+          <div class="form-row">
+            <label>TICKERS <span style="color:#555;font-weight:400">(comma-separated — leave blank for surface_metrics_core)</span></label>
+            <input type="text" x-model="form.tickers" placeholder="AAPL, SPY, IWM, XOM">
+            <template x-if="availableTickers.length > 0">
+              <div class="ticker-chips">
+                <template x-for="t in availableTickers" :key="t">
+                  <span class="ticker-chip" @click="addTicker(t)" x-text="t"></span>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <div class="form-row-h">
+            <div class="form-row">
+              <label>FEATURE COLUMNS (X) <span style="color:#555;font-weight:400">— predictors</span></label>
+              <textarea x-model="form.x_columns" style="min-height:54px"
+                placeholder="oi_weighted_strike_all_div_spot, put_call_oi_ratio"></textarea>
+            </div>
+            <div class="form-row">
+              <label>OUTCOME COLUMNS (Y) <span style="color:#555;font-weight:400">— what to predict</span></label>
+              <textarea x-model="form.y_columns" style="min-height:54px"
+                placeholder="ret_1d_fwd, ret_5d_fwd, ret_20d_fwd"></textarea>
+            </div>
+          </div>
+
+          <div class="form-row-h">
+            <div class="form-row">
+              <label>DATE FROM</label>
+              <input type="date" x-model="form.date_from">
+            </div>
+            <div class="form-row">
+              <label>DATE TO</label>
+              <input type="date" x-model="form.date_to">
+            </div>
+            <div class="form-row">
+              <label>MODEL</label>
+              <select x-model="form.model">
+                <option value="claude-sonnet-4-6">Sonnet 4.6 (faster)</option>
+                <option value="claude-opus-4-7">Opus 4.7 (deeper)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>MAX TOOL CALLS</label>
+              <input type="number" x-model="form.max_tool_calls" min="10" max="200" style="width:80px">
+              <div class="form-hint">~1 per analysis step</div>
+            </div>
+          </div>
+
+          <div x-show="submitError" style="color:#e74c3c;font-size:12px" x-text="submitError"></div>
+
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn" @click="submitRun()" :disabled="submitting"
+                    style="background:var(--accent);color:#fff;padding:7px 20px;font-size:12px">
+              <span x-text="submitting ? 'Starting…' : '▶ Run Research'"></span>
+            </button>
+            <button class="btn" @click="view='list'" style="color:#888">Cancel</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ── Run detail ────────────────────────────────────────────────── -->
+      <template x-if="view === 'run' && selectedRun">
+        <div style="display:flex;flex-direction:column;gap:16px">
+
+          <!-- Header -->
+          <div>
+            <div class="run-hdr">
+              <span class="run-title" x-text="selectedRun.name"></span>
+              <span class="badge" :class="statusClass(selectedRun.status)" x-text="selectedRun.status"></span>
+              <span style="font-size:10px;color:#555" x-text="fmtDate(selectedRun.created_at)"></span>
+              <button class="btn" style="margin-left:auto;font-size:10px;color:#888"
+                      @click="exportPdf(selectedRun.name)">↓ PDF</button>
+              <button class="btn" style="font-size:10px;color:#e74c3c"
+                      @click="deleteRun(selectedRun.id)">✕</button>
+            </div>
+            <div class="run-question" x-text="selectedRun.question"></div>
+          </div>
+
+          <!-- Running progress -->
+          <template x-if="selectedRun.status === 'running'">
+            <div>
+              <div style="font-size:11px;color:#f1c40f;margin-bottom:6px">
+                ⚙ Running… <span x-text="selectedRun.result_count || 0"></span> analyses saved so far
+              </div>
+              <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
+            </div>
+          </template>
+
+          <!-- Error -->
+          <template x-if="selectedRun.status === 'error'">
+            <div style="color:#e74c3c;font-size:12px;background:#2a1a1a;padding:10px;border-radius:4px"
+                 x-text="selectedRun.error_msg || 'Unknown error'"></div>
+          </template>
+
+          <!-- Loading -->
+          <template x-if="loading">
+            <div style="color:#888;font-size:12px">Loading results…</div>
+          </template>
+
+          <!-- AI Summary -->
+          <template x-if="selectedRun.ai_summary">
+            <div>
+              <div class="section-hdr">AI FINDINGS SUMMARY</div>
+              <div class="summary-card" style="margin-top:8px">
+                <template x-for="para in selectedRun.ai_summary.split('\n\n')" :key="para">
+                  <p x-show="para.trim()" x-text="para.trim()"></p>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- Summary table -->
+          <template x-if="summaryRows.length > 0">
+            <div>
+              <div class="section-hdr">RESULTS SUMMARY — sorted by decile spread</div>
+              <div style="overflow-x:auto;margin-top:8px">
+                <table class="res-table">
+                  <thead>
+                    <tr>
+                      <th>Ticker</th><th>Feature</th><th>Outcome</th>
+                      <th>Pearson r</th><th>p-value</th><th>D10–D1 Spread</th>
+                      <th>Consistency %</th><th>Final Equity</th><th>Max DD</th><th>N</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in summaryRows" :key="row.ticker+row.x_col+row.y_col">
+                      <tr>
+                        <td x-text="row.ticker || 'all'"></td>
+                        <td x-text="row.x_col"></td>
+                        <td x-text="row.y_col"></td>
+                        <td class="num" :class="row.pearson_r > 0 ? 'val-pos' : row.pearson_r < 0 ? 'val-neg' : ''"
+                            x-text="r4(row.pearson_r)"></td>
+                        <td class="num" x-text="r4(row.pearson_p)"></td>
+                        <td class="num" :class="row.spread > 0 ? 'val-pos' : row.spread < 0 ? 'val-neg' : ''"
+                            x-text="pct(row.spread)"></td>
+                        <td class="num" x-text="row.consistency_pct != null ? row.consistency_pct + '%' : '—'"></td>
+                        <td class="num" x-text="row.final_equity != null ? row.final_equity.toFixed(2) + 'x' : '—'"></td>
+                        <td class="num val-neg" x-text="row.max_drawdown != null ? pct(row.max_drawdown) : '—'"></td>
+                        <td class="num" x-text="row.n || '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <!-- Charts -->
+          <template x-if="charts.length > 0">
+            <div>
+              <div class="section-hdr">CHARTS (<span x-text="charts.length"></span>)</div>
+              <div class="charts-grid" style="margin-top:8px">
+                <template x-for="chart in charts" :key="chart.id">
+                  <div class="chart-card">
+                    <div class="chart-card-hdr" x-text="chart.title || chart.chart_type"></div>
+                    <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy">
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+        </div>
+      </template>
+
+    </div><!-- /res-main -->
+  </div><!-- /research-body -->
+
+</body>
+</html>
