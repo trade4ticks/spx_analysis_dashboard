@@ -150,6 +150,12 @@ COLUMNS:
   ret_1d_fwd              FLOAT   — 1-day forward return
   ret_5d_fwd              FLOAT   — 5-day forward return
   ret_20d_fwd             FLOAT   — 20-day forward return
+  oi_weighted_strike_all_minus_spot  FLOAT — OI-weighted avg strike (all) minus spot_close; + = OI center above spot
+  oi_weighted_strike_call_minus_spot FLOAT — OI-weighted avg call strike minus spot_close
+  oi_weighted_strike_put_minus_spot  FLOAT — OI-weighted avg put strike minus spot_close
+  oi_weighted_strike_all_div_spot    FLOAT — OI-weighted avg strike (all) divided by spot_close (1.02 = 2% above spot)
+  oi_weighted_strike_call_div_spot   FLOAT — OI-weighted avg call strike divided by spot_close
+  oi_weighted_strike_put_div_spot    FLOAT — OI-weighted avg put strike divided by spot_close
 
 TABLE: option_oi_surface
 Primary key: (ticker, trade_date, expiration, strike, option_type)
