@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────
+# Research Runner Config
+# Run with: python run_research.py --config research_config.yaml
+# ─────────────────────────────────────────────────────────────
+
+name: "OI_weighted_vs_returns_Apr26"
+
+question: >
+  Analyze the relationship between OI-weighted strike metrics and forward returns
+  across all available tickers and return horizons. Identify which features and
+  tickers show the strongest predictive signals, how consistent those signals are
+  year-over-year, and whether the top-decile equity curves look tradeable.
+  Report null results honestly.
+
+# Source table and database
+table: daily_features   # daily_features | option_oi_surface | surface_metrics_core
+
+# Tickers to test (leave empty [] to test all tickers in the table)
+tickers:
+  - AAPL
+  - SPY
+  - IWM
+  - XOM
+
+# Feature columns (x-axis / predictors)
+x_columns:
+  - oi_weighted_strike_all_div_spot
+  - oi_weighted_strike_call_div_spot
+  - oi_weighted_strike_put_div_spot
+  - put_call_oi_ratio
+
+# Outcome columns (y-axis / what you're predicting)
+y_columns:
+  - ret_1d_fwd
+  - ret_5d_fwd
+  - ret_20d_fwd
+
+# Optional date range (null = no filter)
+date_from: null
+date_to: null
+
+# Agent settings
+model: claude-sonnet-4-6
+max_tool_calls: 80
+
+
+# ─────────────────────────────────────────────────────────────
+# Example: SPX surface metrics research
+# Uncomment and adjust to explore vol surface signals
+# ─────────────────────────────────────────────────────────────
+# name: "SPX_skew_vs_IV_changes"
+# question: >
+#   Explore whether put skew metrics predict subsequent changes in ATM IV levels
+#   across multiple tenors. Focus on 30d and 90d tenors.
+# table: surface_metrics_core
+# tickers: []   # no ticker filter — surface_metrics_core is SPX-only
+# x_columns:
+#   - skew_30d_25p_atm
+#   - skew_30d_10p_atm
+#   - skew_90d_25p_atm
+#   - term_ratio_7d_30d
+# y_columns:
+#   - iv_30d_atm
+#   - iv_7d_atm
+# date_from: "2019-01-01"
+# date_to: null
+# model: claude-sonnet-4-6
+# max_tool_calls: 60
