@@ -623,6 +623,27 @@ document.addEventListener('alpine:init', () => {
             this.editingNameId    = null;
         },
 
+        // ── CSV export ────────────────────────────────────────────────────────
+
+        exportCsv(columns, rows, filename) {
+            if (!columns.length || !rows.length) return;
+            const escape = v => {
+                if (v === null || v === undefined) return '';
+                const s = String(v);
+                return (s.includes(',') || s.includes('"') || s.includes('\n'))
+                    ? '"' + s.replace(/"/g, '""') + '"'
+                    : s;
+            };
+            const csv = [columns.join(',')]
+                .concat(rows.map(r => columns.map(c => escape(r[c])).join(',')))
+                .join('\n');
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+            a.download = (filename || 'ai_explorer_data') + '.csv';
+            a.click();
+            URL.revokeObjectURL(a.href);
+        },
+
         // ── Scroll helper ─────────────────────────────────────────────────────
 
         _scrollToBottom() {

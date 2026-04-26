@@ -421,6 +421,22 @@
     .ai-table td:first-child { color: var(--text); font-weight: 600; }
     .ai-table tr:hover td   { background: rgba(255,255,255,.03); }
 
+    /* ── CSV button ────────────────────────────────────────────────────────── */
+    .ai-csv-btn {
+      margin-left: auto;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 3px;
+      padding: 2px 8px;
+      font-size: 9px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .3px;
+      color: var(--dim);
+      cursor: pointer;
+    }
+    .ai-csv-btn:hover { background: rgba(255,255,255,.12); color: var(--muted); }
+
     /* ── Loading spinner ───────────────────────────────────────────────────── */
     .ai-spin {
       display: inline-block;
@@ -691,6 +707,9 @@
               <div class="ai-card-hdr">
                 Data
                 <span class="hdr-count" x-text="turn.rows.length + (turn.rows.length === 5000 ? ' (capped at 5000)' : '')"></span>
+                <button class="ai-csv-btn"
+                        @click.stop="exportCsv(turn.columns, turn.rows, 'turn_' + idx)"
+                        title="Download CSV">↓ CSV</button>
               </div>
               <div class="ai-table-wrap">
                 <table class="ai-table">
