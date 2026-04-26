@@ -26,8 +26,8 @@
     .ai-sidebar {
       width: 220px;
       flex-shrink: 0;
-      background: #1a1a1a;
-      border-right: 1px solid var(--border);
+      background: var(--surface);
+      border-right: 2px solid var(--accent);
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -464,7 +464,7 @@
   <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/ai_explorer.js"></script>
+  <script src="/static/js/ai_explorer.js?v=3"></script>
 </head>
 
 <body x-data="aiExplorer" x-init="init()">
@@ -499,7 +499,7 @@
         <span class="ai-sidebar-title">Sessions</span>
       </div>
 
-      <div x-show="sidebarOpen" x-cloak style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;">
+      <div x-show="sidebarOpen" style="display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;">
         <div class="ai-sidebar-new">
           <button @click="newConversation()">+ New Conversation</button>
         </div>
