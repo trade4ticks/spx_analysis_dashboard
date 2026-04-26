@@ -151,15 +151,6 @@ COLUMNS:
   ret_5d_fwd              FLOAT   — 5-day forward return
   ret_20d_fwd             FLOAT   — 20-day forward return
 
-DERIVED EXPRESSIONS for daily_features (compute in SELECT, not stored columns):
-  oi_weighted_strike_all  - spot_close  AS oi_all_vs_spot      — absolute $-distance of OI center from spot; + = OI center above spot
-  oi_weighted_strike_call - spot_close  AS oi_call_vs_spot     — call OI center vs spot
-  oi_weighted_strike_put  - spot_close  AS oi_put_vs_spot      — put OI center vs spot
-  oi_weighted_strike_all  / spot_close  AS oi_all_moneyness    — OI center as fraction of spot (1.02 = OI center 2% above spot)
-  oi_weighted_strike_call / spot_close  AS oi_call_moneyness   — call OI center moneyness
-  oi_weighted_strike_put  / spot_close  AS oi_put_moneyness    — put OI center moneyness
-Use these aliases consistently so charts and tables label them clearly.
-
 TABLE: option_oi_surface
 Primary key: (ticker, trade_date, expiration, strike, option_type)
 One row per ticker × trade_date × expiration × strike × option_type. The full OI surface.
