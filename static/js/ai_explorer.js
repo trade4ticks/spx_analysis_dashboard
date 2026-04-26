@@ -495,7 +495,7 @@ document.addEventListener('alpine:init', () => {
                 summary:      turn.summary      || null,
                 error:        turn.error        || null,
                 columns:      turn.columns      || [],
-                rows:         (turn.rows        || []).slice(0, 500),
+                rows:         (turn.rows        || []).slice(0, 5000),
                 chartType:    turn.chartType    || null,
                 chartConfig:  turn.chartConfig  || null,
                 responseType: turn.responseType || 'direct',
@@ -503,7 +503,7 @@ document.addEventListener('alpine:init', () => {
                 charts: (turn.charts || []).map(c => ({
                     title:        c.title,
                     columns:      c.columns || [],
-                    rows:         (c.rows   || []).slice(0, 500),
+                    rows:         (c.rows   || []).slice(0, 5000),
                     chart_config: c.chart_config || null,
                 })),
                 done: true,
