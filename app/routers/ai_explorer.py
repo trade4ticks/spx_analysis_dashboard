@@ -771,7 +771,7 @@ async def ai_query(req: QueryRequest, pool=Depends(get_pool)) -> dict:
         # 2. Generate SQL via Claude Sonnet (system prompt is cached)
         sql_msg = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=2048,
+            max_tokens=4096,
             system=_SYSTEM_SQL,
             messages=messages,
         )
