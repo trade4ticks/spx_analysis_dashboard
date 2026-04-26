@@ -182,8 +182,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── PDF export ─────────────────────────────────────────────────────────
-    exportPdf(runName) {
-      alert(`Run in terminal:\n\npython export_report.py --run "${runName}"\n\nPDF saved to reports/ folder.`);
+    exportPdf(runId) {
+      window.location.href = `/api/research/run/${runId}/pdf`;
     },
 
     // ── Helpers ────────────────────────────────────────────────────────────

@@ -89,14 +89,27 @@ def _decile_table(decile_result: dict, styles):
     return t
 
 
+def build_pdf_bytes(run: dict, results: list[dict], chart_rows: list[dict]) -> bytes:
+    """Build PDF and return as bytes (for HTTP download)."""
+    buf = io.BytesIO()
+    _build(run, results, chart_rows, buf)
+    return buf.getvalue()
+
+
 def build_pdf(run: dict, results: list[dict], chart_rows: list[dict],
               output_path: str):
-    """Assemble and write the PDF report to output_path."""
+    """Assemble and write the PDF report to output_path (for CLI use)."""
+    with open(output_path, "wb") as f:
+        f.write(build_pdf_bytes(run, results, chart_rows))
+
+
+def _build(run: dict, results: list[dict], chart_rows: list[dict], dest):
+    """Internal: write PDF to dest (file path str or file-like object)."""
     _check_reportlab()
     S = _dark_style()
 
     doc = SimpleDocTemplate(
-        output_path,
+        dest,
         pagesize=letter,
         leftMargin=0.75 * inch,
         rightMargin=0.75 * inch,

@@ -295,7 +295,7 @@
               <span class="badge" :class="statusClass(selectedRun.status)" x-text="selectedRun.status"></span>
               <span style="font-size:10px;color:#555" x-text="fmtDate(selectedRun.created_at)"></span>
               <button class="btn" style="margin-left:auto;font-size:10px;color:#888"
-                      @click="exportPdf(selectedRun.name)">↓ PDF</button>
+                      @click="exportPdf(selectedRun.id)">↓ PDF</button>
               <button class="btn" style="font-size:10px;color:#e74c3c"
                       @click="deleteRun(selectedRun.id)">✕</button>
             </div>
