@@ -188,8 +188,9 @@ JOIN GUIDANCE for open_interest tables:
 - option_oi_surface joins to daily_features on (ticker, trade_date)
 - These 3 tables are in a SEPARATE database from surface_metrics_core.
   Do NOT join them with surface_metrics_core in a single query.
-- These tables contain multiple tickers (SPY, QQQ, IWM, etc.). Always
-  include a WHERE ticker = '...' filter based on what the user asks about.
+- These tables contain multiple tickers — indices, ETFs, AND single stocks (e.g. SPY, QQQ, IWM,
+  XOM, AAPL, or any other ticker the user mentions). Always trust the user when they name a ticker;
+  it IS in the database. Always include a WHERE ticker = '...' filter based on what the user asks.
   If the user doesn't specify a ticker, ask or default to 'SPY'.
 - option_oi_surface can be large — always include LIMIT and WHERE filters
   on trade_date, dte, or moneyness to keep queries fast.
@@ -200,6 +201,10 @@ QUERY GUIDANCE:
 - For open_interest tables: data is already daily, no intraday component.
 - IV values are decimals — do NOT auto-multiply in SQL unless asked.
 - Always include LIMIT (max 5000). Put LIMIT at the very end of the query.
+- If a query returns 0 rows, report that result plainly ("The query returned 0 rows"). NEVER
+  speculate about whether a ticker exists or whether the table supports certain tickers — the user
+  knows their data. A 0-row result means no matching rows for the given filters, not that the
+  ticker is absent.
 
 CHART GUIDANCE (follow when the user requests a chart, graph, or visualization):
 - Never return a wide single-row pivot (many metric columns, one row). Charts cannot render that shape.
