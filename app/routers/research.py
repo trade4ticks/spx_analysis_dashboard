@@ -337,3 +337,34 @@ async def available_tickers(pool=Depends(get_oi_pool)):
         rows = await conn.fetch(
             "SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
     return [r["ticker"] for r in rows]
+
+
+_OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
+
+_NUMERIC_TYPES = {
+    "double precision", "numeric", "real", "integer",
+    "bigint", "smallint", "decimal",
+}
+_EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
+
+
+@router.get("/columns")
+async def available_columns(table: str = "daily_features",
+                            pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    use_pool = oi_pool if table in _OI_TABLES else pool
+    if use_pool is None:
+        return []
+    async with use_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT column_name, data_type
+               FROM information_schema.columns
+               WHERE table_name = $1 AND table_schema = 'public'
+               ORDER BY ordinal_position""",
+            table,
+        )
+    return [
+        {"name": r["column_name"], "type": r["data_type"]}
+        for r in rows
+        if r["data_type"] in _NUMERIC_TYPES
+        and r["column_name"] not in _EXCLUDE_COLS
+    ]

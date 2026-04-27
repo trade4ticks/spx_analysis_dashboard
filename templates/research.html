@@ -194,7 +194,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js?v=8"></script>
+  <script src="/static/js/research.js?v=9"></script>
 </head>
 
 <body x-data="research" x-init="init()">
@@ -303,11 +303,31 @@
               <label>FEATURE COLUMNS (X) <span style="color:#555;font-weight:400">— predictors</span></label>
               <textarea x-model="form.x_columns" style="min-height:54px"
                 placeholder="oi_weighted_strike_all_div_spot, put_call_oi_ratio"></textarea>
+              <template x-if="availableColumns.length > 0">
+                <div class="ticker-chips" style="margin-top:4px">
+                  <template x-for="col in availableColumns" :key="'x-'+col.name">
+                    <span class="ticker-chip"
+                          :style="isXSel(col.name) ? 'background:#1a3a5c;color:#3498db;border-color:#3498db;font-weight:700' : ''"
+                          @click="toggleXCol(col.name)"
+                          x-text="col.name"></span>
+                  </template>
+                </div>
+              </template>
             </div>
             <div class="form-row">
               <label>OUTCOME COLUMNS (Y) <span style="color:#555;font-weight:400">— what to predict</span></label>
               <textarea x-model="form.y_columns" style="min-height:54px"
                 placeholder="ret_1d_fwd, ret_5d_fwd, ret_20d_fwd"></textarea>
+              <template x-if="availableColumns.length > 0">
+                <div class="ticker-chips" style="margin-top:4px">
+                  <template x-for="col in availableColumns" :key="'y-'+col.name">
+                    <span class="ticker-chip"
+                          :style="isYSel(col.name) ? 'background:#1a2a1a;color:#2ecc71;border-color:#2ecc71;font-weight:700' : ''"
+                          @click="toggleYCol(col.name)"
+                          x-text="col.name"></span>
+                  </template>
+                </div>
+              </template>
             </div>
           </div>
 

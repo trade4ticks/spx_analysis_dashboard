@@ -9,6 +9,7 @@ uses tool calls only for depth — decile analysis, yearly consistency,
 equity curves, regression — focused on the most promising signals.
 """
 import json
+from datetime import date as _date
 import asyncpg
 import anthropic
 
@@ -34,9 +35,11 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
             if ticker:
                 conditions.append(f"ticker = ${p}"); params.append(ticker); p += 1
             if date_from:
-                conditions.append(f"trade_date >= ${p}"); params.append(date_from); p += 1
+                df_val = _date.fromisoformat(date_from) if isinstance(date_from, str) else date_from
+                conditions.append(f"trade_date >= ${p}"); params.append(df_val); p += 1
             if date_to:
-                conditions.append(f"trade_date <= ${p}"); params.append(date_to); p += 1
+                dt_val = _date.fromisoformat(date_to) if isinstance(date_to, str) else date_to
+                conditions.append(f"trade_date <= ${p}"); params.append(dt_val); p += 1
 
             where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
             sql = f"SELECT {col_list} FROM {table} {where} ORDER BY trade_date"

@@ -37,8 +37,12 @@ document.addEventListener('alpine:init', () => {
     followupLoading:  false,
     followupError:    null,
 
+    // Column picker
+    availableColumns: [],
+
     // ── Init ───────────────────────────────────────────────────────────────
     async init() {
+      this._loadColumns(this.form.table);
       if (typeof Chart !== 'undefined') {
         Chart.defaults.color = '#ccc';
         Chart.defaults.borderColor = '#333';
@@ -65,6 +69,28 @@ document.addEventListener('alpine:init', () => {
         if (r.ok) this.availableTickers = await r.json();
       } catch (_) {}
     },
+
+    async _loadColumns(table) {
+      try {
+        const r = await fetch(`/api/research/columns?table=${encodeURIComponent(table)}`);
+        if (r.ok) this.availableColumns = await r.json();
+      } catch (_) {}
+    },
+
+    toggleXCol(col) {
+      const list = this.form.x_columns.split(',').map(s => s.trim()).filter(Boolean);
+      const i = list.indexOf(col);
+      i >= 0 ? list.splice(i, 1) : list.push(col);
+      this.form.x_columns = list.join(', ');
+    },
+    toggleYCol(col) {
+      const list = this.form.y_columns.split(',').map(s => s.trim()).filter(Boolean);
+      const i = list.indexOf(col);
+      i >= 0 ? list.splice(i, 1) : list.push(col);
+      this.form.y_columns = list.join(', ');
+    },
+    isXSel(col) { return this.form.x_columns.split(',').map(s => s.trim()).includes(col); },
+    isYSel(col) { return this.form.y_columns.split(',').map(s => s.trim()).includes(col); },
 
     // ── Run list ───────────────────────────────────────────────────────────
     async loadRuns() {
@@ -184,6 +210,7 @@ document.addEventListener('alpine:init', () => {
         this.form.y_columns = 'iv_30d_atm, iv_7d_atm';
         this.form.tickers   = '';
       }
+      this._loadColumns(table);
     },
 
     async submitRun() {
