@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.db import get_pool, get_oi_pool
 import asyncpg
 
-from research import db as rdb, agent as ragent, charts as rcharts, export as rexport
+from research import db as rdb, engine as rengine, charts as rcharts, export as rexport
 
 router = APIRouter()
 
@@ -19,55 +19,37 @@ router = APIRouter()
 # ── Background execution ──────────────────────────────────────────────────────
 
 async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
-                       config: dict, model: str, max_tool_calls: int):
-    agent_logs: list[str] = []
+                       config: dict, model: str):
+    pipeline_logs: list[str] = []
 
     def _log(msg: str):
-        agent_logs.append(msg)
+        pipeline_logs.append(msg)
 
     try:
-        summary = await ragent.run_agent(
+        summary = await rengine.run_pipeline(
             main_pool=main_pool,
             oi_pool=oi_pool,
             run_id=run_id,
             question=question,
             config=config,
             model=model,
-            max_tool_calls=max_tool_calls,
+            signal_threshold=config.get("signal_threshold", 0.03),
+            max_signals=config.get("max_signals", 30),
+            analysis_types=set(config.get("analysis_types") or [
+                "correlation", "decile", "yearly_consistency",
+                "equity_curve", "regression"]),
             log=_log,
         )
-        # Generate correlation heatmap if multiple tickers
-        tickers = config.get("tickers") or []
-        x_cols  = config.get("x_columns") or []
-        y_cols  = config.get("y_columns") or []
-        if len(tickers) > 1 and x_cols and y_cols:
-            async with main_pool.acquire() as conn:
-                all_results = await rdb.load_results(conn, run_id)
-            flat = []
-            for r in all_results:
-                if r.get("analysis_type") == "correlation":
-                    rd = r.get("result") or {}
-                    if isinstance(rd, str):
-                        rd = json.loads(rd)
-                    flat.append({**rd, "ticker": r.get("ticker"),
-                                 "x_col": r.get("x_col"), "y_col": r.get("y_col")})
-            if flat:
-                png = rcharts.correlation_heatmap(flat, tickers, x_cols, y_cols)
-                if png:
-                    async with main_pool.acquire() as conn:
-                        await rdb.save_chart(conn, run_id, "correlation_heatmap",
-                                             "Pearson Correlation Heatmap", png)
-        # If summary is still empty after agent ran, attach logs to error_msg for debugging
-        log_text = "\n".join(agent_logs[-50:]) if (not summary and agent_logs) else None
+        log_text = "\n".join(pipeline_logs[-50:]) if (not summary and pipeline_logs) else None
         async with main_pool.acquire() as conn:
             await rdb.update_run(conn, run_id, status="complete",
                                  ai_summary=summary or None,
                                  error_msg=log_text)
     except Exception as exc:
-        log_text = "\n".join(agent_logs[-50:]) if agent_logs else None
+        log_text = "\n".join(pipeline_logs[-50:]) if pipeline_logs else None
         err = str(exc)
         if log_text:
-            err = f"{err}\n\n--- Agent log ---\n{log_text}"
+            err = f"{err}\n\n--- Pipeline log ---\n{log_text}"
         async with main_pool.acquire() as conn:
             await rdb.update_run(conn, run_id, status="error", error_msg=err)
 
@@ -84,7 +66,9 @@ class RunRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     model: str = "claude-sonnet-4-6"
-    max_tool_calls: int = 60
+    signal_threshold: float = 0.03
+    max_signals: int = 30
+    analysis_types: list[str] = ["scan", "equity_curve", "regression"]
 
 
 class FollowupRequest(BaseModel):
@@ -156,15 +140,17 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
         raise HTTPException(400, "OI_DATABASE_URL not configured")
 
     config = {
-        "name":         req.name,
-        "table":        req.table,
-        "tickers":      req.tickers,
-        "x_columns":    req.x_columns,
-        "y_columns":    req.y_columns,
-        "date_from":    req.date_from,
-        "date_to":      req.date_to,
-        "model":        req.model,
-        "max_tool_calls": req.max_tool_calls,
+        "name":              req.name,
+        "table":             req.table,
+        "tickers":           req.tickers,
+        "x_columns":         req.x_columns,
+        "y_columns":         req.y_columns,
+        "date_from":         req.date_from,
+        "date_to":           req.date_to,
+        "model":             req.model,
+        "signal_threshold":  req.signal_threshold,
+        "max_signals":       req.max_signals,
+        "analysis_types":    req.analysis_types,
     }
 
     async with pool.acquire() as conn:
@@ -172,7 +158,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
 
     background_tasks.add_task(
         _execute_run, pool, oi_pool, run_id,
-        req.question, config, req.model, req.max_tool_calls,
+        req.question, config, req.model,
     )
 
     return {"run_id": run_id, "name": req.name}
@@ -201,15 +187,17 @@ async def retry_run(run_id: str, req: RunRequest, background_tasks: BackgroundTa
             raise HTTPException(400, "Only failed runs can be retried")
 
         config = {
-            "name":           req.name,
-            "table":          req.table,
-            "tickers":        req.tickers,
-            "x_columns":      req.x_columns,
-            "y_columns":      req.y_columns,
-            "date_from":      req.date_from,
-            "date_to":        req.date_to,
-            "model":          req.model,
-            "max_tool_calls": req.max_tool_calls,
+            "name":              req.name,
+            "table":             req.table,
+            "tickers":           req.tickers,
+            "x_columns":         req.x_columns,
+            "y_columns":         req.y_columns,
+            "date_from":         req.date_from,
+            "date_to":           req.date_to,
+            "model":             req.model,
+            "signal_threshold":  req.signal_threshold,
+            "max_signals":       req.max_signals,
+            "analysis_types":    req.analysis_types,
         }
         # Clear any partial results from the failed run
         await conn.execute("DELETE FROM research_results WHERE run_id = $1::uuid", run_id)
@@ -225,7 +213,7 @@ async def retry_run(run_id: str, req: RunRequest, background_tasks: BackgroundTa
 
     background_tasks.add_task(
         _execute_run, pool, oi_pool, run_id,
-        req.question, config, req.model, req.max_tool_calls,
+        req.question, config, req.model,
     )
     return {"run_id": run_id, "status": "running"}
 
@@ -258,7 +246,7 @@ async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)
             rd = r.get("result") or {}
             corr_rows.append({**rd, "ticker": r.get("ticker"),
                                "x_col": r.get("x_col"), "y_col": r.get("y_col")})
-    corr_table = ragent._format_corr_table(corr_rows) if corr_rows else "(no correlations saved)"
+    corr_table = rengine.format_corr_table(corr_rows) if corr_rows else "(no correlations saved)"
 
     # Build decile summary
     decile_lines = []

@@ -1,0 +1,379 @@
+"""
+Broad relationship scanner — multi-lens analysis + robustness ranking.
+
+All functions operate on in-memory list[dict] rows (no DB, no LLM).
+For each (feature, outcome) pair, scans for linear, monotonic, U-shaped,
+threshold, isolated-region, and tail relationships, then scores robustness.
+"""
+from collections import defaultdict
+from typing import Optional
+
+import numpy as np
+from scipy import stats as sp_stats
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _valid_pairs(rows: list[dict], x_col: str, y_col: str):
+    """Extract (x, y, trade_date) tuples where both are non-None."""
+    out = []
+    for r in rows:
+        xv, yv = r.get(x_col), r.get(y_col)
+        if xv is not None and yv is not None:
+            out.append((float(xv), float(yv), r.get("trade_date")))
+    return out
+
+
+def _bucket(pairs, n_buckets: int = 10):
+    """Sort by x, split into n equal-ish buckets. Returns list of lists of y values."""
+    if not pairs:
+        return []
+    sorted_pairs = sorted(pairs, key=lambda p: p[0])
+    total = len(sorted_pairs)
+    buckets = [[] for _ in range(n_buckets)]
+    for i, (_, y, _) in enumerate(sorted_pairs):
+        b = min(int(i / total * n_buckets), n_buckets - 1)
+        buckets[b].append(y)
+    return buckets
+
+
+def _sharpe(ys: list[float]) -> float:
+    """Mean / std, annualization-agnostic. Returns 0 if std is 0."""
+    if not ys:
+        return 0.0
+    a = np.array(ys)
+    s = float(a.std())
+    return float(a.mean() / s) if s > 0 else 0.0
+
+
+def _year_from_date(d) -> Optional[int]:
+    if d is None:
+        return None
+    if hasattr(d, "year"):
+        return d.year
+    try:
+        return int(str(d)[:4])
+    except Exception:
+        return None
+
+
+# ── Multi-lens relationship profile ──────────────────────────────────────────
+
+def scan_relationship(rows: list[dict], x_col: str, y_col: str,
+                      ticker: Optional[str] = None,
+                      n_buckets: int = 10) -> dict:
+    """
+    Comprehensive scan of the relationship between x_col and y_col.
+    Returns a dict with correlation, bucket profile, pattern detection,
+    and robustness diagnostics.
+    """
+    pairs = _valid_pairs(rows, x_col, y_col)
+    n = len(pairs)
+
+    if n < max(20, n_buckets * 3):
+        return {"error": "insufficient data", "n": n,
+                "x_col": x_col, "y_col": y_col, "ticker": ticker}
+
+    xa = np.array([p[0] for p in pairs])
+    ya = np.array([p[1] for p in pairs])
+
+    # ── 1. Correlation ───────────────────────────────────────────────
+    pr, pp = sp_stats.pearsonr(xa, ya)
+    sr, sp_val = sp_stats.spearmanr(xa, ya)
+
+    # ── 2. Bucket profile ────────────────────────────────────────────
+    buckets = _bucket(pairs, n_buckets)
+    bucket_stats = []
+    for i, ys in enumerate(buckets):
+        if not ys:
+            bucket_stats.append(None)
+            continue
+        a = np.array(ys)
+        bucket_stats.append({
+            "bucket":    i + 1,
+            "n":         len(ys),
+            "avg_ret":   round(float(a.mean()), 6),
+            "med_ret":   round(float(np.median(a)), 6),
+            "win_rate":  round(float((a > 0).mean()), 4),
+            "std_dev":   round(float(a.std()), 6),
+            "sharpe":    round(_sharpe(ys), 4),
+            "payoff":    round(float(a[a > 0].mean() / abs(a[a < 0].mean()))
+                               if (a > 0).any() and (a < 0).any() else 0.0, 4),
+        })
+
+    valid_buckets = [b for b in bucket_stats if b is not None]
+
+    # ── 3. Monotonicity ──────────────────────────────────────────────
+    avgs = [b["avg_ret"] for b in valid_buckets]
+    if len(avgs) >= 2:
+        transitions = sum(1 for i in range(len(avgs) - 1) if avgs[i + 1] > avgs[i])
+        total_trans = len(avgs) - 1
+        # 1.0 = perfectly increasing, 0.0 = perfectly decreasing, 0.5 = no trend
+        mono_raw = transitions / total_trans
+        # Convert to 0-1 scale where 1 = strongly monotonic (either direction)
+        monotonicity = abs(mono_raw - 0.5) * 2
+    else:
+        monotonicity = 0.0
+
+    # ── 4. Best single bucket & best adjacent pair ───────────────────
+    best_single = max(valid_buckets, key=lambda b: abs(b["sharpe"])) if valid_buckets else None
+
+    best_zone = None
+    best_zone_sharpe = 0.0
+    for i in range(len(buckets) - 1):
+        pooled = buckets[i] + buckets[i + 1]
+        if len(pooled) < 10:
+            continue
+        s = abs(_sharpe(pooled))
+        if s > best_zone_sharpe:
+            best_zone_sharpe = s
+            best_zone = {
+                "buckets":  [i + 1, i + 2],
+                "n":        len(pooled),
+                "avg_ret":  round(float(np.mean(pooled)), 6),
+                "sharpe":   round(_sharpe(pooled), 4),
+                "win_rate": round(float((np.array(pooled) > 0).mean()), 4),
+            }
+
+    # ── 5. U-shape / inverted-U detection ────────────────────────────
+    if len(avgs) >= 4:
+        wings = (avgs[0] + avgs[-1]) / 2
+        center = np.mean(avgs[len(avgs) // 4: 3 * len(avgs) // 4])
+        u_score = round(float(wings - center), 6)  # positive = U, negative = inverted-U
+    else:
+        u_score = 0.0
+
+    # ── 6. Tail behavior (pooled top-2 vs bottom-2) ─────────────────
+    if len(buckets) >= 4:
+        bottom_pool = buckets[0] + buckets[1]
+        top_pool = buckets[-2] + buckets[-1]
+        tail_spread = (float(np.mean(top_pool)) - float(np.mean(bottom_pool))
+                       if bottom_pool and top_pool else 0.0)
+        tail_spread = round(tail_spread, 6)
+    else:
+        tail_spread = 0.0
+
+    # ── 7. Pattern classification ────────────────────────────────────
+    pattern = _classify_pattern(avgs, float(pr), float(sr), u_score, monotonicity)
+
+    # ── 8. Robustness diagnostics ────────────────────────────────────
+    robustness = _robustness_diagnostics(pairs, x_col, y_col, n_buckets)
+
+    # ── 9. Composite score ───────────────────────────────────────────
+    composite = _composite_score(
+        rank_corr=abs(float(sr)),
+        monotonicity=monotonicity,
+        consistency_pct=robustness.get("yearly_consistency_pct") or 0,
+        half_stability=robustness.get("half_sample_stable", False),
+        concentration=robustness.get("concentration_risk") or 1.0,
+        best_zone_sharpe=best_zone_sharpe,
+        n=n,
+    )
+
+    return {
+        "x_col":       x_col,
+        "y_col":       y_col,
+        "ticker":      ticker,
+        "n":           n,
+
+        # Correlation
+        "pearson_r":   round(float(pr), 4),
+        "pearson_p":   round(float(pp), 6),
+        "spearman_r":  round(float(sr), 4),
+        "spearman_p":  round(float(sp_val), 6),
+
+        # Bucket profile
+        "bucket_stats":   bucket_stats,
+        "monotonicity":   round(monotonicity, 4),
+        "u_score":        u_score,
+        "tail_spread":    tail_spread,
+
+        # Best zones
+        "best_single_bucket": best_single,
+        "best_adjacent_zone": best_zone,
+
+        # Pattern
+        "pattern": pattern,
+
+        # Robustness
+        "robustness":      robustness,
+        "composite_score": composite,
+    }
+
+
+# ── Pattern classification ───────────────────────────────────────────────────
+
+def _classify_pattern(avgs: list[float], pearson: float, spearman: float,
+                      u_score: float, monotonicity: float) -> str:
+    """Classify the dominant relationship pattern."""
+    if len(avgs) < 3:
+        return "insufficient_data"
+
+    overall_range = max(avgs) - min(avgs) if avgs else 0
+    if overall_range < 1e-8:
+        return "flat"
+
+    # Strong monotonic
+    if monotonicity > 0.75 and abs(spearman) > 0.03:
+        return "monotonic_positive" if spearman > 0 else "monotonic_negative"
+
+    # U or inverted-U
+    if abs(u_score) > overall_range * 0.3 and monotonicity < 0.5:
+        return "u_shape" if u_score > 0 else "inverted_u"
+
+    # Threshold / step: check if most of the spread comes from one transition
+    diffs = [avgs[i + 1] - avgs[i] for i in range(len(avgs) - 1)]
+    if diffs:
+        max_diff = max(abs(d) for d in diffs)
+        if max_diff > overall_range * 0.5:
+            return "threshold"
+
+    # Moderate linear
+    if abs(pearson) > 0.03:
+        return "linear_weak_positive" if pearson > 0 else "linear_weak_negative"
+
+    # Isolated region: best bucket stands out but no overall trend
+    if avgs:
+        best_idx = max(range(len(avgs)), key=lambda i: abs(avgs[i] - np.mean(avgs)))
+        deviation = abs(avgs[best_idx] - np.mean(avgs))
+        if deviation > overall_range * 0.4:
+            return "isolated_region"
+
+    return "no_clear_pattern"
+
+
+# ── Robustness diagnostics ───────────────────────────────────────────────────
+
+def _robustness_diagnostics(pairs, x_col: str, y_col: str,
+                            n_buckets: int = 10) -> dict:
+    """Temporal stability and concentration tests."""
+    n = len(pairs)
+
+    # Group by year
+    by_year: dict[int, list] = defaultdict(list)
+    for x, y, d in pairs:
+        yr = _year_from_date(d)
+        if yr:
+            by_year[yr].append((x, y))
+
+    # Yearly consistency: does the "best zone" direction hold each year?
+    # Use top-2 vs bottom-2 pooled as the signal direction
+    years_checked = 0
+    years_consistent = 0
+    full_buckets = _bucket(pairs, n_buckets)
+    if len(full_buckets) >= 4:
+        full_top = np.mean(full_buckets[-2] + full_buckets[-1]) if full_buckets[-2] + full_buckets[-1] else 0
+        full_bot = np.mean(full_buckets[0] + full_buckets[1]) if full_buckets[0] + full_buckets[1] else 0
+        full_direction = 1 if full_top > full_bot else -1
+
+        for yr, yr_pairs in sorted(by_year.items()):
+            if len(yr_pairs) < n_buckets * 2:
+                continue
+            years_checked += 1
+            yr_buckets = _bucket(yr_pairs, n_buckets)
+            if len(yr_buckets) >= 4:
+                yr_top = np.mean(yr_buckets[-2] + yr_buckets[-1]) if yr_buckets[-2] + yr_buckets[-1] else 0
+                yr_bot = np.mean(yr_buckets[0] + yr_buckets[1]) if yr_buckets[0] + yr_buckets[1] else 0
+                yr_dir = 1 if yr_top > yr_bot else -1
+                if yr_dir == full_direction:
+                    years_consistent += 1
+
+    consistency_pct = round(years_consistent / years_checked * 100, 1) if years_checked else None
+
+    # Concentration risk: what fraction of total return comes from the best single year
+    yearly_spreads = {}
+    for yr, yr_pairs in by_year.items():
+        if len(yr_pairs) < n_buckets * 2:
+            continue
+        yr_buckets = _bucket(yr_pairs, n_buckets)
+        if len(yr_buckets) >= 4:
+            t = float(np.mean(yr_buckets[-2] + yr_buckets[-1])) if yr_buckets[-2] + yr_buckets[-1] else 0
+            b = float(np.mean(yr_buckets[0] + yr_buckets[1])) if yr_buckets[0] + yr_buckets[1] else 0
+            yearly_spreads[yr] = t - b
+
+    total_abs_spread = sum(abs(v) for v in yearly_spreads.values())
+    if total_abs_spread > 0 and yearly_spreads:
+        max_yr_contrib = max(abs(v) for v in yearly_spreads.values())
+        concentration = round(max_yr_contrib / total_abs_spread, 4)
+    else:
+        concentration = 1.0
+
+    # Half-sample stability: split by time, check if signal direction is same in both halves
+    sorted_pairs = sorted(pairs, key=lambda p: p[2] if p[2] else "")
+    mid = len(sorted_pairs) // 2
+    first_half = sorted_pairs[:mid]
+    second_half = sorted_pairs[mid:]
+    half_stable = False
+
+    if len(first_half) >= n_buckets * 3 and len(second_half) >= n_buckets * 3:
+        b1 = _bucket(first_half, n_buckets)
+        b2 = _bucket(second_half, n_buckets)
+        if len(b1) >= 4 and len(b2) >= 4:
+            dir1 = np.mean(b1[-2] + b1[-1]) - np.mean(b1[0] + b1[1]) if (b1[-2] + b1[-1]) and (b1[0] + b1[1]) else 0
+            dir2 = np.mean(b2[-2] + b2[-1]) - np.mean(b2[0] + b2[1]) if (b2[-2] + b2[-1]) and (b2[0] + b2[1]) else 0
+            half_stable = (dir1 > 0 and dir2 > 0) or (dir1 < 0 and dir2 < 0)
+
+    # Leave-one-year-out: does removing any single year flip the overall direction?
+    loyo_fragile = False
+    if len(full_buckets) >= 4 and yearly_spreads:
+        full_spread = full_top - full_bot if len(full_buckets) >= 4 else 0
+        for yr in yearly_spreads:
+            remaining = [(x, y, d) for x, y, d in pairs if _year_from_date(d) != yr]
+            if len(remaining) < n_buckets * 3:
+                continue
+            rb = _bucket(remaining, n_buckets)
+            if len(rb) >= 4:
+                rt = np.mean(rb[-2] + rb[-1]) if (rb[-2] + rb[-1]) else 0
+                rbot = np.mean(rb[0] + rb[1]) if (rb[0] + rb[1]) else 0
+                if (full_spread > 0 and (rt - rbot) < 0) or (full_spread < 0 and (rt - rbot) > 0):
+                    loyo_fragile = True
+                    break
+
+    # Min bucket size
+    bucket_sizes = [len(b) for b in full_buckets if b]
+    min_bucket_n = min(bucket_sizes) if bucket_sizes else 0
+
+    return {
+        "yearly_consistency_pct":  consistency_pct,
+        "years_checked":           years_checked,
+        "years_consistent":        years_consistent,
+        "concentration_risk":      concentration,
+        "half_sample_stable":      half_stable,
+        "loyo_fragile":            loyo_fragile,
+        "min_bucket_n":            min_bucket_n,
+    }
+
+
+# ── Composite robustness score ───────────────────────────────────────────────
+
+def _composite_score(rank_corr: float, monotonicity: float,
+                     consistency_pct: float, half_stability: bool,
+                     concentration: float, best_zone_sharpe: float,
+                     n: int) -> float:
+    """
+    0-100 composite score. Higher = more robust signal.
+    Equal-weighted across 6 components, each normalized to 0-1.
+    """
+    # 1. Rank correlation strength (0-1, capped at |r|=0.20)
+    c_rank = min(rank_corr / 0.20, 1.0)
+
+    # 2. Monotonicity (already 0-1)
+    c_mono = monotonicity
+
+    # 3. Yearly consistency (0-1)
+    c_consistency = (consistency_pct / 100.0) if consistency_pct else 0.0
+
+    # 4. Half-sample stability (binary 0 or 1)
+    c_half = 1.0 if half_stability else 0.0
+
+    # 5. Low concentration (1 = well-spread, 0 = all in one year)
+    c_concentration = max(0.0, 1.0 - concentration)
+
+    # 6. Best-zone Sharpe (0-1, capped at |sharpe|=0.5)
+    c_sharpe = min(abs(best_zone_sharpe) / 0.5, 1.0)
+
+    # 7. Sample size bonus (0-0.5, >500 gets full bonus)
+    c_sample = min(n / 1000, 0.5)
+
+    raw = (c_rank + c_mono + c_consistency + c_half + c_concentration + c_sharpe + c_sample) / 6.5
+    return round(raw * 100, 1)

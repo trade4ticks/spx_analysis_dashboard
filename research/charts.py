@@ -220,3 +220,63 @@ def correlation_heatmap(
 
     plt.tight_layout()
     return _to_png(fig)
+
+
+def bucket_profile_chart(scan: dict) -> bytes:
+    """Multi-metric bucket chart from scanner.scan_relationship output.
+    Shows avg return bars + win rate line + highlights best zone."""
+    bucket_stats = scan.get("bucket_stats") or []
+    valid = [b for b in bucket_stats if b is not None]
+    if len(valid) < 3:
+        return b""
+
+    xs = [b["bucket"] for b in valid]
+    avgs = [b["avg_ret"] * 100 for b in valid]
+    win_rates = [b["win_rate"] * 100 for b in valid]
+
+    title = "Bucket Profile — " + _label(
+        scan.get("ticker", ""), scan.get("x_col", ""), scan.get("y_col", ""))
+
+    fig, ax1 = plt.subplots(figsize=(13, 6), facecolor=_BG)
+    ax1.set_facecolor(_SURFACE)
+    for spine in ax1.spines.values():
+        spine.set_edgecolor("#444")
+    ax1.tick_params(colors=_TEXT, labelsize=11)
+
+    # Bars: avg return
+    colors = [_GREEN if v >= 0 else _RED for v in avgs]
+    bars = ax1.bar(xs, avgs, color=colors, alpha=0.80, edgecolor="#111", linewidth=0.5)
+    ax1.axhline(0, color="#555", linewidth=0.8)
+    ax1.set_xlabel("Bucket  (1 = lowest feature value)", color=_TEXT)
+    ax1.set_ylabel("Avg Return (%)", color=_TEXT)
+    ax1.set_xticks(xs)
+    ax1.set_title(title, color=_TEXT, fontsize=13, pad=10)
+
+    # Win rate line on secondary axis
+    ax2 = ax1.twinx()
+    ax2.plot(xs, win_rates, color=_YELLOW, linewidth=1.5, marker="o", markersize=4)
+    ax2.set_ylabel("Win Rate (%)", color=_YELLOW)
+    ax2.tick_params(axis="y", colors=_YELLOW, labelsize=10)
+    ax2.set_ylim(30, 70)
+
+    # Highlight best adjacent zone
+    bz = scan.get("best_adjacent_zone")
+    if bz and bz.get("buckets"):
+        for b_num in bz["buckets"]:
+            ax1.axvspan(b_num - 0.4, b_num + 0.4, alpha=0.12, color=_ACCENT)
+
+    # Annotations
+    anno = []
+    anno.append(f"Pattern: {scan.get('pattern', '?')}")
+    anno.append(f"Score: {scan.get('composite_score', 0):.0f}/100")
+    anno.append(f"Pearson: {scan.get('pearson_r', 0):.4f}  Spearman: {scan.get('spearman_r', 0):.4f}")
+    rob = scan.get("robustness", {})
+    if rob.get("yearly_consistency_pct") is not None:
+        anno.append(f"Yearly consistency: {rob['yearly_consistency_pct']}%")
+    if rob.get("half_sample_stable") is not None:
+        anno.append(f"Half-sample stable: {'Yes' if rob['half_sample_stable'] else 'No'}")
+    ax1.text(0.02, 0.97, "\n".join(anno), transform=ax1.transAxes,
+             color=_DIM, fontsize=9, va="top", family="monospace")
+
+    plt.tight_layout()
+    return _to_png(fig)
