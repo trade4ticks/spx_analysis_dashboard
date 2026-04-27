@@ -133,6 +133,7 @@ async def _generate_summary(
     config: dict,
     ranked_scans: list[dict],
     equity_results: list[dict],
+    interaction_results: list[dict] = None,
     model: str = "claude-sonnet-4-6",
 ) -> str:
     """ONE LLM call with ranked findings → narrative summary."""
@@ -188,6 +189,24 @@ async def _generate_summary(
                 f"maxDD={r.get('max_drawdown')}, trades={r.get('n_trades')}, "
                 f"winRate={r.get('win_rate')}")
 
+    # Interaction highlights
+    if interaction_results:
+        top_interactions = sorted(
+            [r for r in interaction_results if r.get("composite_interaction_score", 0) > 0],
+            key=lambda r: r.get("composite_interaction_score", 0), reverse=True)
+        if top_interactions:
+            lines.append("\n=== Multi-Factor Interactions ===")
+            for r in top_interactions[:10]:
+                combo = "+".join(r.get("combo", []))
+                bq = r.get("best_quadrant") or r.get("best_octant") or {}
+                lines.append(
+                    f"  {r.get('ticker') or 'all'} | {combo} -> {r.get('y_col')}: "
+                    f"score={r.get('composite_interaction_score', 0):.0f}, "
+                    f"lift={r.get('interaction_lift', 0):+.4f}, "
+                    f"best zone={bq.get('label', '?')} "
+                    f"(avg={bq.get('avg_ret', 0):.4f}, WR={bq.get('win_rate', 0):.0%}), "
+                    f"R²={r.get('ols_r2', 0):.4f}")
+
     # Null results summary
     null_count = sum(1 for s in ranked_scans if s.get("composite_score", 0) < 10)
     if null_count:
@@ -198,19 +217,20 @@ async def _generate_summary(
     client = anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=1500,
         messages=[{
             "role": "user",
             "content": (
                 f"{findings_text}\n\n"
-                "Write a concise research summary (300-500 words). Cover:\n"
-                "1. Strongest signals: what pattern was detected, robustness score, consistency\n"
-                "2. Non-linear patterns: any U-shaped, threshold, or isolated-region findings\n"
-                "3. Equity curve viability for top signals\n"
-                "4. Fragile or overfit-looking results and why\n"
-                "5. Null results worth noting (features that do NOT predict)\n"
-                "6. Suggested next steps for the most promising signals\n\n"
-                "Use professional quant research language. Interpret patterns — do not just list numbers."
+                "Write a concise research summary (400-600 words). Cover:\n"
+                "1. Strongest single-factor signals: pattern, robustness score, consistency\n"
+                "2. Multi-factor interactions: which combos improved on singles? Describe as usable rules\n"
+                "3. Non-linear patterns: any U-shaped, threshold, or isolated-region findings\n"
+                "4. Equity curve viability for top signals\n"
+                "5. Fragile or overfit-looking results and why\n"
+                "6. Null results worth noting (features that do NOT predict)\n"
+                "7. Suggested next steps — which combos deserve further testing?\n\n"
+                "Use professional quant research language. Translate findings into potential trading rules."
             ),
         }],
     )
@@ -236,7 +256,7 @@ async def run_pipeline(
     Returns the AI summary string. All results saved to the database.
     """
     if analysis_types is None:
-        analysis_types = {"scan", "equity_curve", "regression"}
+        analysis_types = {"scan", "interaction", "equity_curve", "regression"}
 
     table    = config.get("table", "daily_features")
     tickers  = config.get("tickers") or []
@@ -313,7 +333,7 @@ async def run_pipeline(
     ranked = sorted(valid_scans,
                     key=lambda s: s.get("composite_score", 0), reverse=True)
     top_signals = ranked[:max_signals]
-    log(f"Step 3/5: Top {len(top_signals)} signals selected for deep analysis.")
+    log(f"Step 3/6: Top {len(top_signals)} signals selected for deep analysis.")
 
     # Bucket profile charts for top signals
     async with main_pool.acquire() as conn:
@@ -324,6 +344,101 @@ async def run_pipeline(
                     conn, run_id, "bucket_profile",
                     f"Profile {s.get('ticker') or 'all'} | {s['x_col']} -> {s['y_col']}",
                     png, s.get("ticker"), s["x_col"], s["y_col"])
+
+    # ── Step 3b: Multivariate interaction scan ──────────────────────────
+    interaction_results = []
+    if "interaction" in analysis_types and len(x_cols) >= 2:
+        from itertools import combinations
+        log(f"Step 3b: Interaction scan (2-factor and 3-factor combos)...")
+
+        # Build best single-factor Sharpe lookup per (ticker, y_col)
+        best_single_sharpe: dict[tuple, float] = {}
+        for s in valid_scans:
+            key = (s.get("ticker"), s["y_col"])
+            bsb = s.get("best_single_bucket") or {}
+            sharpe = abs(bsb.get("sharpe", 0))
+            baz = s.get("best_adjacent_zone") or {}
+            sharpe = max(sharpe, abs(baz.get("sharpe", 0)))
+            best_single_sharpe[key] = max(best_single_sharpe.get(key, 0), sharpe)
+
+        # For each (ticker, y_col), get usable features (had valid scans)
+        usable_features: dict[tuple, list[str]] = defaultdict(list)
+        for s in valid_scans:
+            key = (s.get("ticker"), s["y_col"])
+            if s["x_col"] not in usable_features[key]:
+                usable_features[key].append(s["x_col"])
+
+        n_2f = 0
+        n_3f = 0
+        async with main_pool.acquire() as conn:
+            for (ticker, y_col), feats in usable_features.items():
+                cache_key = ticker if ticker else "_all"
+                rows = cache.get(cache_key, [])
+                baseline = best_single_sharpe.get((ticker, y_col), 0)
+
+                # Cap features to top 6 by single-factor score for this y_col
+                feat_scores = {}
+                for s in valid_scans:
+                    if s.get("ticker") == ticker and s["y_col"] == y_col:
+                        feat_scores[s["x_col"]] = s.get("composite_score", 0)
+                top_feats = sorted(feats, key=lambda f: feat_scores.get(f, 0),
+                                   reverse=True)[:6]
+
+                # 2-factor combos
+                best_2f_sharpe: dict[tuple, float] = {}
+                for fa, fb in combinations(top_feats, 2):
+                    try:
+                        result = scanner.scan_interaction_2f(
+                            rows, fa, fb, y_col, ticker, baseline)
+                    except Exception as exc:
+                        log(f"    2F ERROR {ticker or 'all'} {fa}+{fb}->{y_col}: {exc}")
+                        continue
+                    if result is None:
+                        continue
+                    await rdb.save_result(conn, run_id, "interaction",
+                                          f"{fa}+{fb}", y_col, result, ticker)
+                    interaction_results.append(result)
+                    n_2f += 1
+                    # Track best 2f Sharpe for 3f baseline
+                    bq = result.get("best_quadrant") or {}
+                    best_2f_sharpe[(fa, fb)] = abs(bq.get("sharpe", 0))
+
+                    png = charts.quadrant_chart(result)
+                    if png:
+                        await rdb.save_chart(
+                            conn, run_id, "interaction_quadrant",
+                            f"Interaction {ticker or 'all'} | {fa}+{fb} -> {y_col}",
+                            png, ticker, f"{fa}+{fb}", y_col)
+
+                # 3-factor combos (only features from top 2f results)
+                if len(top_feats) >= 3:
+                    top_2f_feats = set()
+                    top_2f_results = sorted(
+                        [r for r in interaction_results
+                         if r.get("ticker") == ticker and r["y_col"] == y_col],
+                        key=lambda r: r.get("composite_interaction_score", 0),
+                        reverse=True)[:5]
+                    for r in top_2f_results:
+                        top_2f_feats.update(r.get("combo", []))
+
+                    best_2f_overall = max(best_2f_sharpe.values()) if best_2f_sharpe else baseline
+                    for fa, fb, fc in combinations(sorted(top_2f_feats), 3):
+                        try:
+                            result = scanner.scan_interaction_3f(
+                                rows, fa, fb, fc, y_col, ticker, best_2f_overall)
+                        except Exception as exc:
+                            log(f"    3F ERROR {ticker or 'all'} {fa}+{fb}+{fc}->{y_col}: {exc}")
+                            continue
+                        if result is None:
+                            continue
+                        await rdb.save_result(conn, run_id, "interaction_3f",
+                                              f"{fa}+{fb}+{fc}", y_col, result, ticker)
+                        interaction_results.append(result)
+                        n_3f += 1
+
+        log(f"  {n_2f} two-factor + {n_3f} three-factor interactions tested.")
+    else:
+        log("Step 3b: Interaction scan — skipped (need 2+ features).")
 
     # ── Step 4: Equity curves + regression for top signals ───────────────
     equity_results = []
@@ -396,11 +511,12 @@ async def run_pipeline(
                 await rdb.save_chart(conn, run_id, "correlation_heatmap",
                                      "Pearson Correlation Heatmap", png)
 
-    # ── Step 5: LLM summary (ONE call) ──────────────────────────────────
-    log("Step 5/5: Generating AI summary...")
+    # ── Step 6: LLM summary (ONE call) ──────────────────────────────────
+    log("Step 6/6: Generating AI summary...")
     try:
         summary = await _generate_summary(
-            question, config, ranked, equity_results, model=model)
+            question, config, ranked, equity_results,
+            interaction_results=interaction_results, model=model)
         log("  Summary generated.")
     except Exception as exc:
         log(f"  LLM summary failed: {exc}. Using fallback.")

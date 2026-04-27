@@ -435,14 +435,18 @@
           <!-- Summary table -->
           <template x-if="summaryRows.length > 0">
             <div>
-              <div class="section-hdr">SIGNAL SCORECARD — sorted by decile spread</div>
-              <div style="overflow-x:auto;margin-top:8px">
+              <div class="section-hdr" style="display:flex;align-items:center;gap:10px">
+                SIGNAL SCORECARD — sorted by robustness score
+                <button class="csv-btn" @click="exportScorecardCsv()" title="Export to CSV">CSV</button>
+              </div>
+              <div style="overflow-x:auto;max-height:500px;overflow-y:auto;margin-top:8px">
                 <table class="res-table">
-                  <thead>
+                  <thead style="position:sticky;top:0;z-index:2">
                     <tr>
                       <th>Ticker</th><th>Feature</th><th>Outcome</th>
-                      <th>Pearson r</th><th>p-value</th><th>D10–D1 Spread</th>
-                      <th>Consistency %</th><th>Final Equity</th><th>Max DD</th><th>N</th>
+                      <th>Score</th><th>Pattern</th>
+                      <th>Pearson r</th><th>Spearman r</th><th>Tail Spread</th>
+                      <th>Consist %</th><th>Final Equity</th><th>Max DD</th><th>N</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -451,9 +455,12 @@
                         <td x-text="row.ticker || 'all'"></td>
                         <td x-text="row.x_col"></td>
                         <td x-text="row.y_col"></td>
+                        <td class="num" x-text="row.composite_score != null ? row.composite_score.toFixed(0) : '—'"></td>
+                        <td style="font-size:10px" x-text="row.pattern || '—'"></td>
                         <td class="num" :class="row.pearson_r > 0 ? 'val-pos' : row.pearson_r < 0 ? 'val-neg' : ''"
                             x-text="r4(row.pearson_r)"></td>
-                        <td class="num" x-text="r4(row.pearson_p)"></td>
+                        <td class="num" :class="row.spearman_r > 0 ? 'val-pos' : row.spearman_r < 0 ? 'val-neg' : ''"
+                            x-text="r4(row.spearman_r)"></td>
                         <td class="num" :class="row.spread > 0 ? 'val-pos' : row.spread < 0 ? 'val-neg' : ''"
                             x-text="pct(row.spread)"></td>
                         <td class="num" x-text="row.consistency_pct != null ? row.consistency_pct + '%' : '—'"></td>

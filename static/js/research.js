@@ -516,24 +516,80 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Results helpers ────────────────────────────────────────────────────
+    get scans() {
+      return this.results.filter(r => r.analysis_type === 'scan');
+    },
     get correlations() {
-      return this.results.filter(r => r.analysis_type === 'correlation');
+      // Legacy support + extract from scan results
+      const legacy = this.results.filter(r => r.analysis_type === 'correlation');
+      if (legacy.length) return legacy;
+      // Map scan results to correlation-shaped objects
+      return this.scans.filter(r => r.result?.pearson_r != null);
     },
     get deciles() {
-      return this.results.filter(r => r.analysis_type === 'decile');
+      // Legacy support + extract bucket_stats from scan results
+      const legacy = this.results.filter(r => r.analysis_type === 'decile');
+      if (legacy.length) return legacy;
+      return this.scans.filter(r => r.result?.bucket_stats?.length > 0)
+        .map(r => ({
+          ...r,
+          analysis_type: 'decile',
+          result: {
+            deciles: r.result.bucket_stats.filter(b => b != null).map(b => ({
+              decile: b.bucket, n: b.n, avg_ret: b.avg_ret,
+              med_ret: b.med_ret, win_rate: b.win_rate, std_dev: b.std_dev,
+            })),
+            top_bottom_spread: r.result.tail_spread,
+            feature_col: r.result.x_col,
+            outcome_col: r.result.y_col,
+          },
+        }));
     },
     get equityCurves() {
       return this.results.filter(r => r.analysis_type?.startsWith('equity_curve'));
     },
     get yearlyConsistency() {
-      return this.results.filter(r => r.analysis_type === 'yearly_consistency');
+      // Legacy support + extract from scan robustness
+      const legacy = this.results.filter(r => r.analysis_type === 'yearly_consistency');
+      if (legacy.length) return legacy;
+      return this.scans.filter(r => r.result?.robustness?.yearly_consistency_pct != null)
+        .map(r => ({
+          ...r,
+          analysis_type: 'yearly_consistency',
+          result: {
+            consistency_pct: r.result.robustness.yearly_consistency_pct,
+            wins: r.result.robustness.years_consistent,
+            total_years: r.result.robustness.years_checked,
+          },
+        }));
+    },
+    get interactions() {
+      return this.results.filter(r =>
+        r.analysis_type === 'interaction' || r.analysis_type === 'interaction_3f');
     },
 
-    // PNG charts that aren't covered by Chart.js (scatter + heatmap)
+    // PNG charts — show ALL generated chart images on screen
     get staticCharts() {
-      return this.charts.filter(c =>
-        c.chart_type === 'scatter' || c.chart_type === 'correlation_heatmap'
-      );
+      return this.charts;
+    },
+
+    exportScorecardCsv() {
+      const rows = this.summaryRows;
+      if (!rows.length) return;
+      const cols = ['ticker','x_col','y_col','composite_score','pattern',
+                    'pearson_r','spearman_r','spread','consistency_pct',
+                    'final_equity','max_drawdown','n'];
+      const header = cols.join(',');
+      const lines = rows.map(r => cols.map(c => {
+        const v = r[c];
+        return v != null ? v : '';
+      }).join(','));
+      const csv = [header, ...lines].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'signal_scorecard.csv'; a.click();
+      URL.revokeObjectURL(url);
     },
 
     // Interactive chart sections (types that have structured result data)
@@ -543,28 +599,45 @@ document.addEventListener('alpine:init', () => {
              this.yearlyConsistency.length > 0;
     },
 
-    // Summary table
+    // Summary table — reads from scan results (new engine) or legacy types
     get summaryRows() {
       const key = (ticker, x, y) => `${ticker}||${x}||${y}`;
       const map = {};
 
-      for (const r of this.correlations) {
+      // New engine: scan results contain everything
+      for (const r of this.scans) {
+        const k = key(r.ticker, r.x_col, r.y_col);
+        const res = r.result || {};
+        const rob = res.robustness || {};
+        map[k] = {
+          ticker: r.ticker, x_col: r.x_col, y_col: r.y_col,
+          pearson_r:       res.pearson_r,
+          pearson_p:       res.pearson_p,
+          spearman_r:      res.spearman_r,
+          n:               res.n,
+          spread:          res.tail_spread,
+          consistency_pct: rob.yearly_consistency_pct,
+          pattern:         res.pattern,
+          composite_score: res.composite_score,
+          monotonicity:    res.monotonicity,
+        };
+      }
+
+      // Legacy: correlation + decile + yearly separate types
+      for (const r of this.results.filter(x => x.analysis_type === 'correlation')) {
         const k = key(r.ticker, r.x_col, r.y_col);
         map[k] = map[k] || { ticker: r.ticker, x_col: r.x_col, y_col: r.y_col };
-        map[k].pearson_r  = r.result?.pearson_r;
-        map[k].pearson_p  = r.result?.pearson_p;
-        map[k].n          = r.result?.n;
+        map[k].pearson_r = r.result?.pearson_r;
+        map[k].pearson_p = r.result?.pearson_p;
+        map[k].n         = r.result?.n;
       }
-      for (const r of this.deciles) {
+      for (const r of this.results.filter(x => x.analysis_type === 'decile')) {
         const k = key(r.ticker, r.x_col, r.y_col);
         map[k] = map[k] || { ticker: r.ticker, x_col: r.x_col, y_col: r.y_col };
         map[k].spread = r.result?.top_bottom_spread;
       }
-      for (const r of this.yearlyConsistency) {
-        const k = key(r.ticker, r.x_col, r.y_col);
-        map[k] = map[k] || { ticker: r.ticker, x_col: r.x_col, y_col: r.y_col };
-        map[k].consistency_pct = r.result?.consistency_pct;
-      }
+
+      // Equity curves (both old and new engine)
       for (const r of this.equityCurves) {
         if (r.analysis_type !== 'equity_curve_top') continue;
         const k = key(r.ticker, r.x_col, r.y_col);
@@ -574,8 +647,8 @@ document.addEventListener('alpine:init', () => {
       }
 
       return Object.values(map).sort((a, b) => {
-        const sa = Math.abs(a.spread || 0);
-        const sb = Math.abs(b.spread || 0);
+        const sa = a.composite_score || Math.abs(a.spread || 0) * 1000;
+        const sb = b.composite_score || Math.abs(b.spread || 0) * 1000;
         return sb - sa;
       });
     },

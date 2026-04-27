@@ -252,12 +252,15 @@ def bucket_profile_chart(scan: dict) -> bytes:
     ax1.set_xticks(xs)
     ax1.set_title(title, color=_TEXT, fontsize=13, pad=10)
 
-    # Win rate line on secondary axis
+    # Win rate line on secondary axis — dynamic range with padding
     ax2 = ax1.twinx()
     ax2.plot(xs, win_rates, color=_YELLOW, linewidth=1.5, marker="o", markersize=4)
     ax2.set_ylabel("Win Rate (%)", color=_YELLOW)
     ax2.tick_params(axis="y", colors=_YELLOW, labelsize=10)
-    ax2.set_ylim(30, 70)
+    wr_min = min(win_rates) if win_rates else 40
+    wr_max = max(win_rates) if win_rates else 60
+    wr_pad = max((wr_max - wr_min) * 0.3, 5)
+    ax2.set_ylim(max(0, wr_min - wr_pad), min(100, wr_max + wr_pad))
 
     # Highlight best adjacent zone
     bz = scan.get("best_adjacent_zone")
@@ -277,6 +280,58 @@ def bucket_profile_chart(scan: dict) -> bytes:
         anno.append(f"Half-sample stable: {'Yes' if rob['half_sample_stable'] else 'No'}")
     ax1.text(0.02, 0.97, "\n".join(anno), transform=ax1.transAxes,
              color=_DIM, fontsize=9, va="top", family="monospace")
+
+    plt.tight_layout()
+    return _to_png(fig)
+
+
+def quadrant_chart(interaction: dict) -> bytes:
+    """Bar chart showing avg return per quadrant from a 2-factor interaction scan."""
+    quads = interaction.get("quadrants") or []
+    valid = [q for q in quads if q.get("n", 0) >= 5 and q.get("avg_ret") is not None]
+    if len(valid) < 2:
+        return b""
+
+    combo = interaction.get("combo", [])
+    title = "2-Factor Interaction — " + _label(
+        interaction.get("ticker", ""),
+        " + ".join(combo),
+        interaction.get("y_col", ""))
+
+    labels = [q["label"] for q in valid]
+    avgs = [q["avg_ret"] * 100 for q in valid]
+    win_rates = [q.get("win_rate", 0.5) * 100 for q in valid]
+    colors = [_GREEN if v >= 0 else _RED for v in avgs]
+
+    fig, ax1 = plt.subplots(figsize=(10, 5), facecolor=_BG)
+    ax1.set_facecolor(_SURFACE)
+    for spine in ax1.spines.values():
+        spine.set_edgecolor("#444")
+    ax1.tick_params(colors=_TEXT, labelsize=10)
+
+    bars = ax1.bar(range(len(valid)), avgs, color=colors, alpha=0.85,
+                   edgecolor="#111", linewidth=0.5)
+    ax1.axhline(0, color="#555", linewidth=0.8)
+    ax1.set_xticks(range(len(valid)))
+    ax1.set_xticklabels(labels, fontsize=8, color=_TEXT, rotation=15, ha="right")
+    ax1.set_ylabel("Avg Return (%)", color=_TEXT)
+    ax1.set_title(title, color=_TEXT, fontsize=12, pad=10)
+
+    for bar, val, wr in zip(bars, avgs, win_rates):
+        y_off = 0.003 if val >= 0 else -0.003
+        ax1.text(bar.get_x() + bar.get_width() / 2, val + y_off,
+                 f"{val:.2f}%\nWR:{wr:.0f}%",
+                 ha="center", va="bottom" if val >= 0 else "top",
+                 color=_TEXT, fontsize=8)
+
+    # Annotations
+    lift = interaction.get("interaction_lift", 0)
+    r2 = interaction.get("ols_r2", 0)
+    score = interaction.get("composite_interaction_score", 0)
+    ax1.text(0.02, 0.97,
+             f"Lift: {lift:+.4f}  R²: {r2:.4f}  Score: {score:.0f}/100\n"
+             f"n={interaction.get('n', 0)}",
+             transform=ax1.transAxes, color=_DIM, fontsize=9, va="top", family="monospace")
 
     plt.tight_layout()
     return _to_png(fig)

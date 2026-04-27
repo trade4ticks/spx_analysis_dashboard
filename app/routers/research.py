@@ -69,7 +69,7 @@ class RunRequest(BaseModel):
     model: str = "claude-sonnet-4-6"
     signal_threshold: float = 0.03
     max_signals: int = 30
-    analysis_types: list[str] = ["scan", "equity_curve", "regression"]
+    analysis_types: list[str] = ["scan", "interaction", "equity_curve", "regression"]
 
 
 class FollowupRequest(BaseModel):
@@ -240,26 +240,40 @@ async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)
         if isinstance(r.get("result"), str):
             r["result"] = json.loads(r["result"])
 
-    # Build correlation table context
+    # Build correlation table context — support both scan (new) and correlation (legacy)
     corr_rows = []
     for r in results:
-        if r.get("analysis_type") == "correlation" and "error" not in (r.get("result") or {}):
-            rd = r.get("result") or {}
+        rd = r.get("result") or {}
+        if isinstance(rd, str):
+            rd = json.loads(rd)
+        if r.get("analysis_type") == "scan" and "error" not in rd:
+            corr_rows.append({**rd, "ticker": r.get("ticker"),
+                               "x_col": r.get("x_col"), "y_col": r.get("y_col")})
+        elif r.get("analysis_type") == "correlation" and "error" not in rd:
             corr_rows.append({**rd, "ticker": r.get("ticker"),
                                "x_col": r.get("x_col"), "y_col": r.get("y_col")})
     corr_table = rengine.format_corr_table(corr_rows) if corr_rows else "(no correlations saved)"
 
-    # Build decile summary
+    # Build scan/decile summary
     decile_lines = []
     for r in results:
-        if r.get("analysis_type") == "decile":
-            rd = r.get("result") or {}
+        rd = r.get("result") or {}
+        if isinstance(rd, str):
+            rd = json.loads(rd)
+        if r.get("analysis_type") == "scan" and "error" not in rd:
+            spread = rd.get("tail_spread")
+            score = rd.get("composite_score")
+            pattern = rd.get("pattern")
+            if spread is not None:
+                decile_lines.append(
+                    f"  [{score or 0:.0f}] {r.get('ticker') or 'all'} | {r.get('x_col')} → {r.get('y_col')}: "
+                    f"tail_spread={spread*100:.3f}%, pattern={pattern}")
+        elif r.get("analysis_type") == "decile":
             spread = rd.get("top_bottom_spread")
             if spread is not None:
                 decile_lines.append(
                     f"  {r.get('ticker') or 'all'} | {r.get('x_col')} → {r.get('y_col')}: "
-                    f"D10–D1 spread={spread*100:.3f}%"
-                )
+                    f"D10–D1 spread={spread*100:.3f}%")
     decile_summary = "\n".join(decile_lines) if decile_lines else "(none)"
 
     cfg = run.get("config") or {}
