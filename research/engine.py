@@ -261,21 +261,34 @@ async def run_pipeline(
     log(f"Step 2/5: Scanning {total_combos} (ticker × feature × outcome) pairs...")
     all_scans = []
 
+    scan_errors = 0
     async with main_pool.acquire() as conn:
         for cache_key, rows in cache.items():
             ticker = None if cache_key == "_all" else cache_key
             cols_available = set(rows[0].keys()) if rows else set()
+            log(f"  Ticker={ticker or 'all'}: {len(rows)} rows, "
+                f"cols available: {sorted(cols_available - {'trade_date'})}")
             for x_col in x_cols:
                 if x_col not in cols_available:
+                    log(f"    SKIP x_col={x_col} — not in data")
                     continue
                 for y_col in y_cols:
-                    if y_col not in cols_available or x_col == y_col:
+                    if y_col not in cols_available:
+                        log(f"    SKIP y_col={y_col} — not in data")
+                        continue
+                    if x_col == y_col:
                         continue
                     try:
                         scan_result = scanner.scan_relationship(rows, x_col, y_col, ticker)
                     except Exception as exc:
-                        log(f"  SCAN ERROR {ticker or 'all'} {x_col}->{y_col}: {exc}")
+                        log(f"    SCAN ERROR {ticker or 'all'} {x_col}->{y_col}: {exc}")
+                        scan_errors += 1
                         continue
+
+                    if "error" in scan_result:
+                        log(f"    INSUF DATA {ticker or 'all'} {x_col}->{y_col}: "
+                            f"n={scan_result.get('n', 0)}")
+                        scan_errors += 1
 
                     await rdb.save_result(conn, run_id, "scan",
                                           x_col, y_col, scan_result, ticker)
@@ -292,7 +305,9 @@ async def run_pipeline(
                                 png, ticker, x_col, y_col)
 
     valid_scans = [s for s in all_scans if "error" not in s]
-    log(f"  {len(valid_scans)} pairs scanned successfully.")
+    error_scans = [s for s in all_scans if "error" in s]
+    log(f"  {len(valid_scans)} pairs scanned successfully, "
+        f"{len(error_scans)} insufficient data, {scan_errors} errors.")
 
     # ── Step 3: Rank by robustness & deep-dive top signals ───────────────
     ranked = sorted(valid_scans,
