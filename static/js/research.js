@@ -22,7 +22,7 @@ document.addEventListener('alpine:init', () => {
       tickers:        '',
       bucketList:     [{name: '', cols: ''}],  // [{name, cols}]
       x_columns:      '',
-      y_columns:      'ret_1d_fwd, ret_5d_fwd, ret_20d_fwd',
+      y_columns:      '',
       date_from:      '',
       date_to:        '',
       model:          'claude-sonnet-4-6',

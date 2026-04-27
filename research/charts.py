@@ -12,8 +12,8 @@ _SURFACE = "#2d2d2d"
 _TEXT    = "#cccccc"
 _DIM     = "#888888"
 _ACCENT  = "#3498db"
-_GREEN   = "#2ecc71"
-_RED     = "#e74c3c"
+_POS     = "#3498db"   # bright blue for positive / top / long
+_NEG     = "#e84393"   # bright pink for negative / bottom / short
 _YELLOW  = "#f1c40f"
 
 
@@ -52,7 +52,7 @@ def decile_bar_chart(result: dict) -> bytes:
         return b""
     xs = [d["decile"] for d in deciles]
     ys = [d["avg_ret"] or 0 for d in deciles]
-    colors = [_GREEN if v >= 0 else _RED for v in ys]
+    colors = [_POS if v >= 0 else _NEG for v in ys]
 
     title = "Decile Avg Return — " + _label(
         result.get("ticker", ""), result.get("feature_col", ""), result.get("outcome_col", "")
@@ -100,9 +100,9 @@ def equity_curve_chart(top: dict, bottom: Optional[dict] = None) -> bytes:
         ax.set_xticks(tick_idxs)
         ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=7)
 
-    _plot(top, "Top Decile", _GREEN)
+    _plot(top, "Top Decile", _POS)
     if bottom:
-        _plot(bottom, "Bottom Decile", _RED)
+        _plot(bottom, "Bottom Decile", _NEG)
 
     ax.axhline(1.0, color="#555", linewidth=0.6, linestyle="--")
     ax.set_ylabel("Equity (start = 1.0)", color=_TEXT)
@@ -132,8 +132,8 @@ def yearly_consistency_chart(result: dict) -> bytes:
 
     x = np.arange(len(labels))
     w = 0.35
-    ax.bar(x - w / 2, top_vals, w, label="Top Decile", color=_GREEN, alpha=0.8)
-    ax.bar(x + w / 2, bot_vals, w, label="Bottom Decile", color=_RED, alpha=0.8)
+    ax.bar(x - w / 2, top_vals, w, label="Top Decile", color=_POS, alpha=0.8)
+    ax.bar(x + w / 2, bot_vals, w, label="Bottom Decile", color=_NEG, alpha=0.8)
     ax.axhline(0, color="#555", linewidth=0.8)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, fontsize=10)
@@ -163,7 +163,7 @@ def scatter_chart(result: dict) -> bytes:
     # Regression overlay
     m, b = np.polyfit(xs, ys, 1)
     xl = np.linspace(min(xs), max(xs), 100)
-    ax.plot(xl, m * xl + b, color=_RED, linewidth=1.2, alpha=0.7)
+    ax.plot(xl, m * xl + b, color=_YELLOW, linewidth=1.2, alpha=0.7)
 
     ax.set_xlabel(result.get("x_col", ""), color=_TEXT)
     ax.set_ylabel(result.get("y_col", ""), color=_TEXT)
@@ -244,7 +244,7 @@ def bucket_profile_chart(scan: dict) -> bytes:
     ax1.tick_params(colors=_TEXT, labelsize=11)
 
     # Bars: avg return
-    colors = [_GREEN if v >= 0 else _RED for v in avgs]
+    colors = [_POS if v >= 0 else _NEG for v in avgs]
     bars = ax1.bar(xs, avgs, color=colors, alpha=0.80, edgecolor="#111", linewidth=0.5)
     ax1.axhline(0, color="#555", linewidth=0.8)
     ax1.set_xlabel("Bucket  (1 = lowest feature value)", color=_TEXT)
@@ -301,7 +301,7 @@ def quadrant_chart(interaction: dict) -> bytes:
     labels = [q["label"] for q in valid]
     avgs = [q["avg_ret"] * 100 for q in valid]
     win_rates = [q.get("win_rate", 0.5) * 100 for q in valid]
-    colors = [_GREEN if v >= 0 else _RED for v in avgs]
+    colors = [_POS if v >= 0 else _NEG for v in avgs]
 
     fig, ax1 = plt.subplots(figsize=(10, 5), facecolor=_BG)
     ax1.set_facecolor(_SURFACE)
