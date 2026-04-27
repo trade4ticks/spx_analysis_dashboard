@@ -170,7 +170,8 @@ document.addEventListener('alpine:init', () => {
       this.submitError = null;
       // Clear form
       this.form = { name:'', question:'', table:'daily_features', tickers:'',
-                    x_columns:'', y_columns:'ret_1d_fwd, ret_5d_fwd, ret_20d_fwd',
+                    bucketList:[{name:'', cols:''}],
+                    x_columns:'', y_columns:'',
                     date_from:'', date_to:'', model:'claude-sonnet-4-6', max_tool_calls:60 };
     },
 
@@ -203,13 +204,11 @@ document.addEventListener('alpine:init', () => {
 
     setTablePreset(table) {
       this.form.table = table;
-      if (table === 'daily_features') {
-        this.form.x_columns = 'oi_weighted_strike_all_div_spot, put_call_oi_ratio';
-        this.form.y_columns = 'ret_1d_fwd, ret_5d_fwd, ret_20d_fwd';
-      } else if (table === 'surface_metrics_core') {
-        this.form.x_columns = 'skew_30d_25p_atm, skew_30d_10p_atm, term_ratio_7d_30d';
-        this.form.y_columns = 'iv_30d_atm, iv_7d_atm';
-        this.form.tickers   = '';
+      // Clear columns — user selects from the available chips below
+      this.form.x_columns = '';
+      this.form.y_columns = '';
+      if (table === 'surface_metrics_core') {
+        this.form.tickers = '';
       }
       this._loadColumns(table);
     },
