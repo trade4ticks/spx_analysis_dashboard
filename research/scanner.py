@@ -14,6 +14,22 @@ from scipy import stats as sp_stats
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _jsonify(obj):
+    """Recursively convert numpy types to native Python for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _jsonify(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_jsonify(v) for v in obj]
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
 def _valid_pairs(rows: list[dict], x_col: str, y_col: str):
     """Extract (x, y, trade_date) tuples where both are non-None."""
     out = []
@@ -170,7 +186,7 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
         n=n,
     )
 
-    return {
+    return _jsonify({
         "x_col":       x_col,
         "y_col":       y_col,
         "ticker":      ticker,
@@ -198,7 +214,7 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
         # Robustness
         "robustness":      robustness,
         "composite_score": composite,
-    }
+    })
 
 
 # ── Pattern classification ───────────────────────────────────────────────────
