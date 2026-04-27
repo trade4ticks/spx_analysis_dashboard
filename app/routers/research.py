@@ -20,6 +20,11 @@ router = APIRouter()
 
 async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
                        config: dict, model: str, max_tool_calls: int):
+    agent_logs: list[str] = []
+
+    def _log(msg: str):
+        agent_logs.append(msg)
+
     try:
         summary = await ragent.run_agent(
             main_pool=main_pool,
@@ -29,7 +34,7 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
             config=config,
             model=model,
             max_tool_calls=max_tool_calls,
-            log=lambda msg: None,  # silent in web mode
+            log=_log,
         )
         # Generate correlation heatmap if multiple tickers
         tickers = config.get("tickers") or []
@@ -52,11 +57,19 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
                     async with main_pool.acquire() as conn:
                         await rdb.save_chart(conn, run_id, "correlation_heatmap",
                                              "Pearson Correlation Heatmap", png)
+        # If summary is still empty after agent ran, attach logs to error_msg for debugging
+        log_text = "\n".join(agent_logs[-50:]) if (not summary and agent_logs) else None
         async with main_pool.acquire() as conn:
-            await rdb.update_run(conn, run_id, status="complete", ai_summary=summary)
+            await rdb.update_run(conn, run_id, status="complete",
+                                 ai_summary=summary or None,
+                                 error_msg=log_text)
     except Exception as exc:
+        log_text = "\n".join(agent_logs[-50:]) if agent_logs else None
+        err = str(exc)
+        if log_text:
+            err = f"{err}\n\n--- Agent log ---\n{log_text}"
         async with main_pool.acquire() as conn:
-            await rdb.update_run(conn, run_id, status="error", error_msg=str(exc))
+            await rdb.update_run(conn, run_id, status="error", error_msg=err)
 
 
 # ── Request models ────────────────────────────────────────────────────────────

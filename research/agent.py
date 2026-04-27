@@ -63,6 +63,31 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
     return cache, errors
 
 
+def _build_fallback_summary(corr_results: list[dict]) -> str:
+    """Fallback when finish() is called with an empty summary."""
+    if not corr_results:
+        return "Analysis complete. No correlations were computed."
+    valid = [r for r in corr_results if "error" not in r]
+    strong   = sorted([r for r in valid if abs(r.get("pearson_r") or 0) > 0.06],
+                      key=lambda x: abs(x.get("pearson_r") or 0), reverse=True)
+    moderate = sorted([r for r in valid if 0.03 < abs(r.get("pearson_r") or 0) <= 0.06],
+                      key=lambda x: abs(x.get("pearson_r") or 0), reverse=True)
+    lines = [f"Analysis complete. {len(valid)} correlations computed.\n"]
+    if strong:
+        lines.append("Strong signals (|r| > 0.06):")
+        for r in strong[:8]:
+            lines.append(f"  {r.get('ticker') or 'all'} | {r.get('x_col')} → {r.get('y_col')}: "
+                         f"r={r.get('pearson_r', 0):.4f}, n={r.get('n', 0)}")
+    if moderate:
+        lines.append("\nModerate signals (0.03 < |r| ≤ 0.06):")
+        for r in moderate[:5]:
+            lines.append(f"  {r.get('ticker') or 'all'} | {r.get('x_col')} → {r.get('y_col')}: "
+                         f"r={r.get('pearson_r', 0):.4f}, n={r.get('n', 0)}")
+    if not strong and not moderate:
+        lines.append("No signals above the |r| > 0.03 threshold found.")
+    return "\n".join(lines)
+
+
 def _format_corr_table(corr_results: list[dict]) -> str:
     """Format correlation matrix as a readable text table for Claude."""
     header = f"{'Ticker':<8} {'Feature':<42} {'Outcome':<16} {'Pearson r':>9} {'Spearman r':>10} {'N':>6}  Signal"
@@ -412,7 +437,10 @@ async def run_agent(
                     f"{json.dumps({k: v for k, v in inp.items()}, default=str)[:120]})")
 
                 if block.name == "finish":
-                    finish_summary = inp.get("summary", "")
+                    finish_summary = inp.get("summary", "") or ""
+                    if not finish_summary.strip():
+                        log("  finish() called with empty summary — building fallback")
+                        finish_summary = _build_fallback_summary(corr_results)
                     break
 
                 try:

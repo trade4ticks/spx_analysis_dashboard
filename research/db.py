@@ -25,8 +25,8 @@ async def update_run(conn: asyncpg.Connection, run_id: str, *,
         UPDATE research_runs SET
             status       = COALESCE($2, status),
             completed_at = CASE WHEN $2 IN ('complete','error') THEN NOW() ELSE completed_at END,
-            ai_summary   = COALESCE($3, ai_summary),
-            error_msg    = COALESCE($4, error_msg)
+            ai_summary   = COALESCE(NULLIF($3, ''), ai_summary),
+            error_msg    = COALESCE(NULLIF($4, ''), error_msg)
         WHERE id = $1::uuid
         """,
         run_id, status, ai_summary, error_msg,
