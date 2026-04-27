@@ -20,6 +20,7 @@ document.addEventListener('alpine:init', () => {
       question:       '',
       table:          'daily_features',
       tickers:        '',
+      bucketList:     [{name: '', cols: ''}],  // [{name, cols}]
       x_columns:      '',
       y_columns:      'ret_1d_fwd, ret_5d_fwd, ret_20d_fwd',
       date_from:      '',
@@ -223,17 +224,26 @@ document.addEventListener('alpine:init', () => {
       }
 
       const parse = s => s.split(',').map(x => x.trim()).filter(Boolean);
+
+      // Build buckets from the bucket form
+      const buckets = {};
+      for (const bk of (this.form.bucketList || [])) {
+        const bname = bk.name.trim();
+        const bcols = parse(bk.cols);
+        if (bname && bcols.length) buckets[bname] = bcols;
+      }
+
       const body = {
         name,
         question,
         table:          this.form.table,
         tickers:        parse(this.form.tickers),
+        buckets,
         x_columns:      parse(this.form.x_columns),
         y_columns:      parse(this.form.y_columns),
         date_from:      this.form.date_from || null,
         date_to:        this.form.date_to   || null,
         model:          this.form.model,
-        max_tool_calls: parseInt(this.form.max_tool_calls) || 60,
       };
 
       this.submitting = true;
@@ -567,10 +577,61 @@ document.addEventListener('alpine:init', () => {
       return this.results.filter(r =>
         r.analysis_type === 'interaction' || r.analysis_type === 'interaction_3f');
     },
+    get combos() {
+      return this.results.filter(r => r.analysis_type === 'combo');
+    },
+
+    // Multi-factor scorecard (PRIMARY output when combos exist)
+    get comboRows() {
+      return this.combos.map(r => {
+        const res = r.result || {};
+        const bz = res.best_quadrant || res.best_octant || res.best_zone || {};
+        const rob = res.robustness || {};
+        return {
+          ticker:      r.ticker,
+          combo:       (res.combo || []).join(' + '),
+          buckets:     (res.buckets_used || []).join('+'),
+          y_col:       r.y_col,
+          n_factors:   (res.combo || []).length,
+          best_zone:   bz.label || '?',
+          n:           res.n,
+          n_zone:      rob.n_zone || bz.n,
+          avg_ret:     rob.avg_ret || bz.avg_ret,
+          med_ret:     rob.med_ret || bz.med_ret,
+          win_rate:    rob.win_rate || bz.win_rate,
+          max_drawdown: rob.max_drawdown,
+          final_equity: rob.final_equity,
+          consistency: rob.yearly_consistency_pct,
+          lift:        res.interaction_lift,
+          score:       res.composite_interaction_score,
+          r2:          res.ols_r2,
+          warnings:    (res.overfit_warnings || []).join('; '),
+          baseline:    res.baseline_best_single,
+        };
+      }).sort((a, b) => (b.score || 0) - (a.score || 0));
+    },
 
     // PNG charts — show ALL generated chart images on screen
     get staticCharts() {
       return this.charts;
+    },
+
+    exportComboCsv() {
+      const rows = this.comboRows;
+      if (!rows.length) return;
+      const cols = ['ticker','combo','buckets','y_col','n_factors','best_zone',
+                    'n','n_zone','avg_ret','med_ret','win_rate','max_drawdown',
+                    'final_equity','consistency','lift','score','r2','warnings'];
+      const header = cols.join(',');
+      const lines = rows.map(r => cols.map(c => {
+        const v = r[c]; return v != null ? String(v).replace(/,/g, ';') : '';
+      }).join(','));
+      const csv = [header, ...lines].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'combo_scorecard.csv'; a.click();
+      URL.revokeObjectURL(url);
     },
 
     exportScorecardCsv() {

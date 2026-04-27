@@ -62,14 +62,15 @@ class RunRequest(BaseModel):
     question: str
     table: str = "daily_features"
     tickers: list[str] = []
-    x_columns: list[str] = []
+    buckets: dict[str, list[str]] = {}   # {"bucket_name": ["col1", "col2"], ...}
+    x_columns: list[str] = []            # backward compat: treated as single bucket
     y_columns: list[str] = []
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     model: str = "claude-sonnet-4-6"
     signal_threshold: float = 0.03
     max_signals: int = 30
-    analysis_types: list[str] = ["scan", "interaction", "equity_curve", "regression"]
+    analysis_types: list[str] = ["scan", "combo", "equity_curve", "regression"]
 
 
 class FollowupRequest(BaseModel):
@@ -140,11 +141,18 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
     if oi_pool is None and req.table in {"daily_features", "option_oi_surface", "underlying_ohlc"}:
         raise HTTPException(400, "OI_DATABASE_URL not configured")
 
+    # Normalize: if buckets provided, derive x_columns from them; else make one bucket
+    buckets = req.buckets
+    if not buckets and req.x_columns:
+        buckets = {"features": req.x_columns}
+    all_x = list(dict.fromkeys(col for cols in buckets.values() for col in cols))
+
     config = {
         "name":              req.name,
         "table":             req.table,
         "tickers":           req.tickers,
-        "x_columns":         req.x_columns,
+        "buckets":           buckets,
+        "x_columns":         all_x,
         "y_columns":         req.y_columns,
         "date_from":         req.date_from,
         "date_to":           req.date_to,
@@ -187,11 +195,17 @@ async def retry_run(run_id: str, req: RunRequest, background_tasks: BackgroundTa
         if run["status"] not in ("error", "running"):
             raise HTTPException(400, "Only failed runs can be retried")
 
+        retry_buckets = req.buckets
+        if not retry_buckets and req.x_columns:
+            retry_buckets = {"features": req.x_columns}
+        retry_all_x = list(dict.fromkeys(col for cols in retry_buckets.values() for col in cols))
+
         config = {
             "name":              req.name,
             "table":             req.table,
             "tickers":           req.tickers,
-            "x_columns":         req.x_columns,
+            "buckets":           retry_buckets,
+            "x_columns":         retry_all_x,
             "y_columns":         req.y_columns,
             "date_from":         req.date_from,
             "date_to":           req.date_to,

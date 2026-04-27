@@ -194,7 +194,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js?v=10"></script>
+  <script src="/static/js/research.js?v=11"></script>
 </head>
 
 <body x-data="research" x-init="init()">
@@ -298,37 +298,58 @@
             </template>
           </div>
 
-          <div class="form-row-h">
-            <div class="form-row">
-              <label>FEATURE COLUMNS (X) <span style="color:#555;font-weight:400">— predictors</span></label>
-              <textarea x-model="form.x_columns" style="min-height:54px"
+          <!-- Concept Buckets -->
+          <div style="border:1px solid #333;border-radius:6px;padding:10px;margin-bottom:10px">
+            <label style="font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;display:block">
+              CONCEPT BUCKETS <span style="font-weight:400">— group features by concept for multi-factor combos</span>
+            </label>
+            <template x-for="(bk, bi) in form.bucketList" :key="bi">
+              <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px">
+                <input type="text" x-model="bk.name" placeholder="Bucket name"
+                       style="width:120px;flex-shrink:0;font-size:11px">
+                <textarea x-model="bk.cols" placeholder="col1, col2, ..."
+                          style="flex:1;min-height:32px;font-size:11px;resize:vertical"></textarea>
+                <button @click="form.bucketList.splice(bi, 1)"
+                        style="background:none;border:1px solid #555;color:#888;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:11px"
+                        title="Remove bucket">✕</button>
+              </div>
+            </template>
+            <button @click="form.bucketList.push({name: '', cols: ''})"
+                    style="background:rgba(52,152,219,.1);border:1px solid rgba(52,152,219,.2);color:#3498db;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">
+              + Add Bucket
+            </button>
+            <template x-if="availableColumns.length > 0">
+              <div style="margin-top:6px;font-size:9px;color:#555">
+                Available: <span x-text="availableColumns.map(c => c.name).join(', ')"></span>
+              </div>
+            </template>
+          </div>
+
+          <!-- Fallback: ungrouped X columns (for backward compat) -->
+          <details style="margin-bottom:10px">
+            <summary style="font-size:10px;color:#555;cursor:pointer;user-select:none">
+              ▶ Ungrouped features (legacy — use buckets above instead)
+            </summary>
+            <div class="form-row" style="margin-top:6px">
+              <textarea x-model="form.x_columns" style="min-height:40px;font-size:11px"
                 placeholder="oi_weighted_strike_all_div_spot, put_call_oi_ratio"></textarea>
-              <template x-if="availableColumns.length > 0">
-                <div class="ticker-chips" style="margin-top:4px">
-                  <template x-for="col in availableColumns" :key="'x-'+col.name">
-                    <span class="ticker-chip"
-                          :style="isXSel(col.name) ? 'background:#1a3a5c;color:#3498db;border-color:#3498db;font-weight:700' : ''"
-                          @click="toggleXCol(col.name)"
-                          x-text="col.name"></span>
-                  </template>
-                </div>
-              </template>
             </div>
-            <div class="form-row">
-              <label>OUTCOME COLUMNS (Y) <span style="color:#555;font-weight:400">— what to predict</span></label>
-              <textarea x-model="form.y_columns" style="min-height:54px"
-                placeholder="ret_1d_fwd, ret_5d_fwd, ret_20d_fwd"></textarea>
-              <template x-if="availableColumns.length > 0">
-                <div class="ticker-chips" style="margin-top:4px">
-                  <template x-for="col in availableColumns" :key="'y-'+col.name">
-                    <span class="ticker-chip"
-                          :style="isYSel(col.name) ? 'background:#1a2a1a;color:#2ecc71;border-color:#2ecc71;font-weight:700' : ''"
-                          @click="toggleYCol(col.name)"
-                          x-text="col.name"></span>
-                  </template>
-                </div>
-              </template>
-            </div>
+          </details>
+
+          <div class="form-row">
+            <label>OUTCOME COLUMNS (Y) <span style="color:#555;font-weight:400">— what to predict</span></label>
+            <textarea x-model="form.y_columns" style="min-height:54px"
+              placeholder="ret_1d_fwd, ret_5d_fwd, ret_20d_fwd"></textarea>
+            <template x-if="availableColumns.length > 0">
+              <div class="ticker-chips" style="margin-top:4px">
+                <template x-for="col in availableColumns" :key="'y-'+col.name">
+                  <span class="ticker-chip"
+                        :style="isYSel(col.name) ? 'background:#1a2a1a;color:#2ecc71;border-color:#2ecc71;font-weight:700' : ''"
+                        @click="toggleYCol(col.name)"
+                        x-text="col.name"></span>
+                </template>
+              </div>
+            </template>
           </div>
 
           <div class="form-row-h">
@@ -432,11 +453,55 @@
             </div>
           </template>
 
-          <!-- Summary table -->
-          <template x-if="summaryRows.length > 0">
+          <!-- Multi-factor combo scorecard (PRIMARY) -->
+          <template x-if="comboRows.length > 0">
             <div>
               <div class="section-hdr" style="display:flex;align-items:center;gap:10px">
-                SIGNAL SCORECARD — sorted by robustness score
+                MULTI-FACTOR SCORECARD — sorted by interaction score
+                <button class="csv-btn" @click="exportComboCsv()" title="Export to CSV">CSV</button>
+              </div>
+              <div style="overflow-x:auto;max-height:500px;overflow-y:auto;margin-top:8px">
+                <table class="res-table">
+                  <thead style="position:sticky;top:0;z-index:2">
+                    <tr>
+                      <th>Ticker</th><th>Combo</th><th>Outcome</th>
+                      <th>Score</th><th>Best Zone</th><th>Lift</th>
+                      <th>Avg Ret</th><th>Win Rate</th><th>Final Eq</th><th>Max DD</th>
+                      <th>Consist%</th><th>R²</th><th>N</th><th>Warnings</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="row in comboRows" :key="row.ticker+row.combo+row.y_col">
+                      <tr>
+                        <td x-text="row.ticker || 'all'"></td>
+                        <td style="font-size:10px;max-width:250px;white-space:normal" x-text="row.combo"></td>
+                        <td x-text="row.y_col"></td>
+                        <td class="num" x-text="row.score != null ? row.score.toFixed(0) : '—'"></td>
+                        <td style="font-size:10px" x-text="row.best_zone"></td>
+                        <td class="num" :class="row.lift > 0 ? 'val-pos' : row.lift < 0 ? 'val-neg' : ''"
+                            x-text="row.lift != null ? row.lift.toFixed(4) : '—'"></td>
+                        <td class="num" x-text="pct(row.avg_ret)"></td>
+                        <td class="num" x-text="row.win_rate != null ? (row.win_rate*100).toFixed(1)+'%' : '—'"></td>
+                        <td class="num" x-text="row.final_equity != null ? row.final_equity.toFixed(2)+'x' : '—'"></td>
+                        <td class="num val-neg" x-text="row.max_drawdown != null ? pct(row.max_drawdown) : '—'"></td>
+                        <td class="num" x-text="row.consistency != null ? row.consistency+'%' : '—'"></td>
+                        <td class="num" x-text="row.r2 != null ? row.r2.toFixed(4) : '—'"></td>
+                        <td class="num" x-text="row.n || '—'"></td>
+                        <td style="font-size:9px;color:#e67e22;max-width:180px;white-space:normal"
+                            x-text="row.warnings || ''"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <!-- Single-factor baseline (collapsible) -->
+          <template x-if="summaryRows.length > 0">
+            <details style="margin-top:12px">
+              <summary class="section-hdr" style="cursor:pointer;display:flex;align-items:center;gap:10px;user-select:none">
+                ▶ SINGLE-FACTOR BASELINE — sorted by robustness score
                 <button class="csv-btn" @click="exportScorecardCsv()" title="Export to CSV">CSV</button>
               </div>
               <div style="overflow-x:auto;max-height:500px;overflow-y:auto;margin-top:8px">
@@ -472,7 +537,7 @@
                   </tbody>
                 </table>
               </div>
-            </div>
+            </details>
           </template>
 
           <!-- ── Interactive Chart.js charts ──────────────────────────── -->

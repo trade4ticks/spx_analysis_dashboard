@@ -256,14 +256,21 @@ async def run_pipeline(
     Returns the AI summary string. All results saved to the database.
     """
     if analysis_types is None:
-        analysis_types = {"scan", "interaction", "equity_curve", "regression"}
+        analysis_types = {"scan", "combo", "equity_curve", "regression"}
 
     table    = config.get("table", "daily_features")
     tickers  = config.get("tickers") or []
+    buckets  = config.get("buckets") or {}
     x_cols   = config.get("x_columns") or []
     y_cols   = config.get("y_columns") or []
     date_from = config.get("date_from")
     date_to   = config.get("date_to")
+
+    # Normalize: if no buckets, make one from x_cols
+    if not buckets and x_cols:
+        buckets = {"features": x_cols}
+    if not x_cols:
+        x_cols = list(dict.fromkeys(col for cols in buckets.values() for col in cols))
 
     data_pool = oi_pool if table in _OI_TABLES else main_pool
 
@@ -329,15 +336,15 @@ async def run_pipeline(
     log(f"  {len(valid_scans)} pairs scanned successfully, "
         f"{len(error_scans)} insufficient data, {scan_errors} errors.")
 
-    # ── Step 3: Rank by robustness & deep-dive top signals ───────────────
+    # ── Step 3: Single-factor baseline ranking ────────────────────────────
     ranked = sorted(valid_scans,
                     key=lambda s: s.get("composite_score", 0), reverse=True)
     top_signals = ranked[:max_signals]
-    log(f"Step 3/6: Top {len(top_signals)} signals selected for deep analysis.")
+    log(f"Step 3/6: Single-factor baseline — top {len(top_signals)} signals.")
 
-    # Bucket profile charts for top signals
+    # Bucket profile charts for top single-factor signals
     async with main_pool.acquire() as conn:
-        for s in top_signals:
+        for s in top_signals[:10]:  # cap charts at 10
             png = charts.bucket_profile_chart(s)
             if png:
                 await rdb.save_chart(
@@ -345,105 +352,115 @@ async def run_pipeline(
                     f"Profile {s.get('ticker') or 'all'} | {s['x_col']} -> {s['y_col']}",
                     png, s.get("ticker"), s["x_col"], s["y_col"])
 
-    # ── Step 3b: Multivariate interaction scan ──────────────────────────
-    interaction_results = []
-    if "interaction" in analysis_types and len(x_cols) >= 2:
-        from itertools import combinations
-        log(f"Step 3b: Interaction scan (2-factor and 3-factor combos)...")
+    # ── Step 4: Multi-factor combo scan (PRIMARY OUTPUT) ─────────────────
+    from itertools import combinations, product
+    combo_results = []
+    bucket_names = list(buckets.keys())
+    n_buckets_available = len(bucket_names)
 
-        # Build best single-factor Sharpe lookup per (ticker, y_col)
+    if "combo" in analysis_types and n_buckets_available >= 2:
+        log(f"Step 4/6: Multi-factor combo scan across {n_buckets_available} buckets...")
+
+        # Build best single-factor Sharpe per (ticker, y_col) for lift calculation
         best_single_sharpe: dict[tuple, float] = {}
+        best_single_feature: dict[tuple, str] = {}
         for s in valid_scans:
             key = (s.get("ticker"), s["y_col"])
             bsb = s.get("best_single_bucket") or {}
-            sharpe = abs(bsb.get("sharpe", 0))
             baz = s.get("best_adjacent_zone") or {}
-            sharpe = max(sharpe, abs(baz.get("sharpe", 0)))
-            best_single_sharpe[key] = max(best_single_sharpe.get(key, 0), sharpe)
+            sharpe = max(abs(bsb.get("sharpe", 0)), abs(baz.get("sharpe", 0)))
+            if sharpe > best_single_sharpe.get(key, 0):
+                best_single_sharpe[key] = sharpe
+                best_single_feature[key] = s["x_col"]
 
-        # For each (ticker, y_col), get usable features (had valid scans)
-        usable_features: dict[tuple, list[str]] = defaultdict(list)
-        for s in valid_scans:
-            key = (s.get("ticker"), s["y_col"])
-            if s["x_col"] not in usable_features[key]:
-                usable_features[key].append(s["x_col"])
+        # Cap within-bucket features to top 3 by single-factor score
+        feat_scores = {(s.get("ticker"), s["x_col"], s["y_col"]): s.get("composite_score", 0)
+                       for s in valid_scans}
 
-        n_2f = 0
-        n_3f = 0
+        n_combos = 0
         async with main_pool.acquire() as conn:
-            for (ticker, y_col), feats in usable_features.items():
-                cache_key = ticker if ticker else "_all"
-                rows = cache.get(cache_key, [])
-                baseline = best_single_sharpe.get((ticker, y_col), 0)
+            for cache_key, rows in cache.items():
+                ticker = None if cache_key == "_all" else cache_key
+                for y_col in y_cols:
+                    baseline = best_single_sharpe.get((ticker, y_col), 0)
+                    baseline_feat = best_single_feature.get((ticker, y_col), "?")
 
-                # Cap features to top 6 by single-factor score for this y_col
-                feat_scores = {}
-                for s in valid_scans:
-                    if s.get("ticker") == ticker and s["y_col"] == y_col:
-                        feat_scores[s["x_col"]] = s.get("composite_score", 0)
-                top_feats = sorted(feats, key=lambda f: feat_scores.get(f, 0),
-                                   reverse=True)[:6]
+                    # Get top 3 per bucket for this ticker/y_col
+                    bucket_tops = {}
+                    for bname, bcols in buckets.items():
+                        scored = [(c, feat_scores.get((ticker, c, y_col), 0)) for c in bcols
+                                  if c in (set(rows[0].keys()) if rows else set())]
+                        scored.sort(key=lambda x: x[1], reverse=True)
+                        bucket_tops[bname] = [c for c, _ in scored[:3]]
 
-                # 2-factor combos
-                best_2f_sharpe: dict[tuple, float] = {}
-                for fa, fb in combinations(top_feats, 2):
-                    try:
-                        result = scanner.scan_interaction_2f(
-                            rows, fa, fb, y_col, ticker, baseline)
-                    except Exception as exc:
-                        log(f"    2F ERROR {ticker or 'all'} {fa}+{fb}->{y_col}: {exc}")
-                        continue
-                    if result is None:
-                        continue
-                    await rdb.save_result(conn, run_id, "interaction",
-                                          f"{fa}+{fb}", y_col, result, ticker)
-                    interaction_results.append(result)
-                    n_2f += 1
-                    # Track best 2f Sharpe for 3f baseline
-                    bq = result.get("best_quadrant") or {}
-                    best_2f_sharpe[(fa, fb)] = abs(bq.get("sharpe", 0))
+                    # Generate cross-bucket combos for 2, 3, 4 buckets
+                    for k in range(2, min(n_buckets_available + 1, 5)):
+                        for bucket_combo in combinations(bucket_names, k):
+                            feature_lists = [bucket_tops.get(b, []) for b in bucket_combo]
+                            if any(not fl for fl in feature_lists):
+                                continue
+                            for feat_combo in product(*feature_lists):
+                                feat_list = list(feat_combo)
+                                try:
+                                    if len(feat_list) == 2:
+                                        result = scanner.scan_interaction_2f(
+                                            rows, feat_list[0], feat_list[1],
+                                            y_col, ticker, baseline)
+                                    elif len(feat_list) == 3:
+                                        result = scanner.scan_interaction_3f(
+                                            rows, feat_list[0], feat_list[1], feat_list[2],
+                                            y_col, ticker, baseline)
+                                    elif len(feat_list) == 4:
+                                        result = scanner.scan_interaction_4f(
+                                            rows, feat_list, y_col, ticker, baseline)
+                                    else:
+                                        continue
+                                except Exception as exc:
+                                    log(f"    COMBO ERROR {ticker or 'all'} "
+                                        f"{'+'.join(feat_list)}->{y_col}: {exc}")
+                                    continue
+                                if result is None:
+                                    continue
 
-                    png = charts.quadrant_chart(result)
-                    if png:
-                        await rdb.save_chart(
-                            conn, run_id, "interaction_quadrant",
-                            f"Interaction {ticker or 'all'} | {fa}+{fb} -> {y_col}",
-                            png, ticker, f"{fa}+{fb}", y_col)
+                                # Add bucket info and baseline reference
+                                result["buckets_used"] = list(bucket_combo)
+                                result["baseline_best_single"] = {
+                                    "feature": baseline_feat, "sharpe": baseline}
 
-                # 3-factor combos (only features from top 2f results)
-                if len(top_feats) >= 3:
-                    top_2f_feats = set()
-                    top_2f_results = sorted(
-                        [r for r in interaction_results
-                         if r.get("ticker") == ticker and r["y_col"] == y_col],
-                        key=lambda r: r.get("composite_interaction_score", 0),
-                        reverse=True)[:5]
-                    for r in top_2f_results:
-                        top_2f_feats.update(r.get("combo", []))
+                                # Robustness check for best zone
+                                bz = result.get("best_quadrant") or result.get("best_octant") or result.get("best_zone") or {}
+                                if bz.get("label"):
+                                    try:
+                                        rob = scanner.combo_robustness(
+                                            rows, feat_list, y_col, bz["label"], ticker)
+                                        result["robustness"] = rob
+                                        result["overfit_warnings"] = rob.get("warnings", [])
+                                    except Exception:
+                                        pass
 
-                    best_2f_overall = max(best_2f_sharpe.values()) if best_2f_sharpe else baseline
-                    for fa, fb, fc in combinations(sorted(top_2f_feats), 3):
-                        try:
-                            result = scanner.scan_interaction_3f(
-                                rows, fa, fb, fc, y_col, ticker, best_2f_overall)
-                        except Exception as exc:
-                            log(f"    3F ERROR {ticker or 'all'} {fa}+{fb}+{fc}->{y_col}: {exc}")
-                            continue
-                        if result is None:
-                            continue
-                        await rdb.save_result(conn, run_id, "interaction_3f",
-                                              f"{fa}+{fb}+{fc}", y_col, result, ticker)
-                        interaction_results.append(result)
-                        n_3f += 1
+                                x_label = "+".join(feat_list)
+                                await rdb.save_result(conn, run_id, "combo",
+                                                      x_label, y_col, result, ticker)
+                                combo_results.append(result)
+                                n_combos += 1
 
-        log(f"  {n_2f} two-factor + {n_3f} three-factor interactions tested.")
-    else:
-        log("Step 3b: Interaction scan — skipped (need 2+ features).")
+                                # Chart for 2-factor combos
+                                if len(feat_list) == 2:
+                                    png = charts.quadrant_chart(result)
+                                    if png:
+                                        await rdb.save_chart(
+                                            conn, run_id, "combo_quadrant",
+                                            f"Combo {ticker or 'all'} | {x_label} -> {y_col}",
+                                            png, ticker, x_label, y_col)
 
-    # ── Step 4: Equity curves + regression for top signals ───────────────
+        log(f"  {n_combos} multi-factor combos tested.")
+    elif "combo" in analysis_types:
+        log("Step 4/6: Combo scan — skipped (need 2+ buckets).")
+
+    # ── Step 5: Equity curves + regression for top signals ───────────────
     equity_results = []
     if "equity_curve" in analysis_types and top_signals:
-        log(f"Step 4/5: Equity curves for top {len(top_signals)} signals...")
+        log(f"Step 5/6: Equity curves for top {len(top_signals)} signals...")
         async with main_pool.acquire() as conn:
             for s in top_signals:
                 ticker = s.get("ticker")
@@ -516,7 +533,7 @@ async def run_pipeline(
     try:
         summary = await _generate_summary(
             question, config, ranked, equity_results,
-            interaction_results=interaction_results, model=model)
+            interaction_results=combo_results, model=model)
         log("  Summary generated.")
     except Exception as exc:
         log(f"  LLM summary failed: {exc}. Using fallback.")

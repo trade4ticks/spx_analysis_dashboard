@@ -590,3 +590,148 @@ def scan_interaction_3f(rows: list[dict], feat_a: str, feat_b: str, feat_c: str,
         "r2_gain":         round(r2_combo - best_2f_r2, 6),
         "composite_interaction_score": composite,
     })
+
+
+def scan_interaction_4f(rows: list[dict], feats: list[str],
+                        y_col: str, ticker: Optional[str] = None,
+                        baseline_sharpe: float = 0.0) -> Optional[dict]:
+    """Test 4-feature combination. 16 zones from median splits. Min 300 rows."""
+    valid = [r for r in rows
+             if all(r.get(f) is not None for f in feats)
+             and r.get(y_col) is not None]
+    n = len(valid)
+    if n < 300 or len(feats) != 4:
+        return None
+
+    arrays = [np.array([float(r[f]) for r in valid]) for f in feats]
+    ya = np.array([float(r[y_col]) for r in valid])
+    medians = [float(np.median(a)) for a in arrays]
+
+    zones: dict[str, list[float]] = {}
+    for i in range(n):
+        tag = "".join("H" if arrays[j][i] >= medians[j] else "L" for j in range(4))
+        zones.setdefault(tag, []).append(float(ya[i]))
+
+    zone_stats_list = [_zone_stats(ys, label) for label, ys in sorted(zones.items())]
+    valid_zones = [z for z in zone_stats_list if z["n"] >= 8]
+    if not valid_zones:
+        return None
+
+    best = max(valid_zones, key=lambda z: abs(z["sharpe"]))
+    best_sharpe = abs(best["sharpe"])
+    lift = round(best_sharpe - abs(baseline_sharpe), 4)
+
+    r2 = _ols_r2(np.column_stack(arrays), ya)
+
+    composite = round(min(abs(lift) / 0.05, 1.0) * 40
+                       + min(r2 / 0.01, 1.0) * 20
+                       + min(best_sharpe / 0.3, 1.0) * 20
+                       + min(min(z["n"] for z in valid_zones) / 30, 1.0) * 20, 1)
+
+    return _jsonify({
+        "combo":      feats,
+        "y_col":      y_col,
+        "ticker":     ticker,
+        "n":          n,
+        "zones":      zone_stats_list,
+        "best_zone":  best,
+        "baseline_sharpe": baseline_sharpe,
+        "interaction_lift": lift,
+        "ols_r2":     r2,
+        "composite_interaction_score": composite,
+    })
+
+
+def combo_robustness(rows: list[dict], feats: list[str], y_col: str,
+                     best_zone_label: str, ticker: Optional[str] = None) -> dict:
+    """Robustness checks for a multi-factor combo's best zone."""
+    valid = [r for r in rows
+             if all(r.get(f) is not None for f in feats)
+             and r.get(y_col) is not None]
+    if len(valid) < 60:
+        return _jsonify({"error": "insufficient data"})
+
+    arrays = [np.array([float(r[f]) for r in valid]) for f in feats]
+    ya = np.array([float(r[y_col]) for r in valid])
+    medians = [float(np.median(a)) for a in arrays]
+
+    zone_mask = np.ones(len(valid), dtype=bool)
+    for j, c in enumerate(best_zone_label):
+        if c == "H":
+            zone_mask &= (arrays[j] >= medians[j])
+        else:
+            zone_mask &= (arrays[j] < medians[j])
+
+    zone_returns = ya[zone_mask]
+    n_zone = int(zone_mask.sum())
+    if n_zone < 10:
+        return _jsonify({"n_zone": n_zone, "warnings": ["too few in zone"]})
+
+    # Yearly consistency
+    by_year: dict[int, tuple] = {}
+    for i, r in enumerate(valid):
+        yr = _year_from_date(r.get("trade_date"))
+        if yr is None:
+            continue
+        if yr not in by_year:
+            by_year[yr] = ([], [])
+        if zone_mask[i]:
+            by_year[yr][0].append(float(ya[i]))
+        else:
+            by_year[yr][1].append(float(ya[i]))
+
+    years_checked = 0
+    years_consistent = 0
+    yearly_zone_avgs = {}
+    for yr in sorted(by_year):
+        zone_ys, non_ys = by_year[yr]
+        if len(zone_ys) < 5 or len(non_ys) < 5:
+            continue
+        years_checked += 1
+        z_avg = float(np.mean(zone_ys))
+        yearly_zone_avgs[yr] = z_avg
+        if z_avg > float(np.mean(non_ys)):
+            years_consistent += 1
+
+    consistency_pct = round(years_consistent / years_checked * 100, 1) if years_checked else None
+    total_abs = sum(abs(v) for v in yearly_zone_avgs.values()) if yearly_zone_avgs else 0
+    concentration = round(max(abs(v) for v in yearly_zone_avgs.values()) / total_abs, 4) if total_abs > 0 else 1.0
+
+    # Half-sample
+    mid = len(valid) // 2
+    h1 = ya[:mid][zone_mask[:mid]]
+    h2 = ya[mid:][zone_mask[mid:]]
+    half_stable = (len(h1) >= 5 and len(h2) >= 5
+                   and (float(h1.mean()) > 0) == (float(h2.mean()) > 0))
+
+    # Equity
+    equity, peak, max_dd, wins = 1.0, 1.0, 0.0, 0
+    for ret in zone_returns:
+        equity *= (1.0 + ret)
+        peak = max(peak, equity)
+        max_dd = min(max_dd, (equity - peak) / peak)
+        if ret > 0:
+            wins += 1
+
+    warnings = []
+    if concentration > 0.5:
+        warnings.append(f"concentrated: {concentration*100:.0f}% from single best year")
+    if not half_stable:
+        warnings.append("half-sample unstable")
+    if consistency_pct is not None and consistency_pct < 50:
+        warnings.append(f"yearly consistency only {consistency_pct}%")
+    if n_zone < 50:
+        warnings.append(f"small sample: only {n_zone} in zone")
+
+    return _jsonify({
+        "n_zone": n_zone,
+        "avg_ret": round(float(zone_returns.mean()), 6),
+        "med_ret": round(float(np.median(zone_returns)), 6),
+        "win_rate": round(wins / n_zone, 4) if n_zone else None,
+        "final_equity": round(equity, 4),
+        "max_drawdown": round(max_dd, 4),
+        "yearly_consistency_pct": consistency_pct,
+        "concentration_risk": concentration,
+        "half_sample_stable": half_stable,
+        "warnings": warnings,
+    })
