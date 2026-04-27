@@ -3,6 +3,7 @@ import json
 import asyncio
 from typing import Optional
 
+import anthropic
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -71,6 +72,10 @@ class RunRequest(BaseModel):
     date_to: Optional[str] = None
     model: str = "claude-sonnet-4-6"
     max_tool_calls: int = 60
+
+
+class FollowupRequest(BaseModel):
+    question: str
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -169,6 +174,137 @@ async def delete_run(run_id: str, pool=Depends(get_pool)):
         await conn.execute(
             "DELETE FROM research_runs WHERE id = $1::uuid", run_id)
     return {"deleted": run_id}
+
+
+@router.post("/run/{run_id}/retry")
+async def retry_run(run_id: str, req: RunRequest, background_tasks: BackgroundTasks,
+                    pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """Re-run a failed run with updated config. Clears partial results first."""
+    async with pool.acquire() as conn:
+        run = await rdb.load_run(conn, run_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        if run["status"] not in ("error", "running"):
+            raise HTTPException(400, "Only failed runs can be retried")
+
+        config = {
+            "name":           req.name,
+            "table":          req.table,
+            "tickers":        req.tickers,
+            "x_columns":      req.x_columns,
+            "y_columns":      req.y_columns,
+            "date_from":      req.date_from,
+            "date_to":        req.date_to,
+            "model":          req.model,
+            "max_tool_calls": req.max_tool_calls,
+        }
+        # Clear any partial results from the failed run
+        await conn.execute("DELETE FROM research_results WHERE run_id = $1::uuid", run_id)
+        await conn.execute("DELETE FROM research_charts  WHERE run_id = $1::uuid", run_id)
+        await conn.execute("DELETE FROM research_series  WHERE run_id = $1::uuid", run_id)
+        await conn.execute(
+            """UPDATE research_runs SET
+                name = $2, question = $3, config = $4::jsonb,
+                status = 'running', error_msg = NULL, ai_summary = NULL, completed_at = NULL
+               WHERE id = $1::uuid""",
+            run_id, req.name, req.question, json.dumps(config),
+        )
+
+    background_tasks.add_task(
+        _execute_run, pool, oi_pool, run_id,
+        req.question, config, req.model, req.max_tool_calls,
+    )
+    return {"run_id": run_id, "status": "running"}
+
+
+@router.get("/run/{run_id}/followups")
+async def get_followups(run_id: str, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        return await rdb.load_followups(conn, run_id)
+
+
+@router.post("/run/{run_id}/followup")
+async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)):
+    """Send a follow-up question about a completed run. Claude responds with full context."""
+    async with pool.acquire() as conn:
+        run = await rdb.load_run(conn, run_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        results   = await rdb.load_results(conn, run_id)
+        prev_fups = await rdb.load_followups(conn, run_id)
+
+    # Parse result JSONB
+    for r in results:
+        if isinstance(r.get("result"), str):
+            r["result"] = json.loads(r["result"])
+
+    # Build correlation table context
+    corr_rows = []
+    for r in results:
+        if r.get("analysis_type") == "correlation" and "error" not in (r.get("result") or {}):
+            rd = r.get("result") or {}
+            corr_rows.append({**rd, "ticker": r.get("ticker"),
+                               "x_col": r.get("x_col"), "y_col": r.get("y_col")})
+    corr_table = ragent._format_corr_table(corr_rows) if corr_rows else "(no correlations saved)"
+
+    # Build decile summary
+    decile_lines = []
+    for r in results:
+        if r.get("analysis_type") == "decile":
+            rd = r.get("result") or {}
+            spread = rd.get("top_bottom_spread")
+            if spread is not None:
+                decile_lines.append(
+                    f"  {r.get('ticker') or 'all'} | {r.get('x_col')} → {r.get('y_col')}: "
+                    f"D10–D1 spread={spread*100:.3f}%"
+                )
+    decile_summary = "\n".join(decile_lines) if decile_lines else "(none)"
+
+    cfg = run.get("config") or {}
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg)
+
+    system = (
+        "You are a quantitative research analyst reviewing completed statistical research. "
+        "Answer the user's follow-up question specifically and concisely. "
+        "Cite numbers from the analysis when relevant. "
+        "Be honest about what the data does and does not show. "
+        "If the question asks you to run new analysis you cannot do here, say so clearly."
+    )
+
+    # First message: full run context
+    context_msg = (
+        f"Research question: {run.get('question')}\n"
+        f"Table: {cfg.get('table')}  |  "
+        f"Tickers: {', '.join(cfg.get('tickers') or ['all'])}  |  "
+        f"Features: {', '.join(cfg.get('x_columns') or [])}  |  "
+        f"Outcomes: {', '.join(cfg.get('y_columns') or [])}\n\n"
+        f"=== Correlation Matrix ===\n{corr_table}\n\n"
+        f"=== Decile Spreads ===\n{decile_summary}\n\n"
+        f"=== AI Summary ===\n{run.get('ai_summary') or '(no summary generated)'}"
+    )
+
+    # Build multi-turn message history
+    messages = [{"role": "user", "content": context_msg},
+                {"role": "assistant", "content": "Understood. I have the full research context. What's your follow-up question?"}]
+    for fup in prev_fups:
+        messages.append({"role": "user",      "content": fup["question"]})
+        messages.append({"role": "assistant", "content": fup.get("answer") or ""})
+    messages.append({"role": "user", "content": req.question})
+
+    client = anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model=cfg.get("model") or "claude-sonnet-4-6",
+        max_tokens=2048,
+        system=system,
+        messages=messages,
+    )
+    answer = resp.content[0].text if resp.content else "No response."
+
+    async with pool.acquire() as conn:
+        saved = await rdb.save_followup(conn, run_id, req.question, answer)
+
+    return saved
 
 
 @router.get("/run/{run_id}/pdf")

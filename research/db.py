@@ -123,6 +123,33 @@ async def load_charts(conn: asyncpg.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def save_followup(conn: asyncpg.Connection, run_id: str,
+                        question: str, answer: str) -> dict:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO research_followups (run_id, question, answer)
+        VALUES ($1::uuid, $2, $3)
+        RETURNING id::text, created_at
+        """,
+        run_id, question, answer,
+    )
+    return {"id": row["id"], "question": question, "answer": answer,
+            "created_at": row["created_at"]}
+
+
+async def load_followups(conn: asyncpg.Connection, run_id: str) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id::text, question, answer, created_at
+        FROM research_followups
+        WHERE run_id = $1::uuid
+        ORDER BY created_at
+        """,
+        run_id,
+    )
+    return [dict(r) for r in rows]
+
+
 async def list_runs(conn: asyncpg.Connection, limit: int = 20) -> list[dict]:
     rows = await conn.fetch(
         """

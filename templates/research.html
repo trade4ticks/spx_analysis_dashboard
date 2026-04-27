@@ -194,7 +194,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js?v=7"></script>
+  <script src="/static/js/research.js?v=8"></script>
 </head>
 
 <body x-data="research" x-init="init()">
@@ -259,7 +259,12 @@
       <!-- ── New run form ─────────────────────────────────────────────── -->
       <template x-if="view === 'new'">
         <div class="form-section">
-          <div style="font-size:15px;color:#ddd;font-weight:700">New Research Run</div>
+          <div style="font-size:15px;color:#ddd;font-weight:700"
+               x-text="retryRunId ? 'Edit &amp; Retry Run' : 'New Research Run'"></div>
+          <div x-show="retryRunId"
+               style="font-size:11px;color:#f1c40f;background:#2a2000;border:1px solid #5a4a00;border-radius:4px;padding:6px 10px">
+            Editing failed run — results will be cleared and the run restarted.
+          </div>
 
           <div class="form-row">
             <label>RUN NAME</label>
@@ -334,9 +339,9 @@
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn" @click="submitRun()" :disabled="submitting"
                     style="background:var(--accent);color:#fff;padding:7px 20px;font-size:12px">
-              <span x-text="submitting ? 'Starting…' : '▶ Run Research'"></span>
+              <span x-text="submitting ? 'Starting…' : retryRunId ? '↺ Retry Run' : '▶ Run Research'"></span>
             </button>
-            <button class="btn" @click="view='list'" style="color:#888">Cancel</button>
+            <button class="btn" @click="retryRunId ? selectRun(selectedRun) : (view='list')" style="color:#888">Cancel</button>
           </div>
         </div>
       </template>
@@ -372,10 +377,17 @@
             </div>
           </template>
 
-          <!-- Error -->
+          <!-- Error + Edit & Retry -->
           <template x-if="selectedRun.status === 'error'">
-            <div style="color:#e74c3c;font-size:12px;background:#2a1a1a;padding:10px;border-radius:4px"
-                 x-text="selectedRun.error_msg || 'Unknown error'"></div>
+            <div style="background:#2a1a1a;border:1px solid #5a1a1a;border-radius:6px;padding:12px 14px">
+              <div style="color:#e74c3c;font-size:12px;margin-bottom:10px"
+                   x-text="selectedRun.error_msg || 'Unknown error'"></div>
+              <button class="btn"
+                      style="background:#1a3a5c;color:#3498db;border:1px solid #1a5a8a;font-size:11px;padding:5px 14px"
+                      @click="editRetry()">
+                ✎ Edit Config &amp; Retry
+              </button>
+            </div>
           </template>
 
           <!-- Loading -->
@@ -568,6 +580,56 @@
                   </div>
                 </template>
               </div>
+            </div>
+          </template>
+
+          <!-- ── Follow-up dialogue ────────────────────────────────────── -->
+          <template x-if="selectedRun.status === 'complete'">
+            <div style="border-top:1px solid #333;padding-top:16px">
+              <div class="section-hdr" style="margin-bottom:12px">FOLLOW-UP QUESTIONS</div>
+
+              <!-- Existing follow-ups -->
+              <template x-for="(fup, i) in followups" :key="fup.id || i">
+                <div style="margin-bottom:14px">
+                  <div style="background:#2a2a2a;border-left:3px solid #555;padding:8px 12px;border-radius:0 4px 4px 0;margin-bottom:4px">
+                    <div style="font-size:10px;color:#555;margin-bottom:4px">YOUR QUESTION</div>
+                    <div style="font-size:12px;color:#ddd" x-text="fup.question"></div>
+                  </div>
+                  <div style="background:#1a2a1a;border-left:3px solid #2ecc71;padding:10px 12px;border-radius:0 4px 4px 0">
+                    <div style="font-size:10px;color:#555;margin-bottom:6px">AI RESPONSE</div>
+                    <div style="font-size:12px;color:#ccc;line-height:1.7;white-space:pre-wrap" x-text="fup.answer"></div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- New question input -->
+              <div style="display:flex;flex-direction:column;gap:8px" x-show="!followupLoading">
+                <textarea
+                  x-model="followupQuestion"
+                  style="background:#2a2a2a;border:1px solid #444;color:#ddd;padding:8px;border-radius:4px;
+                         font-size:12px;resize:vertical;min-height:64px;font-family:inherit;width:100%"
+                  placeholder="Ask a follow-up question — e.g. 'Why might the signal be weaker in 2022?' or 'Can you explain the D10 result for XOM?'"
+                  @keydown.ctrl.enter="askFollowup()"></textarea>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button class="btn"
+                          style="background:#1a4a2a;color:#2ecc71;border:1px solid #2ecc71;padding:5px 16px;font-size:11px"
+                          @click="askFollowup()" :disabled="!followupQuestion.trim()">
+                    Ask Claude
+                  </button>
+                  <span style="font-size:10px;color:#555">Ctrl+Enter to submit</span>
+                  <span x-show="followupError" style="color:#e74c3c;font-size:11px" x-text="followupError"></span>
+                </div>
+              </div>
+
+              <!-- Loading state -->
+              <div x-show="followupLoading"
+                   style="background:#1a2a1a;border:1px solid #2ecc71;border-radius:6px;padding:12px 14px;
+                          display:flex;align-items:center;gap:10px;color:#2ecc71;font-size:12px">
+                <span style="animation:pulse 1s infinite">⚙</span>
+                <span>Claude is analyzing the results…</span>
+              </div>
+
+              <div id="followup-bottom"></div>
             </div>
           </template>
 

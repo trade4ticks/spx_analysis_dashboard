@@ -6,6 +6,7 @@ document.addEventListener('alpine:init', () => {
     selectedRun: null,
     results:     [],
     charts:      [],
+    followups:   [],
     view:        'list',   // 'list' | 'new' | 'run'
     loading:     false,
     error:       null,
@@ -13,7 +14,7 @@ document.addEventListener('alpine:init', () => {
     lightboxUrl: null,
     _chartInstances: {},
 
-    // New-run form
+    // New-run / retry form
     form: {
       name:           '',
       question:       '',
@@ -26,9 +27,15 @@ document.addEventListener('alpine:init', () => {
       model:          'claude-sonnet-4-6',
       max_tool_calls: 60,
     },
+    retryRunId:   null,   // set when retrying a failed run
     availableTickers: [],
     submitting: false,
     submitError: null,
+
+    // Follow-up chat
+    followupQuestion: '',
+    followupLoading:  false,
+    followupError:    null,
 
     // ── Init ───────────────────────────────────────────────────────────────
     async init() {
@@ -68,11 +75,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     async selectRun(run) {
-      this.view        = 'run';
-      this.selectedRun = run;
-      this.results     = [];
-      this.charts      = [];
-      this.error       = null;
+      this.view             = 'run';
+      this.selectedRun      = run;
+      this.results          = [];
+      this.charts           = [];
+      this.followups        = [];
+      this.followupQuestion = '';
+      this.followupError    = null;
+      this.error            = null;
+      this.retryRunId       = null;
       this._stopPoll();
       this._destroyCharts();
       await this._loadRunDetail(run.id);
@@ -83,14 +94,16 @@ document.addEventListener('alpine:init', () => {
       this.loading = true;
       this._destroyCharts();
       try {
-        const [runRes, resultsRes, chartsRes] = await Promise.all([
+        const [runRes, resultsRes, chartsRes, fupsRes] = await Promise.all([
           fetch(`/api/research/run/${runId}`),
           fetch(`/api/research/run/${runId}/results`),
           fetch(`/api/research/run/${runId}/charts`),
+          fetch(`/api/research/run/${runId}/followups`),
         ]);
         if (runRes.ok)     this.selectedRun = await runRes.json();
         if (resultsRes.ok) this.results     = await resultsRes.json();
         if (chartsRes.ok)  this.charts      = await chartsRes.json();
+        if (fupsRes.ok)    this.followups   = await fupsRes.json();
         await this._renderInteractiveCharts();
       } catch (e) {
         this.error = e.message;
@@ -126,7 +139,32 @@ document.addEventListener('alpine:init', () => {
       this._stopPoll();
       this.view        = 'new';
       this.selectedRun = null;
+      this.retryRunId  = null;
       this.submitError = null;
+      // Clear form
+      this.form = { name:'', question:'', table:'daily_features', tickers:'',
+                    x_columns:'', y_columns:'ret_1d_fwd, ret_5d_fwd, ret_20d_fwd',
+                    date_from:'', date_to:'', model:'claude-sonnet-4-6', max_tool_calls:60 };
+    },
+
+    // Pre-populate form from a failed run for editing + retry
+    editRetry() {
+      const run = this.selectedRun;
+      if (!run) return;
+      const cfg = run.config || {};
+      this.form.name           = run.name;
+      this.form.question       = run.question;
+      this.form.table          = cfg.table          || 'daily_features';
+      this.form.tickers        = (cfg.tickers        || []).join(', ');
+      this.form.x_columns      = (cfg.x_columns      || []).join(', ');
+      this.form.y_columns      = (cfg.y_columns      || []).join(', ');
+      this.form.date_from      = cfg.date_from       || '';
+      this.form.date_to        = cfg.date_to         || '';
+      this.form.model          = cfg.model           || 'claude-sonnet-4-6';
+      this.form.max_tool_calls = cfg.max_tool_calls  || 60;
+      this.retryRunId  = run.id;
+      this.submitError = null;
+      this.view        = 'new';
     },
 
     addTicker(ticker) {
@@ -158,22 +196,25 @@ document.addEventListener('alpine:init', () => {
       }
 
       const parse = s => s.split(',').map(x => x.trim()).filter(Boolean);
+      const body = {
+        name,
+        question,
+        table:          this.form.table,
+        tickers:        parse(this.form.tickers),
+        x_columns:      parse(this.form.x_columns),
+        y_columns:      parse(this.form.y_columns),
+        date_from:      this.form.date_from || null,
+        date_to:        this.form.date_to   || null,
+        model:          this.form.model,
+        max_tool_calls: parseInt(this.form.max_tool_calls) || 60,
+      };
 
       this.submitting = true;
       try {
-        const body = {
-          name,
-          question,
-          table:          this.form.table,
-          tickers:        parse(this.form.tickers),
-          x_columns:      parse(this.form.x_columns),
-          y_columns:      parse(this.form.y_columns),
-          date_from:      this.form.date_from || null,
-          date_to:        this.form.date_to   || null,
-          model:          this.form.model,
-          max_tool_calls: parseInt(this.form.max_tool_calls) || 60,
-        };
-        const r = await fetch('/api/research/run', {
+        const url    = this.retryRunId
+          ? `/api/research/run/${this.retryRunId}/retry`
+          : '/api/research/run';
+        const r = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -183,8 +224,10 @@ document.addEventListener('alpine:init', () => {
           throw new Error(err.detail || `HTTP ${r.status}`);
         }
         const data = await r.json();
+        const runId = data.run_id || this.retryRunId;
+        this.retryRunId = null;
         await this.loadRuns();
-        const run = this.runs.find(x => x.id === data.run_id) || { id: data.run_id, name: data.name, status: 'running' };
+        const run = this.runs.find(x => x.id === runId) || { id: runId, name, status: 'running' };
         await this.selectRun(run);
       } catch (e) {
         this.submitError = e.message;
@@ -400,6 +443,35 @@ document.addEventListener('alpine:init', () => {
       const p1  = t * x * y;
       if (cnt <= p1) return `Phase 1: ${cnt} / ${p1} correlations`;
       return `Phase 2: ${cnt - p1} AI analyses complete`;
+    },
+
+    // ── Follow-up dialogue ─────────────────────────────────────────────────
+    async askFollowup() {
+      const q = this.followupQuestion.trim();
+      if (!q || this.followupLoading) return;
+      this.followupError   = null;
+      this.followupLoading = true;
+      try {
+        const r = await fetch(`/api/research/run/${this.selectedRun.id}/followup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        const saved = await r.json();
+        this.followups.push(saved);
+        this.followupQuestion = '';
+      } catch (e) {
+        this.followupError = e.message;
+      } finally {
+        this.followupLoading = false;
+        await this.$nextTick();
+        const el = document.getElementById('followup-bottom');
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      }
     },
 
     // ── Helpers ────────────────────────────────────────────────────────────
