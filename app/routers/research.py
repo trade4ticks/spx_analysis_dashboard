@@ -228,6 +228,15 @@ async def get_followups(run_id: str, pool=Depends(get_pool)):
 @router.post("/run/{run_id}/followup")
 async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)):
     """Send a follow-up question about a completed run. Claude responds with full context."""
+    try:
+        return await _do_followup(run_id, req, pool)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Followup error: {type(exc).__name__}: {exc}")
+
+
+async def _do_followup(run_id: str, req: FollowupRequest, pool):
     async with pool.acquire() as conn:
         run = await rdb.load_run(conn, run_id)
         if not run:
@@ -308,14 +317,17 @@ async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)
         messages.append({"role": "assistant", "content": fup.get("answer") or ""})
     messages.append({"role": "user", "content": req.question})
 
-    client = anthropic.AsyncAnthropic()
-    resp = await client.messages.create(
-        model=cfg.get("model") or "claude-sonnet-4-6",
-        max_tokens=2048,
-        system=system,
-        messages=messages,
-    )
-    answer = resp.content[0].text if resp.content else "No response."
+    try:
+        client = anthropic.AsyncAnthropic()
+        resp = await client.messages.create(
+            model=cfg.get("model") or "claude-sonnet-4-6",
+            max_tokens=2048,
+            system=system,
+            messages=messages,
+        )
+        answer = resp.content[0].text if resp.content else "No response."
+    except Exception as exc:
+        answer = f"Error generating response: {type(exc).__name__}: {exc}"
 
     async with pool.acquire() as conn:
         saved = await rdb.save_followup(conn, run_id, req.question, answer)
