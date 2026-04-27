@@ -141,13 +141,12 @@ async def _generate_summary(
         return "(anthropic SDK not available — no AI summary)"
 
     lines = [
-        f"Research question: {question}",
         f"Table: {config.get('table')}",
         f"Tickers: {', '.join(config.get('tickers') or ['all'])}",
         f"Features: {', '.join(config.get('x_columns') or [])}",
         f"Outcomes: {', '.join(config.get('y_columns') or [])}",
         f"Period: {config.get('date_from') or 'earliest'} to {config.get('date_to') or 'latest'}",
-        f"\nTotal pairs scanned: {len(ranked_scans)}",
+        f"Total pairs scanned: {len(ranked_scans)}",
         "",
         "=== Top Signals by Robustness Score ===",
         f"{'Score':>5}  {'Ticker':<8} {'Feature':<35} {'Outcome':<16} {'Pattern':<22} "
@@ -171,6 +170,22 @@ async def _generate_summary(
             f"{rob.get('concentration_risk', 1.0):>5.2f}"
         )
 
+    # Full bucket profiles for top 5 signals (all deciles visible to Claude)
+    lines.append("\n=== Full Bucket Profiles (top signals) ===")
+    for s in ranked_scans[:5]:
+        bs = s.get("bucket_stats") or []
+        valid_bs = [b for b in bs if b is not None]
+        if not valid_bs:
+            continue
+        lines.append(f"\n{s.get('ticker') or 'all'} | {s.get('x_col')} -> {s.get('y_col')} "
+                     f"(pattern={s.get('pattern')}, score={s.get('composite_score', 0):.0f}):")
+        lines.append(f"  {'Bucket':>6} {'N':>5} {'AvgRet':>9} {'MedRet':>9} {'WinRate':>8} {'Sharpe':>7}")
+        for b in valid_bs:
+            lines.append(
+                f"  {b['bucket']:>6} {b['n']:>5} "
+                f"{b['avg_ret']*100:>8.3f}% {b['med_ret']*100:>8.3f}% "
+                f"{b['win_rate']*100:>7.1f}% {b['sharpe']:>7.3f}")
+
     # Flag fragile signals
     fragile = [s for s in ranked_scans[:20] if s.get("robustness", {}).get("loyo_fragile")]
     if fragile:
@@ -178,59 +193,71 @@ async def _generate_summary(
         for s in fragile:
             lines.append(f"  {s.get('ticker') or 'all'} | {s.get('x_col')} -> {s.get('y_col')}")
 
-    # Equity curve highlights for top signals
+    # Equity curve highlights
     if equity_results:
-        lines.append("\n=== Equity Curves (top signals) ===")
+        lines.append("\n=== Equity Curves ===")
         for r in sorted(equity_results,
-                        key=lambda x: x.get("final_equity") or 0, reverse=True)[:10]:
+                        key=lambda x: x.get("final_equity") or 0, reverse=True)[:15]:
             lines.append(
                 f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} -> {r.get('outcome_col')} "
                 f"({r.get('which')}): final={r.get('final_equity')}, "
                 f"maxDD={r.get('max_drawdown')}, trades={r.get('n_trades')}, "
                 f"winRate={r.get('win_rate')}")
 
-    # Interaction highlights
+    # Multi-factor combo highlights
     if interaction_results:
-        top_interactions = sorted(
+        top_combos = sorted(
             [r for r in interaction_results if r.get("composite_interaction_score", 0) > 0],
             key=lambda r: r.get("composite_interaction_score", 0), reverse=True)
-        if top_interactions:
-            lines.append("\n=== Multi-Factor Interactions ===")
-            for r in top_interactions[:10]:
+        if top_combos:
+            lines.append("\n=== Multi-Factor Combos ===")
+            for r in top_combos[:10]:
                 combo = "+".join(r.get("combo", []))
-                bq = r.get("best_quadrant") or r.get("best_octant") or {}
+                bz = r.get("best_quadrant") or r.get("best_octant") or r.get("best_zone") or {}
+                rob = r.get("robustness") or {}
                 lines.append(
                     f"  {r.get('ticker') or 'all'} | {combo} -> {r.get('y_col')}: "
                     f"score={r.get('composite_interaction_score', 0):.0f}, "
                     f"lift={r.get('interaction_lift', 0):+.4f}, "
-                    f"best zone={bq.get('label', '?')} "
-                    f"(avg={bq.get('avg_ret', 0):.4f}, WR={bq.get('win_rate', 0):.0%}), "
-                    f"R²={r.get('ols_r2', 0):.4f}")
+                    f"zone={bz.get('label', '?')} "
+                    f"(avg={bz.get('avg_ret', 0):.4f}, WR={bz.get('win_rate', 0):.0%}), "
+                    f"R²={r.get('ols_r2', 0):.4f}"
+                    + (f", warnings={rob.get('warnings')}" if rob.get("warnings") else ""))
 
-    # Null results summary
+    # Null results
     null_count = sum(1 for s in ranked_scans if s.get("composite_score", 0) < 10)
     if null_count:
-        lines.append(f"\n{null_count} pairs scored below 10 (no meaningful relationship detected).")
+        lines.append(f"\n{null_count} pairs scored below 10 (no meaningful relationship).")
 
     findings_text = "\n".join(lines)
 
+    # Build the prompt with the user's question as a PRIORITY DIRECTIVE
     client = anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
-        max_tokens=1500,
+        max_tokens=2000,
         messages=[{
             "role": "user",
             "content": (
-                f"{findings_text}\n\n"
-                "Write a concise research summary (400-600 words). Cover:\n"
-                "1. Strongest single-factor signals: pattern, robustness score, consistency\n"
-                "2. Multi-factor interactions: which combos improved on singles? Describe as usable rules\n"
-                "3. Non-linear patterns: any U-shaped, threshold, or isolated-region findings\n"
-                "4. Equity curve viability for top signals\n"
-                "5. Fragile or overfit-looking results and why\n"
-                "6. Null results worth noting (features that do NOT predict)\n"
-                "7. Suggested next steps — which combos deserve further testing?\n\n"
-                "Use professional quant research language. Translate findings into potential trading rules."
+                f"USER'S RESEARCH QUESTION (address this directly — it is your primary directive):\n"
+                f'"""\n{question}\n"""\n\n'
+                f"ANALYSIS RESULTS:\n{findings_text}\n\n"
+                "INSTRUCTIONS:\n"
+                "Write a research summary (500-800 words). You MUST address the user's specific "
+                "question above as your primary focus. If they asked about specific deciles, "
+                "patterns, comparisons, or conditions — answer those directly using the bucket "
+                "profile data provided.\n\n"
+                "Also cover:\n"
+                "1. Full bucket profile interpretation: don't just report top/bottom — describe "
+                "the shape across ALL deciles. Flag adjacent deciles with similar performance "
+                "(e.g., 'deciles 8-10 all show positive returns, not just the top').\n"
+                "2. Multi-factor combos: which improved on singles? Describe as usable rules.\n"
+                "3. Non-linear patterns: U-shaped, threshold, isolated regions.\n"
+                "4. Equity curve viability.\n"
+                "5. Fragile/overfit warnings.\n"
+                "6. Suggested next steps.\n\n"
+                "Use professional quant research language. Translate findings into potential "
+                "trading rules. Do NOT just list numbers — interpret patterns."
             ),
         }],
     )
@@ -468,6 +495,7 @@ async def run_pipeline(
                 cache_key = ticker if ticker else "_all"
                 rows = cache.get(cache_key, [])
 
+                # Standard top/bottom decile curves
                 top = blocks.equity_curve_from_rows(rows, x_col, y_col, "top", 10, ticker)
                 bot = blocks.equity_curve_from_rows(rows, x_col, y_col, "bottom", 10, ticker)
 
@@ -490,6 +518,34 @@ async def run_pipeline(
                         conn, run_id, "equity_curve",
                         f"Equity {ticker or 'all'} | {x_col} -> {y_col}",
                         png, ticker, x_col, y_col)
+
+                # Also compute top2 (D9+D10) and bottom2 (D1+D2) for adjacent-decile analysis
+                bs = s.get("bucket_stats") or []
+                valid_bs = [b for b in bs if b is not None]
+                if len(valid_bs) >= 9:
+                    d9_avg = valid_bs[8].get("avg_ret", 0) if len(valid_bs) > 8 else 0
+                    d10_avg = valid_bs[9].get("avg_ret", 0) if len(valid_bs) > 9 else 0
+                    # If D9 has similar or better returns than average, include top2 curve
+                    if d9_avg > 0 and d10_avg > 0:
+                        top2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "top2", 10, ticker)
+                        if top2.get("points"):
+                            await rdb.save_result(conn, run_id, "equity_curve_top2",
+                                                  x_col, y_col, top2, ticker)
+                            await rdb.save_series(conn, run_id, x_col, "equity_curve_top2",
+                                                  top2["points"], ticker=ticker, y_col=y_col)
+                            equity_results.append(top2)
+
+                    d1_avg = valid_bs[0].get("avg_ret", 0)
+                    d2_avg = valid_bs[1].get("avg_ret", 0) if len(valid_bs) > 1 else 0
+                    if d1_avg < 0 and d2_avg < 0:
+                        bot2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "bottom2", 10, ticker)
+                        if bot2.get("points"):
+                            await rdb.save_result(conn, run_id, "equity_curve_bottom2",
+                                                  x_col, y_col, bot2, ticker)
+                            await rdb.save_series(conn, run_id, x_col, "equity_curve_bottom2",
+                                                  bot2["points"], ticker=ticker, y_col=y_col)
+                            equity_results.append(bot2)
+
         log(f"  {len(equity_results)} equity curves done.")
 
     # Regression for multi-feature combos

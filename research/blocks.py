@@ -523,11 +523,24 @@ def equity_curve_from_rows(rows: list[dict], feature_col: str, outcome_col: str,
     sorted_vals = sorted(feature_vals)
     val_to_decile = {v: l for v, l in zip(sorted_vals, labels)}
 
-    target_label = n_deciles if which == "top" else 1
+    # Support: "top", "bottom", "top2" (9+10), "bottom2" (1+2), or a specific int
+    if which == "top":
+        target_labels = {n_deciles}
+    elif which == "bottom":
+        target_labels = {1}
+    elif which == "top2":
+        target_labels = {n_deciles - 1, n_deciles}
+    elif which == "bottom2":
+        target_labels = {1, 2}
+    elif isinstance(which, int) or (isinstance(which, str) and which.isdigit()):
+        target_labels = {int(which)}
+    else:
+        target_labels = {n_deciles}
+
     target_rows = [
         (p[0], float(p[2]))
         for p in pairs_with_date
-        if val_to_decile.get(p[1]) == target_label
+        if val_to_decile.get(p[1]) in target_labels
     ]
 
     trades, last_date = [], None
