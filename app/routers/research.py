@@ -40,7 +40,8 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
                 "equity_curve", "regression"]),
             log=_log,
         )
-        log_text = "\n".join(pipeline_logs[-50:]) if (not summary and pipeline_logs) else None
+        # Always save pipeline log for diagnostic visibility
+        log_text = "\n".join(pipeline_logs) if pipeline_logs else None
         async with main_pool.acquire() as conn:
             await rdb.update_run(conn, run_id, status="complete",
                                  ai_summary=summary or None,
