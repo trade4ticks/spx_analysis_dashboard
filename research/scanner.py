@@ -249,12 +249,12 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
     """Temporal stability and concentration tests."""
     n = len(pairs)
 
-    # Group by year
+    # Group by year (keep 3-tuples so _bucket can unpack them)
     by_year: dict[int, list] = defaultdict(list)
     for x, y, d in pairs:
         yr = _year_from_date(d)
         if yr:
-            by_year[yr].append((x, y))
+            by_year[yr].append((x, y, d))
 
     # Yearly consistency: does the "best zone" direction hold each year?
     # Use top-2 vs bottom-2 pooled as the signal direction
