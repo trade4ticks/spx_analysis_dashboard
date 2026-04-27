@@ -21,11 +21,11 @@ _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 async def _fetch_cache(pool: asyncpg.Pool, table: str,
                        tickers: list[str], x_cols: list[str], y_cols: list[str],
                        date_from: str | None, date_to: str | None,
-                       log) -> dict[str, list[dict]]:
-    """Fetch all required columns once per ticker. Returns {ticker_key: list[dict]}."""
+                       log) -> tuple[dict[str, list[dict]], list[str]]:
+    """Fetch all required columns once per ticker. Returns (cache, errors)."""
     needed = list(dict.fromkeys(["trade_date"] + x_cols + y_cols))
     col_list = ", ".join(needed)
-    cache = {}
+    cache, errors = {}, []
     keys = tickers if tickers else [None]
 
     async with pool.acquire() as conn:
@@ -43,7 +43,9 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
             try:
                 fetched = await conn.fetch(sql, *params)
             except Exception as exc:
-                log(f"  FETCH ERROR {ticker or 'all'}: {exc}")
+                msg = f"ticker={ticker or 'all'}: {exc}"
+                errors.append(msg)
+                log(f"  FETCH ERROR {msg}")
                 continue
 
             if fetched:
@@ -51,9 +53,11 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
                 cache[ticker or "_all"] = row_list
                 log(f"  Cached {len(row_list):,} rows for {ticker or 'all'}")
             else:
+                msg = f"ticker={ticker or 'all'}: query returned 0 rows (table={table})"
+                errors.append(msg)
                 log(f"  No data found for {ticker or 'all'}")
 
-    return cache
+    return cache, errors
 
 
 def _format_corr_table(corr_results: list[dict]) -> str:
@@ -78,16 +82,16 @@ def _format_corr_table(corr_results: list[dict]) -> str:
 async def _phase1(main_pool: asyncpg.Pool, data_pool: asyncpg.Pool,
                   run_id: str, table: str,
                   tickers: list[str], x_cols: list[str], y_cols: list[str],
-                  date_from, date_to, log) -> tuple[dict, list[dict]]:
+                  date_from, date_to, log) -> tuple[dict, list[dict], list[str]]:
     """
     Fetch data, run all correlations, save scatter charts.
-    Returns (data_cache, corr_results).
+    Returns (data_cache, corr_results, fetch_errors).
     """
     log("Phase 1: fetching data…")
-    cache = await _fetch_cache(data_pool, table, tickers, x_cols, y_cols,
-                               date_from, date_to, log)
+    cache, fetch_errors = await _fetch_cache(data_pool, table, tickers, x_cols, y_cols,
+                                             date_from, date_to, log)
     if not cache:
-        return {}, []
+        return {}, [], fetch_errors
 
     log(f"Phase 1: running correlation matrix ({len(cache)} ticker(s) × {len(x_cols)} features × {len(y_cols)} outcomes)…")
     corr_results = []
@@ -120,7 +124,7 @@ async def _phase1(main_pool: asyncpg.Pool, data_pool: asyncpg.Pool,
                             )
 
     log(f"Phase 1 complete — {len(corr_results)} correlations computed.")
-    return cache, corr_results
+    return cache, corr_results, []
 
 
 # ── Phase 2: Claude agent tools ───────────────────────────────────────────────
@@ -339,13 +343,14 @@ async def run_agent(
     data_pool = oi_pool if table in _OI_TABLES else main_pool
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
-    data_cache, corr_results = await _phase1(
+    data_cache, corr_results, fetch_errors = await _phase1(
         main_pool, data_pool, run_id, table,
         tickers, x_cols, y_cols, date_from, date_to, log,
     )
 
     if not data_cache:
-        return "Phase 1 failed: no data fetched. Check ticker names and column names in config."
+        detail = "\n".join(fetch_errors) if fetch_errors else "query returned 0 rows"
+        raise ValueError(f"Phase 1 failed — no data loaded.\n{detail}")
 
     # Generate correlation heatmap if multiple tickers
     if len(data_cache) > 1 and x_cols and y_cols:
