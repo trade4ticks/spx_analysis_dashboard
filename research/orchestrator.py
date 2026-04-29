@@ -610,7 +610,9 @@ async def execute_v2_pipeline(
             f" — {spec.get('reason', '')[:80]}")
     if not viz_specs and ranked:
         log("  WARNING: Claude selected 0 charts — auto-generating from top signals")
-        for s in ranked[:4]:
+        # Only use single-factor scans (have x_col); skip interaction results (have combo)
+        single_scans = [s for s in ranked if s.get("x_col") and not s.get("combo")]
+        for s in single_scans[:4]:
             viz_specs.append({"chart_type": "bucket_profile",
                               "ticker": s.get("ticker"),
                               "x_col": s["x_col"], "y_col": s["y_col"],
@@ -619,7 +621,7 @@ async def execute_v2_pipeline(
                               "ticker": s.get("ticker"),
                               "x_col": s["x_col"], "y_col": s["y_col"],
                               "reason": "auto-fallback"})
-        log(f"  Auto-generated {len(viz_specs)} chart specs from top {min(4, len(ranked))} signals")
+        log(f"  Auto-generated {len(viz_specs)} chart specs from top {min(4, len(single_scans))} single-factor signals")
 
     # Generate selected charts
     equity_results = []
