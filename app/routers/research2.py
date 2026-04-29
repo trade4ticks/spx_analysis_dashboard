@@ -78,8 +78,11 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
             knowledge_rules=knowledge_rules,
             log=_log,
         )
+        # Always save pipeline log for diagnostics
+        log_text = "\n".join(logs) if logs else None
         async with main_pool.acquire() as conn:
-            await rdb.update_run(conn, run_id, status="complete", ai_summary=summary)
+            await rdb.update_run(conn, run_id, status="complete",
+                                 ai_summary=summary, error_msg=log_text)
     except Exception as exc:
         log_tail = "\n".join(logs[-30:]) if logs else ""
         err = f"{exc}"

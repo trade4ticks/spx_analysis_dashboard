@@ -604,6 +604,22 @@ async def execute_v2_pipeline(
 
     viz_specs = await select_visualizations(question, all_scans, model)
     log(f"  Claude selected {len(viz_specs)} chart(s)")
+    for i, spec in enumerate(viz_specs):
+        log(f"    [{i+1}] {spec.get('chart_type')}: "
+            f"{spec.get('ticker') or 'all'} | {spec.get('x_col')} → {spec.get('y_col')}"
+            f" — {spec.get('reason', '')[:80]}")
+    if not viz_specs and ranked:
+        log("  WARNING: Claude selected 0 charts — auto-generating from top signals")
+        for s in ranked[:4]:
+            viz_specs.append({"chart_type": "bucket_profile",
+                              "ticker": s.get("ticker"),
+                              "x_col": s["x_col"], "y_col": s["y_col"],
+                              "reason": "auto-fallback"})
+            viz_specs.append({"chart_type": "equity_curve",
+                              "ticker": s.get("ticker"),
+                              "x_col": s["x_col"], "y_col": s["y_col"],
+                              "reason": "auto-fallback"})
+        log(f"  Auto-generated {len(viz_specs)} chart specs from top {min(4, len(ranked))} signals")
 
     # Generate selected charts
     equity_results = []
