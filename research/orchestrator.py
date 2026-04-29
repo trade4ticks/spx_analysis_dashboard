@@ -184,7 +184,34 @@ async def classify_and_plan(
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw).strip()
 
-    plan = json.loads(raw)
+    # Try to parse JSON; if malformed, attempt basic repair then retry
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        # Common Claude issues: trailing commas, unescaped quotes, truncated output
+        # Try to fix trailing commas before } or ]
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
+        # Truncated output: try closing any open braces
+        open_b = fixed.count("{") - fixed.count("}")
+        open_a = fixed.count("[") - fixed.count("]")
+        if open_b > 0 or open_a > 0:
+            # Try to salvage by closing brackets
+            if not fixed.rstrip().endswith("}"):
+                fixed = fixed.rstrip().rstrip(",") + '"' + "}" * open_b + "]" * open_a
+        try:
+            plan = json.loads(fixed)
+        except json.JSONDecodeError:
+            # Last resort: retry the LLM call once with a stricter prompt
+            resp2 = await client.messages.create(
+                model=model,
+                max_tokens=1500,
+                system=_PLAN_SYSTEM + " Your previous response had invalid JSON. Be extra careful with quoting.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw2 = resp2.content[0].text.strip()
+            raw2 = re.sub(r"^```(?:json)?\s*", "", raw2)
+            raw2 = re.sub(r"\s*```$", "", raw2).strip()
+            plan = json.loads(raw2)  # if this fails too, let it raise
 
     # Validate: only keep columns that actually exist in the table
     valid_cols = {c["name"] for c in available_columns}
