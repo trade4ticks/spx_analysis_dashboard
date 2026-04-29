@@ -11,6 +11,11 @@ document.addEventListener('alpine:init', () => {
     pollTimer:   null,
     lightboxUrl: null,
 
+    followups:        [],
+    followupQuestion: '',
+    followupLoading:  false,
+    followupError:    null,
+
     form: {
       name:      '',
       question:  '',
@@ -58,12 +63,14 @@ document.addEventListener('alpine:init', () => {
     async _loadRunDetail(runId) {
       this.loading = true;
       try {
-        const [runRes, chartsRes] = await Promise.all([
+        const [runRes, chartsRes, fupsRes] = await Promise.all([
           fetch(`/api/research2/run/${runId}`),
           fetch(`/api/research2/run/${runId}/charts`),
+          fetch(`/api/research/run/${runId}/followups`),
         ]);
         if (runRes.ok)    this.selectedRun = await runRes.json();
         if (chartsRes.ok) this.charts      = await chartsRes.json();
+        if (fupsRes.ok)   this.followups   = await fupsRes.json();
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -96,9 +103,12 @@ document.addEventListener('alpine:init', () => {
     // ── New run form ───────────────────────────────────────────────────────
     newRun() {
       this._stopPoll();
-      this.view        = 'new';
-      this.selectedRun = null;
-      this.submitError = null;
+      this.view             = 'new';
+      this.selectedRun      = null;
+      this.submitError      = null;
+      this.followups        = [];
+      this.followupQuestion = '';
+      this.followupError    = null;
       this.form = {
         name: '', question: '', table: 'daily_features',
         tickers: '', date_from: '', date_to: '',
@@ -150,6 +160,40 @@ document.addEventListener('alpine:init', () => {
         this.submitError = e.message;
       } finally {
         this.submitting = false;
+      }
+    },
+
+    // ── PDF export ────────────────────────────────────────────────────────
+    exportPdf(runId) {
+      window.location.href = `/api/research/run/${runId}/pdf`;
+    },
+
+    // ── Follow-up ──────────────────────────────────────────────────────────
+    async askFollowup() {
+      const q = this.followupQuestion.trim();
+      if (!q || this.followupLoading) return;
+      this.followupError   = null;
+      this.followupLoading = true;
+      try {
+        const r = await fetch(`/api/research/run/${this.selectedRun.id}/followup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        const saved = await r.json();
+        this.followups.push(saved);
+        this.followupQuestion = '';
+      } catch (e) {
+        this.followupError = e.message;
+      } finally {
+        this.followupLoading = false;
+        await this.$nextTick();
+        const el = document.getElementById('r2-followup-bottom');
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
       }
     },
 

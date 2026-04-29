@@ -94,9 +94,9 @@
       font-size: 9px; font-weight: 700; color: #555; letter-spacing: .5px;
       text-transform: uppercase; margin-bottom: 4px;
     }
-    .plan-reasoning { font-size: 12px; color: #ccc; line-height: 1.6; }
+    .plan-reasoning { font-size: 13px; color: #ccc; line-height: 1.6; }
     .hypothesis-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-    .hypothesis-list li { font-size: 11px; color: #bbb; padding-left: 14px; position: relative; line-height: 1.5; }
+    .hypothesis-list li { font-size: 12px; color: #bbb; padding-left: 14px; position: relative; line-height: 1.5; }
     .hypothesis-list li::before { content: "•"; position: absolute; left: 0; color: #2ecc71; }
     .plan-cols { display: flex; gap: 16px; flex-wrap: wrap; }
     .plan-col-group { flex: 1; min-width: 200px; }
@@ -109,7 +109,7 @@
     .col-tag.outcome { border-color: #1a3a1a; color: #2ecc71; background: #0d1e0d; }
     .plan-key-questions { display: flex; flex-direction: column; gap: 4px; }
     .plan-key-questions span {
-      font-size: 11px; color: #aaa; padding: 4px 8px;
+      font-size: 12px; color: #aaa; padding: 4px 8px;
       border-left: 2px solid #3498db; background: #0d1e2e; border-radius: 0 3px 3px 0;
     }
 
@@ -132,8 +132,8 @@
       text-transform: uppercase; margin-bottom: 10px; opacity: .7;
     }
     .report-card .report-body {
-      font-size: 13px; color: #e0e0e0; line-height: 1.85;
-      white-space: pre-wrap;
+      font-size: 14px; color: #e0e0e0; line-height: 1.85;
+      white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
     }
 
     /* ── Charts grid ─────────────────────────────────────────────────────── */
@@ -164,13 +164,21 @@
       font-size: 9px; color: #555; overflow: hidden; text-overflow: ellipsis;
       white-space: nowrap; flex: 1;
     }
-    .r2-chart-card img { width: 100%; height: auto; display: block; cursor: zoom-in; }
-    .r2-chart-card img:hover { opacity: .9; }
-    .fs-btn {
-      background: none; border: none; cursor: pointer; color: #555;
-      font-size: 15px; padding: 0 2px; flex-shrink: 0;
+    .r2-chart-img-wrap { position: relative; }
+    .r2-chart-card img { width: 100%; height: auto; display: block; cursor: default; }
+    .r2-chart-tooltip {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.82); padding: 5px 10px;
+      font-size: 10px; color: #aaa; font-family: monospace;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      pointer-events: none;
     }
-    .fs-btn:hover { color: #aaa; }
+    .fs-btn {
+      background: rgba(0,0,0,0.55); border: 1px solid #444; cursor: pointer;
+      color: #aaa; font-size: 14px; padding: 2px 5px; border-radius: 3px;
+      flex-shrink: 0; transition: background .15s, color .15s;
+    }
+    .fs-btn:hover { background: #3498db; color: #fff; border-color: #3498db; }
 
     /* ── Error ───────────────────────────────────────────────────────────── */
     .error-card {
@@ -193,7 +201,7 @@
     .lightbox-close:hover { color: #fff; }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=1"></script>
+  <script src="/static/js/research2.js?v=2"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -368,8 +376,13 @@ Examples:
             <span style="font-size:16px;color:#ddd;font-weight:700" x-text="selectedRun.name"></span>
             <span class="badge" :class="statusClass(selectedRun.status)" x-text="selectedRun.status"></span>
             <span style="font-size:10px;color:#555" x-text="fmtDate(selectedRun.created_at)"></span>
-            <button class="btn" style="margin-left:auto;font-size:10px;color:#e74c3c"
-                    @click="deleteRun(selectedRun.id)">✕ Delete</button>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn" style="font-size:10px"
+                      x-show="selectedRun.status === 'complete'"
+                      @click="exportPdf(selectedRun.id)">↓ PDF</button>
+              <button class="btn" style="font-size:10px;color:#e74c3c"
+                      @click="deleteRun(selectedRun.id)">✕ Delete</button>
+            </div>
           </div>
 
           <!-- Research question -->
@@ -491,16 +504,27 @@ Examples:
               </div>
               <div class="r2-charts-grid">
                 <template x-for="chart in charts" :key="chart.id">
-                  <div class="r2-chart-card">
+                  <div class="r2-chart-card" x-data="{hov:false}">
                     <div class="r2-chart-hdr">
                       <span class="r2-chart-type" x-text="chartTypeLabel(chart.chart_type)"></span>
                       <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis"
                             x-text="chart.title"></span>
-                      <button class="fs-btn" @click.stop="openLightbox(chartUrl(chart.id))"
-                              title="Fullscreen">⛶</button>
                     </div>
-                    <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy"
-                         @click="openLightbox(chartUrl(chart.id))">
+                    <div class="r2-chart-img-wrap"
+                         @mouseenter="hov=true" @mouseleave="hov=false">
+                      <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy">
+                      <div x-show="hov" class="r2-chart-tooltip">
+                        <span x-text="chart.x_col"></span>
+                        <span style="color:#555">→</span>
+                        <span x-text="chart.y_col"></span>
+                        <template x-if="chart.ticker">
+                          <span style="color:#3498db" x-text="'| ' + chart.ticker"></span>
+                        </template>
+                        <button class="fs-btn" style="margin-left:auto;pointer-events:all"
+                                @click.stop="openLightbox(chartUrl(chart.id))"
+                                title="Fullscreen">⛶</button>
+                      </div>
+                    </div>
                   </div>
                 </template>
               </div>
@@ -511,6 +535,54 @@ Examples:
           <template x-if="isRunning && charts.length === 0">
             <div style="text-align:center;padding:30px;color:#555;font-size:12px">
               Charts will appear here when the analysis completes.
+            </div>
+          </template>
+
+          <!-- ── Follow-up Questions ─────────────────────────────────────── -->
+          <template x-if="selectedRun.status === 'complete'">
+            <div style="border-top:1px solid #333;padding-top:18px;display:flex;flex-direction:column;gap:14px">
+              <div style="font-size:9px;font-weight:700;color:#aaa;letter-spacing:.5px;text-transform:uppercase">Follow-up Questions</div>
+
+              <!-- Existing follow-ups -->
+              <template x-for="(fup, i) in followups" :key="fup.id || i">
+                <div style="display:flex;flex-direction:column;gap:4px">
+                  <div style="background:#2a2a2a;border-left:3px solid #555;padding:8px 12px;border-radius:0 4px 4px 0">
+                    <div style="font-size:9px;color:#555;margin-bottom:4px;font-weight:700;letter-spacing:.3px">YOUR QUESTION</div>
+                    <div style="font-size:13px;color:#ddd" x-text="fup.question"></div>
+                  </div>
+                  <div style="background:#1a2a1a;border-left:3px solid #2ecc71;padding:10px 12px;border-radius:0 4px 4px 0">
+                    <div style="font-size:9px;color:#555;margin-bottom:6px;font-weight:700;letter-spacing:.3px">AI RESPONSE</div>
+                    <div style="font-size:13px;color:#ccc;line-height:1.75;white-space:pre-wrap" x-text="fup.answer"></div>
+                  </div>
+                </div>
+              </template>
+
+              <!-- New question input -->
+              <div x-show="!followupLoading" style="display:flex;flex-direction:column;gap:8px">
+                <textarea x-model="followupQuestion"
+                  style="background:#2a2a2a;border:1px solid #444;color:#ddd;padding:8px;border-radius:4px;
+                         font-size:13px;resize:vertical;min-height:64px;font-family:inherit;width:100%"
+                  placeholder="Ask a follow-up — e.g. 'Why might the signal weaken in 2022?' or 'Is D5 noise or real?'"
+                  @keydown.ctrl.enter="askFollowup()"></textarea>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button class="btn"
+                          style="background:#1a4a2a;color:#2ecc71;border:1px solid #2ecc71;padding:5px 16px;font-size:11px"
+                          @click="askFollowup()" :disabled="!followupQuestion.trim()">Ask Claude</button>
+                  <span style="font-size:10px;color:#555">Ctrl+Enter to submit</span>
+                  <span x-show="followupError" style="color:#e74c3c;font-size:11px" x-text="followupError"></span>
+                </div>
+              </div>
+
+              <!-- Loading state -->
+              <div x-show="followupLoading"
+                   style="background:#1a2a1a;border:1px solid #2ecc71;border-radius:6px;
+                          padding:12px 14px;display:flex;align-items:center;gap:10px;
+                          color:#2ecc71;font-size:12px">
+                <span style="animation:spin 1.2s linear infinite;display:inline-block">⚙</span>
+                <span>Claude is analyzing the results…</span>
+              </div>
+
+              <div id="r2-followup-bottom"></div>
             </div>
           </template>
 
