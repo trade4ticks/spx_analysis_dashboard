@@ -92,9 +92,10 @@ document.addEventListener('alpine:init', () => {
         if (resultsRes.ok) this.results     = await resultsRes.json();
         if (fupsRes.ok)    this.followups   = await fupsRes.json();
 
-        // Render interactive charts after DOM update
+        // Render interactive charts after DOM update (double nextTick for x-for templates)
         await this.$nextTick();
-        this._renderInteractiveCharts();
+        await this.$nextTick();
+        setTimeout(() => this._renderInteractiveCharts(), 50);
       } catch (e) {
         this.error = e.message;
       } finally {
