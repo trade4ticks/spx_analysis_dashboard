@@ -394,11 +394,15 @@ async def _compose_report(
 
     # Equity summary
     eq_lines = []
-    for r in sorted(equity_results, key=lambda x: x.get("final_equity") or 0, reverse=True)[:8]:
+    for r in sorted(equity_results,
+                    key=lambda x: abs(x.get("cumulative_return") or x.get("final_equity") or 0),
+                    reverse=True)[:8]:
+        cum = r.get("cumulative_return") or r.get("final_equity")
         eq_lines.append(
             f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} → {r.get('outcome_col')} "
-            f"({r.get('which')}): final={r.get('final_equity')}, "
-            f"maxDD={r.get('max_drawdown')}, n={r.get('n_trades')}"
+            f"({r.get('which')}): cumReturn={cum*100:.1f}%, "
+            f"maxDD={r.get('max_drawdown')}, n={r.get('n_trades')}, "
+            f"winRate={r.get('win_rate')}"
         )
 
     def _safe(s: str) -> str:

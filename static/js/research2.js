@@ -1,4 +1,17 @@
 document.addEventListener('alpine:init', () => {
+  // Utility store for template access to results
+  Alpine.store('r2utils', {
+    _results: [],
+    setResults(r) { this._results = r; },
+    getBot(topResult) {
+      return this._results.find(x =>
+        x.analysis_type === 'equity_curve_bottom' &&
+        x.ticker === topResult.ticker &&
+        x.x_col === topResult.x_col &&
+        x.y_col === topResult.y_col) || null;
+    },
+  });
+
   Alpine.data('research2', () => ({
 
     // ── State ──────────────────────────────────────────────────────────────
@@ -89,7 +102,10 @@ document.addEventListener('alpine:init', () => {
         ]);
         if (runRes.ok)     this.selectedRun = await runRes.json();
         if (chartsRes.ok)  this.charts      = await chartsRes.json();
-        if (resultsRes.ok) this.results     = await resultsRes.json();
+        if (resultsRes.ok) {
+          this.results = await resultsRes.json();
+          Alpine.store('r2utils').setResults(this.results);
+        }
         if (fupsRes.ok)    this.followups   = await fupsRes.json();
 
         // Render interactive charts after DOM update (double nextTick for x-for templates)

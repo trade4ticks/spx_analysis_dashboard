@@ -112,18 +112,28 @@ def equity_curve_chart(top: dict, bottom: Optional[dict] = None) -> bytes:
     if bottom:
         _plot(bottom, "Bottom", _NEG)
 
-    ax.axhline(1.0, color="#555", linewidth=0.6, linestyle="--")
-    ax.set_ylabel("Equity (start = 1.0)", color=_TEXT)
+    ax.axhline(0.0, color="#555", linewidth=0.6, linestyle="--")
+    ax.set_ylabel("Cumulative Return", color=_TEXT)
     ax.legend(facecolor=_SURFACE, edgecolor="#444", labelcolor=_TEXT, fontsize=10)
 
-    dd = top.get("max_drawdown")
-    n = top.get("n_trades")
-    final = top.get("final_equity")
+    # Format y-axis as percentage
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v*100:.0f}%"))
+
+    # Show stats for both top and bottom
     anno_y = 0.04
-    if n is not None:
-        info = f"Trades: {n}  |  Final: {final:.2f}x  |  MaxDD: {dd*100:.1f}%"
-        ax.text(0.02, anno_y, info, transform=ax.transAxes, color=_DIM, fontsize=10)
-        anno_y += 0.08
+    for curve, label, color in [(top, "Top", _POS), (bottom, "Bot", _NEG)]:
+        if curve is None:
+            continue
+        n = curve.get("n_trades")
+        cum = curve.get("cumulative_return") or curve.get("final_equity")
+        dd = curve.get("max_drawdown")
+        wr = curve.get("win_rate")
+        if n is not None and cum is not None:
+            info = (f"{label}: n={n}  Cum={cum*100:.1f}%  "
+                    f"MaxDD={dd*100:.1f}%  WR={wr*100:.0f}%")
+            ax.text(0.02, anno_y, info, transform=ax.transAxes,
+                    color=color, fontsize=9)
+            anno_y += 0.06
     note = top.get("concentration_note")
     if note:
         ax.text(0.02, anno_y, f"⚠ {note}",

@@ -197,10 +197,12 @@ async def _generate_summary(
     if equity_results:
         lines.append("\n=== Equity Curves ===")
         for r in sorted(equity_results,
-                        key=lambda x: x.get("final_equity") or 0, reverse=True)[:15]:
+                        key=lambda x: abs(x.get("cumulative_return") or x.get("final_equity") or 0),
+                        reverse=True)[:15]:
+            cum = r.get("cumulative_return") or r.get("final_equity")
             lines.append(
                 f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} -> {r.get('outcome_col')} "
-                f"({r.get('which')}): final={r.get('final_equity')}, "
+                f"({r.get('which')}): cumReturn={cum*100:.1f}%, "
                 f"maxDD={r.get('max_drawdown')}, trades={r.get('n_trades')}, "
                 f"winRate={r.get('win_rate')}")
 

@@ -553,19 +553,23 @@ def equity_curve_from_rows(rows: list[dict], feature_col: str, outcome_col: str,
     if not trades:
         return {"error": "no non-overlapping trades", "points": [], "ticker": ticker}
 
-    equity, peak, max_dd = 1.0, 1.0, 0.0
+    # Cumulative simple returns (no compounding)
+    cumulative = 0.0
+    peak, max_dd = 0.0, 0.0
     points = []
     for date, ret in trades:
-        equity *= (1.0 + ret)
-        peak = max(peak, equity)
-        max_dd = min(max_dd, (equity - peak) / peak)
-        points.append({"date": str(date), "value": round(equity, 6)})
+        cumulative += ret
+        peak = max(peak, cumulative)
+        dd = cumulative - peak
+        max_dd = min(max_dd, dd)
+        points.append({"date": str(date), "value": round(cumulative, 6)})
 
     n = len(trades)
     return {
         "points":       points,
         "n_trades":     n,
-        "final_equity": round(equity, 4),
+        "cumulative_return": round(cumulative, 4),
+        "final_equity": round(1.0 + cumulative, 4),  # backward compat (now meaningless but keeps old UI working)
         "max_drawdown": round(max_dd, 4),
         "avg_ret":      round(sum(r for _, r in trades) / n, 6),
         "win_rate":     round(sum(1 for _, r in trades if r > 0) / n, 4),

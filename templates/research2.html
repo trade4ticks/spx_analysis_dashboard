@@ -202,7 +202,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=4"></script>
+  <script src="/static/js/research2.js?v=5"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -604,12 +604,33 @@ Examples:
                     <div style="height:220px;padding:6px">
                       <canvas :id="'r2-equity-' + r.id"></canvas>
                     </div>
-                    <div style="padding:2px 8px 6px;font-size:9px;color:#666;display:flex;gap:10px">
-                      <span>Trades: <span style="color:#ccc" x-text="r.result?.n_trades || '—'"></span></span>
-                      <span>Final: <span :style="(r.result?.final_equity||1)>=1?'color:#3498db':'color:#e84393'"
-                            x-text="r.result?.final_equity ? r.result.final_equity.toFixed(3)+'x' : '—'"></span></span>
-                      <span>MaxDD: <span style="color:#e84393"
-                            x-text="r.result?.max_drawdown != null ? (r.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
+                    <div style="padding:2px 8px 6px;font-size:9px;color:#666" x-data="{
+                      bot: $store.r2utils?.getBot(r) || null
+                    }">
+                      <div style="display:flex;gap:8px;align-items:center">
+                        <span style="color:#3498db;font-weight:600"
+                              x-text="r.result?.which === 'top2' ? 'D9-D10' : 'D10'"></span>
+                        <span>n=<span style="color:#ccc" x-text="r.result?.n_trades || '—'"></span></span>
+                        <span>Cum: <span :style="(r.result?.cumulative_return||0)>=0?'color:#3498db':'color:#e84393'"
+                              x-text="r.result?.cumulative_return != null ? (r.result.cumulative_return*100).toFixed(1)+'%' : '—'"></span></span>
+                        <span>MaxDD: <span style="color:#e84393"
+                              x-text="r.result?.max_drawdown != null ? (r.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
+                        <span>WR: <span style="color:#ccc"
+                              x-text="r.result?.win_rate != null ? (r.result.win_rate*100).toFixed(0)+'%' : '—'"></span></span>
+                      </div>
+                      <template x-if="bot">
+                        <div style="display:flex;gap:8px;align-items:center;margin-top:2px">
+                          <span style="color:#e84393;font-weight:600"
+                                x-text="bot.result?.which === 'bottom2' ? 'D1-D2' : 'D1'"></span>
+                          <span>n=<span style="color:#ccc" x-text="bot.result?.n_trades || '—'"></span></span>
+                          <span>Cum: <span :style="(bot.result?.cumulative_return||0)>=0?'color:#3498db':'color:#e84393'"
+                                x-text="bot.result?.cumulative_return != null ? (bot.result.cumulative_return*100).toFixed(1)+'%' : '—'"></span></span>
+                          <span>MaxDD: <span style="color:#e84393"
+                                x-text="bot.result?.max_drawdown != null ? (bot.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
+                          <span>WR: <span style="color:#ccc"
+                                x-text="bot.result?.win_rate != null ? (bot.result.win_rate*100).toFixed(0)+'%' : '—'"></span></span>
+                        </div>
+                      </template>
                     </div>
                   </div>
                 </template>
