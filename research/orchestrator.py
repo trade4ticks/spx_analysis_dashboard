@@ -442,6 +442,119 @@ async def _compose_report(
     return msg.content[0].text.strip()
 
 
+# ── Phase 3: Skeptic / validator pass ────────────────────────────────────────
+
+_SKEPTIC_SYSTEM = (
+    "You are a skeptical quantitative reviewer. Your job is to challenge research "
+    "findings and identify weaknesses, overfit risks, and misleading conclusions. "
+    "Be specific and cite numbers. Do not repeat the findings — only challenge them."
+)
+
+_SKEPTIC_USER = """\
+RESEARCH REPORT TO CHALLENGE:
+\"\"\"
+{report}
+\"\"\"
+
+KEY DIAGNOSTICS:
+{diagnostics}
+
+Write a concise skeptic review (150-300 words). Challenge:
+
+1. SAMPLE SIZE: Are bucket sizes large enough? Is N sufficient for the claimed precision?
+   Flag any claim based on fewer than 100 observations per bucket.
+
+2. CONSISTENCY: Does "100% yearly consistency" on 3-4 years mean anything statistically?
+   How many years were actually tested?
+
+3. MONOTONICITY vs TAILS: Is the claimed monotonic relationship truly smooth, or is
+   most of the edge concentrated in extreme deciles while the middle is flat?
+
+4. DRAWDOWN: If max drawdown exceeds 30%, is the signal really tradeable?
+   Would the claimed edge survive transaction costs and slippage?
+
+5. MULTI-FACTOR OVERFIT: Do the multi-factor combos add genuine lift, or are they
+   slicing the sample thin enough that noise looks like signal?
+
+6. REGIME CONCENTRATION: Does the signal work across market regimes, or is it
+   dominated by one unusual period?
+
+7. LOOK-AHEAD: Could any feature construction embed look-ahead bias?
+
+Only raise issues that are actually supported by the diagnostics.
+Do not manufacture problems that don't exist. Be fair but rigorous.
+"""
+
+
+async def _skeptic_review(
+    report: str,
+    ranked_scans: list[dict],
+    equity_results: list[dict],
+    model: str,
+    knowledge_rules: list[str] = None,
+) -> str:
+    """ONE Claude call to challenge the report findings."""
+    if _anthropic is None:
+        return ""
+
+    # Build compact diagnostics for the skeptic
+    diag_lines = []
+    valid = [s for s in ranked_scans if "error" not in s]
+
+    for s in valid[:8]:
+        rob = s.get("robustness", {})
+        bs = [b for b in (s.get("bucket_stats") or []) if b is not None]
+        min_n = min((b["n"] for b in bs), default=0) if bs else 0
+        mid_range = ""
+        if len(bs) >= 6:
+            mid_avgs = [b["avg_ret"] for b in bs[3:7]]
+            mid_range = f"mid-decile range={max(mid_avgs)-min(mid_avgs):.4f}"
+
+        diag_lines.append(
+            f"  {s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')}: "
+            f"score={s.get('composite_score', 0):.0f}, n={s.get('n', 0)}, "
+            f"min_bucket_n={min_n}, "
+            f"consistency={rob.get('yearly_consistency_pct', '?')}% "
+            f"({rob.get('years_checked', '?')} years), "
+            f"concentration={rob.get('concentration_risk', 1):.2f}, "
+            f"half_stable={'Y' if rob.get('half_sample_stable') else 'N'}, "
+            f"loyo_fragile={'Y' if rob.get('loyo_fragile') else 'N'}, "
+            f"{mid_range}"
+        )
+
+    for r in equity_results[:6]:
+        cum = r.get("cumulative_return") or r.get("final_equity", 0)
+        diag_lines.append(
+            f"  Equity {r.get('ticker') or 'all'} | {r.get('feature_col')} → {r.get('outcome_col')} "
+            f"({r.get('which')}): cumReturn={cum*100:.1f}%, "
+            f"maxDD={r.get('max_drawdown', 0)*100:.1f}%, "
+            f"n_trades={r.get('n_trades', 0)}, winRate={r.get('win_rate', 0)*100:.0f}%"
+        )
+
+    diagnostics = "\n".join(diag_lines) if diag_lines else "(no diagnostics available)"
+
+    skeptic_system = _SKEPTIC_SYSTEM
+    if knowledge_rules:
+        rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
+        skeptic_system += f"\n\nDOMAIN RULES (apply these):\n{rules_text}"
+
+    client = _anthropic.AsyncAnthropic()
+    msg = await client.messages.create(
+        model=model,
+        max_tokens=800,
+        system=[{"type": "text", "text": skeptic_system,
+                 "cache_control": {"type": "ephemeral"}}],
+        messages=[{
+            "role": "user",
+            "content": _SKEPTIC_USER.format(
+                report=report[:3000],
+                diagnostics=diagnostics,
+            ),
+        }],
+    )
+    return msg.content[0].text.strip()
+
+
 # ── Phase 1: Main execution pipeline ─────────────────────────────────────────
 
 async def execute_v2_pipeline(
@@ -750,11 +863,34 @@ async def execute_v2_pipeline(
                 log(f"  CHART ERROR {c_type} {title_base}: {exc}")
 
     # ── 4. Compose report ─────────────────────────────────────────────────
-    log("[4/4] Composing report…")
+    log("[4/5] Composing report…")
     async with main_pool.acquire() as conn:
-        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/4: Composing report…")
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
 
-    summary = await _compose_report(question, plan, ranked, equity_results, model,
-                                    knowledge_rules=knowledge_rules)
+    report = await _compose_report(question, plan, ranked, equity_results, model,
+                                   knowledge_rules=knowledge_rules)
     log("  Report complete.")
+
+    # ── 5. Skeptic review ────────────────────────────────────────────────
+    log("[5/5] Running skeptic review…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 5/5: Skeptic review…")
+
+    try:
+        skeptic = await _skeptic_review(report, ranked, equity_results, model,
+                                        knowledge_rules=knowledge_rules)
+        if skeptic:
+            log("  Skeptic review complete.")
+            summary = (
+                f"{report}\n\n"
+                f"---\n\n"
+                f"## Caveats & Challenges\n\n"
+                f"{skeptic}"
+            )
+        else:
+            summary = report
+    except Exception as exc:
+        log(f"  Skeptic review failed: {exc}. Using report without caveats.")
+        summary = report
+
     return summary
