@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Research 2</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    .r2-body { flex: 1; display: flex; flex-direction: row; min-height: 0; overflow: hidden; }
+
+    /* ── Sidebar ─────────────────────────────────────────────────────────── */
+    .r2-sidebar {
+      width: 250px; flex-shrink: 0;
+      background: var(--surface); border-right: 1px solid #333;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .r2-sidebar-hdr {
+      padding: 10px 10px 8px; border-bottom: 1px solid #333;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .r2-sidebar-hdr span { flex: 1; color: #aaa; font-size: 11px; font-weight: 700; letter-spacing: .4px; }
+    .r2-run-list { flex: 1; overflow-y: auto; }
+    .r2-run-item {
+      padding: 9px 10px; border-bottom: 1px solid #222;
+      cursor: pointer; display: flex; flex-direction: column; gap: 3px;
+    }
+    .r2-run-item:hover { background: #2a2a2a; }
+    .r2-run-item.active { background: #1a3a5c; border-left: 2px solid var(--accent); }
+    .r2-run-name { font-size: 11px; color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .r2-run-meta { font-size: 10px; color: #666; display: flex; gap: 6px; align-items: center; }
+
+    /* ── Badges ──────────────────────────────────────────────────────────── */
+    .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
+    .badge-green  { background: #1a4a2a; color: #2ecc71; }
+    .badge-yellow { background: #4a3a10; color: #f1c40f; }
+    .badge-red    { background: #4a1a1a; color: #e74c3c; }
+    .badge-dim    { background: #333; color: #888; }
+
+    /* ── Main area ───────────────────────────────────────────────────────── */
+    .r2-main {
+      flex: 1; overflow-y: auto; padding: 20px 24px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+
+    /* ── Form ────────────────────────────────────────────────────────────── */
+    .r2-form { display: flex; flex-direction: column; gap: 14px; max-width: 680px; }
+    .r2-form label { font-size: 11px; color: #aaa; font-weight: 700; letter-spacing: .3px; display: block; margin-bottom: 3px; }
+    .r2-form input, .r2-form textarea, .r2-form select {
+      background: #2a2a2a; border: 1px solid #444; color: #ddd;
+      padding: 6px 8px; border-radius: 4px; font-size: 12px; width: 100%;
+    }
+    .r2-form textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+    .r2-form input:focus, .r2-form textarea:focus { outline: none; border-color: var(--accent); }
+    .r2-hint { font-size: 10px; color: #555; margin-top: 3px; }
+    .r2-row { display: flex; gap: 10px; }
+    .r2-row > * { flex: 1; }
+    .ticker-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .ticker-chip {
+      font-size: 10px; padding: 2px 7px; border-radius: 10px;
+      background: #333; color: #aaa; cursor: pointer; border: 1px solid #444;
+    }
+    .ticker-chip:hover { background: #1a3a5c; color: #3498db; border-color: #3498db; }
+    .preset-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+    .preset-btn {
+      font-size: 10px; padding: 3px 10px; border-radius: 3px;
+      background: #2a2a2a; color: #aaa; border: 1px solid #444; cursor: pointer;
+    }
+    .preset-btn:hover, .preset-btn.active { border-color: var(--accent); color: var(--accent); }
+
+    /* ── AI notice box ───────────────────────────────────────────────────── */
+    .ai-notice {
+      background: #1a2a1a; border: 1px solid #2a4a2a; border-radius: 6px;
+      padding: 10px 14px; font-size: 11px; color: #2ecc71; display: flex; gap: 8px;
+      align-items: flex-start;
+    }
+    .ai-notice .icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+
+    /* ── Plan card ───────────────────────────────────────────────────────── */
+    .plan-card {
+      border: 1px solid #333; border-radius: 8px; overflow: hidden;
+    }
+    .plan-header {
+      padding: 10px 14px; background: #2a2a2a;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .plan-task-badge {
+      font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 4px;
+      background: var(--badge-bg, #1a3a5c); color: var(--badge-fg, #3498db);
+      letter-spacing: .3px; text-transform: uppercase;
+    }
+    .plan-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+    .plan-section-label {
+      font-size: 9px; font-weight: 700; color: #555; letter-spacing: .5px;
+      text-transform: uppercase; margin-bottom: 4px;
+    }
+    .plan-reasoning { font-size: 12px; color: #ccc; line-height: 1.6; }
+    .hypothesis-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .hypothesis-list li { font-size: 11px; color: #bbb; padding-left: 14px; position: relative; line-height: 1.5; }
+    .hypothesis-list li::before { content: "•"; position: absolute; left: 0; color: #2ecc71; }
+    .plan-cols { display: flex; gap: 16px; flex-wrap: wrap; }
+    .plan-col-group { flex: 1; min-width: 200px; }
+    .col-tag {
+      display: inline-block; font-size: 10px; padding: 2px 6px; border-radius: 3px;
+      background: #2a2a2a; color: #aaa; border: 1px solid #333; margin: 2px 2px 0 0;
+      font-family: monospace;
+    }
+    .col-tag.feature { border-color: #1a3a5c; color: #3498db; background: #0d1e2e; }
+    .col-tag.outcome { border-color: #1a3a1a; color: #2ecc71; background: #0d1e0d; }
+    .plan-key-questions { display: flex; flex-direction: column; gap: 4px; }
+    .plan-key-questions span {
+      font-size: 11px; color: #aaa; padding: 4px 8px;
+      border-left: 2px solid #3498db; background: #0d1e2e; border-radius: 0 3px 3px 0;
+    }
+
+    /* ── Progress ────────────────────────────────────────────────────────── */
+    .progress-wrap { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; padding: 12px 14px; }
+    .progress-step { font-size: 11px; color: #f1c40f; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+    .progress-step .spin { animation: spin 1.2s linear infinite; display: inline-block; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    .progress-bar  { background: #2a2a2a; border-radius: 4px; height: 6px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 4px; background: var(--accent); animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
+
+    /* ── Report ──────────────────────────────────────────────────────────── */
+    .report-card {
+      background: #1a2a1a; border: 1px solid #2a4a2a; border-radius: 8px;
+      padding: 18px 20px;
+    }
+    .report-card .report-label {
+      font-size: 9px; font-weight: 700; color: #2ecc71; letter-spacing: .6px;
+      text-transform: uppercase; margin-bottom: 10px; opacity: .7;
+    }
+    .report-card .report-body {
+      font-size: 13px; color: #e0e0e0; line-height: 1.85;
+      white-space: pre-wrap;
+    }
+
+    /* ── Charts grid ─────────────────────────────────────────────────────── */
+    .charts-label {
+      font-size: 9px; font-weight: 700; color: #aaa; letter-spacing: .5px;
+      text-transform: uppercase; border-bottom: 1px solid #333; padding-bottom: 6px;
+      margin-bottom: 10px;
+    }
+    .r2-charts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 1100px) { .r2-charts-grid { grid-template-columns: 1fr; } }
+    .r2-chart-card {
+      background: #1e1e1e; border: 1px solid #333; border-radius: 6px; overflow: hidden;
+    }
+    .r2-chart-hdr {
+      padding: 7px 10px; background: #2d2d2d; font-size: 11px; color: #aaa;
+      display: flex; align-items: center; gap: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .r2-chart-type {
+      font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+      background: #1a3a5c; color: #3498db; flex-shrink: 0;
+    }
+    .r2-chart-reason {
+      font-size: 9px; color: #555; overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; flex: 1;
+    }
+    .r2-chart-card img { width: 100%; height: auto; display: block; cursor: zoom-in; }
+    .r2-chart-card img:hover { opacity: .9; }
+    .fs-btn {
+      background: none; border: none; cursor: pointer; color: #555;
+      font-size: 15px; padding: 0 2px; flex-shrink: 0;
+    }
+    .fs-btn:hover { color: #aaa; }
+
+    /* ── Error ───────────────────────────────────────────────────────────── */
+    .error-card {
+      background: #2a1a1a; border: 1px solid #5a1a1a; border-radius: 6px;
+      padding: 12px 14px; color: #e74c3c; font-size: 12px;
+    }
+
+    /* ── Empty state ─────────────────────────────────────────────────────── */
+    .r2-empty { text-align: center; padding: 60px 20px; color: #555; font-size: 13px; }
+    .r2-empty .icon { font-size: 40px; margin-bottom: 12px; }
+
+    /* ── Lightbox ────────────────────────────────────────────────────────── */
+    .lightbox-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.93); z-index: 9999;
+      display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+    }
+    .lightbox-overlay img { width: 95vw; height: 93vh; object-fit: contain; border-radius: 4px; }
+    .lightbox-close { position: absolute; top: 16px; right: 20px; font-size: 28px; color: #aaa; cursor: pointer; }
+    .lightbox-close:hover { color: #fff; }
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/research2.js?v=1"></script>
+</head>
+
+<body x-data="research2" x-init="init()">
+
+  <!-- ── Lightbox ──────────────────────────────────────────────────────── -->
+  <div x-show="lightboxUrl" class="lightbox-overlay"
+       @click.self="closeLightbox()" @keydown.window.escape="closeLightbox()">
+    <span class="lightbox-close" @click="closeLightbox()">✕</span>
+    <img :src="lightboxUrl" alt="Chart fullscreen">
+  </div>
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link" href="/research">Research</a>
+      <a class="nav-link on" href="/research2">Research 2</a>
+    </nav>
+    <div class="topbar-right" style="color:#2ecc71;font-size:11px;font-weight:700">
+      ⚡ Orchestrated
+    </div>
+  </div>
+
+  <!-- ── Body ──────────────────────────────────────────────────────────── -->
+  <div class="r2-body">
+
+    <!-- Sidebar -->
+    <div class="r2-sidebar">
+      <div class="r2-sidebar-hdr">
+        <span>INVESTIGATIONS</span>
+        <button class="btn" style="padding:2px 8px;font-size:10px" @click="newRun()">+ New</button>
+      </div>
+      <div class="r2-run-list">
+        <template x-if="runs.length === 0">
+          <div style="padding:16px;color:#555;font-size:11px;text-align:center">No investigations yet</div>
+        </template>
+        <template x-for="run in runs" :key="run.id">
+          <div class="r2-run-item" :class="{active: selectedRun?.id === run.id}"
+               @click="selectRun(run)">
+            <div class="r2-run-name" x-text="run.name"></div>
+            <div class="r2-run-meta">
+              <span class="badge" :class="statusClass(run.status)" x-text="run.status"></span>
+              <span x-text="fmtDate(run.created_at)"></span>
+            </div>
+            <div x-show="run.config?.workflow_plan?.task_type"
+                 style="font-size:9px;color:#555;margin-top:1px"
+                 x-text="run.config?.workflow_plan?.task_type"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Main content -->
+    <div class="r2-main">
+
+      <!-- ── Empty state ──────────────────────────────────────────────── -->
+      <template x-if="view === 'list'">
+        <div class="r2-empty">
+          <div class="icon">🧠</div>
+          <div style="margin-bottom:8px">Research 2 — Orchestrated Investigations</div>
+          <div style="font-size:11px;color:#444;max-width:380px;margin:0 auto;line-height:1.6">
+            Ask a research question in plain language. Claude classifies the task,
+            selects relevant columns, runs the analysis, chooses the most informative
+            visuals, and writes a focused report.
+          </div>
+          <button class="btn" style="margin-top:16px;background:var(--accent);color:#fff;padding:7px 20px"
+                  @click="newRun()">Start Investigation</button>
+        </div>
+      </template>
+
+      <!-- ── New investigation form ────────────────────────────────────── -->
+      <template x-if="view === 'new'">
+        <div class="r2-form">
+          <div style="font-size:15px;color:#ddd;font-weight:700">New Investigation</div>
+
+          <div class="ai-notice">
+            <span class="icon">⚡</span>
+            <span>
+              You don't need to pick columns. Describe what you want to know — Claude will
+              classify the task, select the relevant signals, run the analysis, and choose
+              the most informative visuals for your question.
+            </span>
+          </div>
+
+          <div>
+            <label>INVESTIGATION NAME</label>
+            <input type="text" x-model="form.name" placeholder="e.g. OI_signal_study_Apr28">
+          </div>
+
+          <div>
+            <label>RESEARCH QUESTION</label>
+            <textarea x-model="form.question"
+              placeholder="Describe what you want to investigate in plain language.
+
+Examples:
+• Do open-interest weighted metrics predict 1-day forward returns on SPY?
+• Which OI features have the most stable year-over-year signal?
+• Does a high put/call OI ratio predict a directional move in the next week?
+• What happened on the days where ret_1d_fwd exceeded 2%?"></textarea>
+            <div class="r2-hint">Be specific about the direction of inquiry. The more context, the better the column selection.</div>
+          </div>
+
+          <div>
+            <label>SOURCE TABLE</label>
+            <div class="preset-row">
+              <button class="preset-btn" :class="{active: form.table==='daily_features'}"
+                      @click="setTable('daily_features')">OI / daily_features</button>
+              <button class="preset-btn" :class="{active: form.table==='surface_metrics_core'}"
+                      @click="setTable('surface_metrics_core')">Surface / surface_metrics_core</button>
+            </div>
+            <input type="text" x-model="form.table" style="font-size:11px">
+          </div>
+
+          <div>
+            <label>TICKERS <span style="color:#555;font-weight:400">(comma-separated — blank = all)</span></label>
+            <input type="text" x-model="form.tickers" placeholder="SPY, QQQ, IWM">
+            <template x-if="availableTickers.length > 0">
+              <div class="ticker-chips">
+                <template x-for="t in availableTickers" :key="t">
+                  <span class="ticker-chip" @click="addTicker(t)" x-text="t"></span>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <div class="r2-row">
+            <div>
+              <label>DATE FROM</label>
+              <input type="date" x-model="form.date_from">
+            </div>
+            <div>
+              <label>DATE TO</label>
+              <input type="date" x-model="form.date_to">
+            </div>
+            <div>
+              <label>MODEL</label>
+              <select x-model="form.model">
+                <option value="claude-sonnet-4-6">Sonnet 4.6 (faster)</option>
+                <option value="claude-opus-4-7">Opus 4.7 (deeper)</option>
+              </select>
+            </div>
+          </div>
+
+          <div x-show="submitError"
+               style="background:#2a1a1a;border:1px solid #5a1a1a;border-radius:4px;padding:8px 12px;color:#e74c3c;font-size:12px"
+               x-text="submitError"></div>
+
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn"
+                    style="background:var(--accent);color:#fff;padding:7px 20px;font-size:12px"
+                    @click="submitRun()" :disabled="submitting">
+              <span x-text="submitting ? '⚡ Planning…' : '⚡ Classify &amp; Run'"></span>
+            </button>
+            <button class="btn" @click="view='list'" style="color:#888">Cancel</button>
+            <span x-show="submitting" style="font-size:11px;color:#f1c40f">
+              Claude is reading your question and building a workflow plan…
+            </span>
+          </div>
+        </div>
+      </template>
+
+      <!-- ── Investigation detail ──────────────────────────────────────── -->
+      <template x-if="view === 'run' && selectedRun">
+        <div style="display:flex;flex-direction:column;gap:18px">
+
+          <!-- Header -->
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+            <span style="font-size:16px;color:#ddd;font-weight:700" x-text="selectedRun.name"></span>
+            <span class="badge" :class="statusClass(selectedRun.status)" x-text="selectedRun.status"></span>
+            <span style="font-size:10px;color:#555" x-text="fmtDate(selectedRun.created_at)"></span>
+            <button class="btn" style="margin-left:auto;font-size:10px;color:#e74c3c"
+                    @click="deleteRun(selectedRun.id)">✕ Delete</button>
+          </div>
+
+          <!-- Research question -->
+          <div style="font-size:12px;color:#888;font-style:italic;border-left:3px solid #333;padding-left:10px"
+               x-text="selectedRun.question"></div>
+
+          <!-- ── Workflow Plan ──────────────────────────────────────────── -->
+          <template x-if="plan">
+            <div class="plan-card">
+              <div class="plan-header">
+                <span class="plan-task-badge"
+                      :style="`background:${taskTypeBadgeColor};color:#7ec8e3`"
+                      x-text="plan.task_type"></span>
+                <span style="font-size:11px;color:#777;font-weight:700;letter-spacing:.3px">WORKFLOW PLAN</span>
+                <span style="font-size:10px;color:#444;margin-left:auto"
+                      x-text="plan.depth ? 'Depth: ' + plan.depth : ''"></span>
+              </div>
+              <div class="plan-body">
+
+                <!-- Reasoning -->
+                <div>
+                  <div class="plan-section-label">Classification reasoning</div>
+                  <div class="plan-reasoning" x-text="plan.task_reasoning"></div>
+                </div>
+
+                <!-- Hypotheses -->
+                <template x-if="plan.hypotheses?.length">
+                  <div>
+                    <div class="plan-section-label">Hypotheses to test</div>
+                    <ul class="hypothesis-list">
+                      <template x-for="h in plan.hypotheses" :key="h">
+                        <li x-text="h"></li>
+                      </template>
+                    </ul>
+                  </div>
+                </template>
+
+                <!-- Column selection -->
+                <div class="plan-cols">
+                  <div class="plan-col-group">
+                    <div class="plan-section-label">Feature columns (X)</div>
+                    <template x-for="c in (plan.feature_columns || [])" :key="c">
+                      <span class="col-tag feature" x-text="c"></span>
+                    </template>
+                    <span x-show="!plan.feature_columns?.length" style="font-size:10px;color:#555">none selected</span>
+                  </div>
+                  <div class="plan-col-group">
+                    <div class="plan-section-label">Outcome columns (Y)</div>
+                    <template x-for="c in (plan.outcome_columns || [])" :key="c">
+                      <span class="col-tag outcome" x-text="c"></span>
+                    </template>
+                    <span x-show="!plan.outcome_columns?.length" style="font-size:10px;color:#555">none selected</span>
+                  </div>
+                </div>
+
+                <!-- Key questions -->
+                <template x-if="plan.key_questions?.length">
+                  <div>
+                    <div class="plan-section-label">Key questions to answer</div>
+                    <div class="plan-key-questions">
+                      <template x-for="q in plan.key_questions" :key="q">
+                        <span x-text="q"></span>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Scan focus -->
+                <template x-if="plan.scan_focus">
+                  <div>
+                    <div class="plan-section-label">Analysis focus</div>
+                    <div style="font-size:11px;color:#aaa" x-text="plan.scan_focus"></div>
+                  </div>
+                </template>
+
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Running progress ──────────────────────────────────────── -->
+          <template x-if="isRunning">
+            <div class="progress-wrap">
+              <div class="progress-step">
+                <span class="spin">⚙</span>
+                <span x-text="progressStep || 'Running…'"></span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width:100%"></div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Error ─────────────────────────────────────────────────── -->
+          <template x-if="selectedRun.status === 'error'">
+            <div class="error-card">
+              <div style="font-weight:700;margin-bottom:6px">Investigation failed</div>
+              <div style="white-space:pre-wrap;font-size:11px;color:#c0392b"
+                   x-text="selectedRun.error_msg || 'Unknown error'"></div>
+            </div>
+          </template>
+
+          <!-- ── AI Report ─────────────────────────────────────────────── -->
+          <template x-if="reportText">
+            <div class="report-card">
+              <div class="report-label">AI Research Report</div>
+              <div class="report-body" x-text="reportText"></div>
+            </div>
+          </template>
+
+          <!-- ── Charts ────────────────────────────────────────────────── -->
+          <template x-if="charts.length > 0">
+            <div>
+              <div class="charts-label">
+                Selected Visuals
+                <span style="color:#555;font-weight:400;font-size:9px">
+                  — <span x-text="charts.length"></span> chart<span x-show="charts.length !== 1">s</span>
+                  chosen by Claude as most relevant to your question
+                </span>
+              </div>
+              <div class="r2-charts-grid">
+                <template x-for="chart in charts" :key="chart.id">
+                  <div class="r2-chart-card">
+                    <div class="r2-chart-hdr">
+                      <span class="r2-chart-type" x-text="chartTypeLabel(chart.chart_type)"></span>
+                      <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis"
+                            x-text="chart.title"></span>
+                      <button class="fs-btn" @click.stop="openLightbox(chartUrl(chart.id))"
+                              title="Fullscreen">⛶</button>
+                    </div>
+                    <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy"
+                         @click="openLightbox(chartUrl(chart.id))">
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- Running with no charts yet -->
+          <template x-if="isRunning && charts.length === 0">
+            <div style="text-align:center;padding:30px;color:#555;font-size:12px">
+              Charts will appear here when the analysis completes.
+            </div>
+          </template>
+
+        </div>
+      </template>
+
+    </div><!-- /r2-main -->
+  </div><!-- /r2-body -->
+
+</body>
+</html>

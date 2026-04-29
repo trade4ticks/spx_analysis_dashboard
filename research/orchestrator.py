@@ -1,0 +1,518 @@
+"""
+Research 2 orchestration layer — Phase 1.
+
+Sits above the deterministic tools and decides:
+  1. What kind of analysis the question requires (classify)
+  2. Which columns / tools to run (plan)
+  3. Which specific visuals are worth generating (direct)
+  4. How to frame the final narrative (report)
+
+The deterministic tools (scanner, blocks, charts) are unchanged building blocks.
+"""
+import json
+import re
+from typing import Optional
+
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None
+
+from research import scanner, blocks, charts, db as rdb
+
+_OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
+
+TASK_TYPES = [
+    "single-factor-scan",
+    "multi-factor-interaction",
+    "backtest-pnl-attribution",
+    "event-study",
+    "regime-analysis",
+    "microstructure-investigation",
+    "strategy-entry-condition",
+    "anomaly-investigation",
+]
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+_PLAN_SYSTEM = (
+    "You are a quantitative research orchestrator. "
+    "Read a research question and available data, then produce a precise workflow plan. "
+    "Output ONLY valid JSON — no prose, no markdown fences."
+)
+
+_PLAN_USER = """\
+Research question:
+\"\"\"{question}\"\"\"
+
+Data:
+  Table:  {table}
+  Tickers: {tickers}
+  Period:  {date_range}
+
+Available numeric columns:
+{columns}
+
+Return a JSON object with exactly these keys:
+
+{{
+  "task_type": "<one of: {task_types}>",
+  "task_reasoning": "<1-2 sentences: why this classification>",
+  "hypotheses": ["<testable hypothesis>", ...],
+  "feature_columns": ["<col_name>", ...],
+  "outcome_columns": ["<col_name>", ...],
+  "depth": "<broad | deep | targeted>",
+  "scan_focus": "<what relationship patterns to look for>",
+  "key_questions": ["<specific question the analysis must answer>", ...],
+  "report_guidance": "<instruction for the final narrative>",
+  "column_selection_reasoning": "<why these columns>"
+}}
+
+Column selection rules:
+- feature_columns: predictor/signal columns (X), max 15
+- outcome_columns: what to predict (Y), prefer forward return columns (ret_Nd_fwd), max 4
+- Use ONLY column names from the available list above
+- Never include: id, ticker, trade_date, created_at, updated_at
+- broad depth: include all plausibly relevant features
+- targeted depth: 3-7 most directly relevant features
+"""
+
+_VIZ_SYSTEM = (
+    "You are a data visualization selector for quantitative research. "
+    "Choose the minimum set of charts that best answer the research question. "
+    "Output ONLY valid JSON."
+)
+
+_VIZ_USER = """\
+Research question: {question}
+
+Top scan results (sorted by composite score):
+{scan_summary}
+
+Choose 3 to 6 charts. Available chart types:
+- bucket_profile  : avg return + win rate across all decile buckets (shows full relationship shape)
+- equity_curve    : simulated P&L for top/bottom decile over time (shows tradability)
+- scatter         : raw scatter plot with regression line (shows distribution and outliers)
+- yearly_consistency : per-year returns top vs bottom (shows temporal stability)
+
+Return a JSON array (each element has these keys):
+[
+  {{
+    "chart_type": "<bucket_profile|equity_curve|scatter|yearly_consistency>",
+    "ticker": "<ticker or null>",
+    "x_col": "<feature column>",
+    "y_col": "<outcome column>",
+    "reason": "<one sentence: why this chart answers the question>"
+  }}
+]
+"""
+
+_REPORT_USER = """\
+RESEARCH QUESTION (primary directive):
+\"\"\"{question}\"\"\"
+
+TASK TYPE: {task_type}
+FOCUS: {scan_focus}
+REPORT GUIDANCE: {report_guidance}
+
+TOP SIGNALS:
+{signal_table}
+
+FULL BUCKET PROFILES (top 3):
+{bucket_profiles}
+
+EQUITY CURVES:
+{equity_summary}
+
+Write a focused research report (300-600 words):
+1. Answer the research question directly in the first paragraph
+2. Describe the full bucket profile shape — not just top/bottom
+3. Distinguish what is tradable from what looks spurious
+4. Cite specific numbers (scores, spreads, consistency %)
+5. State clearly what was tested and what did not work
+6. End with a one-sentence actionable conclusion
+
+Professional quant voice. No fluff.
+"""
+
+
+# ── Phase 1: Classify and plan ────────────────────────────────────────────────
+
+async def classify_and_plan(
+    question: str,
+    available_columns: list[dict],
+    tickers: list[str],
+    table: str,
+    date_from: Optional[str],
+    date_to: Optional[str],
+    model: str = "claude-sonnet-4-6",
+) -> dict:
+    """
+    Call Claude to classify the research question and produce a workflow plan.
+    Returns the validated plan dict.
+    """
+    if _anthropic is None:
+        raise RuntimeError("anthropic SDK not installed")
+
+    col_lines = "\n".join(f"  {c['name']}" for c in available_columns)
+    tickers_str = ", ".join(tickers) if tickers else "all (no ticker filter)"
+    date_range = f"{date_from or 'earliest'} → {date_to or 'latest'}"
+
+    prompt = _PLAN_USER.format(
+        question=question,
+        table=table,
+        tickers=tickers_str,
+        date_range=date_range,
+        columns=col_lines,
+        task_types=" | ".join(TASK_TYPES),
+    )
+
+    client = _anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model=model,
+        max_tokens=1500,
+        system=_PLAN_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw).strip()
+
+    plan = json.loads(raw)
+
+    # Validate: only keep columns that actually exist in the table
+    valid_cols = {c["name"] for c in available_columns}
+    plan["feature_columns"] = [c for c in plan.get("feature_columns") or [] if c in valid_cols]
+    plan["outcome_columns"] = [c for c in plan.get("outcome_columns") or [] if c in valid_cols]
+    plan.setdefault("task_type", "single-factor-scan")
+    plan.setdefault("hypotheses", [])
+    plan.setdefault("key_questions", [])
+
+    return plan
+
+
+# ── Phase 1: AI-directed visualization selection ──────────────────────────────
+
+async def select_visualizations(
+    question: str,
+    scan_results: list[dict],
+    model: str = "claude-sonnet-4-6",
+) -> list[dict]:
+    """
+    After scan results are available, ask Claude which charts to generate.
+    Returns list of chart specs: [{chart_type, ticker, x_col, y_col, reason}].
+    """
+    if _anthropic is None or not scan_results:
+        return []
+
+    ranked = sorted(
+        [s for s in scan_results if "error" not in s],
+        key=lambda s: s.get("composite_score", 0), reverse=True,
+    )[:15]
+
+    if not ranked:
+        return []
+
+    lines = []
+    for s in ranked:
+        rob = s.get("robustness", {})
+        lines.append(
+            f"  [{s.get('composite_score', 0):.0f}] "
+            f"{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')}: "
+            f"pattern={s.get('pattern')}, pearson={s.get('pearson_r', 0):.3f}, "
+            f"consistency={rob.get('yearly_consistency_pct', '?')}%, "
+            f"concentration={rob.get('concentration_risk', 1):.2f}, "
+            f"half_stable={'Y' if rob.get('half_sample_stable') else 'N'}"
+        )
+
+    prompt = _VIZ_USER.format(question=question, scan_summary="\n".join(lines))
+
+    client = _anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model=model,
+        max_tokens=800,
+        system=_VIZ_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw = resp.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw).strip()
+
+    try:
+        specs = json.loads(raw)
+        if not isinstance(specs, list):
+            specs = []
+    except Exception:
+        specs = []
+
+    return specs[:6]
+
+
+# ── Phase 1: Compose final report ─────────────────────────────────────────────
+
+async def _compose_report(
+    question: str,
+    plan: dict,
+    ranked_scans: list[dict],
+    equity_results: list[dict],
+    model: str,
+) -> str:
+    if _anthropic is None:
+        return "(anthropic SDK not available)"
+
+    valid = [s for s in ranked_scans if "error" not in s]
+    top = valid[:10]
+
+    # Signal table
+    sig_lines = [
+        f"{'Score':>5}  {'Signal':<55} {'Pattern':<22} {'Consist':>8} {'Conc':>5}",
+        "-" * 100,
+    ]
+    for s in top:
+        rob = s.get("robustness", {})
+        sig = f"{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')}"
+        sig_lines.append(
+            f"{s.get('composite_score', 0):>5.0f}  {sig:<55} "
+            f"{s.get('pattern', ''):< 22} "
+            f"{str(rob.get('yearly_consistency_pct', '—'))+'%':>8} "
+            f"{rob.get('concentration_risk', 1.0):>5.2f}"
+        )
+
+    # Bucket profiles for top 3
+    bp_lines = []
+    for s in top[:3]:
+        bs = [b for b in (s.get("bucket_stats") or []) if b is not None]
+        if bs:
+            bp_lines.append(
+                f"\n{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')} "
+                f"(score={s.get('composite_score', 0):.0f}, pattern={s.get('pattern')}):"
+            )
+            bp_lines.append(f"  {'Bucket':>6} {'N':>5} {'AvgRet':>9} {'WinRate':>8} {'Sharpe':>7}")
+            for b in bs:
+                bp_lines.append(
+                    f"  {b['bucket']:>6} {b['n']:>5} "
+                    f"{b['avg_ret']*100:>8.3f}% {b['win_rate']*100:>7.1f}% "
+                    f"{b.get('sharpe', 0):>7.3f}"
+                )
+
+    # Equity summary
+    eq_lines = []
+    for r in sorted(equity_results, key=lambda x: x.get("final_equity") or 0, reverse=True)[:8]:
+        eq_lines.append(
+            f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} → {r.get('outcome_col')} "
+            f"({r.get('which')}): final={r.get('final_equity')}, "
+            f"maxDD={r.get('max_drawdown')}, n={r.get('n_trades')}"
+        )
+
+    client = _anthropic.AsyncAnthropic()
+    msg = await client.messages.create(
+        model=model,
+        max_tokens=1500,
+        messages=[{
+            "role": "user",
+            "content": _REPORT_USER.format(
+                question=question,
+                task_type=plan.get("task_type", ""),
+                scan_focus=plan.get("scan_focus", ""),
+                report_guidance=plan.get("report_guidance", ""),
+                signal_table="\n".join(sig_lines),
+                bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
+                equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
+            ),
+        }],
+    )
+    return msg.content[0].text.strip()
+
+
+# ── Phase 1: Main execution pipeline ─────────────────────────────────────────
+
+async def execute_v2_pipeline(
+    main_pool,
+    oi_pool,
+    run_id: str,
+    question: str,
+    plan: dict,
+    config: dict,
+    model: str = "claude-sonnet-4-6",
+    log=print,
+) -> str:
+    """
+    Phase 1 execution:
+      1. Fetch data for AI-selected columns
+      2. Run scans
+      3. Ask Claude which visuals to generate (3-6 charts)
+      4. Generate only those visuals
+      5. Compose focused narrative report
+    """
+    from research.engine import _fetch_cache  # reuse fetch logic
+
+    table = config.get("table", "daily_features")
+    tickers = config.get("tickers") or []
+    date_from = config.get("date_from")
+    date_to = config.get("date_to")
+
+    x_cols = plan.get("feature_columns") or []
+    y_cols = plan.get("outcome_columns") or []
+
+    if not x_cols or not y_cols:
+        raise ValueError("Workflow plan has no feature or outcome columns to scan.")
+
+    data_pool = oi_pool if table in _OI_TABLES else main_pool
+
+    # ── 1. Fetch ──────────────────────────────────────────────────────────
+    log(f"[1/4] Fetching data — {len(x_cols)} features, {len(y_cols)} outcomes...")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary=f"[RUNNING] Step 1/4: Fetching data…")
+
+    cache, fetch_errors = await _fetch_cache(
+        data_pool, table, tickers, x_cols, y_cols, date_from, date_to, log)
+    if not cache:
+        raise ValueError(f"No data loaded. {'; '.join(fetch_errors)}")
+
+    # ── 2. Scan ───────────────────────────────────────────────────────────
+    n_pairs = sum(
+        1 for rows in cache.values()
+        for x in x_cols for y in y_cols
+        if x != y and x in (rows[0].keys() if rows else {}) and y in (rows[0].keys() if rows else {})
+    )
+    log(f"[2/4] Scanning {n_pairs} pairs…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary=f"[RUNNING] Step 2/4: Scanning {n_pairs} pairs…")
+
+    all_scans = []
+    async with main_pool.acquire() as conn:
+        for cache_key, rows in cache.items():
+            ticker = None if cache_key == "_all" else cache_key
+            avail = set(rows[0].keys()) if rows else set()
+            for x_col in x_cols:
+                if x_col not in avail:
+                    continue
+                for y_col in y_cols:
+                    if y_col not in avail or x_col == y_col:
+                        continue
+                    try:
+                        scan = scanner.scan_relationship(rows, x_col, y_col, ticker)
+                        await rdb.save_result(conn, run_id, "scan", x_col, y_col, scan, ticker)
+                        all_scans.append(scan)
+                    except Exception as exc:
+                        log(f"  SCAN ERROR {ticker or 'all'} {x_col}→{y_col}: {exc}")
+
+    valid = [s for s in all_scans if "error" not in s]
+    ranked = sorted(valid, key=lambda s: s.get("composite_score", 0), reverse=True)
+    log(f"  {len(valid)} pairs scanned. "
+        f"Top: {ranked[0].get('x_col')} → {ranked[0].get('y_col')} "
+        f"score={ranked[0].get('composite_score', 0):.0f}" if ranked else "  No valid results.")
+
+    # ── 3. AI visualization selection ─────────────────────────────────────
+    log("[3/4] Selecting visualizations…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary="[RUNNING] Step 3/4: Selecting visualizations…")
+
+    viz_specs = await select_visualizations(question, all_scans, model)
+    log(f"  Claude selected {len(viz_specs)} chart(s)")
+
+    # Generate selected charts
+    equity_results = []
+    async with main_pool.acquire() as conn:
+        for spec in viz_specs:
+            c_type = spec.get("chart_type")
+            x_col  = spec.get("x_col")
+            y_col  = spec.get("y_col")
+            ticker = spec.get("ticker") or None
+            cache_key = ticker if ticker else "_all"
+            rows = cache.get(cache_key)
+            if not rows or not x_col or not y_col:
+                continue
+
+            avail = set(rows[0].keys())
+            if x_col not in avail or y_col not in avail:
+                log(f"  SKIP {c_type}: {x_col}/{y_col} not in fetched data")
+                continue
+
+            scan_r = next(
+                (s for s in valid
+                 if s.get("x_col") == x_col and s.get("y_col") == y_col
+                 and (s.get("ticker") or None) == ticker),
+                {},
+            )
+            title_base = f"{ticker or 'all'} | {x_col} → {y_col}"
+
+            try:
+                if c_type == "bucket_profile" and scan_r:
+                    png = charts.bucket_profile_chart(scan_r)
+                    if png:
+                        await rdb.save_chart(conn, run_id, "bucket_profile",
+                                             f"Profile {title_base}",
+                                             png, ticker, x_col, y_col)
+
+                elif c_type == "equity_curve":
+                    rob = scan_r.get("robustness", {}) if scan_r else {}
+                    conc = rob.get("concentration_risk", 1.0)
+                    min_bn = rob.get("min_bucket_n", 0)
+                    expanded = conc > 0.60 or min_bn < 20
+                    top_w = "top2" if expanded else "top"
+                    bot_w = "bottom2" if expanded else "bottom"
+                    note = None
+                    if expanded:
+                        note = (f"Expanded to D9-D10/D1-D2 "
+                                f"(concentration={conc:.2f}, min_n={min_bn})")
+
+                    top_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, top_w, 10, ticker)
+                    bot_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, bot_w, 10, ticker)
+                    if note:
+                        top_eq["concentration_note"] = note
+                        bot_eq["concentration_note"] = note
+
+                    await rdb.save_result(conn, run_id, "equity_curve_top",  x_col, y_col, top_eq, ticker)
+                    await rdb.save_result(conn, run_id, "equity_curve_bottom", x_col, y_col, bot_eq, ticker)
+                    equity_results.extend([top_eq, bot_eq])
+
+                    png = charts.equity_curve_chart(top_eq, bot_eq)
+                    if png:
+                        await rdb.save_chart(conn, run_id, "equity_curve",
+                                             f"Equity {title_base}",
+                                             png, ticker, x_col, y_col)
+
+                elif c_type == "scatter":
+                    scat = blocks.scatter_sample_from_rows(rows, x_col, y_col, ticker=ticker)
+                    if scat.get("points"):
+                        png = charts.scatter_chart(scat)
+                        if png:
+                            await rdb.save_chart(conn, run_id, "scatter",
+                                                 f"Scatter {title_base}",
+                                                 png, ticker, x_col, y_col)
+
+                elif c_type == "yearly_consistency":
+                    ydata = (scan_r.get("robustness") or {}).get("yearly_data") if scan_r else None
+                    if ydata:
+                        yr_result = {
+                            "years": ydata,
+                            "consistency_pct": (scan_r.get("robustness") or {}).get(
+                                "yearly_consistency_pct"),
+                            "ticker": ticker,
+                            "feature_col": x_col,
+                            "outcome_col": y_col,
+                        }
+                        png = charts.yearly_consistency_chart(yr_result)
+                        if png:
+                            await rdb.save_chart(conn, run_id, "yearly_consistency",
+                                                 f"Yearly {title_base}",
+                                                 png, ticker, x_col, y_col)
+
+                log(f"  ✓ {c_type}: {title_base}")
+            except Exception as exc:
+                log(f"  CHART ERROR {c_type} {title_base}: {exc}")
+
+    # ── 4. Compose report ─────────────────────────────────────────────────
+    log("[4/4] Composing report…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/4: Composing report…")
+
+    summary = await _compose_report(question, plan, ranked, equity_results, model)
+    log("  Report complete.")
+    return summary
