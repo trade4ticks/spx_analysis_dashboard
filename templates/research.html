@@ -194,7 +194,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research.js?v=13"></script>
+  <script src="/static/js/research.js?v=15"></script>
 </head>
 
 <body x-data="research" x-init="init()">
@@ -604,6 +604,11 @@
                       <button class="fs-btn" @click.stop="openChartFullscreen('c-equity-' + r.id)"
                               title="Fullscreen">⛶</button>
                     </div>
+                    <template x-if="r.result?.concentration_note">
+                      <div style="padding:3px 10px;font-size:9px;color:#f1c40f;background:#1a1200;border-top:1px solid #3a2800">
+                        ⚠ <span x-text="r.result.concentration_note"></span>
+                      </div>
+                    </template>
                     <div class="chart-canvas-wrap" style="height:300px">
                       <canvas :id="'c-equity-' + r.id"></canvas>
                     </div>
@@ -654,14 +659,19 @@
           <!-- ── Static PNG charts (scatter + heatmap) ────────────────── -->
           <template x-if="staticCharts.length > 0">
             <div>
-              <div class="section-hdr">SCATTER &amp; HEATMAP
+              <div class="section-hdr">CHART GALLERY
                 <span style="color:#555;font-weight:400;font-size:10px"> — click to fullscreen</span>
               </div>
               <div class="charts-grid" style="margin-top:10px">
                 <template x-for="chart in staticCharts" :key="chart.id">
                   <div class="chart-card">
                     <div class="chart-card-hdr" style="display:flex;align-items:center">
-                      <span class="chart-type-badge" x-text="chart.chart_type === 'correlation_heatmap' ? 'Heatmap' : 'Scatter'"></span>
+                      <span class="chart-type-badge" x-text="
+                        chart.chart_type === 'correlation_heatmap' ? 'Heatmap' :
+                        chart.chart_type === 'bucket_profile'      ? 'Profile' :
+                        chart.chart_type === 'equity_curve'        ? 'Equity' :
+                        chart.chart_type === 'combo_quadrant'      ? 'Combo' : 'Scatter'
+                      "></span>
                       <span style="flex:1;overflow:hidden;text-overflow:ellipsis"
                             x-text="chart.title || chart.chart_type"></span>
                       <button class="fs-btn" @click.stop="openLightbox(chartUrl(chart.id))"

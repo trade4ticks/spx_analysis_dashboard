@@ -495,9 +495,35 @@ async def run_pipeline(
                 cache_key = ticker if ticker else "_all"
                 rows = cache.get(cache_key, [])
 
-                # Standard top/bottom decile curves
-                top = blocks.equity_curve_from_rows(rows, x_col, y_col, "top", 10, ticker)
-                bot = blocks.equity_curve_from_rows(rows, x_col, y_col, "bottom", 10, ticker)
+                rob = s.get("robustness", {})
+                concentration = rob.get("concentration_risk", 1.0)
+                min_bucket_n = rob.get("min_bucket_n", 0)
+
+                # Expand to D9-D10 / D1-D2 when extreme decile is too concentrated or too thin
+                use_expanded = concentration > 0.60 or min_bucket_n < 20
+                top_which = "top2" if use_expanded else "top"
+                bot_which = "bottom2" if use_expanded else "bottom"
+
+                concentration_note = None
+                if use_expanded:
+                    if concentration > 0.60:
+                        concentration_note = (
+                            f"D10 concentration: {concentration*100:.0f}% of signal from one year"
+                            f" — expanded to D9-D10 / D1-D2"
+                        )
+                    else:
+                        concentration_note = (
+                            f"Extreme decile thin (min n={min_bucket_n} per bucket)"
+                            f" — expanded to D9-D10 / D1-D2"
+                        )
+                    log(f"    {ticker or 'all'} {x_col}->{y_col}: {concentration_note}")
+
+                top = blocks.equity_curve_from_rows(rows, x_col, y_col, top_which, 10, ticker)
+                bot = blocks.equity_curve_from_rows(rows, x_col, y_col, bot_which, 10, ticker)
+
+                if concentration_note:
+                    top["concentration_note"] = concentration_note
+                    bot["concentration_note"] = concentration_note
 
                 await rdb.save_result(conn, run_id, "equity_curve_top",
                                       x_col, y_col, top, ticker)
@@ -519,32 +545,34 @@ async def run_pipeline(
                         f"Equity {ticker or 'all'} | {x_col} -> {y_col}",
                         png, ticker, x_col, y_col)
 
-                # Also compute top2 (D9+D10) and bottom2 (D1+D2) for adjacent-decile analysis
-                bs = s.get("bucket_stats") or []
-                valid_bs = [b for b in bs if b is not None]
-                if len(valid_bs) >= 9:
-                    d9_avg = valid_bs[8].get("avg_ret", 0) if len(valid_bs) > 8 else 0
-                    d10_avg = valid_bs[9].get("avg_ret", 0) if len(valid_bs) > 9 else 0
-                    # If D9 has similar or better returns than average, include top2 curve
-                    if d9_avg > 0 and d10_avg > 0:
-                        top2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "top2", 10, ticker)
-                        if top2.get("points"):
-                            await rdb.save_result(conn, run_id, "equity_curve_top2",
-                                                  x_col, y_col, top2, ticker)
-                            await rdb.save_series(conn, run_id, x_col, "equity_curve_top2",
-                                                  top2["points"], ticker=ticker, y_col=y_col)
-                            equity_results.append(top2)
+                # When already expanded, skip the adjacency-conditional extras.
+                # When using strict single decile, still offer D9-D10/D1-D2 if adjacent
+                # decile is directionally consistent with D10/D1.
+                if not use_expanded:
+                    bs = s.get("bucket_stats") or []
+                    valid_bs = [b for b in bs if b is not None]
+                    if len(valid_bs) >= 9:
+                        d9_avg = valid_bs[8].get("avg_ret", 0) if len(valid_bs) > 8 else 0
+                        d10_avg = valid_bs[9].get("avg_ret", 0) if len(valid_bs) > 9 else 0
+                        if d9_avg > 0 and d10_avg > 0:
+                            top2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "top2", 10, ticker)
+                            if top2.get("points"):
+                                await rdb.save_result(conn, run_id, "equity_curve_top2",
+                                                      x_col, y_col, top2, ticker)
+                                await rdb.save_series(conn, run_id, x_col, "equity_curve_top2",
+                                                      top2["points"], ticker=ticker, y_col=y_col)
+                                equity_results.append(top2)
 
-                    d1_avg = valid_bs[0].get("avg_ret", 0)
-                    d2_avg = valid_bs[1].get("avg_ret", 0) if len(valid_bs) > 1 else 0
-                    if d1_avg < 0 and d2_avg < 0:
-                        bot2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "bottom2", 10, ticker)
-                        if bot2.get("points"):
-                            await rdb.save_result(conn, run_id, "equity_curve_bottom2",
-                                                  x_col, y_col, bot2, ticker)
-                            await rdb.save_series(conn, run_id, x_col, "equity_curve_bottom2",
-                                                  bot2["points"], ticker=ticker, y_col=y_col)
-                            equity_results.append(bot2)
+                        d1_avg = valid_bs[0].get("avg_ret", 0)
+                        d2_avg = valid_bs[1].get("avg_ret", 0) if len(valid_bs) > 1 else 0
+                        if d1_avg < 0 and d2_avg < 0:
+                            bot2 = blocks.equity_curve_from_rows(rows, x_col, y_col, "bottom2", 10, ticker)
+                            if bot2.get("points"):
+                                await rdb.save_result(conn, run_id, "equity_curve_bottom2",
+                                                      x_col, y_col, bot2, ticker)
+                                await rdb.save_series(conn, run_id, x_col, "equity_curve_bottom2",
+                                                      bot2["points"], ticker=ticker, y_col=y_col)
+                                equity_results.append(bot2)
 
         log(f"  {len(equity_results)} equity curves done.")
 

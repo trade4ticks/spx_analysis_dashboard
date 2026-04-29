@@ -80,29 +80,37 @@ def decile_bar_chart(result: dict) -> bytes:
     return _to_png(fig)
 
 
+_WHICH_LABEL = {
+    "top":     "Top Decile (D10)",
+    "top2":    "Top 2 Deciles (D9-D10)",
+    "bottom":  "Bottom Decile (D1)",
+    "bottom2": "Bottom 2 Deciles (D1-D2)",
+}
+
+
 def equity_curve_chart(top: dict, bottom: Optional[dict] = None) -> bytes:
     title = "Equity Curve — " + _label(
         top.get("ticker", ""), top.get("feature_col", ""), top.get("outcome_col", "")
     )
     fig, ax = _base_fig(figsize=(12, 5), title=title)
 
-    def _plot(result, label, color):
+    def _plot(result, fallback_label, color):
         pts = result.get("points", [])
         if not pts:
             return
+        label = _WHICH_LABEL.get(result.get("which"), fallback_label)
         idxs = list(range(len(pts)))
         vals = [p["value"] for p in pts]
         ax.plot(idxs, vals, color=color, linewidth=1.2, label=label)
-        # Sparse x-axis date labels (every ~10% of trades)
         step = max(1, len(pts) // 8)
         tick_idxs = idxs[::step]
-        tick_labels = [pts[i]["date"][:7] for i in tick_idxs]  # YYYY-MM
+        tick_labels = [pts[i]["date"][:7] for i in tick_idxs]
         ax.set_xticks(tick_idxs)
         ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=7)
 
-    _plot(top, "Top Decile", _POS)
+    _plot(top, "Top", _POS)
     if bottom:
-        _plot(bottom, "Bottom Decile", _NEG)
+        _plot(bottom, "Bottom", _NEG)
 
     ax.axhline(1.0, color="#555", linewidth=0.6, linestyle="--")
     ax.set_ylabel("Equity (start = 1.0)", color=_TEXT)
@@ -111,9 +119,15 @@ def equity_curve_chart(top: dict, bottom: Optional[dict] = None) -> bytes:
     dd = top.get("max_drawdown")
     n = top.get("n_trades")
     final = top.get("final_equity")
+    anno_y = 0.04
     if n is not None:
         info = f"Trades: {n}  |  Final: {final:.2f}x  |  MaxDD: {dd*100:.1f}%"
-        ax.text(0.02, 0.04, info, transform=ax.transAxes, color=_DIM, fontsize=10)
+        ax.text(0.02, anno_y, info, transform=ax.transAxes, color=_DIM, fontsize=10)
+        anno_y += 0.08
+    note = top.get("concentration_note")
+    if note:
+        ax.text(0.02, anno_y, f"⚠ {note}",
+                transform=ax.transAxes, color=_YELLOW, fontsize=8, va="bottom")
     return _to_png(fig)
 
 

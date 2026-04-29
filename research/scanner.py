@@ -282,17 +282,30 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
         full_bot = np.mean(full_buckets[0] + full_buckets[1]) if full_buckets[0] + full_buckets[1] else 0
         full_direction = 1 if full_top > full_bot else -1
 
+        yearly_data = []
         for yr, yr_pairs in sorted(by_year.items()):
             if len(yr_pairs) < n_buckets * 2:
                 continue
             years_checked += 1
             yr_buckets = _bucket(yr_pairs, n_buckets)
             if len(yr_buckets) >= 4:
-                yr_top = np.mean(yr_buckets[-2] + yr_buckets[-1]) if yr_buckets[-2] + yr_buckets[-1] else 0
-                yr_bot = np.mean(yr_buckets[0] + yr_buckets[1]) if yr_buckets[0] + yr_buckets[1] else 0
+                top_pool = yr_buckets[-2] + yr_buckets[-1]
+                bot_pool = yr_buckets[0] + yr_buckets[1]
+                yr_top = float(np.mean(top_pool)) if top_pool else 0.0
+                yr_bot = float(np.mean(bot_pool)) if bot_pool else 0.0
                 yr_dir = 1 if yr_top > yr_bot else -1
                 if yr_dir == full_direction:
                     years_consistent += 1
+                yr_n = sum(len(b) for b in yr_buckets if b)
+                yearly_data.append({
+                    "year": int(yr),
+                    "top_avg": round(yr_top, 6),
+                    "bot_avg": round(yr_bot, 6),
+                    "n": yr_n,
+                    "top_beats": yr_top > yr_bot,
+                })
+    else:
+        yearly_data = []
 
     consistency_pct = round(years_consistent / years_checked * 100, 1) if years_checked else None
 
@@ -353,6 +366,7 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
         "yearly_consistency_pct":  consistency_pct,
         "years_checked":           years_checked,
         "years_consistent":        years_consistent,
+        "yearly_data":             yearly_data,
         "concentration_risk":      concentration,
         "half_sample_stable":      half_stable,
         "loyo_fragile":            loyo_fragile,

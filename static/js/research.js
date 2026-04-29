@@ -346,13 +346,18 @@ document.addEventListener('alpine:init', () => {
       }
 
       // ── Equity curves (render top + bottom together) ─────────────────────
+      const _whichLabel = {
+        top:     'Top Decile (D10)', top2:    'Top 2 Deciles (D9-D10)',
+        bottom:  'Bottom Decile (D1)', bottom2: 'Bottom 2 Deciles (D1-D2)',
+      };
       const topResults = this.results.filter(r => r.analysis_type === 'equity_curve_top');
       for (const r of topResults) {
         const el = document.getElementById('c-equity-' + r.id);
         if (!el || !r.result?.points) continue;
         const pts = r.result.points;
+        const topLabel = _whichLabel[r.result?.which] || 'Top Decile';
         const datasets = [{
-          label: 'Top Decile',
+          label: topLabel,
           data:  pts.map(p => p.value),
           borderColor: '#2ecc71', backgroundColor: 'transparent',
           borderWidth: 2, pointRadius: 0, tension: 0.1,
@@ -362,8 +367,9 @@ document.addEventListener('alpine:init', () => {
           x.ticker === r.ticker && x.x_col === r.x_col && x.y_col === r.y_col
         );
         if (botResult?.result?.points) {
+          const botLabel = _whichLabel[botResult.result?.which] || 'Bottom Decile';
           datasets.push({
-            label: 'Bottom Decile',
+            label: botLabel,
             data:  botResult.result.points.map(p => p.value),
             borderColor: '#e74c3c', backgroundColor: 'transparent',
             borderWidth: 2, pointRadius: 0, tension: 0.1,
@@ -561,16 +567,19 @@ document.addEventListener('alpine:init', () => {
       // Legacy support + extract from scan robustness
       const legacy = this.results.filter(r => r.analysis_type === 'yearly_consistency');
       if (legacy.length) return legacy;
-      return this.scans.filter(r => r.result?.robustness?.yearly_consistency_pct != null)
-        .map(r => ({
-          ...r,
-          analysis_type: 'yearly_consistency',
-          result: {
-            consistency_pct: r.result.robustness.yearly_consistency_pct,
-            wins: r.result.robustness.years_consistent,
-            total_years: r.result.robustness.years_checked,
-          },
-        }));
+      return this.scans.filter(r =>
+        r.result?.robustness?.yearly_consistency_pct != null &&
+        r.result?.robustness?.yearly_data?.length > 0
+      ).map(r => ({
+        ...r,
+        analysis_type: 'yearly_consistency',
+        result: {
+          consistency_pct: r.result.robustness.yearly_consistency_pct,
+          wins: r.result.robustness.years_consistent,
+          total_years: r.result.robustness.years_checked,
+          years: r.result.robustness.yearly_data,
+        },
+      }));
     },
     get interactions() {
       return this.results.filter(r =>
@@ -610,9 +619,12 @@ document.addEventListener('alpine:init', () => {
       }).sort((a, b) => (b.score || 0) - (a.score || 0));
     },
 
-    // PNG charts — show ALL generated chart images on screen
+    // PNG charts — sorted: bucket profiles first, then combos, scatter, equity, heatmap
     get staticCharts() {
-      return this.charts;
+      const order = { bucket_profile: 0, combo_quadrant: 1, scatter: 2, equity_curve: 3, correlation_heatmap: 4 };
+      return [...this.charts].sort((a, b) =>
+        (order[a.chart_type] ?? 99) - (order[b.chart_type] ?? 99)
+      );
     },
 
     exportComboCsv() {
