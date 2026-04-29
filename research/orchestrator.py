@@ -306,6 +306,9 @@ async def _compose_report(
             f"maxDD={r.get('max_drawdown')}, n={r.get('n_trades')}"
         )
 
+    def _safe(s: str) -> str:
+        return str(s).replace("{", "{{").replace("}", "}}")
+
     client = _anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
@@ -313,10 +316,10 @@ async def _compose_report(
         messages=[{
             "role": "user",
             "content": _REPORT_USER.format(
-                question=question,
-                task_type=plan.get("task_type", ""),
-                scan_focus=plan.get("scan_focus", ""),
-                report_guidance=plan.get("report_guidance", ""),
+                question=_safe(question),
+                task_type=_safe(plan.get("task_type", "")),
+                scan_focus=_safe(plan.get("scan_focus", "")),
+                report_guidance=_safe(plan.get("report_guidance", "")),
                 signal_table="\n".join(sig_lines),
                 bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
                 equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
