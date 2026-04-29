@@ -201,7 +201,7 @@
     .lightbox-close:hover { color: #fff; }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=2"></script>
+  <script src="/static/js/research2.js?v=3"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -557,14 +557,72 @@ Examples:
             </div>
           </template>
 
-          <!-- ── Charts ────────────────────────────────────────────────── -->
+          <!-- ── Interactive Charts (Chart.js) ─────────────────────────── -->
+          <template x-if="scans.length > 0">
+            <div>
+              <div class="charts-label">
+                Bucket Profiles
+                <span style="color:#555;font-weight:400;font-size:9px">
+                  — top signals by robustness score (interactive)
+                </span>
+              </div>
+              <div class="r2-charts-grid">
+                <template x-for="r in scans.slice(0, 6)" :key="'d-'+r.id">
+                  <div class="r2-chart-card" x-show="(r.result?.bucket_stats || []).filter(b => b).length >= 3">
+                    <div class="r2-chart-hdr">
+                      <span class="r2-chart-type">Decile</span>
+                      <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis;font-size:10px"
+                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                      <span style="color:#555;font-size:9px"
+                            x-text="'score: ' + (r.result?.composite_score || 0).toFixed(0)"></span>
+                    </div>
+                    <div style="height:220px;padding:6px">
+                      <canvas :id="'r2-decile-' + r.id"></canvas>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="equityCurveResults.length > 0">
+            <div>
+              <div class="charts-label">
+                Equity Curves
+                <span style="color:#555;font-weight:400;font-size:9px">— top/bottom decile performance</span>
+              </div>
+              <div class="r2-charts-grid">
+                <template x-for="r in equityCurveResults.filter(x => x.analysis_type === 'equity_curve_top').slice(0, 4)"
+                          :key="'e-'+r.id">
+                  <div class="r2-chart-card" x-show="r.result?.points?.length > 0">
+                    <div class="r2-chart-hdr">
+                      <span class="r2-chart-type">Equity</span>
+                      <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis;font-size:10px"
+                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
+                    </div>
+                    <div style="height:220px;padding:6px">
+                      <canvas :id="'r2-equity-' + r.id"></canvas>
+                    </div>
+                    <div style="padding:2px 8px 6px;font-size:9px;color:#666;display:flex;gap:10px">
+                      <span>Trades: <span style="color:#ccc" x-text="r.result?.n_trades || '—'"></span></span>
+                      <span>Final: <span :style="(r.result?.final_equity||1)>=1?'color:#3498db':'color:#e84393'"
+                            x-text="r.result?.final_equity ? r.result.final_equity.toFixed(3)+'x' : '—'"></span></span>
+                      <span>MaxDD: <span style="color:#e84393"
+                            x-text="r.result?.max_drawdown != null ? (r.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Static PNG Charts (scatter, heatmap, etc.) ──────────── -->
           <template x-if="charts.length > 0">
             <div>
               <div class="charts-label">
-                Selected Visuals
+                Additional Visuals
                 <span style="color:#555;font-weight:400;font-size:9px">
                   — <span x-text="charts.length"></span> chart<span x-show="charts.length !== 1">s</span>
-                  chosen by Claude as most relevant to your question
                 </span>
               </div>
               <div class="r2-charts-grid">

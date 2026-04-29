@@ -5,11 +5,13 @@ document.addEventListener('alpine:init', () => {
     runs:        [],
     selectedRun: null,
     charts:      [],
+    results:     [],
     view:        'list',   // 'list' | 'new' | 'run'
     loading:     false,
     error:       null,
     pollTimer:   null,
     lightboxUrl: null,
+    _chartInstances: {},
 
     followups:        [],
     followupQuestion: '',
@@ -62,27 +64,139 @@ document.addEventListener('alpine:init', () => {
       this.view        = 'run';
       this.selectedRun = run;
       this.charts      = [];
+      this.results     = [];
       this.error       = null;
+      this._destroyCharts();
       this._stopPoll();
       await this._loadRunDetail(run.id);
       if (run.status === 'running') this._startPoll(run.id);
     },
 
+    _destroyCharts() {
+      Object.values(this._chartInstances).forEach(c => c.destroy());
+      this._chartInstances = {};
+    },
+
     async _loadRunDetail(runId) {
       this.loading = true;
+      this._destroyCharts();
       try {
-        const [runRes, chartsRes, fupsRes] = await Promise.all([
+        const [runRes, chartsRes, resultsRes, fupsRes] = await Promise.all([
           fetch(`/api/research2/run/${runId}`),
           fetch(`/api/research2/run/${runId}/charts`),
+          fetch(`/api/research2/run/${runId}/results`),
           fetch(`/api/research2/run/${runId}/followups`),
         ]);
-        if (runRes.ok)    this.selectedRun = await runRes.json();
-        if (chartsRes.ok) this.charts      = await chartsRes.json();
-        if (fupsRes.ok)   this.followups   = await fupsRes.json();
+        if (runRes.ok)     this.selectedRun = await runRes.json();
+        if (chartsRes.ok)  this.charts      = await chartsRes.json();
+        if (resultsRes.ok) this.results     = await resultsRes.json();
+        if (fupsRes.ok)    this.followups   = await fupsRes.json();
+
+        // Render interactive charts after DOM update
+        await this.$nextTick();
+        this._renderInteractiveCharts();
       } catch (e) {
         this.error = e.message;
       } finally {
         this.loading = false;
+      }
+    },
+
+    // Computed getters for scan results
+    get scans() {
+      return this.results.filter(r => r.analysis_type === 'scan' && !r.result?.error)
+        .sort((a, b) => (b.result?.composite_score || 0) - (a.result?.composite_score || 0));
+    },
+    get equityCurveResults() {
+      return this.results.filter(r => r.analysis_type?.startsWith('equity_curve'));
+    },
+
+    _renderInteractiveCharts() {
+      const darkScales = {
+        x: { ticks: {color:'#888',font:{size:9},maxRotation:45}, grid: {color:'rgba(255,255,255,0.05)'}, border: {color:'transparent'} },
+        y: { ticks: {color:'#888',font:{size:9}}, grid: {color:'rgba(255,255,255,0.05)'}, border: {color:'transparent'} },
+      };
+
+      // Decile/bucket profile charts for top scans
+      for (const r of this.scans.slice(0, 6)) {
+        const bs = (r.result?.bucket_stats || []).filter(b => b != null);
+        if (bs.length < 3) continue;
+        const el = document.getElementById('r2-decile-' + r.id);
+        if (!el) continue;
+
+        const avgs = bs.map(b => (b.avg_ret || 0) * 100);
+        const winRates = bs.map(b => (b.win_rate || 0.5) * 100);
+        this._chartInstances['r2-decile-' + r.id] = new Chart(el, {
+          type: 'bar',
+          data: {
+            labels: bs.map(b => 'D' + b.bucket),
+            datasets: [{
+              label: 'Avg Return %',
+              data: avgs,
+              backgroundColor: avgs.map(v => v >= 0 ? '#3498db' : '#e84393'),
+              borderWidth: 0,
+            }],
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: 'rgba(20,20,20,0.92)', borderColor: '#444', borderWidth: 1,
+                callbacks: {
+                  afterLabel: (ctx) => {
+                    const b = bs[ctx.dataIndex];
+                    return b ? `WR: ${(b.win_rate*100).toFixed(1)}%  Sharpe: ${(b.sharpe||0).toFixed(3)}  n: ${b.n}` : '';
+                  },
+                },
+              },
+            },
+            scales: darkScales,
+          },
+        });
+      }
+
+      // Equity curves
+      const topEqs = this.results.filter(r => r.analysis_type === 'equity_curve_top');
+      for (const r of topEqs.slice(0, 4)) {
+        const el = document.getElementById('r2-equity-' + r.id);
+        if (!el || !r.result?.points) continue;
+        const pts = r.result.points;
+        const datasets = [{
+          label: r.result.which === 'top2' ? 'Top 2 (D9-D10)' : 'Top (D10)',
+          data: pts.map(p => p.value),
+          borderColor: '#3498db', backgroundColor: 'transparent',
+          borderWidth: 2, pointRadius: 0, tension: 0.1,
+        }];
+        const bot = this.results.find(x =>
+          x.analysis_type === 'equity_curve_bottom' &&
+          x.ticker === r.ticker && x.x_col === r.x_col && x.y_col === r.y_col);
+        if (bot?.result?.points) {
+          datasets.push({
+            label: bot.result.which === 'bottom2' ? 'Bottom 2 (D1-D2)' : 'Bottom (D1)',
+            data: bot.result.points.map(p => p.value),
+            borderColor: '#e84393', backgroundColor: 'transparent',
+            borderWidth: 2, pointRadius: 0, tension: 0.1,
+          });
+        }
+        this._chartInstances['r2-equity-' + r.id] = new Chart(el, {
+          type: 'line',
+          data: {
+            labels: pts.map(p => p.date?.slice(0, 7) || ''),
+            datasets,
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: {
+              legend: { labels: { color: '#aaa', font: { size: 10 } } },
+              tooltip: { backgroundColor: 'rgba(20,20,20,0.92)', borderColor: '#444', borderWidth: 1 },
+            },
+            scales: {
+              ...darkScales,
+              x: { ...darkScales.x, ticks: { ...darkScales.x.ticks, maxTicksLimit: 10 } },
+            },
+          },
+        });
       }
     },
 

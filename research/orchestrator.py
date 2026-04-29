@@ -596,34 +596,49 @@ async def execute_v2_pipeline(
             s.get("composite_interaction_score") or s.get("composite_score") or 0
         ), reverse=True)
 
-    # ── 3. AI visualization selection ─────────────────────────────────────
-    log("[3/5] Selecting visualizations…")
+    # ── 3. Deterministic chart generation (no LLM call) ────────────────────
+    log("[3/5] Generating charts deterministically from top signals…")
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id,
-                             ai_summary="[RUNNING] Step 3/5: Selecting visualizations…")
+                             ai_summary="[RUNNING] Step 3/4: Generating charts…")
 
-    viz_specs = await select_visualizations(question, all_scans, model)
-    log(f"  Claude selected {len(viz_specs)} chart(s)")
-    for i, spec in enumerate(viz_specs):
-        log(f"    [{i+1}] {spec.get('chart_type')}: "
-            f"{spec.get('ticker') or 'all'} | {spec.get('x_col')} → {spec.get('y_col')}"
-            f" — {spec.get('reason', '')[:80]}")
-    if not viz_specs and ranked:
-        log("  WARNING: Claude selected 0 charts — auto-generating from top signals")
-        # Only use single-factor scans (have x_col); skip interaction results (have combo)
-        single_scans = [s for s in ranked if s.get("x_col") and not s.get("combo")]
-        for s in single_scans[:4]:
-            viz_specs.append({"chart_type": "bucket_profile",
-                              "ticker": s.get("ticker"),
-                              "x_col": s["x_col"], "y_col": s["y_col"],
-                              "reason": "auto-fallback"})
-            viz_specs.append({"chart_type": "equity_curve",
-                              "ticker": s.get("ticker"),
-                              "x_col": s["x_col"], "y_col": s["y_col"],
-                              "reason": "auto-fallback"})
-        log(f"  Auto-generated {len(viz_specs)} chart specs from top {min(4, len(single_scans))} single-factor signals")
+    # Build chart specs deterministically: bucket profiles for top 5, equity for top 3,
+    # scatter for strongest, yearly consistency for most consistent
+    single_ranked = [s for s in ranked if s.get("x_col") and not s.get("combo")]
+    viz_specs = []
 
-    # Generate selected charts
+    # Bucket profiles for top 5 single-factor signals
+    for s in single_ranked[:5]:
+        viz_specs.append({"chart_type": "bucket_profile",
+                          "ticker": s.get("ticker"),
+                          "x_col": s["x_col"], "y_col": s["y_col"]})
+
+    # Equity curves for top 3
+    for s in single_ranked[:3]:
+        viz_specs.append({"chart_type": "equity_curve",
+                          "ticker": s.get("ticker"),
+                          "x_col": s["x_col"], "y_col": s["y_col"]})
+
+    # Scatter for the strongest signal
+    if single_ranked:
+        s = single_ranked[0]
+        viz_specs.append({"chart_type": "scatter",
+                          "ticker": s.get("ticker"),
+                          "x_col": s["x_col"], "y_col": s["y_col"]})
+
+    # Yearly consistency for the most consistent signal
+    most_consistent = sorted(
+        [s for s in single_ranked if (s.get("robustness") or {}).get("yearly_consistency_pct") is not None],
+        key=lambda s: s["robustness"]["yearly_consistency_pct"], reverse=True)
+    if most_consistent:
+        s = most_consistent[0]
+        viz_specs.append({"chart_type": "yearly_consistency",
+                          "ticker": s.get("ticker"),
+                          "x_col": s["x_col"], "y_col": s["y_col"]})
+
+    log(f"  {len(viz_specs)} charts to generate from top {len(single_ranked)} signals")
+
+    # Generate charts
     equity_results = []
     async with main_pool.acquire() as conn:
         for spec in viz_specs:
@@ -716,9 +731,9 @@ async def execute_v2_pipeline(
                 log(f"  CHART ERROR {c_type} {title_base}: {exc}")
 
     # ── 4. Compose report ─────────────────────────────────────────────────
-    log("[4/5] Composing report…")
+    log("[4/4] Composing report…")
     async with main_pool.acquire() as conn:
-        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/4: Composing report…")
 
     summary = await _compose_report(question, plan, ranked, equity_results, model,
                                     knowledge_rules=knowledge_rules)
