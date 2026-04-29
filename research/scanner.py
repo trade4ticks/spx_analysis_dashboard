@@ -31,12 +31,20 @@ def _jsonify(obj):
     return obj
 
 def _valid_pairs(rows: list[dict], x_col: str, y_col: str):
-    """Extract (x, y, trade_date) tuples where both are non-None."""
+    """Extract (x, y, trade_date) tuples where both are non-None and non-NaN."""
+    import math
     out = []
     for r in rows:
         xv, yv = r.get(x_col), r.get(y_col)
-        if xv is not None and yv is not None:
-            out.append((float(xv), float(yv), r.get("trade_date")))
+        if xv is None or yv is None:
+            continue
+        try:
+            xf, yf = float(xv), float(yv)
+        except (ValueError, TypeError):
+            continue
+        if math.isnan(xf) or math.isnan(yf):
+            continue
+        out.append((xf, yf, r.get("trade_date")))
     return out
 
 

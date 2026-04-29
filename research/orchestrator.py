@@ -509,6 +509,21 @@ async def execute_v2_pipeline(
                         continue
                     try:
                         scan = scanner.scan_relationship(rows, x_col, y_col, ticker)
+                        n_pts = scan.get("n", 0)
+                        if n_pts < len(rows) * 0.9:
+                            # Count why rows were lost
+                            n_x_none = sum(1 for r in rows if r.get(x_col) is None)
+                            n_y_none = sum(1 for r in rows if r.get(y_col) is None)
+                            import math
+                            n_x_nan = sum(1 for r in rows if r.get(x_col) is not None
+                                          and isinstance(r.get(x_col), float)
+                                          and math.isnan(r.get(x_col)))
+                            n_y_nan = sum(1 for r in rows if r.get(y_col) is not None
+                                          and isinstance(r.get(y_col), float)
+                                          and math.isnan(r.get(y_col)))
+                            log(f"    {x_col}→{y_col}: {n_pts}/{len(rows)} pairs "
+                                f"(x_none={n_x_none}, x_nan={n_x_nan}, "
+                                f"y_none={n_y_none}, y_nan={n_y_nan})")
                         await rdb.save_result(conn, run_id, "scan", x_col, y_col, scan, ticker)
                         all_scans.append(scan)
                     except Exception as exc:
