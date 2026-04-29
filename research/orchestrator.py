@@ -275,7 +275,7 @@ async def _compose_report(
         sig = f"{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')}"
         sig_lines.append(
             f"{s.get('composite_score', 0):>5.0f}  {sig:<55} "
-            f"{s.get('pattern', ''):< 22} "
+            f"{s.get('pattern', ''):<22} "
             f"{str(rob.get('yearly_consistency_pct', '—'))+'%':>8} "
             f"{rob.get('concentration_risk', 1.0):>5.2f}"
         )
