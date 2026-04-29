@@ -66,7 +66,7 @@ document.addEventListener('alpine:init', () => {
         const [runRes, chartsRes, fupsRes] = await Promise.all([
           fetch(`/api/research2/run/${runId}`),
           fetch(`/api/research2/run/${runId}/charts`),
-          fetch(`/api/research/run/${runId}/followups`),
+          fetch(`/api/research2/run/${runId}/followups`),
         ]);
         if (runRes.ok)    this.selectedRun = await runRes.json();
         if (chartsRes.ok) this.charts      = await chartsRes.json();
@@ -175,7 +175,7 @@ document.addEventListener('alpine:init', () => {
       this.followupError   = null;
       this.followupLoading = true;
       try {
-        const r = await fetch(`/api/research/run/${this.selectedRun.id}/followup`, {
+        const r = await fetch(`/api/research2/run/${this.selectedRun.id}/followup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question: q }),

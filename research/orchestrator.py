@@ -108,29 +108,34 @@ Return a JSON array (each element has these keys):
 """
 
 _REPORT_USER = """\
-RESEARCH QUESTION (primary directive):
+RESEARCH QUESTION (primary directive — address this directly):
 \"\"\"{question}\"\"\"
 
 TASK TYPE: {task_type}
 FOCUS: {scan_focus}
 REPORT GUIDANCE: {report_guidance}
 
-TOP SIGNALS:
+TOP SINGLE-FACTOR SIGNALS:
 {signal_table}
 
 FULL BUCKET PROFILES (top 3):
 {bucket_profiles}
 
+MULTI-FACTOR INTERACTIONS:
+{interaction_summary}
+
 EQUITY CURVES:
 {equity_summary}
 
-Write a focused research report (300-600 words):
+Write a focused research report (400-700 words):
 1. Answer the research question directly in the first paragraph
 2. Describe the full bucket profile shape — not just top/bottom
-3. Distinguish what is tradable from what looks spurious
-4. Cite specific numbers (scores, spreads, consistency %)
-5. State clearly what was tested and what did not work
-6. End with a one-sentence actionable conclusion
+3. If multi-factor combos were tested, explain which improved on singles
+   and describe as usable trading rules (e.g., "when X is high AND Y is rising")
+4. Distinguish what is tradable from what looks spurious
+5. Cite specific numbers (scores, spreads, consistency %)
+6. State clearly what was tested and what did NOT work
+7. End with a one-sentence actionable conclusion
 
 Professional quant voice. No fluff.
 """
@@ -297,6 +302,22 @@ async def _compose_report(
                     f"{b.get('sharpe', 0):>7.3f}"
                 )
 
+    # Interaction highlights
+    interactions = [s for s in valid if s.get("composite_interaction_score") is not None]
+    int_lines = []
+    if interactions:
+        top_int = sorted(interactions,
+                         key=lambda s: s.get("composite_interaction_score", 0), reverse=True)[:5]
+        for s in top_int:
+            combo = "+".join(s.get("combo", []))
+            bz = s.get("best_quadrant") or s.get("best_octant") or s.get("best_zone") or {}
+            int_lines.append(
+                f"  {s.get('ticker') or 'all'} | {combo} → {s.get('y_col')}: "
+                f"score={s.get('composite_interaction_score', 0):.0f}, "
+                f"lift={s.get('interaction_lift', 0):+.4f}, "
+                f"zone={bz.get('label', '?')} "
+                f"(avg={bz.get('avg_ret', 0):.4f}, WR={bz.get('win_rate', 0):.0%})")
+
     # Equity summary
     eq_lines = []
     for r in sorted(equity_results, key=lambda x: x.get("final_equity") or 0, reverse=True)[:8]:
@@ -322,6 +343,7 @@ async def _compose_report(
                 report_guidance=_safe(plan.get("report_guidance", "")),
                 signal_table="\n".join(sig_lines),
                 bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
+                interaction_summary="\n".join(int_lines) if int_lines else "(none tested)",
                 equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
             ),
         }],
@@ -410,11 +432,87 @@ async def execute_v2_pipeline(
         f"Top: {ranked[0].get('x_col')} → {ranked[0].get('y_col')} "
         f"score={ranked[0].get('composite_score', 0):.0f}" if ranked else "  No valid results.")
 
+    # ── 2b. Adaptive branching ─────────────────────────────────────────────
+    task_type = plan.get("task_type", "single-factor-scan")
+    strong = [s for s in ranked if s.get("composite_score", 0) >= 25]
+    weak_run = len(strong) == 0
+
+    if weak_run and len(x_cols) < 8:
+        log(f"  Adaptive: no signals ≥25 — skipping interaction scan.")
+    elif task_type in ("multi-factor-interaction", "strategy-entry-condition") or len(strong) >= 2:
+        # Run interaction analysis on top features
+        log(f"[2b] Adaptive: {len(strong)} strong signals — running interaction scan…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(conn, run_id,
+                                 ai_summary=f"[RUNNING] Step 2b: Interaction scan ({len(strong)} strong signals)…")
+
+        from itertools import combinations
+        # Get top features per (ticker, y_col)
+        feat_by_ty: dict[tuple, list[str]] = {}
+        for s in ranked[:15]:
+            key = (s.get("ticker"), s["y_col"])
+            if s["x_col"] not in feat_by_ty.setdefault(key, []):
+                feat_by_ty[key].append(s["x_col"])
+
+        n_interactions = 0
+        async with main_pool.acquire() as conn:
+            for (ticker, y_col), feats in feat_by_ty.items():
+                cache_key = ticker if ticker else "_all"
+                rows = cache.get(cache_key, [])
+                if not rows or len(feats) < 2:
+                    continue
+
+                # Best single-factor baseline for lift
+                baseline = max(
+                    (abs((s.get("best_single_bucket") or {}).get("sharpe", 0))
+                     for s in ranked
+                     if s.get("ticker") == ticker and s["y_col"] == y_col),
+                    default=0,
+                )
+
+                top_feats = feats[:5]
+                for fa, fb in combinations(top_feats, 2):
+                    try:
+                        result = scanner.scan_interaction_2f(
+                            rows, fa, fb, y_col, ticker, baseline)
+                    except Exception as exc:
+                        log(f"    2F ERROR {ticker or 'all'} {fa}+{fb}→{y_col}: {exc}")
+                        continue
+                    if result is None:
+                        continue
+                    await rdb.save_result(conn, run_id, "interaction",
+                                          f"{fa}+{fb}", y_col, result, ticker)
+                    all_scans.append(result)
+                    n_interactions += 1
+
+                # 3-factor combos from top 2-factor features
+                if len(top_feats) >= 3:
+                    for fa, fb, fc in combinations(top_feats[:4], 3):
+                        try:
+                            result = scanner.scan_interaction_3f(
+                                rows, fa, fb, fc, y_col, ticker, baseline)
+                        except Exception as exc:
+                            log(f"    3F ERROR {fa}+{fb}+{fc}: {exc}")
+                            continue
+                        if result is None:
+                            continue
+                        await rdb.save_result(conn, run_id, "interaction_3f",
+                                              f"{fa}+{fb}+{fc}", y_col, result, ticker)
+                        all_scans.append(result)
+                        n_interactions += 1
+
+        log(f"  {n_interactions} interaction combos tested.")
+        # Re-rank with interactions included
+        valid = [s for s in all_scans if "error" not in s]
+        ranked = sorted(valid, key=lambda s: (
+            s.get("composite_interaction_score") or s.get("composite_score") or 0
+        ), reverse=True)
+
     # ── 3. AI visualization selection ─────────────────────────────────────
-    log("[3/4] Selecting visualizations…")
+    log("[3/5] Selecting visualizations…")
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id,
-                             ai_summary="[RUNNING] Step 3/4: Selecting visualizations…")
+                             ai_summary="[RUNNING] Step 3/5: Selecting visualizations…")
 
     viz_specs = await select_visualizations(question, all_scans, model)
     log(f"  Claude selected {len(viz_specs)} chart(s)")
@@ -512,9 +610,9 @@ async def execute_v2_pipeline(
                 log(f"  CHART ERROR {c_type} {title_base}: {exc}")
 
     # ── 4. Compose report ─────────────────────────────────────────────────
-    log("[4/4] Composing report…")
+    log("[4/5] Composing report…")
     async with main_pool.acquire() as conn:
-        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/4: Composing report…")
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
 
     summary = await _compose_report(question, plan, ranked, equity_results, model)
     log("  Report complete.")

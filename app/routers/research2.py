@@ -2,12 +2,14 @@
 import json
 from typing import Optional
 
+import anthropic
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 from research import db as rdb
 from research import orchestrator
+from research.engine import format_corr_table
 
 router = APIRouter()
 
@@ -213,3 +215,113 @@ async def available_columns_endpoint(
     oi_pool=Depends(get_oi_pool),
 ):
     return await _get_columns(table, pool, oi_pool)
+
+
+# ── Follow-up questions ──────────────────────────────────────────────────────
+
+class FollowupRequest(BaseModel):
+    question: str
+
+
+@router.get("/run/{run_id}/results")
+async def get_results(run_id: str, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        results = await rdb.load_results(conn, run_id)
+    for r in results:
+        if isinstance(r.get("result"), str):
+            r["result"] = json.loads(r["result"])
+    return results
+
+
+@router.get("/run/{run_id}/followups")
+async def get_followups(run_id: str, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        return await rdb.load_followups(conn, run_id)
+
+
+@router.post("/run/{run_id}/followup")
+async def ask_followup(run_id: str, req: FollowupRequest, pool=Depends(get_pool)):
+    """Follow-up question about a completed Research 2 run."""
+    try:
+        return await _do_followup(run_id, req, pool)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Followup error: {type(exc).__name__}: {exc}")
+
+
+async def _do_followup(run_id: str, req: FollowupRequest, pool):
+    async with pool.acquire() as conn:
+        run = await rdb.load_run(conn, run_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        results   = await rdb.load_results(conn, run_id)
+        prev_fups = await rdb.load_followups(conn, run_id)
+
+    for r in results:
+        if isinstance(r.get("result"), str):
+            r["result"] = json.loads(r["result"])
+
+    # Build scan context
+    scan_rows = []
+    for r in results:
+        rd = r.get("result") or {}
+        if r.get("analysis_type") == "scan" and "error" not in rd:
+            scan_rows.append({**rd, "ticker": r.get("ticker"),
+                              "x_col": r.get("x_col"), "y_col": r.get("y_col")})
+    corr_table = format_corr_table(scan_rows) if scan_rows else "(no scans)"
+
+    # Interaction context
+    int_lines = []
+    for r in results:
+        if r.get("analysis_type") in ("interaction", "interaction_3f"):
+            rd = r.get("result") or {}
+            combo = "+".join(rd.get("combo", []))
+            int_lines.append(
+                f"  {r.get('ticker') or 'all'} | {combo} → {r.get('y_col')}: "
+                f"score={rd.get('composite_interaction_score', 0)}, "
+                f"lift={rd.get('interaction_lift', 0)}")
+    int_summary = "\n".join(int_lines) if int_lines else "(none)"
+
+    cfg = run.get("config") or {}
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg)
+    plan = cfg.get("workflow_plan") or {}
+
+    system = (
+        "You are a quantitative research analyst reviewing completed research. "
+        "Answer follow-up questions concisely, citing numbers from the analysis. "
+        "Be honest about what the data shows and does not show."
+    )
+
+    context_msg = (
+        f"Research question: {run.get('question')}\n"
+        f"Task type: {plan.get('task_type', '?')}\n"
+        f"Table: {cfg.get('table')}  |  "
+        f"Tickers: {', '.join(cfg.get('tickers') or ['all'])}\n\n"
+        f"=== Scan Results ===\n{corr_table}\n\n"
+        f"=== Interactions ===\n{int_summary}\n\n"
+        f"=== AI Summary ===\n{run.get('ai_summary') or '(none)'}"
+    )
+
+    messages = [
+        {"role": "user", "content": context_msg},
+        {"role": "assistant", "content": "I have the full research context. What's your question?"},
+    ]
+    for fup in prev_fups:
+        messages.append({"role": "user", "content": fup["question"]})
+        messages.append({"role": "assistant", "content": fup.get("answer") or ""})
+    messages.append({"role": "user", "content": req.question})
+
+    client = anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model=cfg.get("model") or "claude-sonnet-4-6",
+        max_tokens=2048,
+        system=system,
+        messages=messages,
+    )
+    answer = resp.content[0].text if resp.content else "No response."
+
+    async with pool.acquire() as conn:
+        saved = await rdb.save_followup(conn, run_id, req.question, answer)
+    return saved
