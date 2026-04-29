@@ -22,6 +22,55 @@ from research import scanner, blocks, charts, db as rdb
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 
+# ── Structured output tools (guaranteed valid JSON via tool_use) ──────────────
+
+_PLAN_TOOL = {
+    "name": "produce_plan",
+    "description": "Output the workflow plan as structured JSON.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_type":                 {"type": "string"},
+            "task_reasoning":            {"type": "string"},
+            "hypotheses":                {"type": "array", "items": {"type": "string"}},
+            "feature_columns":           {"type": "array", "items": {"type": "string"}},
+            "outcome_columns":           {"type": "array", "items": {"type": "string"}},
+            "depth":                     {"type": "string", "enum": ["broad", "deep", "targeted"]},
+            "scan_focus":                {"type": "string"},
+            "key_questions":             {"type": "array", "items": {"type": "string"}},
+            "report_guidance":           {"type": "string"},
+            "column_selection_reasoning": {"type": "string"},
+        },
+        "required": ["task_type", "feature_columns", "outcome_columns"],
+    },
+}
+
+_VIZ_TOOL = {
+    "name": "select_charts",
+    "description": "Select which charts to generate.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "charts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chart_type": {"type": "string", "enum": [
+                            "bucket_profile", "equity_curve", "scatter", "yearly_consistency"]},
+                        "ticker":     {"type": "string"},
+                        "x_col":      {"type": "string"},
+                        "y_col":      {"type": "string"},
+                        "reason":     {"type": "string"},
+                    },
+                    "required": ["chart_type", "x_col", "y_col"],
+                },
+            },
+        },
+        "required": ["charts"],
+    },
+}
+
 TASK_TYPES = [
     "single-factor-scan",
     "multi-factor-interaction",
@@ -151,10 +200,11 @@ async def classify_and_plan(
     date_from: Optional[str],
     date_to: Optional[str],
     model: str = "claude-sonnet-4-6",
+    knowledge_rules: list[str] = None,
 ) -> dict:
     """
     Call Claude to classify the research question and produce a workflow plan.
-    Returns the validated plan dict.
+    Uses tool_use for guaranteed valid JSON output.
     """
     if _anthropic is None:
         raise RuntimeError("anthropic SDK not installed")
@@ -172,46 +222,35 @@ async def classify_and_plan(
         task_types=" | ".join(TASK_TYPES),
     )
 
+    # Inject knowledge rules if available
+    if knowledge_rules:
+        rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
+        prompt += f"\n\nDOMAIN KNOWLEDGE (follow these strictly):\n{rules_text}"
+
     client = _anthropic.AsyncAnthropic()
     resp = await client.messages.create(
         model=model,
         max_tokens=1500,
-        system=_PLAN_SYSTEM,
+        system=[{"type": "text", "text": _PLAN_SYSTEM,
+                 "cache_control": {"type": "ephemeral"}}],
+        tools=[_PLAN_TOOL],
+        tool_choice={"type": "tool", "name": "produce_plan"},
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw = resp.content[0].text.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw).strip()
+    # Extract structured output from tool_use block
+    plan = None
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == "produce_plan":
+            plan = block.input
+            break
 
-    # Try to parse JSON; if malformed, attempt basic repair then retry
-    try:
+    if plan is None:
+        # Fallback: try parsing text response as JSON
+        raw = resp.content[0].text if resp.content and hasattr(resp.content[0], "text") else ""
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw).strip()
         plan = json.loads(raw)
-    except json.JSONDecodeError:
-        # Common Claude issues: trailing commas, unescaped quotes, truncated output
-        # Try to fix trailing commas before } or ]
-        fixed = re.sub(r",\s*([}\]])", r"\1", raw)
-        # Truncated output: try closing any open braces
-        open_b = fixed.count("{") - fixed.count("}")
-        open_a = fixed.count("[") - fixed.count("]")
-        if open_b > 0 or open_a > 0:
-            # Try to salvage by closing brackets
-            if not fixed.rstrip().endswith("}"):
-                fixed = fixed.rstrip().rstrip(",") + '"' + "}" * open_b + "]" * open_a
-        try:
-            plan = json.loads(fixed)
-        except json.JSONDecodeError:
-            # Last resort: retry the LLM call once with a stricter prompt
-            resp2 = await client.messages.create(
-                model=model,
-                max_tokens=1500,
-                system=_PLAN_SYSTEM + " Your previous response had invalid JSON. Be extra careful with quoting.",
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw2 = resp2.content[0].text.strip()
-            raw2 = re.sub(r"^```(?:json)?\s*", "", raw2)
-            raw2 = re.sub(r"\s*```$", "", raw2).strip()
-            plan = json.loads(raw2)  # if this fails too, let it raise
 
     # Validate: only keep columns that actually exist in the table
     valid_cols = {c["name"] for c in available_columns}
@@ -233,14 +272,15 @@ async def select_visualizations(
 ) -> list[dict]:
     """
     After scan results are available, ask Claude which charts to generate.
-    Returns list of chart specs: [{chart_type, ticker, x_col, y_col, reason}].
+    Uses tool_use for guaranteed valid JSON output.
     """
     if _anthropic is None or not scan_results:
         return []
 
     ranked = sorted(
         [s for s in scan_results if "error" not in s],
-        key=lambda s: s.get("composite_score", 0), reverse=True,
+        key=lambda s: (s.get("composite_interaction_score") or s.get("composite_score") or 0),
+        reverse=True,
     )[:15]
 
     if not ranked:
@@ -249,13 +289,13 @@ async def select_visualizations(
     lines = []
     for s in ranked:
         rob = s.get("robustness", {})
+        combo = s.get("combo")
+        label = "+".join(combo) if combo else s.get("x_col", "?")
         lines.append(
-            f"  [{s.get('composite_score', 0):.0f}] "
-            f"{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')}: "
-            f"pattern={s.get('pattern')}, pearson={s.get('pearson_r', 0):.3f}, "
-            f"consistency={rob.get('yearly_consistency_pct', '?')}%, "
-            f"concentration={rob.get('concentration_risk', 1):.2f}, "
-            f"half_stable={'Y' if rob.get('half_sample_stable') else 'N'}"
+            f"  [{s.get('composite_interaction_score') or s.get('composite_score', 0):.0f}] "
+            f"{s.get('ticker') or 'all'} | {label} → {s.get('y_col')}: "
+            f"pattern={s.get('pattern', '?')}, "
+            f"consistency={rob.get('yearly_consistency_pct', '?')}%"
         )
 
     prompt = _VIZ_USER.format(question=question, scan_summary="\n".join(lines))
@@ -264,22 +304,28 @@ async def select_visualizations(
     resp = await client.messages.create(
         model=model,
         max_tokens=800,
-        system=_VIZ_SYSTEM,
+        system=[{"type": "text", "text": _VIZ_SYSTEM,
+                 "cache_control": {"type": "ephemeral"}}],
+        tools=[_VIZ_TOOL],
+        tool_choice={"type": "tool", "name": "select_charts"},
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw = resp.content[0].text.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw).strip()
+    # Extract from tool_use block
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == "select_charts":
+            charts = block.input.get("charts", [])
+            return charts[:6]
 
+    # Fallback: try parsing text
+    raw = resp.content[0].text if resp.content and hasattr(resp.content[0], "text") else "[]"
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    raw = re.sub(r"\s*```$", "", raw).strip()
     try:
         specs = json.loads(raw)
-        if not isinstance(specs, list):
-            specs = []
+        return specs[:6] if isinstance(specs, list) else []
     except Exception:
-        specs = []
-
-    return specs[:6]
+        return []
 
 
 # ── Phase 1: Compose final report ─────────────────────────────────────────────
@@ -290,6 +336,7 @@ async def _compose_report(
     ranked_scans: list[dict],
     equity_results: list[dict],
     model: str,
+    knowledge_rules: list[str] = None,
 ) -> str:
     if _anthropic is None:
         return "(anthropic SDK not available)"
@@ -357,10 +404,23 @@ async def _compose_report(
     def _safe(s: str) -> str:
         return str(s).replace("{", "{{").replace("}", "}}")
 
+    # Knowledge rules injection
+    report_system = (
+        "You are a quantitative research analyst writing focused research reports. "
+        "Professional quant voice. No fluff."
+    )
+    if knowledge_rules:
+        rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
+        report_system += (
+            f"\n\nDOMAIN KNOWLEDGE & POLICIES (follow these strictly):\n{rules_text}"
+        )
+
     client = _anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
         max_tokens=1500,
+        system=[{"type": "text", "text": report_system,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{
             "role": "user",
             "content": _REPORT_USER.format(
@@ -388,6 +448,7 @@ async def execute_v2_pipeline(
     plan: dict,
     config: dict,
     model: str = "claude-sonnet-4-6",
+    knowledge_rules: list[str] = None,
     log=print,
 ) -> str:
     """
@@ -641,6 +702,7 @@ async def execute_v2_pipeline(
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
 
-    summary = await _compose_report(question, plan, ranked, equity_results, model)
+    summary = await _compose_report(question, plan, ranked, equity_results, model,
+                                    knowledge_rules=knowledge_rules)
     log("  Report complete.")
     return summary

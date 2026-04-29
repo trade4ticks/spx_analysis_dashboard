@@ -63,6 +63,9 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
     def _log(msg: str):
         logs.append(msg)
 
+    # Load knowledge rules for prompt injection
+    knowledge_rules = await _load_active_rules(main_pool)
+
     try:
         summary = await orchestrator.execute_v2_pipeline(
             main_pool=main_pool,
@@ -72,6 +75,7 @@ async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
             plan=plan,
             config=config,
             model=model,
+            knowledge_rules=knowledge_rules,
             log=_log,
         )
         async with main_pool.acquire() as conn:
@@ -151,6 +155,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
 
     # Classify and plan — synchronous, happens before background task so the
     # client gets the plan immediately in the response
+    knowledge_rules = await _load_active_rules(pool)
+
     try:
         plan = await orchestrator.classify_and_plan(
             question=req.question,
@@ -160,6 +166,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
             date_from=req.date_from,
             date_to=req.date_to,
             model=req.model,
+            knowledge_rules=knowledge_rules,
         )
     except Exception as exc:
         raise HTTPException(500, f"Workflow planning failed: {exc}")
@@ -221,6 +228,54 @@ async def available_columns_endpoint(
 
 class FollowupRequest(BaseModel):
     question: str
+
+
+class KnowledgeRule(BaseModel):
+    category: str = "policy"      # terminology, assumption, caveat, policy
+    rule: str
+
+
+class KnowledgeUpdate(BaseModel):
+    category: Optional[str] = None
+    rule: Optional[str] = None
+    active: Optional[bool] = None
+
+
+# ── Knowledge library ────────────────────────────────────────────────────────
+
+_knowledge_table_ready = False
+
+
+async def _ensure_knowledge_table(pool):
+    global _knowledge_table_ready
+    if _knowledge_table_ready:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_knowledge (
+                    id         SERIAL PRIMARY KEY,
+                    category   TEXT NOT NULL DEFAULT 'policy',
+                    rule       TEXT NOT NULL,
+                    active     BOOLEAN DEFAULT true,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _knowledge_table_ready = True
+    except Exception:
+        pass
+
+
+async def _load_active_rules(pool) -> list[str]:
+    """Load active knowledge rules as formatted strings for prompt injection."""
+    try:
+        await _ensure_knowledge_table(pool)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT category, rule FROM research_knowledge WHERE active = true ORDER BY id")
+        return [f"[{r['category']}] {r['rule']}" for r in rows]
+    except Exception:
+        return []
 
 
 @router.get("/run/{run_id}/results")
@@ -325,3 +380,57 @@ async def _do_followup(run_id: str, req: FollowupRequest, pool):
     async with pool.acquire() as conn:
         saved = await rdb.save_followup(conn, run_id, req.question, answer)
     return saved
+
+
+# ── Knowledge library endpoints ──────────────────────────────────────────────
+
+@router.get("/knowledge")
+async def list_knowledge(pool=Depends(get_pool)):
+    await _ensure_knowledge_table(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, category, rule, active, created_at "
+            "FROM research_knowledge ORDER BY id")
+    return [dict(r) for r in rows]
+
+
+@router.post("/knowledge")
+async def add_knowledge(req: KnowledgeRule, pool=Depends(get_pool)):
+    await _ensure_knowledge_table(pool)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO research_knowledge (category, rule) VALUES ($1, $2) "
+            "RETURNING id, category, rule, active, created_at",
+            req.category, req.rule)
+    return dict(row)
+
+
+@router.patch("/knowledge/{rule_id}")
+async def update_knowledge(rule_id: int, req: KnowledgeUpdate, pool=Depends(get_pool)):
+    await _ensure_knowledge_table(pool)
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM research_knowledge WHERE id = $1", rule_id)
+        if not existing:
+            raise HTTPException(404, "Rule not found")
+        if req.rule is not None:
+            await conn.execute(
+                "UPDATE research_knowledge SET rule = $2 WHERE id = $1", rule_id, req.rule)
+        if req.category is not None:
+            await conn.execute(
+                "UPDATE research_knowledge SET category = $2 WHERE id = $1", rule_id, req.category)
+        if req.active is not None:
+            await conn.execute(
+                "UPDATE research_knowledge SET active = $2 WHERE id = $1", rule_id, req.active)
+        row = await conn.fetchrow(
+            "SELECT id, category, rule, active, created_at "
+            "FROM research_knowledge WHERE id = $1", rule_id)
+    return dict(row)
+
+
+@router.delete("/knowledge/{rule_id}")
+async def delete_knowledge(rule_id: int, pool=Depends(get_pool)):
+    await _ensure_knowledge_table(pool)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM research_knowledge WHERE id = $1", rule_id)
+    return {"deleted": rule_id}

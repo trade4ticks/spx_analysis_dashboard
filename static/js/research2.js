@@ -16,6 +16,13 @@ document.addEventListener('alpine:init', () => {
     followupLoading:  false,
     followupError:    null,
 
+    // Knowledge library
+    knowledgeRules:        [],
+    newKnowledgeCategory:  'policy',
+    newKnowledgeText:      '',
+    editingKnowledgeId:    null,
+    editingKnowledgeText:  '',
+
     form: {
       name:      '',
       question:  '',
@@ -33,6 +40,7 @@ document.addEventListener('alpine:init', () => {
     async init() {
       await this.loadRuns();
       this._loadTickers();
+      this._loadKnowledge();
     },
 
     async _loadTickers() {
@@ -254,6 +262,61 @@ document.addEventListener('alpine:init', () => {
         correlation_heatmap: 'Heatmap',
         combo_quadrant:      'Combo',
       })[t] || t;
+    },
+
+    // ── Knowledge library ────────────────────────────────────────────────
+    async _loadKnowledge() {
+      try {
+        const r = await fetch('/api/research2/knowledge');
+        if (r.ok) this.knowledgeRules = await r.json();
+      } catch (_) {}
+    },
+
+    async addKnowledge() {
+      const text = this.newKnowledgeText.trim();
+      if (!text) return;
+      try {
+        const r = await fetch('/api/research2/knowledge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ category: this.newKnowledgeCategory, rule: text }),
+        });
+        if (r.ok) {
+          this.newKnowledgeText = '';
+          await this._loadKnowledge();
+        }
+      } catch (_) {}
+    },
+
+    async saveKnowledgeEdit(id) {
+      if (this.editingKnowledgeId !== id) return;
+      try {
+        await fetch(`/api/research2/knowledge/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rule: this.editingKnowledgeText }),
+        });
+        this.editingKnowledgeId = null;
+        await this._loadKnowledge();
+      } catch (_) {}
+    },
+
+    async toggleKnowledgeActive(kr) {
+      try {
+        await fetch(`/api/research2/knowledge/${kr.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: !kr.active }),
+        });
+        await this._loadKnowledge();
+      } catch (_) {}
+    },
+
+    async deleteKnowledge(id) {
+      try {
+        await fetch(`/api/research2/knowledge/${id}`, { method: 'DELETE' });
+        await this._loadKnowledge();
+      } catch (_) {}
     },
 
     // ── Helpers ────────────────────────────────────────────────────────────

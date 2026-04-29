@@ -256,6 +256,71 @@
           </div>
         </template>
       </div>
+
+      <!-- Knowledge library (bottom of sidebar) -->
+      <div style="border-top:1px solid #333;flex-shrink:0">
+        <details style="padding:0">
+          <summary style="padding:8px 10px;font-size:10px;color:#777;cursor:pointer;user-select:none;
+                          font-weight:700;letter-spacing:.3px;text-transform:uppercase">
+            Knowledge Library
+            <span style="font-weight:400;color:#555" x-text="'(' + knowledgeRules.length + ')'"></span>
+          </summary>
+          <div style="padding:4px 8px 8px;max-height:200px;overflow-y:auto">
+            <template x-for="(kr, ki) in knowledgeRules" :key="kr.id">
+              <div style="display:flex;gap:4px;align-items:flex-start;margin-bottom:4px;
+                          font-size:10px;padding:4px 6px;background:#222;border-radius:3px"
+                   :style="!kr.active ? 'opacity:0.4' : ''">
+                <span style="color:#3498db;flex-shrink:0;font-weight:600"
+                      x-text="'[' + kr.category + ']'"></span>
+                <template x-if="editingKnowledgeId !== kr.id">
+                  <span style="flex:1;color:#bbb;line-height:1.4" x-text="kr.rule"></span>
+                </template>
+                <template x-if="editingKnowledgeId === kr.id">
+                  <textarea x-model="editingKnowledgeText"
+                            @keydown.enter.prevent="saveKnowledgeEdit(kr.id)"
+                            @blur="saveKnowledgeEdit(kr.id)"
+                            style="flex:1;background:#1a1a1a;border:1px solid #3498db;color:#ddd;
+                                   font-size:10px;padding:3px;border-radius:2px;resize:vertical;
+                                   min-height:40px;font-family:inherit"></textarea>
+                </template>
+                <div style="display:flex;gap:2px;flex-shrink:0">
+                  <button @click="editingKnowledgeId = kr.id; editingKnowledgeText = kr.rule"
+                          style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px"
+                          title="Edit">✎</button>
+                  <button @click="toggleKnowledgeActive(kr)"
+                          style="background:none;border:none;cursor:pointer;font-size:10px;padding:0 2px"
+                          :style="kr.active ? 'color:#2ecc71' : 'color:#555'"
+                          :title="kr.active ? 'Active — click to disable' : 'Disabled — click to enable'"
+                          x-text="kr.active ? '●' : '○'"></button>
+                  <button @click="deleteKnowledge(kr.id)"
+                          style="background:none;border:none;color:#555;cursor:pointer;font-size:10px;padding:0 2px"
+                          title="Delete">✕</button>
+                </div>
+              </div>
+            </template>
+            <!-- Add new rule -->
+            <div style="margin-top:6px">
+              <div style="display:flex;gap:4px;margin-bottom:4px">
+                <select x-model="newKnowledgeCategory"
+                        style="background:#1a1a1a;border:1px solid #444;color:#aaa;font-size:10px;
+                               padding:2px 4px;border-radius:2px">
+                  <option value="terminology">terminology</option>
+                  <option value="assumption">assumption</option>
+                  <option value="caveat">caveat</option>
+                  <option value="policy">policy</option>
+                </select>
+                <input type="text" x-model="newKnowledgeText" placeholder="Add a rule..."
+                       @keydown.enter="addKnowledge()"
+                       style="flex:1;background:#1a1a1a;border:1px solid #444;color:#ddd;
+                              font-size:10px;padding:3px 6px;border-radius:2px">
+                <button @click="addKnowledge()"
+                        style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                               color:#3498db;font-size:10px;padding:2px 8px;border-radius:2px;cursor:pointer">+</button>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
     </div>
 
     <!-- Main content -->
