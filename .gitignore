@@ -20,3 +20,5 @@ Thumbs.db
 
 # Mockups (scratch files, not part of the app)
 mockups/
+research_config.yaml
+latest_research_summary.md
