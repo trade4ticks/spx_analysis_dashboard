@@ -10,9 +10,9 @@ from app.db import get_oi_pool
 router = APIRouter(tags=["oi_signals"])
 
 _METRICS = [
-    "zscore_oi_above_below_ratio_3m",
-    "zscore_oi_weighted_strike_all_div_spot_3m",
-    "d1_oi_weighted_strike_all_div_spot_change",
+    "zscore_oi_above_below_ratio_3m_pc",
+    "zscore_oi_weighted_all_div_spot_3m_pc",
+    "d1_oi_weighted_strike_all_div_spot_change_pc",
 ]
 
 _OUTCOME = "ret_1d_fwd_oc"
