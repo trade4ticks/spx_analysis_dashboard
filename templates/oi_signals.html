@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — OI Signals</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    .oi-body { flex: 1; overflow: auto; padding: 16px; }
+
+    /* Signal table */
+    .sig-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .sig-table th {
+      background: var(--raised); color: var(--dim); font-size: 9px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+      padding: 6px 8px; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 2; cursor: pointer; user-select: none;
+      white-space: nowrap;
+    }
+    .sig-table th:hover { color: var(--accent); }
+    .sig-table td {
+      padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
+      vertical-align: middle;
+    }
+    .sig-table tr:hover td { background: rgba(255,255,255,.03); }
+
+    .ticker-cell { font-weight: 700; color: var(--text); font-size: 12px; }
+    .decile-badge {
+      display: inline-block; padding: 1px 6px; border-radius: 3px;
+      font-weight: 700; font-size: 10px; min-width: 28px; text-align: center;
+    }
+    .decile-hot-pos .decile-badge { background: rgba(52,152,219,.2); color: #3498db; }
+    .decile-hot-neg .decile-badge { background: rgba(232,67,147,.2); color: #e84393; }
+    .pct-text { font-size: 9px; color: var(--dim); margin-left: 4px; }
+
+    .spark-cell { width: 140px; height: 45px; position: relative; }
+    .spark-cell canvas { width: 100% !important; height: 100% !important; }
+
+    /* Co-occurrence */
+    .cooc-section { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 16px; }
+    .cooc-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+    .cooc-table { border-collapse: collapse; font-size: 9px; }
+    .cooc-table th, .cooc-table td {
+      padding: 3px 6px; border: 1px solid rgba(255,255,255,.06); text-align: center;
+    }
+    .cooc-table th { background: var(--raised); color: var(--dim); font-weight: 600; }
+    .cooc-wrap { overflow: auto; max-height: 500px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/oi_signals.js?v=1"></script>
+</head>
+
+<body x-data="oiSignals" x-init="init()">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link on" href="/oi-signals">OI Signals</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link" href="/research">Research</a>
+      <a class="nav-link" href="/research2">Research 2</a>
+    </nav>
+    <div class="topbar-right" x-text="tickers.length ? tickers.length + ' tickers' : ''"></div>
+  </div>
+
+  <!-- Body -->
+  <div class="oi-body">
+
+    <!-- Loading -->
+    <div x-show="loading" style="text-align:center;padding:40px;color:var(--dim)">
+      Loading signal data for all tickers…
+    </div>
+    <div x-show="error" style="color:var(--danger);padding:16px" x-text="error"></div>
+
+    <!-- Signal table -->
+    <template x-if="!loading && tickers.length > 0">
+      <div>
+        <div style="font-size:13px;color:var(--text);font-weight:700;margin-bottom:8px">
+          OI Signal Dashboard
+          <span style="font-weight:400;color:var(--dim);font-size:11px">
+            — today's metric decile placement vs historical avg return
+            <span x-text="'(' + outcome + ')'"></span>
+          </span>
+        </div>
+
+        <div style="overflow:auto;max-height:calc(100vh - 200px)">
+          <table class="sig-table">
+            <thead>
+              <tr>
+                <th style="cursor:default">Ticker</th>
+                <th style="cursor:default">Date</th>
+                <template x-for="m in metrics" :key="m">
+                  <th colspan="2" @click="toggleSort(m)"
+                      x-text="metricShort(m) + sortArrow(m)"></th>
+                </template>
+              </tr>
+              <tr style="border-bottom:2px solid var(--border)">
+                <th style="cursor:default"></th>
+                <th style="cursor:default"></th>
+                <template x-for="m in metrics" :key="'sub-'+m">
+                  <template x-if="true">
+                    <th colspan="2" style="font-weight:400;font-size:8px;color:#555;cursor:default">
+                      Decile · Pctile · Chart
+                    </th>
+                  </template>
+                </template>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="t in sortedTickers" :key="t.ticker">
+                <tr>
+                  <td class="ticker-cell" x-text="t.ticker"></td>
+                  <td style="font-size:9px;color:var(--dim)" x-text="t.latest_date"></td>
+                  <template x-for="m in metrics" :key="t.ticker+m">
+                    <template x-if="true">
+                      <td :class="decileClass(t.metrics?.[m]?.today_decile)">
+                        <span class="decile-badge"
+                              x-text="t.metrics?.[m]?.today_decile != null ? 'D' + t.metrics[m].today_decile : '—'"></span>
+                        <span class="pct-text"
+                              x-text="t.metrics?.[m]?.today_percentile != null ? t.metrics[m].today_percentile + '%' : ''"></span>
+                      </td>
+                    </template>
+                  </template>
+                  <template x-for="m in metrics" :key="t.ticker+m+'-spark'">
+                    <td class="spark-cell">
+                      <canvas :id="'spark-' + t.ticker + '-' + m"></canvas>
+                    </td>
+                  </template>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Co-occurrence matrix -->
+        <div class="cooc-section">
+          <div style="font-size:13px;color:var(--text);font-weight:700;margin-bottom:8px">
+            Signal Co-occurrence
+            <span style="font-weight:400;color:var(--dim);font-size:11px">
+              — % of days two tickers land in the same decile together (low = independent)
+            </span>
+          </div>
+          <div class="cooc-controls">
+            <span style="font-size:10px;color:var(--dim)">Metric:</span>
+            <select x-model="coocMetric"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:11px;padding:3px 6px;border-radius:3px">
+              <template x-for="m in metrics" :key="'cooc-'+m">
+                <option :value="m" x-text="metricShort(m)"></option>
+              </template>
+            </select>
+            <span style="font-size:10px;color:var(--dim)">Decile:</span>
+            <select x-model.number="coocDecile"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:11px;padding:3px 6px;border-radius:3px">
+              <option value="1">D1 (lowest)</option>
+              <option value="2">D2</option>
+              <option value="9">D9</option>
+              <option value="10">D10 (highest)</option>
+            </select>
+            <button @click="loadCooccurrence()"
+                    style="background:rgba(52,152,219,.1);border:1px solid rgba(52,152,219,.2);
+                           color:#3498db;font-size:11px;padding:4px 12px;border-radius:3px;cursor:pointer">
+              Load
+            </button>
+            <span x-show="coocLoading" style="color:var(--dim);font-size:10px">Loading…</span>
+          </div>
+
+          <template x-if="coocData && coocData.tickers">
+            <div class="cooc-wrap">
+              <table class="cooc-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <template x-for="tk in coocData.tickers" :key="'ch-'+tk">
+                      <th x-text="tk" style="font-size:8px;writing-mode:vertical-rl;
+                                             text-orientation:mixed;height:60px"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="ta in coocData.tickers" :key="'cr-'+ta">
+                    <tr>
+                      <th x-text="ta" style="text-align:left"></th>
+                      <template x-for="tb in coocData.tickers" :key="'cv-'+ta+tb">
+                        <td :style="ta === tb ? 'background:#333' : coocColor(coocData.matrix?.[ta]?.[tb] || 0)"
+                            x-text="ta === tb ? '—' : (coocData.matrix?.[ta]?.[tb]?.toFixed(0) || '0') + '%'">
+                        </td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+</body>
+</html>
