@@ -1,0 +1,314 @@
+"""OI Analysis workbench — interactive decile analytics for a single ticker/metric/outcome."""
+import math
+from collections import defaultdict
+from typing import Optional
+
+import numpy as np
+from scipy import stats as sp_stats
+from fastapi import APIRouter, Depends, Query
+
+from app.db import get_oi_pool
+
+router = APIRouter(tags=["oi_analysis"])
+
+
+def _clean_pairs(rows, x_col, y_col):
+    """Extract (x, y, date) tuples, filtering None and NaN."""
+    out = []
+    for r in rows:
+        xv, yv = r.get(x_col), r.get(y_col)
+        if xv is None or yv is None:
+            continue
+        try:
+            xf, yf = float(xv), float(yv)
+        except (ValueError, TypeError):
+            continue
+        if math.isnan(xf) or math.isnan(yf):
+            continue
+        out.append((xf, yf, r.get("trade_date")))
+    return out
+
+
+def _bucket_pairs(pairs, n=10):
+    """Sort by x, split into n equal-count buckets. Returns list of lists of (x, y, date)."""
+    if not pairs:
+        return [[] for _ in range(n)]
+    s = sorted(pairs, key=lambda p: p[0])
+    total = len(s)
+    buckets = [[] for _ in range(n)]
+    for i, p in enumerate(s):
+        b = min(int(i / total * n), n - 1)
+        buckets[b].append(p)
+    return buckets
+
+
+def _parse_horizon(col_name: str) -> int:
+    import re
+    m = re.search(r'(\d+)d', col_name)
+    return int(m.group(1)) if m else 1
+
+
+@router.get("/tickers")
+async def list_tickers(pool=Depends(get_oi_pool)):
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
+    return [r["ticker"] for r in rows]
+
+
+@router.get("/columns")
+async def list_columns(pool=Depends(get_oi_pool)):
+    if not pool:
+        return {"features": [], "outcomes": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'daily_features' AND table_schema = 'public'
+               AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+               AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+               ORDER BY ordinal_position""")
+    all_cols = [r["column_name"] for r in rows]
+    outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
+    features = [c for c in all_cols if c not in outcomes]
+    return {"features": features, "outcomes": outcomes}
+
+
+@router.get("/analyze")
+async def analyze(
+    ticker: str = Query(...),
+    metric: str = Query(...),
+    outcome: str = Query(...),
+    pool=Depends(get_oi_pool),
+):
+    """Full analysis payload for one ticker/metric/outcome combo."""
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    # Fetch data
+    async with pool.acquire() as conn:
+        if ticker == "ALL":
+            rows = await conn.fetch(
+                f"SELECT trade_date, {metric}, {outcome} FROM daily_features "
+                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL "
+                f"ORDER BY trade_date")
+        else:
+            rows = await conn.fetch(
+                f"SELECT trade_date, {metric}, {outcome} FROM daily_features "
+                f"WHERE ticker = $1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
+                f"ORDER BY trade_date", ticker)
+
+    pairs = _clean_pairs([dict(r) for r in rows], metric, outcome)
+    n = len(pairs)
+    if n < 30:
+        return {"error": f"Insufficient data: {n} valid rows", "n": n}
+
+    xa = np.array([p[0] for p in pairs])
+    ya = np.array([p[1] for p in pairs])
+    horizon = _parse_horizon(outcome)
+
+    # ── Decile stats ─────────────────────────────────────────────────────
+    buckets = _bucket_pairs(pairs, 10)
+    decile_stats = []
+    for i, bucket in enumerate(buckets):
+        if not bucket:
+            decile_stats.append(None)
+            continue
+        ys = np.array([p[1] for p in bucket])
+        xs = [p[0] for p in bucket]
+        decile_stats.append({
+            "bucket":   i + 1,
+            "n":        len(bucket),
+            "avg_ret":  round(float(ys.mean()), 6),
+            "med_ret":  round(float(np.median(ys)), 6),
+            "win_rate": round(float((ys > 0).mean()), 4),
+            "std_dev":  round(float(ys.std()), 6),
+            "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
+            "min_val":  round(float(min(xs)), 6),
+            "max_val":  round(float(max(xs)), 6),
+            "returns":  [round(float(y), 6) for y in ys],  # raw returns for boxplot
+        })
+
+    # ── Correlations ─────────────────────────────────────────────────────
+    pr, pp = sp_stats.pearsonr(xa, ya)
+    sr, sp_val = sp_stats.spearmanr(xa, ya)
+
+    # ── Monotonicity ─────────────────────────────────────────────────────
+    avgs = [d["avg_ret"] for d in decile_stats if d is not None]
+    if len(avgs) >= 2:
+        transitions = sum(1 for i in range(len(avgs)-1) if avgs[i+1] > avgs[i])
+        mono_raw = transitions / (len(avgs)-1)
+        monotonicity = round(abs(mono_raw - 0.5) * 2, 4)
+    else:
+        monotonicity = 0
+
+    # ── Pattern classification ───────────────────────────────────────────
+    overall_range = max(avgs) - min(avgs) if avgs else 0
+    if overall_range < 1e-8:
+        pattern = "flat"
+    elif monotonicity > 0.75 and abs(sr) > 0.03:
+        pattern = "monotonic_positive" if sr > 0 else "monotonic_negative"
+    else:
+        diffs = [avgs[i+1]-avgs[i] for i in range(len(avgs)-1)]
+        max_diff = max(abs(d) for d in diffs) if diffs else 0
+        if max_diff > overall_range * 0.5:
+            pattern = "threshold"
+        elif abs(pr) > 0.03:
+            pattern = "linear_weak"
+        else:
+            pattern = "no_clear_pattern"
+
+    # ── Yearly breakdown ─────────────────────────────────────────────────
+    by_year = defaultdict(list)
+    for x, y, d in pairs:
+        yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
+        by_year[yr].append(y)
+
+    yearly = []
+    for yr in sorted(by_year):
+        ys = np.array(by_year[yr])
+        yearly.append({
+            "year":     yr,
+            "n":        len(ys),
+            "avg_ret":  round(float(ys.mean()), 6),
+            "win_rate": round(float((ys > 0).mean()), 4),
+        })
+
+    # ── Equity curve (both modes) ────────────────────────────────────────
+    def _equity_for_decile(decile_idx, mode="concurrent"):
+        bucket = buckets[decile_idx] if 0 <= decile_idx < len(buckets) else []
+        if not bucket:
+            return {"points": [], "n_trades": 0}
+        sorted_trades = sorted(bucket, key=lambda p: p[2])
+
+        if mode == "non_overlapping":
+            trades, last_date = [], None
+            for x, y, d in sorted_trades:
+                dd = d.date() if hasattr(d, 'date') else d
+                if last_date is None or (dd - last_date).days >= horizon:
+                    trades.append((dd, y))
+                    last_date = dd
+        else:
+            trades = [(p[2], p[1]) for p in sorted_trades]
+
+        cum = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        points = []
+        wins = 0
+        for date, ret in trades:
+            cum += ret
+            peak = max(peak, cum)
+            max_dd = min(max_dd, cum - peak)
+            if ret > 0:
+                wins += 1
+            points.append({"date": str(date), "value": round(cum, 6)})
+
+        nn = len(trades)
+        return {
+            "points":     points,
+            "n_trades":   nn,
+            "cum_return": round(cum, 4),
+            "max_dd":     round(max_dd, 4),
+            "avg_ret":    round(sum(r for _, r in trades) / nn, 6) if nn else 0,
+            "win_rate":   round(wins / nn, 4) if nn else 0,
+        }
+
+    equity_by_decile = {}
+    for i in range(10):
+        equity_by_decile[i+1] = {
+            "concurrent":     _equity_for_decile(i, "concurrent"),
+            "non_overlapping": _equity_for_decile(i, "non_overlapping"),
+        }
+
+    # ── Yearly consistency (top vs bottom) ───────────────────────────────
+    yearly_consistency = []
+    years_top_wins = 0
+    for yr in sorted(by_year):
+        yr_pairs = [(x, y, d) for x, y, d in pairs
+                    if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
+        if len(yr_pairs) < 30:
+            continue
+        yr_buckets = _bucket_pairs(yr_pairs, 10)
+        top_ys = [p[1] for p in yr_buckets[9]] if yr_buckets[9] else []
+        bot_ys = [p[1] for p in yr_buckets[0]] if yr_buckets[0] else []
+        t_avg = float(np.mean(top_ys)) if top_ys else 0
+        b_avg = float(np.mean(bot_ys)) if bot_ys else 0
+        top_beats = t_avg > b_avg
+        if top_beats:
+            years_top_wins += 1
+        yearly_consistency.append({
+            "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
+            "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
+        })
+
+    n_years = len(yearly_consistency)
+    consistency_pct = round(years_top_wins / n_years * 100, 1) if n_years else None
+
+    # ── Half-sample stability ────────────────────────────────────────────
+    mid = n // 2
+    h1 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[:mid], 10)
+    h2 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[mid:], 10)
+    h1_spread = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
+    h2_spread = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
+    half_stable = (h1_spread > 0 and h2_spread > 0) or (h1_spread < 0 and h2_spread < 0)
+
+    # ── Concentration risk ───────────────────────────────────────────────
+    yearly_spreads = {}
+    for yc in yearly_consistency:
+        yearly_spreads[yc["year"]] = yc["top_avg"] - yc["bot_avg"]
+    total_abs = sum(abs(v) for v in yearly_spreads.values())
+    concentration = round(max(abs(v) for v in yearly_spreads.values()) / total_abs, 4) if total_abs > 0 else 1.0
+
+    # ── Composite score ──────────────────────────────────────────────────
+    best_sharpe = max(abs(d["sharpe"]) for d in decile_stats if d) if decile_stats else 0
+    c_rank = min(abs(float(sr)) / 0.20, 1.0)
+    c_mono = monotonicity
+    c_consist = (consistency_pct / 100.0) if consistency_pct else 0
+    c_half = 1.0 if half_stable else 0
+    c_conc = max(0, 1.0 - concentration)
+    c_sharpe = min(best_sharpe / 0.5, 1.0)
+    c_sample = min(n / 1000, 0.5)
+    composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
+
+    # ── Today's value ────────────────────────────────────────────────────
+    today_val = pairs[-1][0] if pairs else None
+    today_pct = None
+    today_decile = None
+    if today_val is not None:
+        all_x = sorted(p[0] for p in pairs)
+        today_pct = round(sum(1 for v in all_x if v <= today_val) / len(all_x) * 100, 1)
+        today_decile = min(int(today_pct / 10) + 1, 10)
+
+    return {
+        "ticker":      ticker,
+        "metric":      metric,
+        "outcome":     outcome,
+        "n":           n,
+        "horizon":     horizon,
+
+        # Stats
+        "pearson_r":    round(float(pr), 4),
+        "pearson_p":    round(float(pp), 6),
+        "spearman_r":   round(float(sr), 4),
+        "monotonicity": monotonicity,
+        "pattern":      pattern,
+        "composite_score": composite,
+        "consistency_pct": consistency_pct,
+        "concentration_risk": concentration,
+        "half_sample_stable": bool(half_stable),
+
+        # Decile data
+        "decile_stats":    decile_stats,
+        "equity_by_decile": equity_by_decile,
+
+        # Time series
+        "yearly":              yearly,
+        "yearly_consistency":  yearly_consistency,
+
+        # Today
+        "today_value":      round(float(today_val), 6) if today_val is not None else None,
+        "today_percentile": today_pct,
+        "today_decile":     today_decile,
+        "latest_date":      str(pairs[-1][2]) if pairs else None,
+    }

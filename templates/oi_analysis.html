@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — OI Analysis</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    .oi-body { flex:1; overflow:auto; padding:16px; }
+    .sel-bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+    .sel-bar label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; }
+    .sel-bar select {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 8px; border-radius:4px; max-width:320px;
+    }
+    .sel-bar .go-btn {
+      background:var(--accent); border:none; color:#fff; padding:6px 18px;
+      border-radius:4px; font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .sel-bar .go-btn:hover { opacity:.85; }
+
+    /* Stats card */
+    .stats-card {
+      display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr));
+      gap:1px; background:var(--border); border-radius:6px; overflow:hidden; margin-bottom:16px;
+    }
+    .stat-item { background:var(--surface); padding:10px 12px; }
+    .stat-label { font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+    .stat-value { font-size:15px; font-weight:700; }
+    .stat-value.pos { color:#3498db; }
+    .stat-value.neg { color:#e84393; }
+
+    /* Chart grid */
+    .chart-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px; }
+    @media (max-width:1100px) { .chart-grid { grid-template-columns:1fr; } }
+    .chart-box {
+      background:var(--surface); border:1px solid var(--border); border-radius:6px;
+      padding:10px; min-height:280px;
+    }
+    .chart-title {
+      font-size:11px; font-weight:700; color:var(--muted); margin-bottom:6px;
+      display:flex; align-items:center; gap:8px;
+    }
+    .chart-canvas { height:240px; position:relative; }
+
+    /* Decile selector buttons */
+    .decile-btns { display:flex; gap:3px; flex-wrap:wrap; margin-bottom:8px; }
+    .decile-btn {
+      background:var(--raised); border:1px solid var(--border); color:var(--dim);
+      padding:3px 8px; border-radius:3px; font-size:10px; cursor:pointer; font-weight:600;
+    }
+    .decile-btn.on { background:rgba(52,152,219,.2); border-color:var(--accent); color:var(--accent); }
+    .decile-btn:hover { border-color:var(--dim); }
+
+    /* Equity mode toggle */
+    .mode-seg { display:inline-flex; border:1px solid var(--border); border-radius:3px; overflow:hidden; }
+    .mode-seg span {
+      padding:3px 8px; font-size:10px; cursor:pointer; color:var(--dim);
+      background:var(--raised); border-right:1px solid var(--border);
+    }
+    .mode-seg span:last-child { border-right:none; }
+    .mode-seg span.on { background:var(--accent); color:#fff; font-weight:600; }
+
+    /* Stats table */
+    .dec-table { width:100%; border-collapse:collapse; font-size:12px; margin-top:16px; }
+    .dec-table th {
+      background:var(--raised); color:var(--dim); font-size:10px; font-weight:700;
+      padding:6px 10px; border-bottom:1px solid var(--border); text-transform:uppercase;
+    }
+    .dec-table td {
+      padding:5px 10px; border-bottom:1px solid rgba(255,255,255,.04); color:var(--muted);
+    }
+    .dec-table tr:hover td { background:rgba(255,255,255,.03); }
+    .dec-table .num { text-align:right; font-variant-numeric:tabular-nums; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/oi_analysis.js?v=1"></script>
+</head>
+
+<body x-data="oiAnalysis" x-init="init()">
+
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/oi-signals">OI Signals</a>
+      <a class="nav-link on" href="/oi-analysis">OI Analysis</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link" href="/research">Research</a>
+      <a class="nav-link" href="/research2">Research 2</a>
+    </nav>
+  </div>
+
+  <div class="oi-body">
+
+    <!-- Selectors -->
+    <div class="sel-bar">
+      <div>
+        <label>Ticker</label><br>
+        <select x-model="ticker">
+          <template x-for="t in tickers" :key="t">
+            <option :value="t" x-text="t"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label>Metric (X)</label><br>
+        <select x-model="metric">
+          <template x-for="f in features" :key="f">
+            <option :value="f" x-text="f"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label>Outcome (Y)</label><br>
+        <select x-model="outcome">
+          <template x-for="o in outcomes" :key="o">
+            <option :value="o" x-text="o"></option>
+          </template>
+        </select>
+      </div>
+      <div style="padding-top:14px">
+        <button class="go-btn" @click="loadAnalysis()">Analyze</button>
+      </div>
+      <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
+    </div>
+
+    <div x-show="error" style="color:var(--danger);padding:12px;font-size:12px" x-text="error"></div>
+
+    <!-- Results -->
+    <template x-if="data && !data.error">
+      <div>
+
+        <!-- Stats card -->
+        <div class="stats-card">
+          <div class="stat-item">
+            <div class="stat-label">Score</div>
+            <div class="stat-value" x-text="data.composite_score?.toFixed(0) + '/100'"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Pattern</div>
+            <div class="stat-value" style="font-size:12px" x-text="data.pattern"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Pearson r</div>
+            <div class="stat-value" :class="data.pearson_r >= 0 ? 'pos' : 'neg'" x-text="r4(data.pearson_r)"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Spearman ρ</div>
+            <div class="stat-value" :class="data.spearman_r >= 0 ? 'pos' : 'neg'" x-text="r4(data.spearman_r)"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Monotonicity</div>
+            <div class="stat-value" x-text="data.monotonicity?.toFixed(2)"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Consistency</div>
+            <div class="stat-value" x-text="data.consistency_pct != null ? data.consistency_pct + '%' : '—'"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Concentration</div>
+            <div class="stat-value" :class="data.concentration_risk > 0.5 ? 'neg' : ''"
+                 x-text="data.concentration_risk?.toFixed(2)"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Half-Sample</div>
+            <div class="stat-value" :class="data.half_sample_stable ? 'pos' : 'neg'"
+                 x-text="data.half_sample_stable ? 'Stable' : 'Unstable'"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Today</div>
+            <div class="stat-value" x-text="data.today_decile ? 'D' + data.today_decile + ' (' + data.today_percentile + '%)' : '—'"></div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">N</div>
+            <div class="stat-value" x-text="data.n?.toLocaleString()"></div>
+          </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="chart-grid">
+
+          <!-- Decile bar (clickable) -->
+          <div class="chart-box">
+            <div class="chart-title">
+              Decile Avg Return
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bars to select</span>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
+          </div>
+
+          <!-- Equity curve -->
+          <div class="chart-box">
+            <div class="chart-title">
+              Equity Curve
+              <div class="mode-seg" style="margin-left:auto">
+                <span :class="{on: equityMode==='concurrent'}" @click="setEquityMode('concurrent')">Concurrent</span>
+                <span :class="{on: equityMode==='non_overlapping'}" @click="setEquityMode('non_overlapping')">Non-Overlap</span>
+              </div>
+            </div>
+            <div class="decile-btns">
+              <span class="decile-btn" @click="selectExtremes()" style="font-size:9px">D1+D10</span>
+              <span class="decile-btn" @click="selectAllDeciles()" style="font-size:9px">All</span>
+              <template x-for="d in [1,2,3,4,5,6,7,8,9,10]" :key="'db-'+d">
+                <span class="decile-btn" :class="{on: isDecileSelected(d)}"
+                      @click="toggleDecile(d)" x-text="'D'+d"></span>
+              </template>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-equity"></canvas></div>
+          </div>
+
+          <!-- Yearly avg return -->
+          <div class="chart-box">
+            <div class="chart-title">Avg Return by Year (all deciles)</div>
+            <div class="chart-canvas"><canvas id="chart-yearly"></canvas></div>
+          </div>
+
+          <!-- Yearly consistency -->
+          <div class="chart-box">
+            <div class="chart-title">
+              Yearly D10 vs D1
+              <span style="font-weight:400;font-size:9px;color:var(--dim)"
+                    x-text="data.consistency_pct != null ? '— ' + data.consistency_pct + '% top beats bottom' : ''"></span>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-consistency"></canvas></div>
+          </div>
+        </div>
+
+        <!-- Decile stats table -->
+        <div style="margin-top:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px">Decile Statistics</div>
+          <div style="overflow-x:auto">
+            <table class="dec-table">
+              <thead>
+                <tr>
+                  <th>Decile</th><th>N</th><th>Avg Ret</th><th>Median</th>
+                  <th>Win Rate</th><th>Std Dev</th><th>Sharpe</th>
+                  <th>Metric Range</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="d in (data.decile_stats || []).filter(x => x)" :key="d.bucket">
+                  <tr :style="selectedDeciles.has(d.bucket) ? 'background:rgba(52,152,219,.08)' : ''">
+                    <td style="font-weight:700" x-text="'D' + d.bucket"></td>
+                    <td class="num" x-text="d.n"></td>
+                    <td class="num" :style="d.avg_ret >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                        x-text="(d.avg_ret*100).toFixed(3) + '%'"></td>
+                    <td class="num" x-text="(d.med_ret*100).toFixed(3) + '%'"></td>
+                    <td class="num" x-text="(d.win_rate*100).toFixed(1) + '%'"></td>
+                    <td class="num" x-text="(d.std_dev*100).toFixed(3) + '%'"></td>
+                    <td class="num" x-text="d.sharpe.toFixed(3)"></td>
+                    <td class="num" style="font-size:10px;color:var(--dim)"
+                        x-text="d.min_val.toFixed(4) + ' – ' + d.max_val.toFixed(4)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </template>
+  </div>
+</body>
+</html>
