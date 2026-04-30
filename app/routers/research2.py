@@ -187,10 +187,26 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
             "Specify what you want to predict (e.g., forward returns).",
         )
 
+    # Resolve tickers: user-selected > planner-selected > empty (pooled)
+    tickers = req.tickers
+    if not tickers:
+        if plan.get("tickers_mode") == "all_individual":
+            # Planner detected the question wants per-ticker analysis — load all tickers
+            try:
+                if oi_pool and req.table in _OI_TABLES:
+                    async with oi_pool.acquire() as conn:
+                        tk_rows = await conn.fetch(
+                            "SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
+                    tickers = [r["ticker"] for r in tk_rows]
+            except Exception:
+                pass
+        elif plan.get("tickers_override"):
+            tickers = plan["tickers_override"]
+
     config = {
         "engine":        "v2",
         "table":         req.table,
-        "tickers":       req.tickers,
+        "tickers":       tickers,
         "date_from":     req.date_from,
         "date_to":       req.date_to,
         "model":         req.model,

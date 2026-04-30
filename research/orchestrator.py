@@ -40,6 +40,8 @@ _PLAN_TOOL = {
             "key_questions":             {"type": "array", "items": {"type": "string"}},
             "report_guidance":           {"type": "string"},
             "column_selection_reasoning": {"type": "string"},
+            "tickers": {"type": "array", "items": {"type": "string"},
+                        "description": "Tickers to analyze individually. Use ['ALL'] if the question asks for per-ticker or ticker-level analysis across the full universe."},
         },
         "required": ["task_type", "feature_columns", "outcome_columns"],
     },
@@ -124,6 +126,14 @@ Column selection rules:
 - Never include: id, ticker, trade_date, created_at, updated_at
 - broad depth: include all plausibly relevant features
 - targeted depth: 3-7 most directly relevant features
+
+Ticker selection rules:
+- If the question mentions specific tickers (e.g. "SPY", "AAPL"), include them in tickers array
+- If the question asks for "per-ticker", "ticker-level", "specific tickers", "which tickers",
+  "across tickers", or "explore tickers" — set tickers to ["ALL"] to analyze each ticker separately
+- If the question is about a general concept without mentioning tickers, omit the tickers field
+  (data will be pooled across all tickers)
+- The tickers field in the available data is: {tickers}
 """
 
 _VIZ_SYSTEM = (
@@ -259,6 +269,13 @@ async def classify_and_plan(
     plan.setdefault("task_type", "single-factor-scan")
     plan.setdefault("hypotheses", [])
     plan.setdefault("key_questions", [])
+
+    # Handle ticker selection from the plan
+    plan_tickers = plan.get("tickers") or []
+    if plan_tickers == ["ALL"] or "ALL" in plan_tickers:
+        plan["tickers_mode"] = "all_individual"
+    elif plan_tickers:
+        plan["tickers_override"] = plan_tickers
 
     return plan
 
