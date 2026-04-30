@@ -312,3 +312,140 @@ async def analyze(
         "today_decile":     today_decile,
         "latest_date":      str(pairs[-1][2]) if pairs else None,
     }
+
+
+@router.get("/heatmap")
+async def heatmap_2d(
+    ticker: str = Query(...),
+    metric_x: str = Query(...),
+    metric_y: str = Query(...),
+    outcome: str = Query(...),
+    bins: int = Query(5, ge=3, le=10),
+    pool=Depends(get_oi_pool),
+):
+    """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell."""
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    async with pool.acquire() as conn:
+        if ticker == "ALL":
+            rows = await conn.fetch(
+                f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
+                f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL "
+                f"ORDER BY trade_date")
+        else:
+            rows = await conn.fetch(
+                f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
+                f"WHERE ticker = $1 AND {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL "
+                f"AND {outcome} IS NOT NULL ORDER BY trade_date", ticker)
+
+    valid = []
+    for r in rows:
+        try:
+            xv, yv, ov = float(r[metric_x]), float(r[metric_y]), float(r[outcome])
+            if not (math.isnan(xv) or math.isnan(yv) or math.isnan(ov)):
+                valid.append((xv, yv, ov))
+        except (ValueError, TypeError):
+            continue
+
+    if len(valid) < 50:
+        return {"error": f"Insufficient data: {len(valid)} rows"}
+
+    xs = np.array([v[0] for v in valid])
+    ys = np.array([v[1] for v in valid])
+    os_ = np.array([v[2] for v in valid])
+
+    x_edges = np.percentile(xs, np.linspace(0, 100, bins + 1))
+    y_edges = np.percentile(ys, np.linspace(0, 100, bins + 1))
+    x_edges[-1] += 1e-9
+    y_edges[-1] += 1e-9
+
+    grid = []
+    for i in range(bins):
+        row = []
+        for j in range(bins):
+            mask = ((xs >= x_edges[i]) & (xs < x_edges[i+1]) &
+                    (ys >= y_edges[j]) & (ys < y_edges[j+1]))
+            cell_rets = os_[mask]
+            if len(cell_rets) >= 5:
+                row.append({
+                    "avg_ret": round(float(cell_rets.mean()), 6),
+                    "win_rate": round(float((cell_rets > 0).mean()), 4),
+                    "n": int(len(cell_rets)),
+                })
+            else:
+                row.append(None)
+        grid.append(row)
+
+    x_labels = [f"{x_edges[i]:.2f}–{x_edges[i+1]:.2f}" for i in range(bins)]
+    y_labels = [f"{y_edges[j]:.2f}–{y_edges[j+1]:.2f}" for j in range(bins)]
+
+    return {
+        "metric_x": metric_x, "metric_y": metric_y, "outcome": outcome,
+        "bins": bins, "n": len(valid),
+        "x_labels": x_labels, "y_labels": y_labels,
+        "grid": grid,
+    }
+
+
+@router.get("/ai-summary")
+async def ai_summary(
+    ticker: str = Query(...),
+    metric: str = Query(...),
+    outcome: str = Query(...),
+    pool=Depends(get_oi_pool),
+):
+    """Generate an AI interpretation of the analysis."""
+    try:
+        import anthropic
+    except ImportError:
+        return {"summary": "(anthropic SDK not available)"}
+
+    # Fetch the analysis first
+    data = await analyze(ticker=ticker, metric=metric, outcome=outcome, pool=pool)
+    if data.get("error"):
+        return {"summary": f"Cannot generate: {data['error']}"}
+
+    # Build compact context
+    stats = (f"Score: {data['composite_score']}, Pattern: {data['pattern']}, "
+             f"Pearson: {data['pearson_r']}, Spearman: {data['spearman_r']}, "
+             f"Monotonicity: {data['monotonicity']}, Consistency: {data['consistency_pct']}%, "
+             f"Concentration: {data['concentration_risk']}, "
+             f"Half-stable: {data['half_sample_stable']}, N: {data['n']}")
+
+    deciles = ""
+    for d in (data.get("decile_stats") or []):
+        if d:
+            deciles += (f"  D{d['bucket']}: avg={d['avg_ret']*100:.3f}%, "
+                        f"WR={d['win_rate']*100:.1f}%, Sharpe={d['sharpe']:.3f}, n={d['n']}\n")
+
+    # Load knowledge rules
+    from app.db import get_pool as _get_main_pool
+    knowledge = ""
+    try:
+        from app.routers.research2 import _load_active_rules
+        main_pool = _get_main_pool()
+        if main_pool:
+            rules = await _load_active_rules(main_pool)
+            if rules:
+                knowledge = "\nDOMAIN RULES:\n" + "\n".join(f"- {r}" for r in rules)
+    except Exception:
+        pass
+
+    prompt = (
+        f"Ticker: {ticker}, Metric: {metric}, Outcome: {outcome}\n"
+        f"Stats: {stats}\n\nDecile Profile:\n{deciles}\n"
+        f"Today: D{data.get('today_decile', '?')} ({data.get('today_percentile', '?')}%)"
+        f"{knowledge}\n\n"
+        f"Write 3-4 sentences: Is this metric tradable for this ticker? "
+        f"What are the strengths and risks? What decile(s) should a trader focus on? "
+        f"Be specific and cite numbers. Professional quant voice."
+    )
+
+    client = anthropic.AsyncAnthropic()
+    msg = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return {"summary": msg.content[0].text.strip()}

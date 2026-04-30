@@ -75,7 +75,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=1"></script>
+  <script src="/static/js/oi_analysis.js?v=2"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -227,6 +227,48 @@
             </div>
             <div class="chart-canvas"><canvas id="chart-consistency"></canvas></div>
           </div>
+
+          <!-- Boxplot -->
+          <div class="chart-box">
+            <div class="chart-title">Return Distribution by Decile
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— IQR + median</span>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-boxplot"></canvas></div>
+          </div>
+
+          <!-- Drawdown -->
+          <div class="chart-box">
+            <div class="chart-title">Drawdown
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
+          </div>
+
+          <!-- 2D Heatmap -->
+          <div class="chart-box" style="grid-column:span 2">
+            <div class="chart-title">
+              2-Metric Heatmap
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins</span>
+              <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+                <label style="font-size:9px;color:var(--dim)">Y metric:</label>
+                <select x-model="heatmapMetric"
+                        style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                               font-size:10px;padding:3px 6px;border-radius:3px;max-width:240px">
+                  <option value="">— select —</option>
+                  <template x-for="f in features" :key="'hm-'+f">
+                    <option :value="f" x-text="f"></option>
+                  </template>
+                </select>
+                <button @click="loadHeatmap()"
+                        style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                               color:#3498db;font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                  Load
+                </button>
+                <span x-show="heatmapLoading" style="font-size:9px;color:var(--dim)">Loading…</span>
+              </div>
+            </div>
+            <div class="chart-canvas" style="height:300px"><canvas id="chart-heatmap"></canvas></div>
+          </div>
         </div>
 
         <!-- Decile stats table -->
@@ -258,6 +300,24 @@
                 </template>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- AI Summary -->
+        <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <div style="font-size:12px;font-weight:700;color:var(--muted)">AI Analysis</div>
+            <button @click="generateAISummary()"
+                    style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                           color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
+              Generate
+            </button>
+            <span x-show="aiLoading" style="font-size:10px;color:var(--dim)">Generating…</span>
+          </div>
+          <div x-show="aiSummary"
+               style="background:var(--surface);border:1px solid var(--border);border-radius:6px;
+                      padding:14px 18px;font-size:13px;color:var(--text);line-height:1.7"
+               x-text="aiSummary">
           </div>
         </div>
 
