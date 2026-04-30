@@ -337,6 +337,7 @@ async def _compose_report(
     equity_results: list[dict],
     model: str,
     knowledge_rules: list[str] = None,
+    extra_context: str = "",
 ) -> str:
     if _anthropic is None:
         return "(anthropic SDK not available)"
@@ -436,7 +437,7 @@ async def _compose_report(
                 bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
                 interaction_summary="\n".join(int_lines) if int_lines else "(none tested)",
                 equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
-            ),
+            ) + (f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}" if extra_context else ""),
         }],
     )
     return msg.content[0].text.strip()
@@ -553,6 +554,236 @@ async def _skeptic_review(
         }],
     )
     return msg.content[0].text.strip()
+
+
+# ── Task-type-specific analysis steps ────────────────────────────────────────
+
+async def _run_regime_analysis(cache, ranked, all_scans, x_cols, y_cols,
+                                main_pool, run_id, log):
+    """Split data by regime indicator, scan within each, compare."""
+    regime_results = []
+    # Use the median of the best-performing feature as the regime split
+    # Or if rv_20d is available, use realized vol as regime
+    for cache_key, rows in cache.items():
+        ticker = None if cache_key == "_all" else cache_key
+        avail = set(rows[0].keys()) if rows else set()
+
+        # Find regime column: prefer rv_20d, then spot_close trend, else use median of first x
+        regime_col = None
+        for candidate in ["rv_20d", "rv_5d"]:
+            if candidate in avail:
+                regime_col = candidate
+                break
+
+        if not regime_col:
+            log(f"  No regime column (rv_20d/rv_5d) for {ticker or 'all'} — skipping regime split")
+            continue
+
+        # Split at median of regime column
+        import math
+        vals = [float(r[regime_col]) for r in rows
+                if r.get(regime_col) is not None and not math.isnan(float(r[regime_col]))]
+        if len(vals) < 100:
+            continue
+        import numpy as np
+        median_val = float(np.median(vals))
+
+        high_regime = [r for r in rows if r.get(regime_col) is not None
+                       and float(r[regime_col]) >= median_val]
+        low_regime = [r for r in rows if r.get(regime_col) is not None
+                      and float(r[regime_col]) < median_val]
+
+        log(f"  Regime split on {regime_col} (median={median_val:.4f}): "
+            f"high={len(high_regime)}, low={len(low_regime)}")
+
+        # Scan the top features in each regime separately
+        top_features = list(dict.fromkeys(s["x_col"] for s in ranked[:10] if s.get("x_col")))[:5]
+
+        async with main_pool.acquire() as conn:
+            for x_col in top_features:
+                if x_col not in avail:
+                    continue
+                for y_col in y_cols:
+                    if y_col not in avail or x_col == y_col:
+                        continue
+                    for regime_label, regime_rows in [("high_vol", high_regime), ("low_vol", low_regime)]:
+                        if len(regime_rows) < 60:
+                            continue
+                        try:
+                            scan = scanner.scan_relationship(regime_rows, x_col, y_col, ticker)
+                            scan["regime"] = regime_label
+                            scan["regime_col"] = regime_col
+                            scan["regime_n"] = len(regime_rows)
+                            await rdb.save_result(conn, run_id, f"scan_regime_{regime_label}",
+                                                  x_col, y_col, scan, ticker)
+                            regime_results.append(scan)
+                        except Exception as exc:
+                            log(f"    REGIME ERROR {regime_label} {x_col}→{y_col}: {exc}")
+
+    log(f"  {len(regime_results)} regime-conditional scans completed.")
+    return regime_results
+
+
+async def _run_event_study(cache, x_cols, y_cols, main_pool, run_id, log):
+    """Analyze signals around specific event windows (monthly OpEx, etc.)."""
+    event_results = []
+
+    for cache_key, rows in cache.items():
+        ticker = None if cache_key == "_all" else cache_key
+        avail = set(rows[0].keys()) if rows else set()
+
+        # Use days_to_monthly_opex if available, else use dte-based proxy
+        opex_col = None
+        for candidate in ["days_to_monthly_opex", "pct_oi_in_front_expiry"]:
+            if candidate in avail:
+                opex_col = candidate
+                break
+
+        if not opex_col:
+            log(f"  No event column for {ticker or 'all'} — skipping event study")
+            continue
+
+        import math
+        # Split into "near event" (within 5 days of OpEx) vs "far from event"
+        if opex_col == "days_to_monthly_opex":
+            near = [r for r in rows if r.get(opex_col) is not None
+                    and 0 <= float(r[opex_col]) <= 5]
+            far = [r for r in rows if r.get(opex_col) is not None
+                   and float(r[opex_col]) > 5]
+        else:
+            # pct_oi_in_front_expiry: high = near expiry
+            import numpy as np
+            vals = [float(r[opex_col]) for r in rows
+                    if r.get(opex_col) is not None and not math.isnan(float(r[opex_col]))]
+            if not vals:
+                continue
+            p75 = float(np.percentile(vals, 75))
+            near = [r for r in rows if r.get(opex_col) is not None
+                    and float(r[opex_col]) >= p75]
+            far = [r for r in rows if r.get(opex_col) is not None
+                   and float(r[opex_col]) < p75]
+
+        log(f"  Event split on {opex_col}: near={len(near)}, far={len(far)}")
+
+        async with main_pool.acquire() as conn:
+            for x_col in x_cols[:8]:
+                if x_col not in avail or x_col == opex_col:
+                    continue
+                for y_col in y_cols:
+                    if y_col not in avail or x_col == y_col:
+                        continue
+                    for event_label, event_rows in [("near_event", near), ("far_event", far)]:
+                        if len(event_rows) < 40:
+                            continue
+                        try:
+                            scan = scanner.scan_relationship(event_rows, x_col, y_col, ticker)
+                            scan["event_window"] = event_label
+                            scan["event_col"] = opex_col
+                            scan["event_n"] = len(event_rows)
+                            await rdb.save_result(conn, run_id, f"scan_event_{event_label}",
+                                                  x_col, y_col, scan, ticker)
+                            event_results.append(scan)
+                        except Exception as exc:
+                            log(f"    EVENT ERROR {event_label} {x_col}→{y_col}: {exc}")
+
+    log(f"  {len(event_results)} event-conditional scans completed.")
+    return event_results
+
+
+async def _run_strategy_entry(cache, ranked, x_cols, y_cols,
+                               main_pool, run_id, log):
+    """Generate detailed signal cards for the best combo zones."""
+    strategy_results = []
+
+    # Find the best single-factor signals and best interactions
+    single_top = [s for s in ranked if s.get("x_col") and not s.get("combo")][:3]
+    combo_top = [s for s in ranked if s.get("combo")][:3]
+    candidates = single_top + combo_top
+
+    if not candidates:
+        log("  No candidates for strategy entry conditions.")
+        return []
+
+    async with main_pool.acquire() as conn:
+        for s in candidates:
+            ticker = s.get("ticker")
+            cache_key = ticker if ticker else "_all"
+            rows = cache.get(cache_key, [])
+            if not rows:
+                continue
+
+            y_col = s.get("y_col")
+            combo = s.get("combo")
+
+            if combo:
+                # Multi-factor: compute robustness for the best zone
+                bz = s.get("best_quadrant") or s.get("best_octant") or s.get("best_zone") or {}
+                zone_label = bz.get("label", "")
+                if zone_label:
+                    try:
+                        rob = scanner.combo_robustness(rows, combo, y_col, zone_label, ticker)
+                        entry_card = {
+                            "type": "multi_factor_entry",
+                            "combo": combo,
+                            "y_col": y_col,
+                            "ticker": ticker,
+                            "zone": zone_label,
+                            "zone_stats": bz,
+                            "robustness": rob,
+                            "rule": f"Enter when {' AND '.join(f'{f} is {z}' for f, z in zip(combo, zone_label))} "
+                                    f"→ expect {y_col}",
+                        }
+                        await rdb.save_result(conn, run_id, "strategy_entry",
+                                              "+".join(combo), y_col, entry_card, ticker)
+                        strategy_results.append(entry_card)
+                        log(f"  ✓ Strategy card: {'+'.join(combo)} zone={zone_label}")
+                    except Exception as exc:
+                        log(f"    STRATEGY ERROR {combo}: {exc}")
+            else:
+                # Single factor: generate entry rule from best bucket
+                x_col = s["x_col"]
+                best_b = s.get("best_single_bucket") or {}
+                bucket_num = best_b.get("bucket", "?")
+                bs = s.get("bucket_stats") or []
+                valid_bs = [b for b in bs if b is not None]
+
+                # Walk-forward: split 70/30 and check if signal holds out-of-sample
+                split_idx = int(len(rows) * 0.7)
+                in_sample = rows[:split_idx]
+                out_sample = rows[split_idx:]
+
+                is_scan = oos_scan = None
+                if len(in_sample) >= 60 and len(out_sample) >= 30:
+                    try:
+                        is_scan = scanner.scan_relationship(in_sample, x_col, y_col, ticker)
+                        oos_scan = scanner.scan_relationship(out_sample, x_col, y_col, ticker)
+                    except Exception:
+                        pass
+
+                entry_card = {
+                    "type": "single_factor_entry",
+                    "feature": x_col,
+                    "y_col": y_col,
+                    "ticker": ticker,
+                    "best_bucket": bucket_num,
+                    "bucket_stats": best_b,
+                    "full_sample_score": s.get("composite_score"),
+                    "pattern": s.get("pattern"),
+                    "in_sample_score": is_scan.get("composite_score") if is_scan and "error" not in is_scan else None,
+                    "out_sample_score": oos_scan.get("composite_score") if oos_scan and "error" not in oos_scan else None,
+                    "rule": f"Enter when {x_col} is in bucket {bucket_num} → expect {y_col}",
+                }
+                await rdb.save_result(conn, run_id, "strategy_entry",
+                                      x_col, y_col, entry_card, ticker)
+                strategy_results.append(entry_card)
+
+                oos_label = f"{entry_card.get('out_sample_score', '?')}" if entry_card.get("out_sample_score") else "N/A"
+                log(f"  ✓ Strategy card: {x_col} bucket={bucket_num} "
+                    f"IS_score={entry_card.get('in_sample_score', '?')} "
+                    f"OOS_score={oos_label}")
+
+    log(f"  {len(strategy_results)} strategy entry cards generated.")
+    return strategy_results
 
 
 # ── Phase 1: Main execution pipeline ─────────────────────────────────────────
@@ -728,6 +959,57 @@ async def execute_v2_pipeline(
             s.get("composite_interaction_score") or s.get("composite_score") or 0
         ), reverse=True)
 
+    # ── 2c. Task-type-specific analysis ────────────────────────────────────
+    task_type = plan.get("task_type", "single-factor-scan")
+    extra_context_lines = []
+
+    if task_type == "regime-analysis":
+        log("[2c] Running regime-conditional analysis…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(conn, run_id,
+                                 ai_summary="[RUNNING] Step 2c: Regime analysis…")
+        regime_results = await _run_regime_analysis(
+            cache, ranked, all_scans, x_cols, y_cols, main_pool, run_id, log)
+        if regime_results:
+            extra_context_lines.append("\n=== Regime-Conditional Results ===")
+            for s in sorted(regime_results,
+                            key=lambda x: x.get("composite_score", 0), reverse=True)[:10]:
+                extra_context_lines.append(
+                    f"  [{s.get('composite_score', 0):.0f}] {s.get('regime', '?')} | "
+                    f"{s.get('x_col')} → {s.get('y_col')}: pattern={s.get('pattern')}")
+
+    elif task_type == "event-study":
+        log("[2c] Running event-study analysis…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(conn, run_id,
+                                 ai_summary="[RUNNING] Step 2c: Event study…")
+        event_results = await _run_event_study(
+            cache, x_cols, y_cols, main_pool, run_id, log)
+        if event_results:
+            extra_context_lines.append("\n=== Event-Conditional Results ===")
+            for s in sorted(event_results,
+                            key=lambda x: x.get("composite_score", 0), reverse=True)[:10]:
+                extra_context_lines.append(
+                    f"  [{s.get('composite_score', 0):.0f}] {s.get('event_window', '?')} | "
+                    f"{s.get('x_col')} → {s.get('y_col')}: pattern={s.get('pattern')}")
+
+    elif task_type == "strategy-entry-condition":
+        log("[2c] Generating strategy entry conditions…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(conn, run_id,
+                                 ai_summary="[RUNNING] Step 2c: Strategy entry cards…")
+        strategy_results = await _run_strategy_entry(
+            cache, ranked, x_cols, y_cols, main_pool, run_id, log)
+        if strategy_results:
+            extra_context_lines.append("\n=== Strategy Entry Cards ===")
+            for s in strategy_results:
+                rule = s.get("rule", "?")
+                oos = s.get("out_sample_score")
+                extra_context_lines.append(
+                    f"  Rule: {rule}\n"
+                    f"    IS_score={s.get('in_sample_score', '?')}, "
+                    f"OOS_score={oos if oos is not None else 'N/A'}")
+
     # ── 3. Deterministic chart generation (no LLM call) ────────────────────
     log("[3/5] Generating charts deterministically from top signals…")
     async with main_pool.acquire() as conn:
@@ -867,8 +1149,10 @@ async def execute_v2_pipeline(
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
 
+    extra_ctx = "\n".join(extra_context_lines) if extra_context_lines else ""
     report = await _compose_report(question, plan, ranked, equity_results, model,
-                                   knowledge_rules=knowledge_rules)
+                                   knowledge_rules=knowledge_rules,
+                                   extra_context=extra_ctx)
     log("  Report complete.")
 
     # ── 5. Skeptic review ────────────────────────────────────────────────
