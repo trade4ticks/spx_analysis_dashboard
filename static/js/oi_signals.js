@@ -51,6 +51,12 @@ document.addEventListener('alpine:init', () => {
 
     get sortedTickers() {
       if (!this.sortCol) return this.tickers;
+      if (this.sortCol === '_ticker') {
+        return [...this.tickers].sort((a, b) =>
+          this.sortDir === 'asc'
+            ? a.ticker.localeCompare(b.ticker)
+            : b.ticker.localeCompare(a.ticker));
+      }
       return [...this.tickers].sort((a, b) => {
         const da = a.metrics?.[this.sortCol]?.today_decile ?? 5;
         const db = b.metrics?.[this.sortCol]?.today_decile ?? 5;
@@ -58,11 +64,11 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    toggleSort(metric) {
-      if (this.sortCol === metric) {
+    toggleSort(col) {
+      if (this.sortCol === col) {
         this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
       } else {
-        this.sortCol = metric;
+        this.sortCol = col;
         this.sortDir = 'asc';
       }
     },
@@ -81,9 +87,18 @@ document.addEventListener('alpine:init', () => {
 
     decileClass(d) {
       if (d == null) return '';
-      if (d <= 2) return 'decile-hot-pos';
-      if (d >= 9) return 'decile-hot-neg';
+      if (d === 1) return 'decile-d1';
+      if (d === 2) return 'decile-d2';
+      if (d === 9) return 'decile-d9';
+      if (d === 10) return 'decile-d10';
       return '';
+    },
+
+    // Get the avg return for today's decile
+    todayAvgRet(md) {
+      if (!md || !md.today_decile || !md.deciles) return null;
+      const d = md.deciles.find(b => b && b.bucket === md.today_decile);
+      return d ? d.avg_ret : null;
     },
 
     renderAllSparklines() {

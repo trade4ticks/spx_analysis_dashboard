@@ -9,32 +9,34 @@
     .oi-body { flex: 1; overflow: auto; padding: 16px; }
 
     /* Signal table */
-    .sig-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .sig-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .sig-table th {
-      background: var(--raised); color: var(--dim); font-size: 9px;
+      background: var(--raised); color: var(--dim); font-size: 11px;
       font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
-      padding: 6px 8px; border-bottom: 1px solid var(--border);
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
       position: sticky; top: 0; z-index: 2; cursor: pointer; user-select: none;
       white-space: nowrap;
     }
     .sig-table th:hover { color: var(--accent); }
     .sig-table td {
-      padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
+      padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.04);
       vertical-align: middle;
     }
     .sig-table tr:hover td { background: rgba(255,255,255,.03); }
 
-    .ticker-cell { font-weight: 700; color: var(--text); font-size: 12px; }
+    .ticker-cell { font-weight: 700; color: var(--text); font-size: 14px; }
     .decile-badge {
-      display: inline-block; padding: 1px 6px; border-radius: 3px;
-      font-weight: 700; font-size: 10px; min-width: 28px; text-align: center;
+      display: inline-block; padding: 2px 8px; border-radius: 3px;
+      font-weight: 700; font-size: 12px; min-width: 32px; text-align: center;
     }
-    .decile-hot-pos .decile-badge { background: rgba(52,152,219,.2); color: #3498db; }
-    .decile-hot-neg .decile-badge { background: rgba(232,67,147,.2); color: #e84393; }
-    .pct-text { font-size: 9px; color: var(--dim); margin-left: 4px; }
+    .decile-d1 .decile-badge  { background: rgba(52,152,219,.3);  color: #5dade2; }
+    .decile-d2 .decile-badge  { background: rgba(52,152,219,.15); color: #3498db; }
+    .decile-d9 .decile-badge  { background: rgba(232,67,147,.15); color: #e84393; }
+    .decile-d10 .decile-badge { background: rgba(232,67,147,.3);  color: #f06292; }
+    .pct-text { font-size: 10px; color: var(--dim); margin-left: 4px; }
+    .avg-ret-text { font-size: 10px; margin-left: 6px; font-weight: 600; }
 
-    .spark-cell { width: 140px; height: 45px; position: relative; }
-    .spark-cell canvas { width: 100% !important; height: 100% !important; }
+    /* sparklines are inline in the data cell now */
 
     /* Co-occurrence */
     .cooc-section { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 16px; }
@@ -48,7 +50,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=1"></script>
+  <script src="/static/js/oi_signals.js?v=2"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -92,22 +94,12 @@
           <table class="sig-table">
             <thead>
               <tr>
-                <th style="cursor:default">Ticker</th>
+                <th @click="toggleSort('_ticker')" x-text="'Ticker' + sortArrow('_ticker')"></th>
                 <th style="cursor:default">Date</th>
                 <template x-for="m in metrics" :key="m">
-                  <th colspan="2" @click="toggleSort(m)"
+                  <th @click="toggleSort(m)"
+                      style="text-align:center;border-left:1px solid var(--border);min-width:300px"
                       x-text="metricShort(m) + sortArrow(m)"></th>
-                </template>
-              </tr>
-              <tr style="border-bottom:2px solid var(--border)">
-                <th style="cursor:default"></th>
-                <th style="cursor:default"></th>
-                <template x-for="m in metrics" :key="'sub-'+m">
-                  <template x-if="true">
-                    <th colspan="2" style="font-weight:400;font-size:8px;color:#555;cursor:default">
-                      Decile · Pctile · Chart
-                    </th>
-                  </template>
                 </template>
               </tr>
             </thead>
@@ -115,20 +107,26 @@
               <template x-for="t in sortedTickers" :key="t.ticker">
                 <tr>
                   <td class="ticker-cell" x-text="t.ticker"></td>
-                  <td style="font-size:9px;color:var(--dim)" x-text="t.latest_date"></td>
-                  <template x-for="m in metrics" :key="t.ticker+m">
-                    <template x-if="true">
-                      <td :class="decileClass(t.metrics?.[m]?.today_decile)">
-                        <span class="decile-badge"
-                              x-text="t.metrics?.[m]?.today_decile != null ? 'D' + t.metrics[m].today_decile : '—'"></span>
-                        <span class="pct-text"
-                              x-text="t.metrics?.[m]?.today_percentile != null ? t.metrics[m].today_percentile + '%' : ''"></span>
-                      </td>
-                    </template>
-                  </template>
-                  <template x-for="m in metrics" :key="t.ticker+m+'-spark'">
-                    <td class="spark-cell">
-                      <canvas :id="'spark-' + t.ticker + '-' + m"></canvas>
+                  <td style="font-size:10px;color:var(--dim)" x-text="t.latest_date"></td>
+                  <template x-for="m in metrics" :key="t.ticker+'-'+m">
+                    <!-- Data + sparkline paired under the colspan=2 header -->
+                    <td :class="decileClass(t.metrics?.[m]?.today_decile)"
+                        style="border-left:1px solid rgba(255,255,255,.06)">
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <div style="white-space:nowrap;min-width:120px">
+                          <span class="decile-badge"
+                                x-text="t.metrics?.[m]?.today_decile != null ? 'D' + t.metrics[m].today_decile : '—'"></span>
+                          <span class="pct-text"
+                                x-text="t.metrics?.[m]?.today_percentile != null ? t.metrics[m].today_percentile + '%' : ''"></span>
+                          <span class="avg-ret-text"
+                                :style="(todayAvgRet(t.metrics?.[m]) || 0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                                x-text="todayAvgRet(t.metrics?.[m]) != null ? (todayAvgRet(t.metrics[m]) >= 0 ? '+' : '') + todayAvgRet(t.metrics[m]).toFixed(2) + '%' : ''"></span>
+                        </div>
+                        <div style="width:180px;height:60px;flex-shrink:0">
+                          <canvas :id="'spark-' + t.ticker + '-' + m"
+                                  style="width:100%!important;height:100%!important"></canvas>
+                        </div>
+                      </div>
                     </td>
                   </template>
                 </tr>
