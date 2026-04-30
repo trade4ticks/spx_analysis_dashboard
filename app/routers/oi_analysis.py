@@ -271,6 +271,35 @@ async def analyze(
     c_sample = min(n / 1000, 0.5)
     composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
 
+    # ── Rolling correlation (252-day window) ───────────────────────────
+    sorted_by_date = sorted(pairs, key=lambda p: p[2])
+    rolling_window = 252
+    rolling_corr = []
+    if len(sorted_by_date) > rolling_window:
+        for end in range(rolling_window, len(sorted_by_date)):
+            window = sorted_by_date[end - rolling_window:end]
+            wx = np.array([p[0] for p in window])
+            wy = np.array([p[1] for p in window])
+            if wx.std() > 0 and wy.std() > 0:
+                rc, _ = sp_stats.spearmanr(wx, wy)
+                rolling_corr.append({
+                    "date": str(window[-1][2]),
+                    "spearman": round(float(rc), 4),
+                })
+
+    # ── Trade calendar (month × year avg return per decile) ──────────────
+    # Pre-assign decile to each pair efficiently
+    sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
+    decile_map = {}
+    for rank, idx in enumerate(sorted_by_x):
+        decile_map[idx] = min(int(rank / len(pairs) * 10) + 1, 10)
+
+    trade_calendar = []
+    for idx, (x, y, d) in enumerate(pairs):
+        yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
+        mo = d.month if hasattr(d, 'month') else int(str(d)[5:7])
+        trade_calendar.append({"year": yr, "month": mo, "ret": round(y, 6), "decile": decile_map[idx]})
+
     # ── Today's value ────────────────────────────────────────────────────
     today_val = pairs[-1][0] if pairs else None
     today_pct = None
@@ -305,6 +334,8 @@ async def analyze(
         # Time series
         "yearly":              yearly,
         "yearly_consistency":  yearly_consistency,
+        "rolling_corr":        rolling_corr,
+        "trade_calendar":      trade_calendar,
 
         # Today
         "today_value":      round(float(today_val), 6) if today_val is not None else None,

@@ -13,6 +13,7 @@ document.addEventListener('alpine:init', () => {
     loading: false,
     error: null,
     _charts: {},
+    fsChartId: null,
 
     async init() {
       const [tkRes, colRes] = await Promise.all([
@@ -62,16 +63,25 @@ document.addEventListener('alpine:init', () => {
         this.selectedDeciles.add(d);
       }
       this.selectedDeciles = new Set(this.selectedDeciles); // trigger reactivity
-      this._renderEquity();
-      this._renderDrawdown();
+      this._onDecileChange();
     },
 
-    selectAllDeciles() { this.selectedDeciles = new Set([1,2,3,4,5,6,7,8,9,10]); this._renderEquity(); this._renderDrawdown(); },
-    selectExtremes()   { this.selectedDeciles = new Set([1,10]); this._renderEquity(); this._renderDrawdown(); },
+    selectAllDeciles() { this.selectedDeciles = new Set([1,2,3,4,5,6,7,8,9,10]); this._onDecileChange(); },
+    selectExtremes()   { this.selectedDeciles = new Set([1,10]); this._onDecileChange(); },
+    selectNone()       { this.selectedDeciles = new Set(); this._onDecileChange(); },
+
+    _onDecileChange() {
+      this._renderEquity();
+      this._renderDrawdown();
+      this._renderYearly();
+      this._renderRollingCorr();
+      this._renderReturnDist();
+      this._renderTradeCalendar();
+    },
 
     isDecileSelected(d) { return this.selectedDeciles.has(d); },
 
-    setEquityMode(m) { this.equityMode = m; this._renderEquity(); this._renderDrawdown(); },
+    setEquityMode(m) { this.equityMode = m; this._renderEquity(); this._renderDrawdown(); this._renderRollingCorr(); },
 
     _destroyCharts() {
       Object.values(this._charts).forEach(c => c.destroy());
@@ -197,30 +207,51 @@ document.addEventListener('alpine:init', () => {
 
     _renderYearly() {
       const el = document.getElementById('chart-yearly');
-      if (!el || !this.data?.yearly) return;
+      if (!el || !this.data?.trade_calendar) return;
       if (this._charts['yearly']) this._charts['yearly'].destroy();
 
-      const yearly = this.data.yearly;
+      const cal = this.data.trade_calendar || [];
+      const selDec = this.selectedDeciles;
+      // Filter to selected deciles, group by year
+      const filtered = selDec.size > 0
+        ? cal.filter(c => selDec.has(c.decile))
+        : cal;
+      const byYear = {};
+      for (const c of filtered) {
+        if (!byYear[c.year]) byYear[c.year] = { rets: [], wins: 0 };
+        byYear[c.year].rets.push(c.ret);
+        if (c.ret > 0) byYear[c.year].wins++;
+      }
+      const years = Object.keys(byYear).sort();
+      const avgs = years.map(yr => {
+        const r = byYear[yr].rets;
+        return r.length ? r.reduce((a,b) => a+b, 0) / r.length * 100 : 0;
+      });
+      const decLabel = selDec.size > 0 ? Array.from(selDec).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'All';
+
       this._charts['yearly'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: yearly.map(y => y.year),
+          labels: years,
           datasets: [{
-            label: 'Avg Return',
-            data: yearly.map(y => y.avg_ret * 100),
-            backgroundColor: yearly.map(y => y.avg_ret >= 0 ? '#3498db' : '#e84393'),
+            label: `Avg Return (${decLabel})`,
+            data: avgs,
+            backgroundColor: avgs.map(v => v >= 0 ? '#3498db' : '#e84393'),
             borderWidth: 0,
           }],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { display: false },
+            legend: { labels:{color:'#aaa',font:{size:10}} },
             tooltip: {
               callbacks: {
                 label: ctx => {
-                  const y = yearly[ctx.dataIndex];
-                  return [`Avg: ${(y.avg_ret*100).toFixed(3)}%`, `WR: ${(y.win_rate*100).toFixed(0)}%`, `n: ${y.n}`];
+                  const yr = years[ctx.dataIndex];
+                  const info = byYear[yr];
+                  const avg = info.rets.reduce((a,b)=>a+b,0) / info.rets.length;
+                  const wr = info.wins / info.rets.length;
+                  return [`Avg: ${(avg*100).toFixed(3)}%`, `WR: ${(wr*100).toFixed(0)}%`, `n: ${info.rets.length}`];
                 },
               },
             },
@@ -264,35 +295,38 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Boxplot (IQR bars) ─────────────────────────────────────────────
+    // ── Boxplot (5th-95th percentile + IQR + median) ───────────────────
     _renderBoxplot() {
       const el = document.getElementById('chart-boxplot');
       if (!el || !this.data?.decile_stats) return;
       if (this._charts['boxplot']) this._charts['boxplot'].destroy();
 
-      const stats = (this.data.decile_stats || []).filter(d => d && d.returns?.length);
+      const stats = (this.data.decile_stats || []).filter(d => d && d.returns?.length >= 5);
       const labels = stats.map(d => 'D' + d.bucket);
       const boxData = stats.map(d => {
         const s = [...d.returns].sort((a,b) => a-b);
-        const q1 = s[Math.floor(s.length * 0.25)] * 100;
-        const med = s[Math.floor(s.length * 0.5)] * 100;
-        const q3 = s[Math.floor(s.length * 0.75)] * 100;
-        const mn = s[0] * 100;
-        const mx = s[s.length-1] * 100;
-        return { q1, med, q3, min: mn, max: mx };
+        const pct = p => s[Math.floor(s.length * p)] * 100;
+        return { p5: pct(0.05), q1: pct(0.25), med: pct(0.5), q3: pct(0.75), p95: pct(0.95) };
       });
 
-      // Simulate boxplot with floating bars (IQR) + error bars (whiskers)
+      // IQR as floating bars, whiskers as error-bar-like lines, median as points
       this._charts['boxplot'] = new Chart(el, {
         type: 'bar',
         data: {
           labels,
           datasets: [
+            // Whisker range (5th-95th) as thin faint bars behind
+            { label: 'P5-P95', data: boxData.map(b => [b.p5, b.p95]),
+              backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.2)',
+              borderWidth: 1, barPercentage: 0.15 },
+            // IQR as thicker bars
             { label: 'IQR', data: boxData.map(b => [b.q1, b.q3]),
-              backgroundColor: 'rgba(52,152,219,0.3)', borderColor: '#3498db', borderWidth: 1 },
+              backgroundColor: 'rgba(52,152,219,0.3)', borderColor: '#3498db',
+              borderWidth: 1, barPercentage: 0.5 },
+            // Median as point line
             { label: 'Median', data: boxData.map(b => b.med), type: 'line',
               borderColor: '#fff', backgroundColor: 'transparent',
-              borderWidth: 2, pointRadius: 4, pointBackgroundColor: '#fff' },
+              borderWidth: 2, pointRadius: 4, pointBackgroundColor: '#fff', pointBorderWidth: 0 },
           ],
         },
         options: {
@@ -303,9 +337,9 @@ document.addEventListener('alpine:init', () => {
               callbacks: {
                 label: ctx => {
                   const b = boxData[ctx.dataIndex];
-                  return [`Min: ${b.min.toFixed(2)}%`, `Q1: ${b.q1.toFixed(2)}%`,
+                  return [`P5: ${b.p5.toFixed(2)}%`, `Q1: ${b.q1.toFixed(2)}%`,
                           `Med: ${b.med.toFixed(2)}%`, `Q3: ${b.q3.toFixed(2)}%`,
-                          `Max: ${b.max.toFixed(2)}%`];
+                          `P95: ${b.p95.toFixed(2)}%`];
                 },
               },
             },
@@ -456,12 +490,12 @@ document.addEventListener('alpine:init', () => {
           },
           scales: {
             x: { ...this._darkScales().x, type:'linear', min:-0.5, max:bins-0.5,
-                 ticks: { ...this._darkScales().x.ticks,
-                          callback: v => xLabels[Math.round(v)] || '' },
+                 ticks: { ...this._darkScales().x.ticks, autoSkip: false, stepSize: 1,
+                          callback: v => Number.isInteger(v) && v >= 0 && v < bins ? xLabels[v] : '' },
                  title: { display:true, text:this.heatmapData.metric_x, color:'#888', font:{size:10} } },
             y: { ...this._darkScales().y, type:'linear', min:-0.5, max:bins-0.5,
-                 ticks: { ...this._darkScales().y.ticks,
-                          callback: v => yLabels[Math.round(v)] || '' },
+                 ticks: { ...this._darkScales().y.ticks, autoSkip: false, stepSize: 1,
+                          callback: v => Number.isInteger(v) && v >= 0 && v < bins ? yLabels[v] : '' },
                  title: { display:true, text:this.heatmapData.metric_y, color:'#888', font:{size:10} } },
           },
         },
@@ -491,14 +525,205 @@ document.addEventListener('alpine:init', () => {
       this.aiLoading = false;
     },
 
+    // ── Rolling correlation ────────────────────────────────────────────
+    _renderRollingCorr() {
+      const el = document.getElementById('chart-rolling');
+      if (!el || !this.data?.rolling_corr?.length) return;
+      if (this._charts['rolling']) this._charts['rolling'].destroy();
+
+      const rc = this.data.rolling_corr;
+      this._charts['rolling'] = new Chart(el, {
+        type: 'line',
+        data: {
+          labels: rc.map(r => r.date?.slice(0, 7)),
+          datasets: [{
+            label: 'Spearman ρ (252d)',
+            data: rc.map(r => r.spearman),
+            borderColor: '#3498db', backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels:{color:'#aaa',font:{size:10}} },
+            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks:{...this._darkScales().x.ticks, maxTicksLimit:10} },
+            y: { ...this._darkScales().y, ticks:{...this._darkScales().y.ticks,
+                  callback: v => v.toFixed(3) } },
+          },
+        },
+      });
+    },
+
+    // ── Return distribution (histogram with background) ─────────────────
+    _renderReturnDist() {
+      const el = document.getElementById('chart-dist');
+      if (!el || !this.data?.decile_stats) return;
+      if (this._charts['dist']) this._charts['dist'].destroy();
+
+      const allRets = [];
+      const selRets = [];
+      for (const d of (this.data.decile_stats || [])) {
+        if (!d?.returns) continue;
+        allRets.push(...d.returns.map(r => r * 100));
+        if (this.selectedDeciles.has(d.bucket)) {
+          selRets.push(...d.returns.map(r => r * 100));
+        }
+      }
+      if (!allRets.length) return;
+
+      // Build histogram bins
+      const nBins = 40;
+      const mn = Math.max(Math.min(...allRets), -15);
+      const mx = Math.min(Math.max(...allRets), 15);
+      const step = (mx - mn) / nBins;
+      const labels = [];
+      const allCounts = new Array(nBins).fill(0);
+      const selCounts = new Array(nBins).fill(0);
+      for (let i = 0; i < nBins; i++) labels.push((mn + step * (i + 0.5)).toFixed(1));
+      for (const v of allRets) {
+        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
+        if (b >= 0) allCounts[b]++;
+      }
+      for (const v of selRets) {
+        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
+        if (b >= 0) selCounts[b]++;
+      }
+
+      const decLabel = this.selectedDeciles.size > 0
+        ? Array.from(this.selectedDeciles).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'None';
+
+      this._charts['dist'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'All Deciles', data: allCounts,
+              backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
+            { label: decLabel, data: selCounts,
+              backgroundColor: 'rgba(52,152,219,0.5)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels:{color:'#aaa',font:{size:10}} },
+            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, title:{display:true,text:'Return %',color:'#888',font:{size:10}} },
+            y: { ...this._darkScales().y, title:{display:true,text:'Count',color:'#888',font:{size:10}} },
+          },
+        },
+      });
+    },
+
+    // ── Trade calendar (month × year heatmap) ───────────────────────────
+    _renderTradeCalendar() {
+      const el = document.getElementById('chart-calendar');
+      if (!el || !this.data?.trade_calendar) return;
+      if (this._charts['calendar']) this._charts['calendar'].destroy();
+
+      const cal = this.data.trade_calendar || [];
+      const selDec = this.selectedDeciles;
+      const filtered = selDec.size > 0 ? cal.filter(c => selDec.has(c.decile)) : cal;
+
+      // Group by year × month
+      const byYM = {};
+      for (const c of filtered) {
+        const k = `${c.year}-${c.month}`;
+        if (!byYM[k]) byYM[k] = [];
+        byYM[k].push(c.ret);
+      }
+
+      const years = [...new Set(filtered.map(c => c.year))].sort();
+      const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+      const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+      // Build bubble data
+      const points = [];
+      let minAvg = Infinity, maxAvg = -Infinity;
+      for (let yi = 0; yi < years.length; yi++) {
+        for (let mi = 0; mi < 12; mi++) {
+          const rets = byYM[`${years[yi]}-${mi+1}`];
+          if (!rets?.length) continue;
+          const avg = rets.reduce((a,b)=>a+b,0) / rets.length;
+          minAvg = Math.min(minAvg, avg);
+          maxAvg = Math.max(maxAvg, avg);
+          points.push({ x: mi, y: yi, r: Math.min(Math.max(rets.length, 4), 15),
+                        avg, n: rets.length, year: years[yi], month: mi+1 });
+        }
+      }
+
+      const range = Math.max(Math.abs(minAvg), Math.abs(maxAvg)) || 0.01;
+      const colors = points.map(p =>
+        p.avg >= 0
+          ? `rgba(52,152,219,${Math.min(Math.abs(p.avg/range)*0.8+0.2,1)})`
+          : `rgba(232,67,147,${Math.min(Math.abs(p.avg/range)*0.8+0.2,1)})`);
+
+      this._charts['calendar'] = new Chart(el, {
+        type: 'bubble',
+        data: { datasets: [{ data: points, backgroundColor: colors, borderWidth: 0 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const p = points[ctx.dataIndex];
+                  return [`${monthNames[p.month-1]} ${p.year}`,
+                          `Avg: ${(p.avg*100).toFixed(3)}%`, `n: ${p.n}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ...this._darkScales().x, type:'linear', min:-0.5, max:11.5,
+                 ticks:{...this._darkScales().x.ticks, callback: v => monthNames[Math.round(v)] || ''} },
+            y: { ...this._darkScales().y, type:'linear', min:-0.5, max: years.length - 0.5,
+                 ticks:{...this._darkScales().y.ticks, callback: v => years[Math.round(v)] || ''} },
+          },
+        },
+      });
+    },
+
     // ── Update _renderCharts to include new charts ──────────────────────
     _renderAllCharts() {
       this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
-      this._renderYearlyConsistency();
       this._renderBoxplot();
       this._renderDrawdown();
+      this._renderRollingCorr();
+      this._renderReturnDist();
+      this._renderTradeCalendar();
+    },
+
+    // Fullscreen
+    openFullscreen(chartId) {
+      const src = this._charts[chartId.replace('chart-', '')];
+      if (!src) return;
+      this.fsChartId = chartId;
+      this.$nextTick(() => {
+        const el = document.getElementById('fs-canvas');
+        if (!el) return;
+        // Clone the chart config
+        const cfg = JSON.parse(JSON.stringify(src.config));
+        cfg.options.animation = false;
+        if (this._charts['_fs']) this._charts['_fs'].destroy();
+        this._charts['_fs'] = new Chart(el, cfg);
+      });
+    },
+
+    closeFullscreen() {
+      if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
+      this.fsChartId = null;
     },
 
     // Helpers

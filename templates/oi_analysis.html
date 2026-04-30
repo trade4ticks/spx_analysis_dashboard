@@ -72,10 +72,34 @@
     }
     .dec-table tr:hover td { background:rgba(255,255,255,.03); }
     .dec-table .num { text-align:right; font-variant-numeric:tabular-nums; }
+
+    /* Fullscreen */
+    .fs-btn {
+      background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1);
+      border-radius:3px; padding:1px 5px; font-size:12px; color:var(--dim);
+      cursor:pointer; margin-left:auto;
+    }
+    .fs-btn:hover { background:rgba(255,255,255,.12); color:var(--muted); }
+    .fs-overlay {
+      position:fixed; inset:0; z-index:500; background:rgba(10,10,10,.95);
+      display:flex; flex-direction:column;
+    }
+    .fs-overlay .fs-bar {
+      display:flex; justify-content:flex-end; padding:10px 16px; gap:8px;
+    }
+    .fs-overlay .fs-bar button {
+      background:var(--raised); border:1px solid var(--border); border-radius:4px;
+      padding:5px 12px; font-size:11px; color:var(--muted); cursor:pointer;
+    }
+    .fs-overlay .fs-body { flex:1; padding:12px; position:relative; }
+    .fs-overlay .fs-body canvas {
+      position:absolute; inset:12px;
+      width:calc(100% - 24px)!important; height:calc(100% - 24px)!important;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=2"></script>
+  <script src="/static/js/oi_analysis.js?v=3"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -93,6 +117,18 @@
       <a class="nav-link" href="/research2">Research 2</a>
     </nav>
   </div>
+
+  <!-- Fullscreen overlay -->
+  <template x-if="fsChartId">
+    <div class="fs-overlay" @keydown.escape.window="closeFullscreen()">
+      <div class="fs-bar">
+        <button @click="closeFullscreen()">✕ Close</button>
+      </div>
+      <div class="fs-body">
+        <canvas id="fs-canvas"></canvas>
+      </div>
+    </div>
+  </template>
 
   <div class="oi-body">
 
@@ -188,6 +224,7 @@
             <div class="chart-title">
               Decile Avg Return
               <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bars to select</span>
+              <button class="fs-btn" @click="openFullscreen('chart-decile')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
           </div>
@@ -196,12 +233,14 @@
           <div class="chart-box">
             <div class="chart-title">
               Equity Curve
+              <button class="fs-btn" @click="openFullscreen('chart-equity')" title="Fullscreen">⛶</button>
               <div class="mode-seg" style="margin-left:auto">
                 <span :class="{on: equityMode==='concurrent'}" @click="setEquityMode('concurrent')">Concurrent</span>
                 <span :class="{on: equityMode==='non_overlapping'}" @click="setEquityMode('non_overlapping')">Non-Overlap</span>
               </div>
             </div>
             <div class="decile-btns">
+              <span class="decile-btn" @click="selectNone()" style="font-size:9px">None</span>
               <span class="decile-btn" @click="selectExtremes()" style="font-size:9px">D1+D10</span>
               <span class="decile-btn" @click="selectAllDeciles()" style="font-size:9px">All</span>
               <template x-for="d in [1,2,3,4,5,6,7,8,9,10]" :key="'db-'+d">
@@ -212,26 +251,28 @@
             <div class="chart-canvas"><canvas id="chart-equity"></canvas></div>
           </div>
 
-          <!-- Yearly avg return -->
+          <!-- Yearly avg return (decile-filtered) -->
           <div class="chart-box">
-            <div class="chart-title">Avg Return by Year (all deciles)</div>
+            <div class="chart-title">Avg Return by Year
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
+              <button class="fs-btn" @click="openFullscreen('chart-yearly')" title="Fullscreen">⛶</button>
+            </div>
             <div class="chart-canvas"><canvas id="chart-yearly"></canvas></div>
           </div>
 
-          <!-- Yearly consistency -->
+          <!-- Rolling correlation -->
           <div class="chart-box">
-            <div class="chart-title">
-              Yearly D10 vs D1
-              <span style="font-weight:400;font-size:9px;color:var(--dim)"
-                    x-text="data.consistency_pct != null ? '— ' + data.consistency_pct + '% top beats bottom' : ''"></span>
+            <div class="chart-title">Rolling Signal Strength (252d Spearman)
+              <button class="fs-btn" @click="openFullscreen('chart-rolling')" title="Fullscreen">⛶</button>
             </div>
-            <div class="chart-canvas"><canvas id="chart-consistency"></canvas></div>
+            <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
           </div>
 
           <!-- Boxplot -->
           <div class="chart-box">
             <div class="chart-title">Return Distribution by Decile
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— IQR + median</span>
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— P5/Q1/Med/Q3/P95</span>
+              <button class="fs-btn" @click="openFullscreen('chart-boxplot')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-boxplot"></canvas></div>
           </div>
@@ -240,8 +281,27 @@
           <div class="chart-box">
             <div class="chart-title">Drawdown
               <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
+              <button class="fs-btn" @click="openFullscreen('chart-drawdown')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
+          </div>
+
+          <!-- Return Distribution -->
+          <div class="chart-box">
+            <div class="chart-title">Return Distribution
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected vs all</span>
+              <button class="fs-btn" @click="openFullscreen('chart-dist')" title="Fullscreen">⛶</button>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-dist"></canvas></div>
+          </div>
+
+          <!-- Trade Calendar -->
+          <div class="chart-box">
+            <div class="chart-title">Trade Calendar
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— month × year avg return</span>
+              <button class="fs-btn" @click="openFullscreen('chart-calendar')" title="Fullscreen">⛶</button>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-calendar"></canvas></div>
           </div>
 
           <!-- 2D Heatmap -->
