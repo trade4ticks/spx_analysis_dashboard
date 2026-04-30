@@ -54,6 +54,19 @@ async def _get_columns(table: str, pool, oi_pool) -> list[dict]:
     ]
 
 
+async def _load_all_tickers(oi_pool, table: str) -> list[str]:
+    """Load all distinct tickers from the OI database."""
+    if not oi_pool or table not in _OI_TABLES:
+        return []
+    try:
+        async with oi_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
+        return [r["ticker"] for r in rows]
+    except Exception:
+        return []
+
+
 # ── Background execution ──────────────────────────────────────────────────────
 
 async def _execute_run(main_pool, oi_pool, run_id: str, question: str,
@@ -187,21 +200,26 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
             "Specify what you want to predict (e.g., forward returns).",
         )
 
-    # Resolve tickers: user-selected > planner-selected > empty (pooled)
+    # Resolve tickers: user-selected > planner-selected > auto-detect from question
     tickers = req.tickers
     if not tickers:
+        # Check if planner explicitly selected tickers
         if plan.get("tickers_mode") == "all_individual":
-            # Planner detected the question wants per-ticker analysis — load all tickers
-            try:
-                if oi_pool and req.table in _OI_TABLES:
-                    async with oi_pool.acquire() as conn:
-                        tk_rows = await conn.fetch(
-                            "SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
-                    tickers = [r["ticker"] for r in tk_rows]
-            except Exception:
-                pass
+            tickers = await _load_all_tickers(oi_pool, req.table)
         elif plan.get("tickers_override"):
             tickers = plan["tickers_override"]
+        else:
+            # Auto-detect: if the question mentions per-ticker analysis, load all
+            q_lower = req.question.lower()
+            ticker_keywords = [
+                "per-ticker", "per ticker", "ticker-level", "ticker level",
+                "specific tickers", "which tickers", "across tickers",
+                "explore tickers", "individual ticker", "each ticker",
+                "ticker by ticker", "compare tickers", "best tickers",
+                "show promise", "which symbols", "which stocks",
+            ]
+            if any(kw in q_lower for kw in ticker_keywords):
+                tickers = await _load_all_tickers(oi_pool, req.table)
 
     config = {
         "engine":        "v2",
