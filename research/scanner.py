@@ -192,6 +192,7 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
         concentration=robustness.get("concentration_risk") or 1.0,
         best_zone_sharpe=best_zone_sharpe,
         n=n,
+        extreme_coverage=robustness.get("extreme_coverage", 1.0),
     )
 
     return _jsonify({
@@ -370,6 +371,28 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
     bucket_sizes = [len(b) for b in full_buckets if b]
     min_bucket_n = min(bucket_sizes) if bucket_sizes else 0
 
+    # Temporal coverage for extreme deciles (D1 and D10)
+    # Check what fraction of years each extreme bucket has data in
+    total_years = len(by_year)
+    extreme_coverage = 1.0
+    if total_years >= 3 and len(full_buckets) >= 4:
+        # Re-bucket per year and check if D1/D10 have data each year
+        d1_years = 0
+        d10_years = 0
+        for yr, yr_pairs in by_year.items():
+            if len(yr_pairs) < n_buckets * 2:
+                continue
+            yr_buckets = _bucket(yr_pairs, n_buckets)
+            if len(yr_buckets) >= n_buckets:
+                if yr_buckets[0]:  # D1 has data this year
+                    d1_years += 1
+                if yr_buckets[-1]:  # D10 has data this year
+                    d10_years += 1
+        checked = max(years_checked, 1)
+        d1_cov = d1_years / checked if checked else 0
+        d10_cov = d10_years / checked if checked else 0
+        extreme_coverage = min(d1_cov, d10_cov)  # worst of the two
+
     return {
         "yearly_consistency_pct":  consistency_pct,
         "years_checked":           years_checked,
@@ -379,6 +402,7 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
         "half_sample_stable":      half_stable,
         "loyo_fragile":            loyo_fragile,
         "min_bucket_n":            min_bucket_n,
+        "extreme_coverage":        round(extreme_coverage, 4),
     }
 
 
@@ -387,10 +411,10 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
 def _composite_score(rank_corr: float, monotonicity: float,
                      consistency_pct: float, half_stability: bool,
                      concentration: float, best_zone_sharpe: float,
-                     n: int) -> float:
+                     n: int, extreme_coverage: float = 1.0) -> float:
     """
     0-100 composite score. Higher = more robust signal.
-    Equal-weighted across 6 components, each normalized to 0-1.
+    8 components, each normalized to 0-1, divided by max possible.
     """
     # 1. Rank correlation strength (0-1, capped at |r|=0.20)
     c_rank = min(rank_corr / 0.20, 1.0)
@@ -413,7 +437,13 @@ def _composite_score(rank_corr: float, monotonicity: float,
     # 7. Sample size bonus (0-0.5, >500 gets full bonus)
     c_sample = min(n / 1000, 0.5)
 
-    raw = (c_rank + c_mono + c_consistency + c_half + c_concentration + c_sharpe + c_sample) / 6.5
+    # 8. Extreme decile temporal coverage (0-1)
+    # Penalizes signals where D1 or D10 only have data in a subset of years
+    # (e.g., D1 fires only in 2020-2022 but not 2023-2025)
+    c_coverage = extreme_coverage
+
+    raw = (c_rank + c_mono + c_consistency + c_half + c_concentration
+           + c_sharpe + c_sample + c_coverage) / 7.5
     return round(raw * 100, 1)
 
 

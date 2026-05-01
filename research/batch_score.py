@@ -113,10 +113,10 @@ async def run_batch_score(oi_pool, main_pool, log=print):
             _progress["message"] = f"Ticker {ti+1}/{len(tickers)}: {ticker}"
             log(f"[{ti+1}/{len(tickers)}] {ticker}...")
 
-            # Fetch all data for this ticker once
+            # Fetch data for this ticker (from 2020-01-01 to match OI Analysis default)
             async with oi_pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT * FROM daily_features WHERE ticker = $1 ORDER BY trade_date",
+                    "SELECT * FROM daily_features WHERE ticker = $1 AND trade_date >= '2020-01-01' ORDER BY trade_date",
                     ticker)
             rows = [dict(r) for r in rows]
 
