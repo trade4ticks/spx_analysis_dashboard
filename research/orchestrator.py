@@ -21,6 +21,7 @@ except ImportError:
 from research import scanner, blocks, db as rdb
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
+_EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
 
 # ── Structured output tools (guaranteed valid JSON via tool_use) ──────────────
 
@@ -135,6 +136,9 @@ Column selection rules:
 - outcome_columns: what to predict (Y), prefer forward return columns (ret_Nd_fwd), max 4
 - Use ONLY column names from the available list above
 - Never include: id, ticker, trade_date, created_at, updated_at
+- CRITICAL: If the question explicitly names or describes specific columns/metrics, those columns
+  MUST be included in feature_columns or outcome_columns. Do not substitute similar columns.
+  The user's named metrics are the primary focus — add related columns only as supplements.
 - broad depth: include all plausibly relevant features
 - targeted depth: 3-7 most directly relevant features
 
@@ -182,16 +186,21 @@ PROSE GUIDELINES (for markdown sections):
 - Professional quant voice, no fluff, 400-700 words total prose
 
 CHART GUIDELINES (for chart sections):
-- Include 3-8 charts that best illustrate your findings
-- Use whatever Chart.js chart type fits: bar, line, scatter, radar, doughnut, etc.
+- Include 3-8 charts that best illustrate your findings — variety matters
+- Use whatever Chart.js chart type fits: bar, line, scatter, radar, doughnut, polarArea, etc.
 - Each chart config must be a COMPLETE Chart.js config with type, data (with real numeric values), and options
 - Use these colors: blue=#3498db for positive, pink=#e84393 for negative, muted grays for neutral
 - Dark theme: background transparent, text/ticks #aaa, grid rgba(255,255,255,0.05)
 - Include axis labels and a descriptive title
-- Bucket profiles: bar chart with D1-D10 labels, colored by sign
-- Equity curves: line chart with dates on x-axis
-- Correlation/heatmap: show as a table-like labeled bar chart or grouped bar
-- Any other pattern you see: choose the chart type that best communicates it
+- Chart ideas (use what fits, not all):
+  - Bucket profile: bar chart with D1-D10, colored by sign
+  - Equity curve: line chart with dates on x-axis
+  - Ticker scoreboard: horizontal bar ranking tickers by score
+  - Yearly consistency: grouped bars showing top vs bottom spread per year
+  - Win rate comparison: grouped or stacked bar across tickers
+  - Signal strength: radar chart comparing metrics across signals
+- If TICKER SCOREBOARD data is provided, create a cross-ticker comparison chart
+- If YEARLY BREAKDOWN data is provided, create a yearly consistency chart
 - Keep data arrays compact — round to 4 decimal places
 """
 
@@ -266,6 +275,19 @@ async def classify_and_plan(
     plan.setdefault("hypotheses", [])
     plan.setdefault("key_questions", [])
 
+    # Force-include columns the user explicitly mentioned in the question
+    # Match against available columns (case-insensitive substring match)
+    q_lower = question.lower()
+    for col_name in valid_cols:
+        if col_name.lower() in q_lower and col_name not in _EXCLUDE_COLS:
+            # Determine if it's a feature or outcome based on name
+            if col_name.startswith("ret_") or col_name.endswith("_fwd") or "_fwd_" in col_name:
+                if col_name not in plan["outcome_columns"]:
+                    plan["outcome_columns"].append(col_name)
+            else:
+                if col_name not in plan["feature_columns"]:
+                    plan["feature_columns"].append(col_name)
+
     # Handle ticker selection from the plan
     plan_tickers = plan.get("tickers") or []
     if plan_tickers == ["ALL"] or "ALL" in plan_tickers:
@@ -286,13 +308,14 @@ async def _compose_report(
     model: str,
     knowledge_rules: list[str] = None,
     extra_context: str = "",
+    ticker_scoreboard: dict = None,
 ) -> list[dict]:
     """Compose report as structured sections (markdown + Chart.js configs)."""
     if _anthropic is None:
         return [{"type": "markdown", "content": "(anthropic SDK not available)"}]
 
     valid = [s for s in ranked_scans if "error" not in s]
-    top = valid[:10]
+    top = valid[:20]
 
     # Signal table
     sig_lines = [
@@ -398,13 +421,46 @@ async def _compose_report(
     )
     if eq_chart_lines:
         user_content += f"\n\nEQUITY CURVE POINTS (for charting):\n" + "\n".join(eq_chart_lines)
+
+    # Ticker scoreboard — for cross-ticker comparison charts
+    if ticker_scoreboard and len(ticker_scoreboard) > 1:
+        sb_lines = []
+        for tk in sorted(ticker_scoreboard, key=lambda t: ticker_scoreboard[t]["score"], reverse=True):
+            info = ticker_scoreboard[tk]
+            sb_lines.append(
+                f"  {tk}: score={info['score']:.0f} "
+                f"({info['x_col']} → {info['y_col']}, "
+                f"pattern={info['pattern']}, "
+                f"consistency={info['consistency'] or '?'}%)"
+            )
+        user_content += (
+            f"\n\nTICKER SCOREBOARD (best signal per ticker — use this for cross-ticker comparison charts):\n"
+            + "\n".join(sb_lines)
+        )
+
+    # Yearly consistency breakdown for top signals
+    yearly_lines = []
+    for s in top[:5]:
+        yd = (s.get("robustness") or {}).get("yearly_data")
+        if yd:
+            tk = s.get("ticker") or "all"
+            yearly_lines.append(f"\n  {tk} | {s['x_col']} → {s['y_col']}:")
+            for y in yd:
+                yearly_lines.append(
+                    f"    {y.get('year')}: top_avg={y.get('top_avg', 0):.4f}, "
+                    f"bot_avg={y.get('bot_avg', 0):.4f}, "
+                    f"spread={y.get('top_avg', 0) - y.get('bot_avg', 0):.4f}"
+                )
+    if yearly_lines:
+        user_content += f"\n\nYEARLY BREAKDOWN (for yearly comparison charts):" + "".join(yearly_lines)
+
     if extra_context:
         user_content += f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}"
 
     client = _anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
-        max_tokens=4000,
+        max_tokens=8000,
         system=[{"type": "text", "text": report_system,
                  "cache_control": {"type": "ephemeral"}}],
         tools=[_REPORT_TOOL],
@@ -1027,6 +1083,22 @@ async def execute_v2_pipeline(
             except Exception as exc:
                 log(f"  EQUITY ERROR {x_col}→{y_col}: {exc}")
 
+    # ── 3b. Build ticker scoreboard ─────────────────────────────────────
+    ticker_scoreboard = {}
+    for s in valid:
+        tk = s.get("ticker") or "all"
+        score = s.get("composite_score", 0)
+        if tk not in ticker_scoreboard or score > ticker_scoreboard[tk]["score"]:
+            ticker_scoreboard[tk] = {
+                "score": score,
+                "x_col": s.get("x_col"),
+                "y_col": s.get("y_col"),
+                "pattern": s.get("pattern"),
+                "consistency": (s.get("robustness") or {}).get("yearly_consistency_pct"),
+            }
+    if ticker_scoreboard:
+        log(f"  Ticker scoreboard: {len(ticker_scoreboard)} tickers scored.")
+
     # ── 4. Compose report with inline charts ─────────────────────────────
     log("[4/5] Composing report with charts…")
     async with main_pool.acquire() as conn:
@@ -1035,7 +1107,8 @@ async def execute_v2_pipeline(
     extra_ctx = "\n".join(extra_context_lines) if extra_context_lines else ""
     sections = await _compose_report(question, plan, ranked, equity_results, model,
                                      knowledge_rules=knowledge_rules,
-                                     extra_context=extra_ctx)
+                                     extra_context=extra_ctx,
+                                     ticker_scoreboard=ticker_scoreboard)
     log(f"  Report complete — {len(sections)} sections.")
 
     # ── 5. Skeptic review ────────────────────────────────────────────────
