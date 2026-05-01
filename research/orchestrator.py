@@ -50,34 +50,29 @@ _PLAN_TOOL = {
 
 _REPORT_TOOL = {
     "name": "produce_report",
-    "description": "Output the research report as structured sections with chart references.",
+    "description": "Output the research report with prose narrative and chart placement.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "sections": {
+            "executive_summary": {
+                "type": "string",
+                "description": "2-3 paragraph executive summary answering the research question directly. Cite specific numbers.",
+            },
+            "body": {
+                "type": "string",
+                "description": "Main body of the report (300-500 words). Describe findings in detail, bucket profile shapes, what worked and what didn't. Cite scores, win rates, spreads.",
+            },
+            "conclusions": {
+                "type": "string",
+                "description": "Actionable conclusions. Specific trading rules or recommendations with numbers.",
+            },
+            "chart_sequence": {
                 "type": "array",
-                "description": "Interleaved markdown prose and chart reference blocks.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["markdown", "chart"],
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Markdown text (only for type=markdown).",
-                        },
-                        "chart_id": {
-                            "type": "string",
-                            "description": "Chart reference ID (only for type=chart). Must be one of the available chart IDs listed in the prompt.",
-                        },
-                    },
-                    "required": ["type"],
-                },
+                "items": {"type": "string"},
+                "description": "Ordered list of chart_ids to display between the body paragraphs. Use IDs from the AVAILABLE CHARTS list.",
             },
         },
-        "required": ["sections"],
+        "required": ["executive_summary", "body", "conclusions", "chart_sequence"],
     },
 }
 
@@ -171,27 +166,22 @@ EQUITY CURVES:
 AVAILABLE CHARTS (reference by chart_id in your report):
 {available_charts}
 
-Produce a research report using the produce_report tool. The sections array MUST contain
-BOTH markdown prose AND chart references. The report should follow this structure:
+Produce a research report using the produce_report tool. The tool has these fields:
 
-1. Start with a markdown section (type="markdown") giving an executive summary
-2. Then alternate: prose introducing a finding → chart reference supporting it → more prose → chart → etc.
-3. End with a markdown section containing actionable conclusions
+- executive_summary: 2-3 paragraphs answering the research question directly. Cite numbers.
+- body: 300-500 words of detailed findings. Describe bucket profiles, patterns, what worked/didn't.
+- conclusions: actionable trading rules or recommendations with specific numbers.
+- chart_sequence: ordered list of chart_ids (from AVAILABLE CHARTS) to display in the report.
 
-CRITICAL: The report MUST contain at least 5 markdown sections with substantial prose (400-700 words total).
-A report with only chart references and no prose text is INVALID. The prose IS the report —
-charts illustrate it.
+ALL THREE TEXT FIELDS (executive_summary, body, conclusions) are REQUIRED and must contain
+substantial prose. The text IS the report — charts illustrate it.
 
-For chart sections, set type="chart" and chart_id to one of the IDs from AVAILABLE CHARTS.
-Reference most or all available charts, placing each where it supports the narrative.
-
-PROSE REQUIREMENTS (for type="markdown" sections):
-- First section: answer the research question directly with an executive summary
+WRITING GUIDELINES:
+- Answer the research question directly in executive_summary
 - Describe the full bucket profile shape — not just top/bottom
 - If multi-factor combos were tested, describe as usable trading rules
 - Distinguish tradable from spurious. Cite specific numbers (scores, spreads, win rates)
 - State what did NOT work
-- Final section: actionable conclusions with specific trading rules
 - Professional quant voice, no fluff
 """
 
@@ -697,47 +687,109 @@ async def _compose_report(
         messages=[{"role": "user", "content": user_content}],
     )
 
-    # Extract structured output — LLM returns chart references, we inject configs
-    sections = []
-    llm_sections = None
+    # Extract structured output — separate prose fields + chart sequence
+    report_data = None
     for block in msg.content:
         if block.type == "tool_use" and block.name == "produce_report":
-            llm_sections = block.input.get("sections", [])
+            report_data = block.input
             break
 
-    if llm_sections is None:
-        # Fallback: wrap raw text, attach all charts at the end
+    sections = []
+
+    if report_data is None:
+        # Fallback: raw text + all charts
         raw = msg.content[0].text if msg.content and hasattr(msg.content[0], "text") else ""
         sections.append({"type": "markdown", "content": raw.strip() or "(Report generation failed)"})
         for cid, chart in chart_configs.items():
             sections.append({"type": "chart", "chart_id": cid, "title": chart["title"], "config": chart["config"]})
         return sections
 
-    # Merge LLM prose + chart references with actual configs
+    # Build sections from the structured fields
+    exec_summary = (report_data.get("executive_summary") or "").strip()
+    body = (report_data.get("body") or "").strip()
+    conclusions = (report_data.get("conclusions") or "").strip()
+    chart_seq = report_data.get("chart_sequence") or []
+
+    # If ALL prose fields are empty, make a fallback prose-only call
+    if not exec_summary and not body and not conclusions:
+        fallback_msg = await client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=[{"type": "text", "text": report_system,
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content":
+                user_content.split("AVAILABLE CHARTS")[0] +
+                "\n\nWrite a focused research report (400-700 words) answering the research question. "
+                "Professional quant voice. No fluff. Cite specific numbers."
+            }],
+        )
+        prose = fallback_msg.content[0].text.strip() if fallback_msg.content else "(Report generation failed)"
+        sections.append({"type": "markdown", "content": prose})
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid, "title": chart["title"], "config": chart["config"]})
+        return sections
+
+    # Executive summary first
+    if exec_summary:
+        sections.append({"type": "markdown", "content": exec_summary})
+
+    # Interleave body paragraphs with charts
+    # Split body into paragraphs, distribute charts between them
+    body_paras = [p.strip() for p in body.split("\n\n") if p.strip()] if body else []
     referenced = set()
-    for sec in llm_sections:
-        if sec.get("type") == "markdown":
-            sections.append(sec)
-        elif sec.get("type") == "chart":
-            cid = sec.get("chart_id", "")
+
+    if body_paras and chart_seq:
+        # Distribute charts evenly among paragraphs
+        charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+        chart_idx = 0
+        for i, para in enumerate(body_paras):
+            sections.append({"type": "markdown", "content": para})
+            # Insert charts after this paragraph
+            for _ in range(charts_per_gap):
+                if chart_idx < len(chart_seq):
+                    cid = chart_seq[chart_idx]
+                    if cid in chart_configs:
+                        sections.append({
+                            "type": "chart", "chart_id": cid,
+                            "title": chart_configs[cid]["title"],
+                            "config": chart_configs[cid]["config"],
+                        })
+                        referenced.add(cid)
+                    chart_idx += 1
+        # Any remaining charts
+        while chart_idx < len(chart_seq):
+            cid = chart_seq[chart_idx]
             if cid in chart_configs:
                 sections.append({
-                    "type": "chart",
-                    "chart_id": cid,
+                    "type": "chart", "chart_id": cid,
+                    "title": chart_configs[cid]["title"],
+                    "config": chart_configs[cid]["config"],
+                })
+                referenced.add(cid)
+            chart_idx += 1
+    elif body_paras:
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+    elif chart_seq:
+        for cid in chart_seq:
+            if cid in chart_configs:
+                sections.append({
+                    "type": "chart", "chart_id": cid,
                     "title": chart_configs[cid]["title"],
                     "config": chart_configs[cid]["config"],
                 })
                 referenced.add(cid)
 
-    # Append any charts the LLM didn't reference (so nothing is lost)
-    unreferenced = [cid for cid in chart_configs if cid not in referenced]
-    if unreferenced:
-        for cid in unreferenced:
+    # Conclusions
+    if conclusions:
+        sections.append({"type": "markdown", "content": f"## Conclusions\n\n{conclusions}"})
+
+    # Append any charts not referenced in chart_sequence
+    for cid, chart in chart_configs.items():
+        if cid not in referenced:
             sections.append({
-                "type": "chart",
-                "chart_id": cid,
-                "title": chart_configs[cid]["title"],
-                "config": chart_configs[cid]["config"],
+                "type": "chart", "chart_id": cid,
+                "title": chart["title"], "config": chart["config"],
             })
 
     return sections
