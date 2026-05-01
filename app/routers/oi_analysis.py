@@ -7,7 +7,7 @@ import numpy as np
 from scipy import stats as sp_stats
 from fastapi import APIRouter, Depends, Query
 
-from app.db import get_oi_pool
+from app.db import get_pool, get_oi_pool
 
 router = APIRouter(tags=["oi_analysis"])
 
@@ -516,3 +516,126 @@ async def ai_summary(
         messages=[{"role": "user", "content": prompt}],
     )
     return {"summary": msg.content[0].text.strip()}
+
+
+# ── Score Matrix ──────────────────────────────────────────────────────────────
+
+@router.get("/score-matrix")
+async def get_score_matrix(
+    pool=Depends(get_pool),
+    ticker: Optional[str] = None,
+    metric: Optional[str] = None,
+    fwd_ret: Optional[str] = None,
+    min_score: float = 0,
+    sort_by: str = "composite_score",
+    order: str = "desc",
+    limit: int = 500,
+):
+    """Return score matrix rows with optional filters."""
+    from research.batch_score import ensure_table
+    await ensure_table(pool)
+
+    allowed_sorts = {
+        "composite_score", "ticker", "metric", "fwd_ret", "pattern",
+        "spearman_r", "monotonicity", "yearly_pct", "concentration",
+        "tail_spread", "n_obs", "d10_avg", "d1_avg", "d10_wr", "d1_wr", "best_sharpe",
+    }
+    if sort_by not in allowed_sorts:
+        sort_by = "composite_score"
+    direction = "DESC" if order == "desc" else "ASC"
+
+    where = ["composite_score >= $1"]
+    params = [min_score]
+    idx = 2
+
+    if ticker:
+        where.append(f"ticker = ${idx}")
+        params.append(ticker)
+        idx += 1
+    if metric:
+        where.append(f"metric = ${idx}")
+        params.append(metric)
+        idx += 1
+    if fwd_ret:
+        where.append(f"fwd_ret = ${idx}")
+        params.append(fwd_ret)
+        idx += 1
+
+    where_clause = " AND ".join(where)
+    sql = f"""
+        SELECT ticker, metric, fwd_ret, composite_score, pattern,
+               spearman_r, monotonicity, yearly_pct, concentration,
+               tail_spread, n_obs, d10_avg, d1_avg, d10_wr, d1_wr,
+               best_sharpe, scanned_at
+        FROM oi_score_matrix
+        WHERE {where_clause}
+        ORDER BY {sort_by} {direction} NULLS LAST
+        LIMIT {min(limit, 2000)}
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+
+    return [dict(r) for r in rows]
+
+
+@router.get("/score-matrix/meta")
+async def score_matrix_meta(pool=Depends(get_pool)):
+    """Return distinct metrics, tickers, fwd_rets + summary stats for filter dropdowns."""
+    from research.batch_score import ensure_table
+    await ensure_table(pool)
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM oi_score_matrix")
+        if count == 0:
+            return {"count": 0, "tickers": [], "metrics": [], "fwd_rets": [],
+                    "avg_score": 0, "gte50": 0, "gte70": 0, "last_run": None}
+
+        tickers = [r["ticker"] for r in await conn.fetch(
+            "SELECT DISTINCT ticker FROM oi_score_matrix ORDER BY ticker")]
+        metrics = [r["metric"] for r in await conn.fetch(
+            "SELECT DISTINCT metric FROM oi_score_matrix ORDER BY metric")]
+        fwd_rets = [r["fwd_ret"] for r in await conn.fetch(
+            "SELECT DISTINCT fwd_ret FROM oi_score_matrix ORDER BY fwd_ret")]
+        stats = await conn.fetchrow("""
+            SELECT AVG(composite_score) as avg_score,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   COUNT(*) FILTER (WHERE composite_score >= 70) as gte70,
+                   MAX(scanned_at) as last_run
+            FROM oi_score_matrix
+        """)
+
+    return {
+        "count": count,
+        "tickers": tickers,
+        "metrics": metrics,
+        "fwd_rets": fwd_rets,
+        "avg_score": round(float(stats["avg_score"] or 0), 1),
+        "gte50": int(stats["gte50"] or 0),
+        "gte70": int(stats["gte70"] or 0),
+        "last_run": str(stats["last_run"])[:19] if stats["last_run"] else None,
+    }
+
+
+@router.post("/run-batch-score")
+async def trigger_batch_score(
+    pool=Depends(get_pool),
+    oi_pool=Depends(get_oi_pool),
+):
+    """Trigger a batch score run in the background."""
+    from research.batch_score import get_progress, run_batch_score
+    import asyncio
+
+    progress = get_progress()
+    if progress["running"]:
+        return {"status": "already_running", "message": progress["message"]}
+
+    asyncio.get_event_loop().create_task(run_batch_score(oi_pool, pool))
+
+    return {"status": "started", "message": "Batch scoring started..."}
+
+
+@router.get("/batch-score-status")
+async def batch_score_status():
+    from research.batch_score import get_progress
+    return get_progress()

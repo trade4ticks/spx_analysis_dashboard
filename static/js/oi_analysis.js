@@ -32,6 +32,8 @@ document.addEventListener('alpine:init', () => {
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
       }
+      // Load score matrix (independent of analysis)
+      this.smInit();
     },
 
     async loadAnalysis() {
@@ -960,5 +962,121 @@ document.addEventListener('alpine:init', () => {
     // Helpers
     pct(v) { return v != null ? (v*100).toFixed(2) + '%' : '—'; },
     r4(v)  { return v != null ? v.toFixed(4) : '—'; },
+
+    // ── Score Matrix ──────────────────────────────────────────────────
+    smRows: [],
+    smMeta: { count: 0, tickers: [], metrics: [], fwd_rets: [], avg_score: 0, gte50: 0, gte70: 0, last_run: null },
+    smStatus: { running: false, message: '', last_run: null },
+    smFilterTicker: '',
+    smFilterMetric: '',
+    smFilterFwd: '',
+    smMinScore: 0,
+    smSortKey: 'composite_score',
+    smSortDir: 'desc',
+    smPollTimer: null,
+    smColumns: [
+      { key: 'composite_score', label: 'Score' },
+      { key: 'ticker', label: 'Ticker' },
+      { key: 'metric', label: 'Metric' },
+      { key: 'fwd_ret', label: 'Fwd Ret' },
+      { key: 'pattern', label: 'Pattern' },
+      { key: 'spearman_r', label: 'Spearman' },
+      { key: 'monotonicity', label: 'Mono' },
+      { key: 'yearly_pct', label: 'Consist' },
+      { key: 'd10_d1_spread', label: 'D10-D1' },
+      { key: 'd10_wr', label: 'D10 WR' },
+      { key: 'best_sharpe', label: 'Sharpe' },
+      { key: 'n_obs', label: 'N' },
+    ],
+
+    async smInit() {
+      try {
+        const [metaRes, statusRes] = await Promise.all([
+          fetch('/api/oi-analysis/score-matrix/meta'),
+          fetch('/api/oi-analysis/batch-score-status'),
+        ]);
+        if (metaRes.ok) this.smMeta = await metaRes.json();
+        if (statusRes.ok) this.smStatus = await statusRes.json();
+        if (this.smMeta.count > 0) await this.loadScoreMatrix();
+        if (this.smStatus.running) this._smStartPoll();
+      } catch (_) {}
+    },
+
+    async loadScoreMatrix() {
+      const params = new URLSearchParams({
+        sort_by: this.smSortKey === 'd10_d1_spread' ? 'composite_score' : this.smSortKey,
+        order: this.smSortDir,
+        min_score: this.smMinScore,
+      });
+      if (this.smFilterTicker) params.set('ticker', this.smFilterTicker);
+      if (this.smFilterMetric) params.set('metric', this.smFilterMetric);
+      if (this.smFilterFwd) params.set('fwd_ret', this.smFilterFwd);
+
+      try {
+        const r = await fetch('/api/oi-analysis/score-matrix?' + params);
+        if (r.ok) this.smRows = await r.json();
+        // Refresh meta too
+        const m = await fetch('/api/oi-analysis/score-matrix/meta');
+        if (m.ok) this.smMeta = await m.json();
+      } catch (_) {}
+    },
+
+    smSort(key) {
+      if (this.smSortKey === key) {
+        this.smSortDir = this.smSortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        this.smSortKey = key;
+        this.smSortDir = 'desc';
+      }
+      // Sort client-side for d10_d1_spread (computed), server-side for others
+      if (key === 'd10_d1_spread') {
+        const dir = this.smSortDir === 'desc' ? -1 : 1;
+        this.smRows.sort((a, b) => {
+          const sa = (a.d10_avg || 0) - (a.d1_avg || 0);
+          const sb = (b.d10_avg || 0) - (b.d1_avg || 0);
+          return (sb - sa) * dir;
+        });
+      } else {
+        this.loadScoreMatrix();
+      }
+    },
+
+    async runBatchScore() {
+      try {
+        const r = await fetch('/api/oi-analysis/run-batch-score', { method: 'POST' });
+        if (r.ok) {
+          const data = await r.json();
+          this.smStatus = { running: true, message: data.message, last_run: this.smStatus.last_run };
+          this._smStartPoll();
+        }
+      } catch (_) {}
+    },
+
+    _smStartPoll() {
+      if (this.smPollTimer) return;
+      this.smPollTimer = setInterval(async () => {
+        try {
+          const r = await fetch('/api/oi-analysis/batch-score-status');
+          if (r.ok) {
+            this.smStatus = await r.json();
+            if (!this.smStatus.running) {
+              clearInterval(this.smPollTimer);
+              this.smPollTimer = null;
+              await this.loadScoreMatrix();
+            }
+          }
+        } catch (_) {}
+      }, 3000);
+    },
+
+    drillIntoScore(row) {
+      // Set the analysis selectors to this row's values and trigger analysis
+      this.ticker = row.ticker;
+      this.metric = row.metric;
+      this.outcome = row.fwd_ret;
+      this.$nextTick(() => this.loadAnalysis());
+      // Scroll to top
+      document.querySelector('.oi-body')?.scrollTo({ top: 0, behavior: 'smooth' });
+    },
   }));
 });

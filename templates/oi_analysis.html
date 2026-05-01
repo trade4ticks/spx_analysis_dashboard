@@ -99,7 +99,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=8"></script>
+  <script src="/static/js/oi_analysis.js?v=9"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -412,6 +412,143 @@
 
       </div>
     </template>
+
+    <!-- ── Score Matrix (independent of analysis above) ──────────────── -->
+    <div style="margin-top:24px;border-top:2px solid var(--border);padding-top:16px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:700;color:var(--text)">Score Matrix</div>
+        <button @click="runBatchScore()"
+                :disabled="smStatus.running"
+                style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                       color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;
+                       cursor:pointer;font-weight:600">
+          <span x-text="smStatus.running ? 'Running...' : 'Run Scan'"></span>
+        </button>
+        <button @click="loadScoreMatrix()"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                       font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer">
+          Refresh
+        </button>
+        <span x-show="smStatus.running" style="font-size:10px;color:var(--dim)"
+              x-text="smStatus.message"></span>
+        <span x-show="smMeta.last_run && !smStatus.running"
+              style="font-size:10px;color:var(--dim);margin-left:auto"
+              x-text="'Last: ' + (smMeta.last_run || 'never')"></span>
+      </div>
+
+      <!-- Filters -->
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+        <select x-model="smFilterTicker"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                       font-size:11px;padding:3px 6px;border-radius:3px">
+          <option value="">All Tickers</option>
+          <template x-for="t in smMeta.tickers" :key="'smt-'+t">
+            <option :value="t" x-text="t"></option>
+          </template>
+        </select>
+        <select x-model="smFilterMetric"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                       font-size:11px;padding:3px 6px;border-radius:3px">
+          <option value="">All Metrics</option>
+          <template x-for="m in smMeta.metrics" :key="'smm-'+m">
+            <option :value="m" x-text="m"></option>
+          </template>
+        </select>
+        <select x-model="smFilterFwd"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                       font-size:11px;padding:3px 6px;border-radius:3px">
+          <option value="">All Fwd Rets</option>
+          <template x-for="f in smMeta.fwd_rets" :key="'smf-'+f">
+            <option :value="f" x-text="f"></option>
+          </template>
+        </select>
+        <label style="font-size:10px;color:var(--dim)">Min Score:</label>
+        <input type="number" x-model.number="smMinScore" min="0" max="100" step="5"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:11px;padding:3px 6px;border-radius:3px;width:50px">
+        <button @click="loadScoreMatrix()"
+                style="background:rgba(52,152,219,.1);border:1px solid rgba(52,152,219,.2);
+                       color:#3498db;font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+          Apply
+        </button>
+      </div>
+
+      <!-- Summary -->
+      <div x-show="smMeta.count > 0"
+           style="font-size:10px;color:var(--dim);margin-bottom:6px">
+        <span x-text="smMeta.count + ' scored'"></span>
+        <span style="margin:0 6px">|</span>
+        <span>Avg: <b x-text="smMeta.avg_score"></b></span>
+        <span style="margin:0 6px">|</span>
+        <span>Score &ge;50: <b x-text="smMeta.gte50"></b></span>
+        <span style="margin:0 6px">|</span>
+        <span>Score &ge;70: <b x-text="smMeta.gte70"></b></span>
+        <span style="margin:0 6px">|</span>
+        <span x-text="smRows.length + ' showing'"></span>
+      </div>
+
+      <!-- Table -->
+      <div style="height:400px;overflow:auto;border:1px solid var(--border);border-radius:4px">
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead>
+            <tr>
+              <template x-for="col in smColumns" :key="'smh-'+col.key">
+                <th @click="smSort(col.key)"
+                    style="background:var(--raised);color:var(--dim);font-size:9px;font-weight:700;
+                           text-transform:uppercase;letter-spacing:.3px;padding:6px 8px;
+                           border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2;
+                           cursor:pointer;user-select:none;white-space:nowrap"
+                    x-text="col.label + (smSortKey === col.key ? (smSortDir === 'desc' ? ' ▼' : ' ▲') : '')">
+                </th>
+              </template>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="row in smRows" :key="row.ticker+row.metric+row.fwd_ret">
+              <tr @click="drillIntoScore(row)"
+                  style="cursor:pointer"
+                  :style="{'background': row._highlight ? 'rgba(52,152,219,.08)' : 'transparent'}"
+                  @mouseenter="row._highlight=true" @mouseleave="row._highlight=false">
+                <td style="padding:4px 8px;font-weight:700;color:var(--accent)"
+                    x-text="row.composite_score?.toFixed(0)"></td>
+                <td style="padding:4px 8px;font-weight:600;color:var(--text)"
+                    x-text="row.ticker"></td>
+                <td style="padding:4px 8px;color:var(--text);font-size:10px"
+                    x-text="row.metric"></td>
+                <td style="padding:4px 8px;color:var(--dim);font-size:10px"
+                    x-text="row.fwd_ret"></td>
+                <td style="padding:4px 8px;color:var(--dim);font-size:10px"
+                    x-text="row.pattern"></td>
+                <td style="padding:4px 8px;text-align:right"
+                    :style="(row.spearman_r||0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    x-text="row.spearman_r?.toFixed(3)"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--text)"
+                    x-text="row.monotonicity?.toFixed(2)"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--text)"
+                    x-text="row.yearly_pct != null ? row.yearly_pct.toFixed(0) + '%' : '—'"></td>
+                <td style="padding:4px 8px;text-align:right"
+                    :style="((row.d10_avg||0) - (row.d1_avg||0)) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    x-text="row.d10_avg != null && row.d1_avg != null ? (((row.d10_avg - row.d1_avg)*100).toFixed(3) + '%') : '—'"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--text)"
+                    x-text="row.d10_wr != null ? (row.d10_wr*100).toFixed(1) + '%' : '—'"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--text)"
+                    x-text="row.best_sharpe?.toFixed(3)"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--dim)"
+                    x-text="row.n_obs"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        <div x-show="smRows.length === 0 && smMeta.count === 0"
+             style="text-align:center;padding:40px;color:var(--dim);font-size:12px">
+          No score data yet. Click "Run Scan" to generate scores for all ticker/metric combinations.
+        </div>
+        <div x-show="smRows.length === 0 && smMeta.count > 0"
+             style="text-align:center;padding:40px;color:var(--dim);font-size:12px">
+          No results match current filters.
+        </div>
+      </div>
+    </div>
   </div>
 </body>
 </html>
