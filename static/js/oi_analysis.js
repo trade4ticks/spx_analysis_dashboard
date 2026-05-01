@@ -975,6 +975,7 @@ document.addEventListener('alpine:init', () => {
     smSortDir: 'desc',
     smPollTimer: null,
     smSelectedMetric: '',
+    smSelectedFwd: '',
     smSummary: { by_metric: [], by_fwd: [] },
     smColumns: [
       { key: 'composite_score', label: 'Score' },
@@ -1075,19 +1076,47 @@ document.addEventListener('alpine:init', () => {
       }, 3000);
     },
 
-    async loadSmSummary(metric) {
-      const url = '/api/oi-analysis/score-matrix/summary' + (metric ? '?metric=' + encodeURIComponent(metric) : '');
+    async loadSmSummary(metric, fwdRet) {
+      // Use current selections if args not provided
+      if (metric === undefined) metric = this.smSelectedMetric;
+      if (fwdRet === undefined) fwdRet = this.smSelectedFwd;
+      const params = new URLSearchParams();
+      if (metric) params.set('metric', metric);
+      if (fwdRet) params.set('fwd_ret', fwdRet);
       try {
-        const r = await fetch(url);
+        const r = await fetch('/api/oi-analysis/score-matrix/summary?' + params);
         if (r.ok) {
           this.smSummary = await r.json();
           this.smSelectedMetric = metric || '';
+          this.smSelectedFwd = fwdRet || '';
+          // Sync table filters to match chart selections
+          this.smFilterMetric = this.smSelectedMetric;
+          this.smFilterFwd = this.smSelectedFwd;
+          this.loadScoreMatrix();
           this.$nextTick(() => {
             this._renderSmMetricChart();
             this._renderSmFwdChart();
           });
         }
       } catch (_) {}
+    },
+
+    smClearFilters() {
+      this.smSelectedMetric = '';
+      this.smSelectedFwd = '';
+      this.smFilterMetric = '';
+      this.smFilterFwd = '';
+      this.smFilterTicker = '';
+      this.smMinScore = 0;
+      this.loadSmSummary('', '');
+    },
+
+    _smTooltipCallback(data) {
+      return (ctx) => {
+        if (ctx.datasetIndex !== 0) return '';
+        const d = data[ctx.dataIndex];
+        return `Std: ${d.std_score}  |  Max: ${d.max_score}  |  ≥50: ${d.gte50}/${d.n}`;
+      };
     },
 
     _renderSmMetricChart() {
@@ -1125,23 +1154,18 @@ document.addEventListener('alpine:init', () => {
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           onClick: (evt, elements) => {
-            if (elements.length > 0) {
-              const idx = elements[0].index;
-              const metric = data[idx].metric;
-              self.loadSmSummary(metric);
+            if (elements.length > 0 && elements[0].datasetIndex === 0) {
+              const clicked = data[elements[0].index].metric;
+              // Toggle: click same metric to deselect
+              const newMetric = clicked === self.smSelectedMetric ? '' : clicked;
+              self.loadSmSummary(newMetric, self.smSelectedFwd);
             }
           },
           plugins: {
             legend: { labels: { color: '#aaa', font: { size: 9 } } },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: {
-                afterLabel: (ctx) => {
-                  if (ctx.datasetIndex !== 0) return '';
-                  const d = data[ctx.dataIndex];
-                  return `Std: ${d.std_score}  |  Max: ${d.max_score}  |  ≥50: ${d.gte50}/${d.n}`;
-                },
-              },
+              callbacks: { afterLabel: self._smTooltipCallback(data) },
             },
           },
           scales: {
@@ -1161,6 +1185,7 @@ document.addEventListener('alpine:init', () => {
       const data = this.smSummary.by_fwd || [];
       if (!data.length) return;
 
+      const self = this;
       this._charts['sm-fwd'] = new Chart(el, {
         type: 'bar',
         data: {
@@ -1169,23 +1194,27 @@ document.addEventListener('alpine:init', () => {
             label: 'Avg Score',
             data: data.map(d => d.avg_score),
             backgroundColor: data.map(d =>
-              d.avg_score >= 40 ? '#3498db' :
-              d.avg_score >= 30 ? '#95a5a6' : '#e84393'),
-            borderWidth: 0,
+              d.fwd_ret === self.smSelectedFwd ? '#3498db' :
+              d.avg_score >= 40 ? 'rgba(52,152,219,0.5)' :
+              d.avg_score >= 30 ? 'rgba(149,165,166,0.5)' : 'rgba(232,67,147,0.3)'),
+            borderWidth: data.map(d => d.fwd_ret === self.smSelectedFwd ? 2 : 0),
+            borderColor: '#3498db',
           }],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (evt, elements) => {
+            if (elements.length > 0) {
+              const clicked = data[elements[0].index].fwd_ret;
+              const newFwd = clicked === self.smSelectedFwd ? '' : clicked;
+              self.loadSmSummary(self.smSelectedMetric, newFwd);
+            }
+          },
           plugins: {
             legend: { display: false },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: {
-                afterLabel: (ctx) => {
-                  const d = data[ctx.dataIndex];
-                  return `Std: ${d.std_score}  |  Max: ${d.max_score}  |  ≥50: ${d.gte50}/${d.n}`;
-                },
-              },
+              callbacks: { afterLabel: self._smTooltipCallback(data) },
             },
           },
           scales: {

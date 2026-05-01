@@ -99,7 +99,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=10"></script>
+  <script src="/static/js/oi_analysis.js?v=11"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -550,12 +550,29 @@
       </div>
 
       <!-- Summary charts: avg score by metric + by fwd ret -->
-      <div x-show="smMeta.count > 0" style="display:flex;gap:12px;margin-top:16px">
+      <div x-show="smMeta.count > 0" style="margin-top:16px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">Score Summary</div>
+          <span x-show="smSelectedMetric || smSelectedFwd"
+                style="font-size:10px;color:var(--dim)">
+            Filtered:
+            <b x-show="smSelectedMetric" x-text="smSelectedMetric" style="color:#3498db"></b>
+            <span x-show="smSelectedMetric && smSelectedFwd"> + </span>
+            <b x-show="smSelectedFwd" x-text="smSelectedFwd" style="color:#3498db"></b>
+          </span>
+          <button x-show="smSelectedMetric || smSelectedFwd"
+                  @click="smClearFilters()"
+                  style="background:rgba(232,67,147,.1);border:1px solid rgba(232,67,147,.2);
+                         color:#e84393;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+            Clear All
+          </button>
+        </div>
+        <div style="display:flex;gap:12px">
         <!-- Metric avg score (80%) -->
         <div style="flex:4;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
           <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">
             Avg Score by Metric
-            <span style="font-weight:400;color:var(--dim);font-size:9px">— click a bar to drill down</span>
+            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
           </div>
           <div style="height:280px">
             <canvas id="chart-sm-metric"></canvas>
@@ -565,12 +582,14 @@
         <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
           <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">
             Avg Score by Fwd Ret
+            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
           </div>
           <div style="font-size:9px;color:var(--dim);margin-bottom:8px"
                x-text="smSelectedMetric ? smSelectedMetric : 'All metrics'"></div>
           <div style="height:250px">
             <canvas id="chart-sm-fwd"></canvas>
           </div>
+        </div>
         </div>
       </div>
     </div>
