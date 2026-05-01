@@ -14,6 +14,8 @@ try:
         SimpleDocTemplate, Paragraph, Spacer, Image,
         Table, TableStyle, PageBreak, HRFlowable,
     )
+    from reportlab.graphics.shapes import Drawing, String, Line, Rect
+    from reportlab.graphics import renderPDF
     _REPORTLAB = True
 except ImportError:
     _REPORTLAB = False
@@ -198,7 +200,7 @@ def _build_v2(run: dict, results: list[dict], cfg: dict, dest):
                 config = sec.get("config") or {}
                 story.append(Spacer(1, 6))
                 story.append(Paragraph(f"<b>{_esc(title)}</b>", S["h2"]))
-                _render_chart_as_table(config, story, S)
+                _render_chart_drawing(config, story, S)
                 story.append(Spacer(1, 6))
 
     # ── Scan Results Summary Table ────────────────────────────────────────
@@ -282,51 +284,205 @@ def _md_inline(text: str) -> str:
     return text
 
 
-def _render_chart_as_table(config: dict, story: list, S: dict):
-    """Render a Chart.js config as a reportlab data table."""
+def _render_chart_drawing(config: dict, story: list, S: dict):
+    """Render a Chart.js config as a reportlab Drawing (bar or line chart)."""
     data = config.get("data") or {}
     labels = data.get("labels") or []
     datasets = data.get("datasets") or []
+    chart_type = config.get("type", "bar")
+    is_horizontal = (config.get("options") or {}).get("indexAxis") == "y"
 
     if not labels or not datasets:
-        story.append(Paragraph("<i>(chart data not available for PDF)</i>", S["dim"]))
+        story.append(Paragraph("<i>(chart data not available)</i>", S["dim"]))
         return
 
-    # Build table: first column is labels, then one column per dataset
-    header = [""] + [ds.get("label", f"Series {i+1}") for i, ds in enumerate(datasets)]
-    rows = [header]
-    for i, label in enumerate(labels):
-        row = [str(label)]
-        for ds in datasets:
-            vals = ds.get("data") or []
-            if i < len(vals) and vals[i] is not None:
-                v = vals[i]
-                row.append(f"{v:.3f}" if isinstance(v, float) else str(v))
+    W, H = 460, 200
+    margin_l, margin_b, margin_r, margin_t = 50, 30, 20, 15
+    plot_w = W - margin_l - margin_r
+    plot_h = H - margin_b - margin_t
+
+    d = Drawing(W, H)
+
+    # Background
+    d.add(Rect(0, 0, W, H, fillColor=colors.HexColor("#f8f9fa"), strokeColor=None))
+
+    # Collect all values for axis scaling
+    all_vals = []
+    for ds in datasets:
+        for v in (ds.get("data") or []):
+            if v is not None and isinstance(v, (int, float)):
+                all_vals.append(float(v))
+    if not all_vals:
+        story.append(Paragraph("<i>(no numeric data)</i>", S["dim"]))
+        return
+
+    v_min = min(0, min(all_vals))
+    v_max = max(0, max(all_vals))
+    v_range = v_max - v_min or 1
+
+    ds_colors = [
+        colors.HexColor("#3498db"), colors.HexColor("#e84393"),
+        colors.HexColor("#2ecc71"), colors.HexColor("#e67e22"),
+        colors.HexColor("#9b59b6"), colors.HexColor("#1abc9c"),
+    ]
+
+    if chart_type == "line":
+        _draw_line_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                         ds_colors, margin_l, margin_b, plot_w, plot_h)
+    elif is_horizontal:
+        _draw_horizontal_bar(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                             ds_colors, margin_l, margin_b, plot_w, plot_h, W, H)
+    else:
+        _draw_bar_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                        ds_colors, margin_l, margin_b, plot_w, plot_h)
+
+    # X-axis labels (for non-horizontal charts)
+    if not is_horizontal:
+        n = len(labels)
+        step = max(1, n // 15)
+        for i in range(0, n, step):
+            x = margin_l + (i + 0.5) * plot_w / n
+            d.add(String(x, margin_b - 12, str(labels[i])[:10],
+                         fontSize=6, fillColor=colors.HexColor("#444444"),
+                         textAnchor="middle"))
+
+    # Y-axis labels
+    if not is_horizontal:
+        for frac in [0, 0.25, 0.5, 0.75, 1.0]:
+            val = v_min + frac * v_range
+            y = margin_b + frac * plot_h
+            d.add(String(margin_l - 4, y - 3, f"{val:.2f}",
+                         fontSize=6, fillColor=colors.HexColor("#666666"),
+                         textAnchor="end"))
+            d.add(Line(margin_l, y, margin_l + plot_w, y,
+                       strokeColor=colors.HexColor("#dddddd"), strokeWidth=0.3))
+
+    # Zero line
+    if v_min < 0 < v_max and not is_horizontal:
+        zero_y = margin_b + (-v_min / v_range) * plot_h
+        d.add(Line(margin_l, zero_y, margin_l + plot_w, zero_y,
+                   strokeColor=colors.HexColor("#999999"), strokeWidth=0.5))
+
+    # Legend
+    x_legend = margin_l
+    for i, ds in enumerate(datasets):
+        label = ds.get("label", "")
+        if not label:
+            continue
+        col = ds_colors[i % len(ds_colors)]
+        # Use per-bar coloring color if single dataset
+        if len(datasets) == 1 and isinstance(ds.get("backgroundColor"), list):
+            col = colors.HexColor("#3498db")
+        d.add(Rect(x_legend, H - 10, 8, 6, fillColor=col, strokeColor=None))
+        d.add(String(x_legend + 10, H - 10, label[:30],
+                     fontSize=6, fillColor=colors.HexColor("#444444")))
+        x_legend += len(label) * 4.5 + 20
+
+    story.append(d)
+
+
+def _draw_bar_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                    ds_colors, margin_l, margin_b, plot_w, plot_h):
+    n = len(labels)
+    n_ds = len(datasets)
+    bar_group_w = plot_w / n
+    bar_w = bar_group_w * 0.7 / max(n_ds, 1)
+    gap = bar_group_w * 0.15
+
+    for di, ds in enumerate(datasets):
+        vals = ds.get("data") or []
+        bg = ds.get("backgroundColor")
+        for i in range(min(len(vals), n)):
+            v = vals[i]
+            if v is None:
+                continue
+            v = float(v)
+            # Determine bar color
+            if isinstance(bg, list) and i < len(bg):
+                col = colors.HexColor(bg[i]) if isinstance(bg[i], str) else ds_colors[di % len(ds_colors)]
+            elif isinstance(bg, str):
+                col = colors.HexColor(bg)
             else:
-                row.append("")
-        rows.append(row)
+                col = ds_colors[di % len(ds_colors)]
 
-    # Limit to 30 rows for readability
-    if len(rows) > 31:
-        rows = rows[:31]
-        rows.append(["..."] + ["..." for _ in datasets])
+            zero_y = margin_b + (-v_min / v_range) * plot_h
+            bar_h = (v / v_range) * plot_h
+            x = margin_l + gap + i * bar_group_w + di * bar_w
+            if v >= 0:
+                d.add(Rect(x, zero_y, bar_w, bar_h, fillColor=col, strokeColor=None))
+            else:
+                d.add(Rect(x, zero_y + bar_h, bar_w, -bar_h, fillColor=col, strokeColor=None))
 
-    n_cols = len(header)
-    col_w = min(80, int(450 / n_cols))
-    col_widths = [col_w] * n_cols
 
-    t = Table(rows, colWidths=col_widths)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dce9f5")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1a5276")),
-        ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor("#111111")),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-         [colors.HexColor("#ffffff"), colors.HexColor("#f4f7fb")]),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#aaaaaa")),
-        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
-    ]))
-    story.append(t)
+def _draw_horizontal_bar(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                          ds_colors, margin_l, margin_b, plot_w, plot_h, W, H):
+    n = len(labels)
+    if not n:
+        return
+    # For horizontal bars, labels go on Y axis, values on X
+    bar_h = plot_h / n * 0.7
+    gap = plot_h / n * 0.15
+
+    # Wider left margin for ticker labels
+    h_margin_l = 60
+
+    for di, ds in enumerate(datasets):
+        vals = ds.get("data") or []
+        bg = ds.get("backgroundColor")
+        for i in range(min(len(vals), n)):
+            v = vals[i]
+            if v is None:
+                continue
+            v = float(v)
+            if isinstance(bg, list) and i < len(bg):
+                col = colors.HexColor(bg[i]) if isinstance(bg[i], str) else ds_colors[di % len(ds_colors)]
+            elif isinstance(bg, str):
+                col = colors.HexColor(bg)
+            else:
+                col = ds_colors[di % len(ds_colors)]
+
+            bar_w_px = (v / v_range) * (W - h_margin_l - 20)
+            y = margin_b + (n - 1 - i) * (plot_h / n) + gap
+            d.add(Rect(h_margin_l, y, max(bar_w_px, 1), bar_h, fillColor=col, strokeColor=None))
+            # Value label
+            d.add(String(h_margin_l + bar_w_px + 3, y + bar_h / 2 - 3, f"{v:.0f}",
+                         fontSize=6, fillColor=colors.HexColor("#444444")))
+
+    # Y-axis labels (ticker names)
+    for i, label in enumerate(labels):
+        y = margin_b + (n - 1 - i) * (plot_h / n) + gap + bar_h / 2 - 3
+        d.add(String(h_margin_l - 4, y, str(label)[:12],
+                     fontSize=6, fillColor=colors.HexColor("#444444"),
+                     textAnchor="end"))
+
+
+def _draw_line_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
+                     ds_colors, margin_l, margin_b, plot_w, plot_h):
+    n = len(labels)
+    if n < 2:
+        return
+
+    for di, ds in enumerate(datasets):
+        vals = ds.get("data") or []
+        col = ds_colors[di % len(ds_colors)]
+        if isinstance(ds.get("borderColor"), str):
+            try:
+                col = colors.HexColor(ds["borderColor"])
+            except Exception:
+                pass
+
+        prev_x, prev_y = None, None
+        for i in range(min(len(vals), n)):
+            v = vals[i]
+            if v is None:
+                prev_x, prev_y = None, None
+                continue
+            v = float(v)
+            x = margin_l + i * plot_w / (n - 1)
+            y = margin_b + ((v - v_min) / v_range) * plot_h
+            if prev_x is not None:
+                d.add(Line(prev_x, prev_y, x, y, strokeColor=col, strokeWidth=1.2))
+            prev_x, prev_y = x, y
 
 
 # ── V1 PDF (legacy — unchanged) ─────────────────────────────────────────────

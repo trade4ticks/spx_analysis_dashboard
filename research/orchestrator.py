@@ -171,21 +171,28 @@ EQUITY CURVES:
 AVAILABLE CHARTS (reference by chart_id in your report):
 {available_charts}
 
-Produce a research report using the produce_report tool. The report is an array of sections,
-each either markdown prose or a chart reference. Interleave text and charts naturally —
-introduce a finding in prose, then immediately reference the chart that supports it.
+Produce a research report using the produce_report tool. The sections array MUST contain
+BOTH markdown prose AND chart references. The report should follow this structure:
 
-For chart sections, set type="chart" and chart_id to one of the IDs listed in AVAILABLE CHARTS.
-You should reference most or all of the available charts, placing each where it best supports the narrative.
+1. Start with a markdown section (type="markdown") giving an executive summary
+2. Then alternate: prose introducing a finding → chart reference supporting it → more prose → chart → etc.
+3. End with a markdown section containing actionable conclusions
 
-PROSE GUIDELINES (for markdown sections):
-- Answer the research question directly in the first section
+CRITICAL: The report MUST contain at least 5 markdown sections with substantial prose (400-700 words total).
+A report with only chart references and no prose text is INVALID. The prose IS the report —
+charts illustrate it.
+
+For chart sections, set type="chart" and chart_id to one of the IDs from AVAILABLE CHARTS.
+Reference most or all available charts, placing each where it supports the narrative.
+
+PROSE REQUIREMENTS (for type="markdown" sections):
+- First section: answer the research question directly with an executive summary
 - Describe the full bucket profile shape — not just top/bottom
 - If multi-factor combos were tested, describe as usable trading rules
-- Distinguish tradable from spurious. Cite specific numbers.
+- Distinguish tradable from spurious. Cite specific numbers (scores, spreads, win rates)
 - State what did NOT work
-- End with actionable conclusion
-- Professional quant voice, no fluff, 400-700 words total prose
+- Final section: actionable conclusions with specific trading rules
+- Professional quant voice, no fluff
 """
 
 
