@@ -79,26 +79,37 @@ async def analyze(
     ticker: str = Query(...),
     metric: str = Query(...),
     outcome: str = Query(...),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """Full analysis payload for one ticker/metric/outcome combo."""
     if not pool:
         return {"error": "OI database not configured"}
 
-    # Fetch data
-    async with pool.acquire() as conn:
-        if ticker == "ALL":
-            rows = await conn.fetch(
-                f"SELECT trade_date, {metric}, {outcome} FROM daily_features "
-                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL "
-                f"ORDER BY trade_date")
-        else:
-            rows = await conn.fetch(
-                f"SELECT trade_date, {metric}, {outcome} FROM daily_features "
-                f"WHERE ticker = $1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
-                f"ORDER BY trade_date", ticker)
+    # Fetch data with optional date range
+    date_conditions = ""
+    params = []
+    p = 1
+    if ticker != "ALL":
+        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
+    if date_from:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    pairs = _clean_pairs([dict(r) for r in rows], metric, outcome)
+    # Also fetch spot_close for overlay
+    spot_col = "spot_close"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT trade_date, {metric}, {outcome}, {spot_col} FROM daily_features "
+            f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
+            f"ORDER BY trade_date", *params)
+
+    row_dicts = [dict(r) for r in rows]
+    pairs = _clean_pairs(row_dicts, metric, outcome)
     n = len(pairs)
     if n < 30:
         return {"error": f"Insufficient data: {n} valid rows", "n": n}
@@ -106,6 +117,16 @@ async def analyze(
     xa = np.array([p[0] for p in pairs])
     ya = np.array([p[1] for p in pairs])
     horizon = _parse_horizon(outcome)
+
+    # Spot price time series (for equity overlay)
+    spot_series = []
+    for r in row_dicts:
+        sv = r.get("spot_close")
+        if sv is not None:
+            try:
+                spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
+            except (ValueError, TypeError):
+                pass
 
     # ── Decile stats ─────────────────────────────────────────────────────
     buckets = _bucket_pairs(pairs, 10)
@@ -295,10 +316,14 @@ async def analyze(
         decile_map[idx] = min(int(rank / len(pairs) * 10) + 1, 10)
 
     trade_calendar = []
+    dow_data = []  # day-of-week returns
     for idx, (x, y, d) in enumerate(pairs):
         yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
         mo = d.month if hasattr(d, 'month') else int(str(d)[5:7])
+        # Day of week: 0=Mon ... 4=Fri
+        dow = d.weekday() if hasattr(d, 'weekday') else 0
         trade_calendar.append({"year": yr, "month": mo, "ret": round(y, 6), "decile": decile_map[idx]})
+        dow_data.append({"dow": dow, "ret": round(y, 6), "decile": decile_map[idx]})
 
     # ── Today's value ────────────────────────────────────────────────────
     today_val = pairs[-1][0] if pairs else None
@@ -336,6 +361,8 @@ async def analyze(
         "yearly_consistency":  yearly_consistency,
         "rolling_corr":        rolling_corr,
         "trade_calendar":      trade_calendar,
+        "dow_data":            dow_data,
+        "spot_series":         spot_series,
 
         # Today
         "today_value":      round(float(today_val), 6) if today_val is not None else None,

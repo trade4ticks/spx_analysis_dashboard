@@ -5,6 +5,7 @@ document.addEventListener('alpine:init', () => {
     // Selectors
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
+    dateFrom: '', dateTo: '',
     selectedDeciles: new Set([1, 10]),
     equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
 
@@ -39,10 +40,12 @@ document.addEventListener('alpine:init', () => {
       this.error = null;
       this._destroyCharts();
       try {
-        const r = await fetch(
-          `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
+        let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`);
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
+        if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
+        if (this.dateTo) url += `&date_to=${this.dateTo}`;
+        const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
         if (this.data.error) { this.error = this.data.error; return; }
@@ -71,12 +74,14 @@ document.addEventListener('alpine:init', () => {
     selectNone()       { this.selectedDeciles = new Set(); this._onDecileChange(); },
 
     _onDecileChange() {
+      this._renderDecileBar();
       this._renderEquity();
       this._renderDrawdown();
       this._renderYearly();
       this._renderRollingCorr();
       this._renderReturnDist();
       this._renderTradeCalendar();
+      this._renderDOW();
     },
 
     isDecileSelected(d) { return this.selectedDeciles.has(d); },
@@ -166,9 +171,13 @@ document.addEventListener('alpine:init', () => {
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
       const datasets = [];
+      let longestLabels = [];
+
       for (const d of this.selectedDeciles) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
+        const labels = eq.points.map(p => p.date?.slice(0,7));
+        if (labels.length > longestLabels.length) longestLabels = labels;
         datasets.push({
           label: `D${d}`,
           data: eq.points.map(p => p.value * 100),
@@ -178,13 +187,48 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      const allLabels = datasets.length
-        ? eqData[Array.from(this.selectedDeciles)[0]]?.[this.equityMode]?.points?.map(p => p.date?.slice(0,7)) || []
-        : [];
+      // Aggregate line (average of all selected deciles)
+      if (this.selectedDeciles.size >= 2) {
+        const selArr = Array.from(this.selectedDeciles);
+        const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
+        const maxLen = Math.max(...eqs.map(e => e.length));
+        if (maxLen > 0) {
+          const aggData = [];
+          for (let i = 0; i < maxLen; i++) {
+            let sum = 0, cnt = 0;
+            for (const eq of eqs) {
+              if (i < eq.length) { sum += eq[i].value; cnt++; }
+            }
+            aggData.push(cnt ? (sum / cnt) * 100 : null);
+          }
+          datasets.push({
+            label: 'Aggregate',
+            data: aggData,
+            borderColor: '#fff', backgroundColor: 'transparent',
+            borderWidth: 2.5, pointRadius: 0, tension: 0.1,
+            borderDash: [6, 3],
+          });
+        }
+      }
+
+      // Spot price overlay on secondary axis
+      const spotSeries = this.data.spot_series || [];
+      if (spotSeries.length > 0) {
+        datasets.push({
+          label: 'Spot Price',
+          data: spotSeries.map(s => s.value),
+          borderColor: 'rgba(255,255,255,0.15)', backgroundColor: 'transparent',
+          borderWidth: 1, pointRadius: 0, tension: 0.1,
+          yAxisID: 'y1',
+        });
+        if (spotSeries.length > longestLabels.length) {
+          longestLabels = spotSeries.map(s => s.date?.slice(0,7));
+        }
+      }
 
       this._charts['equity'] = new Chart(el, {
         type: 'line',
-        data: { labels: allLabels, datasets },
+        data: { labels: longestLabels, datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
@@ -193,13 +237,19 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
               mode: 'index', intersect: false,
+              filter: item => item.dataset.label !== 'Spot Price',
             },
           },
           scales: {
             ...this._darkScales(),
             x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
-                  callback: v => v.toFixed(0) + '%' } },
+                  callback: v => v.toFixed(0) + '%' },
+                 title: { display:true, text:'Cum Return %', color:'#888', font:{size:9} } },
+            y1: { display: spotSeries.length > 0, position: 'right',
+                  grid: { drawOnChartArea: false },
+                  ticks: { color:'rgba(255,255,255,0.2)', font:{size:8} },
+                  title: { display:true, text:'Spot', color:'rgba(255,255,255,0.2)', font:{size:8} } },
           },
         },
       });
@@ -380,6 +430,29 @@ document.addEventListener('alpine:init', () => {
           borderWidth: 1.5, pointRadius: 0, tension: 0.1, fill: true,
           backgroundColor: colors[(d-1) % colors.length] + '15',
         });
+      }
+
+      // Aggregate drawdown
+      if (this.selectedDeciles.size >= 2 && datasets.length >= 2) {
+        const selArr = Array.from(this.selectedDeciles);
+        const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
+        const maxLen = Math.max(...eqs.map(e => e.length));
+        if (maxLen > 0) {
+          let peak = 0;
+          const aggDD = [];
+          for (let i = 0; i < maxLen; i++) {
+            let sum = 0, cnt = 0;
+            for (const eq of eqs) { if (i < eq.length) { sum += eq[i].value; cnt++; } }
+            const val = cnt ? sum / cnt : 0;
+            peak = Math.max(peak, val);
+            aggDD.push((val - peak) * 100);
+          }
+          datasets.push({
+            label: 'Aggregate', data: aggDD,
+            borderColor: '#fff', backgroundColor: 'transparent',
+            borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6,3],
+          });
+        }
       }
 
       const allLabels = datasets.length
@@ -693,6 +766,90 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // ── Day of week P&L ────────────────────────────────────────────────
+    _renderDOW() {
+      const el = document.getElementById('chart-dow');
+      if (!el || !this.data?.dow_data) return;
+      if (this._charts['dow']) this._charts['dow'].destroy();
+
+      const dowNames = ['Mon','Tue','Wed','Thu','Fri'];
+      const selDec = this.selectedDeciles;
+      const filtered = selDec.size > 0
+        ? this.data.dow_data.filter(d => selDec.has(d.decile))
+        : this.data.dow_data;
+
+      const byDow = {};
+      for (const d of filtered) {
+        if (!byDow[d.dow]) byDow[d.dow] = [];
+        byDow[d.dow].push(d.ret);
+      }
+      const avgs = dowNames.map((_, i) => {
+        const rets = byDow[i] || [];
+        return rets.length ? rets.reduce((a,b)=>a+b,0) / rets.length * 100 : 0;
+      });
+      const counts = dowNames.map((_, i) => (byDow[i] || []).length);
+
+      this._charts['dow'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: dowNames,
+          datasets: [{ data: avgs,
+            backgroundColor: avgs.map(v => v >= 0 ? '#3498db' : '#e84393'),
+            borderWidth: 0 }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => [
+              `Avg: ${avgs[ctx.dataIndex].toFixed(3)}%`,
+              `n: ${counts[ctx.dataIndex]}`,
+            ] } },
+          },
+          scales: {
+            ...this._darkScales(),
+            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
+                  callback: v => v.toFixed(2) + '%' } },
+          },
+        },
+      });
+    },
+
+    // ── Win rate by decile ───────────────────────────────────────────────
+    _renderWinRate() {
+      const el = document.getElementById('chart-winrate');
+      if (!el || !this.data?.decile_stats) return;
+      if (this._charts['winrate']) this._charts['winrate'].destroy();
+
+      const stats = (this.data.decile_stats || []).filter(d => d);
+      this._charts['winrate'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: stats.map(d => 'D' + d.bucket),
+          datasets: [{
+            data: stats.map(d => d.win_rate * 100),
+            backgroundColor: stats.map(d => d.win_rate >= 0.5 ? '#3498db' : '#e84393'),
+            borderWidth: 0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => {
+              const d = stats[ctx.dataIndex];
+              return [`WR: ${(d.win_rate*100).toFixed(1)}%`, `n: ${d.n}`];
+            } } },
+          },
+          scales: {
+            ...this._darkScales(),
+            y: { ...this._darkScales().y, min: 30, max: 70,
+                 ticks: { ...this._darkScales().y.ticks, callback: v => v + '%' } },
+          },
+        },
+      });
+    },
+
     // ── Update _renderCharts to include new charts ──────────────────────
     _renderAllCharts() {
       this._renderDecileBar();
@@ -703,27 +860,54 @@ document.addEventListener('alpine:init', () => {
       this._renderRollingCorr();
       this._renderReturnDist();
       this._renderTradeCalendar();
+      this._renderDOW();
+      this._renderWinRate();
     },
 
-    // Fullscreen
+    // Fullscreen — re-render the chart into the fullscreen canvas
     openFullscreen(chartId) {
-      const src = this._charts[chartId.replace('chart-', '')];
-      if (!src) return;
+      const key = chartId.replace('chart-', '');
       this.fsChartId = chartId;
       this.$nextTick(() => {
-        const el = document.getElementById('fs-canvas');
-        if (!el) return;
-        // Clone the chart config
-        const cfg = JSON.parse(JSON.stringify(src.config));
-        cfg.options.animation = false;
-        if (this._charts['_fs']) this._charts['_fs'].destroy();
-        this._charts['_fs'] = new Chart(el, cfg);
+        if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
+        // Re-render the specific chart into the fs canvas by calling its render method
+        const fsEl = document.getElementById('fs-canvas');
+        if (!fsEl) return;
+        // Swap canvas ID temporarily so render methods target the fullscreen canvas
+        const origEl = document.getElementById(chartId);
+        if (origEl) origEl.id = chartId + '-orig';
+        fsEl.id = chartId;
+        // Call the appropriate render method
+        const renderMap = {
+          'chart-decile': () => this._renderDecileBar(),
+          'chart-equity': () => this._renderEquity(),
+          'chart-yearly': () => this._renderYearly(),
+          'chart-rolling': () => this._renderRollingCorr(),
+          'chart-boxplot': () => this._renderBoxplot(),
+          'chart-drawdown': () => this._renderDrawdown(),
+          'chart-dist': () => this._renderReturnDist(),
+          'chart-calendar': () => this._renderTradeCalendar(),
+          'chart-dow': () => this._renderDOW(),
+          'chart-winrate': () => this._renderWinRate(),
+        };
+        const fn = renderMap[chartId];
+        if (fn) {
+          fn();
+          // Move the chart instance to _fs key
+          this._charts['_fs'] = this._charts[key];
+          delete this._charts[key];
+        }
+        // Restore IDs
+        fsEl.id = 'fs-canvas';
+        if (origEl) origEl.id = chartId;
       });
     },
 
     closeFullscreen() {
       if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
       this.fsChartId = null;
+      // Re-render the chart back into its original canvas
+      this.$nextTick(() => this._renderAllCharts());
     },
 
     // Helpers

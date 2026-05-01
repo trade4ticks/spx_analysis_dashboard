@@ -99,7 +99,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=3"></script>
+  <script src="/static/js/oi_analysis.js?v=4"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -157,6 +157,18 @@
             <option :value="o" x-text="o"></option>
           </template>
         </select>
+      </div>
+      <div>
+        <label>From</label><br>
+        <input type="date" x-model="dateFrom"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:11px;padding:5px 6px;border-radius:4px">
+      </div>
+      <div>
+        <label>To</label><br>
+        <input type="date" x-model="dateTo"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:11px;padding:5px 6px;border-radius:4px">
       </div>
       <div style="padding-top:14px">
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
@@ -284,6 +296,23 @@
               <button class="fs-btn" @click="openFullscreen('chart-drawdown')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
+          </div>
+
+          <!-- Day of Week P&L -->
+          <div class="chart-box">
+            <div class="chart-title">P&L by Day of Week
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
+              <button class="fs-btn" @click="openFullscreen('chart-dow')" title="Fullscreen">⛶</button>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-dow"></canvas></div>
+          </div>
+
+          <!-- Win Rate by Decile -->
+          <div class="chart-box">
+            <div class="chart-title">Win Rate by Decile
+              <button class="fs-btn" @click="openFullscreen('chart-winrate')" title="Fullscreen">⛶</button>
+            </div>
+            <div class="chart-canvas"><canvas id="chart-winrate"></canvas></div>
           </div>
 
           <!-- Return Distribution -->
