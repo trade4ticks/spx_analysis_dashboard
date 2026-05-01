@@ -617,6 +617,79 @@ async def score_matrix_meta(pool=Depends(get_pool)):
     }
 
 
+@router.get("/score-matrix/summary")
+async def score_matrix_summary(
+    pool=Depends(get_pool),
+    metric: Optional[str] = None,
+):
+    """Aggregated score stats: avg/stddev by metric, and by fwd_ret for a selected metric."""
+    from research.batch_score import ensure_table
+    await ensure_table(pool)
+
+    async with pool.acquire() as conn:
+        # Avg score by metric (all metrics)
+        by_metric = await conn.fetch("""
+            SELECT metric,
+                   AVG(composite_score) as avg_score,
+                   STDDEV(composite_score) as std_score,
+                   COUNT(*) as n,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   MAX(composite_score) as max_score
+            FROM oi_score_matrix
+            GROUP BY metric
+            ORDER BY AVG(composite_score) DESC
+        """)
+
+        # By fwd_ret for selected metric (or all if none selected)
+        if metric:
+            by_fwd = await conn.fetch("""
+                SELECT fwd_ret,
+                       AVG(composite_score) as avg_score,
+                       STDDEV(composite_score) as std_score,
+                       COUNT(*) as n,
+                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                       MAX(composite_score) as max_score
+                FROM oi_score_matrix
+                WHERE metric = $1
+                GROUP BY fwd_ret
+                ORDER BY AVG(composite_score) DESC
+            """, metric)
+        else:
+            by_fwd = await conn.fetch("""
+                SELECT fwd_ret,
+                       AVG(composite_score) as avg_score,
+                       STDDEV(composite_score) as std_score,
+                       COUNT(*) as n,
+                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                       MAX(composite_score) as max_score
+                FROM oi_score_matrix
+                GROUP BY fwd_ret
+                ORDER BY AVG(composite_score) DESC
+            """)
+
+    return {
+        "by_metric": [
+            {"metric": r["metric"],
+             "avg_score": round(float(r["avg_score"] or 0), 1),
+             "std_score": round(float(r["std_score"] or 0), 1),
+             "n": int(r["n"]),
+             "gte50": int(r["gte50"]),
+             "max_score": round(float(r["max_score"] or 0), 1)}
+            for r in by_metric
+        ],
+        "by_fwd": [
+            {"fwd_ret": r["fwd_ret"],
+             "avg_score": round(float(r["avg_score"] or 0), 1),
+             "std_score": round(float(r["std_score"] or 0), 1),
+             "n": int(r["n"]),
+             "gte50": int(r["gte50"]),
+             "max_score": round(float(r["max_score"] or 0), 1)}
+            for r in by_fwd
+        ],
+        "selected_metric": metric,
+    }
+
+
 @router.post("/run-batch-score")
 async def trigger_batch_score(
     pool=Depends(get_pool),

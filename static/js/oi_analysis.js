@@ -974,6 +974,8 @@ document.addEventListener('alpine:init', () => {
     smSortKey: 'composite_score',
     smSortDir: 'desc',
     smPollTimer: null,
+    smSelectedMetric: '',
+    smSummary: { by_metric: [], by_fwd: [] },
     smColumns: [
       { key: 'composite_score', label: 'Score' },
       { key: 'ticker', label: 'Ticker' },
@@ -997,7 +999,10 @@ document.addEventListener('alpine:init', () => {
         ]);
         if (metaRes.ok) this.smMeta = await metaRes.json();
         if (statusRes.ok) this.smStatus = await statusRes.json();
-        if (this.smMeta.count > 0) await this.loadScoreMatrix();
+        if (this.smMeta.count > 0) {
+          await this.loadScoreMatrix();
+          await this.loadSmSummary();
+        }
         if (this.smStatus.running) this._smStartPoll();
       } catch (_) {}
     },
@@ -1063,10 +1068,134 @@ document.addEventListener('alpine:init', () => {
               clearInterval(this.smPollTimer);
               this.smPollTimer = null;
               await this.loadScoreMatrix();
+              await this.loadSmSummary();
             }
           }
         } catch (_) {}
       }, 3000);
+    },
+
+    async loadSmSummary(metric) {
+      const url = '/api/oi-analysis/score-matrix/summary' + (metric ? '?metric=' + encodeURIComponent(metric) : '');
+      try {
+        const r = await fetch(url);
+        if (r.ok) {
+          this.smSummary = await r.json();
+          this.smSelectedMetric = metric || '';
+          this.$nextTick(() => {
+            this._renderSmMetricChart();
+            this._renderSmFwdChart();
+          });
+        }
+      } catch (_) {}
+    },
+
+    _renderSmMetricChart() {
+      const el = document.getElementById('chart-sm-metric');
+      if (!el) return;
+      if (this._charts['sm-metric']) this._charts['sm-metric'].destroy();
+      const data = this.smSummary.by_metric || [];
+      if (!data.length) return;
+
+      const self = this;
+      this._charts['sm-metric'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: data.map(d => d.metric),
+          datasets: [
+            {
+              label: 'Avg Score',
+              data: data.map(d => d.avg_score),
+              backgroundColor: data.map(d =>
+                d.metric === self.smSelectedMetric ? '#3498db' :
+                d.avg_score >= 40 ? 'rgba(52,152,219,0.5)' :
+                d.avg_score >= 30 ? 'rgba(149,165,166,0.5)' :
+                'rgba(232,67,147,0.3)'),
+              borderWidth: data.map(d => d.metric === self.smSelectedMetric ? 2 : 0),
+              borderColor: '#3498db',
+            },
+            {
+              label: 'Std Dev',
+              data: data.map(d => d.std_score),
+              backgroundColor: 'rgba(255,255,255,0.08)',
+              borderWidth: 0,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (evt, elements) => {
+            if (elements.length > 0) {
+              const idx = elements[0].index;
+              const metric = data[idx].metric;
+              self.loadSmSummary(metric);
+            }
+          },
+          plugins: {
+            legend: { labels: { color: '#aaa', font: { size: 9 } } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                afterLabel: (ctx) => {
+                  if (ctx.datasetIndex !== 0) return '';
+                  const d = data[ctx.dataIndex];
+                  return `Std: ${d.std_score}  |  Max: ${d.max_score}  |  ≥50: ${d.gte50}/${d.n}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 7 }, maxRotation: 90, minRotation: 45 },
+                 grid: { color: 'rgba(255,255,255,0.03)' }, border: { color: 'transparent' } },
+            y: { ticks: { color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+          },
+        },
+      });
+    },
+
+    _renderSmFwdChart() {
+      const el = document.getElementById('chart-sm-fwd');
+      if (!el) return;
+      if (this._charts['sm-fwd']) this._charts['sm-fwd'].destroy();
+      const data = this.smSummary.by_fwd || [];
+      if (!data.length) return;
+
+      this._charts['sm-fwd'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: data.map(d => d.fwd_ret),
+          datasets: [{
+            label: 'Avg Score',
+            data: data.map(d => d.avg_score),
+            backgroundColor: data.map(d =>
+              d.avg_score >= 40 ? '#3498db' :
+              d.avg_score >= 30 ? '#95a5a6' : '#e84393'),
+            borderWidth: 0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                afterLabel: (ctx) => {
+                  const d = data[ctx.dataIndex];
+                  return `Std: ${d.std_score}  |  Max: ${d.max_score}  |  ≥50: ${d.gte50}/${d.n}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 8 } },
+                 grid: { color: 'rgba(255,255,255,0.03)' }, border: { color: 'transparent' } },
+            y: { ticks: { color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+          },
+        },
+      });
     },
 
     drillIntoScore(row) {

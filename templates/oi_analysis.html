@@ -99,7 +99,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=9"></script>
+  <script src="/static/js/oi_analysis.js?v=10"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -546,6 +546,31 @@
         <div x-show="smRows.length === 0 && smMeta.count > 0"
              style="text-align:center;padding:40px;color:var(--dim);font-size:12px">
           No results match current filters.
+        </div>
+      </div>
+
+      <!-- Summary charts: avg score by metric + by fwd ret -->
+      <div x-show="smMeta.count > 0" style="display:flex;gap:12px;margin-top:16px">
+        <!-- Metric avg score (80%) -->
+        <div style="flex:4;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">
+            Avg Score by Metric
+            <span style="font-weight:400;color:var(--dim);font-size:9px">— click a bar to drill down</span>
+          </div>
+          <div style="height:280px">
+            <canvas id="chart-sm-metric"></canvas>
+          </div>
+        </div>
+        <!-- Fwd ret avg score (20%) -->
+        <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">
+            Avg Score by Fwd Ret
+          </div>
+          <div style="font-size:9px;color:var(--dim);margin-bottom:8px"
+               x-text="smSelectedMetric ? smSelectedMetric : 'All metrics'"></div>
+          <div style="height:250px">
+            <canvas id="chart-sm-fwd"></canvas>
+          </div>
         </div>
       </div>
     </div>
