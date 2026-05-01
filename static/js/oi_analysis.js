@@ -210,27 +210,34 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      // Aggregate line
+      // Aggregate line — carry forward last known value per decile, average all
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
-        const byDate = {};
-        for (const d of selArr) {
+        // Build a carried-forward cumulative for each decile across the full timeline
+        const carried = selArr.map(d => {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
-          for (const p of pts) {
-            if (!byDate[p.date]) byDate[p.date] = [];
-            byDate[p.date].push(p.value);
+          const valByDate = {};
+          for (const p of pts) valByDate[p.date] = p.value;
+          const arr = new Array(timeline.length).fill(null);
+          let last = 0;
+          for (let i = 0; i < timeline.length; i++) {
+            if (valByDate[timeline[i]] !== undefined) last = valByDate[timeline[i]];
+            arr[i] = last;
           }
-        }
-        const mapped = new Array(timeline.length).fill(null);
-        for (const [dt, vals] of Object.entries(byDate)) {
-          const idx = dateIndex[dt];
-          if (idx !== undefined) mapped[idx] = vals.reduce((a,b)=>a+b,0) / vals.length * 100;
-        }
+          return arr;
+        });
+
+        // Average the carried-forward values at each point
+        const mapped = timeline.map((_, i) => {
+          const sum = carried.reduce((a, c) => a + c[i], 0);
+          return (sum / carried.length) * 100;
+        });
+
         datasets.push({
           label: 'Aggregate', data: mapped,
           borderColor: '#fff', backgroundColor: 'transparent',
           borderWidth: 2.5, pointRadius: 0, tension: 0.1,
-          borderDash: [6, 3], spanGaps: true,
+          borderDash: [6, 3],
         });
       }
 
@@ -469,30 +476,33 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      // Aggregate drawdown
+      // Aggregate drawdown — carry forward last known value per decile, average all
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
-        const byDate = {};
-        for (const d of selArr) {
+        // Build a carried-forward cumulative for each decile across the full timeline
+        const carried = selArr.map(d => {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
-          for (const p of pts) {
-            if (!byDate[p.date]) byDate[p.date] = [];
-            byDate[p.date].push(p.value);
+          const valByDate = {};
+          for (const p of pts) valByDate[p.date] = p.value;
+          const arr = new Array(timeline.length).fill(null);
+          let last = 0;
+          for (let i = 0; i < timeline.length; i++) {
+            if (valByDate[timeline[i]] !== undefined) last = valByDate[timeline[i]];
+            arr[i] = last;
           }
-        }
+          return arr;
+        });
+        // Average the carried-forward values, then compute drawdown from the average
         let peak = 0;
-        const mapped = new Array(timeline.length).fill(null);
-        for (const dt of Object.keys(byDate).sort()) {
-          const val = byDate[dt].reduce((a,b)=>a+b,0) / byDate[dt].length;
-          peak = Math.max(peak, val);
-          const idx = dateIndex[dt];
-          if (idx !== undefined) mapped[idx] = (val - peak) * 100;
-        }
+        const mapped = timeline.map((_, i) => {
+          const avg = carried.reduce((a, c) => a + c[i], 0) / carried.length;
+          peak = Math.max(peak, avg);
+          return (avg - peak) * 100;
+        });
         datasets.push({
           label: 'Aggregate', data: mapped,
           borderColor: '#fff', backgroundColor: 'transparent',
           borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6,3],
-          spanGaps: true,
         });
       }
 
