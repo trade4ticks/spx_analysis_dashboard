@@ -100,13 +100,15 @@ async def analyze(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    # Check if spot_close column exists
+    # Check for spot price column (prefer spot_co, fallback to spot_close)
     async with pool.acquire() as conn:
         col_check = await conn.fetch(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'daily_features' AND column_name = 'spot_close'")
-    has_spot = len(col_check) > 0
-    spot_select = ", spot_close" if has_spot else ""
+            "WHERE table_name = 'daily_features' AND column_name IN ('spot_co', 'spot_close')")
+    spot_cols_found = {r["column_name"] for r in col_check}
+    spot_col = "spot_co" if "spot_co" in spot_cols_found else ("spot_close" if "spot_close" in spot_cols_found else None)
+    has_spot = spot_col is not None
+    spot_select = f", {spot_col}" if has_spot else ""
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -128,7 +130,7 @@ async def analyze(
     spot_series = []
     if has_spot:
         for r in row_dicts:
-            sv = r.get("spot_close")
+            sv = r.get(spot_col)
             if sv is not None:
                 try:
                     spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
