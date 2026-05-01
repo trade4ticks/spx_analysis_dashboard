@@ -132,8 +132,8 @@
       text-transform: uppercase; margin-bottom: 10px; opacity: .7;
     }
     .report-card .report-body {
-      font-size: 14px; color: #e0e0e0; line-height: 1.85;
-      white-space: pre-wrap; word-break: break-word; overflow-wrap: break-word;
+      font-size: 13px; color: #e0e0e0; line-height: 1.7;
+      word-break: break-word; overflow-wrap: break-word;
     }
 
     /* ── Charts grid ─────────────────────────────────────────────────────── */
@@ -202,7 +202,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=5"></script>
+  <script src="/static/js/research2.js?v=6"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -552,19 +552,38 @@ Examples:
             </div>
           </template>
 
-          <!-- ── AI Report ─────────────────────────────────────────────── -->
-          <template x-if="reportText">
+          <!-- ── AI Research Report (sections with inline charts) ──────── -->
+          <template x-if="reportSections.length > 0">
             <div class="report-card">
               <div class="report-label">AI Research Report</div>
-              <div class="report-body" x-text="reportText"></div>
+              <template x-for="(sec, idx) in reportSections" :key="'sec-'+idx">
+                <div>
+                  <!-- Markdown section -->
+                  <template x-if="sec.type === 'markdown'">
+                    <div class="report-body" x-html="_mdToHtml(sec.content || '')"></div>
+                  </template>
+                  <!-- Chart section -->
+                  <template x-if="sec.type === 'chart' && sec.config">
+                    <div class="r2-chart-card" style="margin:12px 0">
+                      <div class="r2-chart-hdr" x-show="sec.title">
+                        <span class="r2-chart-type">Chart</span>
+                        <span style="color:#ddd;flex:1;font-size:10px" x-text="sec.title"></span>
+                      </div>
+                      <div style="height:280px;padding:8px">
+                        <canvas :id="'r2-report-chart-' + idx"></canvas>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
             </div>
           </template>
 
-          <!-- ── Interactive Charts (Chart.js) ─────────────────────────── -->
+          <!-- Interactive Charts from raw results (decile profiles + equity) -->
           <template x-if="scans.length > 0">
             <div>
               <div class="charts-label">
-                Bucket Profiles
+                Scan Results
                 <span style="color:#555;font-weight:400;font-size:9px">
                   — top signals by robustness score (interactive)
                 </span>
@@ -588,100 +607,10 @@ Examples:
             </div>
           </template>
 
-          <template x-if="equityCurveResults.length > 0">
-            <div>
-              <div class="charts-label">
-                Equity Curves
-                <span style="color:#555;font-weight:400;font-size:9px">— top/bottom decile performance</span>
-              </div>
-              <div class="r2-charts-grid">
-                <template x-for="r in equityCurveResults.filter(x => x.analysis_type === 'equity_curve_top').slice(0, 4)"
-                          :key="'e-'+r.id">
-                  <div class="r2-chart-card" x-show="r.result?.points?.length > 0">
-                    <div class="r2-chart-hdr">
-                      <span class="r2-chart-type">Equity</span>
-                      <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis;font-size:10px"
-                            x-text="(r.ticker || 'all') + ' | ' + r.x_col + ' → ' + r.y_col"></span>
-                    </div>
-                    <div style="height:220px;padding:6px">
-                      <canvas :id="'r2-equity-' + r.id"></canvas>
-                    </div>
-                    <div style="padding:2px 8px 6px;font-size:9px;color:#666" x-data="{
-                      bot: $store.r2utils?.getBot(r) || null
-                    }">
-                      <div style="display:flex;gap:8px;align-items:center">
-                        <span style="color:#3498db;font-weight:600"
-                              x-text="r.result?.which === 'top2' ? 'D9-D10' : 'D10'"></span>
-                        <span>n=<span style="color:#ccc" x-text="r.result?.n_trades || '—'"></span></span>
-                        <span>Cum: <span :style="(r.result?.cumulative_return||0)>=0?'color:#3498db':'color:#e84393'"
-                              x-text="r.result?.cumulative_return != null ? (r.result.cumulative_return*100).toFixed(1)+'%' : '—'"></span></span>
-                        <span>MaxDD: <span style="color:#e84393"
-                              x-text="r.result?.max_drawdown != null ? (r.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
-                        <span>WR: <span style="color:#ccc"
-                              x-text="r.result?.win_rate != null ? (r.result.win_rate*100).toFixed(0)+'%' : '—'"></span></span>
-                      </div>
-                      <template x-if="bot">
-                        <div style="display:flex;gap:8px;align-items:center;margin-top:2px">
-                          <span style="color:#e84393;font-weight:600"
-                                x-text="bot.result?.which === 'bottom2' ? 'D1-D2' : 'D1'"></span>
-                          <span>n=<span style="color:#ccc" x-text="bot.result?.n_trades || '—'"></span></span>
-                          <span>Cum: <span :style="(bot.result?.cumulative_return||0)>=0?'color:#3498db':'color:#e84393'"
-                                x-text="bot.result?.cumulative_return != null ? (bot.result.cumulative_return*100).toFixed(1)+'%' : '—'"></span></span>
-                          <span>MaxDD: <span style="color:#e84393"
-                                x-text="bot.result?.max_drawdown != null ? (bot.result.max_drawdown*100).toFixed(1)+'%' : '—'"></span></span>
-                          <span>WR: <span style="color:#ccc"
-                                x-text="bot.result?.win_rate != null ? (bot.result.win_rate*100).toFixed(0)+'%' : '—'"></span></span>
-                        </div>
-                      </template>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <!-- ── Static PNG Charts (scatter, heatmap, etc.) ──────────── -->
-          <template x-if="charts.length > 0">
-            <div>
-              <div class="charts-label">
-                Additional Visuals
-                <span style="color:#555;font-weight:400;font-size:9px">
-                  — <span x-text="charts.length"></span> chart<span x-show="charts.length !== 1">s</span>
-                </span>
-              </div>
-              <div class="r2-charts-grid">
-                <template x-for="chart in charts" :key="chart.id">
-                  <div class="r2-chart-card" x-data="{hov:false}">
-                    <div class="r2-chart-hdr">
-                      <span class="r2-chart-type" x-text="chartTypeLabel(chart.chart_type)"></span>
-                      <span style="color:#ddd;flex:1;overflow:hidden;text-overflow:ellipsis"
-                            x-text="chart.title"></span>
-                    </div>
-                    <div class="r2-chart-img-wrap"
-                         @mouseenter="hov=true" @mouseleave="hov=false">
-                      <img :src="chartUrl(chart.id)" :alt="chart.title" loading="lazy">
-                      <div x-show="hov" class="r2-chart-tooltip">
-                        <span x-text="chart.x_col"></span>
-                        <span style="color:#555">→</span>
-                        <span x-text="chart.y_col"></span>
-                        <template x-if="chart.ticker">
-                          <span style="color:#3498db" x-text="'| ' + chart.ticker"></span>
-                        </template>
-                        <button class="fs-btn" style="margin-left:auto;pointer-events:all"
-                                @click.stop="openLightbox(chartUrl(chart.id))"
-                                title="Fullscreen">⛶</button>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <!-- Running with no charts yet -->
-          <template x-if="isRunning && charts.length === 0">
+          <!-- Running placeholder -->
+          <template x-if="isRunning && reportSections.length === 0">
             <div style="text-align:center;padding:30px;color:#555;font-size:12px">
-              Charts will appear here when the analysis completes.
+              Report and charts will appear here when the analysis completes.
             </div>
           </template>
 

@@ -21,6 +21,21 @@ _NUMERIC_TYPES = {
 _EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
 
 
+def _extract_prose(ai_summary: str | None) -> str:
+    """Extract markdown prose from ai_summary (which may be JSON sections or plain text)."""
+    if not ai_summary:
+        return "(none)"
+    try:
+        sections = json.loads(ai_summary)
+        if isinstance(sections, list):
+            return "\n\n".join(
+                s.get("content", "") for s in sections if s.get("type") == "markdown"
+            )
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return ai_summary
+
+
 # ── Request model ─────────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
@@ -393,7 +408,7 @@ async def _do_followup(run_id: str, req: FollowupRequest, pool):
         f"Tickers: {', '.join(cfg.get('tickers') or ['all'])}\n\n"
         f"=== Scan Results ===\n{corr_table}\n\n"
         f"=== Interactions ===\n{int_summary}\n\n"
-        f"=== AI Summary ===\n{run.get('ai_summary') or '(none)'}"
+        f"=== AI Summary ===\n{_extract_prose(run.get('ai_summary'))}"
     )
 
     messages = [

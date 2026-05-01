@@ -1,3 +1,27 @@
+// Simple markdown-to-HTML for research reports (no external lib)
+function _mdToHtml(md) {
+  if (!md) return '';
+  return md
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Headers
+    .replace(/^### (.+)$/gm, '<h4 style="color:#ddd;margin:12px 0 4px;font-size:13px">$1</h4>')
+    .replace(/^## (.+)$/gm, '<h3 style="color:#eee;margin:16px 0 6px;font-size:14px">$1</h3>')
+    .replace(/^# (.+)$/gm, '<h2 style="color:#fff;margin:18px 0 8px;font-size:15px">$1</h2>')
+    // Horizontal rule
+    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--border);margin:16px 0">')
+    // Bold and italic
+    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#ddd">$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    // Bullet lists
+    .replace(/^- (.+)$/gm, '<li style="margin:2px 0">$1</li>')
+    .replace(/(<li[^>]*>.*<\/li>\n?)+/g, '<ul style="margin:4px 0 8px 16px;padding:0;list-style:disc">$&</ul>')
+    // Paragraphs (double newline)
+    .replace(/\n\n/g, '</p><p style="margin:6px 0">')
+    // Wrap in p
+    .replace(/^/, '<p style="margin:6px 0">')
+    .replace(/$/, '</p>');
+}
+
 document.addEventListener('alpine:init', () => {
   // Utility store for template access to results
   Alpine.store('r2utils', {
@@ -17,7 +41,6 @@ document.addEventListener('alpine:init', () => {
     // ── State ──────────────────────────────────────────────────────────────
     runs:        [],
     selectedRun: null,
-    charts:      [],
     results:     [],
     view:        'list',   // 'list' | 'new' | 'run'
     loading:     false,
@@ -76,7 +99,6 @@ document.addEventListener('alpine:init', () => {
     async selectRun(run) {
       this.view        = 'run';
       this.selectedRun = run;
-      this.charts      = [];
       this.results     = [];
       this.error       = null;
       this._destroyCharts();
@@ -94,24 +116,25 @@ document.addEventListener('alpine:init', () => {
       this.loading = true;
       this._destroyCharts();
       try {
-        const [runRes, chartsRes, resultsRes, fupsRes] = await Promise.all([
+        const [runRes, resultsRes, fupsRes] = await Promise.all([
           fetch(`/api/research2/run/${runId}`),
-          fetch(`/api/research2/run/${runId}/charts`),
           fetch(`/api/research2/run/${runId}/results`),
           fetch(`/api/research2/run/${runId}/followups`),
         ]);
         if (runRes.ok)     this.selectedRun = await runRes.json();
-        if (chartsRes.ok)  this.charts      = await chartsRes.json();
         if (resultsRes.ok) {
           this.results = await resultsRes.json();
           Alpine.store('r2utils').setResults(this.results);
         }
         if (fupsRes.ok)    this.followups   = await fupsRes.json();
 
-        // Render interactive charts after DOM update (double nextTick for x-for templates)
+        // Render charts after DOM update (double nextTick for x-for templates)
         await this.$nextTick();
         await this.$nextTick();
-        setTimeout(() => this._renderInteractiveCharts(), 50);
+        setTimeout(() => {
+          this._renderInteractiveCharts();
+          this._renderReportCharts();
+        }, 50);
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -214,6 +237,59 @@ document.addEventListener('alpine:init', () => {
             },
           },
         });
+      }
+    },
+
+    _renderReportCharts() {
+      const darkOpts = {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { labels: { color: '#aaa', font: { size: 10 } } },
+          tooltip: {
+            backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+          },
+        },
+        scales: {
+          x: { ticks: { color: '#888', font: { size: 9 }, maxRotation: 45 },
+               grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+          y: { ticks: { color: '#888', font: { size: 9 } },
+               grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+        },
+      };
+
+      for (let i = 0; i < this.reportSections.length; i++) {
+        const sec = this.reportSections[i];
+        if (sec.type !== 'chart' || !sec.config) continue;
+        const el = document.getElementById('r2-report-chart-' + i);
+        if (!el) continue;
+        if (this._chartInstances['r2-report-chart-' + i]) continue; // already rendered
+
+        try {
+          const cfg = JSON.parse(JSON.stringify(sec.config)); // deep clone
+          // Apply dark theme defaults if options not fully specified
+          if (!cfg.options) cfg.options = {};
+          const o = cfg.options;
+          if (!o.responsive) o.responsive = true;
+          if (o.maintainAspectRatio === undefined) o.maintainAspectRatio = false;
+          if (o.animation === undefined) o.animation = false;
+          if (!o.plugins) o.plugins = {};
+          if (!o.plugins.legend) o.plugins.legend = darkOpts.plugins.legend;
+          if (!o.plugins.tooltip) o.plugins.tooltip = darkOpts.plugins.tooltip;
+          if (!o.scales) o.scales = {};
+          // Apply dark scale defaults unless already set
+          for (const axis of ['x', 'y']) {
+            if (!o.scales[axis]) o.scales[axis] = {};
+            const ax = o.scales[axis];
+            if (!ax.ticks) ax.ticks = {};
+            if (!ax.ticks.color) ax.ticks.color = '#888';
+            if (!ax.ticks.font) ax.ticks.font = { size: 9 };
+            if (!ax.grid) ax.grid = { color: 'rgba(255,255,255,0.05)' };
+            if (!ax.border) ax.border = { color: 'transparent' };
+          }
+          this._chartInstances['r2-report-chart-' + i] = new Chart(el, cfg);
+        } catch (e) {
+          console.error('Report chart render error at section ' + i, e);
+        }
       }
     },
 
@@ -344,10 +420,12 @@ document.addEventListener('alpine:init', () => {
       await this.loadRuns();
     },
 
+    // ── Markdown rendering ──────────────────────────────────────────────
+    _mdToHtml(md) { return _mdToHtml(md); },
+
     // ── Lightbox ───────────────────────────────────────────────────────────
     openLightbox(url)  { this.lightboxUrl = url; },
     closeLightbox()    { this.lightboxUrl = null; },
-    chartUrl(chartId)  { return `/api/research/chart/${chartId}.png`; },
 
     // ── Computed ───────────────────────────────────────────────────────────
     get plan() {
@@ -364,10 +442,23 @@ document.addEventListener('alpine:init', () => {
       return s.replace('[RUNNING]', '').trim();
     },
 
-    get reportText() {
+    get reportSections() {
       const s = this.selectedRun?.ai_summary || '';
-      if (s.startsWith('[RUNNING]') || !s) return '';
-      return s;
+      if (!s || s.startsWith('[RUNNING]')) return [];
+      try {
+        const parsed = JSON.parse(s);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (_) {}
+      // Legacy plain-text report: wrap in a single markdown section
+      return [{ type: 'markdown', content: s }];
+    },
+
+    get reportText() {
+      // Legacy accessor — extracts prose only (for PDF export, etc.)
+      return this.reportSections
+        .filter(s => s.type === 'markdown')
+        .map(s => s.content || '')
+        .join('\n\n');
     },
 
     get taskTypeBadgeColor() {
@@ -384,16 +475,6 @@ document.addEventListener('alpine:init', () => {
       return colors[this.plan?.task_type] || '#2a2a2a';
     },
 
-    get chartTypeLabel() {
-      return (t) => ({
-        bucket_profile:      'Profile',
-        equity_curve:        'Equity',
-        scatter:             'Scatter',
-        yearly_consistency:  'Yearly',
-        correlation_heatmap: 'Heatmap',
-        combo_quadrant:      'Combo',
-      })[t] || t;
-    },
 
     // ── Knowledge library ────────────────────────────────────────────────
     async _loadKnowledge() {

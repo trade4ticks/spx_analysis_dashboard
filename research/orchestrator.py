@@ -18,7 +18,7 @@ try:
 except ImportError:
     _anthropic = None
 
-from research import scanner, blocks, charts, db as rdb
+from research import scanner, blocks, db as rdb
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 
@@ -47,29 +47,40 @@ _PLAN_TOOL = {
     },
 }
 
-_VIZ_TOOL = {
-    "name": "select_charts",
-    "description": "Select which charts to generate.",
+_REPORT_TOOL = {
+    "name": "produce_report",
+    "description": "Output the research report as structured sections with inline Chart.js charts.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "charts": {
+            "sections": {
                 "type": "array",
+                "description": "Interleaved markdown prose and chart blocks that form the report.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "chart_type": {"type": "string", "enum": [
-                            "bucket_profile", "equity_curve", "scatter", "yearly_consistency"]},
-                        "ticker":     {"type": "string"},
-                        "x_col":      {"type": "string"},
-                        "y_col":      {"type": "string"},
-                        "reason":     {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["markdown", "chart"],
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Markdown text (only for type=markdown).",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Chart title (only for type=chart).",
+                        },
+                        "config": {
+                            "type": "object",
+                            "description": "Complete Chart.js config object with type, data, and options (only for type=chart). Data arrays must contain the actual numeric values, not references.",
+                        },
                     },
-                    "required": ["chart_type", "x_col", "y_col"],
+                    "required": ["type"],
                 },
             },
         },
-        "required": ["charts"],
+        "required": ["sections"],
     },
 }
 
@@ -136,35 +147,6 @@ Ticker selection rules:
 - The tickers field in the available data is: {tickers}
 """
 
-_VIZ_SYSTEM = (
-    "You are a data visualization selector for quantitative research. "
-    "Choose the minimum set of charts that best answer the research question. "
-    "Output ONLY valid JSON."
-)
-
-_VIZ_USER = """\
-Research question: {question}
-
-Top scan results (sorted by composite score):
-{scan_summary}
-
-Choose 3 to 6 charts. Available chart types:
-- bucket_profile  : avg return + win rate across all decile buckets (shows full relationship shape)
-- equity_curve    : simulated P&L for top/bottom decile over time (shows tradability)
-- scatter         : raw scatter plot with regression line (shows distribution and outliers)
-- yearly_consistency : per-year returns top vs bottom (shows temporal stability)
-
-Return a JSON array (each element has these keys):
-[
-  {{
-    "chart_type": "<bucket_profile|equity_curve|scatter|yearly_consistency>",
-    "ticker": "<ticker or null>",
-    "x_col": "<feature column>",
-    "y_col": "<outcome column>",
-    "reason": "<one sentence: why this chart answers the question>"
-  }}
-]
-"""
 
 _REPORT_USER = """\
 RESEARCH QUESTION (primary directive — address this directly):
@@ -186,17 +168,31 @@ MULTI-FACTOR INTERACTIONS:
 EQUITY CURVES:
 {equity_summary}
 
-Write a focused research report (400-700 words):
-1. Answer the research question directly in the first paragraph
-2. Describe the full bucket profile shape — not just top/bottom
-3. If multi-factor combos were tested, explain which improved on singles
-   and describe as usable trading rules (e.g., "when X is high AND Y is rising")
-4. Distinguish what is tradable from what looks spurious
-5. Cite specific numbers (scores, spreads, consistency %)
-6. State clearly what was tested and what did NOT work
-7. End with a one-sentence actionable conclusion
+Produce a research report using the produce_report tool. The report is an array of sections,
+each either markdown prose or a Chart.js chart. Interleave text and charts naturally —
+introduce a finding in prose, then immediately show the chart that supports it.
 
-Professional quant voice. No fluff.
+PROSE GUIDELINES (for markdown sections):
+- Answer the research question directly in the first section
+- Describe the full bucket profile shape — not just top/bottom
+- If multi-factor combos were tested, describe as usable trading rules
+- Distinguish tradable from spurious. Cite specific numbers.
+- State what did NOT work
+- End with actionable conclusion
+- Professional quant voice, no fluff, 400-700 words total prose
+
+CHART GUIDELINES (for chart sections):
+- Include 3-8 charts that best illustrate your findings
+- Use whatever Chart.js chart type fits: bar, line, scatter, radar, doughnut, etc.
+- Each chart config must be a COMPLETE Chart.js config with type, data (with real numeric values), and options
+- Use these colors: blue=#3498db for positive, pink=#e84393 for negative, muted grays for neutral
+- Dark theme: background transparent, text/ticks #aaa, grid rgba(255,255,255,0.05)
+- Include axis labels and a descriptive title
+- Bucket profiles: bar chart with D1-D10 labels, colored by sign
+- Equity curves: line chart with dates on x-axis
+- Correlation/heatmap: show as a table-like labeled bar chart or grouped bar
+- Any other pattern you see: choose the chart type that best communicates it
+- Keep data arrays compact — round to 4 decimal places
 """
 
 
@@ -280,72 +276,7 @@ async def classify_and_plan(
     return plan
 
 
-# ── Phase 1: AI-directed visualization selection ──────────────────────────────
-
-async def select_visualizations(
-    question: str,
-    scan_results: list[dict],
-    model: str = "claude-sonnet-4-6",
-) -> list[dict]:
-    """
-    After scan results are available, ask Claude which charts to generate.
-    Uses tool_use for guaranteed valid JSON output.
-    """
-    if _anthropic is None or not scan_results:
-        return []
-
-    ranked = sorted(
-        [s for s in scan_results if "error" not in s],
-        key=lambda s: (s.get("composite_interaction_score") or s.get("composite_score") or 0),
-        reverse=True,
-    )[:15]
-
-    if not ranked:
-        return []
-
-    lines = []
-    for s in ranked:
-        rob = s.get("robustness", {})
-        combo = s.get("combo")
-        label = "+".join(combo) if combo else s.get("x_col", "?")
-        lines.append(
-            f"  [{s.get('composite_interaction_score') or s.get('composite_score', 0):.0f}] "
-            f"{s.get('ticker') or 'all'} | {label} → {s.get('y_col')}: "
-            f"pattern={s.get('pattern', '?')}, "
-            f"consistency={rob.get('yearly_consistency_pct', '?')}%"
-        )
-
-    prompt = _VIZ_USER.format(question=question, scan_summary="\n".join(lines))
-
-    client = _anthropic.AsyncAnthropic()
-    resp = await client.messages.create(
-        model=model,
-        max_tokens=800,
-        system=[{"type": "text", "text": _VIZ_SYSTEM,
-                 "cache_control": {"type": "ephemeral"}}],
-        tools=[_VIZ_TOOL],
-        tool_choice={"type": "tool", "name": "select_charts"},
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    # Extract from tool_use block
-    for block in resp.content:
-        if block.type == "tool_use" and block.name == "select_charts":
-            charts = block.input.get("charts", [])
-            return charts[:6]
-
-    # Fallback: try parsing text
-    raw = resp.content[0].text if resp.content and hasattr(resp.content[0], "text") else "[]"
-    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    raw = re.sub(r"\s*```$", "", raw).strip()
-    try:
-        specs = json.loads(raw)
-        return specs[:6] if isinstance(specs, list) else []
-    except Exception:
-        return []
-
-
-# ── Phase 1: Compose final report ─────────────────────────────────────────────
+# ── Compose final report with inline charts ─────────────────────────────────────
 
 async def _compose_report(
     question: str,
@@ -355,9 +286,10 @@ async def _compose_report(
     model: str,
     knowledge_rules: list[str] = None,
     extra_context: str = "",
-) -> str:
+) -> list[dict]:
+    """Compose report as structured sections (markdown + Chart.js configs)."""
     if _anthropic is None:
-        return "(anthropic SDK not available)"
+        return [{"type": "markdown", "content": "(anthropic SDK not available)"}]
 
     valid = [s for s in ranked_scans if "error" not in s]
     top = valid[:10]
@@ -377,9 +309,9 @@ async def _compose_report(
             f"{rob.get('concentration_risk', 1.0):>5.2f}"
         )
 
-    # Bucket profiles for top 3
+    # Bucket profiles for top 5 (give the LLM more data to chart)
     bp_lines = []
-    for s in top[:3]:
+    for s in top[:5]:
         bs = [b for b in (s.get("bucket_stats") or []) if b is not None]
         if bs:
             bp_lines.append(
@@ -423,13 +355,30 @@ async def _compose_report(
             f"winRate={r.get('win_rate')}"
         )
 
+    # Equity curve point data for the LLM to chart (top 3)
+    eq_chart_lines = []
+    eq_sorted = sorted(equity_results,
+                       key=lambda x: abs(x.get("cumulative_return") or x.get("final_equity") or 0),
+                       reverse=True)
+    for r in eq_sorted[:6]:
+        pts = r.get("points") or []
+        if pts:
+            # Sample ~40 points evenly for the LLM
+            step = max(1, len(pts) // 40)
+            sampled = pts[::step]
+            vals = ", ".join(f"({p['date']}: {p['value']:.4f})" for p in sampled)
+            eq_chart_lines.append(
+                f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} → {r.get('outcome_col')} "
+                f"({r.get('which')}): [{vals}]"
+            )
+
     def _safe(s: str) -> str:
         return str(s).replace("{", "{{").replace("}", "}}")
 
     # Knowledge rules injection
     report_system = (
-        "You are a quantitative research analyst writing focused research reports. "
-        "Professional quant voice. No fluff."
+        "You are a quantitative research analyst writing focused research reports "
+        "with embedded interactive charts. Professional quant voice. No fluff."
     )
     if knowledge_rules:
         rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
@@ -437,27 +386,40 @@ async def _compose_report(
             f"\n\nDOMAIN KNOWLEDGE & POLICIES (follow these strictly):\n{rules_text}"
         )
 
+    user_content = _REPORT_USER.format(
+        question=_safe(question),
+        task_type=_safe(plan.get("task_type", "")),
+        scan_focus=_safe(plan.get("scan_focus", "")),
+        report_guidance=_safe(plan.get("report_guidance", "")),
+        signal_table="\n".join(sig_lines),
+        bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
+        interaction_summary="\n".join(int_lines) if int_lines else "(none tested)",
+        equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
+    )
+    if eq_chart_lines:
+        user_content += f"\n\nEQUITY CURVE POINTS (for charting):\n" + "\n".join(eq_chart_lines)
+    if extra_context:
+        user_content += f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}"
+
     client = _anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
-        max_tokens=1500,
+        max_tokens=4000,
         system=[{"type": "text", "text": report_system,
                  "cache_control": {"type": "ephemeral"}}],
-        messages=[{
-            "role": "user",
-            "content": _REPORT_USER.format(
-                question=_safe(question),
-                task_type=_safe(plan.get("task_type", "")),
-                scan_focus=_safe(plan.get("scan_focus", "")),
-                report_guidance=_safe(plan.get("report_guidance", "")),
-                signal_table="\n".join(sig_lines),
-                bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
-                interaction_summary="\n".join(int_lines) if int_lines else "(none tested)",
-                equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
-            ) + (f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}" if extra_context else ""),
-        }],
+        tools=[_REPORT_TOOL],
+        tool_choice={"type": "tool", "name": "produce_report"},
+        messages=[{"role": "user", "content": user_content}],
     )
-    return msg.content[0].text.strip()
+
+    # Extract structured output
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "produce_report":
+            return block.input.get("sections", [])
+
+    # Fallback: return raw text as a single markdown section
+    raw = msg.content[0].text if msg.content and hasattr(msg.content[0], "text") else ""
+    return [{"type": "markdown", "content": raw.strip()}]
 
 
 # ── Phase 3: Skeptic / validator pass ────────────────────────────────────────
@@ -1027,171 +989,72 @@ async def execute_v2_pipeline(
                     f"    IS_score={s.get('in_sample_score', '?')}, "
                     f"OOS_score={oos if oos is not None else 'N/A'}")
 
-    # ── 3. Deterministic chart generation (no LLM call) ────────────────────
-    log("[3/5] Generating charts deterministically from top signals…")
+    # ── 3. Equity curve data (for report context, no PNGs) ─────────────────
+    log("[3/5] Computing equity curves for top signals…")
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id,
-                             ai_summary="[RUNNING] Step 3/4: Generating charts…")
+                             ai_summary="[RUNNING] Step 3/5: Computing equity curves…")
 
-    # Build chart specs deterministically: bucket profiles for top 5, equity for top 3,
-    # scatter for strongest, yearly consistency for most consistent
     single_ranked = [s for s in ranked if s.get("x_col") and not s.get("combo")]
-    viz_specs = []
-
-    # Bucket profiles for top 5 single-factor signals
-    for s in single_ranked[:5]:
-        viz_specs.append({"chart_type": "bucket_profile",
-                          "ticker": s.get("ticker"),
-                          "x_col": s["x_col"], "y_col": s["y_col"]})
-
-    # Equity curves for top 3
-    for s in single_ranked[:3]:
-        viz_specs.append({"chart_type": "equity_curve",
-                          "ticker": s.get("ticker"),
-                          "x_col": s["x_col"], "y_col": s["y_col"]})
-
-    # Scatter for the strongest signal
-    if single_ranked:
-        s = single_ranked[0]
-        viz_specs.append({"chart_type": "scatter",
-                          "ticker": s.get("ticker"),
-                          "x_col": s["x_col"], "y_col": s["y_col"]})
-
-    # Yearly consistency for the most consistent signal
-    most_consistent = sorted(
-        [s for s in single_ranked if (s.get("robustness") or {}).get("yearly_consistency_pct") is not None],
-        key=lambda s: s["robustness"]["yearly_consistency_pct"], reverse=True)
-    if most_consistent:
-        s = most_consistent[0]
-        viz_specs.append({"chart_type": "yearly_consistency",
-                          "ticker": s.get("ticker"),
-                          "x_col": s["x_col"], "y_col": s["y_col"]})
-
-    log(f"  {len(viz_specs)} charts to generate from top {len(single_ranked)} signals")
-
-    # Generate charts
     equity_results = []
     async with main_pool.acquire() as conn:
-        for spec in viz_specs:
-            c_type = spec.get("chart_type")
-            x_col  = spec.get("x_col")
-            y_col  = spec.get("y_col")
-            ticker = spec.get("ticker") or None
+        for s in single_ranked[:3]:
+            x_col = s["x_col"]
+            y_col = s["y_col"]
+            ticker = s.get("ticker") or None
             cache_key = ticker if ticker else "_all"
             rows = cache.get(cache_key)
-            if not rows or not x_col or not y_col:
+            if not rows:
                 continue
-
             avail = set(rows[0].keys())
             if x_col not in avail or y_col not in avail:
-                log(f"  SKIP {c_type}: {x_col}/{y_col} not in fetched data")
                 continue
 
-            scan_r = next(
-                (s for s in valid
-                 if s.get("x_col") == x_col and s.get("y_col") == y_col
-                 and (s.get("ticker") or None) == ticker),
-                {},
-            )
-            title_base = f"{ticker or 'all'} | {x_col} → {y_col}"
+            rob = s.get("robustness", {})
+            conc = rob.get("concentration_risk", 1.0)
+            min_bn = rob.get("min_bucket_n", 0)
+            expanded = conc > 0.60 or min_bn < 20
+            top_w = "top2" if expanded else "top"
+            bot_w = "bottom2" if expanded else "bottom"
 
             try:
-                if c_type == "bucket_profile" and scan_r:
-                    png = charts.bucket_profile_chart(scan_r)
-                    if png:
-                        await rdb.save_chart(conn, run_id, "bucket_profile",
-                                             f"Profile {title_base}",
-                                             png, ticker, x_col, y_col)
-
-                elif c_type == "equity_curve":
-                    rob = scan_r.get("robustness", {}) if scan_r else {}
-                    conc = rob.get("concentration_risk", 1.0)
-                    min_bn = rob.get("min_bucket_n", 0)
-                    expanded = conc > 0.60 or min_bn < 20
-                    top_w = "top2" if expanded else "top"
-                    bot_w = "bottom2" if expanded else "bottom"
-                    note = None
-                    if expanded:
-                        note = (f"Expanded to D9-D10/D1-D2 "
-                                f"(concentration={conc:.2f}, min_n={min_bn})")
-
-                    top_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, top_w, 10, ticker)
-                    bot_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, bot_w, 10, ticker)
-                    if note:
-                        top_eq["concentration_note"] = note
-                        bot_eq["concentration_note"] = note
-
-                    await rdb.save_result(conn, run_id, "equity_curve_top",  x_col, y_col, top_eq, ticker)
-                    await rdb.save_result(conn, run_id, "equity_curve_bottom", x_col, y_col, bot_eq, ticker)
-                    equity_results.extend([top_eq, bot_eq])
-
-                    png = charts.equity_curve_chart(top_eq, bot_eq)
-                    if png:
-                        await rdb.save_chart(conn, run_id, "equity_curve",
-                                             f"Equity {title_base}",
-                                             png, ticker, x_col, y_col)
-
-                elif c_type == "scatter":
-                    scat = blocks.scatter_sample_from_rows(rows, x_col, y_col, ticker=ticker)
-                    if scat.get("points"):
-                        png = charts.scatter_chart(scat)
-                        if png:
-                            await rdb.save_chart(conn, run_id, "scatter",
-                                                 f"Scatter {title_base}",
-                                                 png, ticker, x_col, y_col)
-
-                elif c_type == "yearly_consistency":
-                    ydata = (scan_r.get("robustness") or {}).get("yearly_data") if scan_r else None
-                    if ydata:
-                        yr_result = {
-                            "years": ydata,
-                            "consistency_pct": (scan_r.get("robustness") or {}).get(
-                                "yearly_consistency_pct"),
-                            "ticker": ticker,
-                            "feature_col": x_col,
-                            "outcome_col": y_col,
-                        }
-                        png = charts.yearly_consistency_chart(yr_result)
-                        if png:
-                            await rdb.save_chart(conn, run_id, "yearly_consistency",
-                                                 f"Yearly {title_base}",
-                                                 png, ticker, x_col, y_col)
-
-                log(f"  ✓ {c_type}: {title_base}")
+                top_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, top_w, 10, ticker)
+                bot_eq = blocks.equity_curve_from_rows(rows, x_col, y_col, bot_w, 10, ticker)
+                await rdb.save_result(conn, run_id, "equity_curve_top", x_col, y_col, top_eq, ticker)
+                await rdb.save_result(conn, run_id, "equity_curve_bottom", x_col, y_col, bot_eq, ticker)
+                equity_results.extend([top_eq, bot_eq])
+                log(f"  ✓ Equity: {ticker or 'all'} | {x_col} → {y_col}")
             except Exception as exc:
-                log(f"  CHART ERROR {c_type} {title_base}: {exc}")
+                log(f"  EQUITY ERROR {x_col}→{y_col}: {exc}")
 
-    # ── 4. Compose report ─────────────────────────────────────────────────
-    log("[4/5] Composing report…")
+    # ── 4. Compose report with inline charts ─────────────────────────────
+    log("[4/5] Composing report with charts…")
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/5: Composing report…")
 
     extra_ctx = "\n".join(extra_context_lines) if extra_context_lines else ""
-    report = await _compose_report(question, plan, ranked, equity_results, model,
-                                   knowledge_rules=knowledge_rules,
-                                   extra_context=extra_ctx)
-    log("  Report complete.")
+    sections = await _compose_report(question, plan, ranked, equity_results, model,
+                                     knowledge_rules=knowledge_rules,
+                                     extra_context=extra_ctx)
+    log(f"  Report complete — {len(sections)} sections.")
 
     # ── 5. Skeptic review ────────────────────────────────────────────────
     log("[5/5] Running skeptic review…")
     async with main_pool.acquire() as conn:
         await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 5/5: Skeptic review…")
 
+    # Extract prose from sections for the skeptic to review
+    report_text = "\n\n".join(
+        s.get("content", "") for s in sections if s.get("type") == "markdown"
+    )
+
     try:
-        skeptic = await _skeptic_review(report, ranked, equity_results, model,
+        skeptic = await _skeptic_review(report_text, ranked, equity_results, model,
                                         knowledge_rules=knowledge_rules)
         if skeptic:
             log("  Skeptic review complete.")
-            summary = (
-                f"{report}\n\n"
-                f"---\n\n"
-                f"## Caveats & Challenges\n\n"
-                f"{skeptic}"
-            )
-        else:
-            summary = report
+            sections.append({"type": "markdown", "content": f"---\n\n## Caveats & Challenges\n\n{skeptic}"})
     except Exception as exc:
         log(f"  Skeptic review failed: {exc}. Using report without caveats.")
-        summary = report
 
-    return summary
+    return json.dumps(sections)
