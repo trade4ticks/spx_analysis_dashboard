@@ -50,13 +50,13 @@ _PLAN_TOOL = {
 
 _REPORT_TOOL = {
     "name": "produce_report",
-    "description": "Output the research report as structured sections with inline Chart.js charts.",
+    "description": "Output the research report as structured sections with chart references.",
     "input_schema": {
         "type": "object",
         "properties": {
             "sections": {
                 "type": "array",
-                "description": "Interleaved markdown prose and chart blocks that form the report.",
+                "description": "Interleaved markdown prose and chart reference blocks.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -68,13 +68,9 @@ _REPORT_TOOL = {
                             "type": "string",
                             "description": "Markdown text (only for type=markdown).",
                         },
-                        "title": {
+                        "chart_id": {
                             "type": "string",
-                            "description": "Chart title (only for type=chart).",
-                        },
-                        "config": {
-                            "type": "object",
-                            "description": "Complete Chart.js config object with type, data, and options (only for type=chart). Data arrays must contain the actual numeric values, not references.",
+                            "description": "Chart reference ID (only for type=chart). Must be one of the available chart IDs listed in the prompt.",
                         },
                     },
                     "required": ["type"],
@@ -163,7 +159,7 @@ REPORT GUIDANCE: {report_guidance}
 TOP SINGLE-FACTOR SIGNALS:
 {signal_table}
 
-FULL BUCKET PROFILES (top 3):
+FULL BUCKET PROFILES (top 5):
 {bucket_profiles}
 
 MULTI-FACTOR INTERACTIONS:
@@ -172,9 +168,15 @@ MULTI-FACTOR INTERACTIONS:
 EQUITY CURVES:
 {equity_summary}
 
+AVAILABLE CHARTS (reference by chart_id in your report):
+{available_charts}
+
 Produce a research report using the produce_report tool. The report is an array of sections,
-each either markdown prose or a Chart.js chart. Interleave text and charts naturally —
-introduce a finding in prose, then immediately show the chart that supports it.
+each either markdown prose or a chart reference. Interleave text and charts naturally —
+introduce a finding in prose, then immediately reference the chart that supports it.
+
+For chart sections, set type="chart" and chart_id to one of the IDs listed in AVAILABLE CHARTS.
+You should reference most or all of the available charts, placing each where it best supports the narrative.
 
 PROSE GUIDELINES (for markdown sections):
 - Answer the research question directly in the first section
@@ -184,24 +186,6 @@ PROSE GUIDELINES (for markdown sections):
 - State what did NOT work
 - End with actionable conclusion
 - Professional quant voice, no fluff, 400-700 words total prose
-
-CHART GUIDELINES (for chart sections):
-- Include 3-8 charts that best illustrate your findings — variety matters
-- Use whatever Chart.js chart type fits: bar, line, scatter, radar, doughnut, polarArea, etc.
-- Each chart config must be a COMPLETE Chart.js config with type, data (with real numeric values), and options
-- Use these colors: blue=#3498db for positive, pink=#e84393 for negative, muted grays for neutral
-- Dark theme: background transparent, text/ticks #aaa, grid rgba(255,255,255,0.05)
-- Include axis labels and a descriptive title
-- Chart ideas (use what fits, not all):
-  - Bucket profile: bar chart with D1-D10, colored by sign
-  - Equity curve: line chart with dates on x-axis
-  - Ticker scoreboard: horizontal bar ranking tickers by score
-  - Yearly consistency: grouped bars showing top vs bottom spread per year
-  - Win rate comparison: grouped or stacked bar across tickers
-  - Signal strength: radar chart comparing metrics across signals
-- If TICKER SCOREBOARD data is provided, create a cross-ticker comparison chart
-- If YEARLY BREAKDOWN data is provided, create a yearly consistency chart
-- Keep data arrays compact — round to 4 decimal places
 """
 
 
@@ -300,6 +284,240 @@ async def classify_and_plan(
 
 # ── Compose final report with inline charts ─────────────────────────────────────
 
+def _build_chart_configs(
+    ranked_scans: list[dict],
+    equity_results: list[dict],
+    ticker_scoreboard: dict | None,
+) -> dict[str, dict]:
+    """Build Chart.js configs deterministically from analysis data. Returns {chart_id: {title, config}}."""
+    charts = {}
+    valid = [s for s in ranked_scans if "error" not in s]
+    single = [s for s in valid if s.get("x_col") and not s.get("combo")]
+    colors_pos = '#3498db'
+    colors_neg = '#e84393'
+    dark_scales = {
+        'x': {'ticks': {'color': '#888', 'font': {'size': 9}, 'maxRotation': 45},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+        'y': {'ticks': {'color': '#888', 'font': {'size': 9}},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+    }
+    base_opts = {
+        'responsive': True, 'maintainAspectRatio': False, 'animation': False,
+        'plugins': {'legend': {'labels': {'color': '#aaa', 'font': {'size': 10}}},
+                    'tooltip': {'backgroundColor': 'rgba(20,20,20,0.95)',
+                                'borderColor': '#444', 'borderWidth': 1}},
+        'scales': dark_scales,
+    }
+
+    # 1. Ticker scoreboard — horizontal bar of best scores
+    if ticker_scoreboard and len(ticker_scoreboard) > 1:
+        sorted_tickers = sorted(ticker_scoreboard.items(), key=lambda x: x[1]['score'], reverse=True)
+        charts['ticker_scoreboard'] = {
+            'title': 'Best Composite Score by Ticker',
+            'config': {
+                'type': 'bar',
+                'data': {
+                    'labels': [tk for tk, _ in sorted_tickers],
+                    'datasets': [{
+                        'label': 'Composite Score',
+                        'data': [round(info['score'], 1) for _, info in sorted_tickers],
+                        'backgroundColor': [colors_pos if info['score'] >= 40 else
+                                            '#95a5a6' if info['score'] >= 25 else
+                                            colors_neg for _, info in sorted_tickers],
+                        'borderWidth': 0,
+                    }],
+                },
+                'options': {**base_opts, 'indexAxis': 'y',
+                            'plugins': {**base_opts['plugins'],
+                                        'legend': {'display': False}}},
+            },
+        }
+
+    # 2. Bucket profiles for top signals (up to 8)
+    seen_profiles = set()
+    for s in single[:12]:
+        tk = s.get('ticker') or 'all'
+        x_col = s['x_col']
+        y_col = s['y_col']
+        key = f"{tk}_{x_col}_{y_col}"
+        if key in seen_profiles:
+            continue
+        seen_profiles.add(key)
+        bs = [b for b in (s.get('bucket_stats') or []) if b is not None]
+        if len(bs) < 3:
+            continue
+        avgs = [round(b['avg_ret'] * 100, 4) for b in bs]
+        cid = f"bucket_{tk}_{x_col}_{y_col}"
+        charts[cid] = {
+            'title': f'Decile Profile: {tk} | {x_col} → {y_col} (score={s.get("composite_score", 0):.0f})',
+            'config': {
+                'type': 'bar',
+                'data': {
+                    'labels': [f'D{b["bucket"]}' for b in bs],
+                    'datasets': [{
+                        'label': 'Avg Return %',
+                        'data': avgs,
+                        'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                        'borderWidth': 0,
+                    }],
+                },
+                'options': {**base_opts,
+                            'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+            },
+        }
+        if len(charts) - (1 if 'ticker_scoreboard' in charts else 0) >= 8:
+            break
+
+    # 3. Equity curves (top 3 pairs)
+    eq_by_key = {}
+    for r in equity_results:
+        tk = r.get('ticker') or 'all'
+        key = f"{tk}_{r.get('feature_col')}_{r.get('outcome_col')}"
+        eq_by_key.setdefault(key, {})[r.get('which', '')] = r
+
+    eq_count = 0
+    for key, sides in eq_by_key.items():
+        if eq_count >= 3:
+            break
+        top_r = sides.get('top') or sides.get('top2')
+        bot_r = sides.get('bottom') or sides.get('bottom2')
+        if not top_r or not top_r.get('points'):
+            continue
+        pts = top_r['points']
+        step = max(1, len(pts) // 60)
+        sampled_pts = pts[::step]
+        datasets = [{
+            'label': f'Top ({top_r.get("which", "D10")})',
+            'data': [round(p['value'] * 100, 2) for p in sampled_pts],
+            'borderColor': colors_pos, 'backgroundColor': 'transparent',
+            'borderWidth': 2, 'pointRadius': 0, 'tension': 0.1,
+        }]
+        if bot_r and bot_r.get('points'):
+            bot_pts = bot_r['points']
+            bot_step = max(1, len(bot_pts) // 60)
+            bot_sampled = bot_pts[::bot_step]
+            datasets.append({
+                'label': f'Bottom ({bot_r.get("which", "D1")})',
+                'data': [round(p['value'] * 100, 2) for p in bot_sampled],
+                'borderColor': colors_neg, 'backgroundColor': 'transparent',
+                'borderWidth': 2, 'pointRadius': 0, 'tension': 0.1,
+            })
+        tk = top_r.get('ticker') or 'all'
+        fc = top_r.get('feature_col', '?')
+        oc = top_r.get('outcome_col', '?')
+        cid = f"equity_{tk}_{fc}_{oc}"
+        charts[cid] = {
+            'title': f'Equity Curve: {tk} | {fc} → {oc}',
+            'config': {
+                'type': 'line',
+                'data': {
+                    'labels': [p['date'][:7] for p in sampled_pts],
+                    'datasets': datasets,
+                },
+                'options': {**base_opts,
+                            'scales': {**dark_scales,
+                                       'x': {**dark_scales['x'],
+                                              'ticks': {**dark_scales['x']['ticks'], 'maxTicksLimit': 12}}}},
+            },
+        }
+        eq_count += 1
+
+    # 4. Yearly consistency for the most consistent signal
+    most_consistent = sorted(
+        [s for s in single if (s.get('robustness') or {}).get('yearly_data')],
+        key=lambda s: (s.get('robustness') or {}).get('yearly_consistency_pct', 0), reverse=True)
+    if most_consistent:
+        s = most_consistent[0]
+        yd = s['robustness']['yearly_data']
+        tk = s.get('ticker') or 'all'
+        charts[f"yearly_{tk}_{s['x_col']}_{s['y_col']}"] = {
+            'title': f'Yearly Consistency: {tk} | {s["x_col"]} → {s["y_col"]}',
+            'config': {
+                'type': 'bar',
+                'data': {
+                    'labels': [str(y.get('year', '?')) for y in yd],
+                    'datasets': [
+                        {'label': 'Top Decile', 'data': [round(y.get('top_avg', 0) * 100, 3) for y in yd],
+                         'backgroundColor': colors_pos, 'borderWidth': 0},
+                        {'label': 'Bottom Decile', 'data': [round(y.get('bot_avg', 0) * 100, 3) for y in yd],
+                         'backgroundColor': colors_neg, 'borderWidth': 0},
+                    ],
+                },
+                'options': base_opts,
+            },
+        }
+
+    # 5. Win rate comparison across tickers (if multi-ticker)
+    if ticker_scoreboard and len(ticker_scoreboard) > 2:
+        # Collect best signal's D10 win rate per ticker
+        wr_by_ticker = {}
+        for s in single:
+            tk = s.get('ticker') or 'all'
+            if tk == 'all' or tk in wr_by_ticker:
+                continue
+            bs = [b for b in (s.get('bucket_stats') or []) if b is not None]
+            if bs:
+                d10 = next((b for b in bs if b['bucket'] == 10), None)
+                d1 = next((b for b in bs if b['bucket'] == 1), None)
+                if d10 and d1:
+                    wr_by_ticker[tk] = {
+                        'd10_wr': round(d10.get('win_rate', 0.5) * 100, 1),
+                        'd1_wr': round(d1.get('win_rate', 0.5) * 100, 1),
+                    }
+        if len(wr_by_ticker) > 2:
+            sorted_tk = sorted(wr_by_ticker.keys())
+            charts['winrate_comparison'] = {
+                'title': 'D10 vs D1 Win Rate by Ticker (best signal per ticker)',
+                'config': {
+                    'type': 'bar',
+                    'data': {
+                        'labels': sorted_tk,
+                        'datasets': [
+                            {'label': 'D10 Win Rate %', 'data': [wr_by_ticker[t]['d10_wr'] for t in sorted_tk],
+                             'backgroundColor': colors_pos, 'borderWidth': 0},
+                            {'label': 'D1 Win Rate %', 'data': [wr_by_ticker[t]['d1_wr'] for t in sorted_tk],
+                             'backgroundColor': colors_neg, 'borderWidth': 0},
+                        ],
+                    },
+                    'options': base_opts,
+                },
+            }
+
+    # 6. Spread comparison — D10-D1 avg return spread by ticker
+    if ticker_scoreboard and len(ticker_scoreboard) > 2:
+        spread_data = {}
+        for s in single:
+            tk = s.get('ticker') or 'all'
+            if tk == 'all' or tk in spread_data:
+                continue
+            bs = [b for b in (s.get('bucket_stats') or []) if b is not None]
+            if bs:
+                d10 = next((b for b in bs if b['bucket'] == 10), None)
+                d1 = next((b for b in bs if b['bucket'] == 1), None)
+                if d10 and d1:
+                    spread_data[tk] = round((d10['avg_ret'] - d1['avg_ret']) * 100, 4)
+        if len(spread_data) > 2:
+            sorted_tk = sorted(spread_data, key=lambda t: spread_data[t], reverse=True)
+            charts['spread_comparison'] = {
+                'title': 'D10 minus D1 Return Spread by Ticker (%)',
+                'config': {
+                    'type': 'bar',
+                    'data': {
+                        'labels': sorted_tk,
+                        'datasets': [{
+                            'label': 'Spread %',
+                            'data': [spread_data[t] for t in sorted_tk],
+                            'backgroundColor': [colors_pos if spread_data[t] >= 0 else colors_neg for t in sorted_tk],
+                            'borderWidth': 0,
+                        }],
+                    },
+                    'options': {**base_opts, 'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                },
+            }
+
+    return charts
+
+
 async def _compose_report(
     question: str,
     plan: dict,
@@ -310,9 +528,15 @@ async def _compose_report(
     extra_context: str = "",
     ticker_scoreboard: dict = None,
 ) -> list[dict]:
-    """Compose report as structured sections (markdown + Chart.js configs)."""
+    """Compose report: LLM writes prose + chart references, charts built deterministically."""
+    # Build all charts from data
+    chart_configs = _build_chart_configs(ranked_scans, equity_results, ticker_scoreboard)
+
     if _anthropic is None:
-        return [{"type": "markdown", "content": "(anthropic SDK not available)"}]
+        sections = [{"type": "markdown", "content": "(anthropic SDK not available)"}]
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid, "title": chart["title"], "config": chart["config"]})
+        return sections
 
     valid = [s for s in ranked_scans if "error" not in s]
     top = valid[:20]
@@ -332,7 +556,7 @@ async def _compose_report(
             f"{rob.get('concentration_risk', 1.0):>5.2f}"
         )
 
-    # Bucket profiles for top 5 (give the LLM more data to chart)
+    # Bucket profiles for top 5
     bp_lines = []
     for s in top[:5]:
         bs = [b for b in (s.get("bucket_stats") or []) if b is not None]
@@ -378,30 +602,18 @@ async def _compose_report(
             f"winRate={r.get('win_rate')}"
         )
 
-    # Equity curve point data for the LLM to chart (top 3)
-    eq_chart_lines = []
-    eq_sorted = sorted(equity_results,
-                       key=lambda x: abs(x.get("cumulative_return") or x.get("final_equity") or 0),
-                       reverse=True)
-    for r in eq_sorted[:6]:
-        pts = r.get("points") or []
-        if pts:
-            # Sample ~40 points evenly for the LLM
-            step = max(1, len(pts) // 40)
-            sampled = pts[::step]
-            vals = ", ".join(f"({p['date']}: {p['value']:.4f})" for p in sampled)
-            eq_chart_lines.append(
-                f"  {r.get('ticker') or 'all'} | {r.get('feature_col')} → {r.get('outcome_col')} "
-                f"({r.get('which')}): [{vals}]"
-            )
+    # Available charts listing for the LLM
+    chart_listing = []
+    for cid, chart in chart_configs.items():
+        chart_listing.append(f"  {cid}: {chart['title']}")
 
     def _safe(s: str) -> str:
         return str(s).replace("{", "{{").replace("}", "}}")
 
     # Knowledge rules injection
     report_system = (
-        "You are a quantitative research analyst writing focused research reports "
-        "with embedded interactive charts. Professional quant voice. No fluff."
+        "You are a quantitative research analyst writing focused research reports. "
+        "Professional quant voice. No fluff."
     )
     if knowledge_rules:
         rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
@@ -418,49 +630,15 @@ async def _compose_report(
         bucket_profiles="\n".join(bp_lines) if bp_lines else "(none)",
         interaction_summary="\n".join(int_lines) if int_lines else "(none tested)",
         equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
+        available_charts="\n".join(chart_listing) if chart_listing else "(none)",
     )
-    if eq_chart_lines:
-        user_content += f"\n\nEQUITY CURVE POINTS (for charting):\n" + "\n".join(eq_chart_lines)
-
-    # Ticker scoreboard — for cross-ticker comparison charts
-    if ticker_scoreboard and len(ticker_scoreboard) > 1:
-        sb_lines = []
-        for tk in sorted(ticker_scoreboard, key=lambda t: ticker_scoreboard[t]["score"], reverse=True):
-            info = ticker_scoreboard[tk]
-            sb_lines.append(
-                f"  {tk}: score={info['score']:.0f} "
-                f"({info['x_col']} → {info['y_col']}, "
-                f"pattern={info['pattern']}, "
-                f"consistency={info['consistency'] or '?'}%)"
-            )
-        user_content += (
-            f"\n\nTICKER SCOREBOARD (best signal per ticker — use this for cross-ticker comparison charts):\n"
-            + "\n".join(sb_lines)
-        )
-
-    # Yearly consistency breakdown for top signals
-    yearly_lines = []
-    for s in top[:5]:
-        yd = (s.get("robustness") or {}).get("yearly_data")
-        if yd:
-            tk = s.get("ticker") or "all"
-            yearly_lines.append(f"\n  {tk} | {s['x_col']} → {s['y_col']}:")
-            for y in yd:
-                yearly_lines.append(
-                    f"    {y.get('year')}: top_avg={y.get('top_avg', 0):.4f}, "
-                    f"bot_avg={y.get('bot_avg', 0):.4f}, "
-                    f"spread={y.get('top_avg', 0) - y.get('bot_avg', 0):.4f}"
-                )
-    if yearly_lines:
-        user_content += f"\n\nYEARLY BREAKDOWN (for yearly comparison charts):" + "".join(yearly_lines)
-
     if extra_context:
         user_content += f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}"
 
     client = _anthropic.AsyncAnthropic()
     msg = await client.messages.create(
         model=model,
-        max_tokens=8000,
+        max_tokens=3000,
         system=[{"type": "text", "text": report_system,
                  "cache_control": {"type": "ephemeral"}}],
         tools=[_REPORT_TOOL],
@@ -468,14 +646,50 @@ async def _compose_report(
         messages=[{"role": "user", "content": user_content}],
     )
 
-    # Extract structured output
+    # Extract structured output — LLM returns chart references, we inject configs
+    sections = []
+    llm_sections = None
     for block in msg.content:
         if block.type == "tool_use" and block.name == "produce_report":
-            return block.input.get("sections", [])
+            llm_sections = block.input.get("sections", [])
+            break
 
-    # Fallback: return raw text as a single markdown section
-    raw = msg.content[0].text if msg.content and hasattr(msg.content[0], "text") else ""
-    return [{"type": "markdown", "content": raw.strip()}]
+    if llm_sections is None:
+        # Fallback: wrap raw text, attach all charts at the end
+        raw = msg.content[0].text if msg.content and hasattr(msg.content[0], "text") else ""
+        sections.append({"type": "markdown", "content": raw.strip() or "(Report generation failed)"})
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid, "title": chart["title"], "config": chart["config"]})
+        return sections
+
+    # Merge LLM prose + chart references with actual configs
+    referenced = set()
+    for sec in llm_sections:
+        if sec.get("type") == "markdown":
+            sections.append(sec)
+        elif sec.get("type") == "chart":
+            cid = sec.get("chart_id", "")
+            if cid in chart_configs:
+                sections.append({
+                    "type": "chart",
+                    "chart_id": cid,
+                    "title": chart_configs[cid]["title"],
+                    "config": chart_configs[cid]["config"],
+                })
+                referenced.add(cid)
+
+    # Append any charts the LLM didn't reference (so nothing is lost)
+    unreferenced = [cid for cid in chart_configs if cid not in referenced]
+    if unreferenced:
+        for cid in unreferenced:
+            sections.append({
+                "type": "chart",
+                "chart_id": cid,
+                "title": chart_configs[cid]["title"],
+                "config": chart_configs[cid]["config"],
+            })
+
+    return sections
 
 
 # ── Phase 3: Skeptic / validator pass ────────────────────────────────────────
