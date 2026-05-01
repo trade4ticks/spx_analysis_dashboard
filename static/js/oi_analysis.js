@@ -168,54 +168,77 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['equity']) this._charts['equity'].destroy();
 
       const eqData = this.data.equity_by_decile || {};
+      const spotSeries = this.data.spot_series || [];
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
-      const datasets = [];
 
-      // Use {x, y} point format so each dataset has its own date alignment
+      // Build a master timeline from spot (dense) — all other datasets map onto this
+      const timeline = spotSeries.length > 0
+        ? spotSeries.map(s => s.date)
+        : [];  // fallback: build from first equity dataset
+
+      // If no spot, use the longest equity curve dates as timeline
+      if (!timeline.length) {
+        let longest = [];
+        for (const d of this.selectedDeciles) {
+          const pts = eqData[d]?.[this.equityMode]?.points || [];
+          if (pts.length > longest.length) longest = pts;
+        }
+        timeline.push(...longest.map(p => p.date));
+      }
+
+      const dateIndex = {};
+      timeline.forEach((d, i) => dateIndex[d] = i);
+
+      // Map equity curve onto the timeline (null for dates without trades, spanGaps)
+      const datasets = [];
       for (const d of this.selectedDeciles) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
+        const mapped = new Array(timeline.length).fill(null);
+        for (const p of eq.points) {
+          const idx = dateIndex[p.date];
+          if (idx !== undefined) mapped[idx] = p.value * 100;
+        }
         datasets.push({
           label: `D${d}`,
-          data: eq.points.map(p => ({ x: p.date, y: p.value * 100 })),
+          data: mapped,
           borderColor: colors[(d-1) % colors.length],
           backgroundColor: 'transparent',
           borderWidth: 1.5, pointRadius: 0, tension: 0.1,
+          spanGaps: true,
         });
       }
 
-      // Aggregate line (average of selected, aligned by date)
+      // Aggregate line
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
-        const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
-        // Merge all dates, then average values per date
         const byDate = {};
-        for (const eq of eqs) {
-          for (const p of eq) {
+        for (const d of selArr) {
+          const pts = eqData[d]?.[this.equityMode]?.points || [];
+          for (const p of pts) {
             if (!byDate[p.date]) byDate[p.date] = [];
             byDate[p.date].push(p.value);
           }
         }
-        const aggPts = Object.keys(byDate).sort().map(dt => ({
-          x: dt, y: byDate[dt].reduce((a,b)=>a+b,0) / byDate[dt].length * 100,
-        }));
-        if (aggPts.length) {
-          datasets.push({
-            label: 'Aggregate', data: aggPts,
-            borderColor: '#fff', backgroundColor: 'transparent',
-            borderWidth: 2.5, pointRadius: 0, tension: 0.1,
-            borderDash: [6, 3],
-          });
+        const mapped = new Array(timeline.length).fill(null);
+        for (const [dt, vals] of Object.entries(byDate)) {
+          const idx = dateIndex[dt];
+          if (idx !== undefined) mapped[idx] = vals.reduce((a,b)=>a+b,0) / vals.length * 100;
         }
+        datasets.push({
+          label: 'Aggregate', data: mapped,
+          borderColor: '#fff', backgroundColor: 'transparent',
+          borderWidth: 2.5, pointRadius: 0, tension: 0.1,
+          borderDash: [6, 3], spanGaps: true,
+        });
       }
 
-      // Spot price overlay on secondary axis
-      const spotSeries = this.data.spot_series || [];
+      // Spot overlay
       if (spotSeries.length > 0) {
         datasets.push({
           label: 'Spot Price',
-          data: spotSeries.map(s => ({ x: s.date, y: s.value })),
+          data: spotSeries.map(s => s.value),
           borderColor: 'rgba(255,255,255,0.15)', backgroundColor: 'transparent',
           borderWidth: 1, pointRadius: 0, tension: 0.1,
           yAxisID: 'y1',
@@ -224,7 +247,7 @@ document.addEventListener('alpine:init', () => {
 
       this._charts['equity'] = new Chart(el, {
         type: 'line',
-        data: { datasets },
+        data: { labels: timeline.map(d => d?.slice(0,7)), datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
@@ -232,14 +255,13 @@ document.addEventListener('alpine:init', () => {
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
-              mode: 'nearest', intersect: false,
+              mode: 'index', intersect: false,
               filter: item => item.dataset.label !== 'Spot Price',
             },
           },
           scales: {
-            x: { type: 'category',
-                 ...this._darkScales().x,
-                 ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(0) + '%' },
                  title: { display:true, text:'Cum Return %', color:'#888', font:{size:9} } },
@@ -407,64 +429,86 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['drawdown']) this._charts['drawdown'].destroy();
 
       const eqData = this.data.equity_by_decile;
+      const spotSeries = this.data.spot_series || [];
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
+
+      // Reuse the spot timeline for consistent x-axis
+      const timeline = spotSeries.length > 0 ? spotSeries.map(s => s.date) : [];
+      if (!timeline.length) {
+        for (const d of this.selectedDeciles) {
+          const pts = eqData[d]?.[this.equityMode]?.points || [];
+          if (pts.length > timeline.length) { timeline.length = 0; timeline.push(...pts.map(p => p.date)); }
+        }
+      }
+      const dateIndex = {};
+      timeline.forEach((d, i) => dateIndex[d] = i);
+
       const datasets = [];
       for (const d of this.selectedDeciles) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
+        // Compute drawdown then map onto timeline
         let peak = 0;
-        const dd = eq.points.map(p => {
+        const ddByDate = {};
+        for (const p of eq.points) {
           peak = Math.max(peak, p.value);
-          return { x: p.date, y: (p.value - peak) * 100 };
-        });
+          ddByDate[p.date] = (p.value - peak) * 100;
+        }
+        const mapped = new Array(timeline.length).fill(null);
+        for (const [dt, v] of Object.entries(ddByDate)) {
+          const idx = dateIndex[dt];
+          if (idx !== undefined) mapped[idx] = v;
+        }
         datasets.push({
-          label: `D${d}`, data: dd,
+          label: `D${d}`, data: mapped,
           borderColor: colors[(d-1) % colors.length],
           backgroundColor: colors[(d-1) % colors.length] + '15',
           borderWidth: 1.5, pointRadius: 0, tension: 0.1, fill: true,
+          spanGaps: true,
         });
       }
 
       // Aggregate drawdown
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
-        const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
         const byDate = {};
-        for (const eq of eqs) {
-          for (const p of eq) {
+        for (const d of selArr) {
+          const pts = eqData[d]?.[this.equityMode]?.points || [];
+          for (const p of pts) {
             if (!byDate[p.date]) byDate[p.date] = [];
             byDate[p.date].push(p.value);
           }
         }
         let peak = 0;
-        const aggPts = Object.keys(byDate).sort().map(dt => {
+        const mapped = new Array(timeline.length).fill(null);
+        for (const dt of Object.keys(byDate).sort()) {
           const val = byDate[dt].reduce((a,b)=>a+b,0) / byDate[dt].length;
           peak = Math.max(peak, val);
-          return { x: dt, y: (val - peak) * 100 };
-        });
-        if (aggPts.length) {
-          datasets.push({
-            label: 'Aggregate', data: aggPts,
-            borderColor: '#fff', backgroundColor: 'transparent',
-            borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6,3],
-          });
+          const idx = dateIndex[dt];
+          if (idx !== undefined) mapped[idx] = (val - peak) * 100;
         }
+        datasets.push({
+          label: 'Aggregate', data: mapped,
+          borderColor: '#fff', backgroundColor: 'transparent',
+          borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6,3],
+          spanGaps: true,
+        });
       }
 
       this._charts['drawdown'] = new Chart(el, {
         type: 'line',
-        data: { datasets },
+        data: { labels: timeline.map(d => d?.slice(0,7)), datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: { labels:{color:'#aaa',font:{size:10}} },
             tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1,
-                       mode:'nearest', intersect:false },
+                       mode:'index', intersect:false },
           },
           scales: {
-            x: { type: 'category', ...this._darkScales().x,
-                 ticks:{...this._darkScales().x.ticks, maxTicksLimit:12} },
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks:{...this._darkScales().x.ticks, maxTicksLimit:12} },
             y: { ...this._darkScales().y, ticks:{...this._darkScales().y.ticks,
                   callback: v => v.toFixed(1)+'%' },
                  max: 0 },
