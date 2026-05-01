@@ -171,39 +171,38 @@ document.addEventListener('alpine:init', () => {
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
       const datasets = [];
-      let longestLabels = [];
 
+      // Use {x, y} point format so each dataset has its own date alignment
       for (const d of this.selectedDeciles) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
-        const labels = eq.points.map(p => p.date?.slice(0,7));
-        if (labels.length > longestLabels.length) longestLabels = labels;
         datasets.push({
           label: `D${d}`,
-          data: eq.points.map(p => p.value * 100),
+          data: eq.points.map(p => ({ x: p.date, y: p.value * 100 })),
           borderColor: colors[(d-1) % colors.length],
           backgroundColor: 'transparent',
           borderWidth: 1.5, pointRadius: 0, tension: 0.1,
         });
       }
 
-      // Aggregate line (average of all selected deciles)
+      // Aggregate line (average of selected, aligned by date)
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
         const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
-        const maxLen = Math.max(...eqs.map(e => e.length));
-        if (maxLen > 0) {
-          const aggData = [];
-          for (let i = 0; i < maxLen; i++) {
-            let sum = 0, cnt = 0;
-            for (const eq of eqs) {
-              if (i < eq.length) { sum += eq[i].value; cnt++; }
-            }
-            aggData.push(cnt ? (sum / cnt) * 100 : null);
+        // Merge all dates, then average values per date
+        const byDate = {};
+        for (const eq of eqs) {
+          for (const p of eq) {
+            if (!byDate[p.date]) byDate[p.date] = [];
+            byDate[p.date].push(p.value);
           }
+        }
+        const aggPts = Object.keys(byDate).sort().map(dt => ({
+          x: dt, y: byDate[dt].reduce((a,b)=>a+b,0) / byDate[dt].length * 100,
+        }));
+        if (aggPts.length) {
           datasets.push({
-            label: 'Aggregate',
-            data: aggData,
+            label: 'Aggregate', data: aggPts,
             borderColor: '#fff', backgroundColor: 'transparent',
             borderWidth: 2.5, pointRadius: 0, tension: 0.1,
             borderDash: [6, 3],
@@ -216,19 +215,16 @@ document.addEventListener('alpine:init', () => {
       if (spotSeries.length > 0) {
         datasets.push({
           label: 'Spot Price',
-          data: spotSeries.map(s => s.value),
+          data: spotSeries.map(s => ({ x: s.date, y: s.value })),
           borderColor: 'rgba(255,255,255,0.15)', backgroundColor: 'transparent',
           borderWidth: 1, pointRadius: 0, tension: 0.1,
           yAxisID: 'y1',
         });
-        if (spotSeries.length > longestLabels.length) {
-          longestLabels = spotSeries.map(s => s.date?.slice(0,7));
-        }
       }
 
       this._charts['equity'] = new Chart(el, {
         type: 'line',
-        data: { labels: longestLabels, datasets },
+        data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
@@ -236,13 +232,14 @@ document.addEventListener('alpine:init', () => {
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
-              mode: 'index', intersect: false,
+              mode: 'nearest', intersect: false,
               filter: item => item.dataset.label !== 'Spot Price',
             },
           },
           scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            x: { type: 'category',
+                 ...this._darkScales().x,
+                 ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(0) + '%' },
                  title: { display:true, text:'Cum Return %', color:'#888', font:{size:9} } },
@@ -416,62 +413,58 @@ document.addEventListener('alpine:init', () => {
       for (const d of this.selectedDeciles) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
-        // Compute drawdown from equity points
         let peak = 0;
         const dd = eq.points.map(p => {
           peak = Math.max(peak, p.value);
-          return (p.value - peak) * 100;
+          return { x: p.date, y: (p.value - peak) * 100 };
         });
         datasets.push({
-          label: `D${d}`,
-          data: dd,
+          label: `D${d}`, data: dd,
           borderColor: colors[(d-1) % colors.length],
-          backgroundColor: 'transparent',
-          borderWidth: 1.5, pointRadius: 0, tension: 0.1, fill: true,
           backgroundColor: colors[(d-1) % colors.length] + '15',
+          borderWidth: 1.5, pointRadius: 0, tension: 0.1, fill: true,
         });
       }
 
       // Aggregate drawdown
-      if (this.selectedDeciles.size >= 2 && datasets.length >= 2) {
+      if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
         const eqs = selArr.map(d => eqData[d]?.[this.equityMode]?.points || []);
-        const maxLen = Math.max(...eqs.map(e => e.length));
-        if (maxLen > 0) {
-          let peak = 0;
-          const aggDD = [];
-          for (let i = 0; i < maxLen; i++) {
-            let sum = 0, cnt = 0;
-            for (const eq of eqs) { if (i < eq.length) { sum += eq[i].value; cnt++; } }
-            const val = cnt ? sum / cnt : 0;
-            peak = Math.max(peak, val);
-            aggDD.push((val - peak) * 100);
+        const byDate = {};
+        for (const eq of eqs) {
+          for (const p of eq) {
+            if (!byDate[p.date]) byDate[p.date] = [];
+            byDate[p.date].push(p.value);
           }
+        }
+        let peak = 0;
+        const aggPts = Object.keys(byDate).sort().map(dt => {
+          const val = byDate[dt].reduce((a,b)=>a+b,0) / byDate[dt].length;
+          peak = Math.max(peak, val);
+          return { x: dt, y: (val - peak) * 100 };
+        });
+        if (aggPts.length) {
           datasets.push({
-            label: 'Aggregate', data: aggDD,
+            label: 'Aggregate', data: aggPts,
             borderColor: '#fff', backgroundColor: 'transparent',
             borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6,3],
           });
         }
       }
 
-      const allLabels = datasets.length
-        ? eqData[Array.from(this.selectedDeciles)[0]]?.[this.equityMode]?.points?.map(p => p.date?.slice(0,7)) || []
-        : [];
-
       this._charts['drawdown'] = new Chart(el, {
         type: 'line',
-        data: { labels: allLabels, datasets },
+        data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: { labels:{color:'#aaa',font:{size:10}} },
             tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1,
-                       mode:'index', intersect:false },
+                       mode:'nearest', intersect:false },
           },
           scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, ticks:{...this._darkScales().x.ticks, maxTicksLimit:12} },
+            x: { type: 'category', ...this._darkScales().x,
+                 ticks:{...this._darkScales().x.ticks, maxTicksLimit:12} },
             y: { ...this._darkScales().y, ticks:{...this._darkScales().y.ticks,
                   callback: v => v.toFixed(1)+'%' },
                  max: 0 },
