@@ -100,11 +100,17 @@ async def analyze(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    # Also fetch spot_close for overlay
-    spot_col = "spot_close"
+    # Check if spot_close column exists
+    async with pool.acquire() as conn:
+        col_check = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'daily_features' AND column_name = 'spot_close'")
+    has_spot = len(col_check) > 0
+    spot_select = ", spot_close" if has_spot else ""
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT trade_date, {metric}, {outcome}, {spot_col} FROM daily_features "
+            f"SELECT trade_date, {metric}, {outcome}{spot_select} FROM daily_features "
             f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
             f"ORDER BY trade_date", *params)
 
@@ -120,13 +126,14 @@ async def analyze(
 
     # Spot price time series (for equity overlay)
     spot_series = []
-    for r in row_dicts:
-        sv = r.get("spot_close")
-        if sv is not None:
-            try:
-                spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
-            except (ValueError, TypeError):
-                pass
+    if has_spot:
+        for r in row_dicts:
+            sv = r.get("spot_close")
+            if sv is not None:
+                try:
+                    spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
+                except (ValueError, TypeError):
+                    pass
 
     # ── Decile stats ─────────────────────────────────────────────────────
     buckets = _bucket_pairs(pairs, 10)

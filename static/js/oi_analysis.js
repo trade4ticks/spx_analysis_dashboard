@@ -5,7 +5,7 @@ document.addEventListener('alpine:init', () => {
     // Selectors
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
-    dateFrom: '', dateTo: '',
+    dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
     selectedDeciles: new Set([1, 10]),
     equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
 
