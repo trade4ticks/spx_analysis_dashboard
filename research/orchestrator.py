@@ -261,6 +261,7 @@ async def classify_and_plan(
 
     # Force-include columns the user explicitly mentioned in the question
     # Match against available columns (case-insensitive substring match)
+    user_requested_features = []
     q_lower = question.lower()
     for col_name in valid_cols:
         if col_name.lower() in q_lower and col_name not in _EXCLUDE_COLS:
@@ -271,6 +272,8 @@ async def classify_and_plan(
             else:
                 if col_name not in plan["feature_columns"]:
                     plan["feature_columns"].append(col_name)
+                user_requested_features.append(col_name)
+    plan["user_requested_features"] = user_requested_features
 
     # Handle ticker selection from the plan
     plan_tickers = plan.get("tickers") or []
@@ -288,6 +291,7 @@ def _build_chart_configs(
     ranked_scans: list[dict],
     equity_results: list[dict],
     ticker_scoreboard: dict | None,
+    user_requested_features: list[str] = None,
 ) -> dict[str, dict]:
     """Build Chart.js configs deterministically from analysis data. Returns {chart_id: {title, config}}."""
     charts = {}
@@ -333,9 +337,15 @@ def _build_chart_configs(
             },
         }
 
-    # 2. Bucket profiles for top signals (up to 8)
+    # 2. Bucket profiles — prioritize user-requested features, then top by score
+    uf = set(user_requested_features or [])
+    # Sort: user-requested features first, then by score
+    profile_candidates = sorted(single, key=lambda s: (
+        0 if s.get('x_col') in uf else 1,
+        -(s.get('composite_score') or 0),
+    ))
     seen_profiles = set()
-    for s in single[:12]:
+    for s in profile_candidates:
         tk = s.get('ticker') or 'all'
         x_col = s['x_col']
         y_col = s['y_col']
@@ -365,7 +375,8 @@ def _build_chart_configs(
                             'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
             },
         }
-        if len(charts) - (1 if 'ticker_scoreboard' in charts else 0) >= 8:
+        n_bucket_charts = sum(1 for k in charts if k.startswith('bucket_'))
+        if n_bucket_charts >= 8:
             break
 
     # 3. Equity curves (top 3 pairs)
@@ -530,7 +541,8 @@ async def _compose_report(
 ) -> list[dict]:
     """Compose report: LLM writes prose + chart references, charts built deterministically."""
     # Build all charts from data
-    chart_configs = _build_chart_configs(ranked_scans, equity_results, ticker_scoreboard)
+    chart_configs = _build_chart_configs(ranked_scans, equity_results, ticker_scoreboard,
+                                        user_requested_features=plan.get("user_requested_features"))
 
     if _anthropic is None:
         sections = [{"type": "markdown", "content": "(anthropic SDK not available)"}]
@@ -556,14 +568,33 @@ async def _compose_report(
             f"{rob.get('concentration_risk', 1.0):>5.2f}"
         )
 
-    # Bucket profiles for top 5
+    # Bucket profiles — prioritize user-requested features, then top by score
+    user_feats = set(plan.get("user_requested_features") or [])
+    bp_shown = set()
+    bp_candidates = []
+    # User-requested signals first
+    if user_feats:
+        for s in valid:
+            if s.get("x_col") in user_feats and s.get("x_col") not in bp_shown:
+                bp_candidates.append(s)
+                bp_shown.add(s.get("x_col"))
+    # Fill remaining with top by score
+    for s in top:
+        key = f"{s.get('ticker')}_{s.get('x_col')}_{s.get('y_col')}"
+        if key not in bp_shown:
+            bp_candidates.append(s)
+            bp_shown.add(key)
+        if len(bp_candidates) >= 8:
+            break
+
     bp_lines = []
-    for s in top[:5]:
+    for s in bp_candidates[:8]:
         bs = [b for b in (s.get("bucket_stats") or []) if b is not None]
         if bs:
+            marker = " ★USER-REQUESTED" if s.get("x_col") in user_feats else ""
             bp_lines.append(
                 f"\n{s.get('ticker') or 'all'} | {s.get('x_col')} → {s.get('y_col')} "
-                f"(score={s.get('composite_score', 0):.0f}, pattern={s.get('pattern')}):"
+                f"(score={s.get('composite_score', 0):.0f}, pattern={s.get('pattern')}){marker}:"
             )
             bp_lines.append(f"  {'Bucket':>6} {'N':>5} {'AvgRet':>9} {'WinRate':>8} {'Sharpe':>7}")
             for b in bs:
@@ -621,6 +652,17 @@ async def _compose_report(
             f"\n\nDOMAIN KNOWLEDGE & POLICIES (follow these strictly):\n{rules_text}"
         )
 
+    # Tell the LLM which features were explicitly requested
+    if user_feats:
+        user_feat_note = (
+            f"\n\nUSER-REQUESTED FEATURES (the user specifically asked about these — "
+            f"they MUST be the primary focus of your analysis narrative, "
+            f"even if other features scored higher):\n"
+            + ", ".join(sorted(user_feats))
+        )
+    else:
+        user_feat_note = ""
+
     user_content = _REPORT_USER.format(
         question=_safe(question),
         task_type=_safe(plan.get("task_type", "")),
@@ -632,6 +674,8 @@ async def _compose_report(
         equity_summary="\n".join(eq_lines) if eq_lines else "(none)",
         available_charts="\n".join(chart_listing) if chart_listing else "(none)",
     )
+    if user_feat_note:
+        user_content += user_feat_note
     if extra_context:
         user_content += f"\n\nTASK-SPECIFIC ANALYSIS:\n{extra_context}"
 
