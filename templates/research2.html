@@ -202,7 +202,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=9"></script>
+  <script src="/static/js/research2.js?v=10"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -376,7 +376,7 @@ Examples:
             <div class="r2-hint">Be specific about the direction of inquiry. The more context, the better the column selection.</div>
           </div>
 
-          <div x-show="!uploadState.uploadId">
+          <div x-show="!uploadState.uploadId && !backtestUploadState.uploadId">
             <label>SOURCE TABLE</label>
             <div class="preset-row">
               <button class="preset-btn" :class="{active: form.table==='daily_features'}"
@@ -387,7 +387,7 @@ Examples:
             <input type="text" x-model="form.table" style="font-size:11px">
           </div>
 
-          <div x-show="!uploadState.uploadId">
+          <div x-show="!uploadState.uploadId && !backtestUploadState.uploadId">
             <label>TICKERS <span style="color:#555;font-weight:400">(comma-separated — blank = all)</span></label>
             <input type="text" x-model="form.tickers" placeholder="SPY, QQQ, IWM">
             <template x-if="availableTickers.length > 0">
@@ -400,13 +400,13 @@ Examples:
           </div>
 
           <div class="r2-row">
-            <template x-if="!uploadState.uploadId">
+            <template x-if="!uploadState.uploadId && !backtestUploadState.uploadId">
               <div>
                 <label>DATE FROM</label>
                 <input type="date" x-model="form.date_from">
               </div>
             </template>
-            <template x-if="!uploadState.uploadId">
+            <template x-if="!uploadState.uploadId && !backtestUploadState.uploadId">
               <div>
                 <label>DATE TO</label>
                 <input type="date" x-model="form.date_to">
@@ -414,8 +414,14 @@ Examples:
             </template>
             <template x-if="uploadState.uploadId">
               <div style="font-size:10px;color:#555;align-self:center;padding-top:4px">
-                Date range auto-set from upload:
+                Date range auto-set from P&amp;L upload:
                 <span style="color:#aaa" x-text="uploadState.dateFrom + ' → ' + uploadState.dateTo"></span>
+              </div>
+            </template>
+            <template x-if="backtestUploadState.uploadId">
+              <div style="font-size:10px;color:#555;align-self:center;padding-top:4px">
+                Date range from backtest:
+                <span style="color:#aaa" x-text="backtestUploadState.dateFrom + ' → ' + backtestUploadState.dateTo"></span>
               </div>
             </template>
             <div>
@@ -499,6 +505,97 @@ Examples:
                             <template x-for="col in (uploadState.columns || [])" :key="col.name">
                               <td style="padding:3px 8px;color:#aaa"
                                   x-text="row[col.name] ?? ''"></td>
+                            </template>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <!-- ── Backtest Upload (optional) ──────────────────────────────── -->
+          <div style="border:1px solid #1a3a2a;border-radius:6px;padding:12px 14px;background:#0b1a0f">
+            <div style="font-size:10px;font-weight:700;color:#2ecc71;letter-spacing:.4px;
+                        text-transform:uppercase;margin-bottom:8px">
+              Backtest Trades
+              <span style="font-weight:400;color:#555;font-size:9px;text-transform:none">
+                — optional: upload Option Omega CSV or Mesosim JSON for trade regime analysis
+              </span>
+            </div>
+
+            <!-- No upload yet -->
+            <template x-if="!backtestUploadState.uploadId">
+              <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+                <input type="file" accept=".csv,.json"
+                       @change="onBacktestFileChange($event)"
+                       style="background:#1a1a1a;border:1px solid #444;color:#aaa;
+                              padding:4px 6px;border-radius:3px;font-size:11px;flex:1;min-width:0">
+                <button class="btn"
+                        style="font-size:11px;padding:5px 14px;background:rgba(46,204,113,.1);
+                               border-color:rgba(46,204,113,.3);color:#2ecc71;flex-shrink:0"
+                        @click="uploadBacktest()"
+                        :disabled="!backtestUploadState.file || backtestUploadState.uploading">
+                  <span x-text="backtestUploadState.uploading ? '⏳ Uploading…' : '↑ Upload File'"></span>
+                </button>
+                <div x-show="backtestUploadState.error"
+                     style="width:100%;color:#e74c3c;font-size:11px"
+                     x-text="backtestUploadState.error"></div>
+              </div>
+            </template>
+
+            <!-- Upload complete -->
+            <template x-if="backtestUploadState.uploadId">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                  <span style="color:#2ecc71;font-size:11px;font-weight:700">✓ Upload ready</span>
+                  <span style="font-size:11px;color:#bbb" x-text="backtestUploadState.uploadName"></span>
+                  <span style="font-size:10px;color:#555"
+                        x-text="backtestUploadState.tradeCount + ' trades · ' + Math.round(backtestUploadState.matchRate * 100) + '% IV matched'"></span>
+                  <span style="font-size:10px;color:#555"
+                        x-text="backtestUploadState.dateFrom + ' → ' + backtestUploadState.dateTo"></span>
+                  <button @click="clearBacktest()"
+                          style="margin-left:auto;background:none;border:none;color:#555;cursor:pointer;font-size:11px"
+                          title="Remove upload">✕ Clear</button>
+                </div>
+                <!-- Strategy badges -->
+                <div x-show="backtestUploadState.strategies.length > 0"
+                     style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">
+                  <template x-for="s in backtestUploadState.strategies" :key="s">
+                    <span style="font-size:9px;padding:2px 7px;border-radius:3px;
+                                 background:#1a2a1a;color:#2ecc71;border:1px solid #2a4a2a;font-family:monospace"
+                          x-text="s"></span>
+                  </template>
+                </div>
+                <!-- Warnings -->
+                <template x-if="backtestUploadState.warnings.length > 0">
+                  <div style="background:#2a2a0a;border:1px solid #4a4a1a;border-radius:4px;
+                              padding:6px 10px;margin-bottom:8px">
+                    <template x-for="w in backtestUploadState.warnings" :key="w">
+                      <div style="font-size:10px;color:#f1c40f">⚠ <span x-text="w"></span></div>
+                    </template>
+                  </div>
+                </template>
+                <!-- Preview table -->
+                <template x-if="backtestUploadState.preview && backtestUploadState.preview.length">
+                  <div style="overflow-x:auto">
+                    <table style="width:100%;border-collapse:collapse;font-size:10px;font-family:monospace">
+                      <thead>
+                        <tr style="border-bottom:1px solid #333">
+                          <template x-for="col in (['date_opened','date_closed','pnl','strategy','exit_reason','days_in_trade'])" :key="col">
+                            <th style="padding:3px 8px;color:#555;text-align:left;font-weight:600"
+                                x-text="col"></th>
+                          </template>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="(row, ri) in (backtestUploadState.preview || [])" :key="ri">
+                          <tr style="border-bottom:1px solid #1e1e1e">
+                            <template x-for="col in (['date_opened','date_closed','pnl','strategy','exit_reason','days_in_trade'])" :key="col">
+                              <td style="padding:3px 8px;color:#aaa"
+                                  x-text="row[col] ?? ''"></td>
                             </template>
                           </tr>
                         </template>

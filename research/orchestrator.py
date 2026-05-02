@@ -1288,6 +1288,94 @@ your report. Build up a picture of:
 When you have enough findings, call write_report to produce the final report.\
 """
 
+# ── Backtest agentic tools/system ─────────────────────────────────────────────
+
+_BACKTEST_AGENTIC_TOOLS = [
+    t for t in _AGENTIC_TOOLS
+    if t["name"] not in ("run_lag_scan", "run_greek_attribution", "write_report")
+] + [
+    {
+        "name": "run_win_rate_analysis",
+        "description": (
+            "Bucket trades by an IV metric column and compute win rate + mean P&L per bucket. "
+            "Use this to find non-linear IV thresholds that predict binary trade outcomes. "
+            "More informative than Pearson r for win/loss analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_col":     {"type": "string",  "description": "IV metric column to bucket by"},
+                "n_buckets": {"type": "integer", "description": "Number of equal-count buckets (default 5)"},
+            },
+            "required": ["x_col"],
+        },
+    },
+    {
+        "name": "run_time_split_validation",
+        "description": (
+            "Split trades chronologically and check if top IV correlations are stable across time periods. "
+            "Use this on any promising signal to confirm it is not concentrated in one year."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "y_col":    {"type": "string",  "description": "Outcome column (pnl or is_win)"},
+                "n_splits": {"type": "integer", "description": "Number of chronological periods (default 2)"},
+            },
+            "required": ["y_col"],
+        },
+    },
+    {
+        "name": "write_report",
+        "description": "Write the final research report. Call this when you have enough findings.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "executive_summary": {
+                    "type": "string",
+                    "description": "2-3 paragraph executive summary answering the research question.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Detailed findings (300-500 words). Cite specific numbers.",
+                },
+                "conclusions": {
+                    "type": "string",
+                    "description": "Actionable conclusions with specific numbers.",
+                },
+                "chart_sequence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered chart IDs to display (from the AVAILABLE CHARTS list).",
+                },
+            },
+            "required": ["executive_summary", "body", "conclusions", "chart_sequence"],
+        },
+    },
+]
+
+_BACKTEST_AGENTIC_SYSTEM = """\
+You are a quantitative analyst evaluating a completed options backtest. Each row is a \
+completed trade with entry date, exit date, P&L, and SPX implied-volatility surface \
+metrics captured at trade entry (09:35 on the entry date — entry-morning conditions).
+
+Your goal: find which entry-time IV conditions PREDICT better or worse trade outcomes. \
+These are predictive relationships (IV conditions before trade closes → final P&L/win_rate), \
+not incidental correlations.
+
+Key outcome columns: pnl (continuous), is_win (binary 0/1), max_loss, days_in_trade.
+IV metrics are the surface_metrics_core columns (skew, term structure, convexity, etc.).
+
+Guidelines:
+  - Use run_win_rate_analysis for binary win/loss — Pearson r misses threshold effects.
+  - Use run_time_split_validation on any promising signal to confirm it is not limited to one year.
+  - If max_loss is available, analyze drawdown — not just final P&L.
+  - Explicitly distinguish entry-time predictors from post-trade or incidental correlations.
+  - In your report, cite specific r values, win rate differences, and sample sizes.
+
+Call 4-8 tools before writing your report. When done, call write_report.\
+"""
+
 
 def _build_agentic_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
     """Build Chart.js configs from accumulated agentic tool results."""
@@ -1444,6 +1532,219 @@ def _build_agentic_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
                         'options': base_opts,
                     },
                 }
+
+        if len(charts) >= 8:
+            break
+
+    return charts
+
+
+def _build_backtest_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
+    """Build Chart.js configs from accumulated backtest agentic tool results."""
+    charts = {}
+    colors_pos = '#3498db'
+    colors_neg = '#e84393'
+    dark_scales = {
+        'x': {'ticks': {'color': '#888', 'font': {'size': 9}, 'maxRotation': 45},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+        'y': {'ticks': {'color': '#888', 'font': {'size': 9}},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+    }
+    base_opts = {
+        'responsive': True, 'maintainAspectRatio': False, 'animation': False,
+        'plugins': {'legend': {'labels': {'color': '#aaa', 'font': {'size': 10}}},
+                    'tooltip': {'backgroundColor': 'rgba(20,20,20,0.95)',
+                                'borderColor': '#444', 'borderWidth': 1}},
+        'scales': dark_scales,
+    }
+
+    for tr in tool_results:
+        tool_name = tr.get('tool')
+        result    = tr.get('result') or {}
+
+        if tool_name == 'run_correlation_scan' and isinstance(result, list) and result:
+            top = result[:15]
+            labels = [d['x_col'] for d in top]
+            values = [d['r'] for d in top]
+            y_col  = top[0].get('y_col', 'outcome')
+            cid = f"corr_scan_{len(charts)}"
+            charts[cid] = {
+                'title': f"IV Correlation with {y_col} (top {len(top)})",
+                'config': {
+                    'type': 'bar',
+                    'data': {
+                        'labels': labels,
+                        'datasets': [{
+                            'label': 'Pearson r',
+                            'data': values,
+                            'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in values],
+                            'borderWidth': 0,
+                        }],
+                    },
+                    'options': {**base_opts,
+                                'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                },
+            }
+
+        elif tool_name == 'run_win_rate_analysis':
+            buckets = result.get('buckets') or []
+            if len(buckets) >= 3:
+                x_col = result.get('x_col', '?')
+                labels   = [f"B{b['bucket']}" for b in buckets]
+                wr_vals  = [round(b['win_rate'] * 100, 1) for b in buckets]
+                pnl_vals = [b.get('mean_pnl', 0) for b in buckets]
+                cid = f"winrate_{x_col}"
+                charts[cid] = {
+                    'title': f"Win Rate & Mean P&L by {x_col} Bucket",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [
+                                {
+                                    'label': 'Win Rate %',
+                                    'data': wr_vals,
+                                    'backgroundColor': colors_pos,
+                                    'borderWidth': 0,
+                                    'yAxisID': 'y',
+                                },
+                                {
+                                    'label': 'Mean P&L',
+                                    'data': pnl_vals,
+                                    'backgroundColor': colors_neg,
+                                    'borderWidth': 0,
+                                    'yAxisID': 'y1',
+                                },
+                            ],
+                        },
+                        'options': {
+                            **base_opts,
+                            'scales': {
+                                **dark_scales,
+                                'y1': {
+                                    'position': 'right',
+                                    'ticks': {'color': '#e84393', 'font': {'size': 9}},
+                                    'grid': {'drawOnChartArea': False},
+                                },
+                            },
+                        },
+                    },
+                }
+
+        elif tool_name == 'run_decile_profile':
+            bs = result.get('bucket_stats') or []
+            bs = [b for b in bs if b is not None]
+            if len(bs) >= 3:
+                x_col = result.get('x_col', '?')
+                y_col = result.get('y_col', '?')
+                avgs  = [b.get('avg_y', b.get('avg_ret', 0)) for b in bs]
+                cid = f"decile_{x_col}_{y_col}"
+                charts[cid] = {
+                    'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': [f"D{b['bucket']}" for b in bs],
+                            'datasets': [{
+                                'label': y_col,
+                                'data': avgs,
+                                'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_regime_split':
+            high = result.get('high') or {}
+            low  = result.get('low') or {}
+            sc   = result.get('split_col', '?')
+            x_col = result.get('x_col', '?')
+            if high.get('r') is not None and low.get('r') is not None:
+                cid = f"regime_{sc}_{x_col}"
+                charts[cid] = {
+                    'title': f"Regime Split: {x_col} by {sc}",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': ['High regime', 'Low regime'],
+                            'datasets': [
+                                {
+                                    'label': 'Pearson r',
+                                    'data': [round(high['r'], 4), round(low['r'], 4)],
+                                    'backgroundColor': [colors_pos, colors_neg],
+                                    'borderWidth': 0,
+                                },
+                                {
+                                    'label': 'Mean P&L',
+                                    'data': [high.get('mean_y', 0), low.get('mean_y', 0)],
+                                    'backgroundColor': [colors_pos, colors_neg],
+                                    'borderWidth': 0,
+                                },
+                            ],
+                        },
+                        'options': base_opts,
+                    },
+                }
+
+        elif tool_name == 'run_tail_analysis':
+            diff = result.get('difference') or {}
+            if diff:
+                top_cols = list(diff.keys())[:10]
+                vals = [diff[c] for c in top_cols]
+                y_col = result.get('y_col', 'outcome')
+                cid = f"tail_{y_col}_{len(charts)}"
+                charts[cid] = {
+                    'title': f"IV Difference: Best vs Worst {result.get('pct', 10)}% {y_col}",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': top_cols,
+                            'datasets': [{
+                                'label': 'Top% minus Bottom% IV mean',
+                                'data': vals,
+                                'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in vals],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_time_split_validation':
+            periods = result.get('periods') or []
+            score   = result.get('consistency_score', 0)
+            if len(periods) >= 2:
+                # Show top-3 correlations per period as grouped bars
+                all_cols = []
+                for p in periods:
+                    for c in (p.get('top_correlations') or [])[:3]:
+                        if c['x_col'] not in all_cols:
+                            all_cols.append(c['x_col'])
+                all_cols = all_cols[:8]
+                if all_cols:
+                    ds_colors = [colors_pos, colors_neg, '#2ecc71', '#e67e22']
+                    datasets = []
+                    for pi, p in enumerate(periods):
+                        r_map = {c['x_col']: c['r'] for c in (p.get('top_correlations') or [])}
+                        datasets.append({
+                            'label': p.get('label', f'Period {pi+1}'),
+                            'data': [r_map.get(c, 0) for c in all_cols],
+                            'backgroundColor': ds_colors[pi % len(ds_colors)],
+                            'borderWidth': 0,
+                        })
+                    cid = f"timesplit_{result.get('y_col', 'outcome')}"
+                    charts[cid] = {
+                        'title': f"Correlation Stability Across Periods (consistency={score:.0%})",
+                        'config': {
+                            'type': 'bar',
+                            'data': {'labels': all_cols, 'datasets': datasets},
+                            'options': base_opts,
+                        },
+                    }
 
         if len(charts) >= 8:
             break
@@ -1802,6 +2103,314 @@ async def _execute_pnl_pipeline(
     )
 
 
+async def execute_backtest_pipeline(
+    main_pool,
+    run_id: str,
+    question: str,
+    enriched_trades: list[dict],
+    trade_summary: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """
+    Agentic loop for backtest trade-outcome analysis.
+    Each row is a completed trade with entry-time IV metrics attached.
+    Returns JSON sections string.
+    """
+    from research import analysis_tools as at
+
+    client = _get_client()
+    system = _BACKTEST_AGENTIC_SYSTEM
+    if knowledge_rules:
+        rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
+        system += f"\n\nKNOWLEDGE BASE RULES:\n{rules_text}"
+
+    # IV columns: all keys that are not trade-level fields
+    from research.backtest import TRADE_FIELDS
+    all_cols = list(enriched_trades[0].keys()) if enriched_trades else []
+    iv_cols  = [c for c in all_cols if c not in TRADE_FIELDS]
+
+    # Cast is_win to float for correlation tools
+    for t in enriched_trades:
+        if 'is_win' in t:
+            t['is_win'] = float(1.0 if t['is_win'] else 0.0)
+
+    # Quick initial correlations for context
+    corr_pnl = at.run_correlation_scan(enriched_trades, iv_cols, 'pnl')[:15] if iv_cols else []
+    corr_win = at.run_correlation_scan(enriched_trades, iv_cols, 'is_win')[:15] if iv_cols else []
+
+    def _corr_table(rows):
+        lines = []
+        for r in rows:
+            lines.append(f"  {r['x_col']:<45} r={r['r']:+.4f}  p={r['p_val']:.3f}  n={r['n']}")
+        return "\n".join(lines) if lines else "  (no correlations computed)"
+
+    strategies_str = ', '.join(trade_summary.get('strategies') or ['unknown'])
+    initial_msg = (
+        f"RESEARCH QUESTION: {question}\n\n"
+        f"TRADE SUMMARY:\n"
+        f"  Total trades:     {trade_summary['n']}\n"
+        f"  IV-matched:       {trade_summary['matched_count']} ({trade_summary['match_rate']:.0%})\n"
+        f"  Date range:       {trade_summary['date_from']} → {trade_summary['date_to']}\n"
+        f"  Strategies:       {strategies_str}\n"
+        f"  Win rate:         {trade_summary['win_rate']:.1%}\n"
+        f"  Mean P&L:         {trade_summary['mean_pnl']}\n"
+        f"  Std P&L:          {trade_summary['std_pnl']}\n\n"
+        f"TOP 15 IV CORRELATIONS WITH pnl:\n{_corr_table(corr_pnl)}\n\n"
+        f"TOP 15 IV CORRELATIONS WITH is_win:\n{_corr_table(corr_win)}\n\n"
+        f"IV COLUMNS AVAILABLE ({len(iv_cols)} total):\n  "
+        + ", ".join(iv_cols[:40])
+        + (" …" if len(iv_cols) > 40 else "")
+        + "\n\nBegin your analysis."
+    )
+
+    messages = [{"role": "user", "content": initial_msg}]
+    tool_results_acc = []
+    report_data = None
+    max_steps = 8
+
+    log("[RUNNING] Starting backtest agentic analysis loop…")
+    for step in range(max_steps):
+        log(f"  [RUNNING] Backtest analysis step {step + 1}/{max_steps}…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(conn, run_id,
+                                 ai_summary=f"[RUNNING] Backtest analysis step {step+1}/{max_steps}…")
+
+        resp = await client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=[{"type": "text", "text": system}],
+            tools=_BACKTEST_AGENTIC_TOOLS,
+            messages=messages,
+        )
+        messages.append({"role": "assistant", "content": resp.content})
+
+        tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
+        if not tool_use_blocks:
+            break
+
+        tool_result_messages = []
+        for block in tool_use_blocks:
+            tool_name = block.name
+            inputs    = block.input or {}
+
+            if tool_name == "write_report":
+                report_data = inputs
+                break
+
+            log(f"    → {tool_name}({list(inputs.keys())})")
+            try:
+                if tool_name == "run_correlation_scan":
+                    result = at.run_correlation_scan(enriched_trades, inputs["x_cols"], inputs["y_col"])
+                elif tool_name == "run_regression":
+                    result = at.run_regression(enriched_trades, inputs["x_cols"], inputs["y_col"])
+                elif tool_name == "run_regime_split":
+                    result = at.run_regime_split(
+                        enriched_trades, inputs["x_col"], inputs["y_col"],
+                        inputs["split_col"], inputs.get("method", "median"),
+                    )
+                elif tool_name == "run_rolling_correlation":
+                    result = at.run_rolling_correlation(
+                        enriched_trades, inputs["x_col"], inputs["y_col"],
+                        inputs.get("window", 10),
+                    )
+                elif tool_name == "run_tail_analysis":
+                    result = at.run_tail_analysis(
+                        enriched_trades, inputs["y_col"], inputs["x_cols"],
+                        inputs.get("pct", 15),
+                    )
+                elif tool_name == "run_decile_profile":
+                    result = at.run_decile_profile(enriched_trades, inputs["x_col"], inputs["y_col"])
+                elif tool_name == "run_win_rate_analysis":
+                    result = at.run_win_rate_analysis(
+                        enriched_trades, inputs["x_col"],
+                        inputs.get("n_buckets", 5),
+                    )
+                elif tool_name == "run_time_split_validation":
+                    result = at.run_time_split_validation(
+                        enriched_trades, inputs["y_col"],
+                        inputs.get("n_splits", 2),
+                    )
+                else:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+            except Exception as exc:
+                result = {"error": str(exc)}
+
+            tool_results_acc.append({"tool": tool_name, "inputs": inputs, "result": result})
+            result_str = json.dumps(result)
+            if len(result_str) > 8000:
+                result_str = result_str[:8000] + "… (truncated)"
+            tool_result_messages.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_str,
+            })
+
+        if report_data is not None:
+            break
+
+        if tool_result_messages:
+            messages.append({"role": "user", "content": tool_result_messages})
+        else:
+            break
+
+    # Force write_report if loop exited without one
+    if report_data is None:
+        log("  [RUNNING] Composing backtest report (forced)…")
+        messages.append({"role": "user", "content":
+                          "You have completed your analysis. Now call write_report with your findings. "
+                          "Be thorough — cite specific numbers, win rates, and P&L differences."})
+        resp2 = await client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=[{"type": "text", "text": system}],
+            tools=_BACKTEST_AGENTIC_TOOLS,
+            tool_choice={"type": "tool", "name": "write_report"},
+            messages=messages,
+        )
+        for block in resp2.content:
+            if block.type == "tool_use" and block.name == "write_report":
+                report_data = block.input
+                break
+
+    # Build chart configs and assemble sections
+    log("[RUNNING] Composing final backtest report…")
+    chart_configs = _build_backtest_chart_configs(tool_results_acc)
+
+    if report_data is None:
+        sections = [{"type": "markdown",
+                     "content": "(Report generation failed — no write_report call returned)"}]
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+        return json.dumps(sections)
+
+    exec_summary = (report_data.get("executive_summary") or "").strip()
+    body         = (report_data.get("body") or "").strip()
+    conclusions  = (report_data.get("conclusions") or "").strip()
+    chart_seq    = report_data.get("chart_sequence") or []
+
+    sections: list[dict] = []
+    if exec_summary:
+        sections.append({"type": "markdown", "content": exec_summary})
+
+    body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
+    referenced: set[str] = set()
+
+    if body_paras and chart_seq:
+        charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+        chart_idx = 0
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+            for _ in range(charts_per_gap):
+                if chart_idx < len(chart_seq):
+                    cid = chart_seq[chart_idx]
+                    if cid in chart_configs:
+                        sections.append({
+                            "type": "chart", "chart_id": cid,
+                            "title": chart_configs[cid]["title"],
+                            "config": chart_configs[cid]["config"],
+                        })
+                        referenced.add(cid)
+                    chart_idx += 1
+        while chart_idx < len(chart_seq):
+            cid = chart_seq[chart_idx]
+            if cid in chart_configs and cid not in referenced:
+                sections.append({"type": "chart", "chart_id": cid,
+                                  "title": chart_configs[cid]["title"],
+                                  "config": chart_configs[cid]["config"]})
+                referenced.add(cid)
+            chart_idx += 1
+    else:
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+
+    if conclusions:
+        sections.append({"type": "markdown", "content": f"## Conclusions\n\n{conclusions}"})
+
+    for cid, chart in chart_configs.items():
+        if cid not in referenced:
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+
+    return json.dumps(sections)
+
+
+async def _execute_backtest_run(
+    main_pool,
+    run_id: str,
+    question: str,
+    config: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """Load backtest upload (already enriched with IV metrics), run backtest pipeline."""
+    from research.backtest import compute_trade_summary, TRADE_FIELDS
+
+    upload_id = config["backtest_upload_id"]
+
+    log("[RUNNING] Loading backtest upload…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary="[RUNNING] Loading backtest trade data…")
+        row = await conn.fetchrow(
+            "SELECT data, trade_count, matched_count FROM research_backtest_uploads WHERE id = $1::uuid",
+            upload_id,
+        )
+    if row is None:
+        raise ValueError(f"Backtest upload {upload_id} not found")
+
+    enriched_trades = json.loads(row["data"]) if isinstance(row["data"], str) else list(row["data"])
+    log(f"[RUNNING] Loaded {len(enriched_trades)} trades "
+        f"({row['matched_count'] or 0} matched to IV surface)")
+
+    # Separate IV columns
+    iv_cols = [c for c in (enriched_trades[0].keys() if enriched_trades else [])
+               if c not in TRADE_FIELDS]
+
+    # Compute summary
+    trade_summary = compute_trade_summary(enriched_trades)
+
+    # Enrich workflow plan in DB
+    async with main_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE research_runs
+               SET config = jsonb_set(
+                   jsonb_set(
+                       jsonb_set(config,
+                           '{workflow_plan,feature_columns}', $2::jsonb),
+                       '{workflow_plan,task_reasoning}', $3::jsonb),
+                   '{workflow_plan,hypotheses}', $4::jsonb)
+               WHERE id = $1::uuid""",
+            run_id,
+            json.dumps(iv_cols),
+            json.dumps(
+                f"Backtest IV analysis: {trade_summary['n']} trades, "
+                f"{trade_summary['matched_count']} matched to entry-morning IV "
+                f"({trade_summary['match_rate']:.0%} match rate). "
+                f"Claude will explore {len(iv_cols)} IV metric columns vs trade outcomes."
+            ),
+            json.dumps([
+                "Some entry-time IV metrics predict final trade P&L",
+                "IV regime at entry conditions win/loss probability",
+                "The IV predictive signal is stable across different time periods",
+            ]),
+        )
+
+    return await execute_backtest_pipeline(
+        main_pool=main_pool,
+        run_id=run_id,
+        question=question,
+        enriched_trades=enriched_trades,
+        trade_summary=trade_summary,
+        model=model,
+        knowledge_rules=knowledge_rules,
+        log=log,
+    )
+
+
 # ── Phase 1: Main execution pipeline ─────────────────────────────────────────
 
 async def execute_v2_pipeline(
@@ -1823,6 +2432,18 @@ async def execute_v2_pipeline(
       4. Generate only those visuals
       5. Compose focused narrative report
     """
+    # ── Backtest agentic mode ────────────────────────────────────────────
+    if config.get("backtest_upload_id"):
+        return await _execute_backtest_run(
+            main_pool=main_pool,
+            run_id=run_id,
+            question=question,
+            config=config,
+            model=model,
+            knowledge_rules=knowledge_rules,
+            log=log,
+        )
+
     # ── P&L agentic mode ────────────────────────────────────────────────
     if config.get("pnl_upload_id"):
         return await _execute_pnl_pipeline(

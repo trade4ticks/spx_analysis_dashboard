@@ -321,3 +321,137 @@ def run_greek_attribution(rows: list[dict], pnl_col: str = 'pnl') -> dict:
         'n':               result.get('n', 0),
         'unexplained_pnl': unexplained,
     }
+
+
+def run_win_rate_analysis(rows: list[dict], x_col: str,
+                          n_buckets: int = 5) -> dict:
+    """
+    Bucket rows by x_col into n_buckets equal-count groups.
+    Per bucket: win_rate, mean_pnl, std_pnl, n, x_min, x_max.
+    Useful for finding IV threshold effects on binary win/loss outcomes.
+    Returns {x_col, n_buckets, buckets, win_rate_spread}.
+    """
+    valid = []
+    for r in rows:
+        xv  = _safe_float(r.get(x_col))
+        pnl = _safe_float(r.get('pnl'))
+        iw  = r.get('is_win')
+        if xv is None or pnl is None:
+            continue
+        win = bool(iw) if iw is not None else (pnl > 0)
+        valid.append((xv, pnl, win))
+
+    min_rows = n_buckets * 5
+    if len(valid) < min_rows:
+        return {'error': f'insufficient data: need {min_rows} rows, have {len(valid)}', 'n': len(valid)}
+
+    valid.sort(key=lambda t: t[0])
+    n = len(valid)
+    bucket_size = n // n_buckets
+
+    buckets = []
+    for i in range(n_buckets):
+        start = i * bucket_size
+        end   = (i + 1) * bucket_size if i < n_buckets - 1 else n
+        chunk = valid[start:end]
+        xvals  = [t[0] for t in chunk]
+        pnls   = [t[1] for t in chunk]
+        wins   = [t[2] for t in chunk]
+        buckets.append({
+            'bucket':   i + 1,
+            'n':        len(chunk),
+            'x_min':    round(min(xvals), 4),
+            'x_max':    round(max(xvals), 4),
+            'x_mean':   round(statistics.mean(xvals), 4),
+            'win_rate': round(sum(wins) / len(wins), 4),
+            'mean_pnl': round(statistics.mean(pnls), 2),
+            'std_pnl':  round(statistics.stdev(pnls), 2) if len(pnls) > 1 else 0.0,
+        })
+
+    top_wr = buckets[-1]['win_rate']
+    bot_wr = buckets[0]['win_rate']
+    return {
+        'x_col':           x_col,
+        'n_buckets':       n_buckets,
+        'n':               n,
+        'buckets':         buckets,
+        'win_rate_spread': round(top_wr - bot_wr, 4),
+    }
+
+
+def run_time_split_validation(rows: list[dict], y_col: str,
+                              n_splits: int = 2) -> dict:
+    """
+    Split rows chronologically into n_splits periods by date_opened.
+    Per period: top-5 IV correlations with y_col.
+    consistency_score: fraction of period-1 top signals in all other periods' top-10.
+    Returns {y_col, periods, consistency_score, stable_signals}.
+    """
+    min_per = 15
+    sorted_rows = sorted(rows, key=lambda r: r.get('date_opened', ''))
+
+    if len(sorted_rows) < min_per * n_splits:
+        return {
+            'error': f'insufficient data for {n_splits} splits (need ≥{min_per * n_splits} rows)',
+            'n': len(rows),
+        }
+
+    chunk_size = len(sorted_rows) // n_splits
+    periods_rows = []
+    for i in range(n_splits):
+        start = i * chunk_size
+        end   = (i + 1) * chunk_size if i < n_splits - 1 else len(sorted_rows)
+        periods_rows.append(sorted_rows[start:end])
+
+    # IV columns: all keys present in first row except known trade/timestamp fields
+    _non_iv = {
+        'date_opened', 'date_closed', 'pnl', 'pnl_pct', 'strategy',
+        'max_profit', 'max_loss', 'margin_req', 'legs', 'exit_reason',
+        'premium', 'contracts', 'days_in_trade', 'is_win',
+        'join_timestamp', 'trade_date', 'quote_time', 'id',
+        'day_of_week', 'year', 'spx_open_price', 'spx_close_price',
+        'time_opened', 'time_closed',
+    }
+    if sorted_rows:
+        iv_cols = [k for k in sorted_rows[0].keys() if k not in _non_iv]
+    else:
+        iv_cols = []
+
+    periods = []
+    all_top5 = []
+    for i, pr in enumerate(periods_rows):
+        if len(pr) < min_per or not iv_cols:
+            periods.append({
+                'label': f'Period {i+1}',
+                'n':     len(pr),
+                'top_correlations': [],
+            })
+            all_top5.append(set())
+            continue
+        corr = run_correlation_scan(pr, iv_cols, y_col)
+        top5  = [c['x_col'] for c in corr[:5]]
+        top10 = {c['x_col'] for c in corr[:10]}
+        periods.append({
+            'label':            f'Period {i+1} ({(pr[0].get("date_opened","?"))[:7]} – {(pr[-1].get("date_opened","?"))[:7]})',
+            'n':                len(pr),
+            'top_correlations': [{'x_col': c['x_col'], 'r': c['r']} for c in corr[:5]],
+        })
+        all_top5.append((set(top5), top10))
+
+    # Stable signals: in period-1 top-5 AND in every other period's top-10
+    stable = []
+    if all_top5 and isinstance(all_top5[0], tuple):
+        first_top5 = all_top5[0][0]
+        for sig in first_top5:
+            if all(isinstance(p, tuple) and sig in p[1] for p in all_top5[1:]):
+                stable.append(sig)
+
+    score = round(len(stable) / max(len(all_top5[0][0]) if all_top5 and isinstance(all_top5[0], tuple) else 1, 1), 3)
+
+    return {
+        'y_col':             y_col,
+        'n_splits':          n_splits,
+        'periods':           periods,
+        'stable_signals':    stable,
+        'consistency_score': score,
+    }

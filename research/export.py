@@ -141,7 +141,9 @@ def _build_v2(run: dict, results: list[dict], cfg: dict, dest):
 
     # ── Configuration ─────────────────────────────────────────────────────
     config_lines = []
-    if cfg.get("pnl_upload_id"):
+    if cfg.get("backtest_upload_id"):
+        config_lines.append("Mode: Backtest Trade Regime Analysis (agentic)")
+    elif cfg.get("pnl_upload_id"):
         config_lines.append("Mode: P&L–IV Correlation (agentic analysis)")
     elif cfg.get("table"):
         config_lines.append(f"Table: {cfg['table']}")

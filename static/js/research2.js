@@ -75,6 +75,25 @@ document.addEventListener('alpine:init', () => {
       error:      null,
     },
 
+    // Backtest upload
+    backtestUploadState: {
+      file:         null,
+      uploading:    false,
+      uploadId:     null,
+      uploadName:   null,
+      source:       null,
+      tradeCount:   null,
+      matchedCount: null,
+      matchRate:    null,
+      dateFrom:     null,
+      dateTo:       null,
+      strategies:   [],
+      columns:      [],
+      preview:      null,
+      warnings:     [],
+      error:        null,
+    },
+
     form: {
       name:      '',
       question:  '',
@@ -348,6 +367,12 @@ document.addEventListener('alpine:init', () => {
         preview: null, columns: null, rowCount: null,
         dateFrom: null, dateTo: null, error: null,
       };
+      this.backtestUploadState = {
+        file: null, uploading: false, uploadId: null, uploadName: null,
+        source: null, tradeCount: null, matchedCount: null, matchRate: null,
+        dateFrom: null, dateTo: null, strategies: [], columns: [],
+        preview: null, warnings: [], error: null,
+      };
     },
 
     // ── P&L upload ────────────────────────────────────────────────────────
@@ -395,6 +420,55 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
+    // ── Backtest upload ───────────────────────────────────────────────────
+    onBacktestFileChange(event) {
+      const f = event.target.files[0];
+      if (f) this.backtestUploadState.file = f;
+    },
+
+    async uploadBacktest() {
+      const f = this.backtestUploadState.file;
+      if (!f) return;
+      this.backtestUploadState.uploading = true;
+      this.backtestUploadState.error     = null;
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('name', f.name.replace(/\.(csv|json)$/i, ''));
+      try {
+        const r = await fetch('/api/research2/upload-backtest', { method: 'POST', body: fd });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        this.backtestUploadState.uploadId     = data.upload_id;
+        this.backtestUploadState.uploadName   = data.name;
+        this.backtestUploadState.source       = data.source;
+        this.backtestUploadState.tradeCount   = data.trade_count;
+        this.backtestUploadState.matchedCount = data.matched_count;
+        this.backtestUploadState.matchRate    = data.match_rate;
+        this.backtestUploadState.dateFrom     = data.date_from;
+        this.backtestUploadState.dateTo       = data.date_to;
+        this.backtestUploadState.strategies   = data.strategies || [];
+        this.backtestUploadState.columns      = data.columns || [];
+        this.backtestUploadState.preview      = data.preview || [];
+        this.backtestUploadState.warnings     = data.validation?.warnings || [];
+      } catch (e) {
+        this.backtestUploadState.error = e.message;
+      } finally {
+        this.backtestUploadState.uploading = false;
+      }
+    },
+
+    clearBacktest() {
+      this.backtestUploadState = {
+        file: null, uploading: false, uploadId: null, uploadName: null,
+        source: null, tradeCount: null, matchedCount: null, matchRate: null,
+        dateFrom: null, dateTo: null, strategies: [], columns: [],
+        preview: null, warnings: [], error: null,
+      };
+    },
+
     setTable(t) { this.form.table = t; },
 
     addTicker(t) {
@@ -410,14 +484,15 @@ document.addEventListener('alpine:init', () => {
       }
       const parse = s => s.split(',').map(x => x.trim()).filter(Boolean);
       const body = {
-        name:          this.form.name.trim(),
-        question:      this.form.question.trim(),
-        table:         this.form.table,
-        tickers:       parse(this.form.tickers),
-        date_from:     this.form.date_from || null,
-        date_to:       this.form.date_to   || null,
-        model:         this.form.model,
-        pnl_upload_id: this.uploadState.uploadId || null,
+        name:                this.form.name.trim(),
+        question:            this.form.question.trim(),
+        table:               this.form.table,
+        tickers:             parse(this.form.tickers),
+        date_from:           this.form.date_from || null,
+        date_to:             this.form.date_to   || null,
+        model:               this.form.model,
+        pnl_upload_id:       this.uploadState.uploadId || null,
+        backtest_upload_id:  this.backtestUploadState.uploadId || null,
       };
       this.submitting = true;
       try {
@@ -537,6 +612,7 @@ document.addEventListener('alpine:init', () => {
         'microstructure-investigation': '#1a3a3a',
         'anomaly-investigation':     '#2a3a1a',
         'pnl-iv-correlation':        '#2a1a3a',
+        'backtest-regime-analysis':  '#1a3a2a',
       };
       return colors[this.plan?.task_type] || '#2a2a2a';
     },

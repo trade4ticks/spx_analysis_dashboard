@@ -18,6 +18,7 @@ from research import orchestrator
 from research import export as rexport
 from research.engine import format_corr_table
 from research.pnl import parse_pnl_csv
+from research import backtest as rbacktest
 
 router = APIRouter()
 
@@ -54,7 +55,8 @@ class RunRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     model: str = "claude-sonnet-4-6"
-    pnl_upload_id: Optional[str] = None
+    pnl_upload_id:      Optional[str] = None
+    backtest_upload_id: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -246,6 +248,42 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
             "date_to":       date_to,
             "model":         req.model,
             "workflow_plan": plan,
+        }
+        async with pool.acquire() as conn:
+            run_id = await rdb.create_run(conn, req.name, req.question, config)
+        background_tasks.add_task(
+            _execute_run, pool, oi_pool, run_id, req.question, plan, config, req.model,
+        )
+        return {"run_id": run_id, "plan": plan}
+
+    # ── Backtest agentic mode ─────────────────────────────────────────────
+    if req.backtest_upload_id:
+        await _ensure_backtest_table(pool)
+        async with pool.acquire() as conn:
+            upload = await conn.fetchrow(
+                "SELECT id::text, date_from, date_to, trade_count, matched_count "
+                "FROM research_backtest_uploads WHERE id = $1::uuid",
+                req.backtest_upload_id,
+            )
+        if upload is None:
+            raise HTTPException(400, f"Backtest upload '{req.backtest_upload_id}' not found")
+
+        plan = {
+            "task_type":       "backtest-regime-analysis",
+            "task_reasoning":  "Agentic backtest analysis: Claude will explore which entry-time IV conditions predict trade outcomes.",
+            "hypotheses":      [],
+            "feature_columns": [],
+            "outcome_columns": ["pnl", "is_win"],
+            "scan_focus":      "Entry-morning IV conditions predictive of trade P&L and win rate",
+            "report_guidance": "Report on which IV conditions at trade entry (09:35) predict better outcomes. Cite win rates, mean P&L by bucket, and time-split stability.",
+        }
+        config = {
+            "engine":             "v2",
+            "backtest_upload_id": req.backtest_upload_id,
+            "date_from":          str(upload["date_from"]) if upload["date_from"] else None,
+            "date_to":            str(upload["date_to"])   if upload["date_to"]   else None,
+            "model":              req.model,
+            "workflow_plan":      plan,
         }
         async with pool.acquire() as conn:
             run_id = await rdb.create_run(conn, req.name, req.question, config)
@@ -460,6 +498,124 @@ async def list_uploads(pool=Depends(get_pool)):
                ORDER BY created_at DESC LIMIT 20""",
         )
     return [dict(r) for r in rows]
+
+
+# ── Backtest upload table ────────────────────────────────────────────────────
+
+_backtest_table_ready = False
+
+
+async def _ensure_backtest_table(pool):
+    global _backtest_table_ready
+    if _backtest_table_ready:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_backtest_uploads (
+                    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name          TEXT NOT NULL,
+                    source        TEXT,
+                    trade_count   INTEGER,
+                    matched_count INTEGER,
+                    date_from     DATE,
+                    date_to       DATE,
+                    strategies    JSONB,
+                    columns       JSONB,
+                    data          JSONB,
+                    created_at    TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _backtest_table_ready = True
+    except Exception:
+        pass
+
+
+@router.post("/upload-backtest")
+async def upload_backtest(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    pool=Depends(get_pool),
+):
+    """Upload a backtest file (CSV or JSON), join to IV surface at entry, store enriched trades."""
+    await _ensure_backtest_table(pool)
+    content_bytes = await file.read()
+
+    try:
+        trades, meta = rbacktest.parse_backtest_upload(content_bytes, file.filename)
+    except Exception as exc:
+        raise HTTPException(400, f"Parse error: {exc}")
+
+    if not trades:
+        raise HTTPException(400, "No trades found in uploaded file")
+
+    date_from = meta.get("date_from")
+    date_to   = meta.get("date_to")
+    if not date_from or not date_to:
+        raise HTTPException(400, "Could not determine date range from file")
+
+    try:
+        enriched, stats = await rbacktest.align_trades_to_surface(
+            trades, pool, date_from, date_to
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Surface alignment failed: {exc}")
+
+    def _to_date(s):
+        return _date.fromisoformat(s) if s else None
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO research_backtest_uploads
+               (name, source, trade_count, matched_count, date_from, date_to,
+                strategies, columns, data)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)
+               RETURNING id::text, name, source, trade_count, matched_count,
+                         date_from, date_to, created_at""",
+            name,
+            meta.get("source", "unknown"),
+            meta["trade_count"],
+            stats["matched"],
+            _to_date(date_from),
+            _to_date(date_to),
+            json.dumps(meta.get("strategies") or []),
+            json.dumps(meta.get("columns") or []),
+            json.dumps(enriched),
+        )
+
+    return {
+        "upload_id":     row["id"],
+        "name":          row["name"],
+        "source":        row["source"],
+        "trade_count":   row["trade_count"],
+        "matched_count": row["matched_count"],
+        "match_rate":    stats["match_rate"],
+        "date_from":     str(row["date_from"]) if row["date_from"] else None,
+        "date_to":       str(row["date_to"])   if row["date_to"]   else None,
+        "strategies":    meta.get("strategies") or [],
+        "columns":       meta.get("columns") or [],
+        "validation":    {"stats": stats, "warnings": stats.get("warnings", [])},
+        "preview":       enriched[:5],
+    }
+
+
+@router.get("/backtest-uploads")
+async def list_backtest_uploads(pool=Depends(get_pool)):
+    """List recent backtest uploads."""
+    await _ensure_backtest_table(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id::text, name, source, trade_count, matched_count,
+                      date_from, date_to, strategies, created_at
+               FROM research_backtest_uploads
+               ORDER BY created_at DESC LIMIT 20""",
+        )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["strategies"] = d["strategies"] if isinstance(d["strategies"], list) else json.loads(d["strategies"] or "[]")
+        result.append(d)
+    return result
 
 
 # ── Knowledge library ────────────────────────────────────────────────────────
