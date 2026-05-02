@@ -4,6 +4,7 @@ import io
 import math
 import re
 import statistics
+from datetime import date as _date
 from typing import Optional
 
 
@@ -108,12 +109,17 @@ async def align_pnl_to_surface(
     Inner-join P&L rows with surface_metrics_core on (trade_date, quote_time).
     Returns (merged_rows, stats).
     """
+    def _as_date(v):
+        if isinstance(v, _date):
+            return v
+        return _date.fromisoformat(str(v))
+
     async with pool.acquire() as conn:
         surface_rows = await conn.fetch(
             """SELECT * FROM surface_metrics_core
-               WHERE trade_date BETWEEN $1::date AND $2::date
+               WHERE trade_date BETWEEN $1 AND $2
                ORDER BY trade_date, quote_time""",
-            date_from, date_to,
+            _as_date(date_from), _as_date(date_to),
         )
 
     surface_lookup: dict[tuple, dict] = {}
