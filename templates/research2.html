@@ -376,7 +376,7 @@ Examples:
             <div class="r2-hint">Be specific about the direction of inquiry. The more context, the better the column selection.</div>
           </div>
 
-          <div>
+          <div x-show="!uploadState.uploadId">
             <label>SOURCE TABLE</label>
             <div class="preset-row">
               <button class="preset-btn" :class="{active: form.table==='daily_features'}"
@@ -387,7 +387,7 @@ Examples:
             <input type="text" x-model="form.table" style="font-size:11px">
           </div>
 
-          <div>
+          <div x-show="!uploadState.uploadId">
             <label>TICKERS <span style="color:#555;font-weight:400">(comma-separated — blank = all)</span></label>
             <input type="text" x-model="form.tickers" placeholder="SPY, QQQ, IWM">
             <template x-if="availableTickers.length > 0">
@@ -400,14 +400,24 @@ Examples:
           </div>
 
           <div class="r2-row">
-            <div>
-              <label>DATE FROM</label>
-              <input type="date" x-model="form.date_from">
-            </div>
-            <div>
-              <label>DATE TO</label>
-              <input type="date" x-model="form.date_to">
-            </div>
+            <template x-if="!uploadState.uploadId">
+              <div>
+                <label>DATE FROM</label>
+                <input type="date" x-model="form.date_from">
+              </div>
+            </template>
+            <template x-if="!uploadState.uploadId">
+              <div>
+                <label>DATE TO</label>
+                <input type="date" x-model="form.date_to">
+              </div>
+            </template>
+            <template x-if="uploadState.uploadId">
+              <div style="font-size:10px;color:#555;align-self:center;padding-top:4px">
+                Date range auto-set from upload:
+                <span style="color:#aaa" x-text="uploadState.dateFrom + ' → ' + uploadState.dateTo"></span>
+              </div>
+            </template>
             <div>
               <label>MODEL</label>
               <select x-model="form.model">
