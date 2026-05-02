@@ -1,5 +1,6 @@
 """Research 2 API endpoints — orchestration-driven research."""
 import json
+from datetime import date as _date
 from typing import Optional
 
 import anthropic
@@ -384,14 +385,17 @@ async def upload_pnl(
     if not rows:
         raise HTTPException(400, "CSV appears empty")
 
-    date_from = meta.get("date_from")
-    date_to   = meta.get("date_to")
+    def _to_date(s):
+        return _date.fromisoformat(s) if s else None
+
+    date_from = _to_date(meta.get("date_from"))
+    date_to   = _to_date(meta.get("date_to"))
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO research_pnl_uploads
                (name, row_count, date_from, date_to, columns, data)
-               VALUES ($1, $2, $3::date, $4::date, $5::jsonb, $6::jsonb)
+               VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
                RETURNING id::text, name, row_count, date_from, date_to, created_at""",
             name,
             meta["row_count"],
