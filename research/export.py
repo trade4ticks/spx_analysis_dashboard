@@ -121,7 +121,9 @@ def _build_v2(run: dict, results: list[dict], cfg: dict, dest):
 
     # ── Configuration ─────────────────────────────────────────────────────
     config_lines = []
-    if cfg.get("table"):
+    if cfg.get("pnl_upload_id"):
+        config_lines.append("Mode: P&L–IV Correlation (agentic analysis)")
+    elif cfg.get("table"):
         config_lines.append(f"Table: {cfg['table']}")
     if cfg.get("tickers"):
         config_lines.append(f"Tickers: {', '.join(cfg['tickers'])}")

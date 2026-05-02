@@ -5,11 +5,13 @@ from typing import Optional
 
 import anthropic
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 from research import db as rdb
 from research import orchestrator
+from research import export as rexport
 from research.engine import format_corr_table
 from research.pnl import parse_pnl_csv
 
@@ -177,6 +179,28 @@ async def delete_run(run_id: str, pool=Depends(get_pool)):
             raise HTTPException(404, "Run not found")
         await conn.execute("DELETE FROM research_runs WHERE id = $1::uuid", run_id)
     return {"deleted": run_id}
+
+
+@router.get("/run/{run_id}/pdf")
+async def download_pdf(run_id: str, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        run = await rdb.load_run(conn, run_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        results = await rdb.load_results(conn, run_id)
+        charts  = await rdb.load_charts(conn, run_id)
+
+    for r in results:
+        if isinstance(r.get("result"), str):
+            r["result"] = json.loads(r["result"])
+
+    pdf_bytes = rexport.build_pdf_bytes(run, results, charts)
+    safe_name = run["name"].replace(" ", "_").replace("/", "-")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.pdf"'},
+    )
 
 
 @router.post("/run")

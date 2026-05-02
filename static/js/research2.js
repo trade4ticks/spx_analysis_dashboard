@@ -445,7 +445,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── PDF export ────────────────────────────────────────────────────────
     exportPdf(runId) {
-      window.location.href = `/api/research/run/${runId}/pdf`;
+      window.location.href = `/api/research2/run/${runId}/pdf`;
     },
 
     // ── Follow-up ──────────────────────────────────────────────────────────
