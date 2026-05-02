@@ -3,13 +3,14 @@ import json
 from typing import Optional
 
 import anthropic
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 from research import db as rdb
 from research import orchestrator
 from research.engine import format_corr_table
+from research.pnl import parse_pnl_csv
 
 router = APIRouter()
 
@@ -46,6 +47,7 @@ class RunRequest(BaseModel):
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     model: str = "claude-sonnet-4-6"
+    pnl_upload_id: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -179,6 +181,45 @@ async def delete_run(run_id: str, pool=Depends(get_pool)):
 @router.post("/run")
 async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
                     pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    # ── P&L agentic mode: bypass column lookup + classification ──────────
+    if req.pnl_upload_id:
+        await _ensure_pnl_table(pool)
+        async with pool.acquire() as conn:
+            upload = await conn.fetchrow(
+                "SELECT id::text, date_from, date_to FROM research_pnl_uploads "
+                "WHERE id = $1::uuid", req.pnl_upload_id)
+        if upload is None:
+            raise HTTPException(400, f"P&L upload '{req.pnl_upload_id}' not found")
+
+        date_from = req.date_from or (str(upload["date_from"]) if upload["date_from"] else None)
+        date_to   = req.date_to   or (str(upload["date_to"])   if upload["date_to"]   else None)
+        if not date_from or not date_to:
+            raise HTTPException(400, "Could not determine date range from upload — specify date_from/date_to")
+
+        plan = {
+            "task_type":      "pnl-iv-correlation",
+            "task_reasoning": "Agentic P&L–IV analysis: Claude will explore surface_metrics_core columns vs uploaded P&L data.",
+            "hypotheses":     [],
+            "feature_columns": [],
+            "outcome_columns": ["pnl"],
+            "scan_focus":     "IV metrics correlated with P&L",
+            "report_guidance": "Report on IV–P&L correlations. Cite specific r values and patterns.",
+        }
+        config = {
+            "engine":        "v2",
+            "pnl_upload_id": req.pnl_upload_id,
+            "date_from":     date_from,
+            "date_to":       date_to,
+            "model":         req.model,
+            "workflow_plan": plan,
+        }
+        async with pool.acquire() as conn:
+            run_id = await rdb.create_run(conn, req.name, req.question, config)
+        background_tasks.add_task(
+            _execute_run, pool, oi_pool, run_id, req.question, plan, config, req.model,
+        )
+        return {"run_id": run_id, "plan": plan}
+
     # Fetch available columns for the requested table
     available_cols = await _get_columns(req.table, pool, oi_pool)
     if not available_cols:
@@ -291,6 +332,97 @@ class KnowledgeUpdate(BaseModel):
     category: Optional[str] = None
     rule: Optional[str] = None
     active: Optional[bool] = None
+
+
+# ── P&L upload table ────────────────────────────────────────────────────────
+
+_pnl_table_ready = False
+
+
+async def _ensure_pnl_table(pool):
+    global _pnl_table_ready
+    if _pnl_table_ready:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_pnl_uploads (
+                    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name       TEXT NOT NULL,
+                    row_count  INTEGER,
+                    date_from  DATE,
+                    date_to    DATE,
+                    columns    JSONB,
+                    data       JSONB,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _pnl_table_ready = True
+    except Exception:
+        pass
+
+
+@router.post("/upload-pnl")
+async def upload_pnl(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    pool=Depends(get_pool),
+):
+    """Upload a P&L CSV and store it. Returns upload_id, preview, column types."""
+    await _ensure_pnl_table(pool)
+    content_bytes = await file.read()
+    try:
+        content = content_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        content = content_bytes.decode("latin-1")
+
+    try:
+        rows, meta = parse_pnl_csv(content)
+    except Exception as exc:
+        raise HTTPException(400, f"CSV parse error: {exc}")
+
+    if not rows:
+        raise HTTPException(400, "CSV appears empty")
+
+    date_from = meta.get("date_from")
+    date_to   = meta.get("date_to")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO research_pnl_uploads
+               (name, row_count, date_from, date_to, columns, data)
+               VALUES ($1, $2, $3::date, $4::date, $5::jsonb, $6::jsonb)
+               RETURNING id::text, name, row_count, date_from, date_to, created_at""",
+            name,
+            meta["row_count"],
+            date_from,
+            date_to,
+            json.dumps(meta["columns"]),
+            json.dumps(rows),
+        )
+
+    return {
+        "upload_id": row["id"],
+        "name":      row["name"],
+        "row_count": row["row_count"],
+        "date_from": str(row["date_from"]) if row["date_from"] else None,
+        "date_to":   str(row["date_to"])   if row["date_to"]   else None,
+        "columns":   meta["columns"],
+        "preview":   rows[:5],
+    }
+
+
+@router.get("/uploads")
+async def list_uploads(pool=Depends(get_pool)):
+    """List recent P&L uploads."""
+    await _ensure_pnl_table(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id::text, name, row_count, date_from, date_to, created_at
+               FROM research_pnl_uploads
+               ORDER BY created_at DESC LIMIT 20""",
+        )
+    return [dict(r) for r in rows]
 
 
 # ── Knowledge library ────────────────────────────────────────────────────────

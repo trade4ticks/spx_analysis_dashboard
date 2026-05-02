@@ -202,7 +202,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/research2.js?v=7"></script>
+  <script src="/static/js/research2.js?v=8"></script>
 </head>
 
 <body x-data="research2" x-init="init()">
@@ -415,6 +415,89 @@ Examples:
                 <option value="claude-opus-4-7">Opus 4.7 (deeper)</option>
               </select>
             </div>
+          </div>
+
+          <!-- ── P&L Upload (optional) ──────────────────────────────────── -->
+          <div style="border:1px solid #2a3a4a;border-radius:6px;padding:12px 14px;background:#0d1a2a">
+            <div style="font-size:10px;font-weight:700;color:#3498db;letter-spacing:.4px;
+                        text-transform:uppercase;margin-bottom:8px">
+              P&amp;L Data
+              <span style="font-weight:400;color:#555;font-size:9px;text-transform:none">
+                — optional: upload 5-min P&amp;L CSV for IV correlation analysis
+              </span>
+            </div>
+
+            <!-- No upload yet -->
+            <template x-if="!uploadState.uploadId">
+              <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+                <input type="file" accept=".csv"
+                       @change="onPnlFileChange($event)"
+                       style="background:#1a1a1a;border:1px solid #444;color:#aaa;
+                              padding:4px 6px;border-radius:3px;font-size:11px;flex:1;min-width:0">
+                <button class="btn"
+                        style="font-size:11px;padding:5px 14px;background:rgba(52,152,219,.15);
+                               border-color:rgba(52,152,219,.35);color:#3498db;flex-shrink:0"
+                        @click="uploadPnl()"
+                        :disabled="!uploadState.file || uploadState.uploading">
+                  <span x-text="uploadState.uploading ? '⏳ Uploading…' : '↑ Upload CSV'"></span>
+                </button>
+                <div x-show="uploadState.error"
+                     style="width:100%;color:#e74c3c;font-size:11px"
+                     x-text="uploadState.error"></div>
+              </div>
+            </template>
+
+            <!-- Upload complete — show preview -->
+            <template x-if="uploadState.uploadId">
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                  <span style="color:#2ecc71;font-size:11px;font-weight:700">✓ Upload ready</span>
+                  <span style="font-size:11px;color:#bbb" x-text="uploadState.uploadName"></span>
+                  <span style="font-size:10px;color:#555"
+                        x-text="uploadState.rowCount + ' rows, ' + uploadState.dateFrom + ' → ' + uploadState.dateTo"></span>
+                  <button @click="clearUpload()"
+                          style="margin-left:auto;background:none;border:none;color:#555;cursor:pointer;font-size:11px"
+                          title="Remove upload">✕ Clear</button>
+                </div>
+                <!-- Column type badges -->
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">
+                  <template x-for="col in (uploadState.columns || [])" :key="col.name">
+                    <span style="font-size:9px;padding:2px 6px;border-radius:3px;font-family:monospace"
+                          :style="col.type === 'pnl'   ? 'background:#1a3a1a;color:#2ecc71;border:1px solid #2a5a2a' :
+                                  col.type === 'greek' ? 'background:#2a2a1a;color:#f1c40f;border:1px solid #4a4a1a' :
+                                  col.type === 'date' || col.type === 'time'
+                                                       ? 'background:#1a1a3a;color:#7ec8e3;border:1px solid #2a2a5a' :
+                                                         'background:#1e1e1e;color:#666;border:1px solid #333'"
+                          x-text="col.name + ' [' + col.type + ']'"></span>
+                  </template>
+                </div>
+                <!-- Preview table -->
+                <template x-if="uploadState.preview && uploadState.preview.length">
+                  <div style="overflow-x:auto">
+                    <table style="width:100%;border-collapse:collapse;font-size:10px;font-family:monospace">
+                      <thead>
+                        <tr style="border-bottom:1px solid #333">
+                          <template x-for="col in (uploadState.columns || [])" :key="col.name">
+                            <th style="padding:3px 8px;color:#555;text-align:left;font-weight:600"
+                                x-text="col.name"></th>
+                          </template>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="(row, ri) in (uploadState.preview || [])" :key="ri">
+                          <tr style="border-bottom:1px solid #1e1e1e">
+                            <template x-for="col in (uploadState.columns || [])" :key="col.name">
+                              <td style="padding:3px 8px;color:#aaa"
+                                  x-text="row[col.name] ?? ''"></td>
+                            </template>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
 
           <div x-show="submitError"

@@ -1138,6 +1138,637 @@ async def _run_strategy_entry(cache, ranked, x_cols, y_cols,
     return strategy_results
 
 
+# ── Agentic P&L pipeline ─────────────────────────────────────────────────────
+
+_AGENTIC_TOOLS = [
+    {
+        "name": "run_correlation_scan",
+        "description": "Scan multiple IV metric columns vs the P&L column. Returns ranked correlation table.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_cols": {"type": "array", "items": {"type": "string"},
+                           "description": "IV metric column names to scan"},
+                "y_col":  {"type": "string", "description": "Outcome column (usually 'pnl')"},
+            },
+            "required": ["x_cols", "y_col"],
+        },
+    },
+    {
+        "name": "run_regression",
+        "description": "OLS regression of y_col on x_cols. Returns r2, coefficients.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_cols": {"type": "array", "items": {"type": "string"}},
+                "y_col":  {"type": "string"},
+            },
+            "required": ["x_cols", "y_col"],
+        },
+    },
+    {
+        "name": "run_lag_scan",
+        "description": "Pearson r between x_col[t-lag] and y_col[t] at specified lags (in 5-min bars).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_col": {"type": "string"},
+                "y_col": {"type": "string"},
+                "lags":  {"type": "array", "items": {"type": "integer"},
+                          "description": "Lag values in bars, e.g. [1, 5, 10, 30]"},
+            },
+            "required": ["x_col", "y_col"],
+        },
+    },
+    {
+        "name": "run_regime_split",
+        "description": "Split data at median or tercile of split_col and compare x→y correlation in each regime.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_col":     {"type": "string"},
+                "y_col":     {"type": "string"},
+                "split_col": {"type": "string", "description": "Column used to define regimes"},
+                "method":    {"type": "string", "enum": ["median", "tercile"],
+                              "description": "Split method"},
+            },
+            "required": ["x_col", "y_col", "split_col"],
+        },
+    },
+    {
+        "name": "run_rolling_correlation",
+        "description": "Rolling window Pearson r between x_col and y_col over time.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_col":  {"type": "string"},
+                "y_col":  {"type": "string"},
+                "window": {"type": "integer", "description": "Window size in bars"},
+            },
+            "required": ["x_col", "y_col"],
+        },
+    },
+    {
+        "name": "run_tail_analysis",
+        "description": "Compare IV metric means between top/bottom pct% P&L rows.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "y_col":  {"type": "string"},
+                "x_cols": {"type": "array", "items": {"type": "string"}},
+                "pct":    {"type": "integer", "description": "Percentile cutoff, e.g. 10 for top/bottom 10%"},
+            },
+            "required": ["y_col", "x_cols"],
+        },
+    },
+    {
+        "name": "run_decile_profile",
+        "description": "Decile bucket profile showing how y_col varies across 10 buckets of x_col.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "x_col": {"type": "string"},
+                "y_col": {"type": "string"},
+            },
+            "required": ["x_col", "y_col"],
+        },
+    },
+    {
+        "name": "run_greek_attribution",
+        "description": "Regression of P&L on position greeks (delta, theta, vega, gamma). Reveals how much P&L is explained by greeks vs unexplained IV changes.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pnl_col": {"type": "string", "description": "P&L column name (usually 'pnl')"},
+            },
+            "required": ["pnl_col"],
+        },
+    },
+    {
+        "name": "write_report",
+        "description": "Write the final research report. Call this when you have enough findings.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "executive_summary": {
+                    "type": "string",
+                    "description": "2-3 paragraph executive summary answering the research question.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Detailed findings (300-500 words). Cite specific numbers.",
+                },
+                "conclusions": {
+                    "type": "string",
+                    "description": "Actionable conclusions with specific numbers.",
+                },
+                "chart_sequence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered chart IDs to display (from the AVAILABLE CHARTS list).",
+                },
+            },
+            "required": ["executive_summary", "body", "conclusions", "chart_sequence"],
+        },
+    },
+]
+
+_AGENTIC_SYSTEM = """\
+You are a quantitative analyst exploring how SPX implied-volatility metrics relate to \
+a nondirectional options strategy P&L. You have a merged dataset of 5-minute P&L slices \
+and IV surface metrics.
+
+Use the analysis tools iteratively to explore the data. Call 4-8 tools before writing \
+your report. Build up a picture of:
+  - Which IV metrics correlate most with P&L
+  - Whether relationships hold across different IV regimes
+  - Whether there are lead/lag dynamics
+  - What the greek attribution reveals about unexplained P&L
+
+When you have enough findings, call write_report to produce the final report.\
+"""
+
+
+def _build_agentic_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
+    """Build Chart.js configs from accumulated agentic tool results."""
+    charts = {}
+    colors_pos = '#3498db'
+    colors_neg = '#e84393'
+    dark_scales = {
+        'x': {'ticks': {'color': '#888', 'font': {'size': 9}, 'maxRotation': 45},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+        'y': {'ticks': {'color': '#888', 'font': {'size': 9}},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+    }
+    base_opts = {
+        'responsive': True, 'maintainAspectRatio': False, 'animation': False,
+        'plugins': {'legend': {'labels': {'color': '#aaa', 'font': {'size': 10}}},
+                    'tooltip': {'backgroundColor': 'rgba(20,20,20,0.95)',
+                                'borderColor': '#444', 'borderWidth': 1}},
+        'scales': dark_scales,
+    }
+
+    for tr in tool_results:
+        tool_name = tr.get('tool')
+        result    = tr.get('result') or {}
+
+        if tool_name == 'run_correlation_scan' and isinstance(result, list) and result:
+            top = result[:15]
+            labels = [d['x_col'] for d in top]
+            values = [d['r'] for d in top]
+            cid = f"corr_scan_{len(charts)}"
+            charts[cid] = {
+                'title': f"Correlation with {top[0]['y_col']} (top {len(top)})",
+                'config': {
+                    'type': 'bar',
+                    'data': {
+                        'labels': labels,
+                        'datasets': [{
+                            'label': 'Pearson r',
+                            'data': values,
+                            'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in values],
+                            'borderWidth': 0,
+                        }],
+                    },
+                    'options': {**base_opts,
+                                'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                },
+            }
+
+        elif tool_name == 'run_decile_profile':
+            bs = result.get('bucket_stats') or []
+            bs = [b for b in bs if b is not None]
+            if len(bs) >= 3:
+                x_col = result.get('x_col', '?')
+                y_col = result.get('y_col', '?')
+                avgs = [round(b['avg_ret'] * 100, 4) if 'avg_ret' in b else b.get('avg_y', 0) for b in bs]
+                cid = f"decile_{x_col}_{y_col}"
+                charts[cid] = {
+                    'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': [f"D{b['bucket']}" for b in bs],
+                            'datasets': [{
+                                'label': y_col,
+                                'data': avgs,
+                                'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_rolling_correlation' and isinstance(result, list) and len(result) > 5:
+            x_col = tr.get('inputs', {}).get('x_col', '?')
+            y_col = tr.get('inputs', {}).get('y_col', '?')
+            step = max(1, len(result) // 80)
+            sampled = result[::step]
+            cid = f"rolling_corr_{x_col}_{y_col}"
+            charts[cid] = {
+                'title': f"Rolling Correlation: {x_col} → {y_col}",
+                'config': {
+                    'type': 'line',
+                    'data': {
+                        'labels': [p['date'][:16] for p in sampled],
+                        'datasets': [{
+                            'label': 'Rolling r',
+                            'data': [p['r'] for p in sampled],
+                            'borderColor': colors_pos, 'backgroundColor': 'transparent',
+                            'borderWidth': 2, 'pointRadius': 0, 'tension': 0.1,
+                        }],
+                    },
+                    'options': {**base_opts,
+                                'scales': {**dark_scales,
+                                           'x': {**dark_scales['x'],
+                                                  'ticks': {**dark_scales['x']['ticks'],
+                                                             'maxTicksLimit': 10}}}},
+                },
+            }
+
+        elif tool_name == 'run_tail_analysis':
+            diff = result.get('difference') or {}
+            if diff:
+                top_items = list(diff.items())[:12]
+                labels = [k for k, _ in top_items]
+                values = [v for _, v in top_items]
+                cid = f"tail_{result.get('y_col', 'pnl')}"
+                charts[cid] = {
+                    'title': f"IV Metrics: Top vs Bottom {result.get('pct', 10)}% P&L",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [{
+                                'label': 'Difference (top − bottom)',
+                                'data': values,
+                                'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in values],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_regime_split':
+            high = result.get('high') or {}
+            low  = result.get('low') or {}
+            if high.get('r') is not None and low.get('r') is not None:
+                x_col = result.get('x_col', '?')
+                sc    = result.get('split_col', '?')
+                cid = f"regime_{sc}_{x_col}"
+                charts[cid] = {
+                    'title': f"Regime Split: {x_col}→P&L by {sc}",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': ['High regime', 'Low regime'],
+                            'datasets': [
+                                {
+                                    'label': 'Pearson r',
+                                    'data': [round(high['r'], 4), round(low['r'], 4)],
+                                    'backgroundColor': [colors_pos, colors_neg],
+                                    'borderWidth': 0,
+                                },
+                                {
+                                    'label': 'Mean P&L',
+                                    'data': [high.get('mean_y', 0), low.get('mean_y', 0)],
+                                    'backgroundColor': ['rgba(52,152,219,0.35)', 'rgba(232,67,147,0.35)'],
+                                    'borderWidth': 0,
+                                },
+                            ],
+                        },
+                        'options': base_opts,
+                    },
+                }
+
+        if len(charts) >= 8:
+            break
+
+    return charts
+
+
+async def execute_agentic_pipeline(
+    main_pool,
+    run_id: str,
+    question: str,
+    merged_rows: list[dict],
+    pnl_col: str,
+    available_cols: list[str],
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """
+    Multi-step Claude tool-use loop for P&L–IV correlation analysis.
+    Claude calls analysis tools iteratively and terminates with write_report.
+    Returns JSON sections string.
+    """
+    from research import analysis_tools as at
+
+    if _anthropic is None:
+        raise RuntimeError("anthropic SDK not installed")
+
+    # ── 1. Quick correlation table (pre-loop context) ─────────────────────
+    log("[RUNNING] Computing initial correlation table…")
+    from research.pnl import compute_summary_stats
+    iv_cols = [c for c in available_cols if c not in (pnl_col, 'trade_date', 'quote_time')]
+    quick_corr = at.run_correlation_scan(merged_rows, iv_cols[:40], pnl_col)
+    top15 = quick_corr[:15]
+
+    pnl_stats = compute_summary_stats(merged_rows, [pnl_col] + iv_cols[:20])
+
+    # Format quick correlation table
+    corr_lines = [f"{'x_col':<45} {'r':>7} {'p':>8} {'pattern':<20} {'score':>6}",
+                  "-" * 90]
+    for d in top15:
+        corr_lines.append(
+            f"{d['x_col']:<45} {d['r']:>7.4f} {d['p_val']:>8.4f} "
+            f"{d['pattern']:<20} {d['score']:>6.1f}"
+        )
+
+    pnl_s = pnl_stats.get(pnl_col) or {}
+    summary_text = (
+        f"DATASET SUMMARY:\n"
+        f"  Total rows (matched P&L ∩ surface): {len(merged_rows)}\n"
+        f"  P&L stats: mean={pnl_s.get('mean', '?')}, std={pnl_s.get('std', '?')}, "
+        f"min={pnl_s.get('min', '?')}, max={pnl_s.get('max', '?')}\n"
+        f"  Available IV metric columns: {len(iv_cols)}\n"
+        f"  Date range: {merged_rows[0].get('trade_date', '?')} → "
+        f"{merged_rows[-1].get('trade_date', '?')}\n\n"
+        f"TOP 15 CORRELATIONS (full scan, sorted by |r|):\n"
+        + "\n".join(corr_lines)
+    )
+
+    # ── 2. Build agentic system prompt ────────────────────────────────────
+    system = _AGENTIC_SYSTEM
+    if knowledge_rules:
+        rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
+        system += f"\n\nDOMAIN KNOWLEDGE (follow these strictly):\n{rules_text}"
+
+    first_user = (
+        f"RESEARCH QUESTION: {question}\n\n"
+        f"{summary_text}\n\n"
+        f"IV COLUMNS AVAILABLE (all {len(iv_cols)}):\n"
+        + ", ".join(iv_cols)
+        + "\n\nGreek columns available: "
+        + ", ".join(c for c in ('delta', 'theta', 'vega', 'gamma', 'wt_vega')
+                    if merged_rows and c in merged_rows[0])
+        + "\n\nBegin your analysis. Call tools to explore the data."
+    )
+
+    messages = [{"role": "user", "content": first_user}]
+    tool_results_acc: list[dict] = []
+    client = _anthropic.AsyncAnthropic()
+    report_data = None
+    max_steps = 8
+
+    # ── 3. Agentic loop ───────────────────────────────────────────────────
+    for step in range(max_steps):
+        log(f"[RUNNING] Agentic analysis step {step + 1}/{max_steps}…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(
+                conn, run_id,
+                ai_summary=f"[RUNNING] Agentic analysis step {step + 1}/{max_steps}…",
+            )
+
+        resp = await client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=[{"type": "text", "text": system,
+                     "cache_control": {"type": "ephemeral"}}],
+            tools=_AGENTIC_TOOLS,
+            messages=messages,
+        )
+
+        # Collect assistant message content
+        messages.append({"role": "assistant", "content": resp.content})
+
+        # Check stop reason
+        if resp.stop_reason == "end_turn":
+            log("  Claude finished without calling write_report — extracting text.")
+            text = " ".join(b.text for b in resp.content if hasattr(b, 'text') and b.text)
+            if text:
+                sections = [{"type": "markdown", "content": text}]
+                return json.dumps(sections)
+            break
+
+        # Collect and dispatch tool calls
+        tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
+        if not tool_use_blocks:
+            break
+
+        tool_result_messages = []
+        for block in tool_use_blocks:
+            tool_name = block.name
+            inputs = block.input or {}
+
+            if tool_name == "write_report":
+                report_data = inputs
+                break  # exit loop, will build report below
+
+            # Dispatch to analysis_tools
+            log(f"    → {tool_name}({list(inputs.keys())})")
+            try:
+                if tool_name == "run_correlation_scan":
+                    result = at.run_correlation_scan(merged_rows, inputs["x_cols"], inputs["y_col"])
+                elif tool_name == "run_regression":
+                    result = at.run_regression(merged_rows, inputs["x_cols"], inputs["y_col"])
+                elif tool_name == "run_lag_scan":
+                    result = at.run_lag_scan(
+                        merged_rows, inputs["x_col"], inputs["y_col"],
+                        inputs.get("lags", [1, 5, 10, 30]),
+                    )
+                elif tool_name == "run_regime_split":
+                    result = at.run_regime_split(
+                        merged_rows, inputs["x_col"], inputs["y_col"],
+                        inputs["split_col"], inputs.get("method", "median"),
+                    )
+                elif tool_name == "run_rolling_correlation":
+                    result = at.run_rolling_correlation(
+                        merged_rows, inputs["x_col"], inputs["y_col"],
+                        inputs.get("window", 30),
+                    )
+                elif tool_name == "run_tail_analysis":
+                    result = at.run_tail_analysis(
+                        merged_rows, inputs["y_col"], inputs["x_cols"],
+                        inputs.get("pct", 10),
+                    )
+                elif tool_name == "run_decile_profile":
+                    result = at.run_decile_profile(merged_rows, inputs["x_col"], inputs["y_col"])
+                elif tool_name == "run_greek_attribution":
+                    result = at.run_greek_attribution(merged_rows, inputs.get("pnl_col", pnl_col))
+                else:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+            except Exception as exc:
+                result = {"error": str(exc)}
+
+            tool_results_acc.append({"tool": tool_name, "inputs": inputs, "result": result})
+            result_str = json.dumps(result)
+            if len(result_str) > 8000:
+                result_str = result_str[:8000] + "… (truncated)"
+            tool_result_messages.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_str,
+            })
+
+        if report_data is not None:
+            break
+
+        if tool_result_messages:
+            messages.append({"role": "user", "content": tool_result_messages})
+        else:
+            break
+
+    # ── 4. Force a write_report if we exited without one ──────────────────
+    if report_data is None:
+        log("  [RUNNING] Composing report (forced)…")
+        force_msg = (
+            "You have completed your analysis. Now call write_report with your findings. "
+            "Be thorough — cite specific numbers from your tool results."
+        )
+        messages.append({"role": "user", "content": force_msg})
+        resp2 = await client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=[{"type": "text", "text": system}],
+            tools=_AGENTIC_TOOLS,
+            tool_choice={"type": "tool", "name": "write_report"},
+            messages=messages,
+        )
+        for block in resp2.content:
+            if block.type == "tool_use" and block.name == "write_report":
+                report_data = block.input
+                break
+
+    # ── 5. Build chart configs and assemble sections ──────────────────────
+    log("[RUNNING] Composing final report…")
+    chart_configs = _build_agentic_chart_configs(tool_results_acc)
+
+    if report_data is None:
+        sections = [{"type": "markdown", "content": "(Report generation failed — no tool call returned)"}]
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+        return json.dumps(sections)
+
+    exec_summary = (report_data.get("executive_summary") or "").strip()
+    body = (report_data.get("body") or "").strip()
+    conclusions = (report_data.get("conclusions") or "").strip()
+    chart_seq = report_data.get("chart_sequence") or []
+
+    sections = []
+    if exec_summary:
+        sections.append({"type": "markdown", "content": exec_summary})
+
+    body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
+    referenced = set()
+
+    if body_paras and chart_seq:
+        charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+        chart_idx = 0
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+            for _ in range(charts_per_gap):
+                if chart_idx < len(chart_seq):
+                    cid = chart_seq[chart_idx]
+                    if cid in chart_configs:
+                        sections.append({
+                            "type": "chart", "chart_id": cid,
+                            "title": chart_configs[cid]["title"],
+                            "config": chart_configs[cid]["config"],
+                        })
+                        referenced.add(cid)
+                    chart_idx += 1
+        while chart_idx < len(chart_seq):
+            cid = chart_seq[chart_idx]
+            if cid in chart_configs:
+                sections.append({"type": "chart", "chart_id": cid,
+                                  "title": chart_configs[cid]["title"],
+                                  "config": chart_configs[cid]["config"]})
+                referenced.add(cid)
+            chart_idx += 1
+    else:
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+
+    if conclusions:
+        sections.append({"type": "markdown", "content": f"## Conclusions\n\n{conclusions}"})
+
+    for cid, chart in chart_configs.items():
+        if cid not in referenced:
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+
+    return json.dumps(sections)
+
+
+async def _execute_pnl_pipeline(
+    main_pool,
+    run_id: str,
+    question: str,
+    config: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """Load P&L upload, align to surface_metrics_core, run agentic pipeline."""
+    from research.pnl import align_pnl_to_surface, compute_summary_stats
+
+    upload_id = config["pnl_upload_id"]
+    date_from = config.get("date_from")
+    date_to   = config.get("date_to")
+
+    # Load upload record
+    log("[RUNNING] Loading P&L upload…")
+    async with main_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT data, date_from, date_to FROM research_pnl_uploads WHERE id = $1::uuid",
+            upload_id,
+        )
+    if row is None:
+        raise ValueError(f"P&L upload {upload_id} not found")
+
+    pnl_rows = json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
+    if not date_from:
+        date_from = str(row["date_from"])
+    if not date_to:
+        date_to = str(row["date_to"])
+
+    # Align to surface
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary=f"[RUNNING] Aligning P&L data to surface metrics…")
+    merged, stats = await align_pnl_to_surface(pnl_rows, main_pool, date_from, date_to)
+    log(f"[RUNNING] Aligned {stats['matched']}/{stats['pnl_rows']} P&L rows "
+        f"(match_rate={stats['match_rate']:.1%}, surface_rows={stats['surface_rows']})")
+
+    if not merged:
+        raise ValueError(
+            f"No rows matched after P&L–surface JOIN. "
+            f"P&L rows: {stats['pnl_rows']}, surface rows for {date_from}–{date_to}: {stats['surface_rows']}. "
+            "Check that dates/times in the CSV overlap with surface_metrics_core."
+        )
+
+    available_cols = list(merged[0].keys()) if merged else []
+
+    return await execute_agentic_pipeline(
+        main_pool=main_pool,
+        run_id=run_id,
+        question=question,
+        merged_rows=merged,
+        pnl_col="pnl",
+        available_cols=available_cols,
+        model=model,
+        knowledge_rules=knowledge_rules,
+        log=log,
+    )
+
+
 # ── Phase 1: Main execution pipeline ─────────────────────────────────────────
 
 async def execute_v2_pipeline(
@@ -1159,6 +1790,18 @@ async def execute_v2_pipeline(
       4. Generate only those visuals
       5. Compose focused narrative report
     """
+    # ── P&L agentic mode ────────────────────────────────────────────────
+    if config.get("pnl_upload_id"):
+        return await _execute_pnl_pipeline(
+            main_pool=main_pool,
+            run_id=run_id,
+            question=question,
+            config=config,
+            model=model,
+            knowledge_rules=knowledge_rules,
+            log=log,
+        )
+
     from research.engine import _fetch_cache  # reuse fetch logic
 
     table = config.get("table", "daily_features")

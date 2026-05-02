@@ -61,6 +61,20 @@ document.addEventListener('alpine:init', () => {
     editingKnowledgeId:    null,
     editingKnowledgeText:  '',
 
+    // P&L upload
+    uploadState: {
+      file:       null,
+      uploading:  false,
+      uploadId:   null,
+      uploadName: null,
+      preview:    null,
+      columns:    null,
+      rowCount:   null,
+      dateFrom:   null,
+      dateTo:     null,
+      error:      null,
+    },
+
     form: {
       name:      '',
       question:  '',
@@ -329,6 +343,56 @@ document.addEventListener('alpine:init', () => {
         tickers: '', date_from: '', date_to: '',
         model: 'claude-sonnet-4-6',
       };
+      this.uploadState = {
+        file: null, uploading: false, uploadId: null, uploadName: null,
+        preview: null, columns: null, rowCount: null,
+        dateFrom: null, dateTo: null, error: null,
+      };
+    },
+
+    // ── P&L upload ────────────────────────────────────────────────────────
+    onPnlFileChange(event) {
+      const f = event.target.files[0];
+      if (f) this.uploadState.file = f;
+    },
+
+    async uploadPnl() {
+      const f = this.uploadState.file;
+      if (!f) return;
+      this.uploadState.uploading = true;
+      this.uploadState.error     = null;
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('name', f.name.replace(/\.csv$/i, ''));
+      try {
+        const r = await fetch('/api/research2/upload-pnl', { method: 'POST', body: fd });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        this.uploadState.uploadId   = data.upload_id;
+        this.uploadState.uploadName = data.name;
+        this.uploadState.preview    = data.preview;
+        this.uploadState.columns    = data.columns;
+        this.uploadState.rowCount   = data.row_count;
+        this.uploadState.dateFrom   = data.date_from;
+        this.uploadState.dateTo     = data.date_to;
+        if (!this.form.date_from && data.date_from) this.form.date_from = data.date_from;
+        if (!this.form.date_to   && data.date_to)   this.form.date_to   = data.date_to;
+      } catch (e) {
+        this.uploadState.error = e.message;
+      } finally {
+        this.uploadState.uploading = false;
+      }
+    },
+
+    clearUpload() {
+      this.uploadState = {
+        file: null, uploading: false, uploadId: null, uploadName: null,
+        preview: null, columns: null, rowCount: null,
+        dateFrom: null, dateTo: null, error: null,
+      };
     },
 
     setTable(t) { this.form.table = t; },
@@ -346,13 +410,14 @@ document.addEventListener('alpine:init', () => {
       }
       const parse = s => s.split(',').map(x => x.trim()).filter(Boolean);
       const body = {
-        name:      this.form.name.trim(),
-        question:  this.form.question.trim(),
-        table:     this.form.table,
-        tickers:   parse(this.form.tickers),
-        date_from: this.form.date_from || null,
-        date_to:   this.form.date_to   || null,
-        model:     this.form.model,
+        name:          this.form.name.trim(),
+        question:      this.form.question.trim(),
+        table:         this.form.table,
+        tickers:       parse(this.form.tickers),
+        date_from:     this.form.date_from || null,
+        date_to:       this.form.date_to   || null,
+        model:         this.form.model,
+        pnl_upload_id: this.uploadState.uploadId || null,
       };
       this.submitting = true;
       try {
@@ -471,6 +536,7 @@ document.addEventListener('alpine:init', () => {
         'strategy-entry-condition':  '#3a1a2a',
         'microstructure-investigation': '#1a3a3a',
         'anomaly-investigation':     '#2a3a1a',
+        'pnl-iv-correlation':        '#2a1a3a',
       };
       return colors[this.plan?.task_type] || '#2a2a2a';
     },
