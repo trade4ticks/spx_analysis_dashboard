@@ -2120,7 +2120,7 @@ async def execute_backtest_pipeline(
     """
     from research import analysis_tools as at
 
-    client = _get_client()
+    client = _anthropic.AsyncAnthropic()
     system = _BACKTEST_AGENTIC_SYSTEM
     if knowledge_rules:
         rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
