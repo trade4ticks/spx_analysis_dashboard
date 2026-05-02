@@ -354,7 +354,10 @@ async def align_trades_to_surface(
         if isinstance(v, (_date, _datetime)):
             return str(v)
         if isinstance(v, decimal.Decimal):
-            return float(v)
+            f = float(v)
+            return None if (math.isnan(f) or math.isinf(f)) else f
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
         return v
 
     # Build lookup keyed by trade_date string; sanitize for JSON storage

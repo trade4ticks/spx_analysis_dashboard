@@ -564,24 +564,33 @@ async def upload_backtest(
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
 
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """INSERT INTO research_backtest_uploads
-               (name, source, trade_count, matched_count, date_from, date_to,
-                strategies, columns, data)
-               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)
-               RETURNING id::text, name, source, trade_count, matched_count,
-                         date_from, date_to, created_at""",
-            name,
-            meta.get("source", "unknown"),
-            meta["trade_count"],
-            stats["matched"],
-            _to_date(date_from),
-            _to_date(date_to),
-            json.dumps(meta.get("strategies") or []),
-            json.dumps(meta.get("columns") or []),
-            json.dumps(enriched),
-        )
+    try:
+        enriched_json = json.dumps(enriched)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(500, f"Serialization failed: {exc}") from exc
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO research_backtest_uploads
+                   (name, source, trade_count, matched_count, date_from, date_to,
+                    strategies, columns, data)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)
+                   RETURNING id::text, name, source, trade_count, matched_count,
+                             date_from, date_to, created_at""",
+                name,
+                meta.get("source", "unknown"),
+                meta["trade_count"],
+                stats["matched"],
+                _to_date(date_from),
+                _to_date(date_to),
+                json.dumps(meta.get("strategies") or []),
+                json.dumps(meta.get("columns") or []),
+                enriched_json,
+            )
+    except Exception as exc:
+        log.error("Backtest INSERT failed: %s", exc)
+        raise HTTPException(500, f"Database insert failed: {exc}") from exc
 
     return {
         "upload_id":     row["id"],
