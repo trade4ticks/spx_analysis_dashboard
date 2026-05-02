@@ -57,6 +57,19 @@ def _styles():
     return {"title": title_style, "h1": h1, "h2": h2, "body": body, "dim": dim, "tag": tag}
 
 
+def _safe_hex(color_str, fallback):
+    """Return a reportlab color from a hex string, falling back on rgba() or bad input."""
+    if not isinstance(color_str, str):
+        return fallback
+    s = color_str.strip()
+    if s.startswith("#"):
+        try:
+            return colors.HexColor(s)
+        except Exception:
+            return fallback
+    return fallback
+
+
 def _esc(text: str) -> str:
     """Escape XML special chars for reportlab Paragraph."""
     s = str(text)
@@ -407,12 +420,13 @@ def _draw_bar_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
                 continue
             v = float(v)
             # Determine bar color
+            fallback = ds_colors[di % len(ds_colors)]
             if isinstance(bg, list) and i < len(bg):
-                col = colors.HexColor(bg[i]) if isinstance(bg[i], str) else ds_colors[di % len(ds_colors)]
+                col = _safe_hex(bg[i], fallback)
             elif isinstance(bg, str):
-                col = colors.HexColor(bg)
+                col = _safe_hex(bg, fallback)
             else:
-                col = ds_colors[di % len(ds_colors)]
+                col = fallback
 
             zero_y = margin_b + (-v_min / v_range) * plot_h
             bar_h = (v / v_range) * plot_h
@@ -443,12 +457,13 @@ def _draw_horizontal_bar(d, datasets, labels, all_vals, v_min, v_max, v_range,
             if v is None:
                 continue
             v = float(v)
+            fallback = ds_colors[di % len(ds_colors)]
             if isinstance(bg, list) and i < len(bg):
-                col = colors.HexColor(bg[i]) if isinstance(bg[i], str) else ds_colors[di % len(ds_colors)]
+                col = _safe_hex(bg[i], fallback)
             elif isinstance(bg, str):
-                col = colors.HexColor(bg)
+                col = _safe_hex(bg, fallback)
             else:
-                col = ds_colors[di % len(ds_colors)]
+                col = fallback
 
             bar_w_px = (v / v_range) * (W - h_margin_l - 20)
             y = margin_b + (n - 1 - i) * (plot_h / n) + gap
@@ -474,11 +489,7 @@ def _draw_line_chart(d, datasets, labels, all_vals, v_min, v_max, v_range,
     for di, ds in enumerate(datasets):
         vals = ds.get("data") or []
         col = ds_colors[di % len(ds_colors)]
-        if isinstance(ds.get("borderColor"), str):
-            try:
-                col = colors.HexColor(ds["borderColor"])
-            except Exception:
-                pass
+        col = _safe_hex(ds.get("borderColor"), col)
 
         prev_x, prev_y = None, None
         for i in range(min(len(vals), n)):
