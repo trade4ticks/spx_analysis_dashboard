@@ -1756,6 +1756,39 @@ async def _execute_pnl_pipeline(
 
     available_cols = list(merged[0].keys()) if merged else []
 
+    # Separate IV metric columns from P&L / greek / timestamp columns
+    _non_iv = {'trade_date', 'quote_time', 'pnl', 'delta', 'theta',
+               'vega', 'gamma', 'wt_vega', 'id'}
+    iv_cols   = [c for c in available_cols if c not in _non_iv]
+    greek_cols = [c for c in ('delta', 'theta', 'vega', 'gamma', 'wt_vega')
+                  if c in available_cols]
+
+    # Enrich the workflow plan with actual column info and match stats
+    async with main_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE research_runs
+               SET config = jsonb_set(
+                   jsonb_set(
+                       jsonb_set(config,
+                           '{workflow_plan,feature_columns}', $2::jsonb),
+                       '{workflow_plan,task_reasoning}', $3::jsonb),
+                   '{workflow_plan,hypotheses}', $4::jsonb)
+               WHERE id = $1::uuid""",
+            run_id,
+            json.dumps(iv_cols),
+            json.dumps(
+                f"P&L–IV agentic analysis: {stats['matched']} matched 5-min bars "
+                f"({stats['match_rate']:.0%} match rate) across "
+                f"{date_from} – {date_to}. "
+                f"Claude will explore {len(iv_cols)} IV metric columns vs P&L."
+            ),
+            json.dumps([
+                f"Some IV metrics correlate meaningfully with intraday P&L",
+                f"IV regime (level of skew/vol) conditions the P&L relationship",
+                f"Greek attribution leaves unexplained P&L that IV metrics can explain",
+            ]),
+        )
+
     return await execute_agentic_pipeline(
         main_pool=main_pool,
         run_id=run_id,
