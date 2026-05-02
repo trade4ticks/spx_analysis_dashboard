@@ -7,6 +7,7 @@ Supports:
 All functions are pandas-free (stdlib only). Date normalization reuses pnl.normalize_date.
 """
 import csv
+import decimal
 import io
 import json
 import math
@@ -349,10 +350,17 @@ async def align_trades_to_surface(
             _as_date(date_from), _as_date(date_to),
         )
 
-    # Build lookup keyed by trade_date string
+    def _json_safe(v):
+        if isinstance(v, (_date, _datetime)):
+            return str(v)
+        if isinstance(v, decimal.Decimal):
+            return float(v)
+        return v
+
+    # Build lookup keyed by trade_date string; sanitize for JSON storage
     surface_lookup: dict[str, dict] = {}
     for row in surface_rows:
-        surface_lookup[str(row['trade_date'])] = dict(row)
+        surface_lookup[str(row['trade_date'])] = {k: _json_safe(v) for k, v in dict(row).items()}
 
     enriched = []
     matched = 0
