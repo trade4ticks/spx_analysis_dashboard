@@ -59,7 +59,14 @@ def _styles():
 
 def _esc(text: str) -> str:
     """Escape XML special chars for reportlab Paragraph."""
-    return (str(text)
+    s = str(text)
+    # Replace curly quotes and em-dashes with ASCII equivalents ReportLab can handle
+    s = s.replace("‘", "'").replace("’", "'")
+    s = s.replace("“", '"').replace("”", '"')
+    s = s.replace("–", "-").replace("—", "--")
+    s = s.replace("•", "*").replace("…", "...")
+    # XML escapes must come last
+    return (s
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")

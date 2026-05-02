@@ -1,7 +1,11 @@
 """Research 2 API endpoints — orchestration-driven research."""
 import json
+import logging
+import traceback
 from datetime import date as _date
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 import anthropic
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, UploadFile, File, Form
@@ -188,13 +192,18 @@ async def download_pdf(run_id: str, pool=Depends(get_pool)):
         if not run:
             raise HTTPException(404, "Run not found")
         results = await rdb.load_results(conn, run_id)
-        charts  = await rdb.load_charts(conn, run_id)
+        # Research 2 embeds charts in ai_summary; research_charts table is not used
+        charts = []
 
     for r in results:
         if isinstance(r.get("result"), str):
             r["result"] = json.loads(r["result"])
 
-    pdf_bytes = rexport.build_pdf_bytes(run, results, charts)
+    try:
+        pdf_bytes = rexport.build_pdf_bytes(run, results, charts)
+    except Exception as exc:
+        log.error("PDF build failed for run %s:\n%s", run_id, traceback.format_exc())
+        raise HTTPException(500, f"PDF generation failed: {exc}") from exc
     safe_name = run["name"].replace(" ", "_").replace("/", "-")
     return Response(
         content=pdf_bytes,
