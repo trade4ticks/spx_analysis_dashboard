@@ -13,7 +13,7 @@ import json
 import math
 import statistics
 from collections import defaultdict
-from datetime import date as _date, datetime as _datetime
+from datetime import date as _date, datetime as _datetime, time as _time
 from typing import Optional
 
 from research.pnl import normalize_date
@@ -351,7 +351,7 @@ async def align_trades_to_surface(
         )
 
     def _json_safe(v):
-        if isinstance(v, (_date, _datetime)):
+        if isinstance(v, (_date, _datetime, _time)):
             return str(v)
         if isinstance(v, decimal.Decimal):
             f = float(v)
