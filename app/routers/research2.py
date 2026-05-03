@@ -565,6 +565,10 @@ async def upload_backtest(
     if not all_trades:
         raise HTTPException(400, "No trades found in uploaded files")
 
+    # Drop daily_path before alignment — it's massive and not needed for regime analysis
+    for t in all_trades:
+        t.pop('daily_path', None)
+
     # Sort combined trades chronologically
     all_trades.sort(key=lambda t: t.get('date_opened', ''))
 
@@ -590,7 +594,12 @@ async def upload_backtest(
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
 
-    # Strip daily_path from preview rows (can be large)
+    # Strip daily_path from ALL trades — it bloats the payload massively
+    # (thousands of trades × 30-45 daily entries each). Regime analysis only
+    # needs entry date, exit date, P&L, and IV surface fields at entry.
+    for t in enriched:
+        t.pop('daily_path', None)
+
     def _strip_path(t):
         return {k: v for k, v in t.items() if k != 'daily_path'}
 
