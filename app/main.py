@@ -6,6 +6,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db import init_pool, close_pool
+
+# Raise multipart upload limit from 1MB to 200MB for backtest file uploads
+try:
+    from starlette.formparsers import MultiPartParser
+    MultiPartParser.max_file_size = 200 * 1024 * 1024  # 200MB
+except (ImportError, AttributeError):
+    pass
 from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis
 
 BASE_DIR = Path(__file__).parent.parent  # project root
