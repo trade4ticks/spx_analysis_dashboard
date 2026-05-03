@@ -711,6 +711,21 @@ async def finalize_backtest(
     }
 
 
+@router.delete("/clear-backtest-staging")
+async def clear_backtest_staging(
+    name: Optional[str] = None,
+    pool=Depends(get_pool),
+):
+    """Clear staged backtest files. If name given, clear only that group; otherwise clear all."""
+    async with pool.acquire() as conn:
+        if name:
+            await conn.execute(
+                "DELETE FROM research_backtest_staging WHERE upload_name = $1", name)
+        else:
+            await conn.execute("DELETE FROM research_backtest_staging")
+    return {"cleared": True}
+
+
 @router.get("/backtest-uploads")
 async def list_backtest_uploads(pool=Depends(get_pool)):
     """List recent backtest uploads."""

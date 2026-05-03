@@ -513,7 +513,13 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    clearBacktest() {
+    async clearBacktest() {
+      // Clear staging table on server
+      const name = this.backtestUploadState.uploadName;
+      if (name) {
+        await fetch(`/api/research2/clear-backtest-staging?name=${encodeURIComponent(name)}`,
+                     { method: 'DELETE' }).catch(() => {});
+      }
       this.backtestUploadState = {
         files: [], uploading: false, finalizing: false,
         uploadId: null, uploadName: null,
