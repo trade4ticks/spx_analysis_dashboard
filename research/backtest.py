@@ -54,7 +54,7 @@ TRADE_FIELDS = {
     'premium', 'contracts', 'spx_open_price', 'spx_close_price',
     'time_opened', 'time_closed', 'days_in_trade', 'is_win',
     'join_timestamp', 'trade_date', 'quote_time', 'id',
-    'day_of_week', 'year',
+    'day_of_week', 'year', 'daily_path',
 }
 
 
@@ -157,6 +157,7 @@ def parse_backtest_csv(content: str) -> tuple[list[dict], dict]:
             row['days_in_trade'] = _days_between(d_open, d_close)
         pnl = _safe_float(row.get('pnl'))
         row['is_win'] = bool(pnl is not None and pnl > 0)
+        row['daily_path'] = []
 
         trades.append(row)
 
@@ -170,7 +171,7 @@ def parse_backtest_csv(content: str) -> tuple[list[dict], dict]:
     columns = [
         {'name': k, 'type': _infer_column_type(k)}
         for k in trades[0].keys()
-        if k not in ('time_opened', 'time_closed', 'spx_open_price', 'spx_close_price')
+        if k not in ('time_opened', 'time_closed', 'spx_open_price', 'spx_close_price', 'daily_path')
     ]
 
     return trades, {
@@ -219,7 +220,8 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
     trades = []
     for pos_id, pos_events in positions.items():
         enter_event = exit_event = exit_signal = None
-        entry_trades = []
+        entry_trades: list = []
+        eod_events:   list = []
 
         for ev in pos_events:
             et = ev.get('EventType')
@@ -231,6 +233,8 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
                 exit_signal = ev
             elif et == 'EntryTrade':
                 entry_trades.append(ev)
+            elif et == 'EndOfDay':
+                eod_events.append(ev)
 
         if not enter_event or not exit_event:
             continue
@@ -266,6 +270,31 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
             exit_signal.get('Message', 'Unknown') if exit_signal else 'Unknown'
         )
 
+        # Build daily path from EndOfDay events
+        eod_events.sort(key=lambda e: e.get('SimTime', ''))
+        daily_path = []
+        for eod in eod_events:
+            sim_time = eod.get('SimTime', '')
+            eod_date = sim_time[:10] if sim_time else None
+            if not eod_date:
+                continue
+            msg = eod.get('Message', '')
+            try:
+                dit = int(msg.split('=')[1].strip()) if '=' in msg else None
+            except (IndexError, ValueError):
+                dit = None
+            vars_ = eod.get('Vars') or {}
+            daily_path.append({
+                'date':      eod_date,
+                'dit':       dit,
+                'pos_pnl':   _safe_float(vars_.get('pos_pnl')),
+                'pos_delta': _safe_float(vars_.get('pos_delta')),
+                'pos_gamma': _safe_float(vars_.get('pos_gamma')),
+                'pos_theta': _safe_float(vars_.get('pos_theta')),
+                'pos_vega':  _safe_float(vars_.get('pos_vega')),
+                'pos_wvega': _safe_float(vars_.get('pos_wvega')),
+            })
+
         pnl_val = pnl if pnl is not None else 0.0
         trades.append({
             'date_opened':   date_opened,
@@ -278,6 +307,7 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
             'exit_reason':   exit_reason,
             'days_in_trade': _days_between(date_opened, date_closed),
             'is_win':        pnl_val > 0,
+            'daily_path':    daily_path,
         })
 
     if not trades:
@@ -289,6 +319,7 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
     columns = [
         {'name': k, 'type': _infer_column_type(k)}
         for k in trades[0].keys()
+        if k != 'daily_path'
     ]
 
     return trades, {

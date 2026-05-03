@@ -77,7 +77,7 @@ document.addEventListener('alpine:init', () => {
 
     // Backtest upload
     backtestUploadState: {
-      file:         null,
+      files:        [],
       uploading:    false,
       uploadId:     null,
       uploadName:   null,
@@ -89,6 +89,7 @@ document.addEventListener('alpine:init', () => {
       dateTo:       null,
       strategies:   [],
       columns:      [],
+      sources:      [],
       preview:      null,
       warnings:     [],
       error:        null,
@@ -368,8 +369,8 @@ document.addEventListener('alpine:init', () => {
         dateFrom: null, dateTo: null, error: null,
       };
       this.backtestUploadState = {
-        file: null, uploading: false, uploadId: null, uploadName: null,
-        source: null, tradeCount: null, matchedCount: null, matchRate: null,
+        files: [], uploading: false, uploadId: null, uploadName: null,
+        source: null, sources: [], tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
         preview: null, warnings: [], error: null,
       };
@@ -422,18 +423,18 @@ document.addEventListener('alpine:init', () => {
 
     // ── Backtest upload ───────────────────────────────────────────────────
     onBacktestFileChange(event) {
-      const f = event.target.files[0];
-      if (f) this.backtestUploadState.file = f;
+      const fs = Array.from(event.target.files || []);
+      if (fs.length) this.backtestUploadState.files = fs;
     },
 
     async uploadBacktest() {
-      const f = this.backtestUploadState.file;
-      if (!f) return;
+      const files = this.backtestUploadState.files;
+      if (!files.length) return;
       this.backtestUploadState.uploading = true;
       this.backtestUploadState.error     = null;
       const fd = new FormData();
-      fd.append('file', f);
-      fd.append('name', f.name.replace(/\.(csv|json)$/i, ''));
+      files.forEach(f => fd.append('files', f));
+      fd.append('name', files[0].name.replace(/\.(csv|json)$/i, '').replace(/_[a-z]{3}$/i, ''));
       try {
         const r = await fetch('/api/research2/upload-backtest', { method: 'POST', body: fd });
         if (!r.ok) {
@@ -444,6 +445,7 @@ document.addEventListener('alpine:init', () => {
         this.backtestUploadState.uploadId     = data.upload_id;
         this.backtestUploadState.uploadName   = data.name;
         this.backtestUploadState.source       = data.source;
+        this.backtestUploadState.sources      = data.sources || [];
         this.backtestUploadState.tradeCount   = data.trade_count;
         this.backtestUploadState.matchedCount = data.matched_count;
         this.backtestUploadState.matchRate    = data.match_rate;
@@ -462,8 +464,8 @@ document.addEventListener('alpine:init', () => {
 
     clearBacktest() {
       this.backtestUploadState = {
-        file: null, uploading: false, uploadId: null, uploadName: null,
-        source: null, tradeCount: null, matchedCount: null, matchRate: null,
+        files: [], uploading: false, uploadId: null, uploadName: null,
+        source: null, sources: [], tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
         preview: null, warnings: [], error: null,
       };

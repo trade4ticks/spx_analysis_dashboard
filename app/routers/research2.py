@@ -3,7 +3,7 @@ import json
 import logging
 import traceback
 from datetime import date as _date
-from typing import Optional
+from typing import List, Optional
 
 log = logging.getLogger(__name__)
 
@@ -522,10 +522,15 @@ async def _ensure_backtest_table(pool):
                     date_to       DATE,
                     strategies    JSONB,
                     columns       JSONB,
+                    sources       JSONB,
                     data          JSONB,
                     created_at    TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            await conn.execute(
+                "ALTER TABLE research_backtest_uploads "
+                "ADD COLUMN IF NOT EXISTS sources JSONB"
+            )
         _backtest_table_ready = True
     except Exception:
         pass
@@ -533,36 +538,58 @@ async def _ensure_backtest_table(pool):
 
 @router.post("/upload-backtest")
 async def upload_backtest(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     name: str = Form(...),
     pool=Depends(get_pool),
 ):
-    """Upload a backtest file (CSV or JSON), join to IV surface at entry, store enriched trades."""
+    """Upload one or more backtest files (CSV or JSON), aggregate, align to IV surface, store."""
     await _ensure_backtest_table(pool)
-    content_bytes = await file.read()
 
-    try:
-        trades, meta = rbacktest.parse_backtest_upload(content_bytes, file.filename)
-    except Exception as exc:
-        raise HTTPException(400, f"Parse error: {exc}")
+    all_trades: list = []
+    all_metas:  list = []
+    sources:    list = []
 
-    if not trades:
-        raise HTTPException(400, "No trades found in uploaded file")
+    for file in files:
+        content_bytes = await file.read()
+        try:
+            trades, meta = rbacktest.parse_backtest_upload(content_bytes, file.filename)
+        except Exception as exc:
+            raise HTTPException(400, f"Parse error in '{file.filename}': {exc}")
+        all_trades.extend(trades)
+        all_metas.append(meta)
+        sources.append(file.filename)
 
-    date_from = meta.get("date_from")
-    date_to   = meta.get("date_to")
+    if not all_trades:
+        raise HTTPException(400, "No trades found in uploaded files")
+
+    # Sort combined trades chronologically
+    all_trades.sort(key=lambda t: t.get('date_opened', ''))
+
+    # Merge meta across files
+    date_froms = [m['date_from'] for m in all_metas if m.get('date_from')]
+    date_tos   = [m['date_to']   for m in all_metas if m.get('date_to')]
+    date_from  = min(date_froms) if date_froms else None
+    date_to    = max(date_tos)   if date_tos   else None
     if not date_from or not date_to:
-        raise HTTPException(400, "Could not determine date range from file")
+        raise HTTPException(400, "Could not determine date range from files")
+
+    strategies = sorted({s for m in all_metas for s in (m.get('strategies') or [])})
+    columns    = all_metas[0].get('columns') or []
+    source     = all_metas[0].get('source', 'unknown')
 
     try:
         enriched, stats = await rbacktest.align_trades_to_surface(
-            trades, pool, date_from, date_to
+            all_trades, pool, date_from, date_to
         )
     except Exception as exc:
         raise HTTPException(500, f"Surface alignment failed: {exc}")
 
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
+
+    # Strip daily_path from preview rows (can be large)
+    def _strip_path(t):
+        return {k: v for k, v in t.items() if k != 'daily_path'}
 
     try:
         enriched_json = json.dumps(enriched)
@@ -574,18 +601,19 @@ async def upload_backtest(
             row = await conn.fetchrow(
                 """INSERT INTO research_backtest_uploads
                    (name, source, trade_count, matched_count, date_from, date_to,
-                    strategies, columns, data)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)
+                    strategies, columns, sources, data)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)
                    RETURNING id::text, name, source, trade_count, matched_count,
                              date_from, date_to, created_at""",
                 name,
-                meta.get("source", "unknown"),
-                meta["trade_count"],
+                source,
+                len(all_trades),
                 stats["matched"],
                 _to_date(date_from),
                 _to_date(date_to),
-                json.dumps(meta.get("strategies") or []),
-                json.dumps(meta.get("columns") or []),
+                json.dumps(strategies),
+                json.dumps(columns),
+                json.dumps(sources),
                 enriched_json,
             )
     except Exception as exc:
@@ -601,10 +629,11 @@ async def upload_backtest(
         "match_rate":    stats["match_rate"],
         "date_from":     str(row["date_from"]) if row["date_from"] else None,
         "date_to":       str(row["date_to"])   if row["date_to"]   else None,
-        "strategies":    meta.get("strategies") or [],
-        "columns":       meta.get("columns") or [],
+        "strategies":    strategies,
+        "columns":       columns,
+        "sources":       sources,
         "validation":    {"stats": stats, "warnings": stats.get("warnings", [])},
-        "preview":       enriched[:5],
+        "preview":       [_strip_path(t) for t in enriched[:5]],
     }
 
 
