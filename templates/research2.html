@@ -528,26 +528,51 @@ Examples:
 
             <!-- No upload yet -->
             <template x-if="!backtestUploadState.uploadId">
-              <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
-                <input type="file" accept=".csv,.json" multiple
-                       @change="onBacktestFileChange($event)"
-                       style="background:#1a1a1a;border:1px solid #444;color:#aaa;
-                              padding:4px 6px;border-radius:3px;font-size:11px;flex:1;min-width:0">
-                <template x-if="backtestUploadState.files.length > 0">
-                  <span style="font-size:10px;color:#888;align-self:center"
-                        x-text="backtestUploadState.files.length + ' file' + (backtestUploadState.files.length > 1 ? 's' : '') + ' selected'"></span>
+              <div>
+                <!-- File picker + upload button -->
+                <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-bottom:8px">
+                  <input type="file" accept=".csv,.json" multiple
+                         @change="onBacktestFileChange($event)"
+                         style="background:#1a1a1a;border:1px solid #444;color:#aaa;
+                                padding:4px 6px;border-radius:3px;font-size:11px;flex:1;min-width:0">
+                  <button class="btn"
+                          style="font-size:11px;padding:5px 14px;background:rgba(46,204,113,.1);
+                                 border-color:rgba(46,204,113,.3);color:#2ecc71;flex-shrink:0"
+                          @click="uploadBacktest()"
+                          :disabled="!backtestUploadState.files.length || backtestUploadState.uploading">
+                    <span x-text="backtestUploadState.uploading ? '⏳ Uploading…' : '↑ Upload'"></span>
+                  </button>
+                </div>
+
+                <!-- Staged files list -->
+                <template x-if="backtestUploadState.stagedFiles.length > 0">
+                  <div style="margin-bottom:8px">
+                    <div style="font-size:10px;color:#888;margin-bottom:4px"
+                         x-text="backtestUploadState.stagedFiles.length + ' file(s) staged · ' + backtestUploadState.totalTrades + ' trades total'"></div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px">
+                      <template x-for="sf in backtestUploadState.stagedFiles" :key="sf">
+                        <span style="font-size:9px;padding:2px 7px;border-radius:3px;
+                                     background:#1a2a1a;color:#2ecc71;border:1px solid #2a4a2a;font-family:monospace"
+                              x-text="sf"></span>
+                      </template>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                      <span style="font-size:10px;color:#555">Add more files above, or:</span>
+                      <button class="btn"
+                              style="font-size:11px;padding:5px 14px;background:rgba(52,152,219,.15);
+                                     border-color:rgba(52,152,219,.3);color:#3498db"
+                              @click="finalizeBacktest()"
+                              :disabled="backtestUploadState.finalizing">
+                        <span x-text="backtestUploadState.finalizing ? '⏳ Aligning to IV surface…' : '✓ Finalize & Align'"></span>
+                      </button>
+                      <button @click="clearBacktest()"
+                              style="background:none;border:none;color:#555;cursor:pointer;font-size:11px">✕ Clear</button>
+                    </div>
+                  </div>
                 </template>
-                <button class="btn"
-                        style="font-size:11px;padding:5px 14px;background:rgba(46,204,113,.1);
-                               border-color:rgba(46,204,113,.3);color:#2ecc71;flex-shrink:0"
-                        @click="uploadBacktest()"
-                        :disabled="!backtestUploadState.files.length || backtestUploadState.uploading">
-                  <span x-text="backtestUploadState.uploading
-                    ? '⏳ Parsing ' + backtestUploadState.files.length + ' files (may take 30-60s)…'
-                    : '↑ Upload Files'"></span>
-                </button>
+
                 <div x-show="backtestUploadState.error"
-                     style="width:100%;color:#e74c3c;font-size:11px"
+                     style="color:#e74c3c;font-size:11px;margin-top:4px"
                      x-text="backtestUploadState.error"></div>
               </div>
             </template>

@@ -543,54 +543,120 @@ async def upload_backtest(
     name: str = Form(...),
     pool=Depends(get_pool),
 ):
-    """Upload one or more backtest files (CSV or JSON), aggregate, align to IV surface, store."""
+    """Upload a single backtest file. Call multiple times to add files, then finalize."""
     await _ensure_backtest_table(pool)
 
-    all_trades: list = []
-    all_metas:  list = []
-    sources:    list = []
+    # Ensure staging table exists
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS research_backtest_staging (
+                id          SERIAL PRIMARY KEY,
+                upload_name TEXT NOT NULL,
+                filename    TEXT NOT NULL,
+                trades      JSONB NOT NULL,
+                meta        JSONB NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
-    # Read all files first, then parse in parallel threads
-    file_data = []
-    for file in files:
-        content_bytes = await file.read()
-        file_data.append((content_bytes, file.filename))
-        sources.append(file.filename)
+    # Process only the first file (single-file-at-a-time approach)
+    file = files[0]
+    content_bytes = await file.read()
+    log.info("Backtest upload: parsing '%s' (%d bytes)...", file.filename, len(content_bytes))
 
-    log.info("Backtest upload: parsing %d files (%s) in parallel...",
-             len(file_data), ", ".join(sources))
+    try:
+        trades, meta = await asyncio.to_thread(
+            rbacktest.parse_backtest_upload, content_bytes, file.filename
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Parse error in '{file.filename}': {exc}")
 
-    parse_tasks = [
-        asyncio.to_thread(rbacktest.parse_backtest_upload, content, fname)
-        for content, fname in file_data
-    ]
-    results = await asyncio.gather(*parse_tasks, return_exceptions=True)
+    # Drop daily_path — massive and not needed
+    for t in trades:
+        t.pop('daily_path', None)
 
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            raise HTTPException(400, f"Parse error in '{sources[i]}': {result}")
-        trades, meta = result
-        # Drop daily_path immediately — massive and not needed for regime analysis
-        for t in trades:
-            t.pop('daily_path', None)
+    log.info("Parsed %d trades from '%s'", len(trades), file.filename)
+
+    if not trades:
+        raise HTTPException(400, f"No trades found in '{file.filename}'")
+
+    # Store in staging table
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO research_backtest_staging (upload_name, filename, trades, meta)
+               VALUES ($1, $2, $3::jsonb, $4::jsonb)""",
+            name, file.filename,
+            json.dumps(trades), json.dumps(meta),
+        )
+
+        # Count all staged files for this name
+        staged = await conn.fetch(
+            """SELECT filename, meta->>'trade_count' as tc, meta->>'source' as src,
+                      meta->>'date_from' as df, meta->>'date_to' as dt,
+                      meta->'strategies' as strats
+               FROM research_backtest_staging WHERE upload_name = $1
+               ORDER BY created_at""",
+            name,
+        )
+
+    staged_files = [dict(r) for r in staged]
+    total_trades = sum(int(s.get('tc') or 0) for s in staged_files)
+
+    return {
+        "status":       "staged",
+        "filename":     file.filename,
+        "trade_count":  len(trades),
+        "staged_files": [s['filename'] for s in staged_files],
+        "total_staged": len(staged_files),
+        "total_trades": total_trades,
+        "source":       meta.get('source', 'unknown'),
+        "strategies":   meta.get('strategies', []),
+        "date_from":    meta.get('date_from'),
+        "date_to":      meta.get('date_to'),
+        "preview":      [{k: v for k, v in t.items() if k != 'daily_path'} for t in trades[:3]],
+    }
+
+
+@router.post("/finalize-backtest")
+async def finalize_backtest(
+    name: str = Form(...),
+    pool=Depends(get_pool),
+):
+    """Combine all staged files for a name, align to IV surface, create final upload."""
+    await _ensure_backtest_table(pool)
+
+    async with pool.acquire() as conn:
+        staged = await conn.fetch(
+            """SELECT filename, trades, meta
+               FROM research_backtest_staging WHERE upload_name = $1
+               ORDER BY created_at""",
+            name,
+        )
+
+    if not staged:
+        raise HTTPException(400, f"No staged files found for '{name}'")
+
+    all_trades = []
+    all_metas = []
+    sources = []
+
+    for row in staged:
+        trades = json.loads(row['trades']) if isinstance(row['trades'], str) else row['trades']
+        meta = json.loads(row['meta']) if isinstance(row['meta'], str) else row['meta']
         all_trades.extend(trades)
         all_metas.append(meta)
+        sources.append(row['filename'])
 
-    log.info("Parsed %d trades from %d files", len(all_trades), len(file_data))
+    log.info("Finalizing backtest '%s': %d trades from %d files", name, len(all_trades), len(sources))
 
-    if not all_trades:
-        raise HTTPException(400, "No trades found in uploaded files")
-
-    # Sort combined trades chronologically
     all_trades.sort(key=lambda t: t.get('date_opened', ''))
 
-    # Merge meta across files
     date_froms = [m['date_from'] for m in all_metas if m.get('date_from')]
     date_tos   = [m['date_to']   for m in all_metas if m.get('date_to')]
     date_from  = min(date_froms) if date_froms else None
     date_to    = max(date_tos)   if date_tos   else None
     if not date_from or not date_to:
-        raise HTTPException(400, "Could not determine date range from files")
+        raise HTTPException(400, "Could not determine date range from staged files")
 
     strategies = sorted({s for m in all_metas for s in (m.get('strategies') or [])})
     columns    = all_metas[0].get('columns') or []
@@ -603,46 +669,30 @@ async def upload_backtest(
     except Exception as exc:
         raise HTTPException(500, f"Surface alignment failed: {exc}")
 
-    def _to_date(s):
-        return _date.fromisoformat(s) if s else None
-
-    # Strip daily_path from ALL trades — it bloats the payload massively
-    # (thousands of trades × 30-45 daily entries each). Regime analysis only
-    # needs entry date, exit date, P&L, and IV surface fields at entry.
     for t in enriched:
         t.pop('daily_path', None)
 
-    def _strip_path(t):
-        return {k: v for k, v in t.items() if k != 'daily_path'}
+    def _to_date(s):
+        return _date.fromisoformat(s) if s else None
 
-    try:
-        enriched_json = await asyncio.to_thread(json.dumps, enriched)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(500, f"Serialization failed: {exc}") from exc
+    enriched_json = await asyncio.to_thread(json.dumps, enriched)
 
-    try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """INSERT INTO research_backtest_uploads
-                   (name, source, trade_count, matched_count, date_from, date_to,
-                    strategies, columns, sources, data)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)
-                   RETURNING id::text, name, source, trade_count, matched_count,
-                             date_from, date_to, created_at""",
-                name,
-                source,
-                len(all_trades),
-                stats["matched"],
-                _to_date(date_from),
-                _to_date(date_to),
-                json.dumps(strategies),
-                json.dumps(columns),
-                json.dumps(sources),
-                enriched_json,
-            )
-    except Exception as exc:
-        log.error("Backtest INSERT failed: %s", exc)
-        raise HTTPException(500, f"Database insert failed: {exc}") from exc
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO research_backtest_uploads
+               (name, source, trade_count, matched_count, date_from, date_to,
+                strategies, columns, sources, data)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)
+               RETURNING id::text, name, source, trade_count, matched_count,
+                         date_from, date_to, created_at""",
+            name, source, len(all_trades), stats["matched"],
+            _to_date(date_from), _to_date(date_to),
+            json.dumps(strategies), json.dumps(columns),
+            json.dumps(sources), enriched_json,
+        )
+        # Clean up staging
+        await conn.execute(
+            "DELETE FROM research_backtest_staging WHERE upload_name = $1", name)
 
     return {
         "upload_id":     row["id"],
@@ -657,7 +707,7 @@ async def upload_backtest(
         "columns":       columns,
         "sources":       sources,
         "validation":    {"stats": stats, "warnings": stats.get("warnings", [])},
-        "preview":       [_strip_path(t) for t in enriched[:5]],
+        "preview":       [{k: v for k, v in t.items() if k != 'daily_path'} for t in enriched[:5]],
     }
 
 

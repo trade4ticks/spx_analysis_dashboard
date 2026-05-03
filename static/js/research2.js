@@ -75,24 +75,27 @@ document.addEventListener('alpine:init', () => {
       error:      null,
     },
 
-    // Backtest upload
+    // Backtest upload (staged: one file at a time, then finalize)
     backtestUploadState: {
-      files:        [],
-      uploading:    false,
-      uploadId:     null,
-      uploadName:   null,
-      source:       null,
-      tradeCount:   null,
-      matchedCount: null,
-      matchRate:    null,
-      dateFrom:     null,
-      dateTo:       null,
-      strategies:   [],
-      columns:      [],
-      sources:      [],
-      preview:      null,
-      warnings:     [],
-      error:        null,
+      files:          [],
+      uploading:      false,
+      finalizing:     false,
+      uploadId:       null,
+      uploadName:     null,
+      source:         null,
+      tradeCount:     null,
+      matchedCount:   null,
+      matchRate:      null,
+      dateFrom:       null,
+      dateTo:         null,
+      strategies:     [],
+      columns:        [],
+      sources:        [],
+      stagedFiles:    [],    // filenames of staged uploads
+      totalTrades:    0,
+      preview:        null,
+      warnings:       [],
+      error:          null,
     },
 
     form: {
@@ -369,8 +372,10 @@ document.addEventListener('alpine:init', () => {
         dateFrom: null, dateTo: null, error: null,
       };
       this.backtestUploadState = {
-        files: [], uploading: false, uploadId: null, uploadName: null,
-        source: null, sources: [], tradeCount: null, matchedCount: null, matchRate: null,
+        files: [], uploading: false, finalizing: false,
+        uploadId: null, uploadName: null,
+        source: null, sources: [], stagedFiles: [], totalTrades: 0,
+        tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
         preview: null, warnings: [], error: null,
       };
@@ -428,24 +433,67 @@ document.addEventListener('alpine:init', () => {
     },
 
     async uploadBacktest() {
+      // Upload files one at a time to staging
       const files = this.backtestUploadState.files;
       if (!files.length) return;
       this.backtestUploadState.uploading = true;
       this.backtestUploadState.error     = null;
+
+      // Derive a name from the first file (used to group staged files)
+      if (!this.backtestUploadState.uploadName) {
+        this.backtestUploadState.uploadName =
+          files[0].name.replace(/\.(csv|json)$/i, '').replace(/_[a-z]{3,4}$/i, '');
+      }
+      const name = this.backtestUploadState.uploadName;
+
+      for (const file of files) {
+        const fd = new FormData();
+        fd.append('files', file);
+        fd.append('name', name);
+        try {
+          const r = await fetch('/api/research2/upload-backtest', { method: 'POST', body: fd });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+          }
+          const data = await r.json();
+          this.backtestUploadState.source      = data.source;
+          this.backtestUploadState.stagedFiles  = data.staged_files || [];
+          this.backtestUploadState.totalTrades  = data.total_trades || 0;
+          this.backtestUploadState.strategies   = [
+            ...new Set([...(this.backtestUploadState.strategies || []), ...(data.strategies || [])])
+          ];
+          this.backtestUploadState.dateFrom     = this.backtestUploadState.dateFrom
+            ? (data.date_from && data.date_from < this.backtestUploadState.dateFrom ? data.date_from : this.backtestUploadState.dateFrom)
+            : data.date_from;
+          this.backtestUploadState.dateTo       = this.backtestUploadState.dateTo
+            ? (data.date_to && data.date_to > this.backtestUploadState.dateTo ? data.date_to : this.backtestUploadState.dateTo)
+            : data.date_to;
+        } catch (e) {
+          this.backtestUploadState.error = `${file.name}: ${e.message}`;
+          break;
+        }
+      }
+      // Clear file input so user can add more
+      this.backtestUploadState.files = [];
+      this.backtestUploadState.uploading = false;
+    },
+
+    async finalizeBacktest() {
+      const name = this.backtestUploadState.uploadName;
+      if (!name) return;
+      this.backtestUploadState.finalizing = true;
+      this.backtestUploadState.error = null;
       const fd = new FormData();
-      files.forEach(f => fd.append('files', f));
-      fd.append('name', files[0].name.replace(/\.(csv|json)$/i, '').replace(/_[a-z]{3}$/i, ''));
+      fd.append('name', name);
       try {
-        const r = await fetch('/api/research2/upload-backtest', { method: 'POST', body: fd });
+        const r = await fetch('/api/research2/finalize-backtest', { method: 'POST', body: fd });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           throw new Error(err.detail || `HTTP ${r.status}`);
         }
         const data = await r.json();
         this.backtestUploadState.uploadId     = data.upload_id;
-        this.backtestUploadState.uploadName   = data.name;
-        this.backtestUploadState.source       = data.source;
-        this.backtestUploadState.sources      = data.sources || [];
         this.backtestUploadState.tradeCount   = data.trade_count;
         this.backtestUploadState.matchedCount = data.matched_count;
         this.backtestUploadState.matchRate    = data.match_rate;
@@ -453,19 +501,24 @@ document.addEventListener('alpine:init', () => {
         this.backtestUploadState.dateTo       = data.date_to;
         this.backtestUploadState.strategies   = data.strategies || [];
         this.backtestUploadState.columns      = data.columns || [];
+        this.backtestUploadState.sources      = data.sources || [];
         this.backtestUploadState.preview      = data.preview || [];
         this.backtestUploadState.warnings     = data.validation?.warnings || [];
+        if (!this.form.date_from && data.date_from) this.form.date_from = data.date_from;
+        if (!this.form.date_to   && data.date_to)   this.form.date_to   = data.date_to;
       } catch (e) {
         this.backtestUploadState.error = e.message;
       } finally {
-        this.backtestUploadState.uploading = false;
+        this.backtestUploadState.finalizing = false;
       }
     },
 
     clearBacktest() {
       this.backtestUploadState = {
-        files: [], uploading: false, uploadId: null, uploadName: null,
-        source: null, sources: [], tradeCount: null, matchedCount: null, matchRate: null,
+        files: [], uploading: false, finalizing: false,
+        uploadId: null, uploadName: null,
+        source: null, sources: [], stagedFiles: [], totalTrades: 0,
+        tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
         preview: null, warnings: [], error: null,
       };
