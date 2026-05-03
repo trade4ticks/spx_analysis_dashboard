@@ -127,6 +127,9 @@ Column selection rules:
 - outcome_columns: what to predict (Y), prefer forward return columns (ret_Nd_fwd), max 4
 - Use ONLY column names from the available list above
 - Never include: id, ticker, trade_date, created_at, updated_at
+- IMPORTANT: forward_Nd columns (forward_1d, forward_7d, forward_30d, forward_90d, forward_180d)
+  are FORWARD IMPLIED VOLATILITY levels, NOT forward price returns. They must be FEATURE columns,
+  never outcome columns. Outcome columns for return analysis should be ret_*_fwd_* columns only.
 - CRITICAL: If the question explicitly names or describes specific columns/metrics, those columns
   MUST be included in feature_columns or outcome_columns. Do not substitute similar columns.
   The user's named metrics are the primary focus — add related columns only as supplements.
@@ -271,6 +274,14 @@ async def classify_and_plan(
                     plan["feature_columns"].append(col_name)
                 user_requested_features.append(col_name)
     plan["user_requested_features"] = user_requested_features
+
+    # forward_* columns are forward IV levels, not returns — always features, never outcomes
+    moved_fwd = [c for c in plan["outcome_columns"] if c.startswith("forward_")]
+    if moved_fwd:
+        plan["outcome_columns"] = [c for c in plan["outcome_columns"] if not c.startswith("forward_")]
+        for c in moved_fwd:
+            if c not in plan["feature_columns"]:
+                plan["feature_columns"].append(c)
 
     # Handle ticker selection from the plan
     plan_tickers = plan.get("tickers") or []
