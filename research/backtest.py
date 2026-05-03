@@ -6,6 +6,7 @@ Supports:
 
 All functions are pandas-free (stdlib only). Date normalization reuses pnl.normalize_date.
 """
+import asyncio
 import csv
 import decimal
 import io
@@ -391,52 +392,57 @@ async def align_trades_to_surface(
             return None
         return v
 
-    # Build lookup keyed by trade_date string; sanitize for JSON storage
-    surface_lookup: dict[str, dict] = {}
-    for row in surface_rows:
-        surface_lookup[str(row['trade_date'])] = {k: _json_safe(v) for k, v in dict(row).items()}
+    # CPU-bound dict building — run in thread so event loop stays free
+    def _build(surface_rows, trades):
+        surface_lookup: dict[str, dict] = {}
+        for row in surface_rows:
+            surface_lookup[str(row['trade_date'])] = {
+                k: _json_safe(v) for k, v in dict(row).items()
+            }
 
-    enriched = []
-    matched = 0
-    for trade in trades:
-        d = trade.get('date_opened', '')
-        surf = surface_lookup.get(d)
-        if surf is not None:
-            merged = {**surf, **trade}
-            merged['join_timestamp'] = f"{d} 09:35:00"
-            matched += 1
-        else:
-            merged = dict(trade)
-            merged['join_timestamp'] = None
-        enriched.append(merged)
+        enriched = []
+        matched = 0
+        for trade in trades:
+            d = trade.get('date_opened', '')
+            surf = surface_lookup.get(d)
+            if surf is not None:
+                merged = {**surf, **trade}
+                merged['join_timestamp'] = f"{d} 09:35:00"
+                matched += 1
+            else:
+                merged = dict(trade)
+                merged['join_timestamp'] = None
+            enriched.append(merged)
 
-    total = len(trades)
-    unmatched = total - matched
-    match_rate = round(matched / max(total, 1), 3)
+        total = len(trades)
+        unmatched = total - matched
+        match_rate = round(matched / max(total, 1), 3)
 
-    warnings = []
-    if total < 30:
-        warnings.append(f"Small sample: only {total} trades. Results may be unstable.")
-    if match_rate < 0.80:
-        warnings.append(
-            f"Low IV match rate ({match_rate:.0%}). "
-            "Check that trade entry dates overlap with surface_metrics_core data."
-        )
-    years = {str(t.get('date_opened', ''))[:4] for t in trades if t.get('date_opened')}
-    if len(years) <= 1:
-        warnings.append(
-            "All trades are from a single year. "
-            "Time-split stability validation will be limited."
-        )
+        warnings = []
+        if total < 30:
+            warnings.append(f"Small sample: only {total} trades. Results may be unstable.")
+        if match_rate < 0.80:
+            warnings.append(
+                f"Low IV match rate ({match_rate:.0%}). "
+                "Check that trade entry dates overlap with surface_metrics_core data."
+            )
+        years = {str(t.get('date_opened', ''))[:4] for t in trades if t.get('date_opened')}
+        if len(years) <= 1:
+            warnings.append(
+                "All trades are from a single year. "
+                "Time-split stability validation will be limited."
+            )
 
-    stats = {
-        'total':      total,
-        'matched':    matched,
-        'unmatched':  unmatched,
-        'match_rate': match_rate,
-        'warnings':   warnings,
-    }
-    return enriched, stats
+        stats = {
+            'total':      total,
+            'matched':    matched,
+            'unmatched':  unmatched,
+            'match_rate': match_rate,
+            'warnings':   warnings,
+        }
+        return enriched, stats
+
+    return await asyncio.to_thread(_build, surface_rows, trades)
 
 
 # ── Trade summary ─────────────────────────────────────────────────────────────

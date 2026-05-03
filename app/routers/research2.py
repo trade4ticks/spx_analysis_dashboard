@@ -1,4 +1,5 @@
 """Research 2 API endpoints — orchestration-driven research."""
+import asyncio
 import json
 import logging
 import traceback
@@ -552,7 +553,9 @@ async def upload_backtest(
     for file in files:
         content_bytes = await file.read()
         try:
-            trades, meta = rbacktest.parse_backtest_upload(content_bytes, file.filename)
+            trades, meta = await asyncio.to_thread(
+                rbacktest.parse_backtest_upload, content_bytes, file.filename
+            )
         except Exception as exc:
             raise HTTPException(400, f"Parse error in '{file.filename}': {exc}")
         all_trades.extend(trades)
@@ -592,7 +595,7 @@ async def upload_backtest(
         return {k: v for k, v in t.items() if k != 'daily_path'}
 
     try:
-        enriched_json = json.dumps(enriched)
+        enriched_json = await asyncio.to_thread(json.dumps, enriched)
     except (TypeError, ValueError) as exc:
         raise HTTPException(500, f"Serialization failed: {exc}") from exc
 
