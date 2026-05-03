@@ -2319,6 +2319,30 @@ async def _execute_pnl_pipeline(
     )
 
 
+def _iv_family(col: str) -> str:
+    """Classify an IV column into a feature family for redundancy-aware pairing."""
+    c = col.lower()
+    if c.startswith("skew_"):
+        tenor = c.split("_")[1] if "_" in c else ""
+        return f"skew_{tenor}"
+    if c.startswith("convex_"):
+        tenor = c.split("_")[1] if "_" in c else ""
+        return f"convex_{tenor}"
+    if c.startswith("term_slope_"):
+        return "term_slope"
+    if c.startswith("term_ratio_"):
+        return "term_ratio"
+    if c.startswith("vix_") or c.startswith("iv_"):
+        return "iv_level"
+    if c.startswith("forward_"):
+        return "forward"
+    if c == "spot":
+        return "spot"
+    if "opex" in c:
+        return "opex"
+    return "other"
+
+
 async def execute_backtest_pipeline(
     main_pool,
     run_id: str,
@@ -2330,248 +2354,534 @@ async def execute_backtest_pipeline(
     log,
 ) -> str:
     """
-    Agentic loop for backtest trade-outcome analysis.
-    Each row is a completed trade with entry-time IV metrics attached.
+    Deterministic backtest analysis pipeline.
+    Builds a complete evidence packet, then hands it to 1 LLM call for narrative.
     Returns JSON sections string.
     """
     from research import analysis_tools as at
-
-    client = _anthropic.AsyncAnthropic()
-    system = _BACKTEST_AGENTIC_SYSTEM
-    if knowledge_rules:
-        rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
-        system += f"\n\nKNOWLEDGE BASE RULES:\n{rules_text}"
-
-    # IV columns: all keys that are not trade-level fields
     from research.backtest import TRADE_FIELDS
-    all_cols = list(enriched_trades[0].keys()) if enriched_trades else []
-    iv_cols  = [c for c in all_cols if c not in TRADE_FIELDS]
+    from itertools import combinations
 
-    # Cast is_win to float for correlation tools
-    for t in enriched_trades:
+    trades = enriched_trades
+    n_trades = len(trades)
+    all_cols = list(trades[0].keys()) if trades else []
+    iv_cols = [c for c in all_cols if c not in TRADE_FIELDS]
+
+    # Cast is_win to float
+    for t in trades:
         if 'is_win' in t:
             t['is_win'] = float(1.0 if t['is_win'] else 0.0)
 
-    # Quick initial correlations for context
-    corr_pnl = at.run_correlation_scan(enriched_trades, iv_cols, 'pnl')[:15] if iv_cols else []
-    corr_win = at.run_correlation_scan(enriched_trades, iv_cols, 'is_win')[:15] if iv_cols else []
+    evidence = {"trade_summary": trade_summary, "warnings": []}
+    tool_results_acc = []  # for chart builder
 
-    def _corr_table(rows):
-        lines = []
-        for r in rows:
-            lines.append(f"  {r['x_col']:<45} r={r['r']:+.4f}  p={r['p_val']:.3f}  n={r['n']}")
-        return "\n".join(lines) if lines else "  (no correlations computed)"
+    # ── Step 1: Single-factor discovery ──────────────────────────────────
+    log("[1/9] Correlation scan…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 1/9: Correlation scan…")
 
-    strategies_str = ', '.join(trade_summary.get('strategies') or ['unknown'])
-    initial_msg = (
-        f"RESEARCH QUESTION: {question}\n\n"
-        f"TRADE SUMMARY:\n"
-        f"  Total trades:     {trade_summary['n']}\n"
-        f"  IV-matched:       {trade_summary['matched_count']} ({trade_summary['match_rate']:.0%})\n"
-        f"  Date range:       {trade_summary['date_from']} → {trade_summary['date_to']}\n"
-        f"  Strategies:       {strategies_str}\n"
-        f"  Win rate:         {trade_summary['win_rate']:.1%}\n"
-        f"  Mean P&L:         {trade_summary['mean_pnl']}\n"
-        f"  Std P&L:          {trade_summary['std_pnl']}\n\n"
-        f"TOP 15 IV CORRELATIONS WITH pnl:\n{_corr_table(corr_pnl)}\n\n"
-        f"TOP 15 IV CORRELATIONS WITH is_win:\n{_corr_table(corr_win)}\n\n"
-        f"IV COLUMNS AVAILABLE ({len(iv_cols)} total):\n  "
-        + ", ".join(iv_cols[:40])
-        + (" …" if len(iv_cols) > 40 else "")
-        + "\n\nBegin your analysis."
-    )
+    corr_pnl = at.run_correlation_scan(trades, iv_cols, 'pnl')[:15]
+    corr_win = at.run_correlation_scan(trades, iv_cols, 'is_win')[:15]
+    evidence["corr_pnl"] = corr_pnl
+    evidence["corr_win"] = corr_win
+    tool_results_acc.append({"tool": "run_correlation_scan", "inputs": {"y_col": "pnl"}, "result": corr_pnl})
+    tool_results_acc.append({"tool": "run_correlation_scan", "inputs": {"y_col": "is_win"}, "result": corr_win})
 
-    messages = [{"role": "user", "content": initial_msg}]
-    tool_results_acc = []
-    report_data = None
-    max_steps = 12
+    # Merge top candidates
+    seen = set()
+    candidates = []
+    for r in corr_pnl + corr_win:
+        if r["x_col"] not in seen:
+            candidates.append(r["x_col"])
+            seen.add(r["x_col"])
+    candidates = candidates[:20]
+    log(f"  {len(candidates)} candidate features identified")
 
-    log("[RUNNING] Starting backtest agentic analysis loop…")
-    for step in range(max_steps):
-        log(f"  [RUNNING] Backtest analysis step {step + 1}/{max_steps}…")
-        async with main_pool.acquire() as conn:
-            await rdb.update_run(conn, run_id,
-                                 ai_summary=f"[RUNNING] Backtest analysis step {step+1}/{max_steps}…")
+    # ── Step 2: Redundancy filtering ─────────────────────────────────────
+    log("[2/9] Redundancy check…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 2/9: Redundancy filtering…")
 
-        resp = await client.messages.create(
-            model=model,
-            max_tokens=2000,
-            system=[{"type": "text", "text": system}],
-            tools=_BACKTEST_AGENTIC_TOOLS,
-            messages=messages,
-        )
-        messages.append({"role": "assistant", "content": resp.content})
+    redundancy = at.run_feature_redundancy_check(trades, candidates, r_threshold=0.7)
+    non_redundant = redundancy.get("non_redundant", candidates[:8])
+    evidence["redundancy"] = redundancy
+    evidence["non_redundant"] = non_redundant
+    log(f"  {len(non_redundant)} non-redundant features: {', '.join(non_redundant[:6])}")
 
-        tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
-        if not tool_use_blocks:
-            break
+    # ── Step 3: Profiles for non-redundant features ──────────────────────
+    log("[3/9] Decile profiles + win rate analysis…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 3/9: Profiles…")
 
-        tool_result_messages = []
-        for block in tool_use_blocks:
-            tool_name = block.name
-            inputs    = block.input or {}
+    profiles = {}
+    win_rates = {}
+    for feat in non_redundant[:8]:
+        try:
+            prof = at.run_decile_profile(trades, feat, 'pnl')
+            profiles[feat] = prof
+            tool_results_acc.append({"tool": "run_decile_profile", "inputs": {"x_col": feat, "y_col": "pnl"}, "result": prof})
+        except Exception as exc:
+            log(f"    Profile error {feat}: {exc}")
+        try:
+            wr = at.run_win_rate_analysis(trades, feat, n_buckets=5)
+            win_rates[feat] = wr
+            tool_results_acc.append({"tool": "run_win_rate_analysis", "inputs": {"x_col": feat}, "result": wr})
+        except Exception as exc:
+            log(f"    Win rate error {feat}: {exc}")
+    evidence["profiles"] = profiles
+    evidence["win_rates"] = win_rates
 
-            if tool_name == "write_report":
-                report_data = inputs
-                break
+    # ── Step 4: Time-split validation ────────────────────────────────────
+    log("[4/9] Time-split validation…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/9: Time-split validation…")
 
-            log(f"    → {tool_name}({list(inputs.keys())})")
-            try:
-                if tool_name == "run_correlation_scan":
-                    result = at.run_correlation_scan(enriched_trades, inputs["x_cols"], inputs["y_col"])
-                elif tool_name == "run_regression":
-                    result = at.run_regression(enriched_trades, inputs["x_cols"], inputs["y_col"])
-                elif tool_name == "run_regime_split":
-                    result = at.run_regime_split(
-                        enriched_trades, inputs["x_col"], inputs["y_col"],
-                        inputs["split_col"], inputs.get("method", "median"),
-                    )
-                elif tool_name == "run_rolling_correlation":
-                    result = at.run_rolling_correlation(
-                        enriched_trades, inputs["x_col"], inputs["y_col"],
-                        inputs.get("window", 10),
-                    )
-                elif tool_name == "run_tail_analysis":
-                    result = at.run_tail_analysis(
-                        enriched_trades, inputs["y_col"], inputs["x_cols"],
-                        inputs.get("pct", 15),
-                    )
-                elif tool_name == "run_decile_profile":
-                    result = at.run_decile_profile(enriched_trades, inputs["x_col"], inputs["y_col"])
-                elif tool_name == "run_win_rate_analysis":
-                    result = at.run_win_rate_analysis(
-                        enriched_trades, inputs["x_col"],
-                        inputs.get("n_buckets", 5),
-                    )
-                elif tool_name == "run_time_split_validation":
-                    auto_splits = 3 if len(enriched_trades) >= 600 else 2
-                    result = at.run_time_split_validation(
-                        enriched_trades, inputs["y_col"],
-                        inputs.get("n_splits", auto_splits),
-                    )
-                elif tool_name == "run_feature_redundancy_check":
-                    result = at.run_feature_redundancy_check(
-                        enriched_trades,
-                        inputs["features"],
-                        inputs.get("r_threshold", 0.7),
-                    )
-                elif tool_name == "run_two_factor_regime":
-                    result = at.run_two_factor_regime(
-                        enriched_trades,
-                        inputs["factor1"], inputs["factor2"], inputs["y_col"],
-                        inputs.get("n_bins", 3),
-                    )
-                elif tool_name == "run_composite_regime_score":
-                    result = at.run_composite_regime_score(
-                        enriched_trades,
-                        inputs["components"],
-                        inputs.get("interactions"),
-                        inputs.get("y_col", "pnl"),
-                        inputs.get("train_frac", 0.6),
-                    )
-                else:
-                    result = {"error": f"Unknown tool: {tool_name}"}
-            except Exception as exc:
-                result = {"error": str(exc)}
+    n_splits = 3 if n_trades >= 600 else 2
+    time_splits = at.run_time_split_validation(trades, 'pnl', n_splits=n_splits)
+    evidence["time_splits"] = time_splits
+    tool_results_acc.append({"tool": "run_time_split_validation", "inputs": {"y_col": "pnl"}, "result": time_splits})
 
-            tool_results_acc.append({"tool": tool_name, "inputs": inputs, "result": result})
-            result_str = json.dumps(result)
-            if len(result_str) > 8000:
-                result_str = result_str[:8000] + "… (truncated)"
-            tool_result_messages.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result_str,
-            })
-
-        if report_data is not None:
-            break
-
-        if tool_result_messages:
-            messages.append({"role": "user", "content": tool_result_messages})
+    # Classify features as stable/unstable
+    stable_features = []
+    unstable_features = []
+    period_corrs = time_splits.get("feature_stability", {})
+    for feat in non_redundant:
+        feat_periods = period_corrs.get(feat, {}).get("periods", [])
+        if not feat_periods:
+            unstable_features.append(feat)
+            continue
+        # Stable if correlation sign is consistent across majority of periods
+        signs = [1 if p.get("r", 0) > 0 else -1 for p in feat_periods if p.get("r") is not None]
+        if signs and abs(sum(signs)) >= len(signs) * 0.6:
+            stable_features.append(feat)
         else:
+            unstable_features.append(feat)
+    evidence["stable_features"] = stable_features
+    evidence["unstable_features"] = unstable_features
+    log(f"  Stable: {stable_features[:5]}, Unstable: {unstable_features[:5]}")
+
+    # ── Step 5: Tail analysis ────────────────────────────────────────────
+    log("[5/9] Tail analysis…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 5/9: Tail analysis…")
+
+    tail = at.run_tail_analysis(trades, 'pnl', non_redundant[:10], pct=15)
+    evidence["tail_analysis"] = tail
+    tool_results_acc.append({"tool": "run_tail_analysis", "inputs": {"y_col": "pnl", "x_cols": non_redundant[:10]}, "result": tail})
+
+    # ── Step 6: Rolling correlation for top 3 stable features ────────────
+    log("[6/9] Rolling correlation…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 6/9: Rolling correlation…")
+
+    rolling_feats = (stable_features or non_redundant)[:3]
+    window = max(30, n_trades // 10)
+    rolling_corrs = {}
+    for feat in rolling_feats:
+        try:
+            rc = at.run_rolling_correlation(trades, feat, 'pnl', window=window)
+            rolling_corrs[feat] = rc
+            tool_results_acc.append({"tool": "run_rolling_correlation", "inputs": {"x_col": feat, "y_col": "pnl"}, "result": rc})
+        except Exception as exc:
+            log(f"    Rolling corr error {feat}: {exc}")
+    evidence["rolling_corrs"] = rolling_corrs
+
+    # ── Step 7: Two-factor regime grids (different families) ─────────────
+    log("[7/9] Two-factor regime grids…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 7/9: 2-factor grids…")
+
+    # Pick pairs from different families
+    feat_families = {}
+    for feat in non_redundant:
+        fam = _iv_family(feat)
+        feat_families.setdefault(fam, []).append(feat)
+
+    # Best feature per family
+    best_per_family = {}
+    for fam, feats in feat_families.items():
+        best = max(feats, key=lambda f: abs(next((r["r"] for r in corr_pnl if r["x_col"] == f), 0)))
+        best_per_family[fam] = best
+
+    family_reps = list(best_per_family.values())
+    two_factor_grids = []
+    grid_count = 0
+    for f1, f2 in combinations(family_reps, 2):
+        if grid_count >= 3:
             break
+        if _iv_family(f1) == _iv_family(f2):
+            continue
+        try:
+            grid_pnl = at.run_two_factor_regime(trades, f1, f2, 'pnl', n_bins=3)
+            grid_win = at.run_two_factor_regime(trades, f1, f2, 'is_win', n_bins=3)
+            two_factor_grids.append({"f1": f1, "f2": f2, "pnl": grid_pnl, "is_win": grid_win})
+            tool_results_acc.append({"tool": "run_two_factor_regime", "inputs": {"factor1": f1, "factor2": f2, "y_col": "pnl"}, "result": grid_pnl})
+            tool_results_acc.append({"tool": "run_two_factor_regime", "inputs": {"factor1": f1, "factor2": f2, "y_col": "is_win"}, "result": grid_win})
+            grid_count += 1
+        except Exception as exc:
+            log(f"    2-factor grid error {f1}×{f2}: {exc}")
+    evidence["two_factor_grids"] = two_factor_grids
 
-    # Force write_report if loop exited without one
-    if report_data is None:
-        log("  [RUNNING] Composing backtest report (forced)…")
-        messages.append({"role": "user", "content":
-                          "You have completed your analysis. Now call write_report with your findings. "
-                          "Be thorough — cite specific numbers, win rates, and P&L differences."})
-        resp2 = await client.messages.create(
-            model=model,
-            max_tokens=4000,
-            system=[{"type": "text", "text": system}],
-            tools=_BACKTEST_AGENTIC_TOOLS,
-            tool_choice={"type": "tool", "name": "write_report"},
-            messages=messages,
-        )
-        for block in resp2.content:
-            if block.type == "tool_use" and block.name == "write_report":
-                report_data = block.input
+    # ── Step 8: Regime split by VIX ──────────────────────────────────────
+    log("[8/9] VIX regime split…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 8/9: VIX regime split…")
+
+    best_feat = non_redundant[0] if non_redundant else None
+    regime_split = None
+    for vix_col in ['vix_30d', 'vix_90d', 'vix_180d']:
+        if vix_col in iv_cols and best_feat:
+            try:
+                regime_split = at.run_regime_split(trades, best_feat, 'pnl', vix_col, method='median')
+                tool_results_acc.append({"tool": "run_regime_split", "inputs": {"x_col": best_feat, "y_col": "pnl", "split_col": vix_col}, "result": regime_split})
                 break
+            except Exception:
+                pass
+    evidence["regime_split"] = regime_split
 
-    # Build chart configs and assemble sections
-    log("[RUNNING] Composing final backtest report…")
+    # ── Step 9: Composite + model comparison ─────────────────────────────
+    log("[9/9] Composite score + model comparison…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 9/9: Model comparison…")
+
+    # Best single feature
+    best_single = None
+    best_single_r = 0
+    for feat in non_redundant:
+        r_val = abs(next((r["r"] for r in corr_pnl if r["x_col"] == feat), 0))
+        if r_val > best_single_r:
+            best_single_r = r_val
+            best_single = feat
+    best_single_corr = next((r for r in corr_pnl if r["x_col"] == best_single), {}) if best_single else {}
+
+    # Best single win-rate spread
+    best_single_wr_spread = 0
+    if best_single and best_single in win_rates:
+        wr_data = win_rates[best_single]
+        buckets = wr_data.get("buckets", [])
+        if len(buckets) >= 2:
+            wrs = [b.get("win_rate", 0.5) for b in buckets]
+            best_single_wr_spread = max(wrs) - min(wrs)
+
+    # Best 2-factor
+    best_2f = None
+    best_2f_wr_spread = 0
+    for grid in two_factor_grids:
+        cells = grid["is_win"].get("cells", [])
+        if cells:
+            wrs = [c.get("mean_y", 0.5) for c in cells if c.get("n", 0) >= 10]
+            if wrs:
+                spread = max(wrs) - min(wrs)
+                if spread > best_2f_wr_spread:
+                    best_2f_wr_spread = spread
+                    best_2f = grid
+
+    improvement_2f = best_2f_wr_spread - best_single_wr_spread
+    meaningful_2f = improvement_2f > 0.05  # >5pp improvement
+
+    # Composite (only if 2+ stable features)
+    composite = None
+    if len(stable_features) >= 2:
+        components = []
+        for feat in stable_features[:3]:
+            direction = next((r["r"] for r in corr_pnl if r["x_col"] == feat), 0)
+            components.append({"feature": feat, "direction": "positive" if direction > 0 else "negative"})
+
+        # Only add interactions if 2-factor grid showed clear interaction
+        interactions = None
+        if best_2f and best_2f.get("pnl", {}).get("interaction_strength", 0) > 0.1:
+            interactions = [{"type": "amplify", "feature1": best_2f["f1"], "feature2": best_2f["f2"]}]
+
+        try:
+            composite = at.run_composite_regime_score(
+                trades, components, interactions, 'pnl', train_frac=0.6)
+            tool_results_acc.append({"tool": "run_composite_regime_score", "inputs": {"components": components}, "result": composite})
+        except Exception as exc:
+            log(f"    Composite error: {exc}")
+            composite = None
+
+    # Model comparison verdict
+    composite_recommended = False
+    if composite:
+        validate_r = composite.get("validate_r", 0)
+        best_single_validate_r = composite.get("best_single_validate_r", 0)
+        composite_recommended = (
+            validate_r > best_single_validate_r and
+            composite.get("stable", False) and
+            composite.get("composite_vs_single", 0) > 0
+        )
+
+    if composite_recommended:
+        verdict = "composite"
+        verdict_reason = (f"Composite (validate_r={composite.get('validate_r', 0):.3f}) improves over "
+                         f"best single ({best_single}, validate_r={composite.get('best_single_validate_r', 0):.3f}) "
+                         f"and is stable across time splits.")
+    elif meaningful_2f:
+        verdict = "two_factor"
+        verdict_reason = (f"2-factor ({best_2f['f1']} × {best_2f['f2']}) adds {improvement_2f:.1%} win-rate spread "
+                         f"over best single feature ({best_single}).")
+    else:
+        verdict = "single_feature"
+        verdict_reason = (f"Best usable signal is {best_single} alone "
+                         f"(r={best_single_corr.get('r', 0):+.3f}, WR spread={best_single_wr_spread:.1%}). "
+                         f"2-factor adds only {improvement_2f:.1%} and composite does not improve OOS.")
+
+    evidence["model_comparison"] = {
+        "best_single": {"feature": best_single, "r": best_single_corr.get("r"), "wr_spread": best_single_wr_spread},
+        "best_2factor": {"f1": best_2f["f1"], "f2": best_2f["f2"], "wr_spread": best_2f_wr_spread,
+                         "improvement": improvement_2f, "meaningful": meaningful_2f} if best_2f else None,
+        "composite": {"validate_r": composite.get("validate_r"), "recommended": composite_recommended} if composite else None,
+        "verdict": verdict,
+        "verdict_reason": verdict_reason,
+    }
+    evidence["composite"] = composite
+    log(f"  Model verdict: {verdict} — {verdict_reason[:100]}")
+
+    # ── Build charts ─────────────────────────────────────────────────────
     chart_configs = _build_backtest_chart_configs(tool_results_acc)
 
-    if report_data is None:
-        sections = [{"type": "markdown",
-                     "content": "(Report generation failed — no write_report call returned)"}]
+    # ── Compose report (1 LLM call) ──────────────────────────────────────
+    log("[RUNNING] Composing backtest report…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Composing report…")
+
+    evidence_text = _format_evidence_packet(evidence, question)
+    chart_listing = "\n".join(f"  {cid}: {chart['title']}" for cid, chart in chart_configs.items())
+
+    report_system = (
+        "You are a quantitative analyst writing a research report on backtest trade outcomes. "
+        "Professional quant voice. No fluff. Cite specific numbers."
+    )
+    if knowledge_rules:
+        rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
+        report_system += f"\n\nKNOWLEDGE BASE RULES:\n{rules_text}"
+
+    report_prompt = (
+        f"{evidence_text}\n\n"
+        f"AVAILABLE CHARTS:\n{chart_listing}\n\n"
+        f"Write a report using the produce_report tool.\n"
+        f"- executive_summary: 2-3 paragraphs answering the research question. Cite r values, win rates, P&L.\n"
+        f"- body: 400-700 words. Cover: what mattered, why it likely mattered (economic interpretation), "
+        f"how strong the evidence was, whether it held over time (cite rolling correlation and time-split), "
+        f"whether 2-factor/composite added value, what didn't work.\n"
+        f"- conclusions: Explicitly state 'Best usable signal is: [single / 2-factor / composite]' and justify. "
+        f"Recommend filter, sizing input, or exploratory-only.\n"
+        f"- chart_sequence: ordered chart IDs to display.\n\n"
+        f"Do NOT recommend a more complex model unless it clearly improves performance AND stability OOS."
+    )
+
+    client = _anthropic.AsyncAnthropic()
+    msg = await client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=[{"type": "text", "text": report_system,
+                 "cache_control": {"type": "ephemeral"}}],
+        tools=[_BACKTEST_AGENTIC_TOOLS[-1]],  # write_report tool only
+        tool_choice={"type": "tool", "name": "write_report"},
+        messages=[{"role": "user", "content": report_prompt}],
+    )
+
+    report_data = None
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "write_report":
+            report_data = block.input
+            break
+
+    # ── Skeptic review (1 LLM call) ──────────────────────────────────────
+    log("[RUNNING] Skeptic review…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Skeptic review…")
+
+    report_prose = ""
+    if report_data:
+        report_prose = "\n\n".join(filter(None, [
+            report_data.get("executive_summary"),
+            report_data.get("body"),
+            report_data.get("conclusions"),
+        ]))
+
+    skeptic_text = await _skeptic_review(
+        report_prose,
+        [],  # no ranked_scans for backtest
+        [],  # no equity_results
+        model,
+        knowledge_rules=knowledge_rules,
+    ) if report_prose else ""
+
+    # ── Assemble sections ────────────────────────────────────────────────
+    sections: list[dict] = []
+
+    if report_data:
+        exec_summary = (report_data.get("executive_summary") or "").strip()
+        body = (report_data.get("body") or "").strip()
+        conclusions = (report_data.get("conclusions") or "").strip()
+        chart_seq = report_data.get("chart_sequence") or []
+
+        if exec_summary:
+            sections.append({"type": "markdown", "content": exec_summary})
+
+        body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
+        referenced: set[str] = set()
+
+        if body_paras and chart_seq:
+            charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+            chart_idx = 0
+            for para in body_paras:
+                sections.append({"type": "markdown", "content": para})
+                for _ in range(charts_per_gap):
+                    if chart_idx < len(chart_seq):
+                        cid = chart_seq[chart_idx]
+                        if cid in chart_configs:
+                            sections.append({"type": "chart", "chart_id": cid,
+                                              "title": chart_configs[cid]["title"],
+                                              "config": chart_configs[cid]["config"]})
+                            referenced.add(cid)
+                        chart_idx += 1
+            while chart_idx < len(chart_seq):
+                cid = chart_seq[chart_idx]
+                if cid in chart_configs and cid not in referenced:
+                    sections.append({"type": "chart", "chart_id": cid,
+                                      "title": chart_configs[cid]["title"],
+                                      "config": chart_configs[cid]["config"]})
+                    referenced.add(cid)
+                chart_idx += 1
+        else:
+            for para in body_paras:
+                sections.append({"type": "markdown", "content": para})
+
+        if conclusions:
+            sections.append({"type": "markdown", "content": f"## Conclusions\n\n{conclusions}"})
+
+        for cid, chart in chart_configs.items():
+            if cid not in referenced:
+                sections.append({"type": "chart", "chart_id": cid,
+                                  "title": chart["title"], "config": chart["config"]})
+    else:
+        sections.append({"type": "markdown", "content": "(Report generation failed)"})
         for cid, chart in chart_configs.items():
             sections.append({"type": "chart", "chart_id": cid,
                               "title": chart["title"], "config": chart["config"]})
-        return json.dumps(sections)
 
-    exec_summary = (report_data.get("executive_summary") or "").strip()
-    body         = (report_data.get("body") or "").strip()
-    conclusions  = (report_data.get("conclusions") or "").strip()
-    chart_seq    = report_data.get("chart_sequence") or []
-
-    sections: list[dict] = []
-    if exec_summary:
-        sections.append({"type": "markdown", "content": exec_summary})
-
-    body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
-    referenced: set[str] = set()
-
-    if body_paras and chart_seq:
-        charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
-        chart_idx = 0
-        for para in body_paras:
-            sections.append({"type": "markdown", "content": para})
-            for _ in range(charts_per_gap):
-                if chart_idx < len(chart_seq):
-                    cid = chart_seq[chart_idx]
-                    if cid in chart_configs:
-                        sections.append({
-                            "type": "chart", "chart_id": cid,
-                            "title": chart_configs[cid]["title"],
-                            "config": chart_configs[cid]["config"],
-                        })
-                        referenced.add(cid)
-                    chart_idx += 1
-        while chart_idx < len(chart_seq):
-            cid = chart_seq[chart_idx]
-            if cid in chart_configs and cid not in referenced:
-                sections.append({"type": "chart", "chart_id": cid,
-                                  "title": chart_configs[cid]["title"],
-                                  "config": chart_configs[cid]["config"]})
-                referenced.add(cid)
-            chart_idx += 1
-    else:
-        for para in body_paras:
-            sections.append({"type": "markdown", "content": para})
-
-    if conclusions:
-        sections.append({"type": "markdown", "content": f"## Conclusions\n\n{conclusions}"})
-
-    for cid, chart in chart_configs.items():
-        if cid not in referenced:
-            sections.append({"type": "chart", "chart_id": cid,
-                              "title": chart["title"], "config": chart["config"]})
+    if skeptic_text:
+        sections.append({"type": "markdown", "content": f"---\n\n## Caveats & Challenges\n\n{skeptic_text}"})
 
     return json.dumps(sections)
+
+
+def _format_evidence_packet(evidence: dict, question: str) -> str:
+    """Format the evidence packet as structured text for the LLM."""
+    ts = evidence.get("trade_summary", {})
+    lines = [
+        f"RESEARCH QUESTION: {question}",
+        "",
+        "TRADE SUMMARY:",
+        f"  Total trades: {ts.get('n', 0)}",
+        f"  IV-matched: {ts.get('matched_count', 0)} ({ts.get('match_rate', 0):.0%})",
+        f"  Date range: {ts.get('date_from')} → {ts.get('date_to')}",
+        f"  Strategies: {', '.join(ts.get('strategies') or ['unknown'])}",
+        f"  Win rate: {ts.get('win_rate', 0):.1%}",
+        f"  Mean P&L: ${ts.get('mean_pnl', 0):.0f}",
+        f"  Std P&L: ${ts.get('std_pnl', 0):.0f}",
+        "",
+        "TOP CORRELATIONS WITH pnl:",
+    ]
+    for r in evidence.get("corr_pnl", [])[:10]:
+        lines.append(f"  {r['x_col']:<40} r={r['r']:+.4f}  p={r.get('p_val', 0):.4f}")
+
+    lines.append("\nTOP CORRELATIONS WITH is_win:")
+    for r in evidence.get("corr_win", [])[:10]:
+        lines.append(f"  {r['x_col']:<40} r={r['r']:+.4f}  p={r.get('p_val', 0):.4f}")
+
+    lines.append(f"\nNON-REDUNDANT FEATURES ({len(evidence.get('non_redundant', []))}):")
+    lines.append(f"  {', '.join(evidence.get('non_redundant', []))}")
+
+    dropped = evidence.get("redundancy", {}).get("dropped_pairs", [])
+    if dropped:
+        lines.append(f"\n  Dropped for redundancy ({len(dropped)} pairs with |r|>0.7)")
+
+    # Profiles
+    lines.append("\nDECILE PROFILES (top non-redundant → pnl):")
+    for feat, prof in list(evidence.get("profiles", {}).items())[:5]:
+        bs = prof.get("bucket_stats") or []
+        bs = [b for b in bs if b is not None]
+        if bs:
+            d1 = bs[0] if bs else {}
+            d10 = bs[-1] if bs else {}
+            lines.append(f"  {feat}: r={prof.get('pearson_r', 0):+.3f}, "
+                        f"D1 avg=${d1.get('avg_y', d1.get('avg_ret', 0)):,.0f} WR={d1.get('win_rate', 0):.0%}, "
+                        f"D10 avg=${d10.get('avg_y', d10.get('avg_ret', 0)):,.0f} WR={d10.get('win_rate', 0):.0%}")
+
+    # Win rates
+    lines.append("\nWIN RATE ANALYSIS (5-bucket):")
+    for feat, wr in list(evidence.get("win_rates", {}).items())[:5]:
+        buckets = wr.get("buckets", [])
+        if buckets:
+            wrs = [b.get("win_rate", 0.5) for b in buckets]
+            lines.append(f"  {feat}: WR range {min(wrs):.0%}–{max(wrs):.0%}, spread={max(wrs)-min(wrs):.1%}")
+
+    # Time stability
+    lines.append(f"\nSTABLE FEATURES: {', '.join(evidence.get('stable_features', []))}")
+    lines.append(f"UNSTABLE FEATURES: {', '.join(evidence.get('unstable_features', []))}")
+
+    # Tail analysis
+    tail = evidence.get("tail_analysis", {})
+    if tail.get("differences"):
+        lines.append("\nTAIL ANALYSIS (top 15% vs bottom 15% trades, IV differences):")
+        for d in tail["differences"][:8]:
+            lines.append(f"  {d['feature']:<40} top_mean={d['top_mean']:+.4f}  bot_mean={d['bot_mean']:+.4f}  "
+                        f"diff={d['diff']:+.4f}")
+
+    # Rolling correlation
+    lines.append("\nROLLING CORRELATION SUMMARY:")
+    for feat, rc in evidence.get("rolling_corrs", {}).items():
+        if rc:
+            r_vals = [p.get("r", 0) for p in rc if p.get("r") is not None]
+            if r_vals:
+                lines.append(f"  {feat}: range [{min(r_vals):+.3f}, {max(r_vals):+.3f}], "
+                            f"latest={r_vals[-1]:+.3f}")
+
+    # 2-factor grids
+    lines.append("\nTWO-FACTOR REGIME GRIDS:")
+    for grid in evidence.get("two_factor_grids", []):
+        pnl_grid = grid.get("pnl", {})
+        win_grid = grid.get("is_win", {})
+        cells = pnl_grid.get("cells", [])
+        if cells:
+            pnls = [c.get("mean_y", 0) for c in cells if c.get("n", 0) >= 10]
+            best_cell = max(cells, key=lambda c: c.get("mean_y", 0)) if cells else {}
+            worst_cell = min(cells, key=lambda c: c.get("mean_y", 0)) if cells else {}
+            lines.append(f"  {grid['f1']} × {grid['f2']}: "
+                        f"interaction={pnl_grid.get('interaction_strength', 0):.3f}, "
+                        f"best zone={best_cell.get('label', '?')} (P&L=${best_cell.get('mean_y', 0):,.0f}), "
+                        f"worst zone={worst_cell.get('label', '?')} (P&L=${worst_cell.get('mean_y', 0):,.0f})")
+
+    # Regime split
+    rs = evidence.get("regime_split")
+    if rs:
+        lines.append(f"\nVIX REGIME SPLIT ({rs.get('split_col', '?')} median):")
+        for regime, data in rs.get("regimes", {}).items():
+            lines.append(f"  {regime}: r={data.get('r', 0):+.3f}, mean_pnl=${data.get('mean_y', 0):,.0f}, n={data.get('n', 0)}")
+
+    # Model comparison
+    mc = evidence.get("model_comparison", {})
+    lines.append(f"\nMODEL COMPARISON VERDICT: {mc.get('verdict', '?')}")
+    lines.append(f"  Reason: {mc.get('verdict_reason', '')}")
+    bs = mc.get("best_single", {})
+    if bs:
+        lines.append(f"  Best single: {bs.get('feature')} r={bs.get('r', 0):+.3f} WR_spread={bs.get('wr_spread', 0):.1%}")
+    b2f = mc.get("best_2factor")
+    if b2f:
+        lines.append(f"  Best 2-factor: {b2f.get('f1')}×{b2f.get('f2')} WR_spread={b2f.get('wr_spread', 0):.1%} "
+                    f"improvement={b2f.get('improvement', 0):+.1%} meaningful={b2f.get('meaningful')}")
+    comp = mc.get("composite")
+    if comp:
+        lines.append(f"  Composite: validate_r={comp.get('validate_r', 0):.3f} recommended={comp.get('recommended')}")
+
+    # Warnings
+    for w in evidence.get("warnings", []):
+        lines.append(f"\nWARNING: {w}")
+
+    return "\n".join(lines)
 
 
 async def _execute_backtest_run(
