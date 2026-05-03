@@ -542,7 +542,9 @@ Examples:
                                border-color:rgba(46,204,113,.3);color:#2ecc71;flex-shrink:0"
                         @click="uploadBacktest()"
                         :disabled="!backtestUploadState.files.length || backtestUploadState.uploading">
-                  <span x-text="backtestUploadState.uploading ? '⏳ Uploading…' : '↑ Upload Files'"></span>
+                  <span x-text="backtestUploadState.uploading
+                    ? '⏳ Parsing ' + backtestUploadState.files.length + ' files (may take 30-60s)…'
+                    : '↑ Upload Files'"></span>
                 </button>
                 <div x-show="backtestUploadState.error"
                      style="width:100%;color:#e74c3c;font-size:11px"

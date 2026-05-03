@@ -550,24 +550,36 @@ async def upload_backtest(
     all_metas:  list = []
     sources:    list = []
 
+    # Read all files first, then parse in parallel threads
+    file_data = []
     for file in files:
         content_bytes = await file.read()
-        try:
-            trades, meta = await asyncio.to_thread(
-                rbacktest.parse_backtest_upload, content_bytes, file.filename
-            )
-        except Exception as exc:
-            raise HTTPException(400, f"Parse error in '{file.filename}': {exc}")
+        file_data.append((content_bytes, file.filename))
+        sources.append(file.filename)
+
+    log.info("Backtest upload: parsing %d files (%s) in parallel...",
+             len(file_data), ", ".join(sources))
+
+    parse_tasks = [
+        asyncio.to_thread(rbacktest.parse_backtest_upload, content, fname)
+        for content, fname in file_data
+    ]
+    results = await asyncio.gather(*parse_tasks, return_exceptions=True)
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            raise HTTPException(400, f"Parse error in '{sources[i]}': {result}")
+        trades, meta = result
+        # Drop daily_path immediately — massive and not needed for regime analysis
+        for t in trades:
+            t.pop('daily_path', None)
         all_trades.extend(trades)
         all_metas.append(meta)
-        sources.append(file.filename)
+
+    log.info("Parsed %d trades from %d files", len(all_trades), len(file_data))
 
     if not all_trades:
         raise HTTPException(400, "No trades found in uploaded files")
-
-    # Drop daily_path before alignment — it's massive and not needed for regime analysis
-    for t in all_trades:
-        t.pop('daily_path', None)
 
     # Sort combined trades chronologically
     all_trades.sort(key=lambda t: t.get('date_opened', ''))
