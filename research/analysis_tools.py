@@ -379,6 +379,337 @@ def run_win_rate_analysis(rows: list[dict], x_col: str,
     }
 
 
+def run_feature_redundancy_check(rows: list[dict], features: list[str],
+                                  r_threshold: float = 0.7) -> dict:
+    """
+    Compute pairwise Pearson r among features and group redundant ones (|r| >= threshold).
+    Returns {features_checked, r_threshold, n_groups, non_redundant, groups, pairwise_top}.
+    Use this after discovery to avoid building a composite from correlated features.
+    """
+    valid_features = []
+    for f in features:
+        vals = [_safe_float(r.get(f)) for r in rows]
+        if sum(v is not None for v in vals) >= 10:
+            valid_features.append(f)
+
+    if len(valid_features) < 2:
+        return {'error': 'need ≥2 features with valid data', 'features_checked': len(features)}
+
+    # Pairwise correlations
+    pairs = []
+    for i, f1 in enumerate(valid_features):
+        for f2 in valid_features[i + 1:]:
+            fp = _float_pairs(rows, f1, f2)
+            if len(fp) < 10:
+                continue
+            xs, ys = [p[0] for p in fp], [p[1] for p in fp]
+            try:
+                r_val = float(np.corrcoef(xs, ys)[0, 1])
+                if not math.isnan(r_val):
+                    pairs.append({'f1': f1, 'f2': f2, 'r': round(r_val, 4)})
+            except Exception:
+                pass
+    pairs.sort(key=lambda p: abs(p['r']), reverse=True)
+
+    # Build r_map for quick lookup
+    r_map: dict[tuple, float] = {}
+    for p in pairs:
+        r_map[(p['f1'], p['f2'])] = abs(p['r'])
+        r_map[(p['f2'], p['f1'])] = abs(p['r'])
+
+    # Greedy redundancy clustering
+    assigned: set[str] = set()
+    groups = []
+    for f in valid_features:
+        if f in assigned:
+            continue
+        group = [f]
+        assigned.add(f)
+        for f2 in valid_features:
+            if f2 in assigned:
+                continue
+            max_r = max((r_map.get((gm, f2), 0.0) for gm in group), default=0.0)
+            if max_r >= r_threshold:
+                group.append(f2)
+                assigned.add(f2)
+        groups.append({'representative': f, 'members': group, 'size': len(group)})
+
+    groups.sort(key=lambda g: -g['size'])
+
+    return {
+        'features_checked': len(valid_features),
+        'r_threshold': r_threshold,
+        'n_groups': len(groups),
+        'non_redundant': [g['representative'] for g in groups],
+        'groups': groups,
+        'pairwise_top': pairs[:20],
+    }
+
+
+def run_two_factor_regime(rows: list[dict], factor1: str, factor2: str,
+                           y_col: str, n_bins: int = 3) -> dict:
+    """
+    2-factor outcome grid: bin each factor into n_bins equal-count groups, compute
+    mean_y and win_rate per cell. Returns main-effect marginals and interaction strength
+    (max deviation of any cell from its additive prediction). Use this as the discovery
+    layer for regime construction.
+    """
+    valid = []
+    for r in rows:
+        v1 = _safe_float(r.get(factor1))
+        v2 = _safe_float(r.get(factor2))
+        yv = _safe_float(r.get(y_col))
+        if v1 is None or v2 is None or yv is None:
+            continue
+        iw = r.get('is_win')
+        win = bool(iw) if iw is not None else (yv > 0)
+        valid.append((v1, v2, yv, win))
+
+    if len(valid) < n_bins * n_bins * 5:
+        return {'error': f'insufficient data: need ~{n_bins*n_bins*5}, have {len(valid)}', 'n': len(valid)}
+
+    def _bin_edges(vals):
+        sv = sorted(vals)
+        n = len(sv)
+        return [sv[int(n * i / n_bins)] for i in range(1, n_bins)]
+
+    def _assign_bin(v, edges):
+        for i, e in enumerate(edges):
+            if v <= e:
+                return i
+        return len(edges)
+
+    f1_edges = _bin_edges([t[0] for t in valid])
+    f2_edges = _bin_edges([t[1] for t in valid])
+    bin_labels = ['low', 'mid', 'high'] if n_bins == 3 else [str(i + 1) for i in range(n_bins)]
+
+    # Fill cells
+    cells: dict[tuple, dict] = {}
+    for v1, v2, yv, win in valid:
+        key = (_assign_bin(v1, f1_edges), _assign_bin(v2, f2_edges))
+        if key not in cells:
+            cells[key] = {'y': [], 'wins': []}
+        cells[key]['y'].append(yv)
+        cells[key]['wins'].append(win)
+
+    def _cell_stats(b1, b2):
+        c = cells.get((b1, b2), {'y': [], 'wins': []})
+        n = len(c['y'])
+        return {
+            'f1_bin': bin_labels[b1], 'f2_bin': bin_labels[b2],
+            'n': n,
+            'mean_y':   round(statistics.mean(c['y']), 2)          if n > 0 else None,
+            'win_rate': round(sum(c['wins']) / n, 4)                if n > 0 else None,
+            'std_y':    round(statistics.stdev(c['y']), 2)          if n > 1 else None,
+        }
+
+    grid = [[_cell_stats(b1, b2) for b2 in range(n_bins)] for b1 in range(n_bins)]
+    cell_means = {(b1, b2): grid[b1][b2]['mean_y'] for b1 in range(n_bins) for b2 in range(n_bins)}
+
+    # Marginals
+    def _marginal(axis, b_idx):
+        ys, wins = [], []
+        for (b1, b2), c in cells.items():
+            if (b1 if axis == 0 else b2) == b_idx:
+                ys.extend(c['y']); wins.extend(c['wins'])
+        n = len(ys)
+        return {
+            'bin': bin_labels[b_idx], 'n': n,
+            'mean_y':   round(statistics.mean(ys), 2)     if n > 0 else None,
+            'win_rate': round(sum(wins) / n, 4)           if n > 0 else None,
+        }
+
+    marginals_f1 = [_marginal(0, b) for b in range(n_bins)]
+    marginals_f2 = [_marginal(1, b) for b in range(n_bins)]
+
+    # Interaction strength: max deviation from additive prediction
+    all_y = [t[2] for t in valid]
+    global_mean = statistics.mean(all_y)
+    max_interaction = 0.0
+    best_cell = worst_cell = None
+    best_mean = worst_mean = None
+    for b1 in range(n_bins):
+        for b2 in range(n_bins):
+            actual = cell_means.get((b1, b2))
+            if actual is None:
+                continue
+            m1 = marginals_f1[b1].get('mean_y')
+            m2 = marginals_f2[b2].get('mean_y')
+            if m1 is not None and m2 is not None:
+                deviation = abs(actual - (m1 + m2 - global_mean))
+                if deviation > max_interaction:
+                    max_interaction = deviation
+            if best_mean is None or actual > best_mean:
+                best_mean = actual
+                best_cell = {'f1_bin': bin_labels[b1], 'f2_bin': bin_labels[b2], 'mean_y': actual}
+            if worst_mean is None or actual < worst_mean:
+                worst_mean = actual
+                worst_cell = {'f1_bin': bin_labels[b1], 'f2_bin': bin_labels[b2], 'mean_y': actual}
+
+    return {
+        'factor1': factor1, 'factor2': factor2, 'y_col': y_col,
+        'n_bins': n_bins, 'n': len(valid),
+        'global_mean_y': round(global_mean, 2),
+        'grid': grid,
+        'marginals_f1': marginals_f1,
+        'marginals_f2': marginals_f2,
+        'interaction_strength': round(max_interaction, 2),
+        'best_cell': best_cell,
+        'worst_cell': worst_cell,
+    }
+
+
+def run_composite_regime_score(
+    rows: list[dict],
+    components: list[dict],
+    interactions: list[dict] | None = None,
+    y_col: str = 'pnl',
+    train_frac: float = 0.6,
+) -> dict:
+    """
+    Build and validate a composite regime score from 2-5 component features.
+    components: [{feature, direction}] where direction 1=higher-is-favorable, -1=lower-is-favorable.
+    interactions: [{feature1, feature2, type}] where type is 'amplify' or 'conditional'.
+      amplify:     bonus when both components point same way; penalty when opposite.
+      conditional: feature1 gets +1 weight when feature2 is in top tercile, -1 when bottom tercile.
+    Splits chronologically (train_frac train / remainder validate).
+    Returns quintile profiles, train/validate r, and comparison vs best single component.
+    """
+    if not components:
+        return {'error': 'no components specified'}
+    interactions = interactions or []
+
+    # Collect valid rows
+    valid: list[dict] = []
+    for r in rows:
+        yv = _safe_float(r.get(y_col))
+        if yv is None:
+            continue
+        comp_vals = {}
+        ok = True
+        for c in components:
+            v = _safe_float(r.get(c['feature']))
+            if v is None:
+                ok = False
+                break
+            comp_vals[c['feature']] = v
+        if not ok:
+            continue
+        iw = r.get('is_win')
+        valid.append({'date': r.get('date_opened', ''), 'y': yv,
+                      'win': bool(iw) if iw is not None else (yv > 0), **comp_vals})
+
+    if len(valid) < 20:
+        return {'error': f'insufficient data: {len(valid)} valid rows', 'n': len(valid)}
+
+    valid.sort(key=lambda r: r['date'])
+    split_idx = max(10, int(len(valid) * train_frac))
+    train_rows = valid[:split_idx]
+    val_rows   = valid[split_idx:]
+    if len(val_rows) < 10:
+        return {'error': f'validation set too small ({len(val_rows)} rows); reduce train_frac'}
+
+    def _pct_rank(v: float, sorted_vals: list[float]) -> float:
+        pos = int(np.searchsorted(sorted_vals, v, side='right'))
+        return pos / len(sorted_vals)
+
+    def _build_sorted(row_subset):
+        return {c['feature']: sorted(r[c['feature']] for r in row_subset) for c in components}
+
+    def _score_rows(row_subset, sorted_ref):
+        scored = []
+        for r in row_subset:
+            comp_pcts: dict[str, float] = {}
+            total = 0.0
+            for c in components:
+                f, d = c['feature'], int(c.get('direction', 1))
+                pct = _pct_rank(r[f], sorted_ref[f])
+                adj = pct if d >= 0 else (1.0 - pct)
+                comp_pcts[f] = adj
+                total += adj
+            for ix in interactions:
+                f1, f2 = ix.get('feature1'), ix.get('feature2')
+                s1, s2 = comp_pcts.get(f1), comp_pcts.get(f2)
+                if s1 is None or s2 is None:
+                    continue
+                if ix.get('type') == 'amplify':
+                    total += 2.0 * (s1 - 0.5) * (s2 - 0.5)
+                elif ix.get('type') == 'conditional':
+                    total += s1 if s2 > 2/3 else (-s1 if s2 < 1/3 else 0.0)
+            scored.append((total, r['y'], r['win']))
+        return scored
+
+    sorted_train = _build_sorted(train_rows)
+    sorted_full  = _build_sorted(valid)
+
+    train_scored = _score_rows(train_rows, sorted_train)
+    val_scored   = _score_rows(val_rows,   sorted_train)   # use train distribution
+    full_scored  = _score_rows(valid,      sorted_full)
+
+    def _quintile_profile(scored):
+        scored = sorted(scored, key=lambda x: x[0])
+        n, q = len(scored), max(1, len(scored) // 5)
+        out = []
+        for qi in range(5):
+            chunk = scored[qi * q : (qi + 1) * q if qi < 4 else n]
+            ys = [t[1] for t in chunk]; wins = [t[2] for t in chunk]
+            out.append({
+                'quintile': qi + 1, 'n': len(chunk),
+                'score_min': round(chunk[0][0], 3), 'score_max': round(chunk[-1][0], 3),
+                'mean_y': round(statistics.mean(ys), 2),
+                'win_rate': round(sum(wins) / len(wins), 4) if wins else 0.0,
+                'std_y': round(statistics.stdev(ys), 2) if len(ys) > 1 else 0.0,
+            })
+        return out
+
+    def _pearson_r(scored):
+        xs = [t[0] for t in scored]; ys = [t[1] for t in scored]
+        if len(xs) < 3:
+            return 0.0
+        try:
+            r = float(np.corrcoef(xs, ys)[0, 1])
+            return round(r, 4) if not math.isnan(r) else 0.0
+        except Exception:
+            return 0.0
+
+    train_r = _pearson_r(train_scored)
+    val_r   = _pearson_r(val_scored)
+    full_r  = _pearson_r(full_scored)
+
+    # Best single component on validation set (raw feature values vs y)
+    best_single_name, best_single_val_r = None, 0.0
+    for c in components:
+        f = c['feature']
+        pairs = [(r[f], r['y']) for r in val_rows]
+        if len(pairs) < 5:
+            continue
+        xs, ys = [p[0] for p in pairs], [p[1] for p in pairs]
+        try:
+            r_val = float(np.corrcoef(xs, ys)[0, 1])
+            if not math.isnan(r_val) and abs(r_val) > abs(best_single_val_r):
+                best_single_val_r = round(r_val, 4)
+                best_single_name = f
+        except Exception:
+            pass
+
+    return {
+        'y_col': y_col,
+        'n': len(valid), 'n_train': len(train_rows), 'n_validate': len(val_rows),
+        'components': components,
+        'interactions': interactions,
+        'full_quintiles':     _quintile_profile(full_scored),
+        'train_quintiles':    _quintile_profile(train_scored),
+        'validate_quintiles': _quintile_profile(val_scored),
+        'full_r':   full_r,
+        'train_r':  train_r,
+        'validate_r': val_r,
+        'best_single_component':  best_single_name,
+        'best_single_validate_r': best_single_val_r,
+        'composite_vs_single': round(abs(val_r) - abs(best_single_val_r), 4),
+        'stable': abs(val_r) >= abs(train_r) * 0.55,
+    }
+
+
 def run_time_split_validation(rows: list[dict], y_col: str,
                               n_splits: int = 2) -> dict:
     """

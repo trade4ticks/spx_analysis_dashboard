@@ -1314,15 +1314,96 @@ _BACKTEST_AGENTIC_TOOLS = [
         "name": "run_time_split_validation",
         "description": (
             "Split trades chronologically and check if top IV correlations are stable across time periods. "
-            "Use this on any promising signal to confirm it is not concentrated in one year."
+            "Use this on any promising signal. Default n_splits=3 when n≥600, else 2."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "y_col":    {"type": "string",  "description": "Outcome column (pnl or is_win)"},
-                "n_splits": {"type": "integer", "description": "Number of chronological periods (default 2)"},
+                "n_splits": {"type": "integer", "description": "Number of chronological periods (3 recommended for large samples)"},
             },
             "required": ["y_col"],
+        },
+    },
+    {
+        "name": "run_feature_redundancy_check",
+        "description": (
+            "Compute pairwise Pearson r among candidate features and group redundant ones (|r| ≥ threshold). "
+            "Call this after discovery to get one non-redundant representative per feature family before "
+            "building grids or composites."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "features":    {"type": "array", "items": {"type": "string"},
+                                "description": "List of IV metric column names to check"},
+                "r_threshold": {"type": "number",
+                                "description": "Redundancy threshold — features with |r| ≥ this are grouped (default 0.7)"},
+            },
+            "required": ["features"],
+        },
+    },
+    {
+        "name": "run_two_factor_regime",
+        "description": (
+            "Build a 2-factor outcome grid (n_bins × n_bins cells) showing mean_y and win_rate per cell. "
+            "Returns marginals (main effects) and interaction_strength (max deviation from additive prediction). "
+            "Use as the discovery layer — run on several non-redundant feature pairs to find interaction patterns."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "factor1": {"type": "string", "description": "First IV metric column"},
+                "factor2": {"type": "string", "description": "Second IV metric column"},
+                "y_col":   {"type": "string", "description": "Outcome column (pnl or is_win)"},
+                "n_bins":  {"type": "integer", "description": "Bins per factor (default 3 → 3×3 grid)"},
+            },
+            "required": ["factor1", "factor2", "y_col"],
+        },
+    },
+    {
+        "name": "run_composite_regime_score",
+        "description": (
+            "Build a composite regime score from 2–5 component features, apply optional interactions, "
+            "and validate out-of-sample on a chronological holdout. "
+            "Returns quintile outcome profiles for full/train/validate splits, train_r, validate_r, "
+            "and comparison vs the best single component. "
+            "Only call this after finding ≥2 stable, non-redundant features via grids and time-split validation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "components": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "feature":   {"type": "string"},
+                            "direction": {"type": "integer",
+                                          "description": "1 = higher is favorable, -1 = lower is favorable"},
+                        },
+                        "required": ["feature", "direction"],
+                    },
+                    "description": "2–5 feature components with their outcome direction",
+                },
+                "interactions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "feature1": {"type": "string"},
+                            "feature2": {"type": "string"},
+                            "type": {"type": "string", "enum": ["amplify", "conditional"],
+                                     "description": "amplify: bonus when both point same way. conditional: feature1 double-weighted when feature2 is extreme."},
+                        },
+                        "required": ["feature1", "feature2", "type"],
+                    },
+                    "description": "Optional interaction adjustments (max 4). Only add if grid scan showed evidence of interaction.",
+                },
+                "y_col":       {"type": "string",  "description": "Outcome column (default pnl)"},
+                "train_frac":  {"type": "number",  "description": "Fraction for training split (default 0.6)"},
+            },
+            "required": ["components"],
         },
     },
     {
@@ -1359,21 +1440,42 @@ You are a quantitative analyst evaluating a completed options backtest. Each row
 completed trade with entry date, exit date, P&L, and SPX implied-volatility surface \
 metrics captured at trade entry (09:35 on the entry date — entry-morning conditions).
 
-Your goal: find which entry-time IV conditions PREDICT better or worse trade outcomes. \
-These are predictive relationships (IV conditions before trade closes → final P&L/win_rate), \
-not incidental correlations.
+Your goal: find which entry-time IV conditions PREDICT better or worse trade outcomes, \
+and build a compact, validated regime description if the data supports it.
 
-Key outcome columns: pnl (continuous), is_win (binary 0/1), max_loss, days_in_trade.
-IV metrics are the surface_metrics_core columns (skew, term structure, convexity, etc.).
+Key outcome columns: pnl (continuous), is_win (binary 0/1), days_in_trade.
+IV metrics are surface_metrics_core columns (skew, term structure, convexity, level, etc.).
 
-Guidelines:
-  - Use run_win_rate_analysis for binary win/loss — Pearson r misses threshold effects.
-  - Use run_time_split_validation on any promising signal to confirm it is not limited to one year.
-  - If max_loss is available, analyze drawdown — not just final P&L.
-  - Explicitly distinguish entry-time predictors from post-trade or incidental correlations.
-  - In your report, cite specific r values, win rate differences, and sample sizes.
+ANALYSIS WORKFLOW — follow this sequence:
 
-Call 4-8 tools before writing your report. When done, call write_report.\
+STEP 1 — DISCOVERY: Run run_correlation_scan (both pnl and is_win) and run_win_rate_analysis \
+on the strongest candidates to identify the top 10–15 predictive features.
+
+STEP 2 — REDUNDANCY: Run run_feature_redundancy_check on those top features. Use the returned \
+non_redundant list for all subsequent steps. Avoid building composites from correlated features.
+
+STEP 3 — GRID SCAN: Run run_two_factor_regime on 3–5 promising non-redundant pairs (spanning \
+different conceptual domains where possible). For each grid, look for:
+  - Main effects: consistent marginal differences across factor bins.
+  - Interaction effects: cells with mean_y far from additive prediction (high interaction_strength).
+  - Conditional effects: one factor only matters when another is favorable/unfavorable.
+
+STEP 4 — STABILITY: Run run_time_split_validation on the best 2–3 features. Use n_splits=3 \
+if you have ≥600 trades. Only features that appear stable across periods are candidates for the composite.
+
+STEP 5 — COMPOSITE (only if ≥2 stable non-redundant features found): Run run_composite_regime_score:
+  - components: 2–4 features with their directions (based on correlation sign from step 1).
+  - interactions: add amplify or conditional ONLY if the grid scan showed clear evidence. Max 4 interactions.
+  - Check validate_r vs best_single_validate_r. Report whether the composite improves over the \
+    best single metric. If composite_vs_single ≤ 0 or stable=false, say so explicitly.
+
+STEP 6 — REPORT: Describe favorable and unfavorable regime conditions in market terms \
+(e.g. "high term-structure slope + low skew → mean P&L $X, win rate Y%"). \
+Cite actual numbers from validate_quintiles, not train. Flag unstable or low-sample findings. \
+Recommend whether this is useful for filtering, sizing, or exploratory only.
+
+Skip step 5 if fewer than 2 stable features are found — report that no composite is warranted.
+Call 6–12 tools before write_report.\
 """
 
 
@@ -1746,7 +1848,110 @@ def _build_backtest_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
                         },
                     }
 
-        if len(charts) >= 8:
+        elif tool_name == 'run_feature_redundancy_check':
+            pairs = result.get('pairwise_top') or []
+            if len(pairs) >= 2:
+                threshold = result.get('r_threshold', 0.7)
+                top = pairs[:15]
+                labels = [f"{p['f1'][:18]}×{p['f2'][:18]}" for p in top]
+                vals   = [abs(p['r']) for p in top]
+                cid = f"redundancy_{len(charts)}"
+                charts[cid] = {
+                    'title': f"Feature Pairwise |r| (redundancy threshold={threshold})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [{
+                                'label': '|r|',
+                                'data': vals,
+                                'backgroundColor': [colors_neg if v >= threshold else colors_pos for v in vals],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_two_factor_regime':
+            grid = result.get('grid') or []
+            f1, f2, y_col_r = result.get('factor1', '?'), result.get('factor2', '?'), result.get('y_col', '?')
+            if grid and len(grid) >= 2:
+                n_bins = len(grid)
+                f2_labels = [f"f2={grid[0][b2]['f2_bin']}" for b2 in range(n_bins)]
+                ds_colors = [colors_pos, '#2ecc71', '#e67e22']
+                datasets = []
+                for b1 in range(n_bins):
+                    f1_bin = grid[b1][0]['f1_bin']
+                    datasets.append({
+                        'label': f"f1={f1_bin}",
+                        'data': [grid[b1][b2].get('mean_y', 0) for b2 in range(n_bins)],
+                        'backgroundColor': ds_colors[b1 % len(ds_colors)],
+                        'borderWidth': 0,
+                    })
+                ix = round(result.get('interaction_strength', 0), 2)
+                cid = f"grid_{f1[:12]}_{f2[:12]}"
+                charts[cid] = {
+                    'title': f"2-Factor Grid: {f1[:20]} × {f2[:20]} → {y_col_r} (interaction={ix})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {'labels': f2_labels, 'datasets': datasets},
+                        'options': base_opts,
+                    },
+                }
+
+        elif tool_name == 'run_composite_regime_score':
+            vq = result.get('validate_quintiles') or []
+            if len(vq) >= 4:
+                labels   = [f"Q{q['quintile']}" for q in vq]
+                pnl_vals = [q.get('mean_y', 0) for q in vq]
+                wr_vals  = [round(q.get('win_rate', 0) * 100, 1) for q in vq]
+                val_r    = result.get('validate_r', 0)
+                vs_single = result.get('composite_vs_single', 0)
+                stable    = result.get('stable', False)
+                cid = f"composite_{len(charts)}"
+                charts[cid] = {
+                    'title': (
+                        f"Composite Regime (validate r={val_r:+.3f}, vs single {vs_single:+.3f}, "
+                        f"{'✓stable' if stable else '⚠unstable'})"
+                    ),
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [
+                                {
+                                    'label': 'Mean P&L (validate)',
+                                    'data': pnl_vals,
+                                    'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in pnl_vals],
+                                    'borderWidth': 0,
+                                    'yAxisID': 'y',
+                                },
+                                {
+                                    'label': 'Win Rate %',
+                                    'data': wr_vals,
+                                    'backgroundColor': 'rgba(46,204,113,0.4)',
+                                    'borderWidth': 0,
+                                    'yAxisID': 'y1',
+                                },
+                            ],
+                        },
+                        'options': {
+                            **base_opts,
+                            'scales': {
+                                **dark_scales,
+                                'y1': {
+                                    'position': 'right',
+                                    'ticks': {'color': '#2ecc71', 'font': {'size': 9}},
+                                    'grid': {'drawOnChartArea': False},
+                                },
+                            },
+                        },
+                    },
+                }
+
+        if len(charts) >= 10:
             break
 
     return charts
@@ -2168,7 +2373,7 @@ async def execute_backtest_pipeline(
     messages = [{"role": "user", "content": initial_msg}]
     tool_results_acc = []
     report_data = None
-    max_steps = 8
+    max_steps = 12
 
     log("[RUNNING] Starting backtest agentic analysis loop…")
     for step in range(max_steps):
@@ -2228,9 +2433,30 @@ async def execute_backtest_pipeline(
                         inputs.get("n_buckets", 5),
                     )
                 elif tool_name == "run_time_split_validation":
+                    auto_splits = 3 if len(enriched_trades) >= 600 else 2
                     result = at.run_time_split_validation(
                         enriched_trades, inputs["y_col"],
-                        inputs.get("n_splits", 2),
+                        inputs.get("n_splits", auto_splits),
+                    )
+                elif tool_name == "run_feature_redundancy_check":
+                    result = at.run_feature_redundancy_check(
+                        enriched_trades,
+                        inputs["features"],
+                        inputs.get("r_threshold", 0.7),
+                    )
+                elif tool_name == "run_two_factor_regime":
+                    result = at.run_two_factor_regime(
+                        enriched_trades,
+                        inputs["factor1"], inputs["factor2"], inputs["y_col"],
+                        inputs.get("n_bins", 3),
+                    )
+                elif tool_name == "run_composite_regime_score":
+                    result = at.run_composite_regime_score(
+                        enriched_trades,
+                        inputs["components"],
+                        inputs.get("interactions"),
+                        inputs.get("y_col", "pnl"),
+                        inputs.get("train_frac", 0.6),
                     )
                 else:
                     result = {"error": f"Unknown tool: {tool_name}"}
