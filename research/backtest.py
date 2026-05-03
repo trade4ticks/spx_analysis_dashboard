@@ -187,10 +187,13 @@ def parse_backtest_csv(content: str) -> tuple[list[dict], dict]:
 
 # ── JSON Parser (DeltaRay Mesosim) ────────────────────────────────────────────
 
-def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
+def parse_backtest_json(content: str, skip_daily_path: bool = True) -> tuple[list[dict], dict]:
     """
     Parse DeltaRay Mesosim events JSON (flat array grouped by PositionId).
     Returns (trades, meta).
+
+    When skip_daily_path=True (default), EndOfDay events are ignored
+    for much faster parsing on large files.
     """
     try:
         events = json.loads(content)
@@ -200,12 +203,19 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
     if not isinstance(events, list):
         raise ValueError("Expected a JSON array of events")
 
+    # Only keep events we need — skip EndOfDay (bulk of events) when not building daily_path
+    _KEEP_TYPES = {'EnterPosition', 'ExitPosition', 'ExitSignal', 'EntryTrade', 'Start'}
+    if not skip_daily_path:
+        _KEEP_TYPES.add('EndOfDay')
+
     positions: dict = defaultdict(list)
     strategy: Optional[str] = None
 
     for event in events:
+        et = event.get('EventType')
+
         # Extract strategy name from Start event
-        if event.get('EventType') == 'Start' and strategy is None:
+        if et == 'Start' and strategy is None:
             msg = event.get('Message', '')
             for key in ('StrategyName:', 'BacktestName:'):
                 if key in msg:
@@ -213,6 +223,10 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
                     if len(parts) > 1:
                         strategy = parts[1].split()[0].strip()
                     break
+            continue
+
+        if et not in _KEEP_TYPES:
+            continue
 
         pos_id = event.get('PositionId')
         if pos_id is not None:
@@ -271,30 +285,31 @@ def parse_backtest_json(content: str) -> tuple[list[dict], dict]:
             exit_signal.get('Message', 'Unknown') if exit_signal else 'Unknown'
         )
 
-        # Build daily path from EndOfDay events
-        eod_events.sort(key=lambda e: e.get('SimTime', ''))
+        # Build daily path from EndOfDay events (only if not skipped)
         daily_path = []
-        for eod in eod_events:
-            sim_time = eod.get('SimTime', '')
-            eod_date = sim_time[:10] if sim_time else None
-            if not eod_date:
-                continue
-            msg = eod.get('Message', '')
-            try:
-                dit = int(msg.split('=')[1].strip()) if '=' in msg else None
-            except (IndexError, ValueError):
-                dit = None
-            vars_ = eod.get('Vars') or {}
-            daily_path.append({
-                'date':      eod_date,
-                'dit':       dit,
-                'pos_pnl':   _safe_float(vars_.get('pos_pnl')),
-                'pos_delta': _safe_float(vars_.get('pos_delta')),
-                'pos_gamma': _safe_float(vars_.get('pos_gamma')),
-                'pos_theta': _safe_float(vars_.get('pos_theta')),
-                'pos_vega':  _safe_float(vars_.get('pos_vega')),
-                'pos_wvega': _safe_float(vars_.get('pos_wvega')),
-            })
+        if not skip_daily_path and eod_events:
+            eod_events.sort(key=lambda e: e.get('SimTime', ''))
+            for eod in eod_events:
+                sim_time = eod.get('SimTime', '')
+                eod_date = sim_time[:10] if sim_time else None
+                if not eod_date:
+                    continue
+                msg = eod.get('Message', '')
+                try:
+                    dit = int(msg.split('=')[1].strip()) if '=' in msg else None
+                except (IndexError, ValueError):
+                    dit = None
+                vars_ = eod.get('Vars') or {}
+                daily_path.append({
+                    'date':      eod_date,
+                    'dit':       dit,
+                    'pos_pnl':   _safe_float(vars_.get('pos_pnl')),
+                    'pos_delta': _safe_float(vars_.get('pos_delta')),
+                    'pos_gamma': _safe_float(vars_.get('pos_gamma')),
+                    'pos_theta': _safe_float(vars_.get('pos_theta')),
+                    'pos_vega':  _safe_float(vars_.get('pos_vega')),
+                    'pos_wvega': _safe_float(vars_.get('pos_wvega')),
+                })
 
         pnl_val = pnl if pnl is not None else 0.0
         trades.append({
