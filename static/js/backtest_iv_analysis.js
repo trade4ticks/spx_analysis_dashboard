@@ -66,28 +66,23 @@ function fmtR2(v) {
 function makeMultiSelect(maxCount) {
   return {
     selected: [],
-    input: '',
-    suggestions: [],
     _allColumns: [],
+    _max: maxCount,
 
     init(allColumns) {
       this._allColumns = allColumns;
     },
 
-    filter() {
-      const q = this.input.toLowerCase();
-      this.suggestions = q.length < 1 ? [] :
-        this._allColumns
-          .filter(c => c.toLowerCase().includes(q) && !this.selected.includes(c))
-          .slice(0, 12);
+    available() {
+      return this._allColumns.filter(c => !this.selected.includes(c));
     },
 
-    add(col) {
-      if (this.selected.includes(col)) return;
-      if (this.selected.length >= maxCount) return;
+    addFromEvent(event) {
+      const col = event.target.value;
+      event.target.value = '';
+      if (!col || this.selected.includes(col)) return;
+      if (this.selected.length >= this._max) return;
       this.selected.push(col);
-      this.input = '';
-      this.suggestions = [];
     },
 
     remove(col) {
@@ -96,8 +91,6 @@ function makeMultiSelect(maxCount) {
 
     clear() {
       this.selected = [];
-      this.input = '';
-      this.suggestions = [];
     },
   };
 }
@@ -419,7 +412,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const body = this.s5.showAll
           ? {}
-          : { metric: this.s5.metric, bucket_index: this.s5.bucketIdx, n_buckets: this.s5.nBuckets };
+          : { metric: this.s5.metric, bucket_index: (this.s5.bucketIdx || 1) - 1, n_buckets: this.s5.nBuckets };
         this.s5.data = await this._api('distribution', body);
       } catch (e) { this.s5.error = e.message; }
       finally { this.s5.loading = false; }

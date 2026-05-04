@@ -322,27 +322,24 @@
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s2}">
           <div class="biv-ctrl">
-            <div style="position:relative">
-              <label>METRICS (up to 20) — type to search</label>
-              <div class="biv-tags-wrap"
-                   @click="$refs.s2input.focus()">
+            <div>
+              <label>METRICS (up to 20)</label>
+              <div class="biv-tags-wrap" style="margin-bottom:6px">
                 <template x-for="m in s2.ms.selected" :key="m">
-                  <span class="biv-tag" @click.stop="s2.ms.remove(m)">
+                  <span class="biv-tag" @click="s2.ms.remove(m)">
                     <span x-text="m"></span><span style="opacity:.5">×</span>
                   </span>
                 </template>
-                <input class="biv-tag-input" x-ref="s2input"
-                       x-model="s2.ms.input"
-                       @input="s2.ms.filter()"
-                       @keydown.enter.prevent="s2.ms.add(s2.ms.suggestions[0] || s2.ms.input)"
-                       @keydown.escape="s2.ms.suggestions=[]"
-                       placeholder="Search metrics…">
+                <span x-show="s2.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <div class="biv-suggestions" x-show="s2.ms.suggestions.length > 0" @mouseleave="s2.ms.suggestions=[]">
-                <template x-for="sug in s2.ms.suggestions" :key="sug">
-                  <div x-text="sug" @click="s2.ms.add(sug)"></div>
+              <select @change="s2.ms.addFromEvent($event)"
+                      style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
+                      :disabled="s2.ms.selected.length >= 20">
+                <option value="">— add metric —</option>
+                <template x-for="c in s2.ms.available()" :key="c">
+                  <option :value="c" x-text="c"></option>
                 </template>
-              </div>
+              </select>
             </div>
             <div>
               <label>TARGET</label>
@@ -594,9 +591,9 @@
                   </div>
                 </div>
                 <div>
-                  <label>BUCKET #</label>
-                  <input type="number" x-model="s5.bucketIdx" min="0"
-                         :max="(s5.nBuckets||5)-1" style="width:60px">
+                  <label>BUCKET # <span style="color:#444;font-weight:400">(1 = lowest)</span></label>
+                  <input type="number" x-model.number="s5.bucketIdx" min="1"
+                         :max="s5.nBuckets||5" style="width:60px">
                 </div>
               </div>
             </template>
@@ -787,26 +784,24 @@
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s7}">
           <div class="biv-ctrl">
-            <div style="position:relative">
-              <label>METRICS (up to 25) — type to search</label>
-              <div class="biv-tags-wrap" @click="$refs.s7input.focus()">
+            <div>
+              <label>METRICS (up to 25)</label>
+              <div class="biv-tags-wrap" style="margin-bottom:6px">
                 <template x-for="m in s7.ms.selected" :key="m">
-                  <span class="biv-tag" @click.stop="s7.ms.remove(m)">
+                  <span class="biv-tag" @click="s7.ms.remove(m)">
                     <span x-text="m"></span><span style="opacity:.5">×</span>
                   </span>
                 </template>
-                <input class="biv-tag-input" x-ref="s7input"
-                       x-model="s7.ms.input"
-                       @input="s7.ms.filter()"
-                       @keydown.enter.prevent="s7.ms.add(s7.ms.suggestions[0] || s7.ms.input)"
-                       @keydown.escape="s7.ms.suggestions=[]"
-                       placeholder="Search metrics…">
+                <span x-show="s7.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <div class="biv-suggestions" x-show="s7.ms.suggestions.length > 0" @mouseleave="s7.ms.suggestions=[]">
-                <template x-for="sug in s7.ms.suggestions" :key="sug">
-                  <div x-text="sug" @click="s7.ms.add(sug)"></div>
+              <select @change="s7.ms.addFromEvent($event)"
+                      style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
+                      :disabled="s7.ms.selected.length >= 25">
+                <option value="">— add metric —</option>
+                <template x-for="c in s7.ms.available()" :key="c">
+                  <option :value="c" x-text="c"></option>
                 </template>
-              </div>
+              </select>
             </div>
             <button class="biv-btn" @click="loadFeatureCorr()"
                     :disabled="(s7.ms.selected.length < 2) || s7.loading">
