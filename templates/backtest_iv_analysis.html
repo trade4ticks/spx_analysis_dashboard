@@ -17,21 +17,21 @@
       border-bottom:1px solid #2a2a2a;
     }
     .biv-sec-hdr:hover { background:#2d2d2d; }
-    .biv-sec-num  { font-size:9px; font-weight:700; color:#555; letter-spacing:.5px; }
-    .biv-sec-title{ font-size:11px; font-weight:700; color:#ccc; letter-spacing:.3px; flex:1; }
+    .biv-sec-num  { font-size:11px; font-weight:700; color:#555; letter-spacing:.5px; }
+    .biv-sec-title{ font-size:13px; font-weight:700; color:#ccc; letter-spacing:.3px; flex:1; }
     .biv-sec-body { padding:14px; background:#1a1a1a; }
     .biv-sec-body.hidden { display:none; }
 
     /* Controls row */
     .biv-ctrl { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px; }
-    .biv-ctrl label { font-size:10px; color:#888; font-weight:700; display:block; margin-bottom:3px; letter-spacing:.3px; }
+    .biv-ctrl label { font-size:12px; color:#888; font-weight:700; display:block; margin-bottom:3px; letter-spacing:.3px; }
     .biv-ctrl select, .biv-ctrl input[type=number] {
       background:#222; border:1px solid #3a3a3a; color:#ccc;
-      padding:5px 8px; border-radius:3px; font-size:11px; min-width:180px;
+      padding:5px 8px; border-radius:3px; font-size:13px; min-width:180px;
     }
     .biv-ctrl select:focus, .biv-ctrl input:focus { outline:none; border-color:#3498db; }
     .biv-btn {
-      padding:5px 14px; border-radius:3px; font-size:11px; font-weight:700;
+      padding:5px 14px; border-radius:3px; font-size:13px; font-weight:700;
       background:rgba(52,152,219,.15); border:1px solid rgba(52,152,219,.3);
       color:#3498db; cursor:pointer;
     }
@@ -39,29 +39,29 @@
     .biv-btn:disabled { opacity:.4; cursor:default; }
 
     /* Status */
-    .biv-loading { color:#f1c40f; font-size:11px; }
-    .biv-error   { color:#e74c3c; font-size:11px; }
-    .biv-hint    { color:#555; font-size:10px; }
+    .biv-loading { color:#f1c40f; font-size:13px; }
+    .biv-error   { color:#e74c3c; font-size:13px; }
+    .biv-hint    { color:#555; font-size:12px; }
 
     /* Heatmap table */
     .biv-heatmap-wrap { overflow-x:auto; }
-    .biv-heatmap      { border-collapse:collapse; font-size:10px; font-family:monospace; }
-    .biv-heatmap th   { padding:4px 8px; color:#666; font-weight:600; text-align:center; font-size:9px; white-space:nowrap; }
+    .biv-heatmap      { border-collapse:collapse; font-size:12px; font-family:monospace; }
+    .biv-heatmap th   { padding:5px 10px; color:#666; font-weight:600; text-align:center; font-size:11px; white-space:nowrap; }
     .biv-heatmap td   {
-      width:80px; height:52px; text-align:center; vertical-align:middle;
+      width:90px; height:58px; text-align:center; vertical-align:middle;
       border:1px solid #111; cursor:default; transition:opacity .1s;
       padding:4px;
     }
     .biv-heatmap td:hover { opacity:.85; outline:1px solid #aaa; }
-    .biv-cell-val  { font-size:11px; font-weight:700; display:block; }
-    .biv-cell-n    { font-size:9px; opacity:.7; display:block; }
+    .biv-cell-val  { font-size:13px; font-weight:700; display:block; }
+    .biv-cell-n    { font-size:11px; opacity:.7; display:block; }
     .biv-cell-low  { opacity:.55; }
     .biv-cell-zero { opacity:.3; }
 
     /* Toggle group */
     .biv-toggle { display:flex; gap:0; border-radius:3px; overflow:hidden; border:1px solid #3a3a3a; }
     .biv-toggle button {
-      padding:4px 10px; font-size:10px; font-weight:700; cursor:pointer;
+      padding:5px 12px; font-size:12px; font-weight:700; cursor:pointer;
       background:#222; border:none; color:#666;
     }
     .biv-toggle button.on { background:#1a3a5c; color:#3498db; }
@@ -73,27 +73,27 @@
       min-width:260px; max-width:480px; cursor:text;
     }
     .biv-tag {
-      font-size:10px; padding:2px 7px; background:#1a3a5c; color:#3498db;
+      font-size:12px; padding:3px 8px; background:#1a3a5c; color:#3498db;
       border-radius:3px; cursor:pointer; display:flex; gap:4px; align-items:center;
     }
     .biv-tag:hover { background:#1a2a4a; }
     .biv-tag-input {
-      background:none; border:none; color:#ccc; font-size:11px; outline:none; flex:1; min-width:100px;
+      background:none; border:none; color:#ccc; font-size:13px; outline:none; flex:1; min-width:100px;
     }
     .biv-suggestions {
       position:absolute; z-index:50; background:#2a2a2a; border:1px solid #444;
-      border-radius:3px; max-height:180px; overflow-y:auto; min-width:240px; font-size:11px;
+      border-radius:3px; max-height:200px; overflow-y:auto; min-width:260px; font-size:13px;
     }
-    .biv-suggestions div { padding:5px 10px; cursor:pointer; color:#ccc; }
+    .biv-suggestions div { padding:6px 12px; cursor:pointer; color:#ccc; }
     .biv-suggestions div:hover { background:#3a3a3a; color:#fff; }
 
     /* Matrix tables (Sections 2, 7) */
-    .biv-matrix { border-collapse:collapse; font-size:9px; font-family:monospace; }
-    .biv-matrix th { padding:3px 6px; color:#666; font-weight:600; font-size:9px; max-width:80px;
+    .biv-matrix { border-collapse:collapse; font-size:11px; font-family:monospace; }
+    .biv-matrix th { padding:4px 8px; color:#666; font-weight:600; font-size:11px; max-width:100px;
                      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .biv-matrix td {
-      width:58px; height:40px; text-align:center; vertical-align:middle;
-      border:1px solid #111; font-size:10px; font-weight:700;
+      width:66px; height:46px; text-align:center; vertical-align:middle;
+      border:1px solid #111; font-size:12px; font-weight:700;
     }
 
     /* Boxplot */
@@ -117,45 +117,45 @@
     }
     .biv-boxplot-labels {
       display:flex; justify-content:space-between; margin:4px 40px 0;
-      font-size:9px; color:#555; font-family:monospace;
+      font-size:11px; color:#555; font-family:monospace;
     }
     .biv-boxplot-stats {
       display:grid; grid-template-columns:repeat(4, 1fr); gap:8px;
-      margin-top:14px; font-size:11px;
+      margin-top:14px; font-size:13px;
     }
     .biv-stat { display:flex; flex-direction:column; gap:2px; }
-    .biv-stat-label { font-size:9px; color:#555; font-weight:700; letter-spacing:.3px; }
+    .biv-stat-label { font-size:11px; color:#555; font-weight:700; letter-spacing:.3px; }
     .biv-stat-val   { color:#ccc; font-weight:700; }
 
     /* Top/Bottom regime cards */
     .biv-regime-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
     .biv-regime-col h4 {
-      font-size:10px; font-weight:700; letter-spacing:.4px; text-transform:uppercase;
+      font-size:12px; font-weight:700; letter-spacing:.4px; text-transform:uppercase;
       margin-bottom:8px;
     }
     .biv-regime-col.best  h4 { color:#3498db; }
     .biv-regime-col.worst h4 { color:#eb40aa; }
     .biv-regime-item {
       background:#222; border:1px solid #2a2a2a; border-radius:4px;
-      padding:8px 10px; margin-bottom:6px; font-size:11px;
+      padding:9px 12px; margin-bottom:6px; font-size:13px;
     }
-    .biv-regime-metric { color:#888; font-size:10px; font-family:monospace; margin-bottom:3px; }
+    .biv-regime-metric { color:#888; font-size:12px; font-family:monospace; margin-bottom:3px; }
     .biv-regime-vals   { display:flex; gap:12px; }
     .biv-regime-pnl    { font-weight:700; }
     .biv-regime-pnl.pos { color:#3498db; }
     .biv-regime-pnl.neg { color:#eb40aa; }
-    .biv-regime-wr     { color:#888; font-size:10px; }
+    .biv-regime-wr     { color:#888; font-size:12px; }
 
     /* Chart containers */
     .biv-chart-wrap { height:220px; position:relative; }
 
     /* Decile bucket bar (inline) */
-    .biv-d-n { font-size:9px; color:#555; }
+    .biv-d-n { font-size:11px; color:#555; }
 
     /* Section 4 bucket picker */
     .biv-bucket-radio { display:flex; gap:6px; flex-wrap:wrap; }
     .biv-bucket-radio label {
-      font-size:10px; padding:3px 8px; border-radius:3px; cursor:pointer;
+      font-size:12px; padding:4px 10px; border-radius:3px; cursor:pointer;
       background:#222; border:1px solid #3a3a3a; color:#888;
     }
     .biv-bucket-radio input[type=radio]:checked + span { color:#3498db; }
@@ -184,7 +184,7 @@
   <div class="ctrl-strip">
     <span class="ctrl-lbl">BACKTEST</span>
     <select x-model="selectedId" @change="selectUpload($event.target.value)"
-            style="background:#222;border:1px solid #444;color:#ccc;padding:4px 8px;border-radius:3px;font-size:11px;min-width:260px">
+            style="background:#222;border:1px solid #444;color:#ccc;padding:5px 10px;border-radius:3px;font-size:13px;min-width:280px">
       <template x-if="uploads.length === 0">
         <option value="">— no backtest uploads found —</option>
       </template>
@@ -195,7 +195,7 @@
       </template>
     </select>
     <template x-if="uploadInfo">
-      <span style="font-size:10px;color:#555">
+      <span style="font-size:12px;color:#555">
         <span x-text="uploadInfo.trade_count"></span> trades ·
         <span x-text="uploadInfo.matched_count"></span> IV-matched ·
         <span x-text="uploadInfo.date_from + ' → ' + uploadInfo.date_to" style="color:#444"></span>
@@ -203,7 +203,7 @@
     </template>
     <span x-show="loading" class="biv-loading">Loading…</span>
     <span x-show="globalError" class="biv-error" x-text="globalError"></span>
-    <span style="margin-left:auto;font-size:10px;color:#333"
+    <span style="margin-left:auto;font-size:12px;color:#333"
           x-text="ivColumns.length + ' IV metrics available'"></span>
   </div>
 
@@ -223,7 +223,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s1')">
           <span class="biv-sec-num">S1</span>
           <span class="biv-sec-title">2D REGIME HEATMAP</span>
-          <span style="font-size:11px;color:#444" x-text="open.s1 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s1 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s1}">
           <div class="biv-ctrl">
@@ -274,7 +274,7 @@
 
           <template x-if="s1.data && !s1.error">
             <div>
-              <div style="font-size:10px;color:#555;margin-bottom:8px">
+              <div style="font-size:12px;color:#555;margin-bottom:8px">
                 <span x-text="s1.data.valid_count"></span> trades plotted ·
                 rows = <span x-text="s1.data.metric_b" style="color:#aaa;font-family:monospace"></span> ·
                 cols = <span x-text="s1.data.metric_a" style="color:#aaa;font-family:monospace"></span>
@@ -318,7 +318,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s2')">
           <span class="biv-sec-num">S2</span>
           <span class="biv-sec-title">PAIRWISE PREDICTIVE STRENGTH (ΔR²)</span>
-          <span style="font-size:11px;color:#444" x-text="open.s2 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s2 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s2}">
           <div class="biv-ctrl">
@@ -358,7 +358,7 @@
             <button class="biv-btn" style="color:#555;border-color:#333"
                     @click="s2.ms.clear(); s2.data=null">Clear</button>
           </div>
-          <div style="font-size:10px;color:#555;margin-bottom:8px">
+          <div style="font-size:12px;color:#555;margin-bottom:8px">
             Diagonal = individual R². Off-diagonal = symmetric ΔR² (marginal improvement from adding second metric).
             Brighter blue = stronger predictive contribution.
           </div>
@@ -367,7 +367,7 @@
 
           <template x-if="s2.data && !s2.error">
             <div style="overflow-x:auto">
-              <div style="font-size:10px;color:#555;margin-bottom:8px">
+              <div style="font-size:12px;color:#555;margin-bottom:8px">
                 Individual R²:
                 <template x-for="(m, i) in s2.data.metrics" :key="m">
                   <span style="margin-right:10px;font-family:monospace">
@@ -408,7 +408,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s3')">
           <span class="biv-sec-num">S3</span>
           <span class="biv-sec-title">SINGLE METRIC DECILE VIEW</span>
-          <span style="font-size:11px;color:#444" x-text="open.s3 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s3 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s3}">
           <div class="biv-ctrl">
@@ -438,7 +438,7 @@
 
           <template x-if="s3.data && !s3.error">
             <div>
-              <div style="font-size:10px;color:#555;margin-bottom:10px">
+              <div style="font-size:12px;color:#555;margin-bottom:10px">
                 <span x-text="s3.data.total_valid"></span> valid trades ·
                 Pearson r = <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
                                   x-text="s3.data.pearson_r"></span>
@@ -446,7 +446,7 @@
               <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
               <!-- Bucket table -->
               <div style="overflow-x:auto;margin-top:12px">
-                <table style="border-collapse:collapse;font-size:10px;font-family:monospace;width:100%">
+                <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
                   <thead>
                     <tr style="border-bottom:1px solid #333">
                       <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
@@ -484,10 +484,10 @@
         <div class="biv-sec-hdr" @click="toggleSection('s4')">
           <span class="biv-sec-num">S4</span>
           <span class="biv-sec-title">CONDITIONAL SLICE VIEW</span>
-          <span style="font-size:11px;color:#444" x-text="open.s4 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s4 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s4}">
-          <div style="font-size:10px;color:#555;margin-bottom:10px">
+          <div style="font-size:12px;color:#555;margin-bottom:10px">
             Fix one metric to a bucket, then show how a second metric behaves within that slice.
           </div>
           <div class="biv-ctrl">
@@ -513,7 +513,7 @@
               <div style="display:flex;gap:4px;align-items:center">
                 <input type="number" x-model="s4.fixBucket" min="0"
                        :max="s4.fixNBuckets - 1" style="width:60px">
-                <span style="font-size:10px;color:#555">0 = lowest</span>
+                <span style="font-size:12px;color:#555">0 = lowest</span>
               </div>
             </div>
           </div>
@@ -545,7 +545,7 @@
 
           <template x-if="s4.data && !s4.error">
             <div>
-              <div style="font-size:10px;color:#888;margin:10px 0 8px">
+              <div style="font-size:12px;color:#888;margin:10px 0 8px">
                 Within <span style="color:#3498db;font-family:monospace" x-text="s4.data.fix_metric"></span>
                 bucket <span style="color:#3498db" x-text="s4.data.fix_label"></span>
                 (<span x-text="s4.data.slice_n"></span> trades) ·
@@ -563,7 +563,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s5')">
           <span class="biv-sec-num">S5</span>
           <span class="biv-sec-title">P&L DISTRIBUTION (BOXPLOT)</span>
-          <span style="font-size:11px;color:#444" x-text="open.s5 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s5 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s5}">
           <div class="biv-ctrl">
@@ -610,7 +610,7 @@
 
           <template x-if="s5.data && !s5.error">
             <div style="max-width:700px">
-              <div style="font-size:10px;color:#666;margin-bottom:14px">
+              <div style="font-size:12px;color:#666;margin-bottom:14px">
                 <span style="font-weight:700;color:#ccc" x-text="s5.data.label"></span> ·
                 <span x-text="s5.data.n"></span> trades ·
                 win rate <span :style="'color:' + winRateColor(s5.data.win_rate)"
@@ -702,7 +702,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s6')">
           <span class="biv-sec-num">S6</span>
           <span class="biv-sec-title">TIME STABILITY</span>
-          <span style="font-size:11px;color:#444" x-text="open.s6 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s6 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s6}">
           <div class="biv-ctrl">
@@ -732,7 +732,7 @@
 
           <template x-if="s6.data && !s6.error">
             <div>
-              <div style="font-size:10px;color:#555;margin-bottom:8px">
+              <div style="font-size:12px;color:#555;margin-bottom:8px">
                 Overall r = <span :style="'color:' + (s6.data.overall_r >= 0 ? '#3498db' : '#eb40aa')"
                                   x-text="s6.data.overall_r"></span> ·
                 Sign consistency = <span :style="'color:' + (s6.data.sign_consistency >= 0.8 ? '#2ecc71' : s6.data.sign_consistency >= 0.6 ? '#f1c40f' : '#e74c3c')"
@@ -740,7 +740,7 @@
               </div>
               <div class="biv-chart-wrap"><canvas id="s6-chart"></canvas></div>
               <div style="overflow-x:auto;margin-top:10px">
-                <table style="border-collapse:collapse;font-size:10px;font-family:monospace;width:100%">
+                <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
                   <thead>
                     <tr style="border-bottom:1px solid #333">
                       <th style="padding:3px 8px;color:#555;text-align:left">Period</th>
@@ -783,7 +783,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s7')">
           <span class="biv-sec-num">S7</span>
           <span class="biv-sec-title">FEATURE REDUNDANCY MATRIX (METRIC × METRIC)</span>
-          <span style="font-size:11px;color:#444" x-text="open.s7 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s7 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s7}">
           <div class="biv-ctrl">
@@ -815,7 +815,7 @@
             <button class="biv-btn" style="color:#555;border-color:#333"
                     @click="s7.ms.clear(); s7.data=null">Clear</button>
           </div>
-          <div style="font-size:10px;color:#555;margin-bottom:8px">
+          <div style="font-size:12px;color:#555;margin-bottom:8px">
             Blue = positively correlated, pink = negatively correlated.
             Bright cells = redundant metrics that measure similar things.
           </div>
@@ -858,7 +858,7 @@
         <div class="biv-sec-hdr" @click="toggleSection('s8')">
           <span class="biv-sec-num">S8</span>
           <span class="biv-sec-title">TOP / BOTTOM REGIME SUMMARY</span>
-          <span style="font-size:11px;color:#444" x-text="open.s8 ? '▲' : '▼'"></span>
+          <span style="font-size:13px;color:#444" x-text="open.s8 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s8}">
           <span x-show="s8.loading" class="biv-loading">Computing across all IV metrics…</span>
@@ -866,7 +866,7 @@
 
           <template x-if="s8.data && !s8.error">
             <div>
-              <div style="font-size:10px;color:#555;margin-bottom:12px">
+              <div style="font-size:12px;color:#555;margin-bottom:12px">
                 Evaluated <span x-text="s8.data.total_buckets_evaluated"></span> buckets across all IV metrics.
                 Equal-count 5-bucket split per metric. Minimum 8 trades per bucket.
               </div>
@@ -878,7 +878,7 @@
                     <div class="biv-regime-item">
                       <div class="biv-regime-metric"
                            x-text="b.metric + '  · bucket ' + (b.bucket_idx+1) + '/' + b.n_buckets"></div>
-                      <div style="font-size:10px;color:#555;font-family:monospace;margin-bottom:4px"
+                      <div style="font-size:12px;color:#555;font-family:monospace;margin-bottom:4px"
                            x-text="b.bucket_label"></div>
                       <div class="biv-regime-vals">
                         <span class="biv-regime-pnl pos" x-text="'P&L ' + fmtPnl(b.mean_pnl)"></span>
@@ -895,7 +895,7 @@
                     <div class="biv-regime-item">
                       <div class="biv-regime-metric"
                            x-text="b.metric + '  · bucket ' + (b.bucket_idx+1) + '/' + b.n_buckets"></div>
-                      <div style="font-size:10px;color:#555;font-family:monospace;margin-bottom:4px"
+                      <div style="font-size:12px;color:#555;font-family:monospace;margin-bottom:4px"
                            x-text="b.bucket_label"></div>
                       <div class="biv-regime-vals">
                         <span class="biv-regime-pnl neg" x-text="'P&L ' + fmtPnl(b.mean_pnl)"></span>
