@@ -408,7 +408,7 @@
                 </template>
                 <span x-show="s2.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <select @change="s2.ms.addFromEvent($event)"
+              <select @change="if ($event.target.value) { s2.ms.selected.push($event.target.value); $event.target.value=''; }"
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s2.ms.selected.length >= 20">
                 <option value="">— add metric —</option>
@@ -794,7 +794,7 @@
                 </template>
                 <span x-show="s7.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <select @change="s7.ms.addFromEvent($event)"
+              <select @change="if ($event.target.value) { s7.ms.selected.push($event.target.value); $event.target.value=''; }"
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s7.ms.selected.length >= 25">
                 <option value="">— add metric —</option>

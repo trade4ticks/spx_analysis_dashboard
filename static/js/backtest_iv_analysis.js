@@ -66,15 +66,6 @@ function fmtR2(v) {
 function makeMultiSelect(maxCount) {
   return {
     selected: [],
-    _max: maxCount,
-
-    addFromEvent(event) {
-      const col = event.target.value;
-      event.target.value = '';
-      if (!col || this.selected.includes(col)) return;
-      if (this.selected.length >= this._max) return;
-      this.selected.push(col);
-    },
 
     remove(col) {
       this.selected = this.selected.filter(c => c !== col);
