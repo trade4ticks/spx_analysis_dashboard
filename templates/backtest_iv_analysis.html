@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Backtest IV Analysis</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    .biv-body    { flex:1; overflow-y:auto; display:flex; flex-direction:column; min-height:0; }
+    .biv-main    { padding:18px 22px; display:flex; flex-direction:column; gap:16px; }
+
+    /* Section card */
+    .biv-section { border:1px solid #2a2a2a; border-radius:6px; overflow:hidden; }
+    .biv-sec-hdr {
+      display:flex; align-items:center; gap:10px; padding:9px 14px;
+      background:#252525; cursor:pointer; user-select:none;
+      border-bottom:1px solid #2a2a2a;
+    }
+    .biv-sec-hdr:hover { background:#2d2d2d; }
+    .biv-sec-num  { font-size:9px; font-weight:700; color:#555; letter-spacing:.5px; }
+    .biv-sec-title{ font-size:11px; font-weight:700; color:#ccc; letter-spacing:.3px; flex:1; }
+    .biv-sec-body { padding:14px; background:#1a1a1a; }
+    .biv-sec-body.hidden { display:none; }
+
+    /* Controls row */
+    .biv-ctrl { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px; }
+    .biv-ctrl label { font-size:10px; color:#888; font-weight:700; display:block; margin-bottom:3px; letter-spacing:.3px; }
+    .biv-ctrl select, .biv-ctrl input[type=number] {
+      background:#222; border:1px solid #3a3a3a; color:#ccc;
+      padding:5px 8px; border-radius:3px; font-size:11px; min-width:180px;
+    }
+    .biv-ctrl select:focus, .biv-ctrl input:focus { outline:none; border-color:#3498db; }
+    .biv-btn {
+      padding:5px 14px; border-radius:3px; font-size:11px; font-weight:700;
+      background:rgba(52,152,219,.15); border:1px solid rgba(52,152,219,.3);
+      color:#3498db; cursor:pointer;
+    }
+    .biv-btn:hover { background:rgba(52,152,219,.25); }
+    .biv-btn:disabled { opacity:.4; cursor:default; }
+
+    /* Status */
+    .biv-loading { color:#f1c40f; font-size:11px; }
+    .biv-error   { color:#e74c3c; font-size:11px; }
+    .biv-hint    { color:#555; font-size:10px; }
+
+    /* Heatmap table */
+    .biv-heatmap-wrap { overflow-x:auto; }
+    .biv-heatmap      { border-collapse:collapse; font-size:10px; font-family:monospace; }
+    .biv-heatmap th   { padding:4px 8px; color:#666; font-weight:600; text-align:center; font-size:9px; white-space:nowrap; }
+    .biv-heatmap td   {
+      width:80px; height:52px; text-align:center; vertical-align:middle;
+      border:1px solid #111; cursor:default; transition:opacity .1s;
+      padding:4px;
+    }
+    .biv-heatmap td:hover { opacity:.85; outline:1px solid #aaa; }
+    .biv-cell-val  { font-size:11px; font-weight:700; display:block; }
+    .biv-cell-n    { font-size:9px; opacity:.7; display:block; }
+    .biv-cell-low  { opacity:.55; }
+    .biv-cell-zero { opacity:.3; }
+
+    /* Toggle group */
+    .biv-toggle { display:flex; gap:0; border-radius:3px; overflow:hidden; border:1px solid #3a3a3a; }
+    .biv-toggle button {
+      padding:4px 10px; font-size:10px; font-weight:700; cursor:pointer;
+      background:#222; border:none; color:#666;
+    }
+    .biv-toggle button.on { background:#1a3a5c; color:#3498db; }
+
+    /* Tag multi-select */
+    .biv-tags-wrap {
+      display:flex; flex-wrap:wrap; gap:4px; padding:4px 6px; min-height:32px;
+      background:#222; border:1px solid #3a3a3a; border-radius:3px; align-items:center;
+      min-width:260px; max-width:480px; cursor:text;
+    }
+    .biv-tag {
+      font-size:10px; padding:2px 7px; background:#1a3a5c; color:#3498db;
+      border-radius:3px; cursor:pointer; display:flex; gap:4px; align-items:center;
+    }
+    .biv-tag:hover { background:#1a2a4a; }
+    .biv-tag-input {
+      background:none; border:none; color:#ccc; font-size:11px; outline:none; flex:1; min-width:100px;
+    }
+    .biv-suggestions {
+      position:absolute; z-index:50; background:#2a2a2a; border:1px solid #444;
+      border-radius:3px; max-height:180px; overflow-y:auto; min-width:240px; font-size:11px;
+    }
+    .biv-suggestions div { padding:5px 10px; cursor:pointer; color:#ccc; }
+    .biv-suggestions div:hover { background:#3a3a3a; color:#fff; }
+
+    /* Matrix tables (Sections 2, 7) */
+    .biv-matrix { border-collapse:collapse; font-size:9px; font-family:monospace; }
+    .biv-matrix th { padding:3px 6px; color:#666; font-weight:600; font-size:9px; max-width:80px;
+                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .biv-matrix td {
+      width:58px; height:40px; text-align:center; vertical-align:middle;
+      border:1px solid #111; font-size:10px; font-weight:700;
+    }
+
+    /* Boxplot */
+    .biv-boxplot-wrap { padding:20px 0; position:relative; }
+    .biv-boxplot-track {
+      position:relative; height:22px; background:#1e1e1e;
+      border-radius:2px; margin:0 40px;
+    }
+    .biv-boxplot-whisker {
+      position:absolute; top:9px; height:4px; background:#555; border-radius:1px;
+    }
+    .biv-boxplot-box {
+      position:absolute; top:2px; height:18px; border-radius:2px;
+    }
+    .biv-boxplot-median {
+      position:absolute; top:0; width:2px; height:22px; background:#fff; border-radius:1px;
+    }
+    .biv-boxplot-mean {
+      position:absolute; top:4px; width:10px; height:10px; border-radius:50%;
+      background:#f1c40f; transform:translateX(-5px); border:2px solid #111;
+    }
+    .biv-boxplot-labels {
+      display:flex; justify-content:space-between; margin:4px 40px 0;
+      font-size:9px; color:#555; font-family:monospace;
+    }
+    .biv-boxplot-stats {
+      display:grid; grid-template-columns:repeat(4, 1fr); gap:8px;
+      margin-top:14px; font-size:11px;
+    }
+    .biv-stat { display:flex; flex-direction:column; gap:2px; }
+    .biv-stat-label { font-size:9px; color:#555; font-weight:700; letter-spacing:.3px; }
+    .biv-stat-val   { color:#ccc; font-weight:700; }
+
+    /* Top/Bottom regime cards */
+    .biv-regime-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .biv-regime-col h4 {
+      font-size:10px; font-weight:700; letter-spacing:.4px; text-transform:uppercase;
+      margin-bottom:8px;
+    }
+    .biv-regime-col.best  h4 { color:#3498db; }
+    .biv-regime-col.worst h4 { color:#eb40aa; }
+    .biv-regime-item {
+      background:#222; border:1px solid #2a2a2a; border-radius:4px;
+      padding:8px 10px; margin-bottom:6px; font-size:11px;
+    }
+    .biv-regime-metric { color:#888; font-size:10px; font-family:monospace; margin-bottom:3px; }
+    .biv-regime-vals   { display:flex; gap:12px; }
+    .biv-regime-pnl    { font-weight:700; }
+    .biv-regime-pnl.pos { color:#3498db; }
+    .biv-regime-pnl.neg { color:#eb40aa; }
+    .biv-regime-wr     { color:#888; font-size:10px; }
+
+    /* Chart containers */
+    .biv-chart-wrap { height:220px; position:relative; }
+
+    /* Decile bucket bar (inline) */
+    .biv-d-n { font-size:9px; color:#555; }
+
+    /* Section 4 bucket picker */
+    .biv-bucket-radio { display:flex; gap:6px; flex-wrap:wrap; }
+    .biv-bucket-radio label {
+      font-size:10px; padding:3px 8px; border-radius:3px; cursor:pointer;
+      background:#222; border:1px solid #3a3a3a; color:#888;
+    }
+    .biv-bucket-radio input[type=radio]:checked + span { color:#3498db; }
+    .biv-bucket-radio label.active { border-color:#3498db; color:#3498db; background:#1a3a5c22; }
+  </style>
+</head>
+<body x-data="bivApp()">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="brand">SPX <em>IV</em></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/oi-signals">OI Signals</a>
+      <a class="nav-link" href="/oi-analysis">OI Analysis</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link" href="/research">Research</a>
+      <a class="nav-link" href="/research2">Research 2</a>
+      <a class="nav-link on" href="/backtest-iv-analysis">Backtest IV</a>
+    </nav>
+  </div>
+
+  <!-- Control strip: backtest selector -->
+  <div class="ctrl-strip">
+    <span class="ctrl-lbl">BACKTEST</span>
+    <select x-model="selectedId" @change="selectUpload($event.target.value)"
+            style="background:#222;border:1px solid #444;color:#ccc;padding:4px 8px;border-radius:3px;font-size:11px;min-width:260px">
+      <template x-if="uploads.length === 0">
+        <option value="">— no backtest uploads found —</option>
+      </template>
+      <template x-for="u in uploads" :key="u.id">
+        <option :value="u.id"
+                x-text="u.name + '  (' + u.trade_count + ' trades, ' + (u.date_from||'').slice(0,7) + '→' + (u.date_to||'').slice(0,7) + ')'">
+        </option>
+      </template>
+    </select>
+    <template x-if="uploadInfo">
+      <span style="font-size:10px;color:#555">
+        <span x-text="uploadInfo.trade_count"></span> trades ·
+        <span x-text="uploadInfo.matched_count"></span> IV-matched ·
+        <span x-text="uploadInfo.date_from + ' → ' + uploadInfo.date_to" style="color:#444"></span>
+      </span>
+    </template>
+    <span x-show="loading" class="biv-loading">Loading…</span>
+    <span x-show="globalError" class="biv-error" x-text="globalError"></span>
+    <span style="margin-left:auto;font-size:10px;color:#333"
+          x-text="ivColumns.length + ' IV metrics available'"></span>
+  </div>
+
+  <!-- Main scrollable body -->
+  <div class="biv-body">
+    <template x-if="uploads.length === 0 && !loading">
+      <div style="padding:40px;text-align:center;color:#555;font-size:13px">
+        No backtest uploads found. Upload a backtest on the
+        <a href="/research2" style="color:#3498db">Research 2</a> page first.
+      </div>
+    </template>
+
+    <div class="biv-main" x-show="selectedId">
+
+      <!-- ── S1: 2D Heatmap ─────────────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s1')">
+          <span class="biv-sec-num">S1</span>
+          <span class="biv-sec-title">2D REGIME HEATMAP</span>
+          <span style="font-size:11px;color:#444" x-text="open.s1 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s1}">
+          <div class="biv-ctrl">
+            <div>
+              <label>METRIC A (X-AXIS)</label>
+              <select x-model="s1.metricA" style="min-width:220px">
+                <option value="">— select metric —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>METRIC B (Y-AXIS)</label>
+              <select x-model="s1.metricB" style="min-width:220px">
+                <option value="">— select metric —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>BUCKETS</label>
+              <div class="biv-toggle">
+                <button :class="{on: s1.nBuckets===3}" @click="s1.nBuckets=3">3×3</button>
+                <button :class="{on: s1.nBuckets===5}" @click="s1.nBuckets=5">5×5</button>
+                <button :class="{on: s1.nBuckets===10}" @click="s1.nBuckets=10">10×10</button>
+              </div>
+            </div>
+            <div>
+              <label>COLOR BY</label>
+              <div class="biv-toggle">
+                <button :class="{on: s1.valueField==='mean_pnl'}"  @click="s1.valueField='mean_pnl'">P&L</button>
+                <button :class="{on: s1.valueField==='win_rate'}"  @click="s1.valueField='win_rate'">Win%</button>
+                <button :class="{on: s1.valueField==='count'}"     @click="s1.valueField='count'">Count</button>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadHeatmap()"
+                    :disabled="!s1.metricA || !s1.metricB || s1.loading">
+              <span x-text="s1.loading ? '⏳ Computing…' : '↻ Compute'"></span>
+            </button>
+          </div>
+
+          <span x-show="s1.error" class="biv-error" x-text="s1.error"></span>
+          <span x-show="!s1.data && !s1.loading && !s1.error" class="biv-hint">
+            Select two metrics and click Compute.
+          </span>
+
+          <template x-if="s1.data && !s1.error">
+            <div>
+              <div style="font-size:10px;color:#555;margin-bottom:8px">
+                <span x-text="s1.data.valid_count"></span> trades plotted ·
+                rows = <span x-text="s1.data.metric_b" style="color:#aaa;font-family:monospace"></span> ·
+                cols = <span x-text="s1.data.metric_a" style="color:#aaa;font-family:monospace"></span>
+                · low-sample cells (n&lt;20) faded
+              </div>
+              <div class="biv-heatmap-wrap">
+                <table class="biv-heatmap">
+                  <thead>
+                    <tr>
+                      <th style="text-align:right;color:#444">B↓ / A→</th>
+                      <template x-for="(la, ia) in s1.data.labels_a" :key="ia">
+                        <th x-text="la"></th>
+                      </template>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(row, ib) in s1.data.cells" :key="ib">
+                      <tr>
+                        <th style="text-align:right;padding-right:8px;color:#666"
+                            x-text="s1.data.labels_b[ib]"></th>
+                        <template x-for="(cell, ia) in row" :key="ia">
+                          <td :class="{'biv-cell-low': cell.n < 20, 'biv-cell-zero': cell.n === 0}"
+                              :style="'background:' + s1CellBg(cell) + ';color:' + s1CellFg(cell)"
+                              :title="'n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
+                            <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
+                            <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
+                          </td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S2: Pairwise ΔR² ───────────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s2')">
+          <span class="biv-sec-num">S2</span>
+          <span class="biv-sec-title">PAIRWISE PREDICTIVE STRENGTH (ΔR²)</span>
+          <span style="font-size:11px;color:#444" x-text="open.s2 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s2}">
+          <div class="biv-ctrl">
+            <div style="position:relative">
+              <label>METRICS (up to 20) — type to search</label>
+              <div class="biv-tags-wrap"
+                   @click="$refs.s2input.focus()">
+                <template x-for="m in s2.ms.selected" :key="m">
+                  <span class="biv-tag" @click.stop="s2.ms.remove(m)">
+                    <span x-text="m"></span><span style="opacity:.5">×</span>
+                  </span>
+                </template>
+                <input class="biv-tag-input" x-ref="s2input"
+                       x-model="s2.ms.input"
+                       @input="s2.ms.filter()"
+                       @keydown.enter.prevent="s2.ms.add(s2.ms.suggestions[0] || s2.ms.input)"
+                       @keydown.escape="s2.ms.suggestions=[]"
+                       placeholder="Search metrics…">
+              </div>
+              <div class="biv-suggestions" x-show="s2.ms.suggestions.length > 0" @mouseleave="s2.ms.suggestions=[]">
+                <template x-for="sug in s2.ms.suggestions" :key="sug">
+                  <div x-text="sug" @click="s2.ms.add(sug)"></div>
+                </template>
+              </div>
+            </div>
+            <div>
+              <label>TARGET</label>
+              <div class="biv-toggle">
+                <button :class="{on: s2.target==='pnl'}"    @click="s2.target='pnl'">P&L</button>
+                <button :class="{on: s2.target==='is_win'}" @click="s2.target='is_win'">Win</button>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadDeltaR2()"
+                    :disabled="(s2.ms.selected.length < 2) || s2.loading">
+              <span x-text="s2.loading ? '⏳ Computing…' : '↻ Compute Grid'"></span>
+            </button>
+            <button class="biv-btn" style="color:#555;border-color:#333"
+                    @click="s2.ms.clear(); s2.data=null">Clear</button>
+          </div>
+          <div style="font-size:10px;color:#555;margin-bottom:8px">
+            Diagonal = individual R². Off-diagonal = symmetric ΔR² (marginal improvement from adding second metric).
+            Brighter blue = stronger predictive contribution.
+          </div>
+
+          <span x-show="s2.error" class="biv-error" x-text="s2.error"></span>
+
+          <template x-if="s2.data && !s2.error">
+            <div style="overflow-x:auto">
+              <div style="font-size:10px;color:#555;margin-bottom:8px">
+                Individual R²:
+                <template x-for="(m, i) in s2.data.metrics" :key="m">
+                  <span style="margin-right:10px;font-family:monospace">
+                    <span style="color:#aaa" x-text="m"></span>
+                    <span style="color:#3498db" x-text="' r²=' + s2.data.r2_single[m]"></span>
+                  </span>
+                </template>
+              </div>
+              <table class="biv-matrix">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <template x-for="m in s2.data.metrics" :key="m">
+                      <th x-text="m" style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="m"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(row, i) in s2.data.matrix" :key="i">
+                    <tr>
+                      <th x-text="s2.data.metrics[i]" style="text-align:right;padding-right:6px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="s2.data.metrics[i]"></th>
+                      <template x-for="(val, j) in row" :key="j">
+                        <td :style="'background:' + s2CellBg(val, i===j) + ';color:' + textOnColor(s2CellBg(val, i===j))"
+                            :title="s2.data.metrics[i] + ' + ' + s2.data.metrics[j] + ' : ' + (val??'N/A')"
+                            x-text="val !== null && val !== undefined ? val.toFixed(3) : '—'"></td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S3: Decile View ────────────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s3')">
+          <span class="biv-sec-num">S3</span>
+          <span class="biv-sec-title">SINGLE METRIC DECILE VIEW</span>
+          <span style="font-size:11px;color:#444" x-text="open.s3 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s3}">
+          <div class="biv-ctrl">
+            <div>
+              <label>METRIC</label>
+              <select x-model="s3.metric" style="min-width:220px">
+                <option value="">— select metric —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>BUCKETS</label>
+              <div class="biv-toggle">
+                <template x-for="n in [5,10,20]" :key="n">
+                  <button :class="{on: s3.nBuckets===n}" @click="s3.nBuckets=n" x-text="n"></button>
+                </template>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadDecile()" :disabled="!s3.metric || s3.loading">
+              <span x-text="s3.loading ? '⏳ Computing…' : '↻ Compute'"></span>
+            </button>
+          </div>
+
+          <span x-show="s3.error" class="biv-error" x-text="s3.error"></span>
+
+          <template x-if="s3.data && !s3.error">
+            <div>
+              <div style="font-size:10px;color:#555;margin-bottom:10px">
+                <span x-text="s3.data.total_valid"></span> valid trades ·
+                Pearson r = <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
+                                  x-text="s3.data.pearson_r"></span>
+              </div>
+              <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
+              <!-- Bucket table -->
+              <div style="overflow-x:auto;margin-top:12px">
+                <table style="border-collapse:collapse;font-size:10px;font-family:monospace;width:100%">
+                  <thead>
+                    <tr style="border-bottom:1px solid #333">
+                      <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
+                      <th style="padding:3px 8px;color:#555">n</th>
+                      <th style="padding:3px 8px;color:#555">Mean P&L</th>
+                      <th style="padding:3px 8px;color:#555">Win%</th>
+                      <th style="padding:3px 8px;color:#555">σ P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="b in s3.data.buckets" :key="b.bucket_idx">
+                      <tr style="border-bottom:1px solid #1e1e1e"
+                          :class="{'biv-cell-low': b.n < 20}">
+                        <td style="padding:3px 8px;color:#aaa" x-text="b.label"></td>
+                        <td style="padding:3px 8px;text-align:center;color:#555" x-text="b.n"></td>
+                        <td style="padding:3px 8px;text-align:right;font-weight:700"
+                            :style="'color:' + (b.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
+                            x-text="fmtPnl(b.mean_pnl)"></td>
+                        <td style="padding:3px 8px;text-align:right"
+                            :style="'color:' + winRateColor(b.win_rate)"
+                            x-text="fmtPct(b.win_rate)"></td>
+                        <td style="padding:3px 8px;text-align:right;color:#555" x-text="b.pnl_std ?? '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S4: Conditional Slice ──────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s4')">
+          <span class="biv-sec-num">S4</span>
+          <span class="biv-sec-title">CONDITIONAL SLICE VIEW</span>
+          <span style="font-size:11px;color:#444" x-text="open.s4 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s4}">
+          <div style="font-size:10px;color:#555;margin-bottom:10px">
+            Fix one metric to a bucket, then show how a second metric behaves within that slice.
+          </div>
+          <div class="biv-ctrl">
+            <div>
+              <label>FIX METRIC</label>
+              <select x-model="s4.fixMetric" style="min-width:200px">
+                <option value="">— select —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>FIX BUCKETS</label>
+              <div class="biv-toggle">
+                <template x-for="n in [3,5,10]" :key="n">
+                  <button :class="{on: s4.fixNBuckets==n}" @click="s4.fixNBuckets=n" x-text="n"></button>
+                </template>
+              </div>
+            </div>
+            <div>
+              <label>FIX BUCKET #</label>
+              <div style="display:flex;gap:4px;align-items:center">
+                <input type="number" x-model="s4.fixBucket" min="0"
+                       :max="s4.fixNBuckets - 1" style="width:60px">
+                <span style="font-size:10px;color:#555">0 = lowest</span>
+              </div>
+            </div>
+          </div>
+          <div class="biv-ctrl" style="margin-top:8px">
+            <div>
+              <label>VARY METRIC</label>
+              <select x-model="s4.varyMetric" style="min-width:200px">
+                <option value="">— select —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>VARY BUCKETS</label>
+              <div class="biv-toggle">
+                <template x-for="n in [3,5,10]" :key="n">
+                  <button :class="{on: s4.varyNBuckets==n}" @click="s4.varyNBuckets=n" x-text="n"></button>
+                </template>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadConditionalSlice()"
+                    :disabled="!s4.fixMetric || !s4.varyMetric || s4.loading">
+              <span x-text="s4.loading ? '⏳ Computing…' : '↻ Compute Slice'"></span>
+            </button>
+          </div>
+
+          <span x-show="s4.error" class="biv-error" x-text="s4.error"></span>
+
+          <template x-if="s4.data && !s4.error">
+            <div>
+              <div style="font-size:10px;color:#888;margin:10px 0 8px">
+                Within <span style="color:#3498db;font-family:monospace" x-text="s4.data.fix_metric"></span>
+                bucket <span style="color:#3498db" x-text="s4.data.fix_label"></span>
+                (<span x-text="s4.data.slice_n"></span> trades) ·
+                r = <span :style="'color:' + (s4.data.slice_pearson_r >= 0 ? '#3498db' : '#eb40aa')"
+                          x-text="s4.data.slice_pearson_r"></span>
+              </div>
+              <div class="biv-chart-wrap"><canvas id="s4-chart"></canvas></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S5: Distribution View ──────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s5')">
+          <span class="biv-sec-num">S5</span>
+          <span class="biv-sec-title">P&L DISTRIBUTION (BOXPLOT)</span>
+          <span style="font-size:11px;color:#444" x-text="open.s5 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s5}">
+          <div class="biv-ctrl">
+            <div>
+              <label>VIEW</label>
+              <div class="biv-toggle">
+                <button :class="{on: s5.showAll}"  @click="s5.showAll=true">All Trades</button>
+                <button :class="{on: !s5.showAll}" @click="s5.showAll=false">By Bucket</button>
+              </div>
+            </div>
+            <template x-if="!s5.showAll">
+              <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+                <div>
+                  <label>METRIC</label>
+                  <select x-model="s5.metric" style="min-width:200px">
+                    <option value="">— select —</option>
+                    <template x-for="c in ivColumns" :key="c">
+                      <option :value="c" x-text="c"></option>
+                    </template>
+                  </select>
+                </div>
+                <div>
+                  <label>BUCKETS</label>
+                  <div class="biv-toggle">
+                    <template x-for="n in [3,5,10]" :key="n">
+                      <button :class="{on: s5.nBuckets==n}" @click="s5.nBuckets=n" x-text="n"></button>
+                    </template>
+                  </div>
+                </div>
+                <div>
+                  <label>BUCKET #</label>
+                  <input type="number" x-model="s5.bucketIdx" min="0"
+                         :max="(s5.nBuckets||5)-1" style="width:60px">
+                </div>
+              </div>
+            </template>
+            <button class="biv-btn" @click="loadDistribution()"
+                    :disabled="s5.loading || (!s5.showAll && (!s5.metric || s5.bucketIdx === null))">
+              <span x-text="s5.loading ? '⏳ Loading…' : '↻ Compute'"></span>
+            </button>
+          </div>
+
+          <span x-show="s5.error" class="biv-error" x-text="s5.error"></span>
+
+          <template x-if="s5.data && !s5.error">
+            <div style="max-width:700px">
+              <div style="font-size:10px;color:#666;margin-bottom:14px">
+                <span style="font-weight:700;color:#ccc" x-text="s5.data.label"></span> ·
+                <span x-text="s5.data.n"></span> trades ·
+                win rate <span :style="'color:' + winRateColor(s5.data.win_rate)"
+                               x-text="fmtPct(s5.data.win_rate)"></span>
+              </div>
+
+              <!-- Boxplot: full 0–100 range (min–max) with p5/p25/p50/p75/p95 markers -->
+              <div class="biv-boxplot-wrap">
+                <div class="biv-boxplot-track">
+                  <!-- Outer whisker: min → p5 -->
+                  <div class="biv-boxplot-whisker"
+                       :style="'left:' + s5BoxLeft(s5.data.min) + ';width:' + s5BoxWidth(s5.data.min, s5.data.p5)"></div>
+                  <!-- Inner whisker: p5 → p25 -->
+                  <div class="biv-boxplot-whisker" style="background:#444;top:8px;height:6px"
+                       :style="'left:' + s5BoxLeft(s5.data.p5) + ';width:' + s5BoxWidth(s5.data.p5, s5.data.p25)"></div>
+                  <!-- IQR box: p25 → p75 -->
+                  <div class="biv-boxplot-box"
+                       :style="'left:' + s5BoxLeft(s5.data.p25) + ';width:' + s5BoxWidth(s5.data.p25, s5.data.p75) + ';background:' + (s5.data.mean_pnl >= 0 ? 'rgba(41,128,245,0.55)' : 'rgba(220,60,155,0.55)')"></div>
+                  <!-- Inner whisker: p75 → p95 -->
+                  <div class="biv-boxplot-whisker" style="background:#444;top:8px;height:6px"
+                       :style="'left:' + s5BoxLeft(s5.data.p75) + ';width:' + s5BoxWidth(s5.data.p75, s5.data.p95)"></div>
+                  <!-- Outer whisker: p95 → max -->
+                  <div class="biv-boxplot-whisker"
+                       :style="'left:' + s5BoxLeft(s5.data.p95) + ';width:' + s5BoxWidth(s5.data.p95, s5.data.max)"></div>
+                  <!-- Median line -->
+                  <div class="biv-boxplot-median" :style="'left:' + s5MedianLeft()"></div>
+                  <!-- Mean dot -->
+                  <div class="biv-boxplot-mean" :style="'left:' + s5MeanLeft()"></div>
+                </div>
+                <div class="biv-boxplot-labels">
+                  <span x-text="'min ' + s5.data.min"></span>
+                  <span x-text="'p5 ' + s5.data.p5"></span>
+                  <span x-text="'p25 ' + s5.data.p25"></span>
+                  <span x-text="'p50 ' + s5.data.p50" style="color:#eee"></span>
+                  <span x-text="'p75 ' + s5.data.p75"></span>
+                  <span x-text="'p95 ' + s5.data.p95"></span>
+                  <span x-text="'max ' + s5.data.max"></span>
+                </div>
+              </div>
+
+              <div class="biv-boxplot-stats">
+                <div class="biv-stat">
+                  <span class="biv-stat-label">MEAN P&L</span>
+                  <span class="biv-stat-val"
+                        :style="'color:' + (s5.data.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
+                        x-text="fmtPnl(s5.data.mean_pnl)"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">MEDIAN P&L</span>
+                  <span class="biv-stat-val"
+                        :style="'color:' + (s5.data.p50 >= 0 ? '#3498db' : '#eb40aa')"
+                        x-text="fmtPnl(s5.data.p50)"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">STD DEV</span>
+                  <span class="biv-stat-val" x-text="s5.data.std"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">P5 / P95</span>
+                  <span class="biv-stat-val"
+                        x-text="s5.data.p5 + ' / ' + s5.data.p95"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">WIN RATE</span>
+                  <span class="biv-stat-val"
+                        :style="'color:' + winRateColor(s5.data.win_rate)"
+                        x-text="fmtPct(s5.data.win_rate)"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">MIN / MAX</span>
+                  <span class="biv-stat-val" x-text="s5.data.min + ' / ' + s5.data.max"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">P10 / P90</span>
+                  <span class="biv-stat-val" x-text="s5.data.p10 + ' / ' + s5.data.p90"></span>
+                </div>
+                <div class="biv-stat">
+                  <span class="biv-stat-label">N</span>
+                  <span class="biv-stat-val" x-text="s5.data.n"></span>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S6: Time Stability ─────────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s6')">
+          <span class="biv-sec-num">S6</span>
+          <span class="biv-sec-title">TIME STABILITY</span>
+          <span style="font-size:11px;color:#444" x-text="open.s6 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s6}">
+          <div class="biv-ctrl">
+            <div>
+              <label>METRIC</label>
+              <select x-model="s6.metric" style="min-width:220px">
+                <option value="">— select metric —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>PERIODS</label>
+              <div class="biv-toggle">
+                <template x-for="n in [4,6,8,12]" :key="n">
+                  <button :class="{on: s6.nWindows==n}" @click="s6.nWindows=n" x-text="n"></button>
+                </template>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadTimeStability()" :disabled="!s6.metric || s6.loading">
+              <span x-text="s6.loading ? '⏳ Computing…' : '↻ Compute'"></span>
+            </button>
+          </div>
+
+          <span x-show="s6.error" class="biv-error" x-text="s6.error"></span>
+
+          <template x-if="s6.data && !s6.error">
+            <div>
+              <div style="font-size:10px;color:#555;margin-bottom:8px">
+                Overall r = <span :style="'color:' + (s6.data.overall_r >= 0 ? '#3498db' : '#eb40aa')"
+                                  x-text="s6.data.overall_r"></span> ·
+                Sign consistency = <span :style="'color:' + (s6.data.sign_consistency >= 0.8 ? '#2ecc71' : s6.data.sign_consistency >= 0.6 ? '#f1c40f' : '#e74c3c')"
+                                         x-text="fmtPct(s6.data.sign_consistency)"></span>
+              </div>
+              <div class="biv-chart-wrap"><canvas id="s6-chart"></canvas></div>
+              <div style="overflow-x:auto;margin-top:10px">
+                <table style="border-collapse:collapse;font-size:10px;font-family:monospace;width:100%">
+                  <thead>
+                    <tr style="border-bottom:1px solid #333">
+                      <th style="padding:3px 8px;color:#555;text-align:left">Period</th>
+                      <th style="padding:3px 8px;color:#555">Dates</th>
+                      <th style="padding:3px 8px;color:#555">n</th>
+                      <th style="padding:3px 8px;color:#555">r</th>
+                      <th style="padding:3px 8px;color:#555">r²</th>
+                      <th style="padding:3px 8px;color:#555">Mean P&L</th>
+                      <th style="padding:3px 8px;color:#555">Win%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="p in s6.data.periods" :key="p.label">
+                      <tr style="border-bottom:1px solid #1e1e1e">
+                        <td style="padding:3px 8px;color:#aaa" x-text="p.label"></td>
+                        <td style="padding:3px 8px;color:#555" x-text="p.date_from.slice(0,7) + ' → ' + p.date_to.slice(0,7)"></td>
+                        <td style="padding:3px 8px;text-align:center;color:#555" x-text="p.n"></td>
+                        <td style="padding:3px 8px;text-align:right;font-weight:700"
+                            :style="'color:' + (p.r >= 0 ? '#3498db' : '#eb40aa')"
+                            x-text="p.r"></td>
+                        <td style="padding:3px 8px;text-align:right;color:#555" x-text="p.r2"></td>
+                        <td style="padding:3px 8px;text-align:right;font-weight:700"
+                            :style="'color:' + (p.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
+                            x-text="fmtPnl(p.mean_pnl)"></td>
+                        <td style="padding:3px 8px;text-align:right"
+                            :style="'color:' + winRateColor(p.win_rate)"
+                            x-text="fmtPct(p.win_rate)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S7: Feature Redundancy Matrix ─────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s7')">
+          <span class="biv-sec-num">S7</span>
+          <span class="biv-sec-title">FEATURE REDUNDANCY MATRIX (METRIC × METRIC)</span>
+          <span style="font-size:11px;color:#444" x-text="open.s7 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s7}">
+          <div class="biv-ctrl">
+            <div style="position:relative">
+              <label>METRICS (up to 25) — type to search</label>
+              <div class="biv-tags-wrap" @click="$refs.s7input.focus()">
+                <template x-for="m in s7.ms.selected" :key="m">
+                  <span class="biv-tag" @click.stop="s7.ms.remove(m)">
+                    <span x-text="m"></span><span style="opacity:.5">×</span>
+                  </span>
+                </template>
+                <input class="biv-tag-input" x-ref="s7input"
+                       x-model="s7.ms.input"
+                       @input="s7.ms.filter()"
+                       @keydown.enter.prevent="s7.ms.add(s7.ms.suggestions[0] || s7.ms.input)"
+                       @keydown.escape="s7.ms.suggestions=[]"
+                       placeholder="Search metrics…">
+              </div>
+              <div class="biv-suggestions" x-show="s7.ms.suggestions.length > 0" @mouseleave="s7.ms.suggestions=[]">
+                <template x-for="sug in s7.ms.suggestions" :key="sug">
+                  <div x-text="sug" @click="s7.ms.add(sug)"></div>
+                </template>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadFeatureCorr()"
+                    :disabled="(s7.ms.selected.length < 2) || s7.loading">
+              <span x-text="s7.loading ? '⏳ Computing…' : '↻ Compute Matrix'"></span>
+            </button>
+            <button class="biv-btn" style="color:#555;border-color:#333"
+                    @click="s7.ms.clear(); s7.data=null">Clear</button>
+          </div>
+          <div style="font-size:10px;color:#555;margin-bottom:8px">
+            Blue = positively correlated, pink = negatively correlated.
+            Bright cells = redundant metrics that measure similar things.
+          </div>
+
+          <span x-show="s7.error" class="biv-error" x-text="s7.error"></span>
+
+          <template x-if="s7.data && !s7.error">
+            <div style="overflow-x:auto">
+              <table class="biv-matrix">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <template x-for="m in s7.data.metrics" :key="m">
+                      <th x-text="m" :title="m"
+                          style="max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(row, i) in s7.data.matrix" :key="i">
+                    <tr>
+                      <th x-text="s7.data.metrics[i]" :title="s7.data.metrics[i]"
+                          style="text-align:right;padding-right:6px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></th>
+                      <template x-for="(val, j) in row" :key="j">
+                        <td :style="'background:' + corrColor(val) + ';color:' + textOnColor(corrColor(val))"
+                            :title="s7.data.metrics[i] + ' ↔ ' + s7.data.metrics[j] + ' r=' + (val??'N/A')"
+                            x-text="val !== null ? val.toFixed(2) : '—'"></td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- ── S8: Top / Bottom Regimes ───────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s8')">
+          <span class="biv-sec-num">S8</span>
+          <span class="biv-sec-title">TOP / BOTTOM REGIME SUMMARY</span>
+          <span style="font-size:11px;color:#444" x-text="open.s8 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s8}">
+          <span x-show="s8.loading" class="biv-loading">Computing across all IV metrics…</span>
+          <span x-show="s8.error" class="biv-error" x-text="s8.error"></span>
+
+          <template x-if="s8.data && !s8.error">
+            <div>
+              <div style="font-size:10px;color:#555;margin-bottom:12px">
+                Evaluated <span x-text="s8.data.total_buckets_evaluated"></span> buckets across all IV metrics.
+                Equal-count 5-bucket split per metric. Minimum 8 trades per bucket.
+              </div>
+              <div class="biv-regime-grid">
+                <!-- Best -->
+                <div class="biv-regime-col best">
+                  <h4>BEST ENTRY CONDITIONS</h4>
+                  <template x-for="(b, i) in s8.data.best" :key="i">
+                    <div class="biv-regime-item">
+                      <div class="biv-regime-metric"
+                           x-text="b.metric + '  · bucket ' + (b.bucket_idx+1) + '/' + b.n_buckets"></div>
+                      <div style="font-size:10px;color:#555;font-family:monospace;margin-bottom:4px"
+                           x-text="b.bucket_label"></div>
+                      <div class="biv-regime-vals">
+                        <span class="biv-regime-pnl pos" x-text="'P&L ' + fmtPnl(b.mean_pnl)"></span>
+                        <span class="biv-regime-wr" x-text="'Win ' + fmtPct(b.win_rate)"></span>
+                        <span class="biv-regime-wr" x-text="'n=' + b.n"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+                <!-- Worst -->
+                <div class="biv-regime-col worst">
+                  <h4>WORST ENTRY CONDITIONS</h4>
+                  <template x-for="(b, i) in s8.data.worst" :key="i">
+                    <div class="biv-regime-item">
+                      <div class="biv-regime-metric"
+                           x-text="b.metric + '  · bucket ' + (b.bucket_idx+1) + '/' + b.n_buckets"></div>
+                      <div style="font-size:10px;color:#555;font-family:monospace;margin-bottom:4px"
+                           x-text="b.bucket_label"></div>
+                      <div class="biv-regime-vals">
+                        <span class="biv-regime-pnl neg" x-text="'P&L ' + fmtPnl(b.mean_pnl)"></span>
+                        <span class="biv-regime-wr" x-text="'Win ' + fmtPct(b.win_rate)"></span>
+                        <span class="biv-regime-wr" x-text="'n=' + b.n"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+    </div><!-- /biv-main -->
+  </div><!-- /biv-body -->
+
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=1"></script>
+</body>
+</html>
