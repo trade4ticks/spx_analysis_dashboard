@@ -218,10 +218,86 @@
 
     <div class="biv-main" x-show="selectedId">
 
+      <!-- ── S3: Decile View ────────────────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s3')">
+          <span class="biv-sec-num">S1</span>
+          <span class="biv-sec-title">SINGLE METRIC DECILE VIEW</span>
+          <span style="font-size:13px;color:#444" x-text="open.s3 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s3}">
+          <div class="biv-ctrl">
+            <div>
+              <label>METRIC</label>
+              <select x-model="s3.metric" style="min-width:220px">
+                <option value="">— select metric —</option>
+                <template x-for="c in ivColumns" :key="c">
+                  <option :value="c" x-text="c"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label>BUCKETS</label>
+              <div class="biv-toggle">
+                <template x-for="n in [5,10,20]" :key="n">
+                  <button :class="{on: s3.nBuckets===n}" @click="s3.nBuckets=n" x-text="n"></button>
+                </template>
+              </div>
+            </div>
+            <button class="biv-btn" @click="loadDecile()" :disabled="!s3.metric || s3.loading">
+              <span x-text="s3.loading ? '⏳ Computing…' : '↻ Compute'"></span>
+            </button>
+          </div>
+
+          <span x-show="s3.error" class="biv-error" x-text="s3.error"></span>
+
+          <template x-if="s3.data && !s3.error">
+            <div>
+              <div style="font-size:12px;color:#555;margin-bottom:10px">
+                <span x-text="s3.data.total_valid"></span> valid trades ·
+                Pearson r = <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
+                                  x-text="s3.data.pearson_r"></span>
+              </div>
+              <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
+              <!-- Bucket table -->
+              <div style="overflow-x:auto;margin-top:12px">
+                <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
+                  <thead>
+                    <tr style="border-bottom:1px solid #333">
+                      <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
+                      <th style="padding:3px 8px;color:#555">n</th>
+                      <th style="padding:3px 8px;color:#555">Mean P&L</th>
+                      <th style="padding:3px 8px;color:#555">Win%</th>
+                      <th style="padding:3px 8px;color:#555">σ P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="b in s3.data.buckets" :key="b.bucket_idx">
+                      <tr style="border-bottom:1px solid #1e1e1e"
+                          :class="{'biv-cell-low': b.n < 20}">
+                        <td style="padding:3px 8px;color:#aaa" x-text="b.label"></td>
+                        <td style="padding:3px 8px;text-align:center;color:#555" x-text="b.n"></td>
+                        <td style="padding:3px 8px;text-align:right;font-weight:700"
+                            :style="'color:' + (b.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
+                            x-text="fmtPnl(b.mean_pnl)"></td>
+                        <td style="padding:3px 8px;text-align:right"
+                            :style="'color:' + winRateColor(b.win_rate)"
+                            x-text="fmtPct(b.win_rate)"></td>
+                        <td style="padding:3px 8px;text-align:right;color:#555" x-text="b.pnl_std ?? '—'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <!-- ── S1: 2D Heatmap ─────────────────────────────────────────────── -->
       <div class="biv-section">
         <div class="biv-sec-hdr" @click="toggleSection('s1')">
-          <span class="biv-sec-num">S1</span>
+          <span class="biv-sec-num">S2</span>
           <span class="biv-sec-title">2D REGIME HEATMAP</span>
           <span style="font-size:13px;color:#444" x-text="open.s1 ? '▲' : '▼'"></span>
         </div>
@@ -316,7 +392,7 @@
       <!-- ── S2: Pairwise ΔR² ───────────────────────────────────────────── -->
       <div class="biv-section">
         <div class="biv-sec-hdr" @click="toggleSection('s2')">
-          <span class="biv-sec-num">S2</span>
+          <span class="biv-sec-num">S3</span>
           <span class="biv-sec-title">PAIRWISE PREDICTIVE STRENGTH (ΔR²)</span>
           <span style="font-size:13px;color:#444" x-text="open.s2 ? '▲' : '▼'"></span>
         </div>
@@ -336,7 +412,7 @@
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s2.ms.selected.length >= 20">
                 <option value="">— add metric —</option>
-                <template x-for="c in s2.ms.available()" :key="c">
+                <template x-for="c in ivColumns.filter(c => !s2.ms.selected.includes(c))" :key="c">
                   <option :value="c" x-text="c"></option>
                 </template>
               </select>
@@ -395,82 +471,6 @@
                   </template>
                 </tbody>
               </table>
-            </div>
-          </template>
-        </div>
-      </div>
-
-      <!-- ── S3: Decile View ────────────────────────────────────────────── -->
-      <div class="biv-section">
-        <div class="biv-sec-hdr" @click="toggleSection('s3')">
-          <span class="biv-sec-num">S3</span>
-          <span class="biv-sec-title">SINGLE METRIC DECILE VIEW</span>
-          <span style="font-size:13px;color:#444" x-text="open.s3 ? '▲' : '▼'"></span>
-        </div>
-        <div class="biv-sec-body" :class="{hidden: !open.s3}">
-          <div class="biv-ctrl">
-            <div>
-              <label>METRIC</label>
-              <select x-model="s3.metric" style="min-width:220px">
-                <option value="">— select metric —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label>BUCKETS</label>
-              <div class="biv-toggle">
-                <template x-for="n in [5,10,20]" :key="n">
-                  <button :class="{on: s3.nBuckets===n}" @click="s3.nBuckets=n" x-text="n"></button>
-                </template>
-              </div>
-            </div>
-            <button class="biv-btn" @click="loadDecile()" :disabled="!s3.metric || s3.loading">
-              <span x-text="s3.loading ? '⏳ Computing…' : '↻ Compute'"></span>
-            </button>
-          </div>
-
-          <span x-show="s3.error" class="biv-error" x-text="s3.error"></span>
-
-          <template x-if="s3.data && !s3.error">
-            <div>
-              <div style="font-size:12px;color:#555;margin-bottom:10px">
-                <span x-text="s3.data.total_valid"></span> valid trades ·
-                Pearson r = <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
-                                  x-text="s3.data.pearson_r"></span>
-              </div>
-              <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
-              <!-- Bucket table -->
-              <div style="overflow-x:auto;margin-top:12px">
-                <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
-                  <thead>
-                    <tr style="border-bottom:1px solid #333">
-                      <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
-                      <th style="padding:3px 8px;color:#555">n</th>
-                      <th style="padding:3px 8px;color:#555">Mean P&L</th>
-                      <th style="padding:3px 8px;color:#555">Win%</th>
-                      <th style="padding:3px 8px;color:#555">σ P&L</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="b in s3.data.buckets" :key="b.bucket_idx">
-                      <tr style="border-bottom:1px solid #1e1e1e"
-                          :class="{'biv-cell-low': b.n < 20}">
-                        <td style="padding:3px 8px;color:#aaa" x-text="b.label"></td>
-                        <td style="padding:3px 8px;text-align:center;color:#555" x-text="b.n"></td>
-                        <td style="padding:3px 8px;text-align:right;font-weight:700"
-                            :style="'color:' + (b.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
-                            x-text="fmtPnl(b.mean_pnl)"></td>
-                        <td style="padding:3px 8px;text-align:right"
-                            :style="'color:' + winRateColor(b.win_rate)"
-                            x-text="fmtPct(b.win_rate)"></td>
-                        <td style="padding:3px 8px;text-align:right;color:#555" x-text="b.pnl_std ?? '—'"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
             </div>
           </template>
         </div>
@@ -798,7 +798,7 @@
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s7.ms.selected.length >= 25">
                 <option value="">— add metric —</option>
-                <template x-for="c in s7.ms.available()" :key="c">
+                <template x-for="c in ivColumns.filter(c => !s7.ms.selected.includes(c))" :key="c">
                   <option :value="c" x-text="c"></option>
                 </template>
               </select>

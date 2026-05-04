@@ -66,16 +66,7 @@ function fmtR2(v) {
 function makeMultiSelect(maxCount) {
   return {
     selected: [],
-    _allColumns: [],
     _max: maxCount,
-
-    init(allColumns) {
-      this._allColumns = allColumns;
-    },
-
-    available() {
-      return this._allColumns.filter(c => !this.selected.includes(c));
-    },
 
     addFromEvent(event) {
       const col = event.target.value;
@@ -204,8 +195,6 @@ document.addEventListener('alpine:init', () => {
         const r   = await fetch(`/api/backtest-iv/${id}/columns`);
         const res = await r.json();
         this.ivColumns = res.iv_columns || [];
-        if (this.s2.ms) this.s2.ms.init(this.ivColumns);
-        if (this.s7.ms) this.s7.ms.init(this.ivColumns);
       } catch (e) {
         this.globalError = e.message;
         return;
