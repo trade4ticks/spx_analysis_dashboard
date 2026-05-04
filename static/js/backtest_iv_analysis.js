@@ -108,6 +108,7 @@ document.addEventListener('alpine:init', () => {
     s0: {
       target: 'pnl',
       data: null, loading: false, error: null,
+      _chart: null,
     },
 
     // ── Section 1: 2D Heatmap ──
@@ -307,11 +308,75 @@ document.addEventListener('alpine:init', () => {
           throw new Error(e.detail || `HTTP ${r.status}`);
         }
         this.s0.data = await r.json();
+        await this.$nextTick();
+        this._renderS0Chart();
       } catch (e) {
         this.s0.error = e.message;
       } finally {
         this.s0.loading = false;
       }
+    },
+
+    _renderS0Chart() {
+      this.s0._chart = this._destroyChart(this.s0._chart);
+      const el = document.getElementById('s0-chart');
+      if (!el || !this.s0.data?.metrics?.length) return;
+      const metrics = this.s0.data.metrics;
+      const target  = this.s0.data.target;
+      const labels  = metrics.map(m => m.metric);
+      const data    = metrics.map(m => m.r);
+      const colors  = data.map(v =>
+        v >= 0 ? 'rgba(41,128,245,0.85)' : 'rgba(220,60,155,0.85)');
+
+      this.s0._chart = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            backgroundColor: colors,
+            borderWidth: 0,
+            categoryPercentage: 0.95,
+            barPercentage: 0.95,
+          }],
+        },
+        options: {
+          responsive:           true,
+          maintainAspectRatio:  false,
+          animation:            false,
+          plugins: {
+            legend:  { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)',
+              borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                title: items => metrics[items[0].dataIndex].metric,
+                label: ctx => {
+                  const m   = metrics[ctx.dataIndex];
+                  const tgt = target === 'pnl' ? 'P&L' : 'Win';
+                  return `r(${tgt}) = ${m.r >= 0 ? '+' : ''}${m.r.toFixed(4)}  (n=${m.n})`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: {
+                color: '#888', font: { size: 9, family: 'monospace' },
+                maxRotation: 90, minRotation: 90, autoSkip: false,
+              },
+              grid:   { display: false },
+              border: { color: '#333' },
+            },
+            y: {
+              min: -1, max: 1,
+              ticks: { color: '#888', font: { size: 10 }, stepSize: 0.25 },
+              grid:  { color: 'rgba(255,255,255,0.06)' },
+              border: { color: '#333' },
+            },
+          },
+        },
+      });
     },
 
     _destroyChart(ref) {
@@ -334,13 +399,22 @@ document.addEventListener('alpine:init', () => {
     },
 
     s1CellBg(cell) {
-      if (!this.s1.data || !cell) return `rgb(${GRAY.join(',')})`;
-      // Below sample threshold → render as gray (n=0 visual)
+      if (!this.s1.data || !cell) return '#141414';
+      const n    = cell.n || 0;
       const minN = this.s1.minSampleN || 0;
-      if ((cell.n || 0) < minN) return `rgb(${GRAY.join(',')})`;
+
+      // Tier 1: empty cell — nearly the page background, cell almost vanishes
+      if (n === 0) return '#141414';
+
+      // Tier 2: low-sample (0 < n < threshold) — crosshatch on dark base
+      if (n < minN) {
+        return 'repeating-linear-gradient(45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + 'repeating-linear-gradient(-45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + '#1c1c1c';
+      }
+
+      // Tier 3: meets threshold — full gradient, scaled across visible cells only
       const vf = this.s1.valueField;
-      // For gradient scaling, only consider cells that are above threshold so
-      // tiny noisy cells don't compress the gradient for the meaningful ones.
       const visible = this.s1.data.cells.flat().filter(c => (c.n || 0) >= minN);
       if (vf === 'mean_pnl') {
         const maxAbs = Math.max(
@@ -350,7 +424,6 @@ document.addEventListener('alpine:init', () => {
         return pnlColor(cell.mean_pnl, maxAbs);
       }
       if (vf === 'win_rate') return winRateColor(cell.win_rate);
-      // count
       const maxN = Math.max(...visible.map(c => c.n || 0), 0);
       return r2Color(cell.n, maxN);
     },
@@ -364,6 +437,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     s1CellFg(cell) {
+      if (!cell) return '#666';
+      const n    = cell.n || 0;
+      const minN = this.s1.minSampleN || 0;
+      if (n === 0)    return '#333';   // very dim text on near-black
+      if (n < minN)   return '#999';   // muted on hatch
+      // textOnColor parses rgb(...) digits — only valid for the gradient tier
       return textOnColor(this.s1CellBg(cell));
     },
 
