@@ -120,19 +120,54 @@ def _valid_pairs(trades: list, metric: str, target: str = 'pnl') -> tuple:
     return xs, ys
 
 
+# ── Section 0: Correlation Overview ───────────────────────────────────────────
+
+def compute_correlation_overview(trades: list, iv_columns: list,
+                                   target: str = 'pnl', min_n: int = 10) -> dict:
+    """
+    Pearson r between each IV metric and target ('pnl' or 'is_win').
+    Sorted by |r| desc. Skips metrics with fewer than min_n valid pairs.
+    """
+    rows = []
+    for m in iv_columns:
+        xs, ys = _valid_pairs(trades, m, target)
+        if len(xs) < min_n:
+            continue
+        r = _pearson_r(xs, ys)
+        rows.append({
+            'metric': m,
+            'r':      round(r, 4),
+            'r2':     round(r * r, 4),
+            'n':      len(xs),
+        })
+    rows.sort(key=lambda x: abs(x['r']), reverse=True)
+    return {
+        'target':  target,
+        'metrics': rows,
+        'n_total': len(trades),
+    }
+
+
 # ── Section 1: 2D Heatmap ──────────────────────────────────────────────────────
 
-def compute_heatmap(trades: list, metric_a: str, metric_b: str, n_buckets: int) -> dict:
+def compute_heatmap(trades: list, metric_a: str, metric_b: str, n_buckets: int,
+                     boundary_trades: Optional[list] = None) -> dict:
     """
     n_buckets × n_buckets heatmap of trade outcomes.
     Returns cells[row_b][col_a] with per-cell stats.
+
+    If boundary_trades is provided, bin boundaries are computed from that set
+    (e.g. the full upload) while stats are aggregated from `trades`.
     """
     vals_a = [_safe_float(t.get(metric_a)) for t in trades]
     vals_b = [_safe_float(t.get(metric_b)) for t in trades]
     pnls   = [_safe_float(t.get('pnl'))    for t in trades]
 
-    bounds_a = _quantile_boundaries([v for v in vals_a if v is not None], n_buckets)
-    bounds_b = _quantile_boundaries([v for v in vals_b if v is not None], n_buckets)
+    src = boundary_trades if boundary_trades is not None else trades
+    src_a = [_safe_float(t.get(metric_a)) for t in src]
+    src_b = [_safe_float(t.get(metric_b)) for t in src]
+    bounds_a = _quantile_boundaries([v for v in src_a if v is not None], n_buckets)
+    bounds_b = _quantile_boundaries([v for v in src_b if v is not None], n_buckets)
     if not bounds_a or not bounds_b:
         return {'error': 'Insufficient data for bucketing'}
 
@@ -222,13 +257,25 @@ def compute_delta_r2_grid(trades: list, metrics: list, target: str = 'pnl') -> d
 
 # ── Section 3: Decile View ─────────────────────────────────────────────────────
 
-def compute_decile_stats(trades: list, metric: str, n_buckets: int = 10) -> dict:
-    """Equal-count buckets of metric vs trade outcomes."""
+def compute_decile_stats(trades: list, metric: str, n_buckets: int = 10,
+                          boundary_trades: Optional[list] = None) -> dict:
+    """Equal-count buckets of metric vs trade outcomes.
+
+    When boundary_trades is provided, bin boundaries come from that set;
+    only the assignment + aggregation uses `trades`.
+    """
     xs, ys = _valid_pairs(trades, metric, 'pnl')
     if len(xs) < n_buckets:
         return {'error': f'Too few valid trades ({len(xs)}) for {n_buckets} buckets'}
 
-    bounds      = _quantile_boundaries(xs, n_buckets)
+    if boundary_trades is not None:
+        bound_xs = [_safe_float(t.get(metric)) for t in boundary_trades]
+        bound_xs = [v for v in bound_xs if v is not None]
+        if len(bound_xs) < n_buckets:
+            return {'error': f'Boundary set too small ({len(bound_xs)}) for {n_buckets} buckets'}
+        bounds = _quantile_boundaries(bound_xs, n_buckets)
+    else:
+        bounds      = _quantile_boundaries(xs, n_buckets)
     bucket_pnls = [[] for _ in range(n_buckets)]
     for x, pnl in zip(xs, ys):
         idx = _assign_bucket(x, bounds)
@@ -257,16 +304,23 @@ def compute_decile_stats(trades: list, metric: str, n_buckets: int = 10) -> dict
 
 def compute_conditional_slice(trades: list, fix_metric: str, fix_bucket: int,
                                fix_n_buckets: int, vary_metric: str,
-                               vary_n_buckets: int) -> dict:
+                               vary_n_buckets: int,
+                               boundary_trades: Optional[list] = None) -> dict:
     """
     Within trades where fix_metric falls in fix_bucket, bucket vary_metric
     and compute trade outcomes per bucket.
+
+    If boundary_trades is provided, both fix and vary boundaries come from that
+    set (vary boundaries from trades within fix_bucket of the boundary set).
     """
     fix_vals  = [_safe_float(t.get(fix_metric))  for t in trades]
     vary_vals = [_safe_float(t.get(vary_metric)) for t in trades]
     pnls      = [_safe_float(t.get('pnl'))       for t in trades]
 
-    fix_bounds = _quantile_boundaries([v for v in fix_vals if v is not None], fix_n_buckets)
+    src = boundary_trades if boundary_trades is not None else trades
+    src_fix = [_safe_float(t.get(fix_metric)) for t in src]
+    fix_bounds = _quantile_boundaries(
+        [v for v in src_fix if v is not None], fix_n_buckets)
     if not fix_bounds:
         return {'error': 'Insufficient data for fix metric bucketing'}
 
@@ -282,7 +336,19 @@ def compute_conditional_slice(trades: list, fix_metric: str, fix_bucket: int,
     if len(slice_vary) < vary_n_buckets:
         return {'error': f'Too few trades in slice ({len(slice_vary)})'}
 
-    vary_bounds  = _quantile_boundaries(slice_vary, vary_n_buckets)
+    if boundary_trades is not None:
+        # Vary boundaries from the matching fix-bucket slice of the boundary set
+        vary_bound_vals = []
+        for t in boundary_trades:
+            fv = _safe_float(t.get(fix_metric))
+            vv = _safe_float(t.get(vary_metric))
+            if fv is not None and vv is not None and _assign_bucket(fv, fix_bounds) == fix_bucket:
+                vary_bound_vals.append(vv)
+        if len(vary_bound_vals) < vary_n_buckets:
+            return {'error': f'Boundary slice too small ({len(vary_bound_vals)}) for {vary_n_buckets} vary buckets'}
+        vary_bounds = _quantile_boundaries(vary_bound_vals, vary_n_buckets)
+    else:
+        vary_bounds  = _quantile_boundaries(slice_vary, vary_n_buckets)
     bucket_pnls  = [[] for _ in range(vary_n_buckets)]
     for vv, pnl in zip(slice_vary, slice_pnl):
         idx = _assign_bucket(vv, vary_bounds)
@@ -311,9 +377,13 @@ def compute_conditional_slice(trades: list, fix_metric: str, fix_bucket: int,
 
 def compute_distribution(trades: list, metric: Optional[str] = None,
                           bucket_index: Optional[int] = None,
-                          n_buckets: Optional[int] = None) -> dict:
+                          n_buckets: Optional[int] = None,
+                          boundary_trades: Optional[list] = None) -> dict:
     """
     P&L distribution (full 0–100 percentile range) for all trades or a metric bucket.
+
+    boundary_trades only matters in by-bucket mode (fixes the bin boundaries to
+    a different set than the trades being aggregated).
     """
     if metric and bucket_index is not None and n_buckets:
         xs   = [_safe_float(t.get(metric)) for t in trades]
@@ -321,7 +391,14 @@ def compute_distribution(trades: list, metric: Optional[str] = None,
         valid = [(x, p) for x, p in zip(xs, pnls_raw) if x is not None and p is not None]
         if not valid:
             return {'error': 'No valid data'}
-        bounds = _quantile_boundaries([v[0] for v in valid], n_buckets)
+        if boundary_trades is not None:
+            bound_xs = [_safe_float(t.get(metric)) for t in boundary_trades]
+            bound_xs = [v for v in bound_xs if v is not None]
+            if not bound_xs:
+                return {'error': 'No valid boundary data'}
+            bounds = _quantile_boundaries(bound_xs, n_buckets)
+        else:
+            bounds = _quantile_boundaries([v[0] for v in valid], n_buckets)
         pnls   = [p for x, p in valid if _assign_bucket(x, bounds) == bucket_index]
         label  = _bucket_label(bucket_index, bounds) if bounds else '?'
     else:
@@ -440,17 +517,29 @@ def compute_feature_correlation(trades: list, metrics: list) -> dict:
 # ── Section 8: Top/Bottom Regime Summary ──────────────────────────────────────
 
 def compute_top_bottom_regimes(trades: list, iv_columns: list,
-                                n_top: int = 8, n_buckets: int = 5) -> dict:
+                                n_top: int = 8, n_buckets: int = 5,
+                                boundary_trades: Optional[list] = None) -> dict:
     """
     For each IV metric, find the best and worst equal-count bucket by mean P&L.
     Return the n_top best and worst across all metrics.
+
+    When boundary_trades is provided, per-metric bin boundaries come from that
+    set; the filtered `trades` are dropped into those fixed boundaries.
     """
     all_buckets = []
+    src_for_bounds = boundary_trades if boundary_trades is not None else trades
     for metric in iv_columns:
         xs, ys = _valid_pairs(trades, metric, 'pnl')
         if len(xs) < n_buckets * 5:
             continue
-        bounds      = _quantile_boundaries(xs, n_buckets)
+        if boundary_trades is not None:
+            bound_xs = [_safe_float(t.get(metric)) for t in src_for_bounds]
+            bound_xs = [v for v in bound_xs if v is not None]
+            if len(bound_xs) < n_buckets * 5:
+                continue
+            bounds = _quantile_boundaries(bound_xs, n_buckets)
+        else:
+            bounds      = _quantile_boundaries(xs, n_buckets)
         bucket_pnls = [[] for _ in range(n_buckets)]
         for x, pnl in zip(xs, ys):
             idx = _assign_bucket(x, bounds)
@@ -472,4 +561,9 @@ def compute_top_bottom_regimes(trades: list, iv_columns: list,
     all_buckets.sort(key=lambda b: b['mean_pnl'])
     worst = all_buckets[:n_top]
     best  = list(reversed(all_buckets[-n_top:]))
-    return {'best': best, 'worst': worst, 'total_buckets_evaluated': len(all_buckets)}
+    return {
+        'best':                    best,
+        'worst':                   worst,
+        'total_buckets_evaluated': len(all_buckets),
+        'n_trades':                len(trades),
+    }

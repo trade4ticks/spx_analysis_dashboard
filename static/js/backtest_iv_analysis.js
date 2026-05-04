@@ -91,13 +91,32 @@ document.addEventListener('alpine:init', () => {
     loading:          false,
     globalError:      null,
 
+    // Date range filter (defaults to upload's full range)
+    fullRangeFrom:    null,
+    fullRangeTo:      null,
+    dateFrom:         null,
+    dateTo:           null,
+    filteredTradeCount: 0,
+
+    // Bin mode: 'recompute' (default) or 'fixed' (use full-upload boundaries)
+    binMode:          'recompute',
+
     // Section open/closed
-    open: { s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
+    open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
+
+    // ── Section 0: Correlation Overview ──
+    s0: {
+      target: 'pnl',
+      data: null, loading: false, error: null,
+      _chart: null,
+    },
 
     // ── Section 1: 2D Heatmap ──
     s1: {
       metricA: '', metricB: '', nBuckets: 5, valueField: 'mean_pnl',
+      minSampleN: 5,   // cells with n < minSampleN render as gray
       data: null, loading: false, error: null,
+      _renderId: 0,    // bumped on each successful compute to force grid re-render
     },
 
     // ── Section 2: Pairwise ΔR² ──
@@ -174,8 +193,16 @@ document.addEventListener('alpine:init', () => {
       this.uploadInfo  = this.uploads.find(u => u.id === id) || null;
       this.ivColumns   = [];
       this.globalError = null;
+      // Reset date range to the new upload's full range
+      const df = this.uploadInfo?.date_from ? String(this.uploadInfo.date_from).slice(0, 10) : null;
+      const dt = this.uploadInfo?.date_to   ? String(this.uploadInfo.date_to).slice(0, 10)   : null;
+      this.fullRangeFrom = df;
+      this.fullRangeTo   = dt;
+      this.dateFrom      = df;
+      this.dateTo        = dt;
+      this.filteredTradeCount = this.uploadInfo?.trade_count || 0;
       // Reset all section data
-      this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
       this.s7.data = null; this.s8.data = null;
       // Reset multi-selects
@@ -190,22 +217,165 @@ document.addEventListener('alpine:init', () => {
         this.globalError = e.message;
         return;
       }
-      // Auto-load Section 8
+      // Auto-load Sections 0 and 8
+      this.loadCorrelationOverview();
       this.loadTopBottom();
+    },
+
+    // ── Date filter ──
+    applyDateFilter() {
+      // Guard against an inverted range
+      if (this.dateFrom && this.dateTo && this.dateFrom > this.dateTo) {
+        this.globalError = 'Invalid date range: from > to';
+        return;
+      }
+      this.globalError = null;
+      // Invalidate every section's cached result — user must recompute
+      this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s4.data = null; this.s5.data = null; this.s6.data = null;
+      this.s7.data = null; this.s8.data = null;
+      // Auto-loaded sections refresh; filteredTradeCount comes from S8 response.
+      this.loadCorrelationOverview();
+      this.loadTopBottom();
+    },
+
+    resetDateRange() {
+      this.dateFrom = this.fullRangeFrom;
+      this.dateTo   = this.fullRangeTo;
+      this.applyDateFilter();
+    },
+
+    setBinMode(mode) {
+      if (mode !== 'recompute' && mode !== 'fixed') return;
+      if (this.binMode === mode) return;
+      this.binMode = mode;
+      // Same invalidation behavior as a date change
+      this.applyDateFilter();
+    },
+
+    get _hasDateFilter() {
+      return (this.dateFrom && this.dateFrom !== this.fullRangeFrom) ||
+             (this.dateTo   && this.dateTo   !== this.fullRangeTo);
     },
 
     // ── Helpers ──
     _api(path, body) {
-      return fetch(`/api/backtest-iv/${this.selectedId}/${path}`, {
-        method:  body !== undefined ? 'POST' : 'GET',
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-        body:    body !== undefined ? JSON.stringify(body) : undefined,
+      const isPost = body !== undefined;
+      let url = `/api/backtest-iv/${this.selectedId}/${path}`;
+      let payload = body;
+
+      if (isPost) {
+        payload = { ...body };
+        if (this.dateFrom) payload.date_from = this.dateFrom;
+        if (this.dateTo)   payload.date_to   = this.dateTo;
+        if (this.binMode === 'fixed') payload.bin_mode = 'fixed';
+      } else {
+        const params = new URLSearchParams();
+        if (this.dateFrom) params.set('date_from', this.dateFrom);
+        if (this.dateTo)   params.set('date_to',   this.dateTo);
+        if (this.binMode === 'fixed') params.set('bin_mode', 'fixed');
+        const qs = params.toString();
+        if (qs) url += '?' + qs;
+      }
+
+      return fetch(url, {
+        method:  isPost ? 'POST' : 'GET',
+        headers: isPost ? { 'Content-Type': 'application/json' } : {},
+        body:    isPost ? JSON.stringify(payload) : undefined,
       }).then(async r => {
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
           throw new Error(e.detail || `HTTP ${r.status}`);
         }
         return r.json();
+      });
+    },
+
+    // ── Section 0: Correlation Overview ──
+    async loadCorrelationOverview() {
+      if (!this.selectedId) return;
+      this.s0.loading = true; this.s0.error = null;
+      try {
+        // Built inline since the endpoint takes a non-date 'target' query param
+        const params = new URLSearchParams();
+        params.set('target', this.s0.target);
+        if (this.dateFrom) params.set('date_from', this.dateFrom);
+        if (this.dateTo)   params.set('date_to',   this.dateTo);
+        const r = await fetch(
+          `/api/backtest-iv/${this.selectedId}/correlation-overview?${params}`);
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.detail || `HTTP ${r.status}`);
+        }
+        this.s0.data = await r.json();
+        await this.$nextTick();
+        this._renderS0Chart();
+      } catch (e) {
+        this.s0.error = e.message;
+      } finally {
+        this.s0.loading = false;
+      }
+    },
+
+    _renderS0Chart() {
+      this.s0._chart = this._destroyChart(this.s0._chart);
+      const el = document.getElementById('s0-chart');
+      if (!el || !this.s0.data?.metrics?.length) return;
+      const metrics = this.s0.data.metrics;
+      const target  = this.s0.data.target;
+      const labels  = metrics.map(m => m.metric);
+      const data    = metrics.map(m => m.r);
+      const colors  = data.map(v =>
+        v >= 0 ? 'rgba(41,128,245,0.85)' : 'rgba(220,60,155,0.85)');
+
+      this.s0._chart = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            backgroundColor: colors,
+            borderWidth: 0,
+            categoryPercentage: 0.95,
+            barPercentage: 0.95,
+          }],
+        },
+        options: {
+          responsive:           true,
+          maintainAspectRatio:  false,
+          animation:            false,
+          plugins: {
+            legend:  { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)',
+              borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                title: items => metrics[items[0].dataIndex].metric,
+                label: ctx => {
+                  const m   = metrics[ctx.dataIndex];
+                  const tgt = target === 'pnl' ? 'P&L' : 'Win';
+                  return `r(${tgt}) = ${m.r >= 0 ? '+' : ''}${m.r.toFixed(4)}  (n=${m.n})`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: {
+                color: '#888', font: { size: 9, family: 'monospace' },
+                maxRotation: 90, minRotation: 90, autoSkip: false,
+              },
+              grid:   { display: false },
+              border: { color: '#333' },
+            },
+            y: {
+              min: -1, max: 1,
+              ticks: { color: '#888', font: { size: 10 }, stepSize: 0.25 },
+              grid:  { color: 'rgba(255,255,255,0.06)' },
+              border: { color: '#333' },
+            },
+          },
+        },
       });
     },
 
@@ -219,24 +389,42 @@ document.addEventListener('alpine:init', () => {
       if (!this.s1.metricA || !this.s1.metricB || !this.selectedId) return;
       this.s1.loading = true; this.s1.error = null;
       try {
-        this.s1.data = await this._api('heatmap', {
+        const data = await this._api('heatmap', {
           metric_a: this.s1.metricA, metric_b: this.s1.metricB, n_buckets: this.s1.nBuckets,
         });
+        this.s1._renderId = (this.s1._renderId + 1) % 100000;
+        this.s1.data = data;
       } catch (e) { this.s1.error = e.message; }
       finally { this.s1.loading = false; }
     },
 
     s1CellBg(cell) {
-      if (!this.s1.data || !cell) return `rgb(${GRAY.join(',')})`;
+      if (!this.s1.data || !cell) return '#141414';
+      const n    = cell.n || 0;
+      const minN = this.s1.minSampleN || 0;
+
+      // Tier 1: empty cell — nearly the page background, cell almost vanishes
+      if (n === 0) return '#141414';
+
+      // Tier 2: low-sample (0 < n < threshold) — crosshatch on dark base
+      if (n < minN) {
+        return 'repeating-linear-gradient(45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + 'repeating-linear-gradient(-45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + '#1c1c1c';
+      }
+
+      // Tier 3: meets threshold — full gradient, scaled across visible cells only
       const vf = this.s1.valueField;
+      const visible = this.s1.data.cells.flat().filter(c => (c.n || 0) >= minN);
       if (vf === 'mean_pnl') {
-        const maxAbs = Math.max(...this.s1.data.cells.flat()
-          .map(c => Math.abs(c.mean_pnl || 0)).filter(v => v > 0));
+        const maxAbs = Math.max(
+          ...visible.map(c => Math.abs(c.mean_pnl || 0)).filter(v => v > 0),
+          0,
+        );
         return pnlColor(cell.mean_pnl, maxAbs);
       }
       if (vf === 'win_rate') return winRateColor(cell.win_rate);
-      // count
-      const maxN = Math.max(...this.s1.data.cells.flat().map(c => c.n || 0));
+      const maxN = Math.max(...visible.map(c => c.n || 0), 0);
       return r2Color(cell.n, maxN);
     },
 
@@ -249,6 +437,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     s1CellFg(cell) {
+      if (!cell) return '#666';
+      const n    = cell.n || 0;
+      const minN = this.s1.minSampleN || 0;
+      if (n === 0)    return '#333';   // very dim text on near-black
+      if (n < minN)   return '#999';   // muted on hatch
+      // textOnColor parses rgb(...) digits — only valid for the gradient tier
       return textOnColor(this.s1CellBg(cell));
     },
 
@@ -494,10 +688,17 @@ document.addEventListener('alpine:init', () => {
     // ── Section 8: Top/Bottom ──
     async loadTopBottom() {
       if (!this.selectedId) return;
-      this.s8.loading = true;
+      this.s8.loading = true; this.s8.error = null;
       try {
-        this.s8.data = await this._api('top-bottom');
-      } catch (e) { this.s8.error = e.message; }
+        const data = await this._api('top-bottom');
+        this.s8.data = data;
+        if (typeof data?.n_trades === 'number') {
+          this.filteredTradeCount = data.n_trades;
+        }
+      } catch (e) {
+        this.s8.error = e.message;
+        this.filteredTradeCount = 0;
+      }
       finally { this.s8.loading = false; }
     },
 
