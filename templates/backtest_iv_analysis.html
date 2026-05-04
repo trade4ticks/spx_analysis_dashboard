@@ -625,7 +625,7 @@
                        :style="'left:' + s5BoxLeft(s5.data.p5) + ';width:' + s5BoxWidth(s5.data.p5, s5.data.p25)"></div>
                   <!-- IQR box: p25 → p75 -->
                   <div class="biv-boxplot-box"
-                       :style="'left:' + s5BoxLeft(s5.data.p25) + ';width:' + s5BoxWidth(s5.data.p25, s5.data.p75) + ';background:' + (s5.data.mean_pnl >= 0 ? 'rgba(41,128,245,0.55)' : 'rgba(220,60,155,0.55)')"></div>
+                       :style="'left:' + s5BoxLeft(s5.data.p25) + ';width:' + s5BoxWidth(s5.data.p25, s5.data.p75) + ';background:' + (s5.data.mean >= 0 ? 'rgba(41,128,245,0.55)' : 'rgba(220,60,155,0.55)')"></div>
                   <!-- Inner whisker: p75 → p95 -->
                   <div class="biv-boxplot-whisker" style="background:#444;top:8px;height:6px"
                        :style="'left:' + s5BoxLeft(s5.data.p75) + ';width:' + s5BoxWidth(s5.data.p75, s5.data.p95)"></div>
@@ -652,8 +652,8 @@
                 <div class="biv-stat">
                   <span class="biv-stat-label">MEAN P&L</span>
                   <span class="biv-stat-val"
-                        :style="'color:' + (s5.data.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
-                        x-text="fmtPnl(s5.data.mean_pnl)"></span>
+                        :style="'color:' + (s5.data.mean >= 0 ? '#3498db' : '#eb40aa')"
+                        x-text="fmtPnl(s5.data.mean)"></span>
                 </div>
                 <div class="biv-stat">
                   <span class="biv-stat-label">MEDIAN P&L</span>
@@ -911,6 +911,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=1"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=2"></script>
 </body>
 </html>
