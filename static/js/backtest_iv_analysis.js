@@ -98,14 +98,24 @@ document.addEventListener('alpine:init', () => {
     dateTo:           null,
     filteredTradeCount: 0,
 
+    // Bin mode: 'recompute' (default) or 'fixed' (use full-upload boundaries)
+    binMode:          'recompute',
+
     // Section open/closed
-    open: { s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
+    open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
+
+    // ── Section 0: Correlation Overview ──
+    s0: {
+      target: 'pnl',
+      data: null, loading: false, error: null,
+    },
 
     // ── Section 1: 2D Heatmap ──
     s1: {
       metricA: '', metricB: '', nBuckets: 5, valueField: 'mean_pnl',
+      minSampleN: 5,   // cells with n < minSampleN render as gray
       data: null, loading: false, error: null,
-      _renderId: 0,   // bumped on each successful compute to force grid re-render
+      _renderId: 0,    // bumped on each successful compute to force grid re-render
     },
 
     // ── Section 2: Pairwise ΔR² ──
@@ -191,7 +201,7 @@ document.addEventListener('alpine:init', () => {
       this.dateTo        = dt;
       this.filteredTradeCount = this.uploadInfo?.trade_count || 0;
       // Reset all section data
-      this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
       this.s7.data = null; this.s8.data = null;
       // Reset multi-selects
@@ -206,7 +216,8 @@ document.addEventListener('alpine:init', () => {
         this.globalError = e.message;
         return;
       }
-      // Auto-load Section 8
+      // Auto-load Sections 0 and 8
+      this.loadCorrelationOverview();
       this.loadTopBottom();
     },
 
@@ -219,18 +230,25 @@ document.addEventListener('alpine:init', () => {
       }
       this.globalError = null;
       // Invalidate every section's cached result — user must recompute
-      this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
       this.s7.data = null; this.s8.data = null;
-      // Update count via top-bottom (which auto-loads). filteredTradeCount
-      // will be derived on the next successful compute response. As a
-      // best-effort placeholder, leave it as the upload total until S8 returns.
+      // Auto-loaded sections refresh; filteredTradeCount comes from S8 response.
+      this.loadCorrelationOverview();
       this.loadTopBottom();
     },
 
     resetDateRange() {
       this.dateFrom = this.fullRangeFrom;
       this.dateTo   = this.fullRangeTo;
+      this.applyDateFilter();
+    },
+
+    setBinMode(mode) {
+      if (mode !== 'recompute' && mode !== 'fixed') return;
+      if (this.binMode === mode) return;
+      this.binMode = mode;
+      // Same invalidation behavior as a date change
       this.applyDateFilter();
     },
 
@@ -249,10 +267,12 @@ document.addEventListener('alpine:init', () => {
         payload = { ...body };
         if (this.dateFrom) payload.date_from = this.dateFrom;
         if (this.dateTo)   payload.date_to   = this.dateTo;
+        if (this.binMode === 'fixed') payload.bin_mode = 'fixed';
       } else {
         const params = new URLSearchParams();
         if (this.dateFrom) params.set('date_from', this.dateFrom);
         if (this.dateTo)   params.set('date_to',   this.dateTo);
+        if (this.binMode === 'fixed') params.set('bin_mode', 'fixed');
         const qs = params.toString();
         if (qs) url += '?' + qs;
       }
@@ -268,6 +288,30 @@ document.addEventListener('alpine:init', () => {
         }
         return r.json();
       });
+    },
+
+    // ── Section 0: Correlation Overview ──
+    async loadCorrelationOverview() {
+      if (!this.selectedId) return;
+      this.s0.loading = true; this.s0.error = null;
+      try {
+        // Built inline since the endpoint takes a non-date 'target' query param
+        const params = new URLSearchParams();
+        params.set('target', this.s0.target);
+        if (this.dateFrom) params.set('date_from', this.dateFrom);
+        if (this.dateTo)   params.set('date_to',   this.dateTo);
+        const r = await fetch(
+          `/api/backtest-iv/${this.selectedId}/correlation-overview?${params}`);
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          throw new Error(e.detail || `HTTP ${r.status}`);
+        }
+        this.s0.data = await r.json();
+      } catch (e) {
+        this.s0.error = e.message;
+      } finally {
+        this.s0.loading = false;
+      }
     },
 
     _destroyChart(ref) {
@@ -291,15 +335,23 @@ document.addEventListener('alpine:init', () => {
 
     s1CellBg(cell) {
       if (!this.s1.data || !cell) return `rgb(${GRAY.join(',')})`;
+      // Below sample threshold → render as gray (n=0 visual)
+      const minN = this.s1.minSampleN || 0;
+      if ((cell.n || 0) < minN) return `rgb(${GRAY.join(',')})`;
       const vf = this.s1.valueField;
+      // For gradient scaling, only consider cells that are above threshold so
+      // tiny noisy cells don't compress the gradient for the meaningful ones.
+      const visible = this.s1.data.cells.flat().filter(c => (c.n || 0) >= minN);
       if (vf === 'mean_pnl') {
-        const maxAbs = Math.max(...this.s1.data.cells.flat()
-          .map(c => Math.abs(c.mean_pnl || 0)).filter(v => v > 0));
+        const maxAbs = Math.max(
+          ...visible.map(c => Math.abs(c.mean_pnl || 0)).filter(v => v > 0),
+          0,
+        );
         return pnlColor(cell.mean_pnl, maxAbs);
       }
       if (vf === 'win_rate') return winRateColor(cell.win_rate);
       // count
-      const maxN = Math.max(...this.s1.data.cells.flat().map(c => c.n || 0));
+      const maxN = Math.max(...visible.map(c => c.n || 0), 0);
       return r2Color(cell.n, maxN);
     },
 

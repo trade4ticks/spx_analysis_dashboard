@@ -219,6 +219,16 @@
                 title="Reset to full range">↺</button>
       </span>
     </template>
+    <template x-if="uploadInfo">
+      <span style="display:flex;gap:6px;align-items:center;margin-left:14px"
+            title="Recompute: bin boundaries from filtered trades.&#10;Fixed: bin boundaries from the full upload (filtered trades dropped into those bins).">
+        <span style="font-size:11px;color:#666;letter-spacing:.3px">BINS</span>
+        <div class="biv-toggle">
+          <button :class="{on: binMode==='recompute'}" @click="setBinMode('recompute')">Recompute</button>
+          <button :class="{on: binMode==='fixed'}"     @click="setBinMode('fixed')">Fixed</button>
+        </div>
+      </span>
+    </template>
     <span x-show="loading" class="biv-loading">Loading…</span>
     <span x-show="globalError" class="biv-error" x-text="globalError"></span>
     <span style="margin-left:auto;font-size:12px;color:#333"
@@ -235,6 +245,68 @@
     </template>
 
     <div class="biv-main" x-show="selectedId">
+
+      <!-- ── S0: IV Correlation Overview ─────────────────────────────────── -->
+      <div class="biv-section">
+        <div class="biv-sec-hdr" @click="toggleSection('s0')">
+          <span class="biv-sec-num">S0</span>
+          <span class="biv-sec-title">IV CORRELATION OVERVIEW</span>
+          <span style="font-size:13px;color:#444" x-text="open.s0 ? '▲' : '▼'"></span>
+        </div>
+        <div class="biv-sec-body" :class="{hidden: !open.s0}">
+          <div class="biv-ctrl">
+            <div>
+              <label>TARGET</label>
+              <div class="biv-toggle">
+                <button :class="{on: s0.target==='pnl'}"
+                        @click="s0.target='pnl'; loadCorrelationOverview()">P&L</button>
+                <button :class="{on: s0.target==='is_win'}"
+                        @click="s0.target='is_win'; loadCorrelationOverview()">Win</button>
+              </div>
+            </div>
+            <span x-show="s0.loading" class="biv-loading">Computing…</span>
+          </div>
+
+          <span x-show="s0.error" class="biv-error" x-text="s0.error"></span>
+
+          <template x-if="s0.data && !s0.error">
+            <div>
+              <div style="font-size:12px;color:#555;margin-bottom:10px">
+                Pearson r of each IV metric vs
+                <span style="color:#aaa" x-text="s0.target === 'pnl' ? 'P&L' : 'win rate'"></span>,
+                sorted by |r|. Bars require n ≥ 10.
+                Showing <span x-text="s0.data.metrics.length"></span> of
+                <span x-text="ivColumns.length"></span> IV metrics.
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px;font-family:monospace;font-size:11px">
+                <template x-for="m in s0.data.metrics" :key="m.metric">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="min-width:240px;color:#aaa;text-align:right;
+                                 overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                          :title="m.metric" x-text="m.metric"></span>
+                    <div style="flex:1;position:relative;height:16px;background:#1a1a1a;border-radius:2px">
+                      <div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:#333"></div>
+                      <div :style="`position:absolute;top:1px;bottom:1px;
+                                    ${m.r >= 0 ? 'left:50%' : 'right:50%'};
+                                    width:${(Math.abs(m.r) * 50).toFixed(2)}%;
+                                    background:${m.r >= 0 ? 'rgba(41,128,245,0.75)' : 'rgba(220,60,155,0.75)'};
+                                    border-radius:2px`"></div>
+                    </div>
+                    <span style="min-width:64px;text-align:right;font-weight:700"
+                          :style="`color:${m.r >= 0 ? '#3498db' : '#eb40aa'}`"
+                          x-text="(m.r >= 0 ? '+' : '') + m.r.toFixed(3)"></span>
+                    <span style="min-width:46px;text-align:right;color:#555;font-size:10px"
+                          x-text="'n=' + m.n"></span>
+                  </div>
+                </template>
+                <template x-if="s0.data.metrics.length === 0">
+                  <div style="color:#555;font-size:12px;padding:8px">No metrics with n ≥ 10 in this range.</div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
 
       <!-- ── S3: Decile View ────────────────────────────────────────────── -->
       <div class="biv-section">
@@ -355,6 +427,16 @@
                 <button :class="{on: s1.valueField==='count'}"     @click="s1.valueField='count'">Count</button>
               </div>
             </div>
+            <div>
+              <label>HIDE n &lt;</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="range" min="0" max="100" step="1"
+                       x-model.number="s1.minSampleN"
+                       style="width:140px;accent-color:#3498db">
+                <span style="min-width:28px;color:#3498db;font-weight:700;font-family:monospace;font-size:13px"
+                      x-text="s1.minSampleN"></span>
+              </div>
+            </div>
             <button class="biv-btn" @click="loadHeatmap()"
                     :disabled="!s1.metricA || !s1.metricB || s1.loading">
               <span x-text="s1.loading ? '⏳ Computing…' : '↻ Compute'"></span>
@@ -372,7 +454,8 @@
                 <span x-text="s1.data.valid_count"></span> trades plotted ·
                 rows = <span x-text="s1.data.metric_b" style="color:#aaa;font-family:monospace"></span> ·
                 cols = <span x-text="s1.data.metric_a" style="color:#aaa;font-family:monospace"></span>
-                · low-sample cells (n&lt;20) faded
+                · cells with n &lt;
+                <span style="color:#3498db" x-text="s1.minSampleN"></span> grayed out
               </div>
               <div class="biv-heatmap-wrap">
                 <table class="biv-heatmap">
@@ -390,8 +473,7 @@
                         <th style="text-align:right;padding-right:8px;color:#666"
                             x-text="s1.data.labels_b[ib]"></th>
                         <template x-for="(cell, ia) in row" :key="s1._renderId + '-' + ia">
-                          <td :class="{'biv-cell-low': cell.n < 20, 'biv-cell-zero': cell.n === 0}"
-                              :style="'background:' + s1CellBg(cell) + ';color:' + s1CellFg(cell)"
+                          <td :style="'background:' + s1CellBg(cell) + ';color:' + s1CellFg(cell)"
                               :title="'n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
                             <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
                             <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
@@ -929,6 +1011,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=2"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=3"></script>
 </body>
 </html>

@@ -73,6 +73,11 @@ def _filter_by_date(trades: list, date_from: Optional[str], date_to: Optional[st
 class _DateFilterMixin(BaseModel):
     date_from: Optional[str] = None
     date_to:   Optional[str] = None
+    # 'recompute' (default) — bin boundaries from filtered trades.
+    # 'fixed'              — bin boundaries from the full upload.
+    # Ignored by routes that don't bin (delta-r2, time-stability,
+    # feature-correlation, correlation-overview).
+    bin_mode:  Optional[str] = 'recompute'
 
 
 class HeatmapRequest(_DateFilterMixin):
@@ -144,12 +149,14 @@ async def get_columns(upload_id: str, pool=Depends(get_pool)):
 async def heatmap(upload_id: str, req: HeatmapRequest, pool=Depends(get_pool)):
     if req.n_buckets not in (3, 5, 10):
         raise HTTPException(400, "n_buckets must be 3, 5, or 10")
-    trades, _ = await _load_trades(upload_id, pool)
-    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    trades_full, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades_full, req.date_from, req.date_to)
     if not trades:
         raise HTTPException(400, "No trades in selected date range")
+    boundary = trades_full if req.bin_mode == 'fixed' else None
     return await asyncio.to_thread(
-        iv.compute_heatmap, trades, req.metric_a, req.metric_b, req.n_buckets
+        iv.compute_heatmap, trades, req.metric_a, req.metric_b, req.n_buckets,
+        boundary,
     )
 
 
@@ -170,34 +177,40 @@ async def delta_r2(upload_id: str, req: DeltaR2Request, pool=Depends(get_pool)):
 
 @router.post("/{upload_id}/decile")
 async def decile(upload_id: str, req: DecileRequest, pool=Depends(get_pool)):
-    trades, _ = await _load_trades(upload_id, pool)
-    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    trades_full, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades_full, req.date_from, req.date_to)
     if not trades:
         raise HTTPException(400, "No trades in selected date range")
-    return iv.compute_decile_stats(trades, req.metric, req.n_buckets)
+    boundary = trades_full if req.bin_mode == 'fixed' else None
+    return iv.compute_decile_stats(trades, req.metric, req.n_buckets, boundary)
 
 
 @router.post("/{upload_id}/conditional-slice")
 async def conditional_slice(upload_id: str, req: ConditionalSliceRequest,
                              pool=Depends(get_pool)):
-    trades, _ = await _load_trades(upload_id, pool)
-    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    trades_full, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades_full, req.date_from, req.date_to)
     if not trades:
         raise HTTPException(400, "No trades in selected date range")
+    boundary = trades_full if req.bin_mode == 'fixed' else None
     return await asyncio.to_thread(
         iv.compute_conditional_slice,
         trades, req.fix_metric, req.fix_bucket,
         req.fix_n_buckets, req.vary_metric, req.vary_n_buckets,
+        boundary,
     )
 
 
 @router.post("/{upload_id}/distribution")
 async def distribution(upload_id: str, req: DistributionRequest, pool=Depends(get_pool)):
-    trades, _ = await _load_trades(upload_id, pool)
-    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    trades_full, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades_full, req.date_from, req.date_to)
     if not trades:
         raise HTTPException(400, "No trades in selected date range")
-    return iv.compute_distribution(trades, req.metric, req.bucket_index, req.n_buckets)
+    boundary = trades_full if req.bin_mode == 'fixed' else None
+    return iv.compute_distribution(
+        trades, req.metric, req.bucket_index, req.n_buckets, boundary,
+    )
 
 
 @router.post("/{upload_id}/time-stability")
@@ -233,12 +246,33 @@ async def top_bottom(
     upload_id: str,
     date_from: Optional[str] = None,
     date_to:   Optional[str] = None,
+    bin_mode:  Optional[str] = 'recompute',
     pool=Depends(get_pool),
 ):
+    trades_full, iv_columns = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades_full, date_from, date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
+    boundary = trades_full if bin_mode == 'fixed' else None
+    return await asyncio.to_thread(
+        iv.compute_top_bottom_regimes, trades, iv_columns, 8, 5, boundary,
+    )
+
+
+@router.get("/{upload_id}/correlation-overview")
+async def correlation_overview(
+    upload_id: str,
+    target:    str = 'pnl',
+    date_from: Optional[str] = None,
+    date_to:   Optional[str] = None,
+    pool=Depends(get_pool),
+):
+    if target not in ('pnl', 'is_win'):
+        raise HTTPException(400, "target must be 'pnl' or 'is_win'")
     trades, iv_columns = await _load_trades(upload_id, pool)
     trades = _filter_by_date(trades, date_from, date_to)
     if not trades:
         raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
-        iv.compute_top_bottom_regimes, trades, iv_columns
+        iv.compute_correlation_overview, trades, iv_columns, target
     )
