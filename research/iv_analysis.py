@@ -472,4 +472,9 @@ def compute_top_bottom_regimes(trades: list, iv_columns: list,
     all_buckets.sort(key=lambda b: b['mean_pnl'])
     worst = all_buckets[:n_top]
     best  = list(reversed(all_buckets[-n_top:]))
-    return {'best': best, 'worst': worst, 'total_buckets_evaluated': len(all_buckets)}
+    return {
+        'best':                    best,
+        'worst':                   worst,
+        'total_buckets_evaluated': len(all_buckets),
+        'n_trades':                len(trades),
+    }

@@ -91,6 +91,13 @@ document.addEventListener('alpine:init', () => {
     loading:          false,
     globalError:      null,
 
+    // Date range filter (defaults to upload's full range)
+    fullRangeFrom:    null,
+    fullRangeTo:      null,
+    dateFrom:         null,
+    dateTo:           null,
+    filteredTradeCount: 0,
+
     // Section open/closed
     open: { s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
 
@@ -98,6 +105,7 @@ document.addEventListener('alpine:init', () => {
     s1: {
       metricA: '', metricB: '', nBuckets: 5, valueField: 'mean_pnl',
       data: null, loading: false, error: null,
+      _renderId: 0,   // bumped on each successful compute to force grid re-render
     },
 
     // ── Section 2: Pairwise ΔR² ──
@@ -174,6 +182,14 @@ document.addEventListener('alpine:init', () => {
       this.uploadInfo  = this.uploads.find(u => u.id === id) || null;
       this.ivColumns   = [];
       this.globalError = null;
+      // Reset date range to the new upload's full range
+      const df = this.uploadInfo?.date_from ? String(this.uploadInfo.date_from).slice(0, 10) : null;
+      const dt = this.uploadInfo?.date_to   ? String(this.uploadInfo.date_to).slice(0, 10)   : null;
+      this.fullRangeFrom = df;
+      this.fullRangeTo   = dt;
+      this.dateFrom      = df;
+      this.dateTo        = dt;
+      this.filteredTradeCount = this.uploadInfo?.trade_count || 0;
       // Reset all section data
       this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
@@ -194,12 +210,57 @@ document.addEventListener('alpine:init', () => {
       this.loadTopBottom();
     },
 
+    // ── Date filter ──
+    applyDateFilter() {
+      // Guard against an inverted range
+      if (this.dateFrom && this.dateTo && this.dateFrom > this.dateTo) {
+        this.globalError = 'Invalid date range: from > to';
+        return;
+      }
+      this.globalError = null;
+      // Invalidate every section's cached result — user must recompute
+      this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s4.data = null; this.s5.data = null; this.s6.data = null;
+      this.s7.data = null; this.s8.data = null;
+      // Update count via top-bottom (which auto-loads). filteredTradeCount
+      // will be derived on the next successful compute response. As a
+      // best-effort placeholder, leave it as the upload total until S8 returns.
+      this.loadTopBottom();
+    },
+
+    resetDateRange() {
+      this.dateFrom = this.fullRangeFrom;
+      this.dateTo   = this.fullRangeTo;
+      this.applyDateFilter();
+    },
+
+    get _hasDateFilter() {
+      return (this.dateFrom && this.dateFrom !== this.fullRangeFrom) ||
+             (this.dateTo   && this.dateTo   !== this.fullRangeTo);
+    },
+
     // ── Helpers ──
     _api(path, body) {
-      return fetch(`/api/backtest-iv/${this.selectedId}/${path}`, {
-        method:  body !== undefined ? 'POST' : 'GET',
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-        body:    body !== undefined ? JSON.stringify(body) : undefined,
+      const isPost = body !== undefined;
+      let url = `/api/backtest-iv/${this.selectedId}/${path}`;
+      let payload = body;
+
+      if (isPost) {
+        payload = { ...body };
+        if (this.dateFrom) payload.date_from = this.dateFrom;
+        if (this.dateTo)   payload.date_to   = this.dateTo;
+      } else {
+        const params = new URLSearchParams();
+        if (this.dateFrom) params.set('date_from', this.dateFrom);
+        if (this.dateTo)   params.set('date_to',   this.dateTo);
+        const qs = params.toString();
+        if (qs) url += '?' + qs;
+      }
+
+      return fetch(url, {
+        method:  isPost ? 'POST' : 'GET',
+        headers: isPost ? { 'Content-Type': 'application/json' } : {},
+        body:    isPost ? JSON.stringify(payload) : undefined,
       }).then(async r => {
         if (!r.ok) {
           const e = await r.json().catch(() => ({}));
@@ -219,9 +280,11 @@ document.addEventListener('alpine:init', () => {
       if (!this.s1.metricA || !this.s1.metricB || !this.selectedId) return;
       this.s1.loading = true; this.s1.error = null;
       try {
-        this.s1.data = await this._api('heatmap', {
+        const data = await this._api('heatmap', {
           metric_a: this.s1.metricA, metric_b: this.s1.metricB, n_buckets: this.s1.nBuckets,
         });
+        this.s1._renderId = (this.s1._renderId + 1) % 100000;
+        this.s1.data = data;
       } catch (e) { this.s1.error = e.message; }
       finally { this.s1.loading = false; }
     },
@@ -494,10 +557,17 @@ document.addEventListener('alpine:init', () => {
     // ── Section 8: Top/Bottom ──
     async loadTopBottom() {
       if (!this.selectedId) return;
-      this.s8.loading = true;
+      this.s8.loading = true; this.s8.error = null;
       try {
-        this.s8.data = await this._api('top-bottom');
-      } catch (e) { this.s8.error = e.message; }
+        const data = await this._api('top-bottom');
+        this.s8.data = data;
+        if (typeof data?.n_trades === 'number') {
+          this.filteredTradeCount = data.n_trades;
+        }
+      } catch (e) {
+        this.s8.error = e.message;
+        this.filteredTradeCount = 0;
+      }
       finally { this.s8.loading = false; }
     },
 

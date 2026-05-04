@@ -198,7 +198,25 @@
       <span style="font-size:12px;color:#555">
         <span x-text="uploadInfo.trade_count"></span> trades ·
         <span x-text="uploadInfo.matched_count"></span> IV-matched ·
-        <span x-text="uploadInfo.date_from + ' → ' + uploadInfo.date_to" style="color:#444"></span>
+        <span x-text="filteredTradeCount + ' in range'" style="color:#888"></span>
+      </span>
+    </template>
+    <template x-if="uploadInfo">
+      <span style="display:flex;gap:6px;align-items:center;margin-left:14px">
+        <span style="font-size:11px;color:#666;letter-spacing:.3px">DATES</span>
+        <input type="date" x-model="dateFrom"
+               :min="fullRangeFrom" :max="fullRangeTo"
+               @change="applyDateFilter()"
+               style="background:#222;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:3px;font-size:12px">
+        <span style="color:#444">→</span>
+        <input type="date" x-model="dateTo"
+               :min="fullRangeFrom" :max="fullRangeTo"
+               @change="applyDateFilter()"
+               style="background:#222;border:1px solid #444;color:#ccc;padding:3px 6px;border-radius:3px;font-size:12px">
+        <button @click="resetDateRange()"
+                x-show="dateFrom !== fullRangeFrom || dateTo !== fullRangeTo"
+                style="background:none;border:none;color:#888;cursor:pointer;font-size:13px;padding:2px 6px"
+                title="Reset to full range">↺</button>
       </span>
     </template>
     <span x-show="loading" class="biv-loading">Loading…</span>
@@ -367,11 +385,11 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <template x-for="(row, ib) in s1.data.cells" :key="ib">
+                    <template x-for="(row, ib) in s1.data.cells" :key="s1._renderId + '-' + ib">
                       <tr>
                         <th style="text-align:right;padding-right:8px;color:#666"
                             x-text="s1.data.labels_b[ib]"></th>
-                        <template x-for="(cell, ia) in row" :key="ia">
+                        <template x-for="(cell, ia) in row" :key="s1._renderId + '-' + ia">
                           <td :class="{'biv-cell-low': cell.n < 20, 'biv-cell-zero': cell.n === 0}"
                               :style="'background:' + s1CellBg(cell) + ';color:' + s1CellFg(cell)"
                               :title="'n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
@@ -911,6 +929,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=1"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=2"></script>
 </body>
 </html>

@@ -49,25 +49,49 @@ async def _load_trades(upload_id: str, pool) -> tuple:
     return trades, iv_columns
 
 
+# ── Date filter ────────────────────────────────────────────────────────────────
+
+def _filter_by_date(trades: list, date_from: Optional[str], date_to: Optional[str]) -> list:
+    """Filter trades by date_opened (inclusive). Strings in YYYY-MM-DD compare lexically."""
+    if not date_from and not date_to:
+        return trades
+    out = []
+    for t in trades:
+        d = t.get('date_opened')
+        if not d:
+            continue
+        if date_from and d < date_from:
+            continue
+        if date_to and d > date_to:
+            continue
+        out.append(t)
+    return out
+
+
 # ── Request models ─────────────────────────────────────────────────────────────
 
-class HeatmapRequest(BaseModel):
+class _DateFilterMixin(BaseModel):
+    date_from: Optional[str] = None
+    date_to:   Optional[str] = None
+
+
+class HeatmapRequest(_DateFilterMixin):
     metric_a: str
     metric_b: str
     n_buckets: int = 5
 
 
-class DeltaR2Request(BaseModel):
+class DeltaR2Request(_DateFilterMixin):
     metrics: list[str]
     target: str = 'pnl'
 
 
-class DecileRequest(BaseModel):
+class DecileRequest(_DateFilterMixin):
     metric: str
     n_buckets: int = 10
 
 
-class ConditionalSliceRequest(BaseModel):
+class ConditionalSliceRequest(_DateFilterMixin):
     fix_metric:    str
     fix_bucket:    int
     fix_n_buckets: int = 5
@@ -75,18 +99,18 @@ class ConditionalSliceRequest(BaseModel):
     vary_n_buckets: int = 5
 
 
-class DistributionRequest(BaseModel):
+class DistributionRequest(_DateFilterMixin):
     metric:       Optional[str] = None
     bucket_index: Optional[int] = None
     n_buckets:    Optional[int] = None
 
 
-class TimeStabilityRequest(BaseModel):
+class TimeStabilityRequest(_DateFilterMixin):
     metric:    str
     n_windows: int = 6
 
 
-class FeatureCorrelationRequest(BaseModel):
+class FeatureCorrelationRequest(_DateFilterMixin):
     metrics: list[str]
 
 
@@ -121,6 +145,9 @@ async def heatmap(upload_id: str, req: HeatmapRequest, pool=Depends(get_pool)):
     if req.n_buckets not in (3, 5, 10):
         raise HTTPException(400, "n_buckets must be 3, 5, or 10")
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_heatmap, trades, req.metric_a, req.metric_b, req.n_buckets
     )
@@ -133,6 +160,9 @@ async def delta_r2(upload_id: str, req: DeltaR2Request, pool=Depends(get_pool)):
     if len(req.metrics) < 2:
         raise HTTPException(400, "At least 2 metrics required")
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_delta_r2_grid, trades, req.metrics, req.target
     )
@@ -141,6 +171,9 @@ async def delta_r2(upload_id: str, req: DeltaR2Request, pool=Depends(get_pool)):
 @router.post("/{upload_id}/decile")
 async def decile(upload_id: str, req: DecileRequest, pool=Depends(get_pool)):
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return iv.compute_decile_stats(trades, req.metric, req.n_buckets)
 
 
@@ -148,6 +181,9 @@ async def decile(upload_id: str, req: DecileRequest, pool=Depends(get_pool)):
 async def conditional_slice(upload_id: str, req: ConditionalSliceRequest,
                              pool=Depends(get_pool)):
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_conditional_slice,
         trades, req.fix_metric, req.fix_bucket,
@@ -158,6 +194,9 @@ async def conditional_slice(upload_id: str, req: ConditionalSliceRequest,
 @router.post("/{upload_id}/distribution")
 async def distribution(upload_id: str, req: DistributionRequest, pool=Depends(get_pool)):
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return iv.compute_distribution(trades, req.metric, req.bucket_index, req.n_buckets)
 
 
@@ -167,6 +206,9 @@ async def time_stability(upload_id: str, req: TimeStabilityRequest,
     if not (2 <= req.n_windows <= 12):
         raise HTTPException(400, "n_windows must be 2–12")
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_time_stability, trades, req.metric, req.n_windows
     )
@@ -178,14 +220,25 @@ async def feature_correlation(upload_id: str, req: FeatureCorrelationRequest,
     if len(req.metrics) > 25:
         raise HTTPException(400, "Maximum 25 metrics for redundancy matrix")
     trades, _ = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, req.date_from, req.date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_feature_correlation, trades, req.metrics
     )
 
 
 @router.get("/{upload_id}/top-bottom")
-async def top_bottom(upload_id: str, pool=Depends(get_pool)):
+async def top_bottom(
+    upload_id: str,
+    date_from: Optional[str] = None,
+    date_to:   Optional[str] = None,
+    pool=Depends(get_pool),
+):
     trades, iv_columns = await _load_trades(upload_id, pool)
+    trades = _filter_by_date(trades, date_from, date_to)
+    if not trades:
+        raise HTTPException(400, "No trades in selected date range")
     return await asyncio.to_thread(
         iv.compute_top_bottom_regimes, trades, iv_columns
     )
