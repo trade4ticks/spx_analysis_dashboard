@@ -674,6 +674,115 @@ def _compute_path_derived_fields(daily_rows: list[dict], enriched_trades: list[d
     return result
 
 
+def compute_portfolio_context_features(
+    daily_paths: list[dict],
+    enriched_trades: list[dict],
+    windows: tuple = (1, 3, 5, 10, 15),
+    min_history_for_pctl: int = 60,
+) -> dict:
+    """
+    Per-trade portfolio-context features answering: when existing positions
+    had unusually large recent P&L moves, does entering a new trade now
+    correlate with future P&L?
+
+    For each trade T entered on date D:
+      portfolio_pnl_chg_{N}d_at_entry      cumulative average per-trade daily
+                                           P&L change over the last N trading
+                                           days ending at D's 3:30pm slice
+      portfolio_pnl_chg_{N}d_at_entry_pctl 0-100 expanding-window percentile
+                                           rank of that value within the prior
+                                           history of the same metric
+
+    The "average per-trade" roll-up strips out concurrent-position-count bias
+    (50 positions vs 20 won't artificially shift the magnitude). Calendar is
+    the union of dates appearing in any daily_path row — weekends/holidays
+    skipped automatically. T excludes itself: on D, T has no D-1 P&L so its
+    daily_change is None and is not part of the avg.
+
+    Look-ahead note: 3:30pm of D is the reference. For trades entered before
+    3:30pm on D, the 1d feature uses information not yet observable at entry.
+    Documented trade-off for time-axis consistency with Mesosim's daily slice.
+    """
+    by_pos: dict = defaultdict(list)
+    for dp in daily_paths:
+        pid = dp.get('position_id')
+        if pid:
+            by_pos[pid].append(dp)
+    for rows in by_pos.values():
+        rows.sort(key=lambda r: r.get('date', ''))
+
+    daily_changes: dict = defaultdict(dict)
+    for pid, rows in by_pos.items():
+        prev_pnl = None
+        for r in rows:
+            pnl = _safe_float(r.get('pos_pnl'))
+            d = r.get('date')
+            if pnl is not None and prev_pnl is not None and d:
+                daily_changes[d][pid] = pnl - prev_pnl
+            prev_pnl = pnl
+
+    if not daily_changes:
+        return {}
+
+    calendar = sorted(daily_changes.keys())
+
+    avg_pnl_chg: dict = {}
+    for d, pos_changes in daily_changes.items():
+        vals = list(pos_changes.values())
+        avg_pnl_chg[d] = sum(vals) / len(vals) if vals else None
+
+    series_by_window: dict = {}
+    for N in windows:
+        s: dict = {}
+        for i, d in enumerate(calendar):
+            if i < N - 1:
+                s[d] = None
+                continue
+            window_dates = calendar[i - N + 1:i + 1]
+            vals = [avg_pnl_chg.get(wd) for wd in window_dates]
+            s[d] = round(sum(vals), 4) if all(v is not None for v in vals) else None
+        series_by_window[N] = s
+
+    # Expanding-window percentile rank: for each calendar date d, rank its
+    # series value within {series[d'] for d' in calendar, d' < d, value not None}.
+    pctl_by_window: dict = {}
+    for N, series in series_by_window.items():
+        pctls: dict = {}
+        prior_vals: list = []
+        for d in calendar:
+            v = series[d]
+            if v is None or len(prior_vals) < min_history_for_pctl:
+                pctls[d] = None
+            else:
+                n_below = sum(1 for x in prior_vals if x < v)
+                n_equal = sum(1 for x in prior_vals if x == v)
+                pctls[d] = round((n_below + n_equal / 2) / len(prior_vals) * 100, 1)
+            if v is not None:
+                prior_vals.append(v)
+        pctl_by_window[N] = pctls
+
+    out: dict = {}
+    for trade in enriched_trades:
+        pid = trade.get('position_id')
+        date_opened = trade.get('date_opened')
+        if not pid or not date_opened:
+            continue
+        d_ref = None
+        for d in reversed(calendar):
+            if d <= date_opened:
+                d_ref = d
+                break
+        if d_ref is None:
+            continue
+        feat: dict = {}
+        for N in windows:
+            feat[f'portfolio_pnl_chg_{N}d_at_entry'] = series_by_window[N].get(d_ref)
+            feat[f'portfolio_pnl_chg_{N}d_at_entry_pctl'] = pctl_by_window[N].get(d_ref)
+        out[pid] = feat
+
+    return out
+
+
 def compute_trade_summary(trades: list[dict]) -> dict:
     """High-level summary of enriched trade list for agentic context."""
     pnl_vals = [_safe_float(t.get('pnl')) for t in trades]

@@ -3030,9 +3030,36 @@ async def execute_backtest_pipeline(
 def _format_evidence_packet(evidence: dict, question: str) -> str:
     """Format the evidence packet as structured text for the LLM."""
     ts = evidence.get("trade_summary", {})
+
+    # Detect portfolio-context features — they need a glossary so the writer
+    # interprets them as "recent open-position P&L behavior at entry," not IV.
+    all_cited_cols = set()
+    for r in (evidence.get("corr_pnl") or []) + (evidence.get("corr_win") or []):
+        all_cited_cols.add(r.get("x_col", ""))
+    for c in evidence.get("non_redundant") or []:
+        all_cited_cols.add(c)
+    has_portfolio_cols = any(c.startswith("portfolio_pnl_chg_") for c in all_cited_cols)
+
     lines = [
         f"RESEARCH QUESTION: {question}",
         "",
+    ]
+    if has_portfolio_cols:
+        lines += [
+            "COLUMN GLOSSARY (portfolio-context features):",
+            "  portfolio_pnl_chg_Nd_at_entry — cumulative average per-trade daily P&L",
+            "    change over the last N trading days ending at the entry date's 3:30pm",
+            "    slice. 'Per-trade average' (not portfolio total) so concurrent-position",
+            "    count doesn't drive magnitude. The new trade itself is excluded.",
+            "  portfolio_pnl_chg_Nd_at_entry_pctl — 0–100 expanding-window historical",
+            "    percentile rank of the above value vs the prior history of the same",
+            "    metric. p≥90 ≈ 'twice/month' rare; p≥98 ≈ 'few times/year' rare.",
+            "  Note: 1d feature uses 3:30pm-of-entry-day slice → can include partial",
+            "    same-day P&L for trades entered before 3:30pm. 5d+ windows are less",
+            "    sensitive to that.",
+            "",
+        ]
+    lines += [
         "TRADE SUMMARY:",
         f"  Total trades: {ts.get('n', 0)}",
         f"  IV-matched: {ts.get('matched_count', 0)} ({ts.get('match_rate', 0):.0%})",
@@ -3153,7 +3180,11 @@ async def _execute_backtest_run(
     log,
 ) -> str:
     """Load backtest upload (already enriched with IV metrics), run backtest pipeline."""
-    from research.backtest import compute_trade_summary, TRADE_FIELDS
+    from research.backtest import (
+        compute_trade_summary,
+        compute_portfolio_context_features,
+        TRADE_FIELDS,
+    )
 
     upload_id = config["backtest_upload_id"]
 
@@ -3162,7 +3193,8 @@ async def _execute_backtest_run(
         await rdb.update_run(conn, run_id,
                              ai_summary="[RUNNING] Loading backtest trade data…")
         row = await conn.fetchrow(
-            "SELECT data, trade_count, matched_count FROM research_backtest_uploads WHERE id = $1::uuid",
+            "SELECT data, trade_count, matched_count, daily_paths, has_daily_paths "
+            "FROM research_backtest_uploads WHERE id = $1::uuid",
             upload_id,
         )
     if row is None:
@@ -3171,6 +3203,29 @@ async def _execute_backtest_run(
     enriched_trades = json.loads(row["data"]) if isinstance(row["data"], str) else list(row["data"])
     log(f"[RUNNING] Loaded {len(enriched_trades)} trades "
         f"({row['matched_count'] or 0} matched to IV surface)")
+
+    # Portfolio-context features (1d/3d/5d/10d/15d avg per-trade P&L change at entry,
+    # plus expanding-window historical percentile rank). Requires Mesosim daily paths.
+    n_portfolio_features = 0
+    if row["has_daily_paths"]:
+        daily_raw = row["daily_paths"]
+        daily_paths = (json.loads(daily_raw) if isinstance(daily_raw, str)
+                       else list(daily_raw or []))
+        log(f"[RUNNING] Computing portfolio-context features from {len(daily_paths)} daily rows…")
+        portfolio_features = await asyncio.to_thread(
+            compute_portfolio_context_features, daily_paths, enriched_trades
+        )
+        for trade in enriched_trades:
+            pid = trade.get("position_id")
+            if pid and pid in portfolio_features:
+                trade.update(portfolio_features[pid])
+        if portfolio_features:
+            sample = next(iter(portfolio_features.values()))
+            n_portfolio_features = len(sample)
+            log(f"[RUNNING] Attached {n_portfolio_features} portfolio-context columns "
+                f"to {len(portfolio_features)} trades")
+    else:
+        log("[RUNNING] No daily paths — skipping portfolio-context features (CSV upload)")
 
     # Separate IV columns
     iv_cols = [c for c in (enriched_trades[0].keys() if enriched_trades else [])
@@ -3196,7 +3251,11 @@ async def _execute_backtest_run(
                 f"Backtest IV analysis: {trade_summary['n']} trades, "
                 f"{trade_summary['matched_count']} matched to entry-morning IV "
                 f"({trade_summary['match_rate']:.0%} match rate). "
-                f"Claude will explore {len(iv_cols)} IV metric columns vs trade outcomes."
+                f"Claude will explore {len(iv_cols)} feature columns vs trade outcomes"
+                + (f" (incl. {n_portfolio_features} portfolio-context columns: "
+                   f"avg per-trade P&L change over 1/3/5/10/15 trading days "
+                   f"ending at entry-day 3:30pm, with historical percentile rank)."
+                   if n_portfolio_features else ".")
             ),
             json.dumps([
                 "Some entry-time IV metrics predict final trade P&L",
