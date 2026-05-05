@@ -2060,24 +2060,82 @@ def _build_backtest_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
                 x_col = result.get('x_col', '?')
                 y_col = result.get('y_col', '?')
                 avgs  = [b.get('avg_y', b.get('avg_ret', 0)) for b in bs]
+                hint  = (tr.get('chart_type') or 'line').lower()
                 cid = f"decile_{x_col}_{y_col}"
-                charts[cid] = {
-                    'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
-                    'config': {
-                        'type': 'bar',
-                        'data': {
-                            'labels': [f"D{b['bucket']}" for b in bs],
-                            'datasets': [{
-                                'label': y_col,
-                                'data': avgs,
-                                'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
-                                'borderWidth': 0,
-                            }],
+
+                # Scatter variant: dots positioned at (x_mean, avg_y) per decile —
+                # exposes the feature-space spacing (small low values vs huge high
+                # values look very different from equal-spaced D1..D10 bars).
+                if hint == 'scatter' and all(b.get('x_mean') is not None for b in bs):
+                    points = [{'x': b['x_mean'],
+                               'y': b.get('avg_y', b.get('avg_ret', 0))} for b in bs]
+                    charts[cid] = {
+                        'title': f"{x_col} vs {y_col} — decile means (r={result.get('pearson_r', 0):.3f})",
+                        'config': {
+                            'type': 'scatter',
+                            'data': {'datasets': [{
+                                'label': f"avg {y_col} per decile of {x_col}",
+                                'data': points,
+                                'backgroundColor': colors_pos,
+                                'borderColor': colors_pos,
+                                'pointRadius': 6,
+                                'pointHoverRadius': 8,
+                                'showLine': True,
+                            }]},
+                            'options': {**base_opts,
+                                        'scales': {
+                                            **dark_scales,
+                                            'x': {**dark_scales['x'], 'type': 'linear',
+                                                  'title': {'display': True, 'text': x_col,
+                                                            'color': '#888'}},
+                                            'y': {**dark_scales['y'],
+                                                  'title': {'display': True, 'text': f"mean {y_col}",
+                                                            'color': '#888'}},
+                                        }},
                         },
-                        'options': {**base_opts,
-                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
-                    },
-                }
+                    }
+                elif hint == 'line':
+                    charts[cid] = {
+                        'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
+                        'config': {
+                            'type': 'line',
+                            'data': {
+                                'labels': [f"D{b['bucket']}" for b in bs],
+                                'datasets': [{
+                                    'label': f"mean {y_col}",
+                                    'data': avgs,
+                                    'borderColor': colors_pos,
+                                    'backgroundColor': 'rgba(52,152,219,0.15)',
+                                    'pointBackgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                                    'pointRadius': 5,
+                                    'pointHoverRadius': 7,
+                                    'tension': 0.25,
+                                    'fill': True,
+                                    'borderWidth': 2,
+                                }],
+                            },
+                            'options': {**base_opts,
+                                        'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                        },
+                    }
+                else:  # bar (legacy fallback)
+                    charts[cid] = {
+                        'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
+                        'config': {
+                            'type': 'bar',
+                            'data': {
+                                'labels': [f"D{b['bucket']}" for b in bs],
+                                'datasets': [{
+                                    'label': y_col,
+                                    'data': avgs,
+                                    'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                                    'borderWidth': 0,
+                                }],
+                            },
+                            'options': {**base_opts,
+                                        'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                        },
+                    }
 
         elif tool_name == 'run_regime_split':
             high = result.get('high') or {}
@@ -2194,32 +2252,133 @@ def _build_backtest_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
                     },
                 }
 
+        elif tool_name == 'run_rolling_correlation':
+            # Line chart of correlation over time — answers "is the signal stable?"
+            series = result if isinstance(result, list) else result.get('series') or []
+            if len(series) >= 5:
+                x_col = (tr.get('inputs') or {}).get('x_col', '?')
+                y_col = (tr.get('inputs') or {}).get('y_col', 'outcome')
+                labels = [str(p.get('date') or p.get('end_date') or i)
+                          for i, p in enumerate(series)]
+                rs = [p.get('r', 0) for p in series]
+                cid = f"rollcorr_{x_col}_{y_col}"
+                charts[cid] = {
+                    'title': f"Rolling correlation: {x_col} vs {y_col}",
+                    'config': {
+                        'type': 'line',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [{
+                                'label': 'rolling r',
+                                'data': rs,
+                                'borderColor': colors_pos,
+                                'backgroundColor': 'rgba(52,152,219,0.10)',
+                                'pointRadius': 0,
+                                'pointHoverRadius': 4,
+                                'tension': 0.2,
+                                'borderWidth': 2,
+                                'fill': True,
+                            }],
+                        },
+                        'options': {
+                            **base_opts,
+                            'plugins': {**base_opts['plugins'], 'legend': {'display': False}},
+                            'scales': {
+                                **dark_scales,
+                                'x': {**dark_scales['x'],
+                                       'ticks': {**dark_scales['x']['ticks'],
+                                                 'maxTicksLimit': 8, 'autoSkip': True}},
+                            },
+                        },
+                    },
+                }
+
         elif tool_name == 'run_two_factor_regime':
             grid = result.get('grid') or []
             f1, f2, y_col_r = result.get('factor1', '?'), result.get('factor2', '?'), result.get('y_col', '?')
+            hint = (tr.get('chart_type') or 'heatmap').lower()
             if grid and len(grid) >= 2:
                 n_bins = len(grid)
-                f2_labels = [f"f2={grid[0][b2]['f2_bin']}" for b2 in range(n_bins)]
-                ds_colors = [colors_pos, '#2ecc71', '#e67e22']
-                datasets = []
-                for b1 in range(n_bins):
-                    f1_bin = grid[b1][0]['f1_bin']
-                    datasets.append({
-                        'label': f"f1={f1_bin}",
-                        'data': [grid[b1][b2].get('mean_y', 0) for b2 in range(n_bins)],
-                        'backgroundColor': ds_colors[b1 % len(ds_colors)],
-                        'borderWidth': 0,
-                    })
                 ix = round(result.get('interaction_strength', 0), 2)
                 cid = f"grid_{f1[:12]}_{f2[:12]}"
-                charts[cid] = {
-                    'title': f"2-Factor Grid: {f1[:20]} × {f2[:20]} → {y_col_r} (interaction={ix})",
-                    'config': {
-                        'type': 'bar',
-                        'data': {'labels': f2_labels, 'datasets': datasets},
-                        'options': base_opts,
-                    },
-                }
+
+                # Heatmap variant: bubbles at (f1_bin, f2_bin) sized by sample count,
+                # colored by mean_y — feels like a regime-grid heatmap.
+                if hint == 'heatmap':
+                    # Compute mean_y range for color scaling
+                    cells = [grid[b1][b2] for b1 in range(n_bins) for b2 in range(n_bins)]
+                    vals = [c.get('mean_y', 0) for c in cells]
+                    vmin, vmax = min(vals), max(vals)
+                    span = max(vmax - vmin, 1e-9)
+
+                    def _color(v):
+                        # 0 → strong negative (pink), 1 → strong positive (blue)
+                        t = (v - vmin) / span
+                        # Linear blend from #e84393 to #3498db
+                        r = int(0xe8 + (0x34 - 0xe8) * t)
+                        g = int(0x43 + 0x98 - 0x43) if False else int(0x43 + (0x98 - 0x43) * t)
+                        b = int(0x93 + (0xdb - 0x93) * t)
+                        return f"rgba({r},{g},{b},0.85)"
+
+                    points = []
+                    for b1 in range(n_bins):
+                        for b2 in range(n_bins):
+                            cell = grid[b1][b2]
+                            n_cell = cell.get('n', 0)
+                            mean_y = cell.get('mean_y', 0)
+                            points.append({
+                                'x': b1 + 1,  # f1 bin (1-indexed)
+                                'y': b2 + 1,  # f2 bin
+                                'r': max(8, min(28, 8 + (n_cell / max(1, max(c.get('n', 1) for c in cells))) * 20)),
+                                '_mean_y': mean_y,
+                                '_n': n_cell,
+                                'backgroundColor': _color(mean_y),
+                            })
+                    charts[cid] = {
+                        'title': f"{f1[:24]} × {f2[:24]} → mean {y_col_r} (interaction={ix})",
+                        'config': {
+                            'type': 'bubble',
+                            'data': {'datasets': [{
+                                'label': f"mean {y_col_r}",
+                                'data': points,
+                            }]},
+                            'options': {
+                                **base_opts,
+                                'plugins': {**base_opts['plugins'], 'legend': {'display': False}},
+                                'scales': {
+                                    'x': {**dark_scales['x'], 'type': 'linear',
+                                          'min': 0.5, 'max': n_bins + 0.5,
+                                          'ticks': {**dark_scales['x']['ticks'], 'stepSize': 1},
+                                          'title': {'display': True, 'text': f1, 'color': '#888'}},
+                                    'y': {**dark_scales['y'], 'type': 'linear',
+                                          'min': 0.5, 'max': n_bins + 0.5,
+                                          'ticks': {**dark_scales['y']['ticks'], 'stepSize': 1},
+                                          'title': {'display': True, 'text': f2, 'color': '#888'}},
+                                },
+                            },
+                        },
+                    }
+                else:
+                    # Grouped-bar fallback (legacy)
+                    f2_labels = [f"f2={grid[0][b2]['f2_bin']}" for b2 in range(n_bins)]
+                    ds_colors = [colors_pos, '#2ecc71', '#e67e22']
+                    datasets = []
+                    for b1 in range(n_bins):
+                        f1_bin = grid[b1][0]['f1_bin']
+                        datasets.append({
+                            'label': f"f1={f1_bin}",
+                            'data': [grid[b1][b2].get('mean_y', 0) for b2 in range(n_bins)],
+                            'backgroundColor': ds_colors[b1 % len(ds_colors)],
+                            'borderWidth': 0,
+                        })
+                    charts[cid] = {
+                        'title': f"2-Factor Grid: {f1[:20]} × {f2[:20]} → {y_col_r} (interaction={ix})",
+                        'config': {
+                            'type': 'bar',
+                            'data': {'labels': f2_labels, 'datasets': datasets},
+                            'options': base_opts,
+                        },
+                    }
 
         elif tool_name == 'run_composite_regime_score':
             vq = result.get('validate_quintiles') or []
@@ -2696,6 +2855,19 @@ _BACKTEST_PLAN_TOOL = {
                             "type": "string",
                             "description": "Short human-readable label, e.g. 'profile pnl by portfolio_pnl_chg_5d'",
                         },
+                        "chart_type": {
+                            "type": "string",
+                            "enum": ["auto", "bar", "line", "scatter", "heatmap", "none"],
+                            "description": (
+                                "Optional chart hint. 'scatter' for run_decile_profile shows the "
+                                "feature-space spacing (uses x_mean per decile) — preferred when "
+                                "the question is about the SHAPE of a relationship. 'line' for "
+                                "decile profile shows trend across deciles. 'heatmap' for "
+                                "run_two_factor_regime renders bubbles colored by mean_y. 'none' "
+                                "skips chart generation for diagnostic-only operations like "
+                                "run_feature_redundancy_check. Defaults to 'auto'."
+                            ),
+                        },
                     },
                     "required": ["tool", "args", "label"],
                 },
@@ -2732,6 +2904,13 @@ use run_regime_split or run_two_factor_regime as the centerpiece.
 and run_time_split_validation.
 5. Always include at least one stability check (run_time_split_validation or \
 run_rolling_correlation) on whatever feature ends up being the primary signal.
+6. WHEN THE QUESTION USES THE LANGUAGE OF UNUSUALNESS — "unusually large", \
+"rare", "more than normal", "by historical standard", "uncommonly", "tail", \
+"flush", "anomalous" — prefer feature variants ending in `_pctl` over their raw \
+counterparts. The `_pctl` versions encode 0–100 historical percentile rank, so \
+"top 10%" maps directly to deciles 9–10 of the pctl column rather than to "top \
+10% of dollar values within this backtest" (which is regime-specific). Use the \
+raw dollar version only if the question asks about absolute magnitudes.
 
 TOOL SIGNATURES (args):
 - run_correlation_scan: x_cols (list), y_col. For focused questions pass a SHORT \
@@ -2757,7 +2936,26 @@ correlation series.
 OUTCOME COLUMNS available: pnl, is_win.
 
 DO NOT pad the plan. If 4 tools answer the question, output 4 operations. Quality > \
-quantity. Output via produce_analysis_plan tool."""
+quantity.
+
+CHART SELECTION (optional `chart_type` field per operation — use it to make the report \
+visually answer the question rather than always showing the same bar charts):
+- chart_type='scatter' for run_decile_profile when the question is about the SHAPE of \
+a relationship between two features. Plots each decile's (x_mean, mean_y) so the \
+viewer sees actual feature-space spacing, not equally-spaced D1..D10 bars.
+- chart_type='line' for run_decile_profile when the question is about trend or \
+monotonicity across deciles. Default for decile_profile.
+- chart_type='heatmap' for run_two_factor_regime — bubbles colored by mean_y, sized \
+by sample count. Default for two_factor_regime.
+- chart_type='none' to skip a chart for purely diagnostic operations \
+(redundancy checks, time_split when used only to validate stability).
+- chart_type='auto' (or omit) — let the renderer pick the default for that tool.
+
+Mix chart types so the report doesn't feel templated. If you call \
+run_decile_profile 4 times with the same chart_type, the report will look identical \
+to every other report. Pick chart_types that fit the angle of each operation.
+
+Output via produce_analysis_plan tool."""
 
 
 async def _plan_backtest_analysis(
@@ -2918,7 +3116,10 @@ async def _execute_backtest_plan(
             log(f"    [ERROR] {tool}: {exc}")
             result = {"error": str(exc)}
 
-        tool_results_acc.append({"tool": tool, "inputs": args, "result": result, "label": label})
+        tool_results_acc.append({
+            "tool": tool, "inputs": args, "result": result, "label": label,
+            "chart_type": op.get("chart_type"),
+        })
 
     # Stability slot used by _format_evidence_packet — derive from time_splits if present
     time_splits = evidence.get("time_splits") or {}
@@ -3623,17 +3824,30 @@ def _format_evidence_packet(evidence: dict, question: str) -> str:
     if dropped:
         lines.append(f"\n  Dropped for redundancy ({len(dropped)} pairs with |r|>0.7)")
 
-    # Profiles
-    lines.append("\nDECILE PROFILES (top non-redundant → pnl):")
+    # Profiles — include feature-space edges so the writer can quote real thresholds.
+    lines.append("\nDECILE PROFILES (each decile holds ~n/10 trades, sorted by feature value):")
     for feat, prof in list(evidence.get("profiles", {}).items())[:5]:
         bs = prof.get("bucket_stats") or []
         bs = [b for b in bs if b is not None]
         if bs:
-            d1 = bs[0] if bs else {}
-            d10 = bs[-1] if bs else {}
-            lines.append(f"  {feat}: r={prof.get('pearson_r', 0):+.3f}, "
-                        f"D1 avg=${d1.get('avg_y', d1.get('avg_ret', 0)):,.0f} WR={d1.get('win_rate', 0):.0%}, "
-                        f"D10 avg=${d10.get('avg_y', d10.get('avg_ret', 0)):,.0f} WR={d10.get('win_rate', 0):.0%}")
+            d1 = bs[0]
+            d10 = bs[-1]
+            d1_range = (f"x∈[{d1.get('x_min'):.4g}, {d1.get('x_max'):.4g}]"
+                        if d1.get('x_min') is not None else "")
+            d10_range = (f"x∈[{d10.get('x_min'):.4g}, {d10.get('x_max'):.4g}]"
+                         if d10.get('x_min') is not None else "")
+            lines.append(f"  {feat}: r={prof.get('pearson_r', 0):+.3f}")
+            lines.append(f"    D1  {d1_range}: avg_y=${d1.get('avg_y', d1.get('avg_ret', 0)):,.0f} "
+                         f"WR={d1.get('win_rate', 0):.0%}  n={d1.get('n', 0)}")
+            lines.append(f"    D10 {d10_range}: avg_y=${d10.get('avg_y', d10.get('avg_ret', 0)):,.0f} "
+                         f"WR={d10.get('win_rate', 0):.0%}  n={d10.get('n', 0)}")
+            # Show middle decile too so writer can show shape
+            if len(bs) >= 5:
+                d5 = bs[4]
+                d5_range = (f"x∈[{d5.get('x_min'):.4g}, {d5.get('x_max'):.4g}]"
+                            if d5.get('x_min') is not None else "")
+                lines.append(f"    D5  {d5_range}: avg_y=${d5.get('avg_y', d5.get('avg_ret', 0)):,.0f} "
+                             f"WR={d5.get('win_rate', 0):.0%}  n={d5.get('n', 0)}")
 
     # Win rates
     lines.append("\nWIN RATE ANALYSIS (5-bucket):")

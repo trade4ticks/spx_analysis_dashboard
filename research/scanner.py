@@ -61,6 +61,21 @@ def _bucket(pairs, n_buckets: int = 10):
     return buckets
 
 
+def _bucket_with_x(pairs, n_buckets: int = 10):
+    """Same as _bucket but tracks x-values per bucket so callers can report
+    feature-space edges. Returns list of (xs, ys) per bucket."""
+    if not pairs:
+        return []
+    sorted_pairs = sorted(pairs, key=lambda p: p[0])
+    total = len(sorted_pairs)
+    buckets: list = [([], []) for _ in range(n_buckets)]
+    for i, (x, y, _) in enumerate(sorted_pairs):
+        b = min(int(i / total * n_buckets), n_buckets - 1)
+        buckets[b][0].append(x)
+        buckets[b][1].append(y)
+    return buckets
+
+
 def _sharpe(ys: list[float]) -> float:
     """Mean / std, annualization-agnostic. Returns 0 if std is 0."""
     if not ys:
@@ -106,13 +121,15 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
     sr, sp_val = sp_stats.spearmanr(xa, ya)
 
     # ── 2. Bucket profile ────────────────────────────────────────────
-    buckets = _bucket(pairs, n_buckets)
+    buckets_xy = _bucket_with_x(pairs, n_buckets)
+    buckets    = [ys for (_, ys) in buckets_xy]  # back-compat for sections below
     bucket_stats = []
-    for i, ys in enumerate(buckets):
+    for i, (xs, ys) in enumerate(buckets_xy):
         if not ys:
             bucket_stats.append(None)
             continue
         a = np.array(ys)
+        xa_b = np.array(xs)
         bucket_stats.append({
             "bucket":    i + 1,
             "n":         len(ys),
@@ -123,6 +140,10 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
             "sharpe":    round(_sharpe(ys), 4),
             "payoff":    round(float(a[a > 0].mean() / abs(a[a < 0].mean()))
                                if (a > 0).any() and (a < 0).any() else 0.0, 4),
+            # Feature-space edges so callers can quote real thresholds:
+            "x_min":     round(float(xa_b.min()),  6),
+            "x_max":     round(float(xa_b.max()),  6),
+            "x_mean":    round(float(xa_b.mean()), 6),
         })
 
     valid_buckets = [b for b in bucket_stats if b is not None]
