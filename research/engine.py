@@ -235,31 +235,34 @@ async def _generate_summary(
 
     # Build the prompt with the user's question as a PRIORITY DIRECTIVE
     client = anthropic.AsyncAnthropic()
+    _ENGINE_WRITER_SYSTEM = (
+        "You are a professional quantitative researcher writing research summaries. "
+        "Address the user's specific question as your primary directive. If they asked "
+        "about specific deciles, patterns, comparisons, or conditions — answer those "
+        "directly using the bucket profile data provided.\n\n"
+        "Always cover:\n"
+        "1. Full bucket profile interpretation: don't just report top/bottom — describe "
+        "the shape across ALL deciles. Flag adjacent deciles with similar performance "
+        "(e.g., 'deciles 8-10 all show positive returns, not just the top').\n"
+        "2. Multi-factor combos: which improved on singles? Describe as usable rules.\n"
+        "3. Non-linear patterns: U-shaped, threshold, isolated regions.\n"
+        "4. Equity curve viability.\n"
+        "5. Fragile/overfit warnings.\n"
+        "6. Suggested next steps.\n\n"
+        "Use professional quant research language. Translate findings into potential "
+        "trading rules. Do NOT just list numbers — interpret patterns. Write 500-800 words."
+    )
     msg = await client.messages.create(
         model=model,
         max_tokens=2000,
+        system=[{"type": "text", "text": _ENGINE_WRITER_SYSTEM,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{
             "role": "user",
             "content": (
-                f"USER'S RESEARCH QUESTION (address this directly — it is your primary directive):\n"
+                f"USER'S RESEARCH QUESTION:\n"
                 f'"""\n{question}\n"""\n\n'
-                f"ANALYSIS RESULTS:\n{findings_text}\n\n"
-                "INSTRUCTIONS:\n"
-                "Write a research summary (500-800 words). You MUST address the user's specific "
-                "question above as your primary focus. If they asked about specific deciles, "
-                "patterns, comparisons, or conditions — answer those directly using the bucket "
-                "profile data provided.\n\n"
-                "Also cover:\n"
-                "1. Full bucket profile interpretation: don't just report top/bottom — describe "
-                "the shape across ALL deciles. Flag adjacent deciles with similar performance "
-                "(e.g., 'deciles 8-10 all show positive returns, not just the top').\n"
-                "2. Multi-factor combos: which improved on singles? Describe as usable rules.\n"
-                "3. Non-linear patterns: U-shaped, threshold, isolated regions.\n"
-                "4. Equity curve viability.\n"
-                "5. Fragile/overfit warnings.\n"
-                "6. Suggested next steps.\n\n"
-                "Use professional quant research language. Translate findings into potential "
-                "trading rules. Do NOT just list numbers — interpret patterns."
+                f"ANALYSIS RESULTS:\n{findings_text}"
             ),
         }],
     )

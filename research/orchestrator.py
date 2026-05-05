@@ -25,6 +25,56 @@ from research import backtest as rbacktest
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 _EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
 
+
+# ── Prompt-cache helpers ─────────────────────────────────────────────────────
+# Anthropic prompt caching gives a ~90% discount on cache reads. We get the
+# largest savings on multi-turn tool-use loops, where the same tools/system/
+# prior-turn history would otherwise be re-encoded every iteration.
+#
+# Strategy:
+#   - cache the tools array (last tool gets the breakpoint marker)
+#   - cache the system prompt
+#   - mark the last block of the latest user message with cache_control so
+#     the growing conversation prefix is reused on the next loop iteration
+# Anthropic allows up to 4 simultaneous cache breakpoints per request.
+
+def _cache_tools(tools: list) -> list:
+    """Return a copy of `tools` with cache_control on the final tool."""
+    if not tools:
+        return tools
+    out = list(tools)
+    last = dict(out[-1])
+    last["cache_control"] = {"type": "ephemeral"}
+    out[-1] = last
+    return out
+
+
+def _mark_cache_on_last_user_message(messages: list) -> None:
+    """Add cache_control to the last block of the most recent user message,
+    in place. Used inside tool-use loops so each iteration's tool_result
+    becomes a cached prefix for the next iteration."""
+    if not messages:
+        return
+    # Walk backwards to find the most recent user message
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = [{"type": "text", "text": content,
+                                "cache_control": {"type": "ephemeral"}}]
+        elif isinstance(content, list) and content:
+            # Strip any prior cache_control on this message's blocks (only the
+            # latest user message should hold the breakpoint), then mark last.
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+            last_block = content[-1]
+            if isinstance(last_block, dict):
+                last_block["cache_control"] = {"type": "ephemeral"}
+        return
+
 # ── Structured output tools (guaranteed valid JSON via tool_use) ──────────────
 
 _PLAN_TOOL = {
@@ -234,7 +284,7 @@ async def classify_and_plan(
         max_tokens=1500,
         system=[{"type": "text", "text": _PLAN_SYSTEM,
                  "cache_control": {"type": "ephemeral"}}],
-        tools=[_PLAN_TOOL],
+        tools=_cache_tools([_PLAN_TOOL]),
         tool_choice={"type": "tool", "name": "produce_plan"},
         messages=[{"role": "user", "content": prompt}],
     )
@@ -695,7 +745,7 @@ async def _compose_report(
         max_tokens=3000,
         system=[{"type": "text", "text": report_system,
                  "cache_control": {"type": "ephemeral"}}],
-        tools=[_REPORT_TOOL],
+        tools=_cache_tools([_REPORT_TOOL]),
         tool_choice={"type": "tool", "name": "produce_report"},
         messages=[{"role": "user", "content": user_content}],
     )
@@ -2316,7 +2366,7 @@ async def execute_agentic_pipeline(
             max_tokens=4000,
             system=[{"type": "text", "text": system,
                      "cache_control": {"type": "ephemeral"}}],
-            tools=_AGENTIC_TOOLS,
+            tools=_cache_tools(_AGENTIC_TOOLS),
             messages=messages,
         )
 
@@ -2397,6 +2447,7 @@ async def execute_agentic_pipeline(
 
         if tool_result_messages:
             messages.append({"role": "user", "content": tool_result_messages})
+            _mark_cache_on_last_user_message(messages)
         else:
             break
 
@@ -2408,11 +2459,13 @@ async def execute_agentic_pipeline(
             "Be thorough — cite specific numbers from your tool results."
         )
         messages.append({"role": "user", "content": force_msg})
+        _mark_cache_on_last_user_message(messages)
         resp2 = await client.messages.create(
             model=model,
             max_tokens=4000,
-            system=[{"type": "text", "text": system}],
-            tools=_AGENTIC_TOOLS,
+            system=[{"type": "text", "text": system,
+                     "cache_control": {"type": "ephemeral"}}],
+            tools=_cache_tools(_AGENTIC_TOOLS),
             tool_choice={"type": "tool", "name": "write_report"},
             messages=messages,
         )
@@ -2602,7 +2655,492 @@ def _iv_family(col: str) -> str:
     return "other"
 
 
+# ── Backtest plan-and-execute architecture ──────────────────────────────────
+# Replaces the rigid 9-step recipe with: planner LLM call → deterministic
+# executor → writer LLM call. The planner reads the question and picks tools
+# accordingly, so a focused question on specific features doesn't trigger a
+# broad scan-everything pass and a broad question doesn't get a narrow profile.
+
+_BACKTEST_PLAN_TOOL = {
+    "name": "produce_analysis_plan",
+    "description": "Output an ordered list of analysis operations that answer the research question.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reasoning": {
+                "type": "string",
+                "description": (
+                    "Why these specific tools, in this order, answer the user's question. "
+                    "If the question names specific features, explicitly state that the plan focuses on those."
+                ),
+            },
+            "operations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "enum": [
+                                "run_correlation_scan", "run_decile_profile", "run_win_rate_analysis",
+                                "run_two_factor_regime", "run_regime_split", "run_time_split_validation",
+                                "run_feature_redundancy_check", "run_tail_analysis",
+                                "run_rolling_correlation",
+                            ],
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "Tool-specific arguments. See system prompt for each tool's signature.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "Short human-readable label, e.g. 'profile pnl by portfolio_pnl_chg_5d'",
+                        },
+                    },
+                    "required": ["tool", "args", "label"],
+                },
+                "minItems": 1,
+                "maxItems": 14,
+            },
+            "report_focus": {
+                "type": "string",
+                "description": "What the final report should emphasize. Drives the writer's framing.",
+            },
+        },
+        "required": ["reasoning", "operations", "report_focus"],
+    },
+}
+
+_BACKTEST_PLAN_SYSTEM = """You plan a focused analysis to answer a research question \
+on a completed options backtest. Each row is a trade with entry IV metrics, portfolio \
+context features, and outcome columns (pnl, is_win, days_in_trade).
+
+You output a JSON plan listing 3–14 tool calls. The plan must be QUESTION-DRIVEN.
+
+Rules for question-driven planning:
+1. If the question names specific features (e.g. "portfolio_pnl_chg_5d", "vix_30d"), the \
+plan MUST center on those features. Use run_decile_profile / run_win_rate_analysis / \
+run_correlation_scan with x_cols=[those_features] / run_two_factor_regime to interact \
+them with regime variables. Do NOT default to a broad scan across all features when the \
+user has a focused question.
+2. If the question is broad/exploratory ("what predicts P&L?"), THEN start with a \
+correlation_scan across all features, then redundancy_check, then profile the top non-\
+redundant ones, then time_split_validation.
+3. If the question is comparative ("does X behave differently in high vs low VIX?"), \
+use run_regime_split or run_two_factor_regime as the centerpiece.
+4. If the question is about stability / time-variation, lean on run_rolling_correlation \
+and run_time_split_validation.
+5. Always include at least one stability check (run_time_split_validation or \
+run_rolling_correlation) on whatever feature ends up being the primary signal.
+
+TOOL SIGNATURES (args):
+- run_correlation_scan: x_cols (list), y_col. For focused questions pass a SHORT \
+x_cols list (the named features). For broad questions pass a long list.
+- run_decile_profile: x_col, y_col. Profiles 10-bucket mean y per x bucket. The most \
+useful single tool for "does feature X predict outcome Y?" — shows shape + monotonicity.
+- run_win_rate_analysis: x_col, n_buckets (default 5). 5-bucket win-rate spread.
+- run_two_factor_regime: factor1, factor2, y_col, n_bins (default 3). 3×3 grid showing \
+y per (factor1, factor2) cell + interaction strength. Use for "does X interact with Y?".
+- run_regime_split: x_col, y_col, split_col, method (median/quantile). Splits trades \
+by split_col regime, computes x→y correlation within each. "Does this signal work in \
+both regimes?"
+- run_time_split_validation: y_col, n_splits (3 if n_trades >= 600 else 2). \
+Chronological stability — does the relationship hold across sub-periods?
+- run_feature_redundancy_check: features (list), r_threshold (default 0.7). Groups \
+correlated features. Use after a broad scan, BEFORE building profiles, to avoid \
+profiling 5 features that are all measuring the same thing.
+- run_tail_analysis: y_col, x_cols (list), pct (default 15). Compares feature means \
+in best % vs worst % trades.
+- run_rolling_correlation: x_col, y_col, window (default ~n/10). Time-varying \
+correlation series.
+
+OUTCOME COLUMNS available: pnl, is_win.
+
+DO NOT pad the plan. If 4 tools answer the question, output 4 operations. Quality > \
+quantity. Output via produce_analysis_plan tool."""
+
+
+async def _plan_backtest_analysis(
+    question: str,
+    enriched_trades: list[dict],
+    trade_summary: dict,
+    knowledge_rules: list[str],
+    log,
+) -> dict:
+    """LLM call that turns the question + dataset summary into a tool-call plan."""
+    from research.backtest import TRADE_FIELDS
+
+    all_cols = list(enriched_trades[0].keys()) if enriched_trades else []
+    feature_cols = [c for c in all_cols if c not in TRADE_FIELDS]
+
+    # Group features by family so the planner can reason at family level
+    families: dict = {}
+    for c in feature_cols:
+        prefix = c.split("_")[0] if "_" in c else c
+        if c.startswith("portfolio_pnl_chg_"):
+            prefix = "portfolio_pnl_chg"
+        families.setdefault(prefix, []).append(c)
+
+    family_lines = [f"  {fam} ({len(cols)}): {', '.join(cols[:4])}"
+                    + (f", … +{len(cols) - 4} more" if len(cols) > 4 else "")
+                    for fam, cols in sorted(families.items())]
+
+    summary_text = (
+        f"DATASET SUMMARY:\n"
+        f"  Trades: {trade_summary.get('n', len(enriched_trades))}\n"
+        f"  Date range: {trade_summary.get('date_from')} → {trade_summary.get('date_to')}\n"
+        f"  Strategy: {', '.join(trade_summary.get('strategies') or ['unknown'])}\n"
+        f"  Win rate: {trade_summary.get('win_rate', 0):.1%}\n"
+        f"  Mean P&L: ${trade_summary.get('mean_pnl', 0):,.0f}\n"
+        f"  Std P&L: ${trade_summary.get('std_pnl', 0):,.0f}\n\n"
+        f"FEATURE FAMILIES ({len(feature_cols)} total feature columns):\n"
+        + "\n".join(family_lines)
+    )
+
+    plan_prompt = (
+        f"RESEARCH QUESTION:\n\"\"\"\n{question}\n\"\"\"\n\n"
+        f"{summary_text}\n\n"
+        f"Output your analysis plan via produce_analysis_plan."
+    )
+
+    system = _BACKTEST_PLAN_SYSTEM
+    if knowledge_rules:
+        rules_text = "\n".join(f"- {r}" for r in knowledge_rules)
+        system += f"\n\nDOMAIN KNOWLEDGE (apply these):\n{rules_text}"
+
+    # Use Haiku for planning — well within capability for structured tool output
+    # and ~5x cheaper than Sonnet for input.
+    client = _anthropic.AsyncAnthropic()
+    resp = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2500,
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        tools=_cache_tools([_BACKTEST_PLAN_TOOL]),
+        tool_choice={"type": "tool", "name": "produce_analysis_plan"},
+        messages=[{"role": "user", "content": plan_prompt}],
+    )
+
+    plan = None
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == "produce_analysis_plan":
+            plan = block.input
+            break
+    if plan is None:
+        raise ValueError("Planner did not return a structured plan")
+
+    log(f"[PLAN] {len(plan.get('operations', []))} operations: "
+        + " | ".join(op.get("label", op.get("tool", "?"))
+                     for op in plan.get("operations", [])[:6]))
+    return plan
+
+
+async def _execute_backtest_plan(
+    plan: dict,
+    trades: list[dict],
+    log,
+) -> tuple[dict, list[dict]]:
+    """Walk the plan deterministically. Returns (evidence dict, tool_results_acc)."""
+    from research import analysis_tools as at
+
+    operations = plan.get("operations") or []
+    evidence: dict = {}
+    tool_results_acc: list = []
+
+    for i, op in enumerate(operations):
+        tool = op.get("tool")
+        args = op.get("args") or {}
+        label = op.get("label") or tool
+        log(f"  [{i + 1}/{len(operations)}] {label}")
+        try:
+            if tool == "run_correlation_scan":
+                result = at.run_correlation_scan(trades, args["x_cols"], args["y_col"])
+                if args.get("y_col") == "pnl":
+                    evidence["corr_pnl"] = (evidence.get("corr_pnl") or []) + result
+                elif args.get("y_col") == "is_win":
+                    evidence["corr_win"] = (evidence.get("corr_win") or []) + result
+            elif tool == "run_decile_profile":
+                result = at.run_decile_profile(trades, args["x_col"], args["y_col"])
+                evidence.setdefault("profiles", {})[args["x_col"]] = result
+            elif tool == "run_win_rate_analysis":
+                result = at.run_win_rate_analysis(trades, args["x_col"],
+                                                  n_buckets=args.get("n_buckets", 5))
+                evidence.setdefault("win_rates", {})[args["x_col"]] = result
+            elif tool == "run_two_factor_regime":
+                y_col = args.get("y_col", "pnl")
+                result = at.run_two_factor_regime(
+                    trades, args["factor1"], args["factor2"], y_col,
+                    n_bins=args.get("n_bins", 3),
+                )
+                # Match the shape _format_evidence_packet expects
+                grid_entry = next(
+                    (g for g in evidence.get("two_factor_grids", [])
+                     if g.get("f1") == args["factor1"] and g.get("f2") == args["factor2"]),
+                    None,
+                )
+                if grid_entry is None:
+                    grid_entry = {"f1": args["factor1"], "f2": args["factor2"]}
+                    evidence.setdefault("two_factor_grids", []).append(grid_entry)
+                grid_entry[y_col] = result
+            elif tool == "run_regime_split":
+                result = at.run_regime_split(
+                    trades, args["x_col"], args["y_col"],
+                    args["split_col"], args.get("method", "median"),
+                )
+                evidence["regime_split"] = result
+            elif tool == "run_time_split_validation":
+                n_splits = args.get("n_splits") or (3 if len(trades) >= 600 else 2)
+                result = at.run_time_split_validation(trades, args["y_col"], n_splits=n_splits)
+                evidence["time_splits"] = result
+            elif tool == "run_feature_redundancy_check":
+                result = at.run_feature_redundancy_check(
+                    trades, args["features"], r_threshold=args.get("r_threshold", 0.7),
+                )
+                evidence["redundancy"] = result
+                evidence["non_redundant"] = result.get("non_redundant", [])
+            elif tool == "run_tail_analysis":
+                result = at.run_tail_analysis(
+                    trades, args["y_col"], args["x_cols"], pct=args.get("pct", 15),
+                )
+                evidence["tail_analysis"] = result
+            elif tool == "run_rolling_correlation":
+                window = args.get("window") or max(30, len(trades) // 10)
+                result = at.run_rolling_correlation(
+                    trades, args["x_col"], args["y_col"], window=window,
+                )
+                evidence.setdefault("rolling_corrs", {})[args["x_col"]] = result
+            else:
+                log(f"    [WARN] Unknown tool: {tool}")
+                result = {"error": f"Unknown tool: {tool}"}
+        except KeyError as exc:
+            log(f"    [ERROR] {tool} missing arg: {exc}")
+            result = {"error": f"Missing arg: {exc}"}
+        except Exception as exc:
+            log(f"    [ERROR] {tool}: {exc}")
+            result = {"error": str(exc)}
+
+        tool_results_acc.append({"tool": tool, "inputs": args, "result": result, "label": label})
+
+    # Stability slot used by _format_evidence_packet — derive from time_splits if present
+    time_splits = evidence.get("time_splits") or {}
+    period_stability = time_splits.get("feature_stability", {}) if isinstance(time_splits, dict) else {}
+    stable, unstable = [], []
+    for feat, info in period_stability.items():
+        periods = info.get("periods", []) if isinstance(info, dict) else []
+        signs = [1 if p.get("r", 0) > 0 else -1 for p in periods if p.get("r") is not None]
+        if signs and abs(sum(signs)) >= len(signs) * 0.6:
+            stable.append(feat)
+        else:
+            unstable.append(feat)
+    if stable or unstable:
+        evidence["stable_features"] = stable
+        evidence["unstable_features"] = unstable
+
+    return evidence, tool_results_acc
+
+
 async def execute_backtest_pipeline(
+    main_pool,
+    run_id: str,
+    question: str,
+    enriched_trades: list[dict],
+    trade_summary: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+    wide_scan_mode: bool = False,
+) -> str:
+    """
+    Plan-and-execute backtest analysis. Default flow:
+      1. Planner LLM call (Haiku) reads question + dataset summary, outputs tool-call plan.
+      2. Deterministic executor runs the planned tools.
+      3. Writer LLM call (Sonnet) synthesizes the report from executed evidence.
+      4. Skeptic review (Sonnet).
+
+    Returns JSON sections string.
+
+    `wide_scan_mode=True` falls back to the legacy fixed-recipe pipeline for
+    cases where a broad unguided scan is explicitly desired.
+    """
+    if wide_scan_mode:
+        return await execute_backtest_pipeline_wide_scan(
+            main_pool=main_pool, run_id=run_id, question=question,
+            enriched_trades=enriched_trades, trade_summary=trade_summary,
+            model=model, knowledge_rules=knowledge_rules, log=log,
+        )
+
+    trades = enriched_trades
+    n_trades = len(trades)
+
+    # Cast is_win to float for downstream tools
+    for t in trades:
+        if 'is_win' in t:
+            t['is_win'] = float(1.0 if t['is_win'] else 0.0)
+
+    # ── 1. Plan ──────────────────────────────────────────────────────────
+    log("[1/4] Planning analysis…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 1/4: Planning analysis…")
+    plan = await _plan_backtest_analysis(question, trades, trade_summary, knowledge_rules, log)
+
+    # ── 2. Execute ────────────────────────────────────────────────────────
+    log(f"[2/4] Executing {len(plan.get('operations', []))} operations…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary=f"[RUNNING] Step 2/4: Executing plan…")
+    evidence, tool_results_acc = await _execute_backtest_plan(plan, trades, log)
+    evidence["trade_summary"] = trade_summary
+    evidence["plan_reasoning"] = plan.get("reasoning")
+    evidence["report_focus"] = plan.get("report_focus")
+
+    # ── 3. Build charts + write report ────────────────────────────────────
+    log("[3/4] Composing report…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 3/4: Composing report…")
+
+    chart_configs = _build_backtest_chart_configs(tool_results_acc)
+    evidence_text = _format_evidence_packet(evidence, question)
+    chart_listing = "\n".join(f"  {cid}: {chart['title']}" for cid, chart in chart_configs.items())
+
+    report_system = (
+        "You are a quantitative analyst writing a research report on backtest trade outcomes. "
+        "Professional quant voice. No fluff. Cite specific numbers. The analysis was planned "
+        "specifically to address the user's question — frame your report around the question, "
+        "not as a generic regression summary."
+    )
+    if knowledge_rules:
+        rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
+        report_system += f"\n\nKNOWLEDGE BASE RULES:\n{rules_text}"
+
+    plan_summary = (
+        f"PLAN REASONING: {plan.get('reasoning', '(none)')}\n"
+        f"REPORT FOCUS: {plan.get('report_focus', '(none)')}\n"
+    )
+
+    report_prompt = (
+        f"{plan_summary}\n"
+        f"{evidence_text}\n\n"
+        f"AVAILABLE CHARTS:\n{chart_listing or '  (none)'}\n\n"
+        f"Write a report using the produce_report tool. Frame everything around the user's "
+        f"original question and the report focus above. Cite specific numbers from the executed "
+        f"tool results. If the executed analysis showed the question's premise is unsupported "
+        f"(e.g., a feature the user asked about has no predictive power), say so directly — do "
+        f"NOT pivot to a different feature and write a report about it.\n\n"
+        f"- executive_summary: 2-3 paragraphs answering the research question directly.\n"
+        f"- body: 400-700 words. Cover what the planned analysis showed.\n"
+        f"- conclusions: actionable answer to the question, with caveats from stability checks.\n"
+        f"- chart_sequence: ordered chart IDs to display."
+    )
+
+    client = _anthropic.AsyncAnthropic()
+    msg = await client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=[{"type": "text", "text": report_system,
+                 "cache_control": {"type": "ephemeral"}}],
+        tools=_cache_tools([_BACKTEST_AGENTIC_TOOLS[-1]]),  # write_report tool only
+        tool_choice={"type": "tool", "name": "write_report"},
+        messages=[{"role": "user", "content": report_prompt}],
+    )
+
+    report_data = None
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "write_report":
+            report_data = block.input
+            break
+
+    # ── 4. Skeptic review ─────────────────────────────────────────────────
+    log("[4/4] Skeptic review…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id, ai_summary="[RUNNING] Step 4/4: Skeptic review…")
+
+    report_prose = ""
+    if report_data:
+        report_prose = "\n\n".join(filter(None, [
+            report_data.get("executive_summary"),
+            report_data.get("body"),
+            report_data.get("conclusions"),
+        ]))
+
+    skeptic_text = await _skeptic_review(
+        report_prose, [], [], model, knowledge_rules=knowledge_rules,
+    ) if report_prose else ""
+
+    # ── Assemble sections (reuse the existing assembly logic) ─────────────
+    return _assemble_backtest_sections(report_data, chart_configs, skeptic_text)
+
+
+def _assemble_backtest_sections(report_data: dict, chart_configs: dict, skeptic_text: str) -> str:
+    """Build the final JSON sections payload from report fields + charts + skeptic text."""
+    sections: list[dict] = []
+
+    if report_data:
+        exec_summary = (report_data.get("executive_summary") or "").strip()
+        body = (report_data.get("body") or "").strip()
+        conclusions = (report_data.get("conclusions") or "").strip()
+        chart_seq = report_data.get("chart_sequence") or []
+
+        if exec_summary:
+            sections.append({"type": "markdown", "content": exec_summary})
+
+        body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
+        referenced: set = set()
+
+        if body_paras and chart_seq:
+            charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+            chart_idx = 0
+            for para in body_paras:
+                sections.append({"type": "markdown", "content": para})
+                for _ in range(charts_per_gap):
+                    if chart_idx >= len(chart_seq):
+                        break
+                    cid = chart_seq[chart_idx]
+                    chart_idx += 1
+                    if cid in chart_configs and cid not in referenced:
+                        chart = chart_configs[cid]
+                        sections.append({"type": "chart", "chart_id": cid,
+                                         "title": chart["title"], "config": chart["config"]})
+                        referenced.add(cid)
+            while chart_idx < len(chart_seq):
+                cid = chart_seq[chart_idx]
+                chart_idx += 1
+                if cid in chart_configs and cid not in referenced:
+                    chart = chart_configs[cid]
+                    sections.append({"type": "chart", "chart_id": cid,
+                                     "title": chart["title"], "config": chart["config"]})
+                    referenced.add(cid)
+        else:
+            if body:
+                sections.append({"type": "markdown", "content": body})
+            for cid in chart_seq:
+                if cid in chart_configs and cid not in referenced:
+                    chart = chart_configs[cid]
+                    sections.append({"type": "chart", "chart_id": cid,
+                                     "title": chart["title"], "config": chart["config"]})
+                    referenced.add(cid)
+
+        if conclusions:
+            sections.append({"type": "markdown",
+                             "content": f"## Conclusions\n\n{conclusions}"})
+
+        # Append any charts not already referenced by chart_sequence
+        for cid, chart in chart_configs.items():
+            if cid not in referenced:
+                sections.append({"type": "chart", "chart_id": cid,
+                                 "title": chart["title"], "config": chart["config"]})
+    else:
+        sections.append({"type": "markdown",
+                         "content": "(Report generation failed — no tool call returned)"})
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid,
+                             "title": chart["title"], "config": chart["config"]})
+
+    if skeptic_text:
+        sections.append({"type": "markdown",
+                         "content": f"---\n\n## Caveats & Challenges\n\n{skeptic_text}"})
+
+    return json.dumps(sections)
+
+
+async def execute_backtest_pipeline_wide_scan(
     main_pool,
     run_id: str,
     question: str,
@@ -2613,9 +3151,9 @@ async def execute_backtest_pipeline(
     log,
 ) -> str:
     """
-    Deterministic backtest analysis pipeline.
-    Builds a complete evidence packet, then hands it to 1 LLM call for narrative.
-    Returns JSON sections string.
+    Legacy fixed-recipe backtest pipeline. 9 deterministic steps, then 1 writer call.
+    Use when the question is genuinely "scan everything and tell me what predicts P&L"
+    rather than a focused inquiry.
     """
     from research import analysis_tools as at
     from research.backtest import TRADE_FIELDS
@@ -2935,7 +3473,7 @@ async def execute_backtest_pipeline(
         max_tokens=4000,
         system=[{"type": "text", "text": report_system,
                  "cache_control": {"type": "ephemeral"}}],
-        tools=[_BACKTEST_AGENTIC_TOOLS[-1]],  # write_report tool only
+        tools=_cache_tools([_BACKTEST_AGENTIC_TOOLS[-1]]),  # write_report tool only
         tool_choice={"type": "tool", "name": "write_report"},
         messages=[{"role": "user", "content": report_prompt}],
     )
@@ -3273,6 +3811,7 @@ async def _execute_backtest_run(
         model=model,
         knowledge_rules=knowledge_rules,
         log=log,
+        wide_scan_mode=bool(config.get("wide_scan_mode")),
     )
 
 
@@ -3393,7 +3932,7 @@ async def execute_intratrade_pipeline(
             model=model,
             max_tokens=4000,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            tools=_INTRATRADE_AGENTIC_TOOLS,
+            tools=_cache_tools(_INTRATRADE_AGENTIC_TOOLS),
             messages=messages,
         )
 
@@ -3476,6 +4015,7 @@ async def execute_intratrade_pipeline(
 
         if tool_result_messages:
             messages.append({"role": "user", "content": tool_result_messages})
+            _mark_cache_on_last_user_message(messages)
         else:
             break
 
@@ -3485,11 +4025,13 @@ async def execute_intratrade_pipeline(
         messages.append({"role": "user", "content":
             "You have completed your analysis. Now call write_report with your findings. "
             "Be thorough — cite specific numbers from your tool results."})
+        _mark_cache_on_last_user_message(messages)
         resp2 = await client.messages.create(
             model=model,
             max_tokens=4000,
-            system=[{"type": "text", "text": system}],
-            tools=_INTRATRADE_AGENTIC_TOOLS,
+            system=[{"type": "text", "text": system,
+                     "cache_control": {"type": "ephemeral"}}],
+            tools=_cache_tools(_INTRATRADE_AGENTIC_TOOLS),
             tool_choice={"type": "tool", "name": "write_report"},
             messages=messages,
         )

@@ -14,6 +14,7 @@ import asyncpg
 import anthropic
 
 from research import blocks, charts, db as rdb
+from research.orchestrator import _cache_tools, _mark_cache_on_last_user_message
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 
@@ -418,8 +419,9 @@ async def run_agent(
             resp = await client.messages.create(
                 model=model,
                 max_tokens=4096,
-                system=_SYSTEM,
-                tools=_TOOLS,
+                system=[{"type": "text", "text": _SYSTEM,
+                         "cache_control": {"type": "ephemeral"}}],
+                tools=_cache_tools(_TOOLS),
                 messages=messages,
             )
 
@@ -459,6 +461,7 @@ async def run_agent(
                         "content": json.dumps(result, default=str),
                     }],
                 })
+                _mark_cache_on_last_user_message(messages)
                 assistant_content = []
                 break  # restart loop
 
