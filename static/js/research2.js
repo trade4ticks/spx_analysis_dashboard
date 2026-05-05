@@ -77,26 +77,30 @@ document.addEventListener('alpine:init', () => {
 
     // Backtest upload (staged: one file at a time, then finalize)
     backtestUploadState: {
-      files:          [],
-      uploading:      false,
-      finalizing:     false,
-      uploadId:       null,
-      uploadName:     null,
-      source:         null,
-      tradeCount:     null,
-      matchedCount:   null,
-      matchRate:      null,
-      dateFrom:       null,
-      dateTo:         null,
-      strategies:     [],
-      columns:        [],
-      sources:        [],
-      stagedFiles:    [],    // filenames of staged uploads
-      totalTrades:    0,
-      preview:        null,
-      warnings:       [],
-      error:          null,
+      files:           [],
+      uploading:       false,
+      finalizing:      false,
+      uploadId:        null,
+      uploadName:      null,
+      source:          null,
+      tradeCount:      null,
+      matchedCount:    null,
+      matchRate:       null,
+      dateFrom:        null,
+      dateTo:          null,
+      strategies:      [],
+      columns:         [],
+      sources:         [],
+      stagedFiles:     [],    // filenames of staged uploads
+      totalTrades:     0,
+      preview:         null,
+      warnings:        [],
+      hasDailyPaths:   false,
+      pathCount:       0,
+      error:           null,
     },
+
+    analysisMode: 'entry',  // 'entry' | 'intratrade' — only relevant when hasDailyPaths
 
     form: {
       name:      '',
@@ -371,13 +375,14 @@ document.addEventListener('alpine:init', () => {
         preview: null, columns: null, rowCount: null,
         dateFrom: null, dateTo: null, error: null,
       };
+      this.analysisMode = 'entry';
       this.backtestUploadState = {
         files: [], uploading: false, finalizing: false,
         uploadId: null, uploadName: null,
         source: null, sources: [], stagedFiles: [], totalTrades: 0,
         tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
-        preview: null, warnings: [], error: null,
+        preview: null, warnings: [], hasDailyPaths: false, pathCount: 0, error: null,
       };
     },
 
@@ -493,17 +498,20 @@ document.addEventListener('alpine:init', () => {
           throw new Error(err.detail || `HTTP ${r.status}`);
         }
         const data = await r.json();
-        this.backtestUploadState.uploadId     = data.upload_id;
-        this.backtestUploadState.tradeCount   = data.trade_count;
-        this.backtestUploadState.matchedCount = data.matched_count;
-        this.backtestUploadState.matchRate    = data.match_rate;
-        this.backtestUploadState.dateFrom     = data.date_from;
-        this.backtestUploadState.dateTo       = data.date_to;
-        this.backtestUploadState.strategies   = data.strategies || [];
-        this.backtestUploadState.columns      = data.columns || [];
-        this.backtestUploadState.sources      = data.sources || [];
-        this.backtestUploadState.preview      = data.preview || [];
-        this.backtestUploadState.warnings     = data.validation?.warnings || [];
+        this.backtestUploadState.uploadId      = data.upload_id;
+        this.backtestUploadState.tradeCount    = data.trade_count;
+        this.backtestUploadState.matchedCount  = data.matched_count;
+        this.backtestUploadState.matchRate     = data.match_rate;
+        this.backtestUploadState.dateFrom      = data.date_from;
+        this.backtestUploadState.dateTo        = data.date_to;
+        this.backtestUploadState.strategies    = data.strategies || [];
+        this.backtestUploadState.columns       = data.columns || [];
+        this.backtestUploadState.sources       = data.sources || [];
+        this.backtestUploadState.preview       = data.preview || [];
+        this.backtestUploadState.warnings      = data.validation?.warnings || [];
+        this.backtestUploadState.hasDailyPaths = data.has_daily_paths || false;
+        this.backtestUploadState.pathCount     = data.path_count || 0;
+        if (!this.backtestUploadState.hasDailyPaths) this.analysisMode = 'entry';
         if (!this.form.date_from && data.date_from) this.form.date_from = data.date_from;
         if (!this.form.date_to   && data.date_to)   this.form.date_to   = data.date_to;
       } catch (e) {
@@ -520,13 +528,14 @@ document.addEventListener('alpine:init', () => {
         await fetch(`/api/research2/clear-backtest-staging?name=${encodeURIComponent(name)}`,
                      { method: 'DELETE' }).catch(() => {});
       }
+      this.analysisMode = 'entry';
       this.backtestUploadState = {
         files: [], uploading: false, finalizing: false,
         uploadId: null, uploadName: null,
         source: null, sources: [], stagedFiles: [], totalTrades: 0,
         tradeCount: null, matchedCount: null, matchRate: null,
         dateFrom: null, dateTo: null, strategies: [], columns: [],
-        preview: null, warnings: [], error: null,
+        preview: null, warnings: [], hasDailyPaths: false, pathCount: 0, error: null,
       };
     },
 
@@ -554,6 +563,7 @@ document.addEventListener('alpine:init', () => {
         model:               this.form.model,
         pnl_upload_id:       this.uploadState.uploadId || null,
         backtest_upload_id:  this.backtestUploadState.uploadId || null,
+        intratrade_mode:     this.backtestUploadState.hasDailyPaths && this.analysisMode === 'intratrade',
       };
       this.submitting = true;
       try {

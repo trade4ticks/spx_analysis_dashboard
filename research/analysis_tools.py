@@ -786,3 +786,191 @@ def run_time_split_validation(rows: list[dict], y_col: str,
         'stable_signals':    stable,
         'consistency_score': score,
     }
+
+
+# ── Intratrade path tools ──────────────────────────────────────────────────────
+
+def run_days_in_trade_profile(
+    rows: list[dict],
+    y_col: str,
+    n_bins: int = 10,
+    group_by_phase: bool = False,
+) -> dict:
+    """
+    Profile y_col by time-in-trade.
+
+    If group_by_phase=True: group by 'trade_phase' field (early/middle/late).
+    Otherwise: bucket by 'dit' into n_bins equal-width bins.
+
+    Returns per-bin stats and a trend label.
+    """
+    if group_by_phase:
+        phases = ['early', 'middle', 'late']
+        bins_out = []
+        for phase in phases:
+            subset = [r for r in rows if r.get('trade_phase') == phase]
+            y_vals = [_safe_float(r.get(y_col)) for r in subset]
+            y_vals = [v for v in y_vals if v is not None]
+            bins_out.append({
+                'phase':   phase,
+                'n':       len(subset),
+                'mean':    round(statistics.mean(y_vals), 4) if y_vals else None,
+                'std':     round(statistics.stdev(y_vals), 4) if len(y_vals) > 1 else None,
+                'dit_min': None,
+                'dit_max': None,
+            })
+        means = [b['mean'] for b in bins_out if b['mean'] is not None]
+        trend = _classify_trend(means)
+        return {'y_col': y_col, 'group_by_phase': True, 'bins': bins_out, 'trend': trend}
+
+    # DIT-bucket mode
+    dit_vals = [_safe_float(r.get('dit')) for r in rows]
+    valid = [(d, _safe_float(r.get(y_col))) for r, d in zip(rows, dit_vals)
+             if d is not None and _safe_float(r.get(y_col)) is not None]
+
+    if len(valid) < n_bins * 3:
+        return {'error': f'Insufficient rows ({len(valid)}) for {n_bins} bins (need ≥{n_bins * 3})'}
+
+    min_dit = min(d for d, _ in valid)
+    max_dit = max(d for d, _ in valid)
+    width   = (max_dit - min_dit) / n_bins if max_dit > min_dit else 1.0
+
+    bins_out = []
+    for i in range(n_bins):
+        lo = min_dit + i * width
+        hi = min_dit + (i + 1) * width
+        subset_y = [y for d, y in valid if (lo <= d < hi) or (i == n_bins - 1 and d == max_dit)]
+        bins_out.append({
+            'bin':     i + 1,
+            'dit_min': round(lo, 1),
+            'dit_max': round(hi, 1),
+            'n':       len(subset_y),
+            'mean':    round(statistics.mean(subset_y), 4) if subset_y else None,
+            'std':     round(statistics.stdev(subset_y), 4) if len(subset_y) > 1 else None,
+        })
+
+    means = [b['mean'] for b in bins_out if b['mean'] is not None]
+    trend = _classify_trend(means)
+    return {'y_col': y_col, 'n_bins': n_bins, 'bins': bins_out, 'trend': trend}
+
+
+def _classify_trend(means: list) -> str:
+    if len(means) < 2:
+        return 'flat'
+    first_half = means[:len(means) // 2]
+    second_half = means[len(means) // 2:]
+    avg_first = statistics.mean(v for v in first_half if v is not None) if any(v is not None for v in first_half) else 0
+    avg_second = statistics.mean(v for v in second_half if v is not None) if any(v is not None for v in second_half) else 0
+    diff = avg_second - avg_first
+    scale = max(abs(avg_first), abs(avg_second), 1e-9)
+    if abs(diff) / scale < 0.05:
+        return 'flat'
+    return 'improving' if diff > 0 else 'deteriorating'
+
+
+def run_path_event_scan(
+    rows: list[dict],
+    event_col: str,
+    threshold,
+    direction: str,
+    context_cols: list[str],
+    window_days: int = 3,
+    threshold_type: str = 'fixed',
+) -> dict:
+    """
+    Find daily rows where event_col crosses a threshold.
+
+    threshold_type='fixed': use threshold as a literal value.
+    threshold_type='percentile': compute Nth percentile of event_col.
+      direction='below_pct' → bottom N%,  direction='above_pct' → top N%.
+
+    Returns mean context_col values window_days before and after each crossing.
+    """
+    vals = [_safe_float(r.get(event_col)) for r in rows]
+    vals_clean = [v for v in vals if v is not None]
+    if not vals_clean:
+        return {'error': f'No valid values for {event_col}'}
+
+    # Resolve threshold
+    computed_threshold = float(threshold)
+    if threshold_type == 'percentile':
+        pct = float(threshold)
+        sorted_vals = sorted(vals_clean)
+        idx = max(0, int(len(sorted_vals) * pct / 100) - 1)
+        computed_threshold = sorted_vals[idx]
+        # Normalize direction
+        if direction == 'below_pct':
+            direction = 'below'
+        elif direction == 'above_pct':
+            direction = 'above'
+
+    # Build lookup: (position_id, date) → row index
+    pos_date_idx: dict = {}
+    for i, r in enumerate(rows):
+        pos_date_idx[(r.get('position_id'), r.get('date'))] = i
+
+    from datetime import date as _dt, timedelta as _td
+
+    def _add_days(date_str: str, n: int) -> str:
+        try:
+            return str((_dt.fromisoformat(date_str) + _td(days=n)))
+        except (ValueError, TypeError):
+            return ''
+
+    # Find crossing events: rows where condition first becomes True
+    event_rows = []
+    prev_state = None
+    for r, v in zip(rows, vals):
+        if v is None:
+            prev_state = None
+            continue
+        state = (v <= computed_threshold) if direction == 'below' else (v >= computed_threshold)
+        if state and prev_state is not True:
+            event_rows.append(r)
+        prev_state = state
+
+    if not event_rows:
+        return {
+            'event_col': event_col, 'threshold': threshold,
+            'threshold_type': threshold_type,
+            'computed_threshold_value': computed_threshold,
+            'direction': direction, 'event_count': 0,
+            'mean_context_before': {}, 'mean_context_after': {},
+        }
+
+    before_acc: dict[str, list] = {c: [] for c in context_cols}
+    after_acc:  dict[str, list] = {c: [] for c in context_cols}
+
+    for er in event_rows:
+        pos_id   = er.get('position_id')
+        ev_date  = er.get('date', '')
+        for offset in range(1, window_days + 1):
+            before_date = _add_days(ev_date, -offset)
+            after_date  = _add_days(ev_date, offset)
+            for col in context_cols:
+                bi = pos_date_idx.get((pos_id, before_date))
+                ai = pos_date_idx.get((pos_id, after_date))
+                if bi is not None:
+                    v = _safe_float(rows[bi].get(col))
+                    if v is not None:
+                        before_acc[col].append(v)
+                if ai is not None:
+                    v = _safe_float(rows[ai].get(col))
+                    if v is not None:
+                        after_acc[col].append(v)
+
+    mean_before = {c: (round(statistics.mean(before_acc[c]), 4) if before_acc[c] else None)
+                   for c in context_cols}
+    mean_after  = {c: (round(statistics.mean(after_acc[c]), 4) if after_acc[c] else None)
+                   for c in context_cols}
+
+    return {
+        'event_col':               event_col,
+        'threshold':               threshold,
+        'threshold_type':          threshold_type,
+        'computed_threshold_value': computed_threshold,
+        'direction':               direction,
+        'event_count':             len(event_rows),
+        'mean_context_before':     mean_before,
+        'mean_context_after':      mean_after,
+    }

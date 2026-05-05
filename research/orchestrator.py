@@ -1490,6 +1490,263 @@ Call 6–12 tools before write_report.\
 """
 
 
+# ── Intratrade path tools/system ─────────────────────────────────────────────
+
+_INTRATRADE_AGENTIC_TOOLS = [
+    t for t in _AGENTIC_TOOLS
+    if t["name"] not in ("run_regression", "run_lag_scan", "run_greek_attribution",
+                          "write_report")
+] + [
+    {
+        "name": "run_days_in_trade_profile",
+        "description": (
+            "Profile how y_col evolves over trade duration. "
+            "group_by_phase=true groups by 'early'/'middle'/'late' phase labels (normalized for trade length). "
+            "group_by_phase=false bins by absolute DIT value into n_bins equal-width bins. "
+            "Use this to find which phase of the trade drives most damage or recovery."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "y_col":           {"type": "string", "description": "Column to profile (e.g. daily_pnl_change, drawdown_from_peak)"},
+                "n_bins":          {"type": "integer", "description": "Number of DIT bins when group_by_phase=false (default 10)"},
+                "group_by_phase":  {"type": "boolean", "description": "If true, group by early/middle/late phase instead of DIT bins"},
+            },
+            "required": ["y_col"],
+        },
+    },
+    {
+        "name": "run_path_event_scan",
+        "description": (
+            "Find daily rows where event_col crosses a threshold, then report mean context_col values "
+            "window_days before and after each crossing. "
+            "threshold_type='percentile' with direction='below_pct' triggers on the worst N% of event_col values. "
+            "Use this to answer: 'What IV conditions exist just before losses accelerate?'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_col":      {"type": "string", "description": "Column to watch for crossings (e.g. drawdown_from_peak, daily_pnl_change)"},
+                "threshold":      {"type": "number", "description": "Fixed value OR percentile N (0-100) depending on threshold_type"},
+                "direction":      {"type": "string", "enum": ["above", "below", "above_pct", "below_pct"],
+                                   "description": "above/below for fixed threshold; above_pct/below_pct for percentile"},
+                "context_cols":   {"type": "array", "items": {"type": "string"},
+                                   "description": "IV or greek columns to measure before/after the event"},
+                "window_days":    {"type": "integer", "description": "Days before and after to include in context (default 3)"},
+                "threshold_type": {"type": "string", "enum": ["fixed", "percentile"],
+                                   "description": "fixed = literal value; percentile = derive threshold from Nth pct of distribution"},
+            },
+            "required": ["event_col", "threshold", "direction", "context_cols"],
+        },
+    },
+    {
+        "name": "write_report",
+        "description": "Write the final research report. Call this when you have enough findings.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "executive_summary": {
+                    "type": "string",
+                    "description": "2-3 paragraph executive summary answering the research question.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Detailed findings (300-500 words). Cite specific numbers.",
+                },
+                "conclusions": {
+                    "type": "string",
+                    "description": "Actionable conclusions with specific numbers.",
+                },
+                "chart_sequence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered chart IDs to display (from the AVAILABLE CHARTS list).",
+                },
+            },
+            "required": ["executive_summary", "body", "conclusions", "chart_sequence"],
+        },
+    },
+]
+
+_INTRATRADE_AGENTIC_SYSTEM = """\
+You are a quantitative analyst exploring how options trades evolve day-by-day after entry. \
+Each row in the dataset is one trade on one calendar day (NOT a completed trade). \
+The dataset contains daily P&L snapshots and IV surface conditions across all days each position was open.
+
+KEY COLUMNS:
+  pos_pnl        — cumulative P&L since entry at this point in time (not final outcome)
+  daily_pnl_change — day-over-day change in pos_pnl (PREFER THIS over pos_pnl for correlations)
+  drawdown_from_peak — pos_pnl minus the running maximum P&L for this trade (0 or negative)
+  max_pnl_to_date — highest pos_pnl this trade has seen up to this day
+  trade_phase    — early/middle/late based on % of total trade duration
+  dit            — absolute days in trade at this snapshot
+  *_since_entry  — change in an IV metric since trade entry (PREFER THESE over level columns for correlations)
+
+ANALYSIS GUIDANCE:
+  - Correlate IV against daily_pnl_change or drawdown_from_peak, NOT raw pos_pnl. \
+    Raw pos_pnl drifts with DIT and will produce spurious correlations with any time-correlated metric.
+  - IV *_since_entry columns measure what changed in the market since entry — more informative than \
+    absolute IV levels for understanding why trades deteriorate.
+  - Use run_days_in_trade_profile with group_by_phase=true to compare early vs middle vs late path behavior.
+  - Use run_path_event_scan with threshold_type='percentile', direction='below_pct' to find IV conditions \
+    surrounding the worst damage days.
+  - Use run_regime_split with split_col='trade_phase' to compare IV signal strength across trade phases.
+
+Call 4-8 tools before writing your report. Focus on actionable patterns: which IV conditions predict \
+daily P&L damage, when in the trade life do losses typically accelerate, and which IV changes since \
+entry are most associated with drawdowns.\
+"""
+
+
+def _build_intratrade_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
+    """Build Chart.js configs from accumulated intratrade agentic tool results."""
+    charts = {}
+    colors_pos = '#3498db'
+    colors_neg = '#e84393'
+    dark_scales = {
+        'x': {'ticks': {'color': '#888', 'font': {'size': 9}, 'maxRotation': 45},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+        'y': {'ticks': {'color': '#888', 'font': {'size': 9}},
+               'grid': {'color': 'rgba(255,255,255,0.05)'}, 'border': {'color': 'transparent'}},
+    }
+    base_opts = {
+        'responsive': True, 'maintainAspectRatio': False, 'animation': False,
+        'plugins': {'legend': {'labels': {'color': '#aaa', 'font': {'size': 10}}},
+                    'tooltip': {'backgroundColor': 'rgba(20,20,20,0.95)',
+                                'borderColor': '#444', 'borderWidth': 1}},
+        'scales': dark_scales,
+    }
+
+    for tr in tool_results:
+        tool_name = tr.get('tool')
+        result    = tr.get('result') or {}
+
+        if tool_name == 'run_correlation_scan' and isinstance(result, list) and result:
+            top = result[:15]
+            labels = [d['x_col'] for d in top]
+            values = [d['r'] for d in top]
+            y_col  = top[0].get('y_col', 'outcome')
+            cid = f"corr_scan_{len(charts)}"
+            charts[cid] = {
+                'title': f"IV Correlation with {y_col} (top {len(top)})",
+                'config': {
+                    'type': 'bar',
+                    'data': {
+                        'labels': labels,
+                        'datasets': [{'label': 'Pearson r', 'data': values,
+                                      'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in values],
+                                      'borderWidth': 0}],
+                    },
+                    'options': {**base_opts, 'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                },
+            }
+
+        elif tool_name == 'run_days_in_trade_profile':
+            bins = result.get('bins') or []
+            y_col = result.get('y_col', '?')
+            by_phase = result.get('group_by_phase', False)
+            if len(bins) >= 2:
+                if by_phase:
+                    labels = [b.get('phase', '?') for b in bins]
+                else:
+                    labels = [f"DIT {b.get('dit_min', '?'):.0f}–{b.get('dit_max', '?'):.0f}" for b in bins]
+                means = [b.get('mean') for b in bins]
+                ns    = [b.get('n', 0) for b in bins]
+                cid   = f"dit_profile_{y_col}_{len(charts)}"
+                charts[cid] = {
+                    'title': f"{'Phase' if by_phase else 'DIT'} Profile: {y_col} (trend: {result.get('trend','?')})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': labels,
+                            'datasets': [{
+                                'label': f'Mean {y_col}',
+                                'data': means,
+                                'backgroundColor': [colors_pos if (v or 0) >= 0 else colors_neg for v in means],
+                                'borderWidth': 0,
+                            }],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_path_event_scan':
+            before = result.get('mean_context_before') or {}
+            after  = result.get('mean_context_after') or {}
+            cols   = [c for c in before if c in after and before[c] is not None and after[c] is not None]
+            if cols:
+                ev_col    = result.get('event_col', '?')
+                threshold = result.get('computed_threshold_value', result.get('threshold', '?'))
+                cid = f"path_event_{ev_col}_{len(charts)}"
+                charts[cid] = {
+                    'title': f"Context around {ev_col} crossings (n={result.get('event_count', 0)})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': cols,
+                            'datasets': [
+                                {'label': 'Before crossing', 'data': [before[c] for c in cols],
+                                 'backgroundColor': colors_pos, 'borderWidth': 0},
+                                {'label': 'After crossing', 'data': [after[c] for c in cols],
+                                 'backgroundColor': colors_neg, 'borderWidth': 0},
+                            ],
+                        },
+                        'options': base_opts,
+                    },
+                }
+
+        elif tool_name == 'run_decile_profile':
+            bs = result.get('bucket_stats') or []
+            bs = [b for b in bs if b is not None]
+            if len(bs) >= 3:
+                x_col = result.get('x_col', '?')
+                y_col = result.get('y_col', '?')
+                avgs  = [b.get('avg_y', b.get('avg_ret', 0)) for b in bs]
+                cid = f"decile_{x_col}_{y_col}"
+                charts[cid] = {
+                    'title': f"Decile Profile: {x_col} → {y_col} (r={result.get('pearson_r', 0):.3f})",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': [f"D{b['bucket']}" for b in bs],
+                            'datasets': [{'label': y_col, 'data': avgs,
+                                          'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in avgs],
+                                          'borderWidth': 0}],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        elif tool_name == 'run_tail_analysis':
+            diff  = result.get('difference') or {}
+            if diff:
+                top_cols = list(diff.keys())[:10]
+                vals  = [diff[c] for c in top_cols]
+                y_col = result.get('y_col', 'outcome')
+                cid   = f"tail_{y_col}_{len(charts)}"
+                charts[cid] = {
+                    'title': f"IV Diff: Best vs Worst {result.get('pct', 10)}% {y_col}",
+                    'config': {
+                        'type': 'bar',
+                        'data': {
+                            'labels': top_cols,
+                            'datasets': [{'label': 'Top% minus Bottom% IV mean', 'data': vals,
+                                          'backgroundColor': [colors_pos if v >= 0 else colors_neg for v in vals],
+                                          'borderWidth': 0}],
+                        },
+                        'options': {**base_opts,
+                                    'plugins': {**base_opts['plugins'], 'legend': {'display': False}}},
+                    },
+                }
+
+        if len(charts) >= 8:
+            break
+
+    return charts
+
+
 def _build_agentic_chart_configs(tool_results: list[dict]) -> dict[str, dict]:
     """Build Chart.js configs from accumulated agentic tool results."""
     charts = {}
@@ -2958,6 +3215,391 @@ async def _execute_backtest_run(
     )
 
 
+async def execute_intratrade_pipeline(
+    main_pool,
+    run_id: str,
+    question: str,
+    daily_rows: list[dict],
+    path_summary: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """
+    True agentic Claude loop for intratrade path analysis.
+    Claude receives pre-computed context and iteratively calls generic tools.
+    Returns JSON sections string.
+    """
+    from research import analysis_tools as at
+
+    if _anthropic is None:
+        raise RuntimeError("anthropic SDK not installed")
+
+    # ── 1. Pre-compute initial context ────────────────────────────────────
+    log("[RUNNING] Computing intratrade initial context…")
+
+    iv_cols = path_summary.get('iv_level_fields', [])
+    since_entry_cols = path_summary.get('since_entry_fields', [])
+    all_feature_cols = iv_cols + since_entry_cols
+
+    # Top correlations against daily_pnl_change and drawdown_from_peak
+    quick_corr_change = at.run_correlation_scan(
+        daily_rows, all_feature_cols[:40], 'daily_pnl_change'
+    ) if all_feature_cols else []
+    quick_corr_dd = at.run_correlation_scan(
+        daily_rows, all_feature_cols[:40], 'drawdown_from_peak'
+    ) if all_feature_cols else []
+
+    # DIT profile of daily_pnl_change
+    dit_profile = at.run_days_in_trade_profile(daily_rows, 'daily_pnl_change', n_bins=8)
+
+    def _fmt_corr(corr_list, n=12):
+        if not corr_list:
+            return '  (none)'
+        lines = [f"  {'x_col':<45} {'r':>7}"]
+        for d in corr_list[:n]:
+            lines.append(f"  {d['x_col']:<45} {d['r']:>7.4f}")
+        return '\n'.join(lines)
+
+    def _fmt_dit(profile):
+        if 'error' in (profile or {}):
+            return f"  ({profile['error']})"
+        bins = profile.get('bins', [])
+        lines = []
+        for b in bins:
+            label = b.get('phase') or f"DIT {b.get('dit_min','?'):.0f}–{b.get('dit_max','?'):.0f}"
+            mean  = b.get('mean')
+            n     = b.get('n', 0)
+            lines.append(f"  {label:<22} mean={mean:>8.1f}  n={n}" if mean is not None
+                         else f"  {label:<22} (no data)")
+        return '\n'.join(lines) or '  (no data)'
+
+    ps = path_summary
+    summary_text = (
+        f"DATASET SUMMARY:\n"
+        f"  Total daily rows: {ps.get('total_rows', len(daily_rows))}\n"
+        f"  Trades covered: {ps.get('total_trades', '?')}\n"
+        f"  DIT range: min={ps.get('dit_min', '?')}, median={ps.get('dit_p50', '?')}, "
+        f"max={ps.get('dit_max', '?')}\n"
+        f"  Phase breakdown: early={ps.get('n_early', '?')} rows, "
+        f"middle={ps.get('n_middle', '?')}, late={ps.get('n_late', '?')}\n"
+        f"  IV level columns: {len(iv_cols)}\n"
+        f"  Since-entry delta columns: {len(since_entry_cols)}\n\n"
+        f"TOP 12 CORRELATIONS: IV vs daily_pnl_change:\n{_fmt_corr(quick_corr_change)}\n\n"
+        f"TOP 12 CORRELATIONS: IV vs drawdown_from_peak:\n{_fmt_corr(quick_corr_dd)}\n\n"
+        f"DIT PROFILE of daily_pnl_change (trend: {dit_profile.get('trend', '?')}):\n"
+        + _fmt_dit(dit_profile)
+    )
+
+    # ── 2. Build system prompt ────────────────────────────────────────────
+    system = _INTRATRADE_AGENTIC_SYSTEM
+    if knowledge_rules:
+        rules_text = '\n'.join(f'- {r}' for r in knowledge_rules)
+        system += f'\n\nDOMAIN KNOWLEDGE (follow these strictly):\n{rules_text}'
+
+    greek_cols = [c for c in ('pos_pnl', 'pos_delta', 'pos_gamma', 'pos_theta', 'pos_vega', 'pos_wvega')
+                  if daily_rows and c in daily_rows[0]]
+
+    first_user = (
+        f"RESEARCH QUESTION: {question}\n\n"
+        f"{summary_text}\n\n"
+        f"GREEK/PATH COLUMNS: {', '.join(greek_cols)}\n"
+        f"DERIVED PATH COLUMNS: daily_pnl_change, drawdown_from_peak, max_pnl_to_date, "
+        f"pct_of_peak_retained, trade_phase, dit\n"
+        f"IV LEVEL COLUMNS ({len(iv_cols)}): {', '.join(iv_cols[:30])}"
+        + (f"… (+{len(iv_cols) - 30} more)" if len(iv_cols) > 30 else '') + '\n'
+        f"SINCE-ENTRY DELTA COLUMNS ({len(since_entry_cols)}): {', '.join(since_entry_cols[:30])}"
+        + (f"… (+{len(since_entry_cols) - 30} more)" if len(since_entry_cols) > 30 else '') + '\n\n'
+        f"Begin your analysis. Call tools to explore the data."
+    )
+
+    messages = [{"role": "user", "content": first_user}]
+    tool_results_acc: list[dict] = []
+    client = _anthropic.AsyncAnthropic()
+    report_data = None
+    max_steps = 10
+
+    # ── 3. Agentic loop ───────────────────────────────────────────────────
+    for step in range(max_steps):
+        log(f"[RUNNING] Intratrade analysis step {step + 1}/{max_steps}…")
+        async with main_pool.acquire() as conn:
+            await rdb.update_run(
+                conn, run_id,
+                ai_summary=f"[RUNNING] Intratrade path analysis step {step + 1}/{max_steps}…",
+            )
+
+        resp = await client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            tools=_INTRATRADE_AGENTIC_TOOLS,
+            messages=messages,
+        )
+
+        messages.append({"role": "assistant", "content": resp.content})
+
+        if resp.stop_reason == "end_turn":
+            log("  Claude finished without write_report — extracting text.")
+            text = " ".join(b.text for b in resp.content if hasattr(b, 'text') and b.text)
+            if text:
+                return json.dumps([{"type": "markdown", "content": text}])
+            break
+
+        tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
+        if not tool_use_blocks:
+            break
+
+        tool_result_messages = []
+        for block in tool_use_blocks:
+            tool_name = block.name
+            inputs    = block.input or {}
+
+            if tool_name == "write_report":
+                report_data = inputs
+                break
+
+            log(f"    → {tool_name}({list(inputs.keys())})")
+            try:
+                if tool_name == "run_correlation_scan":
+                    result = at.run_correlation_scan(daily_rows, inputs["x_cols"], inputs["y_col"])
+                elif tool_name == "run_regime_split":
+                    result = at.run_regime_split(
+                        daily_rows, inputs["x_col"], inputs["y_col"],
+                        inputs["split_col"], inputs.get("method", "median"),
+                    )
+                elif tool_name == "run_rolling_correlation":
+                    result = at.run_rolling_correlation(
+                        daily_rows, inputs["x_col"], inputs["y_col"],
+                        inputs.get("window", 20),
+                    )
+                elif tool_name == "run_tail_analysis":
+                    result = at.run_tail_analysis(
+                        daily_rows, inputs["y_col"], inputs["x_cols"],
+                        inputs.get("pct", 10),
+                    )
+                elif tool_name == "run_decile_profile":
+                    result = at.run_decile_profile(daily_rows, inputs["x_col"], inputs["y_col"])
+                elif tool_name == "run_days_in_trade_profile":
+                    result = at.run_days_in_trade_profile(
+                        daily_rows, inputs["y_col"],
+                        inputs.get("n_bins", 10),
+                        inputs.get("group_by_phase", False),
+                    )
+                elif tool_name == "run_path_event_scan":
+                    result = at.run_path_event_scan(
+                        daily_rows,
+                        inputs["event_col"],
+                        inputs["threshold"],
+                        inputs["direction"],
+                        inputs["context_cols"],
+                        inputs.get("window_days", 3),
+                        inputs.get("threshold_type", "fixed"),
+                    )
+                else:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+            except Exception as exc:
+                result = {"error": str(exc)}
+
+            tool_results_acc.append({"tool": tool_name, "inputs": inputs, "result": result})
+            result_str = json.dumps(result)
+            if len(result_str) > 8000:
+                result_str = result_str[:8000] + "… (truncated)"
+            tool_result_messages.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_str,
+            })
+
+        if report_data is not None:
+            break
+
+        if tool_result_messages:
+            messages.append({"role": "user", "content": tool_result_messages})
+        else:
+            break
+
+    # ── 4. Force write_report if not called ──────────────────────────────
+    if report_data is None:
+        log("  [RUNNING] Composing intratrade report (forced)…")
+        messages.append({"role": "user", "content":
+            "You have completed your analysis. Now call write_report with your findings. "
+            "Be thorough — cite specific numbers from your tool results."})
+        resp2 = await client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=[{"type": "text", "text": system}],
+            tools=_INTRATRADE_AGENTIC_TOOLS,
+            tool_choice={"type": "tool", "name": "write_report"},
+            messages=messages,
+        )
+        for block in resp2.content:
+            if block.type == "tool_use" and block.name == "write_report":
+                report_data = block.input
+                break
+
+    # ── 5. Build chart configs and assemble sections ──────────────────────
+    log("[RUNNING] Composing intratrade report…")
+    chart_configs = _build_intratrade_chart_configs(tool_results_acc)
+
+    if report_data is None:
+        sections = [{"type": "markdown",
+                     "content": "(Report generation failed — no tool call returned)"}]
+        for cid, chart in chart_configs.items():
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+        return json.dumps(sections)
+
+    exec_summary = (report_data.get("executive_summary") or "").strip()
+    body         = (report_data.get("body") or "").strip()
+    conclusions  = (report_data.get("conclusions") or "").strip()
+    chart_seq    = report_data.get("chart_sequence") or []
+
+    sections = []
+    if exec_summary:
+        sections.append({"type": "markdown", "content": exec_summary})
+
+    body_paras = [p.strip() for p in body.split("\n\n") if p.strip()]
+    referenced = set()
+    if body_paras and chart_seq:
+        charts_per_gap = max(1, len(chart_seq) // max(len(body_paras), 1))
+        chart_idx = 0
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+            for _ in range(charts_per_gap):
+                if chart_idx < len(chart_seq):
+                    cid = chart_seq[chart_idx]
+                    if cid in chart_configs:
+                        sections.append({"type": "chart", "chart_id": cid,
+                                          "title": chart_configs[cid]["title"],
+                                          "config": chart_configs[cid]["config"]})
+                        referenced.add(cid)
+                    chart_idx += 1
+        while chart_idx < len(chart_seq):
+            cid = chart_seq[chart_idx]
+            if cid in chart_configs:
+                sections.append({"type": "chart", "chart_id": cid,
+                                  "title": chart_configs[cid]["title"],
+                                  "config": chart_configs[cid]["config"]})
+                referenced.add(cid)
+            chart_idx += 1
+    else:
+        for para in body_paras:
+            sections.append({"type": "markdown", "content": para})
+
+    if conclusions:
+        sections.append({"type": "markdown",
+                          "content": f"## Conclusions\n\n{conclusions}"})
+
+    for cid, chart in chart_configs.items():
+        if cid not in referenced:
+            sections.append({"type": "chart", "chart_id": cid,
+                              "title": chart["title"], "config": chart["config"]})
+
+    return json.dumps(sections)
+
+
+async def _execute_intratrade_run(
+    main_pool,
+    run_id: str,
+    question: str,
+    config: dict,
+    model: str,
+    knowledge_rules: list[str],
+    log,
+) -> str:
+    """Load daily paths from a backtest upload and run the intratrade agentic pipeline."""
+    upload_id = config["backtest_upload_id"]
+
+    log("[RUNNING] Loading intratrade daily paths…")
+    async with main_pool.acquire() as conn:
+        await rdb.update_run(conn, run_id,
+                             ai_summary="[RUNNING] Loading intratrade daily path data…")
+        row = await conn.fetchrow(
+            "SELECT daily_paths, has_daily_paths, path_count FROM research_backtest_uploads "
+            "WHERE id = $1::uuid",
+            upload_id,
+        )
+    if row is None:
+        raise ValueError(f"Backtest upload {upload_id} not found")
+    if not row["has_daily_paths"]:
+        raise ValueError(
+            "This upload has no daily paths. "
+            "Only Mesosim JSON files with EndOfDay events support intratrade analysis."
+        )
+
+    daily_rows_raw = row["daily_paths"]
+    daily_rows = (json.loads(daily_rows_raw) if isinstance(daily_rows_raw, str)
+                  else list(daily_rows_raw))
+    log(f"[RUNNING] Loaded {len(daily_rows)} daily rows ({row['path_count'] or 0} paths)")
+
+    # Categorize columns
+    _PATH_FIELDS = {'position_id', 'date', 'dit', 'trade_phase', 'join_timestamp',
+                    'daily_pnl_change', 'drawdown_from_peak', 'max_pnl_to_date', 'pct_of_peak_retained'}
+    _GREEK_FIELDS = {'pos_pnl', 'pos_delta', 'pos_gamma', 'pos_theta', 'pos_vega', 'pos_wvega'}
+    _SURFACE_META = {'trade_date', 'quote_time', 'id'}
+
+    sample = daily_rows[0] if daily_rows else {}
+    since_entry_fields = sorted(k for k in sample if k.endswith('_since_entry'))
+    iv_level_fields = sorted(
+        k for k in sample
+        if k not in _PATH_FIELDS and k not in _GREEK_FIELDS and k not in _SURFACE_META
+        and not k.startswith('_') and not k.endswith('_since_entry')
+    )
+
+    # Path-level summary stats
+    dits  = [r.get('dit') for r in daily_rows if r.get('dit') is not None]
+    phase_counts = {}
+    for r in daily_rows:
+        ph = r.get('trade_phase')
+        if ph:
+            phase_counts[ph] = phase_counts.get(ph, 0) + 1
+    pos_ids = {r.get('position_id') for r in daily_rows if r.get('position_id')}
+
+    import statistics as _stats
+    path_summary = {
+        'total_rows':        len(daily_rows),
+        'total_trades':      len(pos_ids),
+        'dit_min':           min(dits) if dits else None,
+        'dit_p50':           round(_stats.median(dits), 1) if dits else None,
+        'dit_max':           max(dits) if dits else None,
+        'n_early':           phase_counts.get('early', 0),
+        'n_middle':          phase_counts.get('middle', 0),
+        'n_late':            phase_counts.get('late', 0),
+        'iv_level_fields':   iv_level_fields,
+        'since_entry_fields': since_entry_fields,
+    }
+
+    # Enrich workflow plan
+    async with main_pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE research_runs
+               SET config = jsonb_set(
+                   jsonb_set(config,
+                       '{workflow_plan,feature_columns}', $2::jsonb),
+                   '{workflow_plan,task_reasoning}', $3::jsonb)
+               WHERE id = $1::uuid""",
+            run_id,
+            json.dumps(iv_level_fields + since_entry_fields),
+            json.dumps(
+                f"Intratrade path analysis: {len(daily_rows)} daily rows across "
+                f"{len(pos_ids)} trades. "
+                f"{len(iv_level_fields)} IV level fields + {len(since_entry_fields)} "
+                f"since-entry delta fields available."
+            ),
+        )
+
+    return await execute_intratrade_pipeline(
+        main_pool=main_pool,
+        run_id=run_id,
+        question=question,
+        daily_rows=daily_rows,
+        path_summary=path_summary,
+        model=model,
+        knowledge_rules=knowledge_rules,
+        log=log,
+    )
+
+
 # ── Phase 1: Main execution pipeline ─────────────────────────────────────────
 
 async def execute_v2_pipeline(
@@ -2979,6 +3621,18 @@ async def execute_v2_pipeline(
       4. Generate only those visuals
       5. Compose focused narrative report
     """
+    # ── Intratrade path analysis mode ───────────────────────────────────
+    if config.get("intratrade_mode") and config.get("backtest_upload_id"):
+        return await _execute_intratrade_run(
+            main_pool=main_pool,
+            run_id=run_id,
+            question=question,
+            config=config,
+            model=model,
+            knowledge_rules=knowledge_rules,
+            log=log,
+        )
+
     # ── Backtest agentic mode ────────────────────────────────────────────
     if config.get("backtest_upload_id"):
         return await _execute_backtest_run(

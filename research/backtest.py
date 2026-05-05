@@ -55,7 +55,7 @@ TRADE_FIELDS = {
     'premium', 'contracts', 'spx_open_price', 'spx_close_price',
     'time_opened', 'time_closed', 'days_in_trade', 'is_win',
     'join_timestamp', 'trade_date', 'quote_time', 'id',
-    'day_of_week', 'year', 'daily_path',
+    'day_of_week', 'year', 'daily_path', 'position_id',
 }
 
 
@@ -313,6 +313,7 @@ def parse_backtest_json(content: str, skip_daily_path: bool = True) -> tuple[lis
 
         pnl_val = pnl if pnl is not None else 0.0
         trades.append({
+            'position_id':   str(pos_id),
             'date_opened':   date_opened,
             'date_closed':   date_closed,
             'pnl':           round(pnl_val, 4),
@@ -461,6 +462,217 @@ async def align_trades_to_surface(
 
 
 # ── Trade summary ─────────────────────────────────────────────────────────────
+
+def extract_daily_paths(content: str) -> list[dict]:
+    """
+    Extract EndOfDay snapshots from a Mesosim JSON file.
+    Returns a flat list of daily rows sorted by (position_id, date).
+    Returns [] for non-Mesosim content (no EndOfDay events).
+    """
+    try:
+        events = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(events, list):
+        return []
+
+    positions: dict = defaultdict(list)
+    for event in events:
+        if event.get('EventType') == 'EndOfDay':
+            pos_id = event.get('PositionId')
+            if pos_id is not None:
+                positions[pos_id].append(event)
+
+    if not positions:
+        return []
+
+    rows = []
+    for pos_id, eod_events in positions.items():
+        eod_events.sort(key=lambda e: e.get('SimTime', ''))
+        for idx, eod in enumerate(eod_events):
+            sim_time = eod.get('SimTime', '')
+            eod_date = sim_time[:10] if len(sim_time) >= 10 else None
+            if not eod_date:
+                continue
+            msg = eod.get('Message', '')
+            # DIT from "DIT: N" or "DIT=N" pattern in Message
+            dit = None
+            for sep in ('DIT: ', 'DIT=', 'DIT:'):
+                if sep in msg:
+                    try:
+                        dit = int(msg.split(sep)[1].split()[0].strip())
+                    except (IndexError, ValueError):
+                        pass
+                    break
+            if dit is None:
+                dit = idx + 1  # fallback: count events
+
+            vars_ = eod.get('Vars') or {}
+            rows.append({
+                'position_id': str(pos_id),
+                'date':        eod_date,
+                'dit':         dit,
+                'pos_pnl':     _safe_float(vars_.get('pos_pnl')),
+                'pos_delta':   _safe_float(vars_.get('pos_delta')),
+                'pos_gamma':   _safe_float(vars_.get('pos_gamma')),
+                'pos_theta':   _safe_float(vars_.get('pos_theta')),
+                'pos_vega':    _safe_float(vars_.get('pos_vega')),
+                'pos_wvega':   _safe_float(vars_.get('pos_wvega')),
+            })
+
+    rows.sort(key=lambda r: (r['position_id'], r['date']))
+    return rows
+
+
+async def align_daily_paths_to_surface(
+    daily_rows: list[dict],
+    pool,
+    date_from: str,
+    date_to: str,
+) -> tuple[list[dict], dict]:
+    """
+    LEFT JOIN daily path rows to surface_metrics_core at 09:35 on each row's date.
+    Returns (enriched_rows, stats).
+    """
+    def _as_date(v):
+        if isinstance(v, _date):
+            return v
+        return _date.fromisoformat(str(v))
+
+    async with pool.acquire() as conn:
+        surface_rows = await conn.fetch(
+            """SELECT * FROM surface_metrics_core
+               WHERE trade_date BETWEEN $1 AND $2
+                 AND quote_time = '09:35:00'::time
+               ORDER BY trade_date""",
+            _as_date(date_from), _as_date(date_to),
+        )
+
+    import decimal
+
+    def _json_safe(v):
+        if isinstance(v, (_date, _datetime, _time)):
+            return str(v)
+        if isinstance(v, decimal.Decimal):
+            f = float(v)
+            return None if (math.isnan(f) or math.isinf(f)) else f
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return v
+
+    def _build(surface_rows, daily_rows):
+        surface_lookup: dict[str, dict] = {}
+        for row in surface_rows:
+            surface_lookup[str(row['trade_date'])] = {
+                k: _json_safe(v) for k, v in dict(row).items()
+            }
+
+        enriched = []
+        matched = 0
+        for dr in daily_rows:
+            d = dr.get('date', '')
+            surf = surface_lookup.get(d)
+            if surf is not None:
+                merged = {**surf, **dr}
+                merged['join_timestamp'] = f"{d} 09:35:00"
+                matched += 1
+            else:
+                merged = dict(dr)
+                merged['join_timestamp'] = None
+            enriched.append(merged)
+
+        total = len(daily_rows)
+        return enriched, {
+            'total':      total,
+            'matched':    matched,
+            'unmatched':  total - matched,
+            'match_rate': round(matched / max(total, 1), 3),
+        }
+
+    return await asyncio.to_thread(_build, surface_rows, daily_rows)
+
+
+def _compute_path_derived_fields(daily_rows: list[dict], enriched_trades: list[dict]) -> list[dict]:
+    """
+    Compute derived per-row fields after surface alignment:
+      - daily_pnl_change, max_pnl_to_date, drawdown_from_peak, pct_of_peak_retained
+      - trade_phase (early/middle/late based on % of total trade duration)
+      - {iv_col}_since_entry for each IV metric present in both daily row and parent trade
+
+    Requires enriched_trades to have 'position_id' linking to daily_rows.
+    """
+    from collections import defaultdict
+
+    trades_lookup = {t.get('position_id'): t for t in enriched_trades if t.get('position_id')}
+
+    # Group daily rows by position_id, preserving order
+    by_position: dict[str, list] = defaultdict(list)
+    for dr in daily_rows:
+        by_position[dr.get('position_id', '')].append(dr)
+
+    # Identify IV columns from a representative trade (those not in TRADE_FIELDS)
+    iv_col_set: set = set()
+    if enriched_trades:
+        iv_col_set = {k for k in enriched_trades[0].keys()
+                      if k not in TRADE_FIELDS and not k.startswith('_')
+                      and k not in ('trade_date', 'quote_time')}
+
+    result = []
+    for pos_id, series in by_position.items():
+        trade = trades_lookup.get(pos_id) or {}
+        total_days = trade.get('days_in_trade') or 0
+        if not total_days:
+            # Fall back to max dit in series
+            dits = [r.get('dit') for r in series if r.get('dit') is not None]
+            total_days = max(dits) if dits else 1
+
+        max_pnl = None
+        prev_pnl = None
+        for dr in series:
+            row = dict(dr)
+            pnl = _safe_float(row.get('pos_pnl'))
+
+            # Running max
+            if pnl is not None:
+                max_pnl = pnl if max_pnl is None else max(max_pnl, pnl)
+
+            row['max_pnl_to_date'] = max_pnl
+            row['daily_pnl_change'] = (
+                round(pnl - prev_pnl, 4)
+                if (pnl is not None and prev_pnl is not None)
+                else None
+            )
+            row['drawdown_from_peak'] = (
+                round(pnl - max_pnl, 4)
+                if (pnl is not None and max_pnl is not None)
+                else None
+            )
+            row['pct_of_peak_retained'] = (
+                round(pnl / max_pnl, 4)
+                if (pnl is not None and max_pnl is not None and max_pnl > 0)
+                else None
+            )
+
+            # Trade phase
+            dit = row.get('dit')
+            if dit is not None and total_days > 0:
+                pct = dit / total_days
+                row['trade_phase'] = 'early' if pct <= 0.2 else ('late' if pct > 0.7 else 'middle')
+            else:
+                row['trade_phase'] = None
+
+            # Since-entry IV deltas
+            for iv_col in iv_col_set:
+                entry_val = _safe_float(trade.get(iv_col))
+                daily_val = _safe_float(row.get(iv_col))
+                if entry_val is not None and daily_val is not None:
+                    row[f'{iv_col}_since_entry'] = round(daily_val - entry_val, 6)
+
+            prev_pnl = pnl
+            result.append(row)
+
+    return result
+
 
 def compute_trade_summary(trades: list[dict]) -> dict:
     """High-level summary of enriched trade list for agentic context."""

@@ -58,6 +58,7 @@ class RunRequest(BaseModel):
     model: str = "claude-sonnet-4-6"
     pnl_upload_id:      Optional[str] = None
     backtest_upload_id: Optional[str] = None
+    intratrade_mode:    bool = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -257,35 +258,65 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks,
         )
         return {"run_id": run_id, "plan": plan}
 
-    # ── Backtest agentic mode ─────────────────────────────────────────────
+    # ── Backtest / intratrade agentic modes ──────────────────────────────
     if req.backtest_upload_id:
         await _ensure_backtest_table(pool)
         async with pool.acquire() as conn:
             upload = await conn.fetchrow(
-                "SELECT id::text, date_from, date_to, trade_count, matched_count "
+                "SELECT id::text, date_from, date_to, trade_count, matched_count, "
+                "has_daily_paths, path_count "
                 "FROM research_backtest_uploads WHERE id = $1::uuid",
                 req.backtest_upload_id,
             )
         if upload is None:
             raise HTTPException(400, f"Backtest upload '{req.backtest_upload_id}' not found")
 
-        plan = {
-            "task_type":       "backtest-regime-analysis",
-            "task_reasoning":  "Agentic backtest analysis: Claude will explore which entry-time IV conditions predict trade outcomes.",
-            "hypotheses":      [],
-            "feature_columns": [],
-            "outcome_columns": ["pnl", "is_win"],
-            "scan_focus":      "Entry-morning IV conditions predictive of trade P&L and win rate",
-            "report_guidance": "Report on which IV conditions at trade entry (09:35) predict better outcomes. Cite win rates, mean P&L by bucket, and time-split stability.",
-        }
-        config = {
-            "engine":             "v2",
-            "backtest_upload_id": req.backtest_upload_id,
-            "date_from":          str(upload["date_from"]) if upload["date_from"] else None,
-            "date_to":            str(upload["date_to"])   if upload["date_to"]   else None,
-            "model":              req.model,
-            "workflow_plan":      plan,
-        }
+        intratrade = req.intratrade_mode and bool(upload.get("has_daily_paths"))
+        if req.intratrade_mode and not upload.get("has_daily_paths"):
+            raise HTTPException(
+                400,
+                "This upload has no daily paths. "
+                "Intratrade mode requires a Mesosim JSON file with EndOfDay events.",
+            )
+
+        if intratrade:
+            plan = {
+                "task_type":       "intratrade-path-analysis",
+                "task_reasoning":  "Agentic intratrade analysis: Claude will explore how trades evolve day-by-day and which IV conditions predict damage or recovery.",
+                "hypotheses":      [],
+                "feature_columns": [],
+                "outcome_columns": ["daily_pnl_change", "drawdown_from_peak"],
+                "scan_focus":      "IV surface changes since entry correlated with daily P&L damage",
+                "report_guidance": "Report on which IV conditions predict daily P&L changes and drawdowns. Discuss phase-level patterns (early/middle/late) and since-entry IV deltas.",
+            }
+            config = {
+                "engine":             "v2",
+                "backtest_upload_id": req.backtest_upload_id,
+                "intratrade_mode":    True,
+                "date_from":          str(upload["date_from"]) if upload["date_from"] else None,
+                "date_to":            str(upload["date_to"])   if upload["date_to"]   else None,
+                "model":              req.model,
+                "workflow_plan":      plan,
+            }
+        else:
+            plan = {
+                "task_type":       "backtest-regime-analysis",
+                "task_reasoning":  "Agentic backtest analysis: Claude will explore which entry-time IV conditions predict trade outcomes.",
+                "hypotheses":      [],
+                "feature_columns": [],
+                "outcome_columns": ["pnl", "is_win"],
+                "scan_focus":      "Entry-morning IV conditions predictive of trade P&L and win rate",
+                "report_guidance": "Report on which IV conditions at trade entry (09:35) predict better outcomes. Cite win rates, mean P&L by bucket, and time-split stability.",
+            }
+            config = {
+                "engine":             "v2",
+                "backtest_upload_id": req.backtest_upload_id,
+                "date_from":          str(upload["date_from"]) if upload["date_from"] else None,
+                "date_to":            str(upload["date_to"])   if upload["date_to"]   else None,
+                "model":              req.model,
+                "workflow_plan":      plan,
+            }
+
         async with pool.acquire() as conn:
             run_id = await rdb.create_run(conn, req.name, req.question, config)
         background_tasks.add_task(
@@ -532,6 +563,18 @@ async def _ensure_backtest_table(pool):
                 "ALTER TABLE research_backtest_uploads "
                 "ADD COLUMN IF NOT EXISTS sources JSONB"
             )
+            await conn.execute(
+                "ALTER TABLE research_backtest_uploads "
+                "ADD COLUMN IF NOT EXISTS daily_paths JSONB"
+            )
+            await conn.execute(
+                "ALTER TABLE research_backtest_uploads "
+                "ADD COLUMN IF NOT EXISTS path_count INTEGER DEFAULT 0"
+            )
+            await conn.execute(
+                "ALTER TABLE research_backtest_uploads "
+                "ADD COLUMN IF NOT EXISTS has_daily_paths BOOLEAN DEFAULT FALSE"
+            )
         _backtest_table_ready = True
     except Exception:
         pass
@@ -546,7 +589,7 @@ async def upload_backtest(
     """Upload a single backtest file. Call multiple times to add files, then finalize."""
     await _ensure_backtest_table(pool)
 
-    # Ensure staging table exists
+    # Ensure staging table exists (with raw_content for re-parsing daily paths at finalize)
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS research_backtest_staging (
@@ -558,6 +601,10 @@ async def upload_backtest(
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute(
+            "ALTER TABLE research_backtest_staging "
+            "ADD COLUMN IF NOT EXISTS raw_content TEXT"
+        )
 
     # Process only the first file (single-file-at-a-time approach)
     file = files[0]
@@ -580,13 +627,23 @@ async def upload_backtest(
     if not trades:
         raise HTTPException(400, f"No trades found in '{file.filename}'")
 
-    # Store in staging table
+    # Store in staging table; preserve raw content for JSON files (needed to extract daily paths at finalize)
+    is_json = file.filename.lower().endswith('.json')
+    raw_text: Optional[str] = None
+    if is_json:
+        for enc in ('utf-8-sig', 'utf-8', 'latin-1'):
+            try:
+                raw_text = content_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+
     async with pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO research_backtest_staging (upload_name, filename, trades, meta)
-               VALUES ($1, $2, $3::jsonb, $4::jsonb)""",
+            """INSERT INTO research_backtest_staging (upload_name, filename, trades, meta, raw_content)
+               VALUES ($1, $2, $3::jsonb, $4::jsonb, $5)""",
             name, file.filename,
-            json.dumps(trades), json.dumps(meta),
+            json.dumps(trades), json.dumps(meta), raw_text,
         )
 
         # Count all staged files for this name
@@ -627,7 +684,7 @@ async def finalize_backtest(
 
     async with pool.acquire() as conn:
         staged = await conn.fetch(
-            """SELECT filename, trades, meta
+            """SELECT filename, trades, meta, raw_content
                FROM research_backtest_staging WHERE upload_name = $1
                ORDER BY created_at""",
             name,
@@ -639,6 +696,7 @@ async def finalize_backtest(
     all_trades = []
     all_metas = []
     sources = []
+    raw_contents = []  # collect raw JSON text for daily path extraction
 
     for row in staged:
         trades = json.loads(row['trades']) if isinstance(row['trades'], str) else row['trades']
@@ -646,6 +704,8 @@ async def finalize_backtest(
         all_trades.extend(trades)
         all_metas.append(meta)
         sources.append(row['filename'])
+        if row.get('raw_content'):
+            raw_contents.append(row['raw_content'])
 
     log.info("Finalizing backtest '%s': %d trades from %d files", name, len(all_trades), len(sources))
 
@@ -672,42 +732,76 @@ async def finalize_backtest(
     for t in enriched:
         t.pop('daily_path', None)
 
+    # ── Extract daily paths from raw JSON files (Mesosim only) ──────────────
+    all_daily_rows: list = []
+    has_daily_paths = False
+    path_count = 0
+
+    if raw_contents:
+        log.info("Extracting daily paths from %d raw JSON files…", len(raw_contents))
+        for raw_text in raw_contents:
+            rows = await asyncio.to_thread(rbacktest.extract_daily_paths, raw_text)
+            all_daily_rows.extend(rows)
+
+        if all_daily_rows:
+            log.info("Aligning %d daily path rows to IV surface…", len(all_daily_rows))
+            try:
+                aligned_daily, path_stats = await rbacktest.align_daily_paths_to_surface(
+                    all_daily_rows, pool, date_from, date_to
+                )
+                all_daily_rows = await asyncio.to_thread(
+                    rbacktest._compute_path_derived_fields, aligned_daily, enriched
+                )
+                has_daily_paths = True
+                path_count = len(all_daily_rows)
+                log.info("Daily paths ready: %d rows, match_rate=%.2f",
+                         path_count, path_stats.get('match_rate', 0))
+            except Exception as exc:
+                log.warning("Daily path extraction failed (non-fatal): %s", exc)
+                all_daily_rows = []
+
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
 
-    enriched_json = await asyncio.to_thread(json.dumps, enriched)
+    enriched_json      = await asyncio.to_thread(json.dumps, enriched)
+    daily_paths_json   = await asyncio.to_thread(json.dumps, all_daily_rows) if all_daily_rows else None
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO research_backtest_uploads
                (name, source, trade_count, matched_count, date_from, date_to,
-                strategies, columns, sources, data)
-               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb)
+                strategies, columns, sources, data,
+                daily_paths, path_count, has_daily_paths)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,
+                       $11::jsonb,$12,$13)
                RETURNING id::text, name, source, trade_count, matched_count,
                          date_from, date_to, created_at""",
             name, source, len(all_trades), stats["matched"],
             _to_date(date_from), _to_date(date_to),
             json.dumps(strategies), json.dumps(columns),
             json.dumps(sources), enriched_json,
+            daily_paths_json, path_count, has_daily_paths,
         )
         # Clean up staging
         await conn.execute(
             "DELETE FROM research_backtest_staging WHERE upload_name = $1", name)
 
     return {
-        "upload_id":     row["id"],
-        "name":          row["name"],
-        "source":        row["source"],
-        "trade_count":   row["trade_count"],
-        "matched_count": row["matched_count"],
-        "match_rate":    stats["match_rate"],
-        "date_from":     str(row["date_from"]) if row["date_from"] else None,
-        "date_to":       str(row["date_to"])   if row["date_to"]   else None,
-        "strategies":    strategies,
-        "columns":       columns,
-        "sources":       sources,
-        "validation":    {"stats": stats, "warnings": stats.get("warnings", [])},
-        "preview":       [{k: v for k, v in t.items() if k != 'daily_path'} for t in enriched[:5]],
+        "upload_id":       row["id"],
+        "name":            row["name"],
+        "source":          row["source"],
+        "trade_count":     row["trade_count"],
+        "matched_count":   row["matched_count"],
+        "match_rate":      stats["match_rate"],
+        "date_from":       str(row["date_from"]) if row["date_from"] else None,
+        "date_to":         str(row["date_to"])   if row["date_to"]   else None,
+        "strategies":      strategies,
+        "columns":         columns,
+        "sources":         sources,
+        "has_daily_paths": has_daily_paths,
+        "path_count":      path_count,
+        "validation":      {"stats": stats, "warnings": stats.get("warnings", [])},
+        "preview":         [{k: v for k, v in t.items() if k != 'daily_path'} for t in enriched[:5]],
     }
 
 
@@ -733,7 +827,7 @@ async def list_backtest_uploads(pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT id::text, name, source, trade_count, matched_count,
-                      date_from, date_to, strategies, created_at
+                      date_from, date_to, strategies, has_daily_paths, path_count, created_at
                FROM research_backtest_uploads
                ORDER BY created_at DESC LIMIT 20""",
         )
@@ -741,6 +835,8 @@ async def list_backtest_uploads(pool=Depends(get_pool)):
     for r in rows:
         d = dict(r)
         d["strategies"] = d["strategies"] if isinstance(d["strategies"], list) else json.loads(d["strategies"] or "[]")
+        d.setdefault("has_daily_paths", False)
+        d.setdefault("path_count", 0)
         result.append(d)
     return result
 
