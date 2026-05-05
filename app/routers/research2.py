@@ -589,7 +589,7 @@ async def upload_backtest(
     """Upload a single backtest file. Call multiple times to add files, then finalize."""
     await _ensure_backtest_table(pool)
 
-    # Ensure staging table exists (with raw_content for re-parsing daily paths at finalize)
+    # Ensure staging table exists
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS research_backtest_staging (
@@ -604,6 +604,10 @@ async def upload_backtest(
         await conn.execute(
             "ALTER TABLE research_backtest_staging "
             "ADD COLUMN IF NOT EXISTS raw_content TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE research_backtest_staging "
+            "ADD COLUMN IF NOT EXISTS staged_daily_paths JSONB"
         )
 
     # Process only the first file (single-file-at-a-time approach)
@@ -627,9 +631,11 @@ async def upload_backtest(
     if not trades:
         raise HTTPException(400, f"No trades found in '{file.filename}'")
 
-    # Store in staging table; preserve raw content for JSON files (needed to extract daily paths at finalize)
+    # For JSON files: extract daily paths NOW while the file is in memory.
+    # Storing pre-extracted rows in staging avoids re-parsing large files at finalize time.
     is_json = file.filename.lower().endswith('.json')
     raw_text: Optional[str] = None
+    staged_daily_paths_json: Optional[str] = None
     if is_json:
         for enc in ('utf-8-sig', 'utf-8', 'latin-1'):
             try:
@@ -637,13 +643,22 @@ async def upload_backtest(
                 break
             except UnicodeDecodeError:
                 continue
+        if raw_text:
+            try:
+                daily_rows = await asyncio.to_thread(rbacktest.extract_daily_paths, raw_text)
+                if daily_rows:
+                    staged_daily_paths_json = await asyncio.to_thread(json.dumps, daily_rows)
+                    log.info("Pre-extracted %d daily path rows from '%s'", len(daily_rows), file.filename)
+            except Exception as exc:
+                log.warning("Daily path pre-extraction failed for '%s' (non-fatal): %s", file.filename, exc)
 
     async with pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO research_backtest_staging (upload_name, filename, trades, meta, raw_content)
-               VALUES ($1, $2, $3::jsonb, $4::jsonb, $5)""",
+            """INSERT INTO research_backtest_staging
+               (upload_name, filename, trades, meta, raw_content, staged_daily_paths)
+               VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6::jsonb)""",
             name, file.filename,
-            json.dumps(trades), json.dumps(meta), raw_text,
+            json.dumps(trades), json.dumps(meta), raw_text, staged_daily_paths_json,
         )
 
         # Count all staged files for this name
@@ -682,9 +697,30 @@ async def finalize_backtest(
     """Combine all staged files for a name, align to IV surface, create final upload."""
     await _ensure_backtest_table(pool)
 
+    # Ensure staging schema is current (idempotent — safe to run every call)
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS research_backtest_staging (
+                id          SERIAL PRIMARY KEY,
+                upload_name TEXT NOT NULL,
+                filename    TEXT NOT NULL,
+                trades      JSONB NOT NULL,
+                meta        JSONB NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "ALTER TABLE research_backtest_staging "
+            "ADD COLUMN IF NOT EXISTS raw_content TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE research_backtest_staging "
+            "ADD COLUMN IF NOT EXISTS staged_daily_paths JSONB"
+        )
+
     async with pool.acquire() as conn:
         staged = await conn.fetch(
-            """SELECT filename, trades, meta, raw_content
+            """SELECT filename, trades, meta, staged_daily_paths
                FROM research_backtest_staging WHERE upload_name = $1
                ORDER BY created_at""",
             name,
@@ -696,7 +732,7 @@ async def finalize_backtest(
     all_trades = []
     all_metas = []
     sources = []
-    raw_contents = []  # collect raw JSON text for daily path extraction
+    all_daily_rows_pre: list = []  # pre-extracted rows from staging
 
     for row in staged:
         trades = json.loads(row['trades']) if isinstance(row['trades'], str) else row['trades']
@@ -704,8 +740,12 @@ async def finalize_backtest(
         all_trades.extend(trades)
         all_metas.append(meta)
         sources.append(row['filename'])
-        if row.get('raw_content'):
-            raw_contents.append(row['raw_content'])
+        staged_paths = row.get('staged_daily_paths')
+        if staged_paths:
+            if isinstance(staged_paths, str):
+                staged_paths = json.loads(staged_paths)
+            if isinstance(staged_paths, list):
+                all_daily_rows_pre.extend(staged_paths)
 
     log.info("Finalizing backtest '%s': %d trades from %d files", name, len(all_trades), len(sources))
 
@@ -732,33 +772,27 @@ async def finalize_backtest(
     for t in enriched:
         t.pop('daily_path', None)
 
-    # ── Extract daily paths from raw JSON files (Mesosim only) ──────────────
+    # ── Align pre-extracted daily paths to IV surface (Mesosim only) ─────────
     all_daily_rows: list = []
     has_daily_paths = False
     path_count = 0
 
-    if raw_contents:
-        log.info("Extracting daily paths from %d raw JSON files…", len(raw_contents))
-        for raw_text in raw_contents:
-            rows = await asyncio.to_thread(rbacktest.extract_daily_paths, raw_text)
-            all_daily_rows.extend(rows)
-
-        if all_daily_rows:
-            log.info("Aligning %d daily path rows to IV surface…", len(all_daily_rows))
-            try:
-                aligned_daily, path_stats = await rbacktest.align_daily_paths_to_surface(
-                    all_daily_rows, pool, date_from, date_to
-                )
-                all_daily_rows = await asyncio.to_thread(
-                    rbacktest._compute_path_derived_fields, aligned_daily, enriched
-                )
-                has_daily_paths = True
-                path_count = len(all_daily_rows)
-                log.info("Daily paths ready: %d rows, match_rate=%.2f",
-                         path_count, path_stats.get('match_rate', 0))
-            except Exception as exc:
-                log.warning("Daily path extraction failed (non-fatal): %s", exc)
-                all_daily_rows = []
+    if all_daily_rows_pre:
+        log.info("Aligning %d pre-extracted daily path rows to IV surface…", len(all_daily_rows_pre))
+        try:
+            aligned_daily, path_stats = await rbacktest.align_daily_paths_to_surface(
+                all_daily_rows_pre, pool, date_from, date_to
+            )
+            all_daily_rows = await asyncio.to_thread(
+                rbacktest._compute_path_derived_fields, aligned_daily, enriched
+            )
+            has_daily_paths = True
+            path_count = len(all_daily_rows)
+            log.info("Daily paths ready: %d rows, match_rate=%.2f",
+                     path_count, path_stats.get('match_rate', 0))
+        except Exception as exc:
+            log.warning("Daily path alignment failed (non-fatal): %s", exc, exc_info=True)
+            all_daily_rows = []
 
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
