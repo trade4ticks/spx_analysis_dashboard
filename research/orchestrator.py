@@ -9,6 +9,7 @@ Sits above the deterministic tools and decides:
 
 The deterministic tools (scanner, blocks, charts) are unchanged building blocks.
 """
+import asyncio
 import json
 import re
 from typing import Optional
@@ -19,6 +20,7 @@ except ImportError:
     _anthropic = None
 
 from research import scanner, blocks, db as rdb
+from research import backtest as rbacktest
 
 _OI_TABLES = {"daily_features", "option_oi_surface", "underlying_ohlc"}
 _EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
@@ -3515,8 +3517,8 @@ async def _execute_intratrade_run(
         await rdb.update_run(conn, run_id,
                              ai_summary="[RUNNING] Loading intratrade daily path data…")
         row = await conn.fetchrow(
-            "SELECT daily_paths, has_daily_paths, path_count FROM research_backtest_uploads "
-            "WHERE id = $1::uuid",
+            "SELECT daily_paths, has_daily_paths, path_count, date_from, date_to, data "
+            "FROM research_backtest_uploads WHERE id = $1::uuid",
             upload_id,
         )
     if row is None:
@@ -3530,7 +3532,29 @@ async def _execute_intratrade_run(
     daily_rows_raw = row["daily_paths"]
     daily_rows = (json.loads(daily_rows_raw) if isinstance(daily_rows_raw, str)
                   else list(daily_rows_raw))
-    log(f"[RUNNING] Loaded {len(daily_rows)} daily rows ({row['path_count'] or 0} paths)")
+    log(f"[RUNNING] Loaded {len(daily_rows)} compact daily rows — aligning to IV surface…")
+
+    # Align to surface and compute derived fields here (background task — no timeout constraint).
+    # Daily paths are stored compact (~9 cols) to stay under PostgreSQL's 256 MB JSONB limit;
+    # full enrichment (100+ surface cols + since_entry deltas) happens at query time.
+    date_from_str = str(row["date_from"]) if row["date_from"] else None
+    date_to_str   = str(row["date_to"])   if row["date_to"]   else None
+    data_raw      = row["data"]
+    enriched_trades = (json.loads(data_raw) if isinstance(data_raw, str) else list(data_raw or []))
+
+    try:
+        aligned_daily, path_stats = await rbacktest.align_daily_paths_to_surface(
+            daily_rows, main_pool, date_from_str, date_to_str
+        )
+        daily_rows = await asyncio.to_thread(
+            rbacktest._compute_path_derived_fields, aligned_daily, enriched_trades
+        )
+        log(f"[RUNNING] Enriched {len(daily_rows)} daily rows "
+            f"(surface match_rate={path_stats.get('match_rate', 0):.2f})")
+    except Exception as exc:
+        log(f"[WARNING] Surface alignment failed ({exc}) — proceeding with compact rows")
+
+    log(f"[RUNNING] {len(daily_rows)} daily rows ready for analysis")
 
     # Categorize columns
     _PATH_FIELDS = {'position_id', 'date', 'dit', 'trade_phase', 'join_timestamp',

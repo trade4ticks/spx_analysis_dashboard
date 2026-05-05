@@ -772,27 +772,16 @@ async def finalize_backtest(
     for t in enriched:
         t.pop('daily_path', None)
 
-    # ── Align pre-extracted daily paths to IV surface (Mesosim only) ─────────
-    all_daily_rows: list = []
-    has_daily_paths = False
-    path_count = 0
-
-    if all_daily_rows_pre:
-        log.info("Aligning %d pre-extracted daily path rows to IV surface…", len(all_daily_rows_pre))
-        try:
-            aligned_daily, path_stats = await rbacktest.align_daily_paths_to_surface(
-                all_daily_rows_pre, pool, date_from, date_to
-            )
-            all_daily_rows = await asyncio.to_thread(
-                rbacktest._compute_path_derived_fields, aligned_daily, enriched
-            )
-            has_daily_paths = True
-            path_count = len(all_daily_rows)
-            log.info("Daily paths ready: %d rows, match_rate=%.2f",
-                     path_count, path_stats.get('match_rate', 0))
-        except Exception as exc:
-            log.warning("Daily path alignment failed (non-fatal): %s", exc, exc_info=True)
-            all_daily_rows = []
+    # ── Store compact daily path rows (alignment deferred to query time) ──────
+    # Surface alignment expands each row to 100+ columns, pushing past PostgreSQL's
+    # 256 MB JSONB limit for large backtests. Store only the raw ~9-column rows here;
+    # alignment and derived fields run in _execute_intratrade_run (background task).
+    all_daily_rows: list = all_daily_rows_pre
+    has_daily_paths = bool(all_daily_rows_pre)
+    path_count = len(all_daily_rows_pre)
+    if path_count:
+        log.info("Storing %d compact daily path rows (surface alignment deferred to query time)",
+                 path_count)
 
     def _to_date(s):
         return _date.fromisoformat(s) if s else None
