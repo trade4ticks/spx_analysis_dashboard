@@ -102,6 +102,8 @@ document.addEventListener('alpine:init', () => {
 
     analysisMode: 'entry',  // 'entry' | 'intratrade' — only relevant when hasDailyPaths
 
+    savedBacktestUploads: [],  // previously finalized uploads loaded from server
+
     form: {
       name:      '',
       question:  '',
@@ -120,6 +122,7 @@ document.addEventListener('alpine:init', () => {
       await this.loadRuns();
       this._loadTickers();
       this._loadKnowledge();
+      this._loadSavedBacktestUploads();
     },
 
     async _loadTickers() {
@@ -537,6 +540,41 @@ document.addEventListener('alpine:init', () => {
         dateFrom: null, dateTo: null, strategies: [], columns: [],
         preview: null, warnings: [], hasDailyPaths: false, pathCount: 0, error: null,
       };
+    },
+
+    async _loadSavedBacktestUploads() {
+      try {
+        const r = await fetch('/api/research2/backtest-uploads');
+        if (r.ok) this.savedBacktestUploads = await r.json();
+      } catch (_) {}
+    },
+
+    selectSavedBacktestUpload(upload) {
+      this.analysisMode = 'entry';
+      this.backtestUploadState = {
+        files: [], uploading: false, finalizing: false,
+        uploadId:     upload.id,
+        uploadName:   upload.name,
+        source:       upload.source,
+        tradeCount:   upload.trade_count,
+        matchedCount: upload.matched_count,
+        matchRate:    upload.match_rate || 0,
+        dateFrom:     upload.date_from,
+        dateTo:       upload.date_to,
+        strategies:   upload.strategies || [],
+        columns:      [],
+        sources:      upload.sources || [],
+        stagedFiles:  [],
+        totalTrades:  upload.trade_count || 0,
+        preview:      null,
+        warnings:     [],
+        hasDailyPaths: upload.has_daily_paths || false,
+        pathCount:    upload.path_count || 0,
+        error:        null,
+      };
+      if (!this.backtestUploadState.hasDailyPaths) this.analysisMode = 'entry';
+      if (upload.date_from) this.form.date_from = upload.date_from;
+      if (upload.date_to)   this.form.date_to   = upload.date_to;
     },
 
     setTable(t) { this.form.table = t; },
