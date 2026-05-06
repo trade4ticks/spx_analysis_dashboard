@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import math
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -269,6 +270,50 @@ async def list_uploads(pool=Depends(get_pool)):
 async def get_columns(upload_id: str, pool=Depends(get_pool)):
     trades, iv_columns = await _load_trades(upload_id, pool)
     return {'iv_columns': iv_columns, 'trade_count': len(trades)}
+
+
+@router.get("/{upload_id}/column-stats")
+async def column_stats(
+    upload_id: str,
+    col:       str = Query(..., description="Column name"),
+    pool=Depends(get_pool),
+):
+    """Distribution stats for one column across the full upload — used by the
+    filter slider widget to size its track. Stable across filter/date changes
+    so dragging always references the same scale."""
+    trades, _ = await _load_trades(upload_id, pool)
+    vals: list = []
+    for t in trades:
+        v = t.get(col)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(f) or math.isinf(f):
+            continue
+        vals.append(f)
+    if not vals:
+        raise HTTPException(404, f"Column '{col}' has no numeric values")
+    vals.sort()
+    n = len(vals)
+
+    def _pct(p: float) -> float:
+        idx = int(round(p * (n - 1)))
+        return vals[max(0, min(n - 1, idx))]
+
+    return {
+        'col':  col,
+        'n':    n,
+        'min':  vals[0],
+        'max':  vals[-1],
+        'p01':  _pct(0.01),
+        'p05':  _pct(0.05),
+        'p50':  _pct(0.50),
+        'p95':  _pct(0.95),
+        'p99':  _pct(0.99),
+    }
 
 
 class SummaryRequest(_DateFilterMixin):

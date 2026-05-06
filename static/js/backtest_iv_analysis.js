@@ -122,6 +122,17 @@ document.addEventListener('alpine:init', () => {
       posLeft:   0,
     },
 
+    // Lazy-cached per-column distribution stats from /column-stats. Keyed
+    // by column name. Each entry is either:
+    //   undefined — never requested
+    //   null      — fetch in flight
+    //   false     — fetch failed (column has no numeric values)
+    //   object    — {min, max, p01, p05, p50, p95, p99, n}
+    columnStats: {},
+
+    // Active drag state for the slider chip. null when not dragging.
+    sliderDrag: null,
+
     // Section open/closed
     open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
 
@@ -204,6 +215,7 @@ document.addEventListener('alpine:init', () => {
       const initial = this._readFiltersFromUrl();
       if (initial.length) {
         this.filters = initial;
+        this._ensureFilterStats();
         this.applyFilters();
       }
     },
@@ -249,6 +261,7 @@ document.addEventListener('alpine:init', () => {
         this.filters = [];
         this._writeFiltersToUrl();
       }
+      this.columnStats = {};
 
       try {
         const r   = await fetch(`/api/backtest-iv/${id}/columns`);
@@ -311,6 +324,7 @@ document.addEventListener('alpine:init', () => {
       const norm = this._normaliseFilter(clause);
       if (!norm) return;
       this.filters = [...this.filters, norm];
+      this._ensureFilterStats();
       this._writeFiltersToUrl();
       this.applyFilters();
     },
@@ -322,6 +336,7 @@ document.addEventListener('alpine:init', () => {
       const next = this.filters.slice();
       next[idx] = norm;
       this.filters = next;
+      this._ensureFilterStats();
       this._writeFiltersToUrl();
       this.applyFilters();
     },
@@ -474,6 +489,148 @@ document.addEventListener('alpine:init', () => {
       return order
         .filter(f => groups[f]?.length)
         .map(f => ({ family: f, columns: groups[f] }));
+    },
+
+    // ── Column stats (slider track range) ──
+    async _fetchColumnStats(col) {
+      if (!this.selectedId) return;
+      this.columnStats[col] = null;  // mark as fetching
+      try {
+        const r = await fetch(
+          `/api/backtest-iv/${this.selectedId}/column-stats?col=${encodeURIComponent(col)}`);
+        if (r.ok) {
+          this.columnStats[col] = await r.json();
+        } else {
+          this.columnStats[col] = false;
+        }
+      } catch (_) {
+        this.columnStats[col] = false;
+      }
+    },
+
+    _ensureFilterStats() {
+      const cols = Array.from(new Set(this.filters.map(f => f.col)));
+      for (const col of cols) {
+        if (!(col in this.columnStats)) this._fetchColumnStats(col);
+      }
+    },
+
+    // ── Slider chip helpers ──
+    _isSliderEligible(f) {
+      if (!f || f.op !== 'between') return false;
+      const s = this.columnStats[f.col];
+      if (!s || s === true) return false;
+      // Need a non-degenerate range; binary or constant columns fall back to text chip.
+      return s.p99 !== s.p01;
+    },
+
+    _sliderTrackRange(stats) {
+      // Use 1st–99th percentile so a few outliers don't crush the useful range.
+      // Handles can still be set outside this range via the popover.
+      return { lo: stats.p01, hi: stats.p99 };
+    },
+
+    _sliderValueAt(filter, side) {
+      // What value to show on the slider for a possibly-null bound. The slider
+      // visually anchors a null bound to the track edge; on first drag it's
+      // committed as a real number via updateFilter.
+      const s = this.columnStats[filter.col];
+      if (!s || s === true || s === false) return 0;
+      const { lo, hi } = this._sliderTrackRange(s);
+      if (side === 'min') return (filter.min === null || filter.min === undefined) ? lo : filter.min;
+      return (filter.max === null || filter.max === undefined) ? hi : filter.max;
+    },
+
+    _sliderPct(filter, side) {
+      const s = this.columnStats[filter.col];
+      if (!s || s === true || s === false) return side === 'min' ? 0 : 100;
+      const { lo, hi } = this._sliderTrackRange(s);
+      const v = this._sliderValueAt(filter, side);
+      const span = hi - lo;
+      if (span <= 0) return side === 'min' ? 0 : 100;
+      const pct = (v - lo) / span * 100;
+      return Math.max(0, Math.min(100, pct));
+    },
+
+    _formatSliderValue(v) {
+      if (v === null || v === undefined || Number.isNaN(v)) return '—';
+      const abs = Math.abs(v);
+      if (abs >= 1000) return Math.round(v).toLocaleString();
+      if (abs >= 10)   return v.toFixed(1);
+      if (abs >= 1)    return v.toFixed(2);
+      return v.toFixed(4);
+    },
+
+    startSliderDrag(evt, idx, mode) {
+      // mode: 'min' | 'max' | 'pan'
+      evt.preventDefault();
+      evt.stopPropagation();
+      const f = this.filters[idx];
+      const stats = this.columnStats[f.col];
+      if (!stats || stats === true || stats === false) return;
+      const trackEl = evt.currentTarget.closest('.biv-slider-track-wrap');
+      if (!trackEl) return;
+      const r = trackEl.getBoundingClientRect();
+      this.sliderDrag = {
+        idx,
+        mode,
+        startX:    evt.clientX,
+        trackLeft: r.left,
+        trackWidth:r.width,
+        startMin:  this._sliderValueAt(f, 'min'),
+        startMax:  this._sliderValueAt(f, 'max'),
+        stats,
+      };
+      try { evt.target.setPointerCapture?.(evt.pointerId); } catch (_) {}
+    },
+
+    doSliderDrag(evt) {
+      const d = this.sliderDrag;
+      if (!d) return;
+      const { lo, hi } = this._sliderTrackRange(d.stats);
+      const valuePerPx = (hi - lo) / Math.max(1, d.trackWidth);
+      const delta = (evt.clientX - d.startX) * valuePerPx;
+      const f = this.filters[d.idx];
+      if (!f) return;
+
+      if (d.mode === 'min') {
+        const next = Math.max(lo, Math.min(d.startMax, d.startMin + delta));
+        f.min = this._roundForCol(next, d.stats);
+        if (f.max === null || f.max === undefined) f.max = d.startMax;
+      } else if (d.mode === 'max') {
+        const next = Math.max(d.startMin, Math.min(hi, d.startMax + delta));
+        f.max = this._roundForCol(next, d.stats);
+        if (f.min === null || f.min === undefined) f.min = d.startMin;
+      } else if (d.mode === 'pan') {
+        const span = d.startMax - d.startMin;
+        let candMin = d.startMin + delta;
+        let candMax = d.startMax + delta;
+        if (candMin < lo) { candMin = lo; candMax = lo + span; }
+        if (candMax > hi) { candMax = hi; candMin = hi - span; }
+        f.min = this._roundForCol(candMin, d.stats);
+        f.max = this._roundForCol(candMax, d.stats);
+      }
+    },
+
+    endSliderDrag(_evt) {
+      const d = this.sliderDrag;
+      this.sliderDrag = null;
+      if (!d) return;
+      const f = this.filters[d.idx];
+      if (!f) return;
+      // Route through updateFilter so URL syncs and sections refetch.
+      this.updateFilter(d.idx, { col: f.col, op: 'between', min: f.min, max: f.max });
+    },
+
+    _roundForCol(v, stats) {
+      // Round to a sensible precision based on column scale. Saves URLs
+      // from "vix_30d:between:18.4123459237" type noise.
+      const span = stats.p99 - stats.p01;
+      if (span >= 1000) return Math.round(v);
+      if (span >= 100)  return Math.round(v * 10) / 10;
+      if (span >= 10)   return Math.round(v * 100) / 100;
+      if (span >= 1)    return Math.round(v * 1000) / 1000;
+      return Math.round(v * 10000) / 10000;
     },
 
     // ── Chip rendering ──

@@ -187,6 +187,53 @@
     }
     .biv-filter-clear:hover { color:#ccc; }
 
+    /* Slider chip — used for between filters once column stats load */
+    .biv-slider-chip {
+      display:inline-flex; align-items:center; gap:8px;
+      background:#1a3a5c; border-radius:3px; color:#3498db;
+      padding:3px 6px 3px 9px; font-family:monospace; font-size:11px;
+      user-select:none;
+    }
+    .biv-slider-col {
+      cursor:pointer; padding:0 2px;
+      max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .biv-slider-col:hover { color:#fff; }
+    .biv-slider-track-wrap {
+      position:relative; width:140px; height:20px;
+      display:flex; align-items:center;
+      cursor:default; touch-action:none;
+    }
+    .biv-slider-track {
+      position:absolute; left:0; right:0; top:50%; height:3px;
+      transform:translateY(-50%);
+      background:#0d1f33; border-radius:2px;
+    }
+    .biv-slider-active {
+      position:absolute; top:50%; height:3px;
+      transform:translateY(-50%);
+      background:#3498db; border-radius:2px;
+      cursor:grab;
+    }
+    .biv-slider-active:active { cursor:grabbing; }
+    .biv-slider-handle {
+      position:absolute; top:50%; width:10px; height:14px;
+      transform:translate(-50%, -50%);
+      background:#3498db; border:1px solid #1a3a5c;
+      border-radius:2px; cursor:ew-resize;
+      box-shadow:0 0 0 1px rgba(0,0,0,0.4);
+    }
+    .biv-slider-handle:hover { background:#5cb0ed; }
+    .biv-slider-readout {
+      font-size:11px; color:#3498db; font-family:monospace;
+      min-width:78px; text-align:right;
+    }
+    .biv-slider-chip > .x {
+      background:none; border:none; color:#3498db; cursor:pointer;
+      padding:3px 4px; font-size:11px; opacity:.65;
+    }
+    .biv-slider-chip > .x:hover { opacity:1; color:#fff; }
+
     .biv-filter-popover {
       /* Fixed (not absolute) so the .ctrl-strip's overflow-x doesn't clip
          it. Coordinates are computed from the + Filter button's bounding
@@ -449,16 +496,47 @@
   </div>
 
   <!-- Filter chips strip — only visible when filters are active -->
-  <div class="biv-filters-strip" x-show="filters.length > 0">
+  <div class="biv-filters-strip" x-show="filters.length > 0"
+       @pointermove.window="doSliderDrag($event)"
+       @pointerup.window="endSliderDrag($event)"
+       @pointercancel.window="endSliderDrag($event)">
     <span class="ctrl-lbl">FILTERS</span>
     <template x-for="(f, idx) in filters" :key="idx">
-      <span class="biv-filter-chip">
-        <span class="body" @click="openFilterEditor(idx)"
-              x-text="formatFilterChip(f)"
-              title="click to edit"></span>
-        <button class="x" @click="removeFilter(idx)"
-                title="remove filter">✕</button>
-      </span>
+      <template x-if="_isSliderEligible(f)">
+        <!-- Slider chip: drag handles to retighten range, drag middle to pan -->
+        <span class="biv-slider-chip">
+          <span class="biv-slider-col" @click="openFilterEditor(idx)"
+                x-text="f.col" title="click to edit column / operator"></span>
+          <span class="biv-slider-track-wrap">
+            <span class="biv-slider-track"></span>
+            <span class="biv-slider-active"
+                  @pointerdown="startSliderDrag($event, idx, 'pan')"
+                  :style="`left:${_sliderPct(f, 'min')}%; right:${100 - _sliderPct(f, 'max')}%`"
+                  title="drag to pan"></span>
+            <span class="biv-slider-handle"
+                  @pointerdown="startSliderDrag($event, idx, 'min')"
+                  :style="`left:${_sliderPct(f, 'min')}%`"
+                  title="drag min"></span>
+            <span class="biv-slider-handle"
+                  @pointerdown="startSliderDrag($event, idx, 'max')"
+                  :style="`left:${_sliderPct(f, 'max')}%`"
+                  title="drag max"></span>
+          </span>
+          <span class="biv-slider-readout"
+                x-text="_formatSliderValue(_sliderValueAt(f, 'min')) + '–' + _formatSliderValue(_sliderValueAt(f, 'max'))"></span>
+          <button class="x" @click="removeFilter(idx)"
+                  title="remove filter">✕</button>
+        </span>
+      </template>
+      <template x-if="!_isSliderEligible(f)">
+        <span class="biv-filter-chip">
+          <span class="body" @click="openFilterEditor(idx)"
+                x-text="formatFilterChip(f)"
+                title="click to edit"></span>
+          <button class="x" @click="removeFilter(idx)"
+                  title="remove filter">✕</button>
+        </span>
+      </template>
     </template>
     <button class="biv-filter-clear" @click="clearFilters()"
             x-show="filters.length > 1">Clear all</button>
@@ -1335,6 +1413,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=7"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=8"></script>
 </body>
 </html>
