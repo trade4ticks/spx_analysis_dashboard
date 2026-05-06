@@ -26,7 +26,8 @@ async def _load_trades(upload_id: str, pool) -> tuple:
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT data FROM research_backtest_uploads WHERE id = $1::uuid",
+            "SELECT data, daily_paths, has_daily_paths "
+            "FROM research_backtest_uploads WHERE id = $1::uuid",
             upload_id,
         )
     if not row:
@@ -36,6 +37,27 @@ async def _load_trades(upload_id: str, pool) -> tuple:
     trades = json.loads(data) if isinstance(data, str) else data
     if not trades:
         raise HTTPException(400, "Upload has no trade data")
+
+    # Lazy-merge portfolio context features (avg per-trade P&L change over
+    # 1/3/5/10/15 trading days ending at the entry-day 3:30pm slice, plus
+    # historical percentile rank). Derived from daily_paths so it works for
+    # any Mesosim upload without re-uploading.
+    if row['has_daily_paths']:
+        from research.backtest import compute_portfolio_context_features
+        daily_raw = row['daily_paths']
+        daily_paths = (json.loads(daily_raw) if isinstance(daily_raw, str)
+                       else list(daily_raw or []))
+        if daily_paths:
+            try:
+                portfolio_features = await asyncio.to_thread(
+                    compute_portfolio_context_features, daily_paths, trades
+                )
+                for t in trades:
+                    pid = t.get('position_id')
+                    if pid and pid in portfolio_features:
+                        t.update(portfolio_features[pid])
+            except Exception as exc:
+                log.warning("portfolio context features failed for %s: %s", upload_id, exc)
 
     # IV columns = all keys not in TRADE_FIELDS
     iv_columns = sorted(

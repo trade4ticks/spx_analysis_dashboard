@@ -469,14 +469,16 @@ document.addEventListener('alpine:init', () => {
       if (c.startsWith('iv_'))          return 'iv';
       if (c.startsWith('forward_'))     return 'forward';
       if (c.startsWith('portfolio_'))   return 'portfolio';
-      if (['pnl','pnl_pct','is_win','days_in_trade'].includes(c)) return 'outcome';
+      if (c.startsWith('entry_'))       return 'entry';
+      if (['pnl','pnl_pct','is_win','days_in_trade','premium','margin_req'].includes(c))
+        return 'outcome';
       return 'other';
     },
 
     filteredColumnList() {
       const q = (this.filterEditor.colSearch || '').toLowerCase().trim();
       // Trade-side columns aren't in ivColumns; expose them as filterable too.
-      const tradeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade'];
+      const tradeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade', 'premium', 'margin_req'];
       const seen = new Set();
       const all  = [];
       for (const c of [...this.ivColumns, ...tradeCols]) {
@@ -488,7 +490,7 @@ document.addEventListener('alpine:init', () => {
         const fam = this._colFamily(c);
         (groups[fam] ||= []).push(c);
       }
-      const order = ['portfolio','outcome','vix','skew','term','convex','iv','forward','other'];
+      const order = ['portfolio','entry','outcome','vix','skew','term','convex','iv','forward','other'];
       return order
         .filter(f => groups[f]?.length)
         .map(f => ({ family: f, columns: groups[f] }));

@@ -270,6 +270,16 @@ def parse_backtest_json(content: str, skip_daily_path: bool = True) -> tuple[lis
         pnl       = _safe_float(exit_vars.get('pos_pnl', exit_vars.get('pos_realized_pnl', 0)))
         margin_req = _safe_float(enter_vars.get('pos_margin', enter_vars.get('stop_loss', 0)))
 
+        # Inception-time greeks: position's risk profile at the moment of
+        # trade entry. Same fields the EOD events carry, just sampled at
+        # the EnterPosition timestamp instead of end-of-day.
+        entry_pos_pnl   = _safe_float(enter_vars.get('pos_pnl'))
+        entry_pos_delta = _safe_float(enter_vars.get('pos_delta'))
+        entry_pos_gamma = _safe_float(enter_vars.get('pos_gamma'))
+        entry_pos_theta = _safe_float(enter_vars.get('pos_theta'))
+        entry_pos_vega  = _safe_float(enter_vars.get('pos_vega'))
+        entry_pos_wvega = _safe_float(enter_vars.get('pos_wvega'))
+
         # Premium from initial EntryTrade events (same SimTime as EnterPosition)
         enter_time = enter_event.get('SimTime', '')
         initial_entries = [t for t in entry_trades if t.get('SimTime') == enter_time]
@@ -313,18 +323,25 @@ def parse_backtest_json(content: str, skip_daily_path: bool = True) -> tuple[lis
 
         pnl_val = pnl if pnl is not None else 0.0
         trades.append({
-            'position_id':   str(pos_id),
-            'date_opened':   date_opened,
-            'date_closed':   date_closed,
-            'pnl':           round(pnl_val, 4),
-            'strategy':      strategy or 'Unknown',
-            'premium':       round(premium, 4),
-            'margin_req':    margin_req,
-            'legs':          len(initial_entries),
-            'exit_reason':   exit_reason,
-            'days_in_trade': _days_between(date_opened, date_closed),
-            'is_win':        pnl_val > 0,
-            'daily_path':    daily_path,
+            'position_id':     str(pos_id),
+            'date_opened':     date_opened,
+            'date_closed':     date_closed,
+            'pnl':             round(pnl_val, 4),
+            'strategy':        strategy or 'Unknown',
+            'premium':         round(premium, 4),
+            'margin_req':      margin_req,
+            'legs':            len(initial_entries),
+            'exit_reason':     exit_reason,
+            'days_in_trade':   _days_between(date_opened, date_closed),
+            'is_win':          pnl_val > 0,
+            'daily_path':      daily_path,
+            # Inception-time greeks (treated as feature columns downstream)
+            'entry_pos_pnl':   entry_pos_pnl,
+            'entry_pos_delta': entry_pos_delta,
+            'entry_pos_gamma': entry_pos_gamma,
+            'entry_pos_theta': entry_pos_theta,
+            'entry_pos_vega':  entry_pos_vega,
+            'entry_pos_wvega': entry_pos_wvega,
         })
 
     if not trades:
