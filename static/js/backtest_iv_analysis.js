@@ -109,12 +109,17 @@ document.addEventListener('alpine:init', () => {
 
     // Editor state for the +Filter popover (single editor instance —
     // open replaces any current draft). editIdx=null for "add", or the
-    // index of an existing filter being modified.
+    // index of an existing filter being modified. posTop/posLeft are
+    // recomputed from the +Filter button's bounding rect on open so the
+    // popover floats above the section cards instead of being clipped
+    // by .ctrl-strip's overflow-x.
     filterEditor: {
       open:      false,
       editIdx:   null,
       draft:     { col: '', op: 'between', min: '', max: '', value: '' },
       colSearch: '',
+      posTop:    0,
+      posLeft:   0,
     },
 
     // Section open/closed
@@ -337,7 +342,23 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Filter editor (popover) ──
+    _computeFilterPos() {
+      // Anchor under the + Filter button. Popover is 340px wide; clamp left
+      // edge so it can't drift off-screen on narrow viewports.
+      const btn = this.$refs.filterBtn;
+      if (!btn) return { posTop: 80, posLeft: 20 };
+      const r        = btn.getBoundingClientRect();
+      const popWidth = 340;
+      const margin   = 8;
+      let left = r.right - popWidth;             // align right edge with button's right
+      if (left < margin) left = margin;          // clamp to viewport
+      const maxLeft = (window.innerWidth || 0) - popWidth - margin;
+      if (maxLeft > 0 && left > maxLeft) left = maxLeft;
+      return { posTop: r.bottom + 4, posLeft: left };
+    },
+
     openFilterEditor(idx = null) {
+      const pos = this._computeFilterPos();
       if (typeof idx === 'number' && idx >= 0 && idx < this.filters.length) {
         const f = this.filters[idx];
         this.filterEditor = {
@@ -351,6 +372,7 @@ document.addEventListener('alpine:init', () => {
             value: (f.op !== 'between' && f.value !== null && f.value !== undefined) ? f.value : '',
           },
           colSearch: '',
+          ...pos,
         };
       } else {
         this.filterEditor = {
@@ -358,6 +380,7 @@ document.addEventListener('alpine:init', () => {
           editIdx:   null,
           draft:     { col: '', op: 'between', min: '', max: '', value: '' },
           colSearch: '',
+          ...pos,
         };
       }
     },
