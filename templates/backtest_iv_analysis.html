@@ -240,13 +240,12 @@
       padding:12px 14px;
     }
     .biv-summary-grid {
-      display:grid; grid-template-columns:1fr auto; gap:14px; align-items:flex-start;
-    }
-    @media (max-width: 1100px) {
-      .biv-summary-grid { grid-template-columns:1fr; }
+      display:flex; flex-direction:column; gap:8px;
     }
     .biv-summary-cards {
-      display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr));
+      /* Small stat cards in a single row when there's room; minmax allows
+         graceful wrap on narrower viewports. */
+      display:grid; grid-template-columns:repeat(auto-fit, minmax(105px, 1fr));
       gap:6px;
     }
     .biv-summary-cards .biv-stat {
@@ -262,18 +261,23 @@
     .biv-summary-cards .biv-stat-val.pos { color:#3498db; }
     .biv-summary-cards .biv-stat-val.neg { color:#eb40aa; }
 
+    /* Large cards row: equity / drawdown / exit reasons all share the
+       full strip width below the stat cards. */
     .biv-summary-sparks {
-      display:flex; flex-direction:column; gap:8px; min-width:280px;
+      display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;
+    }
+    @media (max-width: 800px) {
+      .biv-summary-sparks { grid-template-columns:1fr; }
     }
     .biv-spark-card {
       background:#222; border:1px solid #2a2a2a; border-radius:4px;
-      padding:7px 9px;
+      padding:7px 9px; min-width:0;
     }
     .biv-spark-label {
       font-size:10px; color:#666; font-weight:700; letter-spacing:.4px;
       margin-bottom:4px;
     }
-    .biv-spark-canvas { height:54px; position:relative; }
+    .biv-spark-canvas { height:80px; position:relative; }
     .biv-exit-card .biv-exit-list {
       display:flex; flex-direction:column; gap:2px;
       max-height:80px; overflow-y:auto;
@@ -517,13 +521,6 @@
                      x-text="summary.data.profit_factor === null ? '—'
                              : (summary.data.profit_factor === Infinity ? '∞'
                                 : summary.data.profit_factor.toFixed(2))"></div>
-              </div>
-              <div class="biv-stat" title="win_rate * avg_winner − loss_rate * |avg_loser|">
-                <div class="biv-stat-label">EXPECTANCY</div>
-                <div class="biv-stat-val"
-                     :class="summary.data.expectancy >= 0 ? 'pos' : 'neg'"
-                     x-text="summary.data.expectancy !== null
-                             ? (summary.data.expectancy >= 0 ? '+' : '') + Math.round(summary.data.expectancy).toLocaleString() : '—'"></div>
               </div>
               <div class="biv-stat">
                 <div class="biv-stat-label">AVG WINNER</div>
@@ -1338,6 +1335,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=6"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=7"></script>
 </body>
 </html>
