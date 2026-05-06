@@ -567,3 +567,115 @@ def compute_top_bottom_regimes(trades: list, iv_columns: list,
         'total_buckets_evaluated': len(all_buckets),
         'n_trades':                len(trades),
     }
+
+
+# ── Summary stats + equity / drawdown series ─────────────────────────────────
+
+def compute_summary_stats(trades: list) -> dict:
+    """Per-trade summary metrics + an equity curve and drawdown series, all
+    against the given (date- and metric-filtered) trade list.
+
+    Equity is built by summing P&L of trades sorted by date_opened. With
+    overlapping positions, this is "cumulative realised P&L by entry order"
+    — a useful headline curve, not a true mark-to-market account equity.
+    Drawdown is equity minus its running maximum.
+    """
+    n = len(trades)
+    if n == 0:
+        return {
+            'n': 0,
+            'win_rate': None, 'mean_pnl': None, 'median_pnl': None,
+            'std_pnl': None, 'profit_factor': None, 'expectancy': None,
+            'max_winner': None, 'max_loser': None,
+            'avg_winner': None, 'avg_loser': None,
+            'mean_dit':   None, 'median_dit': None,
+            'exit_reasons': [], 'equity_curve': [], 'drawdown_curve': [],
+        }
+
+    pnls = [_safe_float(t.get('pnl')) for t in trades]
+    pnls = [p for p in pnls if p is not None]
+    if not pnls:
+        return {
+            'n': n,
+            'win_rate': None, 'mean_pnl': None, 'median_pnl': None,
+            'std_pnl': None, 'profit_factor': None, 'expectancy': None,
+            'max_winner': None, 'max_loser': None,
+            'avg_winner': None, 'avg_loser': None,
+            'mean_dit':   None, 'median_dit': None,
+            'exit_reasons': [], 'equity_curve': [], 'drawdown_curve': [],
+        }
+
+    winners = [p for p in pnls if p > 0]
+    losers  = [p for p in pnls if p < 0]
+    n_pnls  = len(pnls)
+
+    win_rate   = round(len(winners) / n_pnls, 4)
+    mean_pnl   = round(statistics.mean(pnls), 2)
+    median_pnl = round(statistics.median(pnls), 2)
+    std_pnl    = round(statistics.stdev(pnls), 2) if n_pnls > 1 else 0.0
+
+    sum_w   = sum(winners)
+    sum_abs_l = abs(sum(losers))
+    profit_factor = (round(sum_w / sum_abs_l, 3)
+                     if sum_abs_l > 0 else (float('inf') if sum_w > 0 else None))
+
+    avg_winner = round(statistics.mean(winners), 2) if winners else 0.0
+    avg_loser  = round(statistics.mean(losers),  2) if losers  else 0.0
+    expectancy = round(win_rate * avg_winner + (1 - win_rate) * avg_loser, 2)
+
+    max_winner = round(max(pnls), 2)
+    max_loser  = round(min(pnls), 2)
+
+    dits = [_safe_float(t.get('days_in_trade')) for t in trades]
+    dits = [d for d in dits if d is not None]
+    mean_dit   = round(statistics.mean(dits), 1)   if dits else None
+    median_dit = round(statistics.median(dits), 1) if dits else None
+
+    # Exit-reason breakdown (% of trades per category, sorted desc).
+    exit_counts: dict = {}
+    for t in trades:
+        reason = (t.get('exit_reason') or 'Unknown').strip() or 'Unknown'
+        exit_counts[reason] = exit_counts.get(reason, 0) + 1
+    exit_reasons = sorted(
+        ({'reason': r, 'n': c, 'pct': round(c / n, 4)}
+         for r, c in exit_counts.items()),
+        key=lambda x: -x['n'],
+    )
+
+    # Equity / drawdown — sort by date_opened (then date_closed for stable
+    # ordering of same-day entries). Trades without date_opened are skipped
+    # from the curve but still counted in the per-trade stats above.
+    sortable = [t for t in trades if t.get('date_opened')]
+    sortable.sort(key=lambda t: (t.get('date_opened') or '', t.get('date_closed') or ''))
+    equity_curve: list = []
+    drawdown_curve: list = []
+    cum   = 0.0
+    peak  = 0.0
+    for t in sortable:
+        p = _safe_float(t.get('pnl'))
+        if p is None:
+            continue
+        cum += p
+        peak = max(peak, cum)
+        dd  = cum - peak  # ≤ 0
+        equity_curve.append(  {'date': t['date_opened'], 'equity':   round(cum, 2)})
+        drawdown_curve.append({'date': t['date_opened'], 'drawdown': round(dd,  2)})
+
+    return {
+        'n':            n,
+        'win_rate':     win_rate,
+        'mean_pnl':     mean_pnl,
+        'median_pnl':   median_pnl,
+        'std_pnl':      std_pnl,
+        'profit_factor': profit_factor,
+        'expectancy':   expectancy,
+        'max_winner':   max_winner,
+        'max_loser':    max_loser,
+        'avg_winner':   avg_winner,
+        'avg_loser':    avg_loser,
+        'mean_dit':     mean_dit,
+        'median_dit':   median_dit,
+        'exit_reasons': exit_reasons,
+        'equity_curve': equity_curve,
+        'drawdown_curve': drawdown_curve,
+    }

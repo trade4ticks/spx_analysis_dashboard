@@ -233,6 +233,57 @@
     .biv-filter-err {
       font-size:11px; color:#e74c3c; margin-top:8px; min-height:14px;
     }
+
+    /* Summary stats strip */
+    .biv-summary {
+      border:1px solid #2a2a2a; border-radius:6px; background:#1a1a1a;
+      padding:12px 14px;
+    }
+    .biv-summary-grid {
+      display:grid; grid-template-columns:1fr auto; gap:14px; align-items:flex-start;
+    }
+    @media (max-width: 1100px) {
+      .biv-summary-grid { grid-template-columns:1fr; }
+    }
+    .biv-summary-cards {
+      display:grid; grid-template-columns:repeat(auto-fill, minmax(110px, 1fr));
+      gap:6px;
+    }
+    .biv-summary-cards .biv-stat {
+      background:#222; border:1px solid #2a2a2a; border-radius:4px;
+      padding:7px 9px; display:flex; flex-direction:column; gap:2px;
+    }
+    .biv-summary-cards .biv-stat-label {
+      font-size:10px; color:#666; font-weight:700; letter-spacing:.4px;
+    }
+    .biv-summary-cards .biv-stat-val {
+      font-size:14px; color:#ccc; font-weight:700; font-family:monospace;
+    }
+    .biv-summary-cards .biv-stat-val.pos { color:#3498db; }
+    .biv-summary-cards .biv-stat-val.neg { color:#eb40aa; }
+
+    .biv-summary-sparks {
+      display:flex; flex-direction:column; gap:8px; min-width:280px;
+    }
+    .biv-spark-card {
+      background:#222; border:1px solid #2a2a2a; border-radius:4px;
+      padding:7px 9px;
+    }
+    .biv-spark-label {
+      font-size:10px; color:#666; font-weight:700; letter-spacing:.4px;
+      margin-bottom:4px;
+    }
+    .biv-spark-canvas { height:54px; position:relative; }
+    .biv-exit-card .biv-exit-list {
+      display:flex; flex-direction:column; gap:2px;
+      max-height:80px; overflow-y:auto;
+    }
+    .biv-exit-row {
+      display:flex; justify-content:space-between; align-items:baseline;
+      font-size:11px; font-family:monospace; gap:10px;
+    }
+    .biv-exit-name { color:#aaa; }
+    .biv-exit-pct  { color:#3498db; font-weight:700; }
   </style>
 </head>
 <body x-data="bivApp()">
@@ -419,6 +470,123 @@
     </template>
 
     <div class="biv-main" x-show="selectedId">
+
+      <!-- ── Summary stats strip ─────────────────────────────────────────── -->
+      <div class="biv-summary"
+           x-show="summary.data || summary.loading || summary.error">
+        <template x-if="summary.error">
+          <div class="biv-error" x-text="summary.error"></div>
+        </template>
+        <template x-if="summary.data">
+          <div class="biv-summary-grid">
+            <!-- Stat cards -->
+            <div class="biv-summary-cards">
+              <div class="biv-stat">
+                <div class="biv-stat-label">TRADES</div>
+                <div class="biv-stat-val" x-text="summary.data.n"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">WIN RATE</div>
+                <div class="biv-stat-val"
+                     x-text="summary.data.win_rate !== null
+                             ? (summary.data.win_rate * 100).toFixed(1) + '%' : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">MEAN P&amp;L</div>
+                <div class="biv-stat-val"
+                     :class="summary.data.mean_pnl >= 0 ? 'pos' : 'neg'"
+                     x-text="summary.data.mean_pnl !== null
+                             ? (summary.data.mean_pnl >= 0 ? '+' : '') + Math.round(summary.data.mean_pnl).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">MEDIAN P&amp;L</div>
+                <div class="biv-stat-val"
+                     :class="summary.data.median_pnl >= 0 ? 'pos' : 'neg'"
+                     x-text="summary.data.median_pnl !== null
+                             ? (summary.data.median_pnl >= 0 ? '+' : '') + Math.round(summary.data.median_pnl).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">STD</div>
+                <div class="biv-stat-val"
+                     x-text="summary.data.std_pnl !== null ? Math.round(summary.data.std_pnl).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat" title="Σ winners ÷ |Σ losers|. >1.5 solid, >2.0 strong.">
+                <div class="biv-stat-label">PROFIT FACTOR</div>
+                <div class="biv-stat-val"
+                     :class="summary.data.profit_factor >= 1 ? 'pos' : 'neg'"
+                     x-text="summary.data.profit_factor === null ? '—'
+                             : (summary.data.profit_factor === Infinity ? '∞'
+                                : summary.data.profit_factor.toFixed(2))"></div>
+              </div>
+              <div class="biv-stat" title="win_rate * avg_winner − loss_rate * |avg_loser|">
+                <div class="biv-stat-label">EXPECTANCY</div>
+                <div class="biv-stat-val"
+                     :class="summary.data.expectancy >= 0 ? 'pos' : 'neg'"
+                     x-text="summary.data.expectancy !== null
+                             ? (summary.data.expectancy >= 0 ? '+' : '') + Math.round(summary.data.expectancy).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">AVG WINNER</div>
+                <div class="biv-stat-val pos"
+                     x-text="summary.data.avg_winner !== null
+                             ? '+' + Math.round(summary.data.avg_winner).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">AVG LOSER</div>
+                <div class="biv-stat-val neg"
+                     x-text="summary.data.avg_loser !== null
+                             ? Math.round(summary.data.avg_loser).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">MAX WINNER</div>
+                <div class="biv-stat-val pos"
+                     x-text="summary.data.max_winner !== null
+                             ? '+' + Math.round(summary.data.max_winner).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">MAX LOSER</div>
+                <div class="biv-stat-val neg"
+                     x-text="summary.data.max_loser !== null
+                             ? Math.round(summary.data.max_loser).toLocaleString() : '—'"></div>
+              </div>
+              <div class="biv-stat">
+                <div class="biv-stat-label">DIT (mean / med)</div>
+                <div class="biv-stat-val"
+                     x-text="summary.data.mean_dit !== null
+                             ? summary.data.mean_dit + ' / ' + summary.data.median_dit : '—'"></div>
+              </div>
+            </div>
+
+            <!-- Equity + drawdown sparklines + exit reasons -->
+            <div class="biv-summary-sparks">
+              <div class="biv-spark-card" title="Cumulative realised P&L by entry order.&#10;Not a true mark-to-market account equity when positions overlap.">
+                <div class="biv-spark-label">EQUITY</div>
+                <div class="biv-spark-canvas">
+                  <canvas id="summary-equity-chart"></canvas>
+                </div>
+              </div>
+              <div class="biv-spark-card" title="Equity minus its running max.&#10;Caveat: misleading when positions overlap heavily.">
+                <div class="biv-spark-label">DRAWDOWN</div>
+                <div class="biv-spark-canvas">
+                  <canvas id="summary-drawdown-chart"></canvas>
+                </div>
+              </div>
+              <div class="biv-spark-card biv-exit-card">
+                <div class="biv-spark-label">EXIT REASONS</div>
+                <div class="biv-exit-list">
+                  <template x-for="er in summary.data.exit_reasons" :key="er.reason">
+                    <div class="biv-exit-row">
+                      <span class="biv-exit-name" x-text="er.reason"></span>
+                      <span class="biv-exit-pct"
+                            x-text="(er.pct * 100).toFixed(1) + '%'"></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
 
       <!-- ── S0: IV Correlation Overview ─────────────────────────────────── -->
       <div class="biv-section">
@@ -1170,6 +1338,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=5"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=6"></script>
 </body>
 </html>

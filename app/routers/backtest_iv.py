@@ -271,6 +271,19 @@ async def get_columns(upload_id: str, pool=Depends(get_pool)):
     return {'iv_columns': iv_columns, 'trade_count': len(trades)}
 
 
+class SummaryRequest(_DateFilterMixin):
+    pass
+
+
+@router.post("/{upload_id}/summary")
+async def summary(upload_id: str, req: SummaryRequest, pool=Depends(get_pool)):
+    trades, _ = await _load_trades(upload_id, pool)
+    trades = _apply_filters(trades, req.date_from, req.date_to, req.filters)
+    if not trades:
+        raise HTTPException(400, "No trades after filters")
+    return await asyncio.to_thread(iv.compute_summary_stats, trades)
+
+
 @router.post("/{upload_id}/heatmap")
 async def heatmap(upload_id: str, req: HeatmapRequest, pool=Depends(get_pool)):
     if req.n_buckets not in (3, 5, 10):

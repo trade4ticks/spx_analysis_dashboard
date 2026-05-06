@@ -125,6 +125,12 @@ document.addEventListener('alpine:init', () => {
     // Section open/closed
     open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
 
+    // ── Summary stats strip (above S0) ──
+    summary: {
+      data: null, loading: false, error: null,
+      _equityChart: null, _ddChart: null,
+    },
+
     // ── Section 0: Correlation Overview ──
     s0: {
       target: 'pnl',
@@ -252,7 +258,8 @@ document.addEventListener('alpine:init', () => {
         this.globalError = e.message;
         return;
       }
-      // Auto-load Sections 0 and 8
+      // Auto-load summary, S0, S8
+      this.loadSummary();
       this.loadCorrelationOverview();
       this.loadTopBottom();
     },
@@ -266,10 +273,12 @@ document.addEventListener('alpine:init', () => {
       }
       this.globalError = null;
       // Invalidate every section's cached result — user must recompute
+      this.summary.data = null;
       this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
       this.s7.data = null; this.s8.data = null;
       // Auto-loaded sections refresh; filteredTradeCount comes from S8 response.
+      this.loadSummary();
       this.loadCorrelationOverview();
       this.loadTopBottom();
     },
@@ -335,9 +344,11 @@ document.addEventListener('alpine:init', () => {
       // Same invalidation pattern as applyDateFilter — keeps the two filter
       // axes (date + metric) behaving identically from the user's POV.
       this.globalError = null;
+      this.summary.data = null;
       this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
       this.s4.data = null; this.s5.data = null; this.s6.data = null;
       this.s7.data = null; this.s8.data = null;
+      this.loadSummary();
       this.loadCorrelationOverview();
       this.loadTopBottom();
     },
@@ -600,6 +611,88 @@ document.addEventListener('alpine:init', () => {
         }
         return r.json();
       });
+    },
+
+    // ── Summary strip (stat cards + equity / drawdown sparklines) ──
+    async loadSummary() {
+      if (!this.selectedId) return;
+      this.summary.loading = true; this.summary.error = null;
+      try {
+        const data = await this._api('summary', {});
+        this.summary.data = data;
+        if (typeof data?.n === 'number') this.filteredTradeCount = data.n;
+        await this.$nextTick();
+        this._renderSummaryCharts();
+      } catch (e) {
+        this.summary.error = e.message;
+      } finally {
+        this.summary.loading = false;
+      }
+    },
+
+    _renderSummaryCharts() {
+      this.summary._equityChart = this._destroyChart(this.summary._equityChart);
+      this.summary._ddChart     = this._destroyChart(this.summary._ddChart);
+
+      const eq = this.summary.data?.equity_curve   || [];
+      const dd = this.summary.data?.drawdown_curve || [];
+      if (!eq.length) return;
+
+      const sparkOpts = {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: 'rgba(20,20,20,0.95)',
+            borderColor: '#444', borderWidth: 1,
+            displayColors: false,
+            callbacks: {
+              title: items => items[0].label,
+              label: ctx => (ctx.parsed.y >= 0 ? '+' : '') + ctx.parsed.y.toFixed(0),
+            },
+          },
+        },
+        scales: {
+          x: { display: false },
+          y: { ticks: { color: '#666', font: { size: 9 }, maxTicksLimit: 3 },
+                grid: { color: 'rgba(255,255,255,0.04)' }, border: { display: false } },
+        },
+        elements: { point: { radius: 0, hitRadius: 6, hoverRadius: 3 } },
+      };
+
+      const eqEl = document.getElementById('summary-equity-chart');
+      if (eqEl) {
+        this.summary._equityChart = new Chart(eqEl.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: eq.map(p => p.date),
+            datasets: [{
+              data: eq.map(p => p.equity),
+              borderColor: 'rgba(52,152,219,0.95)',
+              backgroundColor: 'rgba(52,152,219,0.10)',
+              borderWidth: 1.6, fill: true, tension: 0.18,
+            }],
+          },
+          options: sparkOpts,
+        });
+      }
+
+      const ddEl = document.getElementById('summary-drawdown-chart');
+      if (ddEl) {
+        this.summary._ddChart = new Chart(ddEl.getContext('2d'), {
+          type: 'line',
+          data: {
+            labels: dd.map(p => p.date),
+            datasets: [{
+              data: dd.map(p => p.drawdown),
+              borderColor: 'rgba(220,60,155,0.95)',
+              backgroundColor: 'rgba(220,60,155,0.12)',
+              borderWidth: 1.6, fill: true, tension: 0.18,
+            }],
+          },
+          options: sparkOpts,
+        });
+      }
     },
 
     // ── Section 0: Correlation Overview ──
