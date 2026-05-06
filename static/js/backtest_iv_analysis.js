@@ -101,6 +101,12 @@ document.addEventListener('alpine:init', () => {
     // Bin mode: 'recompute' (default) or 'fixed' (use full-upload boundaries)
     binMode:          'recompute',
 
+    // Metric filters. Each entry: {col, op, min?, max?, value?}.
+    //   op = 'between'  → uses min and/or max (either may be null for one-sided)
+    //   op = 'gte'/'lte'/'gt'/'lt'/'eq' → uses value
+    // Applied in addition to the date filter; same invalidation behaviour.
+    filters:          [],
+
     // Section open/closed
     open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
 
@@ -171,6 +177,13 @@ document.addEventListener('alpine:init', () => {
       this.s2.ms = makeMultiSelect(20);
       this.s7.ms = makeMultiSelect(25);
       await this.loadUploads();
+      // URL-supplied filters apply to whichever upload was auto-selected.
+      // selectUpload() clears filters as part of the reset, so we restore here.
+      const initial = this._readFiltersFromUrl();
+      if (initial.length) {
+        this.filters = initial;
+        this.applyFilters();
+      }
     },
 
     async loadUploads() {
@@ -208,6 +221,12 @@ document.addEventListener('alpine:init', () => {
       // Reset multi-selects
       if (this.s2.ms) this.s2.ms.clear();
       if (this.s7.ms) this.s7.ms.clear();
+      // Different upload, different feature columns — drop any active filters
+      // and clear the URL's f= params.
+      if (this.filters.length) {
+        this.filters = [];
+        this._writeFiltersToUrl();
+      }
 
       try {
         const r   = await fetch(`/api/backtest-iv/${id}/columns`);
@@ -258,6 +277,139 @@ document.addEventListener('alpine:init', () => {
              (this.dateTo   && this.dateTo   !== this.fullRangeTo);
     },
 
+    get _hasMetricFilters() {
+      return this.filters.length > 0;
+    },
+
+    // ── Metric filters ──
+    addFilter(clause) {
+      const norm = this._normaliseFilter(clause);
+      if (!norm) return;
+      this.filters = [...this.filters, norm];
+      this._writeFiltersToUrl();
+      this.applyFilters();
+    },
+
+    updateFilter(idx, clause) {
+      if (idx < 0 || idx >= this.filters.length) return;
+      const norm = this._normaliseFilter(clause);
+      if (!norm) return;
+      const next = this.filters.slice();
+      next[idx] = norm;
+      this.filters = next;
+      this._writeFiltersToUrl();
+      this.applyFilters();
+    },
+
+    removeFilter(idx) {
+      if (idx < 0 || idx >= this.filters.length) return;
+      this.filters = this.filters.filter((_, i) => i !== idx);
+      this._writeFiltersToUrl();
+      this.applyFilters();
+    },
+
+    clearFilters() {
+      if (!this.filters.length) return;
+      this.filters = [];
+      this._writeFiltersToUrl();
+      this.applyFilters();
+    },
+
+    applyFilters() {
+      // Same invalidation pattern as applyDateFilter — keeps the two filter
+      // axes (date + metric) behaving identically from the user's POV.
+      this.globalError = null;
+      this.s0.data = null; this.s1.data = null; this.s2.data = null; this.s3.data = null;
+      this.s4.data = null; this.s5.data = null; this.s6.data = null;
+      this.s7.data = null; this.s8.data = null;
+      this.loadCorrelationOverview();
+      this.loadTopBottom();
+    },
+
+    _normaliseFilter(c) {
+      if (!c || typeof c !== 'object') return null;
+      const col = c.col;
+      const op  = c.op;
+      if (!col || !op) return null;
+      if (op === 'between') {
+        const lo = (c.min === '' || c.min === undefined) ? null
+                 : (c.min === null ? null : Number(c.min));
+        const hi = (c.max === '' || c.max === undefined) ? null
+                 : (c.max === null ? null : Number(c.max));
+        if (lo === null && hi === null) return null;
+        if ((lo !== null && Number.isNaN(lo)) || (hi !== null && Number.isNaN(hi))) return null;
+        return { col, op: 'between', min: lo, max: hi };
+      }
+      if (['gte', 'lte', 'gt', 'lt', 'eq'].includes(op)) {
+        const v = (c.value === '' || c.value === undefined || c.value === null)
+                ? null : Number(c.value);
+        if (v === null || Number.isNaN(v)) return null;
+        return { col, op, value: v };
+      }
+      return null;
+    },
+
+    // ── Filter URL serialization ──
+    // Format: ?f=col:op:arg1:arg2 (repeated). Matches the backend parser.
+    _filterToParam(f) {
+      if (!f) return null;
+      if (f.op === 'between') {
+        const lo = (f.min === null || f.min === undefined) ? '' : String(f.min);
+        const hi = (f.max === null || f.max === undefined) ? '' : String(f.max);
+        return `${f.col}:between:${lo}:${hi}`;
+      }
+      if (['gte', 'lte', 'gt', 'lt', 'eq'].includes(f.op)) {
+        return `${f.col}:${f.op}:${f.value}`;
+      }
+      return null;
+    },
+
+    _filterFromParam(s) {
+      if (!s) return null;
+      const parts = String(s).split(':');
+      if (parts.length < 3) return null;
+      const [col, op] = parts;
+      if (op === 'between') {
+        if (parts.length < 4) return null;
+        const lo = parts[2] === '' ? null : Number(parts[2]);
+        const hi = parts[3] === '' ? null : Number(parts[3]);
+        if (lo === null && hi === null) return null;
+        if ((lo !== null && Number.isNaN(lo)) || (hi !== null && Number.isNaN(hi))) return null;
+        return { col, op: 'between', min: lo, max: hi };
+      }
+      if (['gte', 'lte', 'gt', 'lt', 'eq'].includes(op)) {
+        const v = parts[2] === '' ? null : Number(parts[2]);
+        if (v === null || Number.isNaN(v)) return null;
+        return { col, op, value: v };
+      }
+      return null;
+    },
+
+    _readFiltersFromUrl() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        return params.getAll('f')
+          .map(s => this._filterFromParam(s))
+          .filter(Boolean);
+      } catch (_) {
+        return [];
+      }
+    },
+
+    _writeFiltersToUrl() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        params.delete('f');
+        for (const f of this.filters) {
+          const s = this._filterToParam(f);
+          if (s) params.append('f', s);
+        }
+        const qs = params.toString();
+        const next = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+        window.history.replaceState(null, '', next);
+      } catch (_) { /* URL APIs unavailable — silently no-op */ }
+    },
+
     // ── Helpers ──
     _api(path, body) {
       const isPost = body !== undefined;
@@ -269,11 +421,16 @@ document.addEventListener('alpine:init', () => {
         if (this.dateFrom) payload.date_from = this.dateFrom;
         if (this.dateTo)   payload.date_to   = this.dateTo;
         if (this.binMode === 'fixed') payload.bin_mode = 'fixed';
+        if (this.filters.length) payload.filters = this.filters;
       } else {
         const params = new URLSearchParams();
         if (this.dateFrom) params.set('date_from', this.dateFrom);
         if (this.dateTo)   params.set('date_to',   this.dateTo);
         if (this.binMode === 'fixed') params.set('bin_mode', 'fixed');
+        for (const f of this.filters) {
+          const s = this._filterToParam(f);
+          if (s) params.append('f', s);
+        }
         const qs = params.toString();
         if (qs) url += '?' + qs;
       }
@@ -301,6 +458,10 @@ document.addEventListener('alpine:init', () => {
         params.set('target', this.s0.target);
         if (this.dateFrom) params.set('date_from', this.dateFrom);
         if (this.dateTo)   params.set('date_to',   this.dateTo);
+        for (const f of this.filters) {
+          const s = this._filterToParam(f);
+          if (s) params.append('f', s);
+        }
         const r = await fetch(
           `/api/backtest-iv/${this.selectedId}/correlation-overview?${params}`);
         if (!r.ok) {
