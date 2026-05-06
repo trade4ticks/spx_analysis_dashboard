@@ -98,8 +98,10 @@ document.addEventListener('alpine:init', () => {
     dateTo:           null,
     filteredTradeCount: 0,
 
-    // Bin mode: 'recompute' (default) or 'fixed' (use full-upload boundaries)
-    binMode:          'recompute',
+    // Bin mode: 'fixed' (default — use full-upload boundaries so deciles
+    // mean the same thing across filter slices) or 'recompute' (boundaries
+    // from the filtered subset).
+    binMode:          'fixed',
 
     // Metric filters. Each entry: {col, op, min?, max?, value?}.
     //   op = 'between'  → uses min and/or max (either may be null for one-sided)
@@ -425,6 +427,7 @@ document.addEventListener('alpine:init', () => {
           colSearch: '',
           ...pos,
         };
+        this._ensureOneColStat(f.col);
       } else {
         this.filterEditor = {
           open:      true,
@@ -513,6 +516,10 @@ document.addEventListener('alpine:init', () => {
       for (const col of cols) {
         if (!(col in this.columnStats)) this._fetchColumnStats(col);
       }
+    },
+
+    _ensureOneColStat(col) {
+      if (col && !(col in this.columnStats)) this._fetchColumnStats(col);
     },
 
     // ── Slider chip helpers ──
@@ -742,13 +749,13 @@ document.addEventListener('alpine:init', () => {
         payload = { ...body };
         if (this.dateFrom) payload.date_from = this.dateFrom;
         if (this.dateTo)   payload.date_to   = this.dateTo;
-        if (this.binMode === 'fixed') payload.bin_mode = 'fixed';
+        payload.bin_mode = this.binMode;
         if (this.filters.length) payload.filters = this.filters;
       } else {
         const params = new URLSearchParams();
         if (this.dateFrom) params.set('date_from', this.dateFrom);
         if (this.dateTo)   params.set('date_to',   this.dateTo);
-        if (this.binMode === 'fixed') params.set('bin_mode', 'fixed');
+        params.set('bin_mode', this.binMode);
         for (const f of this.filters) {
           const s = this._filterToParam(f);
           if (s) params.append('f', s);

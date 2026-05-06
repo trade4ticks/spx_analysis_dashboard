@@ -280,6 +280,18 @@
     .biv-filter-err {
       font-size:11px; color:#e74c3c; margin-top:8px; min-height:14px;
     }
+    .biv-filter-rangehint {
+      margin-top:6px; padding:6px 8px;
+      background:#1a1a1a; border:1px solid #2a2a2a; border-radius:3px;
+      font-size:11px; font-family:monospace; color:#aaa;
+      display:flex; flex-direction:column; gap:2px;
+    }
+    .biv-filter-rangehint .dim {
+      color:#555; margin-right:4px;
+    }
+    .biv-filter-rangehint .dim + span {
+      margin-right:6px;
+    }
 
     /* Summary stats strip */
     .biv-summary {
@@ -396,11 +408,11 @@
     </template>
     <template x-if="uploadInfo">
       <span style="display:flex;gap:6px;align-items:center;margin-left:14px"
-            title="Recompute: bin boundaries from filtered trades.&#10;Fixed: bin boundaries from the full upload (filtered trades dropped into those bins).">
+            title="Fixed: bin boundaries from the full upload (filtered trades dropped into those bins). D10 means the same threshold across slices.&#10;Recompute: bin boundaries from the filtered subset only.">
         <span style="font-size:11px;color:#666;letter-spacing:.3px">BINS</span>
         <div class="biv-toggle">
-          <button :class="{on: binMode==='recompute'}" @click="setBinMode('recompute')">Recompute</button>
           <button :class="{on: binMode==='fixed'}"     @click="setBinMode('fixed')">Fixed</button>
+          <button :class="{on: binMode==='recompute'}" @click="setBinMode('recompute')">Recompute</button>
         </div>
       </span>
     </template>
@@ -428,7 +440,7 @@
                 <template x-for="c in grp.columns" :key="c">
                   <div class="biv-filter-coloption"
                        :class="{selected: c === filterEditor.draft.col}"
-                       @click="filterEditor.draft.col = c"
+                       @click="filterEditor.draft.col = c; _ensureOneColStat(c)"
                        x-text="c"></div>
                 </template>
               </div>
@@ -439,6 +451,32 @@
               </div>
             </template>
           </div>
+
+          <!-- Range hint for the selected column — helps the user pick
+               sensible min/max values without guessing the column's scale. -->
+          <template x-if="filterEditor.draft.col && columnStats[filterEditor.draft.col]
+                          && columnStats[filterEditor.draft.col] !== true
+                          && columnStats[filterEditor.draft.col] !== false">
+            <div class="biv-filter-rangehint">
+              <div>
+                <span class="dim">range</span>
+                <span x-text="_formatSliderValue(columnStats[filterEditor.draft.col].min)"></span>
+                …
+                <span x-text="_formatSliderValue(columnStats[filterEditor.draft.col].max)"></span>
+              </div>
+              <div>
+                <span class="dim">typical (p5–p95)</span>
+                <span x-text="_formatSliderValue(columnStats[filterEditor.draft.col].p05)"></span>
+                …
+                <span x-text="_formatSliderValue(columnStats[filterEditor.draft.col].p95)"></span>
+                <span class="dim">median</span>
+                <span x-text="_formatSliderValue(columnStats[filterEditor.draft.col].p50)"></span>
+              </div>
+            </div>
+          </template>
+          <template x-if="filterEditor.draft.col && columnStats[filterEditor.draft.col] === null">
+            <div class="biv-filter-rangehint" style="opacity:0.5">loading range…</div>
+          </template>
 
           <label class="lbl-spaced">Operator</label>
           <div class="biv-toggle biv-filter-toggle">
@@ -1413,6 +1451,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=8"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=9"></script>
 </body>
 </html>
