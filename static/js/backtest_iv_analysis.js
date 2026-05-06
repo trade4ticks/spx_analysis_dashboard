@@ -107,6 +107,16 @@ document.addEventListener('alpine:init', () => {
     // Applied in addition to the date filter; same invalidation behaviour.
     filters:          [],
 
+    // Editor state for the +Filter popover (single editor instance —
+    // open replaces any current draft). editIdx=null for "add", or the
+    // index of an existing filter being modified.
+    filterEditor: {
+      open:      false,
+      editIdx:   null,
+      draft:     { col: '', op: 'between', min: '', max: '', value: '' },
+      colSearch: '',
+    },
+
     // Section open/closed
     open: { s0: true, s1: true, s2: true, s3: true, s4: false, s5: false, s6: false, s7: false, s8: true },
 
@@ -324,6 +334,102 @@ document.addEventListener('alpine:init', () => {
       this.s7.data = null; this.s8.data = null;
       this.loadCorrelationOverview();
       this.loadTopBottom();
+    },
+
+    // ── Filter editor (popover) ──
+    openFilterEditor(idx = null) {
+      if (typeof idx === 'number' && idx >= 0 && idx < this.filters.length) {
+        const f = this.filters[idx];
+        this.filterEditor = {
+          open:      true,
+          editIdx:   idx,
+          draft: {
+            col:   f.col,
+            op:    f.op,
+            min:   (f.op === 'between' && f.min !== null && f.min !== undefined) ? f.min : '',
+            max:   (f.op === 'between' && f.max !== null && f.max !== undefined) ? f.max : '',
+            value: (f.op !== 'between' && f.value !== null && f.value !== undefined) ? f.value : '',
+          },
+          colSearch: '',
+        };
+      } else {
+        this.filterEditor = {
+          open:      true,
+          editIdx:   null,
+          draft:     { col: '', op: 'between', min: '', max: '', value: '' },
+          colSearch: '',
+        };
+      }
+    },
+
+    closeFilterEditor() {
+      this.filterEditor.open = false;
+    },
+
+    submitFilterEditor() {
+      if (!this._filterDraftValid()) return;
+      const draft = this.filterEditor.draft;
+      const idx   = this.filterEditor.editIdx;
+      this.closeFilterEditor();
+      if (idx !== null) {
+        this.updateFilter(idx, draft);
+      } else {
+        this.addFilter(draft);
+      }
+    },
+
+    _filterDraftValid() {
+      return this._normaliseFilter(this.filterEditor.draft) !== null;
+    },
+
+    // ── Column grouping for the editor's dropdown ──
+    _colFamily(c) {
+      if (!c) return 'other';
+      if (c.startsWith('vix_'))         return 'vix';
+      if (c.startsWith('skew_'))        return 'skew';
+      if (c.startsWith('term_'))        return 'term';
+      if (c.startsWith('convex_'))      return 'convex';
+      if (c.startsWith('iv_'))          return 'iv';
+      if (c.startsWith('forward_'))     return 'forward';
+      if (c.startsWith('portfolio_'))   return 'portfolio';
+      if (['pnl','pnl_pct','is_win','days_in_trade'].includes(c)) return 'outcome';
+      return 'other';
+    },
+
+    filteredColumnList() {
+      const q = (this.filterEditor.colSearch || '').toLowerCase().trim();
+      // Trade-side columns aren't in ivColumns; expose them as filterable too.
+      const tradeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade'];
+      const seen = new Set();
+      const all  = [];
+      for (const c of [...this.ivColumns, ...tradeCols]) {
+        if (!seen.has(c)) { seen.add(c); all.push(c); }
+      }
+      const matched = q ? all.filter(c => c.toLowerCase().includes(q)) : all;
+      const groups  = {};
+      for (const c of matched) {
+        const fam = this._colFamily(c);
+        (groups[fam] ||= []).push(c);
+      }
+      const order = ['portfolio','outcome','vix','skew','term','convex','iv','forward','other'];
+      return order
+        .filter(f => groups[f]?.length)
+        .map(f => ({ family: f, columns: groups[f] }));
+    },
+
+    // ── Chip rendering ──
+    formatFilterChip(f) {
+      if (!f || !f.col) return '';
+      if (f.op === 'between') {
+        const lo = (f.min === null || f.min === undefined) ? null : f.min;
+        const hi = (f.max === null || f.max === undefined) ? null : f.max;
+        if (lo !== null && hi !== null) return `${f.col} ∈ [${lo}, ${hi}]`;
+        if (lo !== null) return `${f.col} ≥ ${lo}`;
+        if (hi !== null) return `${f.col} ≤ ${hi}`;
+        return f.col;
+      }
+      const sym = { gte: '≥', lte: '≤', gt: '>', lt: '<', eq: '=' }[f.op] || f.op;
+      return `${f.col} ${sym} ${f.value}`;
     },
 
     _normaliseFilter(c) {

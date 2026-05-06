@@ -160,6 +160,74 @@
     }
     .biv-bucket-radio input[type=radio]:checked + span { color:#3498db; }
     .biv-bucket-radio label.active { border-color:#3498db; color:#3498db; background:#1a3a5c22; }
+
+    /* Metric filter chips + popover */
+    .biv-filters-strip {
+      display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+      padding:7px 22px; background:#181818;
+      border-bottom:1px solid #222; font-size:12px;
+    }
+    .biv-filter-chip {
+      display:inline-flex; align-items:center;
+      background:#1a3a5c; border-radius:3px;
+      font-family:monospace; font-size:12px; color:#3498db;
+    }
+    .biv-filter-chip > .body {
+      padding:3px 6px 3px 9px; cursor:pointer;
+    }
+    .biv-filter-chip > .body:hover { color:#fff; }
+    .biv-filter-chip > .x {
+      background:none; border:none; color:#3498db; cursor:pointer;
+      padding:3px 8px 3px 4px; font-size:11px; opacity:.65;
+    }
+    .biv-filter-chip > .x:hover { opacity:1; color:#fff; }
+    .biv-filter-clear {
+      background:none; border:none; color:#666; cursor:pointer;
+      font-size:11px; padding:2px 8px; margin-left:6px; letter-spacing:.3px;
+    }
+    .biv-filter-clear:hover { color:#ccc; }
+
+    .biv-filter-popover {
+      position:absolute; top:calc(100% + 4px); right:0;
+      background:#222; border:1px solid #444; border-radius:4px;
+      padding:14px; width:340px; z-index:100;
+      box-shadow:0 6px 18px rgba(0,0,0,0.7);
+    }
+    .biv-filter-popover label {
+      display:block; font-size:11px; color:#666; font-weight:700;
+      letter-spacing:.4px; margin:0 0 4px;
+    }
+    .biv-filter-popover label.lbl-spaced { margin-top:12px; }
+    .biv-filter-input {
+      background:#1a1a1a; border:1px solid #3a3a3a; color:#ccc;
+      padding:5px 8px; border-radius:3px; font-size:12px;
+      font-family:inherit; box-sizing:border-box;
+    }
+    .biv-filter-input:focus { outline:none; border-color:#3498db; }
+    .biv-filter-collist {
+      max-height:170px; overflow-y:auto;
+      background:#1a1a1a; border:1px solid #2a2a2a; border-radius:3px;
+      margin-top:4px;
+    }
+    .biv-filter-fam {
+      font-size:10px; font-weight:700; color:#666; padding:5px 10px 2px;
+      text-transform:uppercase; letter-spacing:.5px;
+      background:#1f1f1f; position:sticky; top:0;
+    }
+    .biv-filter-coloption {
+      padding:4px 12px; font-size:12px; font-family:monospace;
+      color:#aaa; cursor:pointer;
+    }
+    .biv-filter-coloption:hover { background:#2a2a2a; color:#fff; }
+    .biv-filter-coloption.selected { background:#1a3a5c; color:#3498db; }
+    .biv-filter-toggle button {
+      padding:5px 10px; font-size:12px; font-weight:700; cursor:pointer;
+      background:#1a1a1a; border:none; color:#888; min-width:42px;
+    }
+    .biv-filter-toggle button.on { background:#1a3a5c; color:#3498db; }
+    .biv-filter-err {
+      font-size:11px; color:#e74c3c; margin-top:8px; min-height:14px;
+    }
   </style>
 </head>
 <body x-data="bivApp()">
@@ -229,10 +297,110 @@
         </div>
       </span>
     </template>
+    <template x-if="uploadInfo">
+      <span style="position:relative;margin-left:14px">
+        <button @click="openFilterEditor()" class="biv-btn"
+                style="padding:4px 10px;font-size:12px"
+                title="Add a metric filter (applies to every section)">
+          + Filter
+        </button>
+        <!-- Filter editor popover -->
+        <div x-show="filterEditor.open" x-cloak
+             @click.outside="closeFilterEditor()"
+             @keydown.escape.window="closeFilterEditor()"
+             class="biv-filter-popover">
+          <label>Column</label>
+          <input type="text" x-model="filterEditor.colSearch"
+                 placeholder="search columns…"
+                 class="biv-filter-input" style="width:100%">
+          <div class="biv-filter-collist">
+            <template x-for="grp in filteredColumnList()" :key="grp.family">
+              <div>
+                <div class="biv-filter-fam" x-text="grp.family"></div>
+                <template x-for="c in grp.columns" :key="c">
+                  <div class="biv-filter-coloption"
+                       :class="{selected: c === filterEditor.draft.col}"
+                       @click="filterEditor.draft.col = c"
+                       x-text="c"></div>
+                </template>
+              </div>
+            </template>
+            <template x-if="filteredColumnList().length === 0">
+              <div style="padding:10px;color:#555;font-size:11px;text-align:center">
+                no matching columns
+              </div>
+            </template>
+          </div>
+
+          <label class="lbl-spaced">Operator</label>
+          <div class="biv-toggle biv-filter-toggle">
+            <button :class="{on: filterEditor.draft.op === 'between'}"
+                    @click="filterEditor.draft.op = 'between'">between</button>
+            <button :class="{on: filterEditor.draft.op === 'gte'}"
+                    @click="filterEditor.draft.op = 'gte'">≥</button>
+            <button :class="{on: filterEditor.draft.op === 'lte'}"
+                    @click="filterEditor.draft.op = 'lte'">≤</button>
+            <button :class="{on: filterEditor.draft.op === 'eq'}"
+                    @click="filterEditor.draft.op = 'eq'">=</button>
+          </div>
+
+          <label class="lbl-spaced">Value</label>
+          <template x-if="filterEditor.draft.op === 'between'">
+            <span style="display:flex;gap:8px;align-items:center">
+              <input type="number" step="any" x-model="filterEditor.draft.min"
+                     placeholder="min"
+                     class="biv-filter-input" style="width:120px">
+              <span style="color:#555">to</span>
+              <input type="number" step="any" x-model="filterEditor.draft.max"
+                     placeholder="max"
+                     class="biv-filter-input" style="width:120px">
+            </span>
+          </template>
+          <template x-if="filterEditor.draft.op !== 'between'">
+            <input type="number" step="any" x-model="filterEditor.draft.value"
+                   placeholder="value"
+                   class="biv-filter-input" style="width:140px">
+          </template>
+
+          <div class="biv-filter-err"
+               x-text="!_filterDraftValid() && filterEditor.draft.col
+                       ? (filterEditor.draft.op === 'between'
+                          ? 'Enter min, max, or both'
+                          : 'Enter a numeric value')
+                       : ''"></div>
+
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+            <button @click="closeFilterEditor()" class="biv-btn"
+                    style="background:none;border:1px solid #444;color:#888">
+              Cancel
+            </button>
+            <button @click="submitFilterEditor()" class="biv-btn"
+                    :disabled="!_filterDraftValid()"
+                    x-text="filterEditor.editIdx !== null ? 'Update' : 'Add'"></button>
+          </div>
+        </div>
+      </span>
+    </template>
     <span x-show="loading" class="biv-loading">Loading…</span>
     <span x-show="globalError" class="biv-error" x-text="globalError"></span>
     <span style="margin-left:auto;font-size:12px;color:#333"
           x-text="ivColumns.length + ' IV metrics available'"></span>
+  </div>
+
+  <!-- Filter chips strip — only visible when filters are active -->
+  <div class="biv-filters-strip" x-show="filters.length > 0">
+    <span class="ctrl-lbl">FILTERS</span>
+    <template x-for="(f, idx) in filters" :key="idx">
+      <span class="biv-filter-chip">
+        <span class="body" @click="openFilterEditor(idx)"
+              x-text="formatFilterChip(f)"
+              title="click to edit"></span>
+        <button class="x" @click="removeFilter(idx)"
+                title="remove filter">✕</button>
+      </span>
+    </template>
+    <button class="biv-filter-clear" @click="clearFilters()"
+            x-show="filters.length > 1">Clear all</button>
   </div>
 
   <!-- Main scrollable body -->
