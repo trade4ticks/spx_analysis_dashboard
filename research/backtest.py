@@ -50,12 +50,20 @@ _MESOSIM_EXIT_REASONS = {
 
 # Trade-level fields that are NOT IV surface metrics (used to separate IV cols from trade cols)
 TRADE_FIELDS = {
-    'date_opened', 'date_closed', 'pnl', 'pnl_pct', 'strategy',
-    'max_profit', 'max_loss', 'margin_req', 'legs', 'exit_reason',
-    'premium', 'contracts', 'spx_open_price', 'spx_close_price',
-    'time_opened', 'time_closed', 'days_in_trade', 'is_win',
-    'join_timestamp', 'trade_date', 'quote_time', 'id',
-    'day_of_week', 'year', 'daily_path', 'position_id',
+    # Identifiers / metadata — never analysed as features.
+    'position_id', 'id', 'strategy', 'daily_path',
+    # Dates and times — categorical, handled separately if needed.
+    'date_opened', 'date_closed', 'time_opened', 'time_closed',
+    'trade_date', 'quote_time', 'join_timestamp',
+    'day_of_week', 'year',
+    # Outcome / post-entry leakage columns — would leak future info if used as features.
+    'pnl', 'pnl_pct', 'is_win', 'days_in_trade', 'exit_reason',
+    'spx_close_price',
+    # NOTE: premium, margin_req, max_profit, max_loss, legs, contracts,
+    # and spx_open_price are entry-side trade attributes (known at the
+    # moment of trade open). They are NOT in TRADE_FIELDS so downstream
+    # analysis (correlation scans, decile profiles, dropdown selectors,
+    # etc.) treats them as features alongside IV metrics.
 }
 
 

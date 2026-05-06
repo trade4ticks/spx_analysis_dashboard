@@ -470,18 +470,24 @@ document.addEventListener('alpine:init', () => {
       if (c.startsWith('forward_'))     return 'forward';
       if (c.startsWith('portfolio_'))   return 'portfolio';
       if (c.startsWith('entry_'))       return 'entry';
-      if (['pnl','pnl_pct','is_win','days_in_trade','premium','margin_req'].includes(c))
-        return 'outcome';
+      // Outcome (Y) columns — only used in the FILTER dropdown, not
+      // for selecting features in section dropdowns.
+      if (['pnl','pnl_pct','is_win','days_in_trade'].includes(c)) return 'outcome';
+      // Trade-side entry-time attributes (also valid as features).
+      if (['premium','margin_req','max_profit','max_loss',
+           'legs','contracts','spx_open_price'].includes(c)) return 'trade';
       return 'other';
     },
 
     filteredColumnList() {
       const q = (this.filterEditor.colSearch || '').toLowerCase().trim();
-      // Trade-side columns aren't in ivColumns; expose them as filterable too.
-      const tradeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade', 'premium', 'margin_req'];
+      // Outcome columns aren't in ivColumns (they're TRADE_FIELDS) but should
+      // still be filterable, so expose them here. Entry-side trade
+      // attributes like premium / margin_req now flow through ivColumns.
+      const outcomeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade'];
       const seen = new Set();
       const all  = [];
-      for (const c of [...this.ivColumns, ...tradeCols]) {
+      for (const c of [...this.ivColumns, ...outcomeCols]) {
         if (!seen.has(c)) { seen.add(c); all.push(c); }
       }
       const matched = q ? all.filter(c => c.toLowerCase().includes(q)) : all;
@@ -490,7 +496,8 @@ document.addEventListener('alpine:init', () => {
         const fam = this._colFamily(c);
         (groups[fam] ||= []).push(c);
       }
-      const order = ['portfolio','entry','outcome','vix','skew','term','convex','iv','forward','other'];
+      const order = ['portfolio','entry','trade','outcome',
+                     'vix','skew','term','convex','iv','forward','other'];
       return order
         .filter(f => groups[f]?.length)
         .map(f => ({ family: f, columns: groups[f] }));
