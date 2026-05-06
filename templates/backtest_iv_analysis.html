@@ -190,10 +190,12 @@
     .biv-filter-popover {
       /* Fixed (not absolute) so the .ctrl-strip's overflow-x doesn't clip
          it. Coordinates are computed from the + Filter button's bounding
-         rect when the popover opens. */
+         rect when the popover opens. box-sizing keeps the rendered width
+         equal to `width` so the JS positioning math matches reality. */
       position:fixed;
       background:#222; border:1px solid #444; border-radius:4px;
-      padding:14px; width:340px; z-index:1000;
+      padding:14px; width:340px; box-sizing:border-box;
+      z-index:1000;
       box-shadow:0 6px 18px rgba(0,0,0,0.7);
     }
     .biv-filter-popover label {

@@ -191,6 +191,7 @@ document.addEventListener('alpine:init', () => {
     async init() {
       this.s2.ms = makeMultiSelect(20);
       this.s7.ms = makeMultiSelect(25);
+      window.addEventListener('resize', () => this._onFilterPosResize());
       await this.loadUploads();
       // URL-supplied filters apply to whichever upload was auto-selected.
       // selectUpload() clears filters as part of the reset, so we restore here.
@@ -343,18 +344,42 @@ document.addEventListener('alpine:init', () => {
 
     // ── Filter editor (popover) ──
     _computeFilterPos() {
-      // Anchor under the + Filter button. Popover is 340px wide; clamp left
-      // edge so it can't drift off-screen on narrow viewports.
-      const btn = this.$refs.filterBtn;
-      if (!btn) return { posTop: 80, posLeft: 20 };
-      const r        = btn.getBoundingClientRect();
       const popWidth = 340;
       const margin   = 8;
-      let left = r.right - popWidth;             // align right edge with button's right
-      if (left < margin) left = margin;          // clamp to viewport
-      const maxLeft = (window.innerWidth || 0) - popWidth - margin;
-      if (maxLeft > 0 && left > maxLeft) left = maxLeft;
-      return { posTop: r.bottom + 4, posLeft: left };
+      const viewport = window.innerWidth ||
+                       document.documentElement.clientWidth || 1024;
+
+      const btn = this.$refs.filterBtn;
+      if (!btn) return { posTop: 80, posLeft: margin };
+
+      const r = btn.getBoundingClientRect();
+
+      // Default placement: right-align popover with button (extends LEFT
+      // from the button). Best when the button is near the right side of
+      // the viewport — the popover stays adjacent without overflowing.
+      let left = r.right - popWidth;
+
+      // If right-alignment would overflow the LEFT edge of the viewport,
+      // switch to left-alignment under the button (extends right). This
+      // handles the case where the button itself is near the left edge.
+      if (left < margin) {
+        left = r.left;
+      }
+
+      // Final viewport clamp — never let the popover extend past either
+      // edge of the viewport, regardless of the button's position.
+      const maxLeft = viewport - popWidth - margin;
+      if (left > maxLeft) left = Math.max(margin, maxLeft);
+      if (left < margin) left = margin;
+
+      return { posTop: r.bottom + 4, posLeft: Math.round(left) };
+    },
+
+    _onFilterPosResize() {
+      // Re-anchor the popover when the viewport changes while it's open.
+      // No-op when closed.
+      if (!this.filterEditor.open) return;
+      Object.assign(this.filterEditor, this._computeFilterPos());
     },
 
     openFilterEditor(idx = null) {
