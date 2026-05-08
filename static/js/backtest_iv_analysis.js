@@ -152,6 +152,10 @@ document.addEventListener('alpine:init', () => {
     // ── Section 0: Correlation Overview ──
     s0: {
       target: 'pnl',
+      // Sort/emphasize method: 'pearson' | 'spearman' | 'consensus'.
+      // Both pearson and spearman bars always render; this controls
+      // which one drives sort order and gets full-opacity bars.
+      method: 'pearson',
       data: null, loading: false, error: null,
       _chart: null,
     },
@@ -1015,35 +1019,84 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    setS0Method(method) {
+      if (!['pearson','spearman','consensus'].includes(method)) return;
+      if (this.s0.method === method) return;
+      this.s0.method = method;
+      // No fetch needed — the backend returns all three values.
+      this._renderS0Chart();
+    },
+
+    _s0Value(m, method) {
+      if (method === 'spearman')   return (m.spearman_r  ?? 0);
+      if (method === 'consensus')  return (m.consensus_r ?? 0);
+      return (m.pearson_r ?? m.r ?? 0);
+    },
+
     _renderS0Chart() {
       this.s0._chart = this._destroyChart(this.s0._chart);
       const el = document.getElementById('s0-chart');
       if (!el || !this.s0.data?.metrics?.length) return;
-      const metrics = this.s0.data.metrics;
+
       const target  = this.s0.data.target;
-      const labels  = metrics.map(m => m.metric);
-      const data    = metrics.map(m => m.r);
-      const colors  = data.map(v =>
-        v >= 0 ? 'rgba(41,128,245,0.85)' : 'rgba(220,60,155,0.85)');
+      const method  = this.s0.method || 'pearson';
+      // Sort by selected method so the most relevant signals lead. Highlight
+      // the method's bars at full opacity; the other one is dimmed but always
+      // visible so divergence between the two is obvious at a glance.
+      const metrics = [...this.s0.data.metrics].sort(
+        (a, b) => Math.abs(this._s0Value(b, method)) - Math.abs(this._s0Value(a, method))
+      );
+      const labels = metrics.map(m => m.metric);
+
+      const pearsonAlpha   = method === 'pearson'   ? 0.92 : 0.30;
+      const spearmanAlpha  = method === 'spearman'  ? 0.92 : 0.30;
+      const consensusAlpha = method === 'consensus' ? 0.92 : 0.30;
+
+      const datasets = [];
+      if (method === 'consensus') {
+        // Consensus mode is a single-value summary; show one bar plus dimmed
+        // pearson/spearman as reference so divergence still reads.
+        datasets.push({
+          label: 'Consensus',
+          data: metrics.map(m => m.consensus_r ?? 0),
+          backgroundColor: metrics.map(m => {
+            const v = m.consensus_r ?? 0;
+            return v >= 0 ? `rgba(46,204,113,${consensusAlpha})`
+                          : `rgba(220,60,155,${consensusAlpha})`;
+          }),
+          borderWidth: 0, categoryPercentage: 0.92, barPercentage: 0.92,
+        });
+      }
+      datasets.push({
+        label: 'Pearson r',
+        data: metrics.map(m => m.pearson_r ?? m.r ?? 0),
+        backgroundColor: metrics.map(m => {
+          const v = m.pearson_r ?? m.r ?? 0;
+          return v >= 0 ? `rgba(41,128,245,${pearsonAlpha})`
+                        : `rgba(220,60,155,${pearsonAlpha})`;
+        }),
+        borderWidth: 0, categoryPercentage: 0.92, barPercentage: 0.92,
+      });
+      datasets.push({
+        label: 'Spearman ρ',
+        data: metrics.map(m => m.spearman_r ?? 0),
+        backgroundColor: metrics.map(m => {
+          const v = m.spearman_r ?? 0;
+          return v >= 0 ? `rgba(241,196,15,${spearmanAlpha})`
+                        : `rgba(155,89,182,${spearmanAlpha})`;
+        }),
+        borderWidth: 0, categoryPercentage: 0.92, barPercentage: 0.92,
+      });
 
       this.s0._chart = new Chart(el.getContext('2d'), {
         type: 'bar',
-        data: {
-          labels,
-          datasets: [{
-            data,
-            backgroundColor: colors,
-            borderWidth: 0,
-            categoryPercentage: 0.95,
-            barPercentage: 0.95,
-          }],
-        },
+        data: { labels, datasets },
         options: {
-          responsive:           true,
-          maintainAspectRatio:  false,
-          animation:            false,
+          responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend:  { display: false },
+            legend: {
+              labels: { color: '#888', font: { size: 10 }, boxWidth: 14 },
+            },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
@@ -1052,7 +1105,17 @@ document.addEventListener('alpine:init', () => {
                 label: ctx => {
                   const m   = metrics[ctx.dataIndex];
                   const tgt = target === 'pnl' ? 'P&L' : 'Win';
-                  return `r(${tgt}) = ${m.r >= 0 ? '+' : ''}${m.r.toFixed(4)}  (n=${m.n})`;
+                  const p   = m.pearson_r ?? m.r ?? 0;
+                  const s   = m.spearman_r ?? 0;
+                  const c   = m.consensus_r ?? 0;
+                  const div = m.divergence ?? Math.abs(p - s);
+                  const sign = v => (v >= 0 ? '+' : '') + v.toFixed(4);
+                  return [
+                    `target: ${tgt}   n=${m.n}`,
+                    `Pearson r  = ${sign(p)}`,
+                    `Spearman ρ = ${sign(s)}`,
+                    `Consensus  = ${sign(c)}   (divergence=${div.toFixed(3)})`,
+                  ];
                 },
               },
             },

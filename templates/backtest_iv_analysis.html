@@ -722,6 +722,17 @@
                         @click="s0.target='is_win'; loadCorrelationOverview()">Win</button>
               </div>
             </div>
+            <div title="Pearson: linear strength.&#10;Spearman: monotonic strength (catches non-linear shapes; robust to outliers).&#10;Consensus: sign(Pearson) × min(|Pearson|,|Spearman|) — what both methods agree on.">
+              <label>SORT BY</label>
+              <div class="biv-toggle">
+                <button :class="{on: s0.method==='pearson'}"
+                        @click="setS0Method('pearson')">Pearson</button>
+                <button :class="{on: s0.method==='spearman'}"
+                        @click="setS0Method('spearman')">Spearman</button>
+                <button :class="{on: s0.method==='consensus'}"
+                        @click="setS0Method('consensus')">Consensus</button>
+              </div>
+            </div>
             <span x-show="s0.loading" class="biv-loading">Computing…</span>
           </div>
 
@@ -730,9 +741,11 @@
           <template x-if="s0.data && !s0.error">
             <div>
               <div style="font-size:12px;color:#555;margin-bottom:10px">
-                Pearson r of each IV metric vs
+                Pearson r &amp; Spearman ρ of each IV metric vs
                 <span style="color:#aaa" x-text="s0.target === 'pnl' ? 'P&L' : 'win rate'"></span>,
-                sorted by |r|. Bars require n ≥ 10.
+                sorted by selected method. Both bars are always shown — the
+                method picked for sort is full-opacity; the other is dimmed
+                so divergence is visible at a glance. Bars require n ≥ 10.
                 Showing <span x-text="s0.data.metrics.length"></span> of
                 <span x-text="ivColumns.length"></span> IV metrics. Scroll horizontally if needed.
               </div>
@@ -790,8 +803,17 @@
             <div>
               <div style="font-size:12px;color:#555;margin-bottom:10px">
                 <span x-text="s3.data.total_valid"></span> valid trades ·
-                Pearson r = <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
-                                  x-text="s3.data.pearson_r"></span>
+                Pearson r =
+                <span :style="'color:' + (s3.data.pearson_r >= 0 ? '#3498db' : '#eb40aa')"
+                      x-text="s3.data.pearson_r"></span>
+                · Spearman ρ =
+                <span :style="'color:' + ((s3.data.spearman_r ?? 0) >= 0 ? '#f1c40f' : '#9b59b6')"
+                      x-text="s3.data.spearman_r ?? '—'"></span>
+                <span x-show="(s3.data.divergence ?? 0) >= 0.1"
+                      style="color:#e74c3c;font-weight:700"
+                      :title="'Pearson and Spearman differ by ' + s3.data.divergence + ' — check for outlier-driven or non-linear effects'">
+                  · Δ=<span x-text="s3.data.divergence"></span>
+                </span>
               </div>
               <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
               <!-- Bucket table -->
@@ -1305,10 +1327,20 @@
           <template x-if="s6.data && !s6.error">
             <div>
               <div style="font-size:12px;color:#555;margin-bottom:8px">
-                Overall r = <span :style="'color:' + (s6.data.overall_r >= 0 ? '#3498db' : '#eb40aa')"
-                                  x-text="s6.data.overall_r"></span> ·
-                Sign consistency = <span :style="'color:' + (s6.data.sign_consistency >= 0.8 ? '#2ecc71' : s6.data.sign_consistency >= 0.6 ? '#f1c40f' : '#e74c3c')"
-                                         x-text="fmtPct(s6.data.sign_consistency)"></span>
+                Overall: Pearson r =
+                <span :style="'color:' + (s6.data.overall_r >= 0 ? '#3498db' : '#eb40aa')"
+                      x-text="s6.data.overall_r"></span>
+                · Spearman ρ =
+                <span :style="'color:' + ((s6.data.overall_spearman_r ?? 0) >= 0 ? '#f1c40f' : '#9b59b6')"
+                      x-text="s6.data.overall_spearman_r ?? '—'"></span>
+                <span x-show="(s6.data.overall_divergence ?? 0) >= 0.1"
+                      style="color:#e74c3c;font-weight:700"
+                      :title="'Pearson and Spearman differ by ' + s6.data.overall_divergence">
+                  · Δ=<span x-text="s6.data.overall_divergence"></span>
+                </span>
+                · Sign consistency =
+                <span :style="'color:' + (s6.data.sign_consistency >= 0.8 ? '#2ecc71' : s6.data.sign_consistency >= 0.6 ? '#f1c40f' : '#e74c3c')"
+                      x-text="fmtPct(s6.data.sign_consistency)"></span>
               </div>
               <div class="biv-chart-wrap"><canvas id="s6-chart"></canvas></div>
               <div style="overflow-x:auto;margin-top:10px">
@@ -1318,8 +1350,8 @@
                       <th style="padding:3px 8px;color:#555;text-align:left">Period</th>
                       <th style="padding:3px 8px;color:#555">Dates</th>
                       <th style="padding:3px 8px;color:#555">n</th>
-                      <th style="padding:3px 8px;color:#555">r</th>
-                      <th style="padding:3px 8px;color:#555">r²</th>
+                      <th style="padding:3px 8px;color:#555">Pearson r</th>
+                      <th style="padding:3px 8px;color:#555">Spearman ρ</th>
                       <th style="padding:3px 8px;color:#555">Mean P&L</th>
                       <th style="padding:3px 8px;color:#555">Win%</th>
                     </tr>
@@ -1331,9 +1363,11 @@
                         <td style="padding:3px 8px;color:#555" x-text="p.date_from.slice(0,7) + ' → ' + p.date_to.slice(0,7)"></td>
                         <td style="padding:3px 8px;text-align:center;color:#555" x-text="p.n"></td>
                         <td style="padding:3px 8px;text-align:right;font-weight:700"
-                            :style="'color:' + (p.r >= 0 ? '#3498db' : '#eb40aa')"
-                            x-text="p.r"></td>
-                        <td style="padding:3px 8px;text-align:right;color:#555" x-text="p.r2"></td>
+                            :style="'color:' + ((p.pearson_r ?? p.r) >= 0 ? '#3498db' : '#eb40aa')"
+                            x-text="(p.pearson_r ?? p.r)"></td>
+                        <td style="padding:3px 8px;text-align:right;font-weight:700"
+                            :style="'color:' + ((p.spearman_r ?? 0) >= 0 ? '#f1c40f' : '#9b59b6')"
+                            x-text="p.spearman_r ?? '—'"></td>
                         <td style="padding:3px 8px;text-align:right;font-weight:700"
                             :style="'color:' + (p.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
                             x-text="fmtPnl(p.mean_pnl)"></td>
@@ -1490,6 +1524,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=12"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=13"></script>
 </body>
 </html>

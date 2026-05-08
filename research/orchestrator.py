@@ -3683,7 +3683,18 @@ async def execute_backtest_pipeline_wide_scan(
 
     report_system = (
         "You are a quantitative analyst writing a research report on backtest trade outcomes. "
-        "Professional quant voice. No fluff. Cite specific numbers."
+        "Professional quant voice. No fluff. Cite specific numbers.\n\n"
+        "PEARSON vs SPEARMAN — the evidence packet shows both r (Pearson, linear) and "
+        "ρ (Spearman, rank/monotonic) for every correlation, plus Δ=|r−ρ|. Use them:\n"
+        "  • When |r| and |ρ| agree (Δ < 0.05) — cite Pearson and move on.\n"
+        "  • When |r| > |ρ| by ≥ 0.10 — Pearson is being inflated by tail observations. "
+        "Call this out explicitly: 'Pearson r=X but Spearman ρ=Y — relationship is "
+        "driven by a few extreme trades, not a stable shape across the range.' Treat "
+        "it as a fragile signal.\n"
+        "  • When |ρ| > |r| by ≥ 0.10 — there is a non-linear monotonic relationship "
+        "Pearson is missing. Call this out: 'Spearman ρ=Y vs Pearson r=X — relationship "
+        "is monotonic but non-linear; consider a rank-based or sigmoidal transformation.'\n"
+        "Rows in the evidence packet flagged ⚠ DIVERGENT have Δ ≥ 0.10."
     )
     if knowledge_rules:
         rules_text = "\n".join(f"  - {r}" for r in knowledge_rules)
@@ -3693,10 +3704,11 @@ async def execute_backtest_pipeline_wide_scan(
         f"{evidence_text}\n\n"
         f"AVAILABLE CHARTS:\n{chart_listing}\n\n"
         f"Write a report using the produce_report tool.\n"
-        f"- executive_summary: 2-3 paragraphs answering the research question. Cite r values, win rates, P&L.\n"
+        f"- executive_summary: 2-3 paragraphs answering the research question. Cite r values, win rates, P&L. "
+        f"If the leading signal has |r−ρ| ≥ 0.10, flag it in the summary.\n"
         f"- body: 400-700 words. Cover: what mattered, why it likely mattered (economic interpretation), "
         f"how strong the evidence was, whether it held over time (cite rolling correlation and time-split), "
-        f"whether 2-factor/composite added value, what didn't work.\n"
+        f"whether Pearson vs Spearman agree, whether 2-factor/composite added value, what didn't work.\n"
         f"- conclusions: Explicitly state 'Best usable signal is: [single / 2-factor / composite]' and justify. "
         f"Recommend filter, sizing input, or exploratory-only.\n"
         f"- chart_sequence: ordered chart IDs to display.\n\n"
@@ -3843,14 +3855,26 @@ def _format_evidence_packet(evidence: dict, question: str) -> str:
         f"  Mean P&L: ${ts.get('mean_pnl', 0):.0f}",
         f"  Std P&L: ${ts.get('std_pnl', 0):.0f}",
         "",
-        "TOP CORRELATIONS WITH pnl:",
+        "TOP CORRELATIONS WITH pnl  (r=Pearson, ρ=Spearman, Δ=|r−ρ|):",
     ]
     for r in evidence.get("corr_pnl", [])[:10]:
-        lines.append(f"  {r['x_col']:<40} r={r['r']:+.4f}  p={r.get('p_val', 0):.4f}")
+        sp  = r.get('spearman_r', r.get('r', 0))
+        div = r.get('divergence', abs(r.get('r', 0) - sp))
+        flag = "  ⚠ DIVERGENT" if div >= 0.10 else ""
+        lines.append(
+            f"  {r['x_col']:<40} r={r['r']:+.4f}  ρ={sp:+.4f}  Δ={div:.3f}  "
+            f"p={r.get('p_val', 0):.4f}{flag}"
+        )
 
     lines.append("\nTOP CORRELATIONS WITH is_win:")
     for r in evidence.get("corr_win", [])[:10]:
-        lines.append(f"  {r['x_col']:<40} r={r['r']:+.4f}  p={r.get('p_val', 0):.4f}")
+        sp  = r.get('spearman_r', r.get('r', 0))
+        div = r.get('divergence', abs(r.get('r', 0) - sp))
+        flag = "  ⚠ DIVERGENT" if div >= 0.10 else ""
+        lines.append(
+            f"  {r['x_col']:<40} r={r['r']:+.4f}  ρ={sp:+.4f}  Δ={div:.3f}  "
+            f"p={r.get('p_val', 0):.4f}{flag}"
+        )
 
     lines.append(f"\nNON-REDUNDANT FEATURES ({len(evidence.get('non_redundant', []))}):")
     lines.append(f"  {', '.join(evidence.get('non_redundant', []))}")

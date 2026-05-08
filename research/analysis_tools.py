@@ -64,14 +64,20 @@ def run_correlation_scan(rows: list[dict], x_cols: list[str], y_col: str) -> lis
         scan = scanner.scan_relationship(rows, x_col, y_col)
         if 'error' in scan:
             continue
+        pearson  = scan.get('pearson_r', 0)
+        spearman = scan.get('spearman_r', 0)
         results.append({
-            'x_col':   x_col,
-            'y_col':   y_col,
-            'r':       round(scan.get('pearson_r', 0), 4),
-            'p_val':   round(scan.get('pearson_p', 1), 4),
-            'pattern': scan.get('pattern', ''),
-            'score':   round(scan.get('composite_score', 0), 1),
-            'n':       scan.get('n', 0),
+            'x_col':      x_col,
+            'y_col':      y_col,
+            'r':          round(pearson, 4),  # back-compat: writer reads .r
+            'p_val':      round(scan.get('pearson_p', 1), 4),
+            'pearson_r':  round(pearson, 4),
+            'spearman_r': round(spearman, 4),
+            'spearman_p': round(scan.get('spearman_p', 1), 4),
+            'divergence': round(abs(pearson - spearman), 4),
+            'pattern':    scan.get('pattern', ''),
+            'score':      round(scan.get('composite_score', 0), 1),
+            'n':          scan.get('n', 0),
         })
     results.sort(key=lambda d: abs(d['r']), reverse=True)
     return results

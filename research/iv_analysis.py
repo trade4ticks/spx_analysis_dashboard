@@ -32,6 +32,44 @@ def _pearson_r(xs: list, ys: list) -> float:
     return num / denom if denom > 1e-12 else 0.0
 
 
+def _ranks(values: list) -> list:
+    """Average-rank assignment, ties get the mean of their slot range.
+    Stdlib only — no numpy."""
+    n = len(values)
+    if n == 0:
+        return []
+    indexed = sorted(range(n), key=lambda i: values[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        # Group ties (same value) so they share the average rank.
+        while j + 1 < n and values[indexed[j + 1]] == values[indexed[i]]:
+            j += 1
+        avg_rank = (i + j) / 2.0 + 1.0  # 1-based ranks
+        for k in range(i, j + 1):
+            ranks[indexed[k]] = avg_rank
+        i = j + 1
+    return ranks
+
+
+def _spearman_r(xs: list, ys: list) -> float:
+    """Rank-based correlation. Captures any monotonic relationship
+    (linear, log, sigmoidal, etc.) and is robust to outliers."""
+    if len(xs) < 3:
+        return 0.0
+    return _pearson_r(_ranks(xs), _ranks(ys))
+
+
+def _consensus_r(pearson: float, spearman: float) -> float:
+    """Sign-of-Pearson × min(|pearson|, |spearman|).
+    "What both methods agree on" — demotes signals where Pearson alone
+    is strong (outlier-driven) or Spearman alone is strong (Pearson
+    can't see the shape) without picking a winner."""
+    sign = 1.0 if pearson >= 0 else -1.0
+    return sign * min(abs(pearson), abs(spearman))
+
+
 def _ols_residuals(xs: list, ys: list) -> list:
     """OLS residuals of regressing ys on xs."""
     n   = len(xs)
@@ -133,13 +171,20 @@ def compute_correlation_overview(trades: list, iv_columns: list,
         xs, ys = _valid_pairs(trades, m, target)
         if len(xs) < min_n:
             continue
-        r = _pearson_r(xs, ys)
+        r  = _pearson_r(xs, ys)
+        rs = _spearman_r(xs, ys)
+        cons = _consensus_r(r, rs)
         rows.append({
-            'metric': m,
-            'r':      round(r, 4),
-            'r2':     round(r * r, 4),
-            'n':      len(xs),
+            'metric':     m,
+            'r':          round(r, 4),       # back-compat: Pearson, what existing UI reads
+            'r2':         round(r * r, 4),
+            'pearson_r':  round(r, 4),
+            'spearman_r': round(rs, 4),
+            'consensus_r': round(cons, 4),
+            'divergence': round(abs(r - rs), 4),
+            'n':          len(xs),
         })
+    # Sort by Pearson |r| by default; the frontend re-sorts on toggle change.
     rows.sort(key=lambda x: abs(x['r']), reverse=True)
     return {
         'target':  target,
@@ -291,12 +336,17 @@ def compute_decile_stats(trades: list, metric: str, n_buckets: int = 10,
         stats['bucket_idx'] = i
         buckets.append(stats)
 
+    pearson  = _pearson_r(xs, ys)
+    spearman = _spearman_r(xs, ys)
     return {
         'metric':      metric,
         'n_buckets':   n_buckets,
         'buckets':     buckets,
         'total_valid': len(xs),
-        'pearson_r':   round(_pearson_r(xs, ys), 4),
+        'pearson_r':   round(pearson, 4),
+        'spearman_r':  round(spearman, 4),
+        'consensus_r': round(_consensus_r(pearson, spearman), 4),
+        'divergence':  round(abs(pearson - spearman), 4),
     }
 
 
@@ -458,29 +508,43 @@ def compute_time_stability(trades: list, metric: str, n_windows: int = 6) -> dic
         xs    = [c[1] for c in seg]
         ys    = [c[2] for c in seg]
         r     = _pearson_r(xs, ys)
+        rs    = _spearman_r(xs, ys)
         periods.append({
-            'label':    f"P{i+1}",
-            'date_from': dates[0],
-            'date_to':   dates[-1],
-            'n':         len(seg),
-            'r':         round(r, 4),
-            'r2':        round(r * r, 4),
-            'mean_pnl':  round(sum(ys) / len(ys), 2),
-            'win_rate':  round(sum(1 for y in ys if y > 0) / len(ys), 4),
+            'label':      f"P{i+1}",
+            'date_from':  dates[0],
+            'date_to':    dates[-1],
+            'n':          len(seg),
+            'r':          round(r, 4),
+            'r2':         round(r * r, 4),
+            'pearson_r':  round(r, 4),
+            'spearman_r': round(rs, 4),
+            'divergence': round(abs(r - rs), 4),
+            'mean_pnl':   round(sum(ys) / len(ys), 2),
+            'win_rate':   round(sum(1 for y in ys if y > 0) / len(ys), 4),
         })
 
-    overall_r = _pearson_r([v[1] for v in valid], [v[2] for v in valid])
+    overall_xs = [v[1] for v in valid]
+    overall_ys = [v[2] for v in valid]
+    overall_r  = _pearson_r(overall_xs, overall_ys)
+    overall_rs = _spearman_r(overall_xs, overall_ys)
     sign_consistency = sum(
         1 for p in periods if (p['r'] >= 0) == (overall_r >= 0)
     ) / len(periods)
+    sign_consistency_spearman = sum(
+        1 for p in periods if (p['spearman_r'] >= 0) == (overall_rs >= 0)
+    ) / len(periods)
 
     return {
-        'metric':            metric,
-        'n_windows':         n_windows,
-        'periods':           periods,
-        'overall_r':         round(overall_r, 4),
-        'sign_consistency':  round(sign_consistency, 2),
-        'total_valid':       len(valid),
+        'metric':                     metric,
+        'n_windows':                  n_windows,
+        'periods':                    periods,
+        'overall_r':                  round(overall_r, 4),
+        'overall_pearson_r':          round(overall_r, 4),
+        'overall_spearman_r':         round(overall_rs, 4),
+        'overall_divergence':         round(abs(overall_r - overall_rs), 4),
+        'sign_consistency':           round(sign_consistency, 2),
+        'sign_consistency_spearman':  round(sign_consistency_spearman, 2),
+        'total_valid':                len(valid),
     }
 
 
