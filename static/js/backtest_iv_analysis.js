@@ -61,6 +61,80 @@ function fmtR2(v) {
 }
 
 
+// ── Today's-value Chart.js plugin ─────────────────────────────────────────────
+// Draws a dashed gold line + × at the precise fractional x-position of today's
+// value within the matching decile bucket. Skipped silently when today's value
+// is null or outside all bucket ranges.
+const _todayMarkerPlugin = {
+  id: 'todayMarker',
+  afterDatasetsDraw(chart, _args, opts) {
+    if (!opts || opts.todayValue == null || !Array.isArray(opts.buckets)) return;
+    const v = Number(opts.todayValue);
+    if (!Number.isFinite(v)) return;
+    const buckets = opts.buckets;
+
+    let bucketIdx = -1;
+    for (let i = 0; i < buckets.length; i++) {
+      const b = buckets[i];
+      if (b.x_min == null || b.x_max == null) continue;
+      const lo = (i === 0)                ? -Infinity : b.x_min;
+      const hi = (i === buckets.length-1) ?  Infinity : b.x_max;
+      if (v >= lo && v <= hi) { bucketIdx = i; break; }
+    }
+    if (bucketIdx < 0) return;
+    const b   = buckets[bucketIdx];
+    const den = (b.x_max - b.x_min) || 1e-9;
+    const frac = Math.max(0, Math.min(1, (v - b.x_min) / den));
+
+    const xScale = chart.scales.x;
+    if (!xScale) return;
+    // For category scales getPixelForValue(idx) returns the bucket center.
+    const centerPx = xScale.getPixelForValue(bucketIdx);
+    let cellWidth;
+    if (buckets.length > 1) {
+      const next = bucketIdx === 0
+        ? xScale.getPixelForValue(1) - xScale.getPixelForValue(0)
+        : xScale.getPixelForValue(bucketIdx) - xScale.getPixelForValue(bucketIdx - 1);
+      cellWidth = Math.abs(next);
+    } else {
+      cellWidth = xScale.right - xScale.left;
+    }
+    const xPx = centerPx + (frac - 0.5) * cellWidth;
+    const top = chart.chartArea.top;
+    const bot = chart.chartArea.bottom;
+
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.lineWidth   = 2;
+    ctx.strokeStyle = 'rgba(241,196,15,0.85)';
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(xPx, top);
+    ctx.lineTo(xPx, bot);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // × glyph at the top of the chart area
+    ctx.fillStyle    = '#f1c40f';
+    ctx.font         = 'bold 16px sans-serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('×', xPx, top - 2);
+    // small numeric label
+    ctx.font = '11px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle    = 'rgba(241,196,15,0.95)';
+    const label = Math.abs(v) >= 1000 ? Math.round(v).toString()
+                  : Math.abs(v) >= 1   ? v.toFixed(2)
+                  :                       v.toFixed(4);
+    // Keep the label in-bounds horizontally
+    const labelX = Math.max(xScale.left + 18,
+                            Math.min(xScale.right - 18, xPx));
+    ctx.fillText('today=' + label, labelX, top + 2);
+    ctx.restore();
+  },
+};
+
+
 // ── Metric multi-select helper ─────────────────────────────────────────────────
 
 function makeMultiSelect(maxCount) {
@@ -203,10 +277,14 @@ document.addEventListener('alpine:init', () => {
     // ── Section 3: Decile ──
     // metrics is an array — each entry gets its own decile chart stacked
     // vertically. dataByMetric / charts are keyed by metric name.
+    // _loadToken increments on every loadDecile() so a stale fetch
+    // can't overwrite newer state if the user clicks faster than the
+    // server responds.
     s3: {
       metrics: [''], nBuckets: 10,
       dataByMetric: {},
       charts: {},
+      _loadToken: 0,
       loading: false, error: null,
     },
 
@@ -555,6 +633,28 @@ document.addEventListener('alpine:init', () => {
       if (!a || !b || a.value == null || b.value == null) return false;
       const cell = this.todayHeatmapCell(this.s1.data, a.value, b.value);
       return cell && cell.ia === ia && cell.ib === ib;
+    },
+
+    // Fractional position 0..100 of today's value within its containing
+    // heatmap cell. Used to position the precise × marker via CSS percent.
+    s1TodayPctX(ia) {
+      const data = this.s1.data;
+      const a = this.todayValueFor(data?.metric_a);
+      if (!data?.bounds_a || !a || a.value == null) return 50;
+      const lo = data.bounds_a[ia];
+      const hi = data.bounds_a[ia + 1];
+      if (hi <= lo) return 50;
+      return Math.max(2, Math.min(98, ((a.value - lo) / (hi - lo)) * 100));
+    },
+
+    s1TodayPctY(ib) {
+      const data = this.s1.data;
+      const b = this.todayValueFor(data?.metric_b);
+      if (!data?.bounds_b || !b || b.value == null) return 50;
+      const lo = data.bounds_b[ib];
+      const hi = data.bounds_b[ib + 1];
+      if (hi <= lo) return 50;
+      return Math.max(2, Math.min(98, ((b.value - lo) / (hi - lo)) * 100));
     },
 
     // For a heatmap result with bounds_a/bounds_b, return {ia, ib} for the
@@ -1502,12 +1602,10 @@ document.addEventListener('alpine:init', () => {
       if (metrics.length === 0) return;
       this.s3.loading = true; this.s3.error = null;
 
-      // Destroy any prior charts so we don't leak canvases when metrics change.
-      for (const k of Object.keys(this.s3.charts || {})) {
-        this.s3.charts[k] = this._destroyChart(this.s3.charts[k]);
-      }
-
+      // In-flight cancellation: only the latest call applies its results.
+      const token = ++this.s3._loadToken;
       const cellFilter = this._buildCellFilter();
+
       try {
         const results = await Promise.all(metrics.map(metric =>
           this._api('decile', {
@@ -1517,32 +1615,65 @@ document.addEventListener('alpine:init', () => {
           }).then(d => [metric, d])
             .catch(e => [metric, { error: e.message || String(e) }])
         ));
+        // A newer load was kicked off while we were waiting — drop these.
+        if (token !== this.s3._loadToken) return;
+
         const next = {};
         for (const [m, d] of results) next[m] = d;
         this.s3.dataByMetric = next;
         await this.$nextTick();
+        if (token !== this.s3._loadToken) return;
+
         for (const m of metrics) {
-          if (next[m]?.buckets) this._renderDecileChartForMetric(m);
+          if (next[m]?.buckets) {
+            this._renderDecileChartForMetric(m);
+          } else {
+            // Error or empty: blank the canvas but keep it in the DOM so a
+            // subsequent successful load can render into the same element.
+            this.s3.charts[m] = this._destroyChart(this.s3.charts[m]);
+            this._blankCanvas('s3-chart-' + this._safeId(m));
+          }
         }
       } catch (e) {
-        this.s3.error = e.message;
+        if (token === this.s3._loadToken) this.s3.error = e.message;
       } finally {
-        this.s3.loading = false;
+        if (token === this.s3._loadToken) this.s3.loading = false;
       }
     },
 
-    _renderDecileChartForMetric(metric) {
+    _blankCanvas(id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const ctx = el.getContext('2d');
+      ctx.clearRect(0, 0, el.width, el.height);
+    },
+
+    _renderDecileChartForMetric(metric, retries = 5) {
       const data = this.s3.dataByMetric[metric];
       if (!data?.buckets) return;
-      this.s3.charts[metric] = this._destroyChart(this.s3.charts[metric]);
       const el = document.getElementById('s3-chart-' + this._safeId(metric));
-      if (!el) return;
+      if (!el) {
+        // Canvas is gated behind Alpine's reactive template — if Alpine
+        // hasn't inserted the element yet, retry briefly. Robust against
+        // any rendering race after error→success transitions.
+        if (retries > 0) {
+          setTimeout(() => this._renderDecileChartForMetric(metric, retries - 1), 50);
+        }
+        return;
+      }
+      this.s3.charts[metric] = this._destroyChart(this.s3.charts[metric]);
+
       const buckets  = data.buckets;
       const labels   = buckets.map(b => b.label);
       const pnls     = buckets.map(b => b.mean_pnl ?? 0);
       const maxAbs   = Math.max(...pnls.map(Math.abs), 1);
       const colors   = pnls.map(v => pnlColor(v, maxAbs));
       const winRates = buckets.map(b => (b.win_rate ?? 0) * 100);
+
+      // Today's value marker — drawn by an inline plugin so the line lands
+      // at the precise fractional x position within the matching bucket.
+      const todayInfo = this.todayValueFor(metric);
+      const todayValue = todayInfo?.value;
 
       this.s3.charts[metric] = new Chart(el.getContext('2d'), {
         type: 'bar',
@@ -1571,7 +1702,10 @@ document.addEventListener('alpine:init', () => {
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          plugins: { legend: { labels: { color: '#aaa', font: { size: 11 } } } },
+          plugins: {
+            legend: { labels: { color: '#aaa', font: { size: 11 } } },
+            todayMarker: { todayValue, buckets },
+          },
           scales: {
             x: { ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#333' } },
             y:  { ticks: { color: '#aaa', font: { size: 10 } }, grid: { color: '#333' },
@@ -1581,6 +1715,7 @@ document.addEventListener('alpine:init', () => {
                   title: { display: true, text: 'Win Rate %', color: '#aaa', font: { size: 10 } } },
           },
         },
+        plugins: [_todayMarkerPlugin],
       });
     },
 

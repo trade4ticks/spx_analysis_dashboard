@@ -378,6 +378,18 @@
       outline-offset:-2px;
       box-shadow:inset 0 0 0 1px rgba(241,196,15,0.4);
     }
+    /* Precise × marker placed at today's fractional location inside the cell */
+    .biv-cell-today-x {
+      position:absolute;
+      transform:translate(-50%, -50%);
+      color:#f1c40f;
+      font-size:22px;
+      font-weight:900;
+      line-height:1;
+      text-shadow: 0 0 5px rgba(0,0,0,0.85), 0 0 2px rgba(0,0,0,0.85);
+      pointer-events:none;
+      z-index:2;
+    }
     /* User-selected cells (drives S3 cell filter) */
     .biv-heatmap td.biv-cell-selected {
       outline:2px solid #3498db !important;
@@ -954,77 +966,75 @@
                         title="Remove this metric">✕</button>
               </div>
 
+              <!-- Stats row + tiny today-label only when data is good -->
               <template x-if="m && s3.dataByMetric[m] && !s3.dataByMetric[m].error">
-                <div>
-                  <div style="font-size:12px;color:#555;margin-bottom:10px">
-                    <span x-text="s3.dataByMetric[m].total_valid"></span> valid trades ·
-                    Pearson r =
-                    <span :style="'color:' + (s3.dataByMetric[m].pearson_r >= 0 ? '#3498db' : '#eb40aa')"
-                          x-text="s3.dataByMetric[m].pearson_r"></span>
-                    · Spearman ρ =
-                    <span :style="'color:' + ((s3.dataByMetric[m].spearman_r ?? 0) >= 0 ? '#f1c40f' : '#9b59b6')"
-                          x-text="s3.dataByMetric[m].spearman_r ?? '—'"></span>
-                    <span x-show="(s3.dataByMetric[m].divergence ?? 0) >= 0.1"
-                          style="color:#e74c3c;font-weight:700"
-                          :title="'Pearson and Spearman differ by ' + s3.dataByMetric[m].divergence">
-                      · Δ=<span x-text="s3.dataByMetric[m].divergence"></span>
+                <div style="font-size:12px;color:#555;margin-bottom:6px">
+                  <span x-text="s3.dataByMetric[m].total_valid"></span> valid trades ·
+                  Pearson r =
+                  <span :style="'color:' + (s3.dataByMetric[m].pearson_r >= 0 ? '#3498db' : '#eb40aa')"
+                        x-text="s3.dataByMetric[m].pearson_r"></span>
+                  · Spearman ρ =
+                  <span :style="'color:' + ((s3.dataByMetric[m].spearman_r ?? 0) >= 0 ? '#f1c40f' : '#9b59b6')"
+                        x-text="s3.dataByMetric[m].spearman_r ?? '—'"></span>
+                  <span x-show="(s3.dataByMetric[m].divergence ?? 0) >= 0.1"
+                        style="color:#e74c3c;font-weight:700"
+                        :title="'Pearson and Spearman differ by ' + s3.dataByMetric[m].divergence">
+                    · Δ=<span x-text="s3.dataByMetric[m].divergence"></span>
+                  </span>
+                  <template x-if="todayValueFor(m)?.value !== null && todayValueFor(m)?.value !== undefined && todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value)">
+                    <span style="color:#f1c40f;margin-left:10px"
+                          :title="'Today: ' + todayValueFor(m).value.toFixed(6) + ' (' + todayValueFor(m).date + ' ' + todayValueFor(m).time + ')'">
+                      · today in bucket
+                      <strong x-text="todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value).label"></strong>
                     </span>
-                  </div>
-                  <template x-if="todayValueFor(m)?.value !== null && todayValueFor(m)?.value !== undefined">
-                    <div class="biv-today-strip"
-                         :title="'Live value of ' + m + ' at the latest snapshot'">
-                      <span class="biv-today-dot"></span>
-                      <span class="biv-today-label">Today
-                        (<span x-text="todayValueFor(m).date"></span>
-                        <span x-text="todayValueFor(m).time"></span>):
-                      </span>
-                      <strong x-text="m"></strong> =
-                      <strong x-text="todayValueFor(m).value.toFixed(4)"></strong>
-                      <template x-if="todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value)">
-                        <span>
-                          → bucket
-                          <strong x-text="todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value).label"></strong>
-                        </span>
-                      </template>
-                    </div>
                   </template>
-                  <div class="biv-chart-wrap"><canvas :id="'s3-chart-' + _safeId(m)"></canvas></div>
-                  <details style="margin-top:8px">
-                    <summary style="font-size:11px;color:#666;cursor:pointer">bucket table</summary>
-                    <div style="overflow-x:auto;margin-top:8px">
-                      <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
-                        <thead>
-                          <tr style="border-bottom:1px solid #333">
-                            <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
-                            <th style="padding:3px 8px;color:#555">n</th>
-                            <th style="padding:3px 8px;color:#555">Mean P&L</th>
-                            <th style="padding:3px 8px;color:#555">Win%</th>
-                            <th style="padding:3px 8px;color:#555">σ P&L</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <template x-for="b in s3.dataByMetric[m].buckets" :key="b.bucket_idx">
-                            <tr style="border-bottom:1px solid #1e1e1e"
-                                :class="{'biv-cell-low': b.n < 20}">
-                              <td style="padding:3px 8px;color:#aaa" x-text="b.label"></td>
-                              <td style="padding:3px 8px;text-align:center;color:#555" x-text="b.n"></td>
-                              <td style="padding:3px 8px;text-align:right;font-weight:700"
-                                  :style="'color:' + (b.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
-                                  x-text="fmtPnl(b.mean_pnl)"></td>
-                              <td style="padding:3px 8px;text-align:right"
-                                  :style="'color:' + winRateColor(b.win_rate)"
-                                  x-text="fmtPct(b.win_rate)"></td>
-                              <td style="padding:3px 8px;text-align:right;color:#555" x-text="b.pnl_std ?? '—'"></td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </div>
-                  </details>
                 </div>
               </template>
+
+              <!-- Chart canvas — ALWAYS in the DOM when m is set, regardless
+                   of error/success state. This keeps re-renders robust across
+                   error→success transitions (no Alpine x-if race). -->
+              <template x-if="m">
+                <div class="biv-chart-wrap"><canvas :id="'s3-chart-' + _safeId(m)"></canvas></div>
+              </template>
+
               <template x-if="m && s3.dataByMetric[m]?.error">
-                <div class="biv-error" x-text="s3.dataByMetric[m].error"></div>
+                <div class="biv-error" style="margin-top:6px" x-text="s3.dataByMetric[m].error"></div>
+              </template>
+
+              <template x-if="m && s3.dataByMetric[m] && !s3.dataByMetric[m].error">
+                <details style="margin-top:8px">
+                  <summary style="font-size:11px;color:#666;cursor:pointer">bucket table</summary>
+                  <div style="overflow-x:auto;margin-top:8px">
+                    <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
+                      <thead>
+                        <tr style="border-bottom:1px solid #333">
+                          <th style="padding:3px 8px;color:#555;text-align:left">Bucket</th>
+                          <th style="padding:3px 8px;color:#555">n</th>
+                          <th style="padding:3px 8px;color:#555">Mean P&L</th>
+                          <th style="padding:3px 8px;color:#555">Win%</th>
+                          <th style="padding:3px 8px;color:#555">σ P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="b in s3.dataByMetric[m].buckets" :key="b.bucket_idx">
+                          <tr style="border-bottom:1px solid #1e1e1e"
+                              :class="{'biv-cell-low': b.n < 20}">
+                            <td style="padding:3px 8px;color:#aaa" x-text="b.label"></td>
+                            <td style="padding:3px 8px;text-align:center;color:#555" x-text="b.n"></td>
+                            <td style="padding:3px 8px;text-align:right;font-weight:700"
+                                :style="'color:' + (b.mean_pnl >= 0 ? '#3498db' : '#eb40aa')"
+                                x-text="fmtPnl(b.mean_pnl)"></td>
+                            <td style="padding:3px 8px;text-align:right"
+                                :style="'color:' + winRateColor(b.win_rate)"
+                                x-text="fmtPct(b.win_rate)"></td>
+                            <td style="padding:3px 8px;text-align:right;color:#555" x-text="b.pnl_std ?? '—'"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
               </template>
             </div>
           </template>
@@ -1126,10 +1136,18 @@
                                 'biv-cell-selected': isS1CellSelected(ia, ib),
                               }"
                               @click="toggleS1Cell(ia, ib)"
-                              style="cursor:pointer"
+                              style="cursor:pointer;position:relative"
                               :title="(isS1TodayCell(ia, ib) ? '⚪ TODAY · ' : '') + (isS1CellSelected(ia, ib) ? '✓ SELECTED · ' : '') + 'click to toggle as S3 filter · n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
                             <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
                             <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
+                            <!-- Precise today marker — positioned via the
+                                 fractional value within the cell's bin range.
+                                 Cell already has position:relative. -->
+                            <template x-if="isS1TodayCell(ia, ib)">
+                              <span class="biv-cell-today-x"
+                                    :style="`left:${s1TodayPctX(ia)}%; top:${s1TodayPctY(ib)}%`"
+                                    title="precise location of today's value">×</span>
+                            </template>
                           </td>
                         </template>
                       </tr>
@@ -1714,6 +1732,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=16"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=17"></script>
 </body>
 </html>
