@@ -271,9 +271,13 @@ document.addEventListener('alpine:init', () => {
       // Click-toggled cell selection that drives S3 multi-metric filter.
       // Each entry: {ia, ib}. Cleared on metric change.
       selectedCells: [],
-      // Last 5 trading days (incl. today) of (metricA, metricB) values.
+      // Last 10 trading days (incl. today) of (metricA, metricB) values.
       // Each entry: {date, a, b}. Loaded from /api/meta/value-trail.
       trail: [],
+      // Pre-computed pixel coordinates for the polyline overlay. Recomputed
+      // after each heatmap+trail load on a delayed nextTick so the table
+      // has actually been laid out before we measure cells.
+      trailPoints: '',
     },
 
     // Global toggle for live (today + trail) overlays. When false, hides
@@ -787,12 +791,13 @@ document.addEventListener('alpine:init', () => {
     async loadHeatmapTrail() {
       if (!this.s1.metricA || !this.s1.metricB) {
         this.s1.trail = [];
+        this.s1.trailPoints = '';
         return;
       }
       try {
         const [aRes, bRes] = await Promise.all([
-          fetch('/api/meta/value-trail?days=5&col=' + encodeURIComponent(this.s1.metricA)).then(r => r.json()),
-          fetch('/api/meta/value-trail?days=5&col=' + encodeURIComponent(this.s1.metricB)).then(r => r.json()),
+          fetch('/api/meta/value-trail?days=10&col=' + encodeURIComponent(this.s1.metricA)).then(r => r.json()),
+          fetch('/api/meta/value-trail?days=10&col=' + encodeURIComponent(this.s1.metricB)).then(r => r.json()),
         ]);
         const aByDate = {};
         const bByDate = {};
@@ -808,6 +813,12 @@ document.addEventListener('alpine:init', () => {
         console.warn('heatmap trail fetch failed', e);
         this.s1.trail = [];
       }
+      // Wait two animation frames so the table has been laid out before
+      // we measure cells for the polyline. Single nextTick wasn't enough.
+      await this.$nextTick();
+      requestAnimationFrame(() => {
+        this.s1.trailPoints = this.s1ComputeTrailLine();
+      });
     },
 
     // For a value, return (cellIdx, fracInsideCell) so trail dots can be
