@@ -70,6 +70,68 @@ def _consensus_r(pearson: float, spearman: float) -> float:
     return sign * min(abs(pearson), abs(spearman))
 
 
+def _mutual_information(xs: list, ys: list, n_bins: int = 8) -> float:
+    """Normalized mutual information in [0, 1]. Captures any kind of
+    statistical dependence between x and y — including U-shapes, threshold
+    effects, and other non-monotonic patterns that Pearson and Spearman
+    both miss. Always non-negative (no direction).
+
+    Quantile-binned joint histogram, MI computed in nats and normalized
+    by sqrt(H(X) * H(Y)) so the value sits in [0, 1] alongside |r| and |ρ|.
+    """
+    n = len(xs)
+    if n < max(20, n_bins * n_bins):
+        return 0.0
+    # Quantile-bin x and y (so each bin has roughly equal count). Using
+    # rank-based binning keeps the marginal distributions ~uniform, which
+    # in turn maximises sensitivity to dependence in the joint.
+    rx = _ranks(xs)
+    ry = _ranks(ys)
+    def _bin(rs):
+        return [min(int((r - 1) / n * n_bins), n_bins - 1) for r in rs]
+    bx = _bin(rx)
+    by = _bin(ry)
+
+    # Joint count table.
+    joint = [[0] * n_bins for _ in range(n_bins)]
+    for i in range(n):
+        joint[bx[i]][by[i]] += 1
+
+    # Marginal counts.
+    px = [sum(joint[i]) for i in range(n_bins)]
+    py = [sum(joint[i][j] for i in range(n_bins)) for j in range(n_bins)]
+    total = float(n)
+
+    mi = 0.0
+    for i in range(n_bins):
+        for j in range(n_bins):
+            n_ij = joint[i][j]
+            if n_ij == 0:
+                continue
+            p_ij = n_ij / total
+            p_i  = px[i] / total
+            p_j  = py[j] / total
+            mi  += p_ij * math.log(p_ij / (p_i * p_j))
+
+    # Marginal entropies (in nats).
+    def _entropy(counts):
+        h = 0.0
+        for c in counts:
+            if c == 0:
+                continue
+            p = c / total
+            h -= p * math.log(p)
+        return h
+    hx = _entropy(px)
+    hy = _entropy(py)
+    denom = math.sqrt(hx * hy)
+    if denom <= 1e-12:
+        return 0.0
+    nmi = mi / denom
+    # Numerical noise can push slightly outside [0, 1].
+    return max(0.0, min(1.0, nmi))
+
+
 def _ols_residuals(xs: list, ys: list) -> list:
     """OLS residuals of regressing ys on xs."""
     n   = len(xs)
@@ -171,18 +233,20 @@ def compute_correlation_overview(trades: list, iv_columns: list,
         xs, ys = _valid_pairs(trades, m, target)
         if len(xs) < min_n:
             continue
-        r  = _pearson_r(xs, ys)
-        rs = _spearman_r(xs, ys)
+        r    = _pearson_r(xs, ys)
+        rs   = _spearman_r(xs, ys)
         cons = _consensus_r(r, rs)
+        mi   = _mutual_information(xs, ys)
         rows.append({
-            'metric':     m,
-            'r':          round(r, 4),       # back-compat: Pearson, what existing UI reads
-            'r2':         round(r * r, 4),
-            'pearson_r':  round(r, 4),
-            'spearman_r': round(rs, 4),
+            'metric':      m,
+            'r':           round(r, 4),       # back-compat: Pearson, what existing UI reads
+            'r2':          round(r * r, 4),
+            'pearson_r':   round(r, 4),
+            'spearman_r':  round(rs, 4),
             'consensus_r': round(cons, 4),
-            'divergence': round(abs(r - rs), 4),
-            'n':          len(xs),
+            'mi':          round(mi, 4),
+            'divergence':  round(abs(r - rs), 4),
+            'n':           len(xs),
         })
     # Sort by Pearson |r| by default; the frontend re-sorts on toggle change.
     rows.sort(key=lambda x: abs(x['r']), reverse=True)

@@ -293,6 +293,55 @@
       margin-right:6px;
     }
 
+    /* Searchable metric picker — replaces native <select> in section dropdowns */
+    .biv-metric-btn {
+      background:#222; border:1px solid #3a3a3a; color:#ccc;
+      padding:5px 26px 5px 10px; border-radius:3px;
+      font-size:13px; min-width:200px; text-align:left;
+      cursor:pointer; position:relative;
+      font-family:inherit;
+      max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .biv-metric-btn:hover { border-color:#555; }
+    .biv-metric-btn::after {
+      content:'▾'; position:absolute; right:9px; top:50%;
+      transform:translateY(-50%); color:#666; font-size:10px;
+    }
+    .biv-metric-btn.empty { color:#666; }
+    .biv-metric-popover {
+      position:fixed;
+      background:#222; border:1px solid #444; border-radius:4px;
+      padding:10px; width:320px; box-sizing:border-box;
+      z-index:1000;
+      box-shadow:0 6px 18px rgba(0,0,0,0.7);
+    }
+    .biv-metric-popover input[type=text] {
+      background:#1a1a1a; border:1px solid #3a3a3a; color:#ccc;
+      padding:5px 8px; border-radius:3px; font-size:12px;
+      width:100%; box-sizing:border-box;
+    }
+    .biv-metric-popover input[type=text]:focus { outline:none; border-color:#3498db; }
+    .biv-metric-list {
+      max-height:280px; overflow-y:auto; margin-top:6px;
+      background:#1a1a1a; border:1px solid #2a2a2a; border-radius:3px;
+    }
+    .biv-metric-fam {
+      font-size:10px; font-weight:700; color:#666; padding:5px 10px 2px;
+      text-transform:uppercase; letter-spacing:.5px;
+      background:#1f1f1f; position:sticky; top:0;
+    }
+    .biv-metric-option {
+      padding:4px 12px; font-size:12px; font-family:monospace;
+      color:#aaa; cursor:pointer;
+    }
+    .biv-metric-option:hover { background:#2a2a2a; color:#fff; }
+    .biv-metric-option.selected { background:#1a3a5c; color:#3498db; }
+    .biv-metric-clear {
+      background:none; border:none; color:#666; cursor:pointer;
+      font-size:11px; padding:2px 8px; margin-top:6px; width:100%; text-align:right;
+    }
+    .biv-metric-clear:hover { color:#ccc; }
+
     /* Summary stats strip */
     .biv-summary {
       border:1px solid #2a2a2a; border-radius:6px; background:#1a1a1a;
@@ -722,7 +771,7 @@
                         @click="s0.target='is_win'; loadCorrelationOverview()">Win</button>
               </div>
             </div>
-            <div title="Pearson: linear strength.&#10;Spearman: monotonic strength (catches non-linear shapes; robust to outliers).&#10;Consensus: sign(Pearson) × min(|Pearson|,|Spearman|) — what both methods agree on.">
+            <div title="Pearson: linear strength.&#10;Spearman: monotonic strength (catches non-linear shapes; robust to outliers).&#10;Consensus: sign(Pearson) × min(|Pearson|,|Spearman|) — what both methods agree on.&#10;MI: mutual information, normalized to [0,1]. Catches non-monotonic dependence (U-shapes, threshold effects) that Pearson and Spearman both miss. Always non-negative.">
               <label>SORT BY</label>
               <div class="biv-toggle">
                 <button :class="{on: s0.method==='pearson'}"
@@ -731,6 +780,8 @@
                         @click="setS0Method('spearman')">Spearman</button>
                 <button :class="{on: s0.method==='consensus'}"
                         @click="setS0Method('consensus')">Consensus</button>
+                <button :class="{on: s0.method==='mi'}"
+                        @click="setS0Method('mi')">MI</button>
               </div>
             </div>
             <span x-show="s0.loading" class="biv-loading">Computing…</span>
@@ -741,11 +792,14 @@
           <template x-if="s0.data && !s0.error">
             <div>
               <div style="font-size:12px;color:#555;margin-bottom:10px">
-                Pearson r &amp; Spearman ρ of each IV metric vs
+                Pearson r (blue), Spearman ρ (gold), and MI (teal) of each IV
+                metric vs
                 <span style="color:#aaa" x-text="s0.target === 'pnl' ? 'P&L' : 'win rate'"></span>,
-                sorted by selected method. Both bars are always shown — the
-                method picked for sort is full-opacity; the other is dimmed
-                so divergence is visible at a glance. Bars require n ≥ 10.
+                sorted by selected method. All three bars are always shown —
+                the selected method is full-opacity; the others are dimmed so
+                divergence is visible at a glance. <strong>MI catches
+                non-monotonic dependence</strong> (U-shapes, threshold effects)
+                that Pearson and Spearman miss. Bars require n ≥ 10.
                 Showing <span x-text="s0.data.metrics.length"></span> of
                 <span x-text="ivColumns.length"></span> IV metrics. Scroll horizontally if needed.
               </div>
@@ -773,16 +827,11 @@
           <div class="biv-ctrl">
             <div>
               <label>METRIC</label>
-              <select x-model="s3.metric" style="min-width:220px">
-                <option value="">— select metric —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s3.metric')}"
+                      :title="columnDescription(metricVal('s3.metric')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s3.metric', $event)"
+                      x-text="metricVal('s3.metric') || '— select metric —'"></button>
             </div>
             <div>
               <label>BUCKETS</label>
@@ -862,29 +911,19 @@
           <div class="biv-ctrl">
             <div>
               <label>METRIC A (X-AXIS)</label>
-              <select x-model="s1.metricA" style="min-width:220px">
-                <option value="">— select metric —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s1.metricA')}"
+                      :title="columnDescription(metricVal('s1.metricA')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s1.metricA', $event)"
+                      x-text="metricVal('s1.metricA') || '— select metric —'"></button>
             </div>
             <div>
               <label>METRIC B (Y-AXIS)</label>
-              <select x-model="s1.metricB" style="min-width:220px">
-                <option value="">— select metric —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s1.metricB')}"
+                      :title="columnDescription(metricVal('s1.metricB')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s1.metricB', $event)"
+                      x-text="metricVal('s1.metricB') || '— select metric —'"></button>
             </div>
             <div>
               <label>BUCKETS</label>
@@ -1071,16 +1110,11 @@
           <div class="biv-ctrl">
             <div>
               <label>FIX METRIC</label>
-              <select x-model="s4.fixMetric" style="min-width:200px">
-                <option value="">— select —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s4.fixMetric')}"
+                      :title="columnDescription(metricVal('s4.fixMetric')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s4.fixMetric', $event)"
+                      x-text="metricVal('s4.fixMetric') || '— select metric —'"></button>
             </div>
             <div>
               <label>FIX BUCKETS</label>
@@ -1102,16 +1136,11 @@
           <div class="biv-ctrl" style="margin-top:8px">
             <div>
               <label>VARY METRIC</label>
-              <select x-model="s4.varyMetric" style="min-width:200px">
-                <option value="">— select —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s4.varyMetric')}"
+                      :title="columnDescription(metricVal('s4.varyMetric')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s4.varyMetric', $event)"
+                      x-text="metricVal('s4.varyMetric') || '— select metric —'"></button>
             </div>
             <div>
               <label>VARY BUCKETS</label>
@@ -1164,16 +1193,11 @@
               <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
                 <div>
                   <label>METRIC</label>
-                  <select x-model="s5.metric" style="min-width:200px">
-                    <option value="">— select —</option>
-                    <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                      <optgroup :label="grp.family">
-                        <template x-for="c in grp.columns" :key="c">
-                          <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                        </template>
-                      </optgroup>
-                    </template>
-                  </select>
+                  <button class="biv-metric-btn" type="button"
+                          :class="{empty: !metricVal('s5.metric')}"
+                          :title="columnDescription(metricVal('s5.metric')) || 'click to search and pick a metric'"
+                          @click="openMetricPicker('s5.metric', $event)"
+                          x-text="metricVal('s5.metric') || '— select metric —'"></button>
                 </div>
                 <div>
                   <label>BUCKETS</label>
@@ -1298,16 +1322,11 @@
           <div class="biv-ctrl">
             <div>
               <label>METRIC</label>
-              <select x-model="s6.metric" style="min-width:220px">
-                <option value="">— select metric —</option>
-                <template x-for="grp in metricColumnGroups()" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button"
+                      :class="{empty: !metricVal('s6.metric')}"
+                      :title="columnDescription(metricVal('s6.metric')) || 'click to search and pick a metric'"
+                      @click="openMetricPicker('s6.metric', $event)"
+                      x-text="metricVal('s6.metric') || '— select metric —'"></button>
             </div>
             <div>
               <label>PERIODS</label>
@@ -1520,10 +1539,44 @@
       </div>
 
     </div><!-- /biv-main -->
+
+    <!-- Shared searchable metric picker — opened from any section dropdown.
+         Position is computed from the trigger button's bounding rect when
+         opened; only one instance can be active at a time. -->
+    <div x-show="metricPicker.open" x-cloak
+         @click.outside="closeMetricPicker()"
+         @keydown.escape.window="closeMetricPicker()"
+         class="biv-metric-popover"
+         :style="`top:${metricPicker.posTop}px; left:${metricPicker.posLeft}px`">
+      <input type="text" x-model="metricPicker.search"
+             placeholder="search columns or descriptions…"
+             x-init="$nextTick(() => $el.focus())">
+      <div class="biv-metric-list">
+        <template x-for="grp in metricPickerGroups()" :key="grp.family">
+          <div>
+            <div class="biv-metric-fam" x-text="grp.family"></div>
+            <template x-for="c in grp.columns" :key="c">
+              <div class="biv-metric-option"
+                   :class="{selected: c === metricPickerCurrent()}"
+                   :title="columnDescription(c) || c"
+                   @click="pickMetric(c)"
+                   x-text="c"></div>
+            </template>
+          </div>
+        </template>
+        <template x-if="metricPickerGroups().length === 0">
+          <div style="padding:14px;color:#555;font-size:11px;text-align:center">
+            no matching metrics
+          </div>
+        </template>
+      </div>
+      <button class="biv-metric-clear"
+              @click="pickMetric('')">Clear selection ✕</button>
+    </div>
   </div><!-- /biv-body -->
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=13"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=14"></script>
 </body>
 </html>

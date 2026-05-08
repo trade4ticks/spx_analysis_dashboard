@@ -137,6 +137,18 @@ document.addEventListener('alpine:init', () => {
     // show descriptions on hover, and format values by their units.
     catalog: {},
 
+    // Shared searchable picker for the section metric dropdowns. Only one
+    // instance — opens for whichever section's button was clicked, writes
+    // the picked value back through `path` (dot-notation, e.g. 's3.metric'),
+    // closes on selection or click-outside.
+    metricPicker: {
+      open:    false,
+      path:    null,
+      search:  '',
+      posTop:  0,
+      posLeft: 0,
+    },
+
     // Active drag state for the slider chip. null when not dragging.
     sliderDrag: null,
 
@@ -414,10 +426,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     _onFilterPosResize() {
-      // Re-anchor the popover when the viewport changes while it's open.
-      // No-op when closed.
-      if (!this.filterEditor.open) return;
-      Object.assign(this.filterEditor, this._computeFilterPos());
+      // Re-anchor open popovers when the viewport changes. No-op when closed.
+      if (this.filterEditor.open) {
+        Object.assign(this.filterEditor, this._computeFilterPos());
+      }
+      if (this.metricPicker.open) {
+        // Picker doesn't have its anchor element cached, so just close on
+        // resize — simpler and the user can reopen.
+        this.metricPicker.open = false;
+      }
     },
 
     openFilterEditor(idx = null) {
@@ -537,12 +554,19 @@ document.addEventListener('alpine:init', () => {
     // Grouped metric list for the section dropdowns. Same family ordering
     // and intra-family sort as filteredColumnList(), but no outcome
     // columns (sections select features, not Y variables) and supports
-    // an exclude set for multi-selects (S2/S7).
-    metricColumnGroups(excludeArr) {
+    // an exclude set for multi-selects (S2/S7) plus an optional search
+    // string (used by the searchable metric picker).
+    metricColumnGroups(excludeArr, searchQuery) {
       const exclude = new Set(excludeArr || []);
+      const q = (searchQuery || '').toLowerCase().trim();
       const groups = {};
       for (const c of this.ivColumns) {
         if (exclude.has(c)) continue;
+        if (q) {
+          const nameHit = c.toLowerCase().includes(q);
+          const desc    = (this.columnDescription(c) || '').toLowerCase();
+          if (!nameHit && !desc.includes(q)) continue;
+        }
         const fam = this._colFamily(c);
         (groups[fam] ||= []).push(c);
       }
@@ -572,6 +596,77 @@ document.addEventListener('alpine:init', () => {
       return order
         .filter(f => groups[f]?.length)
         .map(f => ({ family: f, columns: groups[f] }));
+    },
+
+    // ── Shared searchable metric picker ──
+    _getNested(path) {
+      if (!path) return null;
+      return path.split('.').reduce((o, k) => (o == null ? null : o[k]), this);
+    },
+
+    _setNested(path, value) {
+      if (!path) return;
+      const keys = path.split('.');
+      const last = keys.pop();
+      const parent = keys.reduce((o, k) => o[k], this);
+      if (parent) parent[last] = value;
+    },
+
+    _computeMetricPickerPos(btn) {
+      const popWidth = 320;
+      const margin   = 8;
+      const viewport = window.innerWidth ||
+                       document.documentElement.clientWidth || 1024;
+      if (!btn) return { posTop: 80, posLeft: margin };
+      const r = btn.getBoundingClientRect();
+      // Prefer left-aligned with the button (extends right). Falls back to
+      // right-aligned (extends left) if it would overflow the right edge.
+      let left = r.left;
+      if (left + popWidth + margin > viewport) {
+        left = r.right - popWidth;
+      }
+      const maxLeft = viewport - popWidth - margin;
+      if (left > maxLeft) left = Math.max(margin, maxLeft);
+      if (left < margin) left = margin;
+      return { posTop: r.bottom + 4, posLeft: Math.round(left) };
+    },
+
+    openMetricPicker(path, evt) {
+      const btn = evt?.currentTarget || evt?.target;
+      const pos = this._computeMetricPickerPos(btn);
+      this.metricPicker = {
+        open:   true,
+        path,
+        search: '',
+        ...pos,
+      };
+    },
+
+    closeMetricPicker() {
+      this.metricPicker.open = false;
+    },
+
+    pickMetric(value) {
+      if (this.metricPicker.path) {
+        this._setNested(this.metricPicker.path, value || '');
+      }
+      this.closeMetricPicker();
+    },
+
+    metricPickerCurrent() {
+      return this._getNested(this.metricPicker.path);
+    },
+
+    metricPickerGroups() {
+      // Uses the picker's search string to filter the standard grouped list.
+      return this.metricColumnGroups(null, this.metricPicker.search);
+    },
+
+    // Shorthand for templates: read a metric value via dot path. Used by the
+    // picker trigger buttons so each section binds without losing reactivity.
+    metricVal(path) {
+      const v = this._getNested(path);
+      return (v === null || v === undefined || v === '') ? '' : v;
     },
 
     filteredColumnList() {
@@ -1020,16 +1115,17 @@ document.addEventListener('alpine:init', () => {
     },
 
     setS0Method(method) {
-      if (!['pearson','spearman','consensus'].includes(method)) return;
+      if (!['pearson','spearman','consensus','mi'].includes(method)) return;
       if (this.s0.method === method) return;
       this.s0.method = method;
-      // No fetch needed — the backend returns all three values.
+      // No fetch needed — the backend returns all values.
       this._renderS0Chart();
     },
 
     _s0Value(m, method) {
       if (method === 'spearman')   return (m.spearman_r  ?? 0);
       if (method === 'consensus')  return (m.consensus_r ?? 0);
+      if (method === 'mi')         return (m.mi          ?? 0);
       return (m.pearson_r ?? m.r ?? 0);
     },
 
@@ -1051,6 +1147,7 @@ document.addEventListener('alpine:init', () => {
       const pearsonAlpha   = method === 'pearson'   ? 0.92 : 0.30;
       const spearmanAlpha  = method === 'spearman'  ? 0.92 : 0.30;
       const consensusAlpha = method === 'consensus' ? 0.92 : 0.30;
+      const miAlpha        = method === 'mi'        ? 0.92 : 0.30;
 
       const datasets = [];
       if (method === 'consensus') {
@@ -1087,6 +1184,14 @@ document.addEventListener('alpine:init', () => {
         }),
         borderWidth: 0, categoryPercentage: 0.92, barPercentage: 0.92,
       });
+      // MI is unsigned (always ≥ 0) — single teal color. Catches non-monotonic
+      // dependence (U-shapes, threshold effects) that Pearson and Spearman miss.
+      datasets.push({
+        label: 'MI (any shape)',
+        data: metrics.map(m => m.mi ?? 0),
+        backgroundColor: `rgba(26,188,156,${miAlpha})`,
+        borderWidth: 0, categoryPercentage: 0.92, barPercentage: 0.92,
+      });
 
       this.s0._chart = new Chart(el.getContext('2d'), {
         type: 'bar',
@@ -1108,13 +1213,15 @@ document.addEventListener('alpine:init', () => {
                   const p   = m.pearson_r ?? m.r ?? 0;
                   const s   = m.spearman_r ?? 0;
                   const c   = m.consensus_r ?? 0;
+                  const mi  = m.mi ?? 0;
                   const div = m.divergence ?? Math.abs(p - s);
                   const sign = v => (v >= 0 ? '+' : '') + v.toFixed(4);
                   return [
                     `target: ${tgt}   n=${m.n}`,
                     `Pearson r  = ${sign(p)}`,
                     `Spearman ρ = ${sign(s)}`,
-                    `Consensus  = ${sign(c)}   (divergence=${div.toFixed(3)})`,
+                    `MI         = ${mi.toFixed(4)}   (unsigned)`,
+                    `Consensus  = ${sign(c)}   (Δ=${div.toFixed(3)})`,
                   ];
                 },
               },
