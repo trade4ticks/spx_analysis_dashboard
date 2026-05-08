@@ -183,6 +183,46 @@ def _apply_filters(
     return out
 
 
+def _apply_cell_filter(trades: list, cells: Optional[list]) -> list:
+    """Keep trades that fall inside ANY of the (metric_a, metric_b) cells.
+    Each cell is a CellClause-shaped object/dict with metric_a, a_min,
+    a_max, metric_b, b_min, b_max. OR semantics — used by the S1 heatmap
+    to drive S3 single-metric decile views."""
+    if not cells:
+        return trades
+    parsed = []
+    for c in cells:
+        if hasattr(c, 'model_dump'):
+            c = c.model_dump()
+        elif hasattr(c, 'dict'):
+            c = c.dict()
+        try:
+            parsed.append((
+                c['metric_a'], float(c['a_min']), float(c['a_max']),
+                c['metric_b'], float(c['b_min']), float(c['b_max']),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not parsed:
+        return trades
+    out = []
+    for t in trades:
+        for ma, amin, amax, mb, bmin, bmax in parsed:
+            va = t.get(ma)
+            vb = t.get(mb)
+            if va is None or vb is None:
+                continue
+            try:
+                vaf = float(va)
+                vbf = float(vb)
+            except (TypeError, ValueError):
+                continue
+            if amin <= vaf <= amax and bmin <= vbf <= bmax:
+                out.append(t)
+                break
+    return out
+
+
 def _parse_filter_param(s: str) -> Optional[dict]:
     """Parse one URL-encoded filter clause: 'col:op:arg1:arg2'.
       between → arg1=min (may be blank), arg2=max (may be blank)
@@ -240,9 +280,24 @@ class DeltaR2Request(_DateFilterMixin):
     target: str = 'pnl'
 
 
+class CellClause(BaseModel):
+    """One heatmap cell expressed as bounds on two metrics. Trade is
+    considered to match this cell when both metrics' values fall within
+    the inclusive ranges."""
+    metric_a: str
+    a_min:    float
+    a_max:    float
+    metric_b: str
+    b_min:    float
+    b_max:    float
+
+
 class DecileRequest(_DateFilterMixin):
     metric: str
     n_buckets: int = 10
+    # Optional cell-filter from the S1 heatmap. Multiple cells combine with
+    # OR semantics (a trade matches if it lies inside any selected cell).
+    cell_filter: list[CellClause] = []
 
 
 class ConditionalSliceRequest(_DateFilterMixin):
@@ -385,6 +440,8 @@ async def delta_r2(upload_id: str, req: DeltaR2Request, pool=Depends(get_pool)):
 async def decile(upload_id: str, req: DecileRequest, pool=Depends(get_pool)):
     trades_full, _ = await _load_trades(upload_id, pool)
     trades = _apply_filters(trades_full, req.date_from, req.date_to, req.filters)
+    if req.cell_filter:
+        trades = _apply_cell_filter(trades, req.cell_filter)
     if not trades:
         raise HTTPException(400, "No trades after filters")
     boundary = trades_full if req.bin_mode == 'fixed' else None

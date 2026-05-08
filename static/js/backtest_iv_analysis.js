@@ -188,6 +188,9 @@ document.addEventListener('alpine:init', () => {
       minSampleN: 5,   // cells with n < minSampleN render as gray
       data: null, loading: false, error: null,
       _renderId: 0,    // bumped on each successful compute to force grid re-render
+      // Click-toggled cell selection that drives S3 multi-metric filter.
+      // Each entry: {ia, ib}. Cleared on metric change.
+      selectedCells: [],
     },
 
     // ── Section 2: Pairwise ΔR² ──
@@ -198,10 +201,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Section 3: Decile ──
+    // metrics is an array — each entry gets its own decile chart stacked
+    // vertically. dataByMetric / charts are keyed by metric name.
     s3: {
-      metric: '', nBuckets: 10,
-      data: null, loading: false, error: null,
-      _chart: null,
+      metrics: [''], nBuckets: 10,
+      dataByMetric: {},
+      charts: {},
+      loading: false, error: null,
     },
 
     // ── Section 4: Conditional Slice ──
@@ -683,17 +689,26 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Shared searchable metric picker ──
+    _pathTokens(path) {
+      // 's3.metric' → ['s3', 'metric']
+      // 's3.metrics[0]' → ['s3', 'metrics', 0]
+      if (!path) return [];
+      return path.split(/\.|\[|\]/)
+        .filter(s => s !== '')
+        .map(s => /^\d+$/.test(s) ? Number(s) : s);
+    },
+
     _getNested(path) {
-      if (!path) return null;
-      return path.split('.').reduce((o, k) => (o == null ? null : o[k]), this);
+      const tokens = this._pathTokens(path);
+      return tokens.reduce((o, k) => (o == null ? null : o[k]), this);
     },
 
     _setNested(path, value) {
-      if (!path) return;
-      const keys = path.split('.');
-      const last = keys.pop();
-      const parent = keys.reduce((o, k) => o[k], this);
-      if (parent) parent[last] = value;
+      const tokens = this._pathTokens(path);
+      if (!tokens.length) return;
+      const last = tokens.pop();
+      const parent = tokens.reduce((o, k) => o[k], this);
+      if (parent != null) parent[last] = value;
     },
 
     _computeMetricPickerPos(btn) {
@@ -1356,6 +1371,10 @@ document.addEventListener('alpine:init', () => {
     async loadHeatmap() {
       if (!this.s1.metricA || !this.s1.metricB || !this.selectedId) return;
       this.s1.loading = true; this.s1.error = null;
+      // Cell selection is keyed to the previous heatmap's bin layout, so a
+      // recompute (different metrics or bin count) always invalidates it.
+      const hadSelection = this.s1.selectedCells.length > 0;
+      this.s1.selectedCells = [];
       try {
         const data = await this._api('heatmap', {
           metric_a: this.s1.metricA, metric_b: this.s1.metricB, n_buckets: this.s1.nBuckets,
@@ -1364,6 +1383,8 @@ document.addEventListener('alpine:init', () => {
         this.s1.data = data;
       } catch (e) { this.s1.error = e.message; }
       finally { this.s1.loading = false; }
+      // If S3 was filtered by old cells, refresh now that the filter is empty.
+      if (hadSelection && this.s3HasResults()) this.loadDecile();
     },
 
     s1CellBg(cell) {
@@ -1435,29 +1456,95 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Section 3: Decile ──
-    async loadDecile() {
-      if (!this.s3.metric || !this.selectedId) return;
-      this.s3.loading = true; this.s3.error = null;
-      try {
-        this.s3.data = await this._api('decile', { metric: this.s3.metric, n_buckets: this.s3.nBuckets });
-        await this.$nextTick();
-        this._renderDecileChart();
-      } catch (e) { this.s3.error = e.message; }
-      finally { this.s3.loading = false; }
+    // ── S3: multi-metric decile, optional S1-cell filter ──
+    s3AddMetric() {
+      this.s3.metrics = [...this.s3.metrics, ''];
     },
 
-    _renderDecileChart() {
-      this.s3._chart = this._destroyChart(this.s3._chart);
-      const el = document.getElementById('s3-chart');
-      if (!el || !this.s3.data?.buckets) return;
-      const buckets  = this.s3.data.buckets;
+    s3RemoveMetric(idx) {
+      const m = this.s3.metrics[idx];
+      if (m && this.s3.charts[m]) {
+        this.s3.charts[m] = this._destroyChart(this.s3.charts[m]);
+      }
+      if (m) delete this.s3.dataByMetric[m];
+      const next = this.s3.metrics.filter((_, i) => i !== idx);
+      this.s3.metrics = next.length ? next : [''];
+    },
+
+    s3HasResults() {
+      return Object.keys(this.s3.dataByMetric || {}).length > 0;
+    },
+
+    _safeId(s) {
+      return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    },
+
+    // Translate s1.selectedCells into the backend CellClause shape using
+    // the heatmap's known per-axis quantile boundaries.
+    _buildCellFilter() {
+      const sel = this.s1.selectedCells || [];
+      if (sel.length === 0) return [];
+      const data = this.s1.data;
+      if (!data?.bounds_a || !data?.bounds_b) return [];
+      return sel.map(({ ia, ib }) => ({
+        metric_a: data.metric_a,
+        a_min:    data.bounds_a[ia],
+        a_max:    data.bounds_a[ia + 1],
+        metric_b: data.metric_b,
+        b_min:    data.bounds_b[ib],
+        b_max:    data.bounds_b[ib + 1],
+      }));
+    },
+
+    async loadDecile() {
+      if (!this.selectedId) return;
+      const metrics = (this.s3.metrics || []).filter(m => !!m);
+      if (metrics.length === 0) return;
+      this.s3.loading = true; this.s3.error = null;
+
+      // Destroy any prior charts so we don't leak canvases when metrics change.
+      for (const k of Object.keys(this.s3.charts || {})) {
+        this.s3.charts[k] = this._destroyChart(this.s3.charts[k]);
+      }
+
+      const cellFilter = this._buildCellFilter();
+      try {
+        const results = await Promise.all(metrics.map(metric =>
+          this._api('decile', {
+            metric,
+            n_buckets:   this.s3.nBuckets,
+            cell_filter: cellFilter,
+          }).then(d => [metric, d])
+            .catch(e => [metric, { error: e.message || String(e) }])
+        ));
+        const next = {};
+        for (const [m, d] of results) next[m] = d;
+        this.s3.dataByMetric = next;
+        await this.$nextTick();
+        for (const m of metrics) {
+          if (next[m]?.buckets) this._renderDecileChartForMetric(m);
+        }
+      } catch (e) {
+        this.s3.error = e.message;
+      } finally {
+        this.s3.loading = false;
+      }
+    },
+
+    _renderDecileChartForMetric(metric) {
+      const data = this.s3.dataByMetric[metric];
+      if (!data?.buckets) return;
+      this.s3.charts[metric] = this._destroyChart(this.s3.charts[metric]);
+      const el = document.getElementById('s3-chart-' + this._safeId(metric));
+      if (!el) return;
+      const buckets  = data.buckets;
       const labels   = buckets.map(b => b.label);
       const pnls     = buckets.map(b => b.mean_pnl ?? 0);
       const maxAbs   = Math.max(...pnls.map(Math.abs), 1);
       const colors   = pnls.map(v => pnlColor(v, maxAbs));
       const winRates = buckets.map(b => (b.win_rate ?? 0) * 100);
 
-      this.s3._chart = new Chart(el.getContext('2d'), {
+      this.s3.charts[metric] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: {
           labels,
@@ -1495,6 +1582,27 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+    },
+
+    // ── S1 cell selection (drives S3 cell filter) ──
+    toggleS1Cell(ia, ib) {
+      const sel = this.s1.selectedCells || [];
+      const idx = sel.findIndex(c => c.ia === ia && c.ib === ib);
+      this.s1.selectedCells = idx >= 0
+        ? sel.filter((_, i) => i !== idx)
+        : [...sel, { ia, ib }];
+      // If S3 already has results, re-fetch with the new cell filter.
+      if (this.s3HasResults()) this.loadDecile();
+    },
+
+    clearS1Selection() {
+      if (!this.s1.selectedCells.length) return;
+      this.s1.selectedCells = [];
+      if (this.s3HasResults()) this.loadDecile();
+    },
+
+    isS1CellSelected(ia, ib) {
+      return (this.s1.selectedCells || []).some(c => c.ia === ia && c.ib === ib);
     },
 
     // ── Section 4: Conditional Slice ──
