@@ -47,6 +47,11 @@
     .biv-heatmap-wrap { overflow-x:auto; }
     .biv-heatmap      { border-collapse:collapse; font-size:12px; font-family:monospace; }
     .biv-heatmap th   { padding:5px 10px; color:#666; font-weight:600; text-align:center; font-size:11px; white-space:nowrap; }
+    /* Cells need position:relative for the absolute today marker, and
+       cursor:pointer for click-toggle. Setting via class — putting these on
+       the inline style attribute would conflict with the reactive :style
+       binding that paints the cell background. */
+    .biv-heatmap td   { position:relative; cursor:pointer; }
     .biv-heatmap td   {
       width:90px; height:58px; text-align:center; vertical-align:middle;
       border:1px solid #111; cursor:default; transition:opacity .1s;
@@ -372,23 +377,45 @@
       background:#f1c40f; box-shadow:0 0 6px rgba(241,196,15,0.6);
     }
     .biv-today-label { color:#999; }
-    /* Cell highlight for today's location on the heatmap */
+    /* Today's location on the heatmap — soft light-gray cell outline */
     .biv-heatmap td.biv-cell-today {
-      outline:2px solid #f1c40f !important;
+      outline:2px solid #d8d8d8 !important;
       outline-offset:-2px;
-      box-shadow:inset 0 0 0 1px rgba(241,196,15,0.4);
+      box-shadow:inset 0 0 0 1px rgba(216,216,216,0.4);
     }
-    /* Precise × marker placed at today's fractional location inside the cell */
+    /* Precise crosshair at today's fractional location inside the cell.
+       Drawn as a centered dot with thin lines extending to the cell edges
+       — clearly readable against any cell background color. */
     .biv-cell-today-x {
       position:absolute;
-      transform:translate(-50%, -50%);
-      color:#f1c40f;
-      font-size:22px;
-      font-weight:900;
-      line-height:1;
-      text-shadow: 0 0 5px rgba(0,0,0,0.85), 0 0 2px rgba(0,0,0,0.85);
+      width:0; height:0;
       pointer-events:none;
-      z-index:2;
+      z-index:3;
+    }
+    .biv-cell-today-x::before,
+    .biv-cell-today-x::after {
+      content:'';
+      position:absolute;
+      background:#e6e6e6;
+      box-shadow:0 0 3px rgba(0,0,0,0.85);
+    }
+    /* Vertical line of the crosshair */
+    .biv-cell-today-x::before {
+      left:-1px; top:-9px;
+      width:2px; height:18px;
+    }
+    /* Horizontal line of the crosshair */
+    .biv-cell-today-x::after {
+      top:-1px; left:-9px;
+      height:2px; width:18px;
+    }
+    /* Center dot stacked on top so the precise point is unambiguous */
+    .biv-cell-today-x {
+      width:7px; height:7px;
+      transform:translate(-50%, -50%);
+      border-radius:50%;
+      background:#fff;
+      box-shadow:0 0 0 2px #555, 0 0 5px rgba(0,0,0,0.85);
     }
     /* User-selected cells (drives S3 cell filter) */
     .biv-heatmap td.biv-cell-selected {
@@ -982,7 +1009,7 @@
                     · Δ=<span x-text="s3.dataByMetric[m].divergence"></span>
                   </span>
                   <template x-if="todayValueFor(m)?.value !== null && todayValueFor(m)?.value !== undefined && todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value)">
-                    <span style="color:#f1c40f;margin-left:10px"
+                    <span style="color:#bbb;margin-left:10px"
                           :title="'Today: ' + todayValueFor(m).value.toFixed(6) + ' (' + todayValueFor(m).date + ' ' + todayValueFor(m).time + ')'">
                       · today in bucket
                       <strong x-text="todayBucket(s3.dataByMetric[m].buckets, todayValueFor(m).value).label"></strong>
@@ -991,11 +1018,15 @@
                 </div>
               </template>
 
-              <!-- Chart canvas — ALWAYS in the DOM when m is set, regardless
-                   of error/success state. This keeps re-renders robust across
-                   error→success transitions (no Alpine x-if race). -->
+              <!-- Chart canvas — ALWAYS in the DOM when m is set. The id
+                   includes s3._renderToken so Alpine recreates the element
+                   on every successful loadDecile call, guaranteeing
+                   Chart.js renders into a fresh DOM node and never carries
+                   contaminated state across error→success transitions. -->
               <template x-if="m">
-                <div class="biv-chart-wrap"><canvas :id="'s3-chart-' + _safeId(m)"></canvas></div>
+                <div class="biv-chart-wrap">
+                  <canvas :id="'s3-chart-' + _safeId(m) + '-' + s3._renderToken"></canvas>
+                </div>
               </template>
 
               <template x-if="m && s3.dataByMetric[m]?.error">
@@ -1136,17 +1167,18 @@
                                 'biv-cell-selected': isS1CellSelected(ia, ib),
                               }"
                               @click="toggleS1Cell(ia, ib)"
-                              style="cursor:pointer;position:relative"
-                              :title="(isS1TodayCell(ia, ib) ? '⚪ TODAY · ' : '') + (isS1CellSelected(ia, ib) ? '✓ SELECTED · ' : '') + 'click to toggle as S3 filter · n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
+                              :title="(isS1TodayCell(ia, ib) ? '◻ TODAY · ' : '') + (isS1CellSelected(ia, ib) ? '✓ SELECTED · ' : '') + 'click to toggle as S3 filter · n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
                             <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
                             <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
                             <!-- Precise today marker — positioned via the
                                  fractional value within the cell's bin range.
-                                 Cell already has position:relative. -->
+                                 .biv-heatmap td already has position:relative
+                                 (set in CSS, not inline, so it can't be
+                                 overridden by the reactive :style binding). -->
                             <template x-if="isS1TodayCell(ia, ib)">
                               <span class="biv-cell-today-x"
                                     :style="`left:${s1TodayPctX(ia)}%; top:${s1TodayPctY(ib)}%`"
-                                    title="precise location of today's value">×</span>
+                                    title="precise location of today's value"></span>
                             </template>
                           </td>
                         </template>
@@ -1732,6 +1764,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=17"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=18"></script>
 </body>
 </html>

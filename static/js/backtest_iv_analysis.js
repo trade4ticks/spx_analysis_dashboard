@@ -106,30 +106,32 @@ const _todayMarkerPlugin = {
     const ctx = chart.ctx;
     ctx.save();
     ctx.lineWidth   = 2;
-    ctx.strokeStyle = 'rgba(241,196,15,0.85)';
+    ctx.strokeStyle = 'rgba(220,220,220,0.85)';   // light gray
     ctx.setLineDash([5, 4]);
     ctx.beginPath();
     ctx.moveTo(xPx, top);
     ctx.lineTo(xPx, bot);
     ctx.stroke();
     ctx.setLineDash([]);
-    // × glyph at the top of the chart area
-    ctx.fillStyle    = '#f1c40f';
-    ctx.font         = 'bold 16px sans-serif';
+    // Filled dot at the top of the line — precise point indicator
+    ctx.fillStyle = '#e6e6e6';
+    ctx.beginPath();
+    ctx.arc(xPx, top + 4, 4, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+    // Small numeric label above the dot, kept in-bounds horizontally
+    ctx.fillStyle    = 'rgba(220,220,220,0.95)';
+    ctx.font         = '11px monospace';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
-    ctx.fillText('×', xPx, top - 2);
-    // small numeric label
-    ctx.font = '11px monospace';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle    = 'rgba(241,196,15,0.95)';
     const label = Math.abs(v) >= 1000 ? Math.round(v).toString()
                   : Math.abs(v) >= 1   ? v.toFixed(2)
                   :                       v.toFixed(4);
-    // Keep the label in-bounds horizontally
-    const labelX = Math.max(xScale.left + 18,
-                            Math.min(xScale.right - 18, xPx));
-    ctx.fillText('today=' + label, labelX, top + 2);
+    const labelX = Math.max(xScale.left + 24,
+                            Math.min(xScale.right - 24, xPx));
+    ctx.fillText('today ' + label, labelX, top - 2);
     ctx.restore();
   },
 };
@@ -277,14 +279,20 @@ document.addEventListener('alpine:init', () => {
     // ── Section 3: Decile ──
     // metrics is an array — each entry gets its own decile chart stacked
     // vertically. dataByMetric / charts are keyed by metric name.
-    // _loadToken increments on every loadDecile() so a stale fetch
-    // can't overwrite newer state if the user clicks faster than the
-    // server responds.
+    // _loadToken: increments on every loadDecile() so a stale fetch
+    //   can't overwrite newer state if the user clicks faster than the
+    //   server responds.
+    // _renderToken: bumped on each successful render cycle and embedded in
+    //   each canvas id. Alpine reactively re-creates the canvas element
+    //   when the id changes, which guarantees Chart.js is rendering into a
+    //   fresh DOM node — no state contamination across error→success
+    //   transitions.
     s3: {
       metrics: [''], nBuckets: 10,
       dataByMetric: {},
       charts: {},
       _loadToken: 0,
+      _renderToken: 0,
       loading: false, error: null,
     },
 
@@ -1618,20 +1626,26 @@ document.addEventListener('alpine:init', () => {
         // A newer load was kicked off while we were waiting — drop these.
         if (token !== this.s3._loadToken) return;
 
+        // Tear down ALL prior chart instances before swapping data. Alpine
+        // is about to recreate the canvases (because we bump _renderToken)
+        // and the old canvas elements will be removed from the DOM.
+        for (const k of Object.keys(this.s3.charts || {})) {
+          this.s3.charts[k] = this._destroyChart(this.s3.charts[k]);
+        }
+        this.s3.charts = {};
+
         const next = {};
         for (const [m, d] of results) next[m] = d;
         this.s3.dataByMetric = next;
+        // Bump render token AFTER data update so the canvas id changes in
+        // the same reactive cycle. Alpine creates fresh canvas elements.
+        this.s3._renderToken++;
         await this.$nextTick();
         if (token !== this.s3._loadToken) return;
 
         for (const m of metrics) {
           if (next[m]?.buckets) {
             this._renderDecileChartForMetric(m);
-          } else {
-            // Error or empty: blank the canvas but keep it in the DOM so a
-            // subsequent successful load can render into the same element.
-            this.s3.charts[m] = this._destroyChart(this.s3.charts[m]);
-            this._blankCanvas('s3-chart-' + this._safeId(m));
           }
         }
       } catch (e) {
@@ -1641,21 +1655,14 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    _blankCanvas(id) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      const ctx = el.getContext('2d');
-      ctx.clearRect(0, 0, el.width, el.height);
-    },
-
     _renderDecileChartForMetric(metric, retries = 5) {
       const data = this.s3.dataByMetric[metric];
       if (!data?.buckets) return;
-      const el = document.getElementById('s3-chart-' + this._safeId(metric));
+      const id = 's3-chart-' + this._safeId(metric) + '-' + this.s3._renderToken;
+      const el = document.getElementById(id);
       if (!el) {
         // Canvas is gated behind Alpine's reactive template — if Alpine
-        // hasn't inserted the element yet, retry briefly. Robust against
-        // any rendering race after error→success transitions.
+        // hasn't inserted the element with the new token yet, retry briefly.
         if (retries > 0) {
           setTimeout(() => this._renderDecileChartForMetric(metric, retries - 1), 50);
         }
