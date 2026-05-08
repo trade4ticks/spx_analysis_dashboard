@@ -271,7 +271,14 @@ document.addEventListener('alpine:init', () => {
       // Click-toggled cell selection that drives S3 multi-metric filter.
       // Each entry: {ia, ib}. Cleared on metric change.
       selectedCells: [],
+      // Last 5 trading days (incl. today) of (metricA, metricB) values.
+      // Each entry: {date, a, b}. Loaded from /api/meta/value-trail.
+      trail: [],
     },
+
+    // Global toggle for live (today + trail) overlays. When false, hides
+    // S0/S3 today markers and the heatmap × + trail.
+    liveOverlays: true,
 
     // ── Section 2: Pairwise ΔR² ──
     s2: {
@@ -768,12 +775,134 @@ document.addEventListener('alpine:init', () => {
     },
 
     isS1TodayCell(ia, ib) {
-      if (!this.s1.data) return false;
+      if (!this.s1.data || !this.liveOverlays) return false;
       const a = this.todayValueFor(this.s1.metricA);
       const b = this.todayValueFor(this.s1.metricB);
       if (!a || !b || a.value == null || b.value == null) return false;
       const cell = this.todayHeatmapCell(this.s1.data, a.value, b.value);
       return cell && cell.ia === ia && cell.ib === ib;
+    },
+
+    // ── S1 heatmap trail (last N days) ──
+    async loadHeatmapTrail() {
+      if (!this.s1.metricA || !this.s1.metricB) {
+        this.s1.trail = [];
+        return;
+      }
+      try {
+        const [aRes, bRes] = await Promise.all([
+          fetch('/api/meta/value-trail?days=5&col=' + encodeURIComponent(this.s1.metricA)).then(r => r.json()),
+          fetch('/api/meta/value-trail?days=5&col=' + encodeURIComponent(this.s1.metricB)).then(r => r.json()),
+        ]);
+        const aByDate = {};
+        const bByDate = {};
+        for (const p of (aRes.trail || [])) aByDate[p.date] = p.value;
+        for (const p of (bRes.trail || [])) bByDate[p.date] = p.value;
+        const dates = Array.from(new Set([
+          ...Object.keys(aByDate), ...Object.keys(bByDate),
+        ])).sort();
+        this.s1.trail = dates
+          .map(d => ({ date: d, a: aByDate[d], b: bByDate[d] }))
+          .filter(p => p.a != null && p.b != null);
+      } catch (e) {
+        console.warn('heatmap trail fetch failed', e);
+        this.s1.trail = [];
+      }
+    },
+
+    // For a value, return (cellIdx, fracInsideCell) so trail dots can be
+    // positioned absolutely inside the table relative to the heatmap area.
+    _heatmapPos(val, bounds) {
+      if (val == null || !bounds || bounds.length < 2) return null;
+      // Clamp into the bin range so points outside the heatmap still show
+      // at the nearest edge rather than disappearing.
+      let idx = -1;
+      if (val < bounds[0]) idx = 0;
+      else if (val > bounds[bounds.length - 1]) idx = bounds.length - 2;
+      else {
+        for (let i = 0; i < bounds.length - 1; i++) {
+          if (val >= bounds[i] && val <= bounds[i + 1]) { idx = i; break; }
+        }
+      }
+      if (idx < 0) return null;
+      const lo = bounds[idx];
+      const hi = bounds[idx + 1];
+      const frac = hi <= lo ? 0.5 : Math.max(0, Math.min(1, (val - lo) / (hi - lo)));
+      return { idx, frac };
+    },
+
+    // Returns trail markers as a list of {dayIdx, ia, ib, fracX, fracY,
+    // isToday, date, a, b} positioned within their containing cells.
+    s1TrailMarkers() {
+      if (!this.liveOverlays || !this.s1.data?.bounds_a || !this.s1.trail?.length) {
+        return [];
+      }
+      const data = this.s1.data;
+      const out = [];
+      const trail = this.s1.trail;
+      const lastDate = trail[trail.length - 1]?.date;
+      trail.forEach((p, i) => {
+        const xp = this._heatmapPos(p.a, data.bounds_a);
+        const yp = this._heatmapPos(p.b, data.bounds_b);
+        if (!xp || !yp) return;
+        out.push({
+          dayIdx:  i,
+          isToday: p.date === lastDate,
+          ia:      xp.idx,
+          ib:      yp.idx,
+          fracX:   xp.frac * 100,
+          fracY:   yp.frac * 100,
+          date:    p.date,
+          a:       p.a,
+          b:       p.b,
+        });
+      });
+      return out;
+    },
+
+    s1TrailMarkersInCell(ia, ib) {
+      return this.s1TrailMarkers().filter(m => m.ia === ia && m.ib === ib);
+    },
+
+    // Pixel coordinates of the trail polyline relative to the heatmap-wrap.
+    // Computed by measuring each containing cell's bounding rect — works
+    // regardless of cell width / table layout / header offset.
+    s1ComputeTrailLine() {
+      const markers = this.s1TrailMarkers();
+      if (markers.length < 2) return '';
+      // Find the heatmap table; bail quietly if not yet rendered.
+      const table = document.querySelector('.biv-heatmap');
+      if (!table) return '';
+      const wrap = table.closest('.biv-heatmap-wrap');
+      if (!wrap) return '';
+      const wrapRect = wrap.getBoundingClientRect();
+      const rows = table.querySelectorAll('tbody tr');
+      const points = [];
+      for (const m of markers) {
+        const row = rows[m.ib];
+        if (!row) continue;
+        // Skip the header <th> in column 0; data cells start at index 1.
+        const cells = row.querySelectorAll('td');
+        const cell  = cells[m.ia];
+        if (!cell) continue;
+        const r = cell.getBoundingClientRect();
+        const x = (r.left - wrapRect.left) + (m.fracX / 100) * r.width
+                  + wrap.scrollLeft;
+        const y = (r.top - wrapRect.top)   + (m.fracY / 100) * r.height
+                  + wrap.scrollTop;
+        points.push(x.toFixed(1) + ',' + y.toFixed(1));
+      }
+      return points.join(' ');
+    },
+
+    toggleLiveOverlays() {
+      this.liveOverlays = !this.liveOverlays;
+      // Re-render section charts so the today line gets removed/restored.
+      for (const m of (this.s3.metrics || [])) {
+        if (m && this.s3.dataByMetric[m]?.buckets) {
+          this._renderDecileChartForMetric(m);
+        }
+      }
     },
 
     // Fractional position 0..100 of today's value within its containing
@@ -1657,6 +1786,8 @@ document.addEventListener('alpine:init', () => {
         this.s1.data = data;
       } catch (e) { this.s1.error = e.message; }
       finally { this.s1.loading = false; }
+      // Fetch the trail (last N days) for the chosen metric pair.
+      this.loadHeatmapTrail();
       // If S3 was filtered by old cells, refresh now that the filter is empty.
       if (hadSelection && this.s3HasResults()) this.loadDecile();
     },
@@ -1771,17 +1902,28 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadDecile() {
-      if (!this.selectedId) return;
+      if (!this.selectedId) {
+        console.log('[loadDecile] aborted — no upload selected');
+        return;
+      }
       const metrics = (this.s3.metrics || []).filter(m => !!m);
-      if (metrics.length === 0) return;
+      if (metrics.length === 0) {
+        console.log('[loadDecile] aborted — no metrics set');
+        return;
+      }
       this.s3.loading = true; this.s3.error = null;
 
       // In-flight cancellation: only the latest call applies its results.
       const token = ++this.s3._loadToken;
       const cellFilter = this._buildCellFilter();
+      console.log('[loadDecile] token=' + token,
+                  'metrics=', metrics,
+                  'cells=' + (this.s1.selectedCells?.length || 0),
+                  'cellFilter=', cellFilter);
 
+      let results;
       try {
-        const results = await Promise.all(metrics.map(metric =>
+        results = await Promise.all(metrics.map(metric =>
           this._api('decile', {
             metric,
             n_buckets:   this.s3.nBuckets,
@@ -1789,33 +1931,57 @@ document.addEventListener('alpine:init', () => {
           }).then(d => [metric, d])
             .catch(e => [metric, { error: e.message || String(e) }])
         ));
+      } catch (e) {
+        console.error('[loadDecile] Promise.all failed at token=' + token, e);
+        if (token === this.s3._loadToken) {
+          this.s3.error = e.message;
+          this.s3.loading = false;
+        }
+        return;
+      }
+      console.log('[loadDecile] results token=' + token,
+                  results.map(([m, d]) => [m, d?.error ? 'ERROR: ' + d.error
+                                              : d?.buckets?.length + ' buckets']));
+
+      try {
         // A newer load was kicked off while we were waiting — drop these.
         // Importantly we do NOT touch chart state here; the previous render
         // stays visible until a NEWER successful load replaces it.
-        if (token !== this.s3._loadToken) return;
+        if (token !== this.s3._loadToken) {
+          console.log('[loadDecile] stale token=' + token + ', current=' + this.s3._loadToken);
+          return;
+        }
 
         const next = {};
         for (const [m, d] of results) next[m] = d;
         this.s3.dataByMetric = next;
         await this.$nextTick();
-        if (token !== this.s3._loadToken) return;
+        if (token !== this.s3._loadToken) {
+          console.log('[loadDecile] stale token after nextTick at ' + token);
+          return;
+        }
 
         for (const m of metrics) {
-          if (next[m]?.buckets) {
+          const hasBuckets = !!next[m]?.buckets;
+          console.log('[loadDecile]   metric=' + m,
+                      'hasBuckets=' + hasBuckets,
+                      'error=' + (next[m]?.error || ''));
+          if (hasBuckets) {
             this._renderDecileChartForMetric(m);
           } else {
-            // Error or no buckets — destroy chart instance, paint error
-            // into the wrap so the user can see what happened.
+            // Error or no buckets — destroy chart, paint error into wrap.
             this.s3.charts[m] = this._destroyChart(this.s3.charts[m]);
             const wrap = document.getElementById('s3-wrap-' + this._safeId(m));
             if (wrap) {
               const msg = (next[m]?.error || 'No data after filters').replace(/[<>&]/g, '');
               wrap.innerHTML = '<div style="color:#e74c3c;padding:12px;font-size:12px;font-family:monospace">' + msg + '</div>';
+            } else {
+              console.warn('[loadDecile] wrap not found for ' + m + ' at error path');
             }
           }
         }
       } catch (e) {
-        console.error('loadDecile failed', e);
+        console.error('[loadDecile] post-fetch exception at token=' + token, e);
         if (token === this.s3._loadToken) this.s3.error = e.message;
       } finally {
         if (token === this.s3._loadToken) this.s3.loading = false;
@@ -1824,18 +1990,21 @@ document.addEventListener('alpine:init', () => {
 
     _renderDecileChartForMetric(metric, retries = 8) {
       const data = this.s3.dataByMetric[metric];
-      if (!data?.buckets) return;
+      if (!data?.buckets) {
+        console.log('[renderDecile] no buckets for ' + metric + ', skipping');
+        return;
+      }
       const wrap = document.getElementById('s3-wrap-' + this._safeId(metric));
       if (!wrap) {
-        // Wrap div is gated behind Alpine's x-if; if it isn't in the DOM
-        // yet, retry briefly. Robust against any Alpine timing.
+        // Wrap div should always be in DOM (uses x-show, not x-if). If
+        // missing, retry briefly — defensive only.
+        console.warn('[renderDecile] wrap missing for ' + metric + ', retries=' + retries);
         if (retries > 0) {
           setTimeout(() => this._renderDecileChartForMetric(metric, retries - 1), 80);
-        } else {
-          console.warn('S3 wrap not found for metric', metric);
         }
         return;
       }
+      console.log('[renderDecile] rendering ' + metric + ' (' + data.buckets.length + ' buckets)');
       // Tear down the prior chart instance and rebuild the canvas from
       // scratch. Eliminates ANY state contamination from previous renders.
       this.s3.charts[metric] = this._destroyChart(this.s3.charts[metric]);
@@ -1852,8 +2021,9 @@ document.addEventListener('alpine:init', () => {
 
       // Today's value marker — drawn by an inline plugin so the line lands
       // at the precise fractional x position within the matching bucket.
+      // Suppressed entirely when the global Live overlay toggle is off.
       const todayInfo = this.todayValueFor(metric);
-      const todayValue = todayInfo?.value;
+      const todayValue = this.liveOverlays ? todayInfo?.value : null;
 
       try {
       this.s3.charts[metric] = new Chart(canvas.getContext('2d'), {

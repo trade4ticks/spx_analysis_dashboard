@@ -93,6 +93,47 @@ async def get_columns_catalog(pool=Depends(get_pool)) -> list[dict]:
     return _columns_catalog_cache
 
 
+@router.get("/value-trail")
+async def get_value_trail(
+    col:  str = Query(..., description="Column name from surface_metrics_catalog"),
+    days: int = Query(5,   ge=1, le=30, description="Latest day plus prior days"),
+    pool=Depends(get_pool),
+) -> dict:
+    """Trail of one column's latest-quote-of-day values for the last N
+    trading days. Used by the Backtest IV heatmap to draw a path of
+    recent positions, with today as the head."""
+    catalog = await get_columns_catalog(pool)
+    valid_cols = {r['column_name'] for r in catalog}
+    if col not in valid_cols:
+        return {'col': col, 'trail': []}
+    # Column name is whitelisted, safe to interpolate.
+    sql = (
+        f'WITH latest_per_day AS ('
+        f'  SELECT trade_date, MAX(quote_time) AS quote_time '
+        f'  FROM surface_metrics_core '
+        f'  WHERE "{col}" IS NOT NULL '
+        f'  GROUP BY trade_date '
+        f'  ORDER BY trade_date DESC '
+        f'  LIMIT $1'
+        f') '
+        f'SELECT smc.trade_date, smc.quote_time, smc."{col}" AS value '
+        f'FROM surface_metrics_core smc '
+        f'JOIN latest_per_day lpd USING (trade_date, quote_time) '
+        f'ORDER BY smc.trade_date'
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, days)
+    return {
+        'col':   col,
+        'trail': [
+            {'date': str(r['trade_date']),
+             'time': str(r['quote_time'])[:5],
+             'value': float(r['value'])}
+            for r in rows
+        ],
+    }
+
+
 @router.get("/today-value")
 async def get_today_value(
     col: str = Query(..., description="Column name from surface_metrics_catalog"),

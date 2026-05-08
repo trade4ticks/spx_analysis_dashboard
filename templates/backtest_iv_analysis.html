@@ -44,7 +44,11 @@
     .biv-hint    { color:#555; font-size:12px; }
 
     /* Heatmap table */
-    .biv-heatmap-wrap { overflow-x:auto; }
+    .biv-heatmap-wrap { overflow-x:auto; position:relative; }
+    .biv-heatmap-trail-svg {
+      position:absolute; top:0; left:0;
+      pointer-events:none; z-index:4;
+    }
     .biv-heatmap      { border-collapse:collapse; font-size:12px; font-family:monospace; }
     .biv-heatmap th   { padding:5px 10px; color:#666; font-weight:600; text-align:center; font-size:11px; white-space:nowrap; }
     /* Cells need position:relative for the absolute today marker, and
@@ -417,6 +421,18 @@
       background:#fff;
       box-shadow:0 0 0 2px #555, 0 0 5px rgba(0,0,0,0.85);
     }
+    /* Trail dots — recent days of (a, b) at the same time slice */
+    .biv-trail-dot {
+      position:absolute;
+      width:5px; height:5px;
+      border-radius:50%;
+      background:rgba(220,220,220,0.7);
+      box-shadow:0 0 0 1px rgba(0,0,0,0.7);
+      transform:translate(-50%, -50%);
+      pointer-events:auto;
+      z-index:2;
+    }
+    .biv-trail-dot.is-today { display:none; /* the crosshair × is the today marker */ }
     /* User-selected cells (drives S3 cell filter) */
     .biv-heatmap td.biv-cell-selected {
       outline:2px solid #3498db !important;
@@ -690,6 +706,11 @@
     <span x-show="loading" class="biv-loading">Loading…</span>
     <span x-show="globalError" class="biv-error" x-text="globalError"></span>
     <span style="display:flex;gap:4px;align-items:center;margin-left:auto">
+      <button @click="toggleLiveOverlays()" class="biv-fullscreen-btn"
+              :style="liveOverlays ? 'border-color:#3498db;color:#3498db' : ''"
+              title="Toggle today + recent-days markers across all visuals">
+        <span x-text="liveOverlays ? '◉ Live: ON' : '◯ Live: OFF'"></span>
+      </button>
       <button @click="saveDefaults()" class="biv-fullscreen-btn"
               title="Save the current metric picks, filters, buckets, and panel state as your default for next page load">
         💾 Save default
@@ -1036,13 +1057,15 @@
                 </div>
               </template>
 
-              <!-- Stable wrapper div — canvas inside is created
-                   imperatively by _renderDecileChartForMetric so the
-                   render path doesn't depend on Alpine timing or
-                   Chart.js internal state. -->
-              <template x-if="m">
-                <div class="biv-chart-wrap" :id="'s3-wrap-' + _safeId(m)"></div>
-              </template>
+              <!-- Stable wrapper div, always in the DOM regardless of m
+                   or data state (using x-show, NOT x-if). The canvas
+                   inside is created imperatively by
+                   _renderDecileChartForMetric. Always-in-DOM means
+                   getElementById can never fail to find this wrap, no
+                   matter what timing or state Alpine is in. -->
+              <div class="biv-chart-wrap"
+                   :id="'s3-wrap-' + _safeId(m || ('empty-' + mi))"
+                   x-show="!!m"></div>
 
               <template x-if="m && s3.dataByMetric[m]?.error">
                 <div class="biv-error" style="margin-top:6px" x-text="s3.dataByMetric[m].error"></div>
@@ -1185,11 +1208,19 @@
                               :title="(isS1TodayCell(ia, ib) ? '◻ TODAY · ' : '') + (isS1CellSelected(ia, ib) ? '✓ SELECTED · ' : '') + 'click to toggle as S3 filter · n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
                             <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
                             <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
-                            <!-- Precise today marker — positioned via the
-                                 fractional value within the cell's bin range.
-                                 .biv-heatmap td already has position:relative
-                                 (set in CSS, not inline, so it can't be
-                                 overridden by the reactive :style binding). -->
+                            <!-- Trail dots — last N days of (a, b) values.
+                                 Rendered as small light-gray circles inside
+                                 the cell at the precise fractional position.
+                                 The most-recent point gets the crosshair × on
+                                 top. .biv-heatmap td has position:relative
+                                 in CSS so the absolutely-positioned markers
+                                 land inside the cell. -->
+                            <template x-for="m in s1TrailMarkersInCell(ia, ib)" :key="m.date">
+                              <span class="biv-trail-dot"
+                                    :class="{'is-today': m.isToday}"
+                                    :style="`left:${m.fracX}%; top:${m.fracY}%`"
+                                    :title="m.date + ': a=' + m.a.toFixed(4) + '  b=' + m.b.toFixed(4)"></span>
+                            </template>
                             <template x-if="isS1TodayCell(ia, ib)">
                               <span class="biv-cell-today-x"
                                     :style="`left:${s1TodayPctX(ia)}%; top:${s1TodayPctY(ib)}%`"
@@ -1201,6 +1232,20 @@
                     </template>
                   </tbody>
                 </table>
+                <!-- Trail line — connects last N days of (a, b) values
+                     drawn over the heatmap. Recomputed on render via
+                     getBoundingClientRect on the cells. -->
+                <svg class="biv-heatmap-trail-svg"
+                     x-show="liveOverlays && s1.trail?.length >= 2"
+                     :width="$el.parentElement?.scrollWidth || 0"
+                     :height="$el.parentElement?.scrollHeight || 0">
+                  <polyline
+                    :points="s1ComputeTrailLine()"
+                    fill="none"
+                    stroke="rgba(220,220,220,0.5)"
+                    stroke-width="1.2"
+                    stroke-dasharray="3,3" />
+                </svg>
               </div>
             </div>
           </template>
@@ -1780,6 +1825,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=19"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=20"></script>
 </body>
 </html>
