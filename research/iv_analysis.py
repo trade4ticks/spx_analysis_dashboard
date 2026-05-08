@@ -303,6 +303,8 @@ def compute_heatmap(trades: list, metric_a: str, metric_b: str, n_buckets: int,
         'n_buckets':   n_buckets,
         'labels_a':    [_bucket_label(i, bounds_a) for i in range(n_buckets)],
         'labels_b':    [_bucket_label(i, bounds_b) for i in range(n_buckets)],
+        'bounds_a':    [round(b, 6) for b in bounds_a],
+        'bounds_b':    [round(b, 6) for b in bounds_b],
         'cells':       cells,
         'valid_count': valid_count,
     }

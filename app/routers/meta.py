@@ -91,3 +91,39 @@ async def get_columns_catalog(pool=Depends(get_pool)) -> list[dict]:
         )
     _columns_catalog_cache = [dict(r) for r in rows]
     return _columns_catalog_cache
+
+
+@router.get("/today-value")
+async def get_today_value(
+    col: str = Query(..., description="Column name from surface_metrics_catalog"),
+    pool=Depends(get_pool),
+) -> dict:
+    """Latest value of a single surface_metrics_core column. Used by the
+    Backtest IV page to mark "today's value" on decile charts and heatmaps.
+    Trade-derived columns (entry_pos_*, portfolio_*, premium, etc.) are not
+    in the catalog, so this returns null for them — the UI hides the marker
+    in those cases.
+    """
+    catalog = await get_columns_catalog(pool)
+    valid_cols = {r['column_name'] for r in catalog}
+    if col not in valid_cols:
+        return {'col': col, 'date': None, 'time': None, 'value': None,
+                'reason': 'not in surface_metrics_catalog'}
+    # Column name is now whitelisted — safe to interpolate.
+    sql = (
+        f'SELECT trade_date, quote_time, "{col}" AS value '
+        f'FROM surface_metrics_core '
+        f'WHERE trade_date = (SELECT MAX(trade_date) FROM surface_metrics_core) '
+        f'  AND "{col}" IS NOT NULL '
+        f'ORDER BY quote_time DESC LIMIT 1'
+    )
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql)
+    if not row or row['value'] is None:
+        return {'col': col, 'date': None, 'time': None, 'value': None}
+    return {
+        'col':   col,
+        'date':  str(row['trade_date']),
+        'time':  str(row['quote_time'])[:5],
+        'value': float(row['value']),
+    }

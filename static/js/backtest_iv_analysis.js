@@ -137,6 +137,13 @@ document.addEventListener('alpine:init', () => {
     // show descriptions on hover, and format values by their units.
     catalog: {},
 
+    // Lazy-cached "today's value" lookups from /api/meta/today-value.
+    //   undefined  → not requested
+    //   null       → fetch in flight
+    //   {value:n}  → success
+    //   {value:null} → no surface_metrics_core value (or trade-derived col)
+    todayValues: {},
+
     // Shared searchable picker for the section metric dropdowns. Only one
     // instance — opens for whichever section's button was clicked, writes
     // the picked value back through `path` (dot-notation, e.g. 's3.metric'),
@@ -164,10 +171,13 @@ document.addEventListener('alpine:init', () => {
     // ── Section 0: Correlation Overview ──
     s0: {
       target: 'pnl',
-      // Sort/emphasize method: 'pearson' | 'spearman' | 'consensus'.
-      // Both pearson and spearman bars always render; this controls
-      // which one drives sort order and gets full-opacity bars.
+      // Sort/emphasize method: 'pearson' | 'spearman' | 'consensus' | 'mi'.
+      // All three signed bars (Pearson/Spearman) and the MI bar always render;
+      // this controls which one drives sort order and gets full-opacity.
       method: 'pearson',
+      // Toggled by the fullscreen icon. When true the section is fixed to
+      // the viewport and the chart wrapper grows to fill remaining height.
+      fullscreen: false,
       data: null, loading: false, error: null,
       _chart: null,
     },
@@ -232,6 +242,9 @@ document.addEventListener('alpine:init', () => {
       this.s2.ms = makeMultiSelect(20);
       this.s7.ms = makeMultiSelect(25);
       window.addEventListener('resize', () => this._onFilterPosResize());
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && this.s0.fullscreen) this.toggleS0Fullscreen();
+      });
       this._loadCatalog();   // fire-and-forget; UI gracefully degrades to prefix matching until loaded
       await this.loadUploads();
       // URL-supplied filters apply to whichever upload was auto-selected.
@@ -487,6 +500,77 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Column grouping for the editor's dropdown ──
+    // ── Today's value lookups (live snapshot of a surface metric) ──
+    async _fetchTodayValue(col) {
+      if (!col) return;
+      this.todayValues[col] = null;
+      try {
+        const r = await fetch('/api/meta/today-value?col=' + encodeURIComponent(col));
+        if (r.ok) {
+          this.todayValues[col] = await r.json();
+        } else {
+          this.todayValues[col] = { col, value: null };
+        }
+      } catch (_) {
+        this.todayValues[col] = { col, value: null };
+      }
+    },
+
+    ensureTodayValue(col) {
+      if (col && !(col in this.todayValues)) this._fetchTodayValue(col);
+    },
+
+    todayValueFor(col) {
+      const v = this.todayValues[col];
+      return (v && typeof v === 'object') ? v : null;
+    },
+
+    // For a decile profile result, return {idx (0-9), label} of which bucket
+    // today's value falls into, or null if no today value available.
+    todayBucket(buckets, todayValue) {
+      if (!buckets?.length || todayValue == null) return null;
+      for (let i = 0; i < buckets.length; i++) {
+        const b = buckets[i];
+        if (b.x_min == null || b.x_max == null) continue;
+        // Use ≥ for the lowest edge so the smallest values still land in D1.
+        const lo = (i === 0) ? -Infinity : b.x_min;
+        const hi = (i === buckets.length - 1) ? Infinity : b.x_max;
+        if (todayValue >= lo && todayValue <= hi) {
+          return { idx: i, label: 'D' + (b.bucket_idx + 1) };
+        }
+      }
+      return null;
+    },
+
+    isS1TodayCell(ia, ib) {
+      if (!this.s1.data) return false;
+      const a = this.todayValueFor(this.s1.metricA);
+      const b = this.todayValueFor(this.s1.metricB);
+      if (!a || !b || a.value == null || b.value == null) return false;
+      const cell = this.todayHeatmapCell(this.s1.data, a.value, b.value);
+      return cell && cell.ia === ia && cell.ib === ib;
+    },
+
+    // For a heatmap result with bounds_a/bounds_b, return {ia, ib} for the
+    // cell containing today's (a, b), or null.
+    todayHeatmapCell(data, todayA, todayB) {
+      if (!data?.bounds_a || !data?.bounds_b) return null;
+      if (todayA == null || todayB == null) return null;
+      const findIdx = (val, bounds) => {
+        // bounds is length n_buckets+1; cell i covers [bounds[i], bounds[i+1]]
+        if (val < bounds[0]) return 0;
+        if (val > bounds[bounds.length - 1]) return bounds.length - 2;
+        for (let i = 0; i < bounds.length - 1; i++) {
+          if (val >= bounds[i] && val <= bounds[i + 1]) return i;
+        }
+        return null;
+      };
+      const ia = findIdx(todayA, data.bounds_a);
+      const ib = findIdx(todayB, data.bounds_b);
+      if (ia == null || ib == null) return null;
+      return { ia, ib };
+    },
+
     // ── Catalog (semantic metadata) ──
     async _loadCatalog() {
       try {
@@ -650,6 +734,9 @@ document.addEventListener('alpine:init', () => {
       if (this.metricPicker.path) {
         this._setNested(this.metricPicker.path, value || '');
       }
+      // Pre-fetch today's value so the marker shows up as soon as the user
+      // hits Compute. No-op for trade-derived columns (returns value: null).
+      if (value) this.ensureTodayValue(value);
       this.closeMetricPicker();
     },
 
@@ -1114,6 +1201,17 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    toggleS0Fullscreen() {
+      this.s0.fullscreen = !this.s0.fullscreen;
+      // Force the section open if entering fullscreen so the body shows.
+      if (this.s0.fullscreen) this.open.s0 = true;
+      // Chart.js's responsive observer picks up the new container size on
+      // its own, but a manual resize on the next tick keeps it snappy.
+      this.$nextTick(() => {
+        try { this.s0._chart?.resize(); } catch (_) {}
+      });
+    },
+
     setS0Method(method) {
       if (!['pearson','spearman','consensus','mi'].includes(method)) return;
       if (this.s0.method === method) return;
@@ -1200,11 +1298,13 @@ document.addEventListener('alpine:init', () => {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: {
-              labels: { color: '#888', font: { size: 10 }, boxWidth: 14 },
+              labels: { color: '#aaa', font: { size: 12 }, boxWidth: 14 },
             },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
+              titleFont: { size: 12 },
+              bodyFont:  { size: 12, family: 'monospace' },
               callbacks: {
                 title: items => metrics[items[0].dataIndex].metric,
                 label: ctx => {
@@ -1230,7 +1330,7 @@ document.addEventListener('alpine:init', () => {
           scales: {
             x: {
               ticks: {
-                color: '#888', font: { size: 9, family: 'monospace' },
+                color: '#aaa', font: { size: 11, family: 'monospace' },
                 maxRotation: 90, minRotation: 90, autoSkip: false,
               },
               grid:   { display: false },
@@ -1238,7 +1338,7 @@ document.addEventListener('alpine:init', () => {
             },
             y: {
               min: -1, max: 1,
-              ticks: { color: '#888', font: { size: 10 }, stepSize: 0.25 },
+              ticks: { color: '#aaa', font: { size: 12 }, stepSize: 0.25 },
               grid:  { color: 'rgba(255,255,255,0.06)' },
               border: { color: '#333' },
             },

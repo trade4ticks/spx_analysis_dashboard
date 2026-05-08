@@ -342,6 +342,43 @@
     }
     .biv-metric-clear:hover { color:#ccc; }
 
+    /* Fullscreen mode for any biv-section. Used by S0 today; reusable. */
+    .biv-fullscreen {
+      position:fixed; inset:0; z-index:2000;
+      background:#1a1a1a; border:none; border-radius:0;
+      display:flex; flex-direction:column;
+    }
+    .biv-fullscreen .biv-sec-body {
+      flex:1; overflow:auto; padding:14px;
+    }
+    .biv-fullscreen .biv-sec-body.hidden { display:none; }
+    .biv-fullscreen-btn {
+      background:none; border:1px solid #3a3a3a; color:#888;
+      cursor:pointer; padding:2px 7px; border-radius:3px;
+      font-size:13px; line-height:1; margin-left:4px;
+    }
+    .biv-fullscreen-btn:hover { color:#3498db; border-color:#3498db; }
+
+    /* Today's-value annotation for decile and other 1D charts */
+    .biv-today-strip {
+      display:inline-flex; align-items:center; gap:6px;
+      margin-bottom:8px; padding:4px 10px;
+      background:rgba(241,196,15,0.10); border:1px solid rgba(241,196,15,0.4);
+      border-radius:3px;
+      font-size:12px; font-family:monospace; color:#ddd;
+    }
+    .biv-today-dot {
+      width:8px; height:8px; border-radius:50%;
+      background:#f1c40f; box-shadow:0 0 6px rgba(241,196,15,0.6);
+    }
+    .biv-today-label { color:#999; }
+    /* Cell highlight for today's location on the heatmap */
+    .biv-heatmap td.biv-cell-today {
+      outline:2px solid #f1c40f !important;
+      outline-offset:-2px;
+      box-shadow:inset 0 0 0 1px rgba(241,196,15,0.4);
+    }
+
     /* Summary stats strip */
     .biv-summary {
       border:1px solid #2a2a2a; border-radius:6px; background:#1a1a1a;
@@ -754,11 +791,17 @@
       </div>
 
       <!-- ── S0: IV Correlation Overview ─────────────────────────────────── -->
-      <div class="biv-section">
+      <div class="biv-section" :class="{'biv-fullscreen': s0.fullscreen}">
         <div class="biv-sec-hdr" @click="toggleSection('s0')">
           <span class="biv-sec-num">S0</span>
           <span class="biv-sec-title">IV CORRELATION OVERVIEW</span>
-          <span style="font-size:13px;color:#444" x-text="open.s0 ? '▲' : '▼'"></span>
+          <button @click.stop="toggleS0Fullscreen()"
+                  class="biv-fullscreen-btn"
+                  :title="s0.fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'"
+                  x-text="s0.fullscreen ? '⤡' : '⤢'"></button>
+          <span style="font-size:13px;color:#444"
+                x-show="!s0.fullscreen"
+                x-text="open.s0 ? '▲' : '▼'"></span>
         </div>
         <div class="biv-sec-body" :class="{hidden: !open.s0}">
           <div class="biv-ctrl">
@@ -803,8 +846,9 @@
                 Showing <span x-text="s0.data.metrics.length"></span> of
                 <span x-text="ivColumns.length"></span> IV metrics. Scroll horizontally if needed.
               </div>
-              <div style="overflow-x:auto;overflow-y:hidden;border:1px solid #2a2a2a;border-radius:3px;background:#0e0e0e">
-                <div :style="'width:' + Math.max(700, s0.data.metrics.length * 11 + 60) + 'px;height:340px'">
+              <div class="biv-s0-scroll"
+                   style="overflow-x:auto;overflow-y:hidden;border:1px solid #2a2a2a;border-radius:3px;background:#0e0e0e">
+                <div :style="'width:' + Math.max(700, s0.data.metrics.length * (s0.fullscreen ? 22 : 16) + 60) + 'px;height:' + (s0.fullscreen ? 'calc(100vh - 220px)' : '420px')">
                   <canvas id="s0-chart"></canvas>
                 </div>
               </div>
@@ -864,6 +908,25 @@
                   · Δ=<span x-text="s3.data.divergence"></span>
                 </span>
               </div>
+              <!-- Today's value marker (only for catalog/surface columns) -->
+              <template x-if="todayValueFor(s3.metric)?.value !== null && todayValueFor(s3.metric)?.value !== undefined">
+                <div class="biv-today-strip"
+                     :title="'Live value of ' + s3.metric + ' at the latest snapshot'">
+                  <span class="biv-today-dot"></span>
+                  <span class="biv-today-label">Today
+                    (<span x-text="todayValueFor(s3.metric).date"></span>
+                    <span x-text="todayValueFor(s3.metric).time"></span>):
+                  </span>
+                  <strong x-text="s3.metric"></strong> =
+                  <strong x-text="todayValueFor(s3.metric).value.toFixed(4)"></strong>
+                  <template x-if="todayBucket(s3.data.buckets, todayValueFor(s3.metric).value)">
+                    <span>
+                      → bucket
+                      <strong x-text="todayBucket(s3.data.buckets, todayValueFor(s3.metric).value).label"></strong>
+                    </span>
+                  </template>
+                </div>
+              </template>
               <div class="biv-chart-wrap"><canvas id="s3-chart"></canvas></div>
               <!-- Bucket table -->
               <div style="overflow-x:auto;margin-top:12px">
@@ -990,7 +1053,8 @@
                             x-text="s1.data.labels_b[ib]"></th>
                         <template x-for="(cell, ia) in row" :key="s1._renderId + '-' + ia">
                           <td :style="'background:' + s1CellBg(cell) + ';color:' + s1CellFg(cell)"
-                              :title="'n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
+                              :class="{'biv-cell-today': isS1TodayCell(ia, ib)}"
+                              :title="(isS1TodayCell(ia, ib) ? '⚪ TODAY · ' : '') + 'n=' + cell.n + '  P&L=' + (cell.mean_pnl??'—') + '  Win%=' + (cell.win_rate!=null ? (cell.win_rate*100).toFixed(1)+'%' : '—') + '  σ=' + (cell.pnl_std??'—')">
                             <span class="biv-cell-val" x-text="s1CellText(cell)"></span>
                             <span class="biv-cell-n"   x-text="'n=' + cell.n"></span>
                           </td>
@@ -1577,6 +1641,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=14"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=15"></script>
 </body>
 </html>
