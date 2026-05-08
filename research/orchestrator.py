@@ -2935,6 +2935,41 @@ correlation series.
 
 OUTCOME COLUMNS available: pnl, is_win.
 
+FEATURE FAMILIES (surface_metrics_core; pick by semantic intent, not by name parsing):
+  vix         — VIX-style 30d-variance forecasts at multiple tenors (1d/7d/30d/90d/180d).
+  iv          — implied vol at each tenor × wing (10p / 25p / atm / 25c / 10c).
+  skew        — vol differences across wings within one tenor (e.g. skew_30d_25p_25c).
+  term        — single-tenor vol differences across the term.
+  term_slope  — slope of the term structure (e.g. term_slope_1_7_atm).
+  term_ratio  — vol ratios across tenors.
+  convex      — second-difference of vol across the wing dimension at one tenor.
+  rr          — risk reversal (call wing − put wing).
+  vix_basis   — diff between near-month and back-month VIX-style measures.
+  forward     — ATM forward price by tenor.
+  rv          — realized vol over a window (1w / 1m / 3m).
+  vrp         — vol risk premium = IV − RV.
+  vrp_ratio   — IV / RV.
+  log_ret     — underlying log return (d / 1w / 1m).
+  vov         — vol of vol.
+  spot_vol    — spot-vol covariance.
+  portfolio   — avg per-trade P&L change in your open positions over 1/3/5/10/15
+                trading days at entry. portfolio_pnl_chg_*_at_entry (raw $) and
+                portfolio_pnl_chg_*_at_entry_pctl (0–100 historical percentile rank).
+  entry       — position greeks captured at trade open: entry_pos_delta / gamma /
+                theta / vega / wvega / pnl.
+  trade       — trade-level entry attributes: premium, margin_req, max_profit,
+                max_loss, legs, contracts, spx_open_price.
+
+FORM VARIANTS for surface metrics (most surface_metrics_core columns exist in 4 forms):
+  raw level     — e.g. iv_30d_atm
+  z_<col>       — 90d trailing z-score (e.g. z_iv_30d_atm)
+  chg_d_<col>   — 1-day change (e.g. chg_d_vix_30d)
+  chg_1w_<col>  — 1-week change
+
+When a question uses unusualness language ("rare", "more than normal", "by historical
+standard"), prefer z_* variants (which are the standardized version of the level form).
+When a question is about momentum or recent direction, prefer chg_d_* / chg_1w_*.
+
 DO NOT pad the plan. If 4 tools answer the question, output 4 operations. Quality > \
 quantity.
 

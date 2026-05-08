@@ -67,3 +67,27 @@ async def get_grid() -> dict:
         "common_dtes":    [7, 14, 30, 45, 60, 90, 120, 180],
         "common_deltas":  [10, 25, 35, 50, 65, 75, 90],
     }
+
+
+# Process-memory cache for the catalog. The table rarely changes;
+# refetching on every page load is wasteful. Cleared by app restart.
+_columns_catalog_cache: list[dict] | None = None
+
+
+@router.get("/columns-catalog")
+async def get_columns_catalog(pool=Depends(get_pool)) -> list[dict]:
+    """Per-column semantic metadata for surface_metrics_core.
+    Used by the frontend to group / describe / format columns in
+    filter dropdowns, section metric pickers, and tooltips."""
+    global _columns_catalog_cache
+    if _columns_catalog_cache is not None:
+        return _columns_catalog_cache
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT column_name, family, tenor, wing, form,
+                      base_column, units, description, formula
+               FROM surface_metrics_catalog
+               ORDER BY family, tenor, wing, form, column_name"""
+        )
+    _columns_catalog_cache = [dict(r) for r in rows]
+    return _columns_catalog_cache

@@ -132,6 +132,11 @@ document.addEventListener('alpine:init', () => {
     //   object    — {min, max, p01, p05, p50, p95, p99, n}
     columnStats: {},
 
+    // Per-column semantic metadata from /api/meta/columns-catalog. Keyed by
+    // column_name. Loaded once on init. Used to group columns in dropdowns,
+    // show descriptions on hover, and format values by their units.
+    catalog: {},
+
     // Active drag state for the slider chip. null when not dragging.
     sliderDrag: null,
 
@@ -211,6 +216,7 @@ document.addEventListener('alpine:init', () => {
       this.s2.ms = makeMultiSelect(20);
       this.s7.ms = makeMultiSelect(25);
       window.addEventListener('resize', () => this._onFilterPosResize());
+      this._loadCatalog();   // fire-and-forget; UI gracefully degrades to prefix matching until loaded
       await this.loadUploads();
       // URL-supplied filters apply to whichever upload was auto-selected.
       // selectUpload() clears filters as part of the reset, so we restore here.
@@ -460,8 +466,36 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Column grouping for the editor's dropdown ──
+    // ── Catalog (semantic metadata) ──
+    async _loadCatalog() {
+      try {
+        const r = await fetch('/api/meta/columns-catalog');
+        if (!r.ok) return;
+        const rows = await r.json();
+        const byName = {};
+        for (const row of rows) {
+          if (row?.column_name) byName[row.column_name] = row;
+        }
+        this.catalog = byName;
+      } catch (_) { /* catalog is best-effort; UI falls back to prefix matching */ }
+    },
+
+    catalogFor(c) {
+      return c ? (this.catalog[c] || null) : null;
+    },
+
+    columnDescription(c) {
+      const e = this.catalogFor(c);
+      return e?.description || '';
+    },
+
     _colFamily(c) {
       if (!c) return 'other';
+      // Catalog wins when available — exact, authoritative classification.
+      const e = this.catalog[c];
+      if (e?.family) return e.family;
+      // Fallback prefix matching for non-catalog columns (entry greeks,
+      // portfolio context, outcomes, trade attrs) and any unmatched extras.
       if (c.startsWith('vix_'))         return 'vix';
       if (c.startsWith('skew_'))        return 'skew';
       if (c.startsWith('term_'))        return 'term';
@@ -470,34 +504,117 @@ document.addEventListener('alpine:init', () => {
       if (c.startsWith('forward_'))     return 'forward';
       if (c.startsWith('portfolio_'))   return 'portfolio';
       if (c.startsWith('entry_'))       return 'entry';
-      // Outcome (Y) columns — only used in the FILTER dropdown, not
-      // for selecting features in section dropdowns.
       if (['pnl','pnl_pct','is_win','days_in_trade'].includes(c)) return 'outcome';
-      // Trade-side entry-time attributes (also valid as features).
       if (['premium','margin_req','max_profit','max_loss',
            'legs','contracts','spx_open_price'].includes(c)) return 'trade';
       return 'other';
     },
 
+    // Catalog-aware sort order so families with many entries (skew, iv,
+    // convex) read predictably: short tenors first, puts before calls,
+    // levels before z-scores before changes.
+    _tenorRank(t) {
+      const order = {'1d':1,'7d':2,'30d':3,'90d':4,'180d':5,
+                     '1d_7d':6,'7d_30d':7,'30d_90d':8,'1d_30d':9,
+                     '1w':10,'1m':11,'3m':12,'d':13};
+      if (t == null) return 99;
+      return order[t] ?? 50;
+    },
+    _wingRank(w) {
+      const order = {'10p':1,'25p':2,'atm':3,'25c':4,'10c':5};
+      if (w == null) return 99;
+      return order[w] ?? 50;
+    },
+    _formRank(f) {
+      const order = {'level':1,'z':2,'chg_d':3,'chg_1w':4};
+      return order[f] ?? 5;
+    },
+
+    // Grouped metric list for the section dropdowns. Same family ordering
+    // and intra-family sort as filteredColumnList(), but no outcome
+    // columns (sections select features, not Y variables) and supports
+    // an exclude set for multi-selects (S2/S7).
+    metricColumnGroups(excludeArr) {
+      const exclude = new Set(excludeArr || []);
+      const groups = {};
+      for (const c of this.ivColumns) {
+        if (exclude.has(c)) continue;
+        const fam = this._colFamily(c);
+        (groups[fam] ||= []).push(c);
+      }
+      const sortKey = (c) => {
+        const e = this.catalogFor(c);
+        return [
+          this._tenorRank(e?.tenor),
+          this._wingRank(e?.wing),
+          this._formRank(e?.form),
+          c,
+        ];
+      };
+      const cmp = (a, b) => {
+        const ka = sortKey(a), kb = sortKey(b);
+        for (let i = 0; i < ka.length; i++) {
+          if (ka[i] < kb[i]) return -1;
+          if (ka[i] > kb[i]) return 1;
+        }
+        return 0;
+      };
+      for (const fam of Object.keys(groups)) groups[fam].sort(cmp);
+      const order = ['portfolio','entry','trade',
+                     'vix','skew','term','term_ratio','term_slope',
+                     'convex','rr','iv','forward','vix_basis',
+                     'log_ret','rv','vrp','vrp_ratio','vov','spot_vol',
+                     'spot','meta','other'];
+      return order
+        .filter(f => groups[f]?.length)
+        .map(f => ({ family: f, columns: groups[f] }));
+    },
+
     filteredColumnList() {
       const q = (this.filterEditor.colSearch || '').toLowerCase().trim();
-      // Outcome columns aren't in ivColumns (they're TRADE_FIELDS) but should
-      // still be filterable, so expose them here. Entry-side trade
-      // attributes like premium / margin_req now flow through ivColumns.
       const outcomeCols = ['pnl', 'pnl_pct', 'is_win', 'days_in_trade'];
       const seen = new Set();
       const all  = [];
       for (const c of [...this.ivColumns, ...outcomeCols]) {
         if (!seen.has(c)) { seen.add(c); all.push(c); }
       }
-      const matched = q ? all.filter(c => c.toLowerCase().includes(q)) : all;
-      const groups  = {};
+      // Match name OR description so a search for "put-call skew" or "realized vol"
+      // finds the right columns even when their cryptic names don't contain those words.
+      const matched = !q ? all : all.filter(c => {
+        if (c.toLowerCase().includes(q)) return true;
+        const d = (this.columnDescription(c) || '').toLowerCase();
+        return d.includes(q);
+      });
+      const groups = {};
       for (const c of matched) {
         const fam = this._colFamily(c);
         (groups[fam] ||= []).push(c);
       }
+      // Sort within family using catalog metadata when present, name otherwise.
+      const sortKey = (c) => {
+        const e = this.catalogFor(c);
+        return [
+          this._tenorRank(e?.tenor),
+          this._wingRank(e?.wing),
+          this._formRank(e?.form),
+          c,
+        ];
+      };
+      const cmp = (a, b) => {
+        const ka = sortKey(a), kb = sortKey(b);
+        for (let i = 0; i < ka.length; i++) {
+          if (ka[i] < kb[i]) return -1;
+          if (ka[i] > kb[i]) return 1;
+        }
+        return 0;
+      };
+      for (const fam of Object.keys(groups)) groups[fam].sort(cmp);
+
       const order = ['portfolio','entry','trade','outcome',
-                     'vix','skew','term','convex','iv','forward','other'];
+                     'vix','skew','term','term_ratio','term_slope',
+                     'convex','rr','iv','forward','vix_basis',
+                     'log_ret','rv','vrp','vrp_ratio','vov','spot_vol',
+                     'spot','meta','other'];
       return order
         .filter(f => groups[f]?.length)
         .map(f => ({ family: f, columns: groups[f] }));

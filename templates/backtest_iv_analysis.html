@@ -441,6 +441,7 @@
                   <div class="biv-filter-coloption"
                        :class="{selected: c === filterEditor.draft.col}"
                        @click="filterEditor.draft.col = c; _ensureOneColStat(c)"
+                       :title="columnDescription(c) || c"
                        x-text="c"></div>
                 </template>
               </div>
@@ -542,7 +543,8 @@
     <template x-for="(f, idx) in filters" :key="idx">
       <template x-if="_isSliderEligible(f)">
         <!-- Slider chip: drag handles to retighten range, drag middle to pan -->
-        <span class="biv-slider-chip">
+        <span class="biv-slider-chip"
+              :title="columnDescription(f.col) || ''">
           <span class="biv-slider-col" @click="openFilterEditor(idx)"
                 x-text="f.col" title="click to edit column / operator"></span>
           <span class="biv-slider-track-wrap">
@@ -567,7 +569,8 @@
         </span>
       </template>
       <template x-if="!_isSliderEligible(f)">
-        <span class="biv-filter-chip">
+        <span class="biv-filter-chip"
+              :title="columnDescription(f.col) || ''">
           <span class="body" @click="openFilterEditor(idx)"
                 x-text="formatFilterChip(f)"
                 title="click to edit"></span>
@@ -759,8 +762,12 @@
               <label>METRIC</label>
               <select x-model="s3.metric" style="min-width:220px">
                 <option value="">— select metric —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -835,8 +842,12 @@
               <label>METRIC A (X-AXIS)</label>
               <select x-model="s1.metricA" style="min-width:220px">
                 <option value="">— select metric —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -844,8 +855,12 @@
               <label>METRIC B (Y-AXIS)</label>
               <select x-model="s1.metricB" style="min-width:220px">
                 <option value="">— select metric —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -952,8 +967,12 @@
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s2.ms.selected.length >= 20">
                 <option value="">— add metric —</option>
-                <template x-for="c in ivColumns.filter(c => !s2.ms.selected.includes(c))" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups(s2.ms.selected)" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -1032,8 +1051,12 @@
               <label>FIX METRIC</label>
               <select x-model="s4.fixMetric" style="min-width:200px">
                 <option value="">— select —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -1059,8 +1082,12 @@
               <label>VARY METRIC</label>
               <select x-model="s4.varyMetric" style="min-width:200px">
                 <option value="">— select —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -1117,8 +1144,12 @@
                   <label>METRIC</label>
                   <select x-model="s5.metric" style="min-width:200px">
                     <option value="">— select —</option>
-                    <template x-for="c in ivColumns" :key="c">
-                      <option :value="c" x-text="c"></option>
+                    <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                      <optgroup :label="grp.family">
+                        <template x-for="c in grp.columns" :key="c">
+                          <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                        </template>
+                      </optgroup>
                     </template>
                   </select>
                 </div>
@@ -1247,8 +1278,12 @@
               <label>METRIC</label>
               <select x-model="s6.metric" style="min-width:220px">
                 <option value="">— select metric —</option>
-                <template x-for="c in ivColumns" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups()" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -1338,8 +1373,12 @@
                       style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
                       :disabled="s7.ms.selected.length >= 25">
                 <option value="">— add metric —</option>
-                <template x-for="c in ivColumns.filter(c => !s7.ms.selected.includes(c))" :key="c">
-                  <option :value="c" x-text="c"></option>
+                <template x-for="grp in metricColumnGroups(s7.ms.selected)" :key="grp.family">
+                  <optgroup :label="grp.family">
+                    <template x-for="c in grp.columns" :key="c">
+                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
+                    </template>
+                  </optgroup>
                 </template>
               </select>
             </div>
@@ -1451,6 +1490,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=11"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=12"></script>
 </body>
 </html>
