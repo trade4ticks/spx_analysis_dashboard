@@ -689,8 +689,26 @@
     </template>
     <span x-show="loading" class="biv-loading">Loading…</span>
     <span x-show="globalError" class="biv-error" x-text="globalError"></span>
-    <span style="margin-left:auto;font-size:12px;color:#333"
-          x-text="ivColumns.length + ' IV metrics available'"></span>
+    <span style="display:flex;gap:4px;align-items:center;margin-left:auto">
+      <button @click="saveDefaults()" class="biv-fullscreen-btn"
+              title="Save the current metric picks, filters, buckets, and panel state as your default for next page load">
+        💾 Save default
+      </button>
+      <button @click="loadDefaults()" class="biv-fullscreen-btn"
+              :disabled="!hasSavedDefaults()"
+              :style="hasSavedDefaults() ? '' : 'opacity:0.4;cursor:not-allowed'"
+              title="Load saved defaults">
+        📂 Load
+      </button>
+      <button @click="clearDefaults()" class="biv-fullscreen-btn"
+              :disabled="!hasSavedDefaults()"
+              :style="hasSavedDefaults() ? '' : 'opacity:0.4;cursor:not-allowed'"
+              title="Clear saved defaults">
+        🗑 Clear
+      </button>
+      <span style="font-size:12px;color:#333;margin-left:6px"
+            x-text="ivColumns.length + ' IV metrics'"></span>
+    </span>
   </div>
 
   <!-- Filter chips strip — only visible when filters are active -->
@@ -1018,15 +1036,12 @@
                 </div>
               </template>
 
-              <!-- Chart canvas — ALWAYS in the DOM when m is set. The id
-                   includes s3._renderToken so Alpine recreates the element
-                   on every successful loadDecile call, guaranteeing
-                   Chart.js renders into a fresh DOM node and never carries
-                   contaminated state across error→success transitions. -->
+              <!-- Stable wrapper div — canvas inside is created
+                   imperatively by _renderDecileChartForMetric so the
+                   render path doesn't depend on Alpine timing or
+                   Chart.js internal state. -->
               <template x-if="m">
-                <div class="biv-chart-wrap">
-                  <canvas :id="'s3-chart-' + _safeId(m) + '-' + s3._renderToken"></canvas>
-                </div>
+                <div class="biv-chart-wrap" :id="'s3-wrap-' + _safeId(m)"></div>
               </template>
 
               <template x-if="m && s3.dataByMetric[m]?.error">
@@ -1211,18 +1226,12 @@
                 </template>
                 <span x-show="s2.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <select @change="if ($event.target.value) { s2.ms.selected.push($event.target.value); $event.target.value=''; }"
-                      style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
-                      :disabled="s2.ms.selected.length >= 20">
-                <option value="">— add metric —</option>
-                <template x-for="grp in metricColumnGroups(s2.ms.selected)" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button" style="min-width:260px"
+                      :class="{empty: true}"
+                      :disabled="s2.ms.selected.length >= 20"
+                      @click="openMetricPickerMulti('s2.ms.selected', $event)">
+                + Add metric (search)
+              </button>
             </div>
             <div>
               <label>TARGET</label>
@@ -1354,7 +1363,7 @@
                 r = <span :style="'color:' + (s4.data.slice_pearson_r >= 0 ? '#3498db' : '#eb40aa')"
                           x-text="s4.data.slice_pearson_r"></span>
               </div>
-              <div class="biv-chart-wrap"><canvas id="s4-chart"></canvas></div>
+              <div class="biv-chart-wrap" id="s4-wrap"></div>
             </div>
           </template>
         </div>
@@ -1548,7 +1557,7 @@
                 <span :style="'color:' + (s6.data.sign_consistency >= 0.8 ? '#2ecc71' : s6.data.sign_consistency >= 0.6 ? '#f1c40f' : '#e74c3c')"
                       x-text="fmtPct(s6.data.sign_consistency)"></span>
               </div>
-              <div class="biv-chart-wrap"><canvas id="s6-chart"></canvas></div>
+              <div class="biv-chart-wrap" id="s6-wrap"></div>
               <div style="overflow-x:auto;margin-top:10px">
                 <table style="border-collapse:collapse;font-size:12px;font-family:monospace;width:100%">
                   <thead>
@@ -1609,18 +1618,12 @@
                 </template>
                 <span x-show="s7.ms.selected.length === 0" class="biv-hint">No metrics selected — add from dropdown below</span>
               </div>
-              <select @change="if ($event.target.value) { s7.ms.selected.push($event.target.value); $event.target.value=''; }"
-                      style="background:#222;border:1px solid #3a3a3a;color:#ccc;padding:5px 8px;border-radius:3px;font-size:13px;min-width:260px"
-                      :disabled="s7.ms.selected.length >= 25">
-                <option value="">— add metric —</option>
-                <template x-for="grp in metricColumnGroups(s7.ms.selected)" :key="grp.family">
-                  <optgroup :label="grp.family">
-                    <template x-for="c in grp.columns" :key="c">
-                      <option :value="c" x-text="c" :title="columnDescription(c) || c"></option>
-                    </template>
-                  </optgroup>
-                </template>
-              </select>
+              <button class="biv-metric-btn" type="button" style="min-width:260px"
+                      :class="{empty: true}"
+                      :disabled="s7.ms.selected.length >= 25"
+                      @click="openMetricPickerMulti('s7.ms.selected', $event)">
+                + Add metric (search)
+              </button>
             </div>
             <button class="biv-btn" @click="loadFeatureCorr()"
                     :disabled="(s7.ms.selected.length < 2) || s7.loading">
@@ -1729,12 +1732,22 @@
 
     <!-- Shared searchable metric picker — opened from any section dropdown.
          Position is computed from the trigger button's bounding rect when
-         opened; only one instance can be active at a time. -->
+         opened; only one instance can be active at a time. In multi mode
+         the popover stays open as the user accumulates selections. -->
     <div x-show="metricPicker.open" x-cloak
          @click.outside="closeMetricPicker()"
          @keydown.escape.window="closeMetricPicker()"
          class="biv-metric-popover"
          :style="`top:${metricPicker.posTop}px; left:${metricPicker.posLeft}px`">
+      <template x-if="metricPicker.multiPath">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+          <span style="font-size:11px;color:#888">
+            <strong x-text="(_getNested(metricPicker.multiPath) || []).length"></strong> selected ·
+            click to add, search to filter
+          </span>
+          <button class="biv-fullscreen-btn" @click="closeMetricPicker()">Done</button>
+        </div>
+      </template>
       <input type="text" x-model="metricPicker.search"
              placeholder="search columns or descriptions…"
              x-init="$nextTick(() => $el.focus())">
@@ -1753,17 +1766,20 @@
         </template>
         <template x-if="metricPickerGroups().length === 0">
           <div style="padding:14px;color:#555;font-size:11px;text-align:center">
-            no matching metrics
+            <span x-show="!metricPicker.multiPath">no matching metrics</span>
+            <span x-show="metricPicker.multiPath">no more metrics to add — close to compute</span>
           </div>
         </template>
       </div>
-      <button class="biv-metric-clear"
-              @click="pickMetric('')">Clear selection ✕</button>
+      <template x-if="!metricPicker.multiPath">
+        <button class="biv-metric-clear"
+                @click="pickMetric('')">Clear selection ✕</button>
+      </template>
     </div>
   </div><!-- /biv-body -->
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=18"></script>
+  <script src="/static/js/backtest_iv_analysis.js?v=19"></script>
 </body>
 </html>

@@ -224,12 +224,16 @@ document.addEventListener('alpine:init', () => {
     // instance — opens for whichever section's button was clicked, writes
     // the picked value back through `path` (dot-notation, e.g. 's3.metric'),
     // closes on selection or click-outside.
+    // multiPath: when set, picker is in multi-select mode — picks push into
+    // the array at multiPath instead of replacing path, and the popover
+    // stays open so the user can pick several metrics in a row.
     metricPicker: {
-      open:    false,
-      path:    null,
-      search:  '',
-      posTop:  0,
-      posLeft: 0,
+      open:      false,
+      path:      null,
+      multiPath: null,
+      search:    '',
+      posTop:    0,
+      posLeft:   0,
     },
 
     // Active drag state for the slider chip. null when not dragging.
@@ -282,17 +286,14 @@ document.addEventListener('alpine:init', () => {
     // _loadToken: increments on every loadDecile() so a stale fetch
     //   can't overwrite newer state if the user clicks faster than the
     //   server responds.
-    // _renderToken: bumped on each successful render cycle and embedded in
-    //   each canvas id. Alpine reactively re-creates the canvas element
-    //   when the id changes, which guarantees Chart.js is rendering into a
-    //   fresh DOM node — no state contamination across error→success
-    //   transitions.
+    // Canvas elements are created imperatively inside stable wrapper divs
+    // (#s3-wrap-<safe>) — no canvas reuse across renders, no Alpine ↔
+    // Chart.js timing dependency.
     s3: {
       metrics: [''], nBuckets: 10,
       dataByMetric: {},
       charts: {},
       _loadToken: 0,
-      _renderToken: 0,
       loading: false, error: null,
     },
 
@@ -339,14 +340,146 @@ document.addEventListener('alpine:init', () => {
       });
       this._loadCatalog();   // fire-and-forget; UI gracefully degrades to prefix matching until loaded
       await this.loadUploads();
-      // URL-supplied filters apply to whichever upload was auto-selected.
-      // selectUpload() clears filters as part of the reset, so we restore here.
+      // Restore saved defaults on top of the freshly-selected upload.
+      // URL-supplied filters take precedence over saved-default filters
+      // since they're explicit per-page-load context.
+      const restoredDefaults = this.loadDefaults(/*silent*/ true);
       const initial = this._readFiltersFromUrl();
       if (initial.length) {
         this.filters = initial;
         this._ensureFilterStats();
         this.applyFilters();
+      } else if (restoredDefaults) {
+        this.applyFilters();
       }
+    },
+
+    // ── Save / load / clear defaults (localStorage) ──
+    // Captures every metric pick, filter, bucket count, target/method
+    // toggle, and panel open state. Date range is intentionally excluded
+    // since it's tied to the specific upload's available range and we
+    // want it auto-filled per upload.
+    _DEFAULTS_KEY: 'biv:defaults:v1',
+
+    saveDefaults() {
+      const d = {
+        savedAt: new Date().toISOString(),
+        binMode: this.binMode,
+        open:    { ...this.open },
+        filters: this.filters.map(f => ({ ...f })),
+        s0: { target: this.s0.target, method: this.s0.method },
+        s1: {
+          metricA:    this.s1.metricA,
+          metricB:    this.s1.metricB,
+          nBuckets:   this.s1.nBuckets,
+          valueField: this.s1.valueField,
+          minSampleN: this.s1.minSampleN,
+        },
+        s2: {
+          selected: [...(this.s2.ms?.selected || [])],
+          target:   this.s2.target,
+        },
+        s3: {
+          metrics:  [...this.s3.metrics],
+          nBuckets: this.s3.nBuckets,
+        },
+        s4: {
+          fixMetric:    this.s4.fixMetric,
+          fixBucket:    this.s4.fixBucket,
+          fixNBuckets:  this.s4.fixNBuckets,
+          varyMetric:   this.s4.varyMetric,
+          varyNBuckets: this.s4.varyNBuckets,
+        },
+        s5: {
+          metric:    this.s5.metric,
+          bucketIdx: this.s5.bucketIdx,
+          nBuckets:  this.s5.nBuckets,
+          showAll:   this.s5.showAll,
+        },
+        s6: { metric: this.s6.metric, nWindows: this.s6.nWindows },
+        s7: { selected: [...(this.s7.ms?.selected || [])] },
+      };
+      try {
+        localStorage.setItem(this._DEFAULTS_KEY, JSON.stringify(d));
+        this._flashMessage('Defaults saved.');
+      } catch (e) {
+        this.globalError = 'Save failed: ' + e.message;
+      }
+    },
+
+    loadDefaults(silent = false) {
+      let d;
+      try {
+        const raw = localStorage.getItem(this._DEFAULTS_KEY);
+        if (!raw) {
+          if (!silent) this._flashMessage('No defaults saved yet.');
+          return false;
+        }
+        d = JSON.parse(raw);
+      } catch (e) {
+        if (!silent) this.globalError = 'Load failed: ' + e.message;
+        return false;
+      }
+      if (d.binMode) this.binMode = d.binMode;
+      if (d.open) Object.assign(this.open, d.open);
+      if (d.filters) {
+        this.filters = d.filters;
+        this._writeFiltersToUrl();
+        this._ensureFilterStats();
+      }
+      if (d.s0) Object.assign(this.s0, d.s0);
+      if (d.s1) Object.assign(this.s1, d.s1);
+      if (d.s2 && this.s2.ms) {
+        this.s2.ms.selected = d.s2.selected || [];
+        if (d.s2.target) this.s2.target = d.s2.target;
+      }
+      if (d.s3) {
+        this.s3.metrics = (d.s3.metrics?.length ? [...d.s3.metrics] : ['']);
+        if (d.s3.nBuckets) this.s3.nBuckets = d.s3.nBuckets;
+      }
+      if (d.s4) Object.assign(this.s4, d.s4);
+      if (d.s5) Object.assign(this.s5, d.s5);
+      if (d.s6) Object.assign(this.s6, d.s6);
+      if (d.s7 && this.s7.ms) this.s7.ms.selected = d.s7.selected || [];
+
+      // Pre-fetch today's value for any newly-loaded surface metric so
+      // markers show as soon as the section computes.
+      const allCols = [
+        this.s1.metricA, this.s1.metricB,
+        this.s4.fixMetric, this.s4.varyMetric,
+        this.s5.metric, this.s6.metric,
+        ...this.s3.metrics,
+      ].filter(Boolean);
+      for (const c of allCols) this.ensureTodayValue(c);
+
+      if (!silent) {
+        const when = d.savedAt ? ' (saved ' + d.savedAt.slice(0, 16).replace('T', ' ') + ')' : '';
+        this._flashMessage('Defaults loaded' + when + '.');
+      }
+      return true;
+    },
+
+    clearDefaults() {
+      try {
+        localStorage.removeItem(this._DEFAULTS_KEY);
+        this._flashMessage('Defaults cleared.');
+      } catch (e) {
+        this.globalError = 'Clear failed: ' + e.message;
+      }
+    },
+
+    hasSavedDefaults() {
+      try {
+        return !!localStorage.getItem(this._DEFAULTS_KEY);
+      } catch (_) { return false; }
+    },
+
+    _flashMessage(msg) {
+      this.globalError = msg;
+      const original = msg;
+      setTimeout(() => {
+        if (this.globalError === original) this.globalError = null;
+      }, 2200);
     },
 
     async loadUploads() {
@@ -842,9 +975,22 @@ document.addEventListener('alpine:init', () => {
       const btn = evt?.currentTarget || evt?.target;
       const pos = this._computeMetricPickerPos(btn);
       this.metricPicker = {
-        open:   true,
+        open:      true,
         path,
-        search: '',
+        multiPath: null,
+        search:    '',
+        ...pos,
+      };
+    },
+
+    openMetricPickerMulti(arrPath, evt) {
+      const btn = evt?.currentTarget || evt?.target;
+      const pos = this._computeMetricPickerPos(btn);
+      this.metricPicker = {
+        open:      true,
+        path:      null,
+        multiPath: arrPath,   // dot-notation pointing at an array
+        search:    '',
         ...pos,
       };
     },
@@ -854,22 +1000,42 @@ document.addEventListener('alpine:init', () => {
     },
 
     pickMetric(value) {
-      if (this.metricPicker.path) {
-        this._setNested(this.metricPicker.path, value || '');
+      if (!value) {
+        this.closeMetricPicker();
+        return;
       }
-      // Pre-fetch today's value so the marker shows up as soon as the user
-      // hits Compute. No-op for trade-derived columns (returns value: null).
-      if (value) this.ensureTodayValue(value);
+      if (this.metricPicker.multiPath) {
+        // Multi mode: append to the target array if not already present;
+        // keep the picker open so user can keep picking.
+        const arr = this._getNested(this.metricPicker.multiPath);
+        if (Array.isArray(arr) && !arr.includes(value)) {
+          // Mutate via assignment so Alpine reactivity sees a new reference.
+          this._setNested(this.metricPicker.multiPath, [...arr, value]);
+          this.ensureTodayValue(value);
+        }
+        return;
+      }
+      if (this.metricPicker.path) {
+        this._setNested(this.metricPicker.path, value);
+      }
+      this.ensureTodayValue(value);
       this.closeMetricPicker();
     },
 
     metricPickerCurrent() {
+      if (this.metricPicker.multiPath) return null;
       return this._getNested(this.metricPicker.path);
     },
 
     metricPickerGroups() {
-      // Uses the picker's search string to filter the standard grouped list.
-      return this.metricColumnGroups(null, this.metricPicker.search);
+      // In multi mode exclude already-picked entries so the popover stays
+      // useful as the user accumulates selections.
+      let exclude = null;
+      if (this.metricPicker.multiPath) {
+        const arr = this._getNested(this.metricPicker.multiPath);
+        if (Array.isArray(arr)) exclude = arr;
+      }
+      return this.metricColumnGroups(exclude, this.metricPicker.search);
     },
 
     // Shorthand for templates: read a metric value via dot path. Used by the
@@ -1624,51 +1790,58 @@ document.addEventListener('alpine:init', () => {
             .catch(e => [metric, { error: e.message || String(e) }])
         ));
         // A newer load was kicked off while we were waiting — drop these.
+        // Importantly we do NOT touch chart state here; the previous render
+        // stays visible until a NEWER successful load replaces it.
         if (token !== this.s3._loadToken) return;
-
-        // Tear down ALL prior chart instances before swapping data. Alpine
-        // is about to recreate the canvases (because we bump _renderToken)
-        // and the old canvas elements will be removed from the DOM.
-        for (const k of Object.keys(this.s3.charts || {})) {
-          this.s3.charts[k] = this._destroyChart(this.s3.charts[k]);
-        }
-        this.s3.charts = {};
 
         const next = {};
         for (const [m, d] of results) next[m] = d;
         this.s3.dataByMetric = next;
-        // Bump render token AFTER data update so the canvas id changes in
-        // the same reactive cycle. Alpine creates fresh canvas elements.
-        this.s3._renderToken++;
         await this.$nextTick();
         if (token !== this.s3._loadToken) return;
 
         for (const m of metrics) {
           if (next[m]?.buckets) {
             this._renderDecileChartForMetric(m);
+          } else {
+            // Error or no buckets — destroy chart instance, paint error
+            // into the wrap so the user can see what happened.
+            this.s3.charts[m] = this._destroyChart(this.s3.charts[m]);
+            const wrap = document.getElementById('s3-wrap-' + this._safeId(m));
+            if (wrap) {
+              const msg = (next[m]?.error || 'No data after filters').replace(/[<>&]/g, '');
+              wrap.innerHTML = '<div style="color:#e74c3c;padding:12px;font-size:12px;font-family:monospace">' + msg + '</div>';
+            }
           }
         }
       } catch (e) {
+        console.error('loadDecile failed', e);
         if (token === this.s3._loadToken) this.s3.error = e.message;
       } finally {
         if (token === this.s3._loadToken) this.s3.loading = false;
       }
     },
 
-    _renderDecileChartForMetric(metric, retries = 5) {
+    _renderDecileChartForMetric(metric, retries = 8) {
       const data = this.s3.dataByMetric[metric];
       if (!data?.buckets) return;
-      const id = 's3-chart-' + this._safeId(metric) + '-' + this.s3._renderToken;
-      const el = document.getElementById(id);
-      if (!el) {
-        // Canvas is gated behind Alpine's reactive template — if Alpine
-        // hasn't inserted the element with the new token yet, retry briefly.
+      const wrap = document.getElementById('s3-wrap-' + this._safeId(metric));
+      if (!wrap) {
+        // Wrap div is gated behind Alpine's x-if; if it isn't in the DOM
+        // yet, retry briefly. Robust against any Alpine timing.
         if (retries > 0) {
-          setTimeout(() => this._renderDecileChartForMetric(metric, retries - 1), 50);
+          setTimeout(() => this._renderDecileChartForMetric(metric, retries - 1), 80);
+        } else {
+          console.warn('S3 wrap not found for metric', metric);
         }
         return;
       }
+      // Tear down the prior chart instance and rebuild the canvas from
+      // scratch. Eliminates ANY state contamination from previous renders.
       this.s3.charts[metric] = this._destroyChart(this.s3.charts[metric]);
+      wrap.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      wrap.appendChild(canvas);
 
       const buckets  = data.buckets;
       const labels   = buckets.map(b => b.label);
@@ -1682,7 +1855,8 @@ document.addEventListener('alpine:init', () => {
       const todayInfo = this.todayValueFor(metric);
       const todayValue = todayInfo?.value;
 
-      this.s3.charts[metric] = new Chart(el.getContext('2d'), {
+      try {
+      this.s3.charts[metric] = new Chart(canvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels,
@@ -1724,6 +1898,10 @@ document.addEventListener('alpine:init', () => {
         },
         plugins: [_todayMarkerPlugin],
       });
+      } catch (e) {
+        console.error('S3 chart render failed for', metric, e);
+        wrap.innerHTML = '<div style="color:#e74c3c;padding:12px;font-size:11px;font-family:monospace">Chart render failed: ' + (e.message || e) + '</div>';
+      }
     },
 
     // ── S1 cell selection (drives S3 cell filter) ──
@@ -1765,17 +1943,30 @@ document.addEventListener('alpine:init', () => {
       finally { this.s4.loading = false; }
     },
 
-    _renderSliceChart() {
+    _renderSliceChart(retries = 8) {
+      if (!this.s4.data?.buckets) return;
+      const wrap = document.getElementById('s4-wrap');
+      if (!wrap) {
+        if (retries > 0) {
+          setTimeout(() => this._renderSliceChart(retries - 1), 80);
+        } else {
+          console.warn('S4 wrap not found');
+        }
+        return;
+      }
       this.s4._chart = this._destroyChart(this.s4._chart);
-      const el = document.getElementById('s4-chart');
-      if (!el || !this.s4.data?.buckets) return;
+      wrap.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      wrap.appendChild(canvas);
+
       const buckets = this.s4.data.buckets;
       const labels  = buckets.map(b => b.label);
       const pnls    = buckets.map(b => b.mean_pnl ?? 0);
       const maxAbs  = Math.max(...pnls.map(Math.abs), 1);
       const colors  = pnls.map(v => pnlColor(v, maxAbs));
 
-      this.s4._chart = new Chart(el.getContext('2d'), {
+      try {
+      this.s4._chart = new Chart(canvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels,
@@ -1795,6 +1986,10 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+      } catch (e) {
+        console.error('S4 chart render failed', e);
+        wrap.innerHTML = '<div style="color:#e74c3c;padding:12px;font-size:11px">Chart render failed: ' + (e.message || e) + '</div>';
+      }
     },
 
     // ── Section 5: Distribution ──
@@ -1840,17 +2035,30 @@ document.addEventListener('alpine:init', () => {
       finally { this.s6.loading = false; }
     },
 
-    _renderStabilityChart() {
+    _renderStabilityChart(retries = 8) {
+      if (!this.s6.data?.periods) return;
+      const wrap = document.getElementById('s6-wrap');
+      if (!wrap) {
+        if (retries > 0) {
+          setTimeout(() => this._renderStabilityChart(retries - 1), 80);
+        } else {
+          console.warn('S6 wrap not found');
+        }
+        return;
+      }
       this.s6._chart = this._destroyChart(this.s6._chart);
-      const el = document.getElementById('s6-chart');
-      if (!el || !this.s6.data?.periods) return;
+      wrap.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      wrap.appendChild(canvas);
+
       const periods = this.s6.data.periods;
-      const labels  = periods.map(p => p.label + '\n' + p.date_from.slice(0, 7));
+      const labels  = periods.map(p => p.label + '\n' + (p.date_from || '').slice(0, 7));
       const rs      = periods.map(p => p.r);
       const pnls    = periods.map(p => p.mean_pnl);
       const maxAbsPnl = Math.max(...pnls.map(Math.abs), 1);
 
-      this.s6._chart = new Chart(el.getContext('2d'), {
+      try {
+      this.s6._chart = new Chart(canvas.getContext('2d'), {
         data: {
           labels,
           datasets: [
@@ -1890,6 +2098,10 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+      } catch (e) {
+        console.error('S6 chart render failed', e);
+        wrap.innerHTML = '<div style="color:#e74c3c;padding:12px;font-size:11px">Chart render failed: ' + (e.message || e) + '</div>';
+      }
     },
 
     // ── Section 7: Feature Correlation ──
