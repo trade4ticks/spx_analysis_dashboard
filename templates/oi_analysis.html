@@ -620,6 +620,197 @@
         </div>
         </div>
       </div>
+
+      <!-- Feature Families -->
+      <div x-show="ifClusters.length > 0" style="margin-top:20px">
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">Feature Families
+          <span style="font-weight:400;color:var(--dim);font-size:9px">-- auto-grouped by score-vector similarity · ★ = representative used in 2F scan</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <template x-for="(cl, ci) in ifClusters" :key="ci">
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;min-width:150px;max-width:220px">
+              <div style="font-size:9px;font-weight:700;color:#3498db;margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px"
+                   x-text="'Family ' + (ci+1)"></div>
+              <template x-for="m in cl.metrics" :key="m">
+                <div :style="m === cl.representative
+                       ? 'font-size:10px;color:var(--text);font-weight:700;margin-bottom:2px'
+                       : 'font-size:10px;color:var(--dim);margin-bottom:2px'">
+                  <span x-text="m === cl.representative ? '★ ' + m : m"></span>
+                  <span style="float:right;color:var(--dim)" x-text="cl.avg_scores[m]?.toFixed(0)"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- 2F Interaction Scanner -->
+      <div x-show="smMeta.count > 0" style="margin-top:20px;padding-bottom:32px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text)">2-Factor Interaction Scanner</div>
+          <button @click="run2fScan()"
+                  :disabled="ifStatus.running"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;
+                         cursor:pointer;font-weight:600">
+            <span x-text="ifStatus.running ? 'Running...' : 'Run 2F Scan'"></span>
+          </button>
+          <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
+                x-text="ifStatus.message"></span>
+          <!-- fwd_ret filter -->
+          <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
+                  style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
+                         color:var(--text);font-size:11px;padding:4px 6px;border-radius:4px">
+            <option value="">All Fwd Rets</option>
+            <template x-for="f in smMeta.fwd_rets" :key="f">
+              <option :value="f" x-text="f"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Ranked table -->
+        <div x-show="ifRows.length > 0"
+             style="background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:12px">
+          <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FEAT A</th>
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FEAT B</th>
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FWD RET</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">AVG LIFT</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">MAX LIFT</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">AVG SCORE</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">TICKERS</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(row, ri) in ifRows" :key="ri">
+                <tr @click="drillInteraction(row)" style="cursor:pointer"
+                    :style="ifSelected && ifSelected.feat_a===row.feat_a && ifSelected.feat_b===row.feat_b && ifSelected.fwd_ret===row.fwd_ret
+                            ? 'background:rgba(52,152,219,.12)' : ''"
+                    @mouseover="$event.currentTarget.style.background='rgba(255,255,255,.03)'"
+                    @mouseout="$event.currentTarget.style.background=(ifSelected && ifSelected.feat_a===row.feat_a && ifSelected.feat_b===row.feat_b && ifSelected.fwd_ret===row.fwd_ret ? 'rgba(52,152,219,.12)' : '')">
+                  <td style="padding:5px 10px;color:var(--text)" x-text="row.feat_a"></td>
+                  <td style="padding:5px 10px;color:var(--text)" x-text="row.feat_b"></td>
+                  <td style="padding:5px 10px;color:var(--dim)" x-text="row.fwd_ret"></td>
+                  <td style="padding:5px 10px;text-align:right"
+                      :style="'color:' + (row.avg_lift >= 0 ? '#3498db' : '#e84393')"
+                      x-text="row.avg_lift?.toFixed(3)"></td>
+                  <td style="padding:5px 10px;text-align:right;color:var(--muted)"
+                      x-text="row.max_lift?.toFixed(3)"></td>
+                  <td style="padding:5px 10px;text-align:right;color:var(--muted)"
+                      x-text="row.avg_score?.toFixed(1)"></td>
+                  <td style="padding:5px 10px;text-align:right;color:var(--dim)"
+                      x-text="row.n_tickers"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- No results placeholder -->
+        <div x-show="ifRows.length === 0 && !ifStatus.running"
+             style="text-align:center;padding:32px;color:var(--dim);font-size:12px">
+          No interaction data yet. Click "Run 2F Scan" to compute cross-family combinations.
+        </div>
+
+        <!-- 2F Heatmap panel (shown when a row is selected) -->
+        <div x-show="ifSelected" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+            <div style="font-size:11px;font-weight:700;color:var(--text)">
+              <span x-text="ifSelected?.feat_a"></span>
+              <span style="color:var(--dim)"> × </span>
+              <span x-text="ifSelected?.feat_b"></span>
+            </div>
+            <!-- Ticker selector -->
+            <select x-model="ifDetailTicker" @change="loadInteractionDetail()"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:11px;padding:3px 6px;border-radius:4px">
+              <option value="">All Tickers</option>
+              <template x-for="d in [...new Set(ifDetail.map(x=>x.ticker))].sort()" :key="d">
+                <option :value="d" x-text="d"></option>
+              </template>
+            </select>
+            <!-- Fwd ret selector -->
+            <select x-model="ifDetailFwd" @change="loadInteractionDetail()"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:11px;padding:3px 6px;border-radius:4px">
+              <option value="">All Fwd Rets</option>
+              <template x-for="d in [...new Set(ifDetail.map(x=>x.fwd_ret))].sort()" :key="d">
+                <option :value="d" x-text="d"></option>
+              </template>
+            </select>
+            <span style="margin-left:auto;font-size:10px;color:var(--dim)">
+              Lift: <b :style="'color:' + ((ifDetailRow?.interaction_lift||0) >= 0 ? '#3498db' : '#e84393')"
+                       x-text="ifDetailRow?.interaction_lift?.toFixed(3) ?? '—'"></b>
+              &nbsp;·&nbsp; Score: <b style="color:var(--muted)"
+                                       x-text="ifDetailRow?.composite_interaction_score?.toFixed(1) ?? '—'"></b>
+              &nbsp;·&nbsp; n=<span x-text="ifDetailRow?.n ?? '—'"></span>
+            </span>
+            <button @click="ifSelected=null"
+                    style="background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:14px">✕</button>
+          </div>
+
+          <!-- 2×2 heatmap grid -->
+          <div x-show="ifDetailRow?.quadrants?.length > 0">
+            <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:2px;max-width:520px">
+              <!-- Header row -->
+              <div></div>
+              <div style="text-align:center;font-size:9px;color:var(--dim);padding-bottom:4px"
+                   x-text="(ifSelected?.feat_a ?? '') + ' LOW'"></div>
+              <div style="text-align:center;font-size:9px;color:var(--dim);padding-bottom:4px"
+                   x-text="(ifSelected?.feat_a ?? '') + ' HIGH'"></div>
+              <!-- feat_b HIGH row -->
+              <div style="display:flex;align-items:center;font-size:9px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
+                   x-text="(ifSelected?.feat_b ?? '') + ' HIGH'"></div>
+              <template x-for="aHigh in [false, true]" :key="'bH-'+aHigh">
+                <div :style="'border-radius:4px;padding:12px 8px;min-height:80px;' +
+                             'background:' + ifQuadrantColor(ifQuadCell(aHigh, true))">
+                  <template x-if="ifQuadCell(aHigh, true)">
+                    <div>
+                      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:4px"
+                           x-text="((ifQuadCell(aHigh,true)?.avg_ret||0)*100).toFixed(2) + '%'"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.7)"
+                           x-text="'WR ' + ((ifQuadCell(aHigh,true)?.win_rate||0)*100).toFixed(0) + '%'"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.6)"
+                           x-text="'Sh ' + (ifQuadCell(aHigh,true)?.sharpe||0).toFixed(2)"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.5)"
+                           x-text="'n=' + (ifQuadCell(aHigh,true)?.n||0)"></div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- feat_b LOW row -->
+              <div style="display:flex;align-items:center;font-size:9px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
+                   x-text="(ifSelected?.feat_b ?? '') + ' LOW'"></div>
+              <template x-for="aHigh in [false, true]" :key="'bL-'+aHigh">
+                <div :style="'border-radius:4px;padding:12px 8px;min-height:80px;' +
+                             'background:' + ifQuadrantColor(ifQuadCell(aHigh, false))">
+                  <template x-if="ifQuadCell(aHigh, false)">
+                    <div>
+                      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:4px"
+                           x-text="((ifQuadCell(aHigh,false)?.avg_ret||0)*100).toFixed(2) + '%'"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.7)"
+                           x-text="'WR ' + ((ifQuadCell(aHigh,false)?.win_rate||0)*100).toFixed(0) + '%'"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.6)"
+                           x-text="'Sh ' + (ifQuadCell(aHigh,false)?.sharpe||0).toFixed(2)"></div>
+                      <div style="font-size:9px;color:rgba(255,255,255,.5)"
+                           x-text="'n=' + (ifQuadCell(aHigh,false)?.n||0)"></div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+            <div style="margin-top:8px;font-size:9px;color:var(--dim)">
+              Best quadrant: <b style="color:var(--muted)" x-text="ifDetailRow?.best_quadrant ?? '—'"></b>
+              &nbsp;·&nbsp; R² gain: <span x-text="ifDetailRow?.r2_gain?.toFixed(4) ?? '—'"></span>
+            </div>
+          </div>
+          <div x-show="!ifDetailRow?.quadrants?.length"
+               style="color:var(--dim);font-size:11px;padding:16px">No quadrant data for this selection.</div>
+        </div>
+      </div>
+
     </div>
   </div>
 </body>

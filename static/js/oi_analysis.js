@@ -978,6 +978,19 @@ document.addEventListener('alpine:init', () => {
     smSelectedFwd: '',
     smSelectedTicker: '',
     smSummary: { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] },
+
+    // ── Interaction Scan ──
+    ifClusters: [],
+    ifStatus: { running: false, message: '', last_run: null },
+    ifPollTimer: null,
+    ifRows: [],          // ranked interaction-matrix rows
+    ifFwdFilter: '',
+    ifSelected: null,    // currently-drilled combo {feat_a, feat_b}
+    ifDetail: [],        // quadrant rows for selected combo
+    ifDetailTicker: '',
+    ifDetailFwd: '',
+    ifDetailRow: null,   // single row shown in heatmap
+
     smColumns: [
       { key: 'composite_score', label: 'Score' },
       { key: 'ticker', label: 'Ticker' },
@@ -1004,8 +1017,11 @@ document.addEventListener('alpine:init', () => {
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();
           await this.loadSmSummary();
+          await this.loadClusters();
+          await this.loadInteractionMatrix();
         }
         if (this.smStatus.running) this._smStartPoll();
+        if (this.ifStatus.running) this._ifStartPoll();
       } catch (_) {}
     },
 
@@ -1332,6 +1348,107 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+    },
+
+    // ── Feature Clusters ──────────────────────────────────────────────
+    async loadClusters() {
+      try {
+        const r = await fetch('/api/oi-analysis/feature-clusters');
+        if (r.ok) this.ifClusters = await r.json();
+      } catch (_) {}
+    },
+
+    // ── 2F Interaction Scanner ────────────────────────────────────────
+    async run2fScan() {
+      try {
+        const r = await fetch('/api/oi-analysis/run-2f-scan', { method: 'POST' });
+        if (r.ok) {
+          const d = await r.json();
+          this.ifStatus = { running: d.status !== 'already_running' || true,
+                            message: d.message, last_run: this.ifStatus.last_run };
+          this._ifStartPoll();
+        }
+      } catch (_) {}
+    },
+
+    _ifStartPoll() {
+      if (this.ifPollTimer) return;
+      this.ifPollTimer = setInterval(async () => {
+        try {
+          const r = await fetch('/api/oi-analysis/2f-scan-status');
+          if (r.ok) {
+            this.ifStatus = await r.json();
+            if (!this.ifStatus.running) {
+              clearInterval(this.ifPollTimer);
+              this.ifPollTimer = null;
+              await this.loadInteractionMatrix();
+            }
+          }
+        } catch (_) {}
+      }, 3000);
+    },
+
+    async loadInteractionMatrix() {
+      const params = new URLSearchParams();
+      if (this.ifFwdFilter) params.set('fwd_ret', this.ifFwdFilter);
+      try {
+        const r = await fetch('/api/oi-analysis/interaction-matrix?' + params);
+        if (r.ok) this.ifRows = await r.json();
+      } catch (_) {}
+    },
+
+    async drillInteraction(row) {
+      this.ifSelected = row;
+      this.ifDetailTicker = '';
+      this.ifDetailFwd = row.fwd_ret || '';
+      await this.loadInteractionDetail();
+    },
+
+    async loadInteractionDetail() {
+      if (!this.ifSelected) return;
+      const params = new URLSearchParams({
+        feat_a: this.ifSelected.feat_a,
+        feat_b: this.ifSelected.feat_b,
+      });
+      if (this.ifDetailTicker) params.set('ticker', this.ifDetailTicker);
+      if (this.ifDetailFwd) params.set('fwd_ret', this.ifDetailFwd);
+      try {
+        const r = await fetch('/api/oi-analysis/interaction-detail?' + params);
+        if (r.ok) {
+          this.ifDetail = await r.json();
+          this.ifDetailRow = this.ifDetail[0] || null;
+          this._pickDetailRow();
+        }
+      } catch (_) {}
+    },
+
+    _pickDetailRow() {
+      if (!this.ifDetail.length) { this.ifDetailRow = null; return; }
+      const match = this.ifDetail.find(d =>
+        (!this.ifDetailTicker || d.ticker === this.ifDetailTicker) &&
+        (!this.ifDetailFwd    || d.fwd_ret === this.ifDetailFwd));
+      this.ifDetailRow = match || this.ifDetail[0] || null;
+    },
+
+    ifQuadrantColor(q) {
+      if (!q || q.avg_ret == null) return 'rgba(80,80,80,0.3)';
+      const v = q.avg_ret;
+      const abs = Math.max(...(this.ifDetailRow?.quadrants || []).map(x => Math.abs(x.avg_ret || 0)), 0.001);
+      const t = Math.max(-1, Math.min(1, v / abs));
+      if (t >= 0) return `rgba(52,152,219,${0.15 + t * 0.65})`;
+      return `rgba(232,67,147,${0.15 + (-t) * 0.65})`;
+    },
+
+    ifQuadCell(feat_a_high, feat_b_high) {
+      const label = (feat_a_high ? 'H' : 'L') + (feat_b_high ? 'H' : 'L');
+      return (this.ifDetailRow?.quadrants || []).find(q => {
+        // Label stored as "feat_a_H+feat_b_H" or shorthand "HH"
+        if (q.label && q.label.length <= 4) return q.label === label;
+        const parts = (q.label || '').split('+');
+        const aH = parts[0]?.endsWith('_H');
+        const bH = parts[1]?.endsWith('_H');
+        return aH === feat_a_high && bH === feat_b_high;
+      }) || null;
     },
 
     drillIntoScore(row) {

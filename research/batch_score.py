@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS oi_score_matrix (
     d10_wr          REAL,
     d1_wr           REAL,
     best_sharpe     REAL,
+    mi              REAL,
+    pearson_r       REAL,
+    loyo_fragile    BOOLEAN,
     scanned_at      TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (ticker, metric, fwd_ret)
 );
@@ -47,8 +50,8 @@ _UPSERT = """\
 INSERT INTO oi_score_matrix
     (ticker, metric, fwd_ret, composite_score, pattern, spearman_r,
      monotonicity, yearly_pct, concentration, tail_spread, n_obs,
-     d10_avg, d1_avg, d10_wr, d1_wr, best_sharpe, scanned_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+     d10_avg, d1_avg, d10_wr, d1_wr, best_sharpe, mi, pearson_r, loyo_fragile, scanned_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
 ON CONFLICT (ticker, metric, fwd_ret) DO UPDATE SET
     composite_score=EXCLUDED.composite_score, pattern=EXCLUDED.pattern,
     spearman_r=EXCLUDED.spearman_r, monotonicity=EXCLUDED.monotonicity,
@@ -56,7 +59,9 @@ ON CONFLICT (ticker, metric, fwd_ret) DO UPDATE SET
     tail_spread=EXCLUDED.tail_spread, n_obs=EXCLUDED.n_obs,
     d10_avg=EXCLUDED.d10_avg, d1_avg=EXCLUDED.d1_avg,
     d10_wr=EXCLUDED.d10_wr, d1_wr=EXCLUDED.d1_wr,
-    best_sharpe=EXCLUDED.best_sharpe, scanned_at=NOW()
+    best_sharpe=EXCLUDED.best_sharpe,
+    mi=EXCLUDED.mi, pearson_r=EXCLUDED.pearson_r, loyo_fragile=EXCLUDED.loyo_fragile,
+    scanned_at=NOW()
 """
 
 # Shared progress state for API polling
@@ -70,6 +75,9 @@ def get_progress() -> dict:
 async def ensure_table(pool):
     async with pool.acquire() as conn:
         await conn.execute(_TABLE_DDL)
+        for col, typ in [('mi', 'REAL'), ('pearson_r', 'REAL'), ('loyo_fragile', 'BOOLEAN')]:
+            await conn.execute(
+                f'ALTER TABLE oi_score_matrix ADD COLUMN IF NOT EXISTS {col} {typ}')
 
 
 async def run_batch_score(oi_pool, main_pool, log=print):
@@ -166,6 +174,9 @@ async def run_batch_score(oi_pool, main_pool, log=print):
                         d10.get("win_rate"),
                         d1.get("win_rate"),
                         best.get("sharpe"),
+                        result.get("mi"),
+                        result.get("pearson_r"),
+                        rob.get("loyo_fragile"),
                     ))
                     total_scored += 1
 

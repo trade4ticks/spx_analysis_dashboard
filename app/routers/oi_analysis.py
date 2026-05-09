@@ -1,4 +1,5 @@
 """OI Analysis workbench — interactive decile analytics for a single ticker/metric/outcome."""
+import json
 import math
 from collections import defaultdict
 from typing import Optional
@@ -745,3 +746,101 @@ async def trigger_batch_score(
 async def batch_score_status():
     from research.batch_score import get_progress
     return get_progress()
+
+
+@router.get("/feature-clusters")
+async def feature_clusters(pool=Depends(get_pool)):
+    """Compute and return feature clusters from score-vector similarity."""
+    from research.interaction_scan import compute_clusters
+    clusters = await compute_clusters(pool)
+    return clusters
+
+
+@router.post("/run-2f-scan")
+async def trigger_2f_scan(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """Trigger a 2-factor interaction scan in the background."""
+    from research.interaction_scan import get_progress, run_2f_scan
+    import asyncio
+    progress = get_progress()
+    if progress['running']:
+        return {'status': 'already_running', 'message': progress['message']}
+    asyncio.get_event_loop().create_task(run_2f_scan(oi_pool, pool))
+    return {'status': 'started', 'message': '2F scan started...'}
+
+
+@router.get("/2f-scan-status")
+async def scan_2f_status():
+    from research.interaction_scan import get_progress
+    return get_progress()
+
+
+@router.get("/interaction-matrix")
+async def interaction_matrix(
+    pool=Depends(get_pool),
+    fwd_ret: Optional[str] = None,
+    min_lift: float = 0.0,
+    limit: int = 100,
+):
+    """Ranked cross-family 2F results, aggregated across tickers."""
+    from research.interaction_scan import ensure_table
+    await ensure_table(pool)
+    wheres = ['interaction_lift >= $1']
+    params: list = [min_lift]
+    if fwd_ret:
+        params.append(fwd_ret)
+        wheres.append(f'fwd_ret = ${len(params)}')
+    where_sql = 'WHERE ' + ' AND '.join(wheres)
+    sql = f"""
+        SELECT feat_a, feat_b, fwd_ret,
+               AVG(composite_interaction_score) AS avg_score,
+               AVG(interaction_lift)            AS avg_lift,
+               MAX(interaction_lift)            AS max_lift,
+               COUNT(DISTINCT ticker)           AS n_tickers,
+               MAX(best_quad_sharpe)            AS max_quad_sharpe
+        FROM oi_interaction_matrix
+        {where_sql}
+        GROUP BY feat_a, feat_b, fwd_ret
+        ORDER BY avg_lift DESC
+        LIMIT ${len(params)+1}
+    """
+    params.append(limit)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    return [dict(r) for r in rows]
+
+
+@router.get("/interaction-detail")
+async def interaction_detail(
+    pool=Depends(get_pool),
+    feat_a: str = Query(...),
+    feat_b: str = Query(...),
+    ticker: Optional[str] = None,
+    fwd_ret: Optional[str] = None,
+):
+    """Full quadrant detail for a specific feat_a x feat_b combo."""
+    from research.interaction_scan import ensure_table
+    await ensure_table(pool)
+    wheres = ['feat_a = $1', 'feat_b = $2']
+    params: list = [feat_a, feat_b]
+    if ticker:
+        params.append(ticker)
+        wheres.append(f'ticker = ${len(params)}')
+    if fwd_ret:
+        params.append(fwd_ret)
+        wheres.append(f'fwd_ret = ${len(params)}')
+    where_sql = 'WHERE ' + ' AND '.join(wheres)
+    sql = f"""
+        SELECT ticker, fwd_ret, composite_interaction_score, interaction_lift,
+               best_quadrant, best_quad_sharpe, best_quad_avg_ret, best_quad_win_rate,
+               best_quad_n, r2_gain, ols_r2, n, quadrants
+        FROM oi_interaction_matrix {where_sql}
+        ORDER BY ticker, fwd_ret
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['quadrants'] = json.loads(d['quadrants']) if d['quadrants'] else []
+        result.append(d)
+    return result

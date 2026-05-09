@@ -96,6 +96,26 @@ def _year_from_date(d) -> Optional[int]:
         return None
 
 
+def _mutual_information(x: np.ndarray, y: np.ndarray, n_bins: int = 5) -> float:
+    """Mutual information via equal-count (quantile) bins. Returns MI in nats."""
+    n = len(x)
+    if n < n_bins * 4:
+        return 0.0
+    q_x = np.quantile(x, np.linspace(0, 1, n_bins + 1))
+    q_y = np.quantile(y, np.linspace(0, 1, n_bins + 1))
+    bx = np.clip(np.searchsorted(q_x[1:-1], x), 0, n_bins - 1)
+    by = np.clip(np.searchsorted(q_y[1:-1], y), 0, n_bins - 1)
+    joint = np.zeros((n_bins, n_bins))
+    for i in range(n):
+        joint[bx[i], by[i]] += 1
+    joint /= n
+    px = joint.sum(axis=1, keepdims=True)
+    py = joint.sum(axis=0, keepdims=True)
+    mask = joint > 0
+    mi = float(np.sum(joint[mask] * np.log(joint[mask] / (px * py)[mask])))
+    return max(mi, 0.0)
+
+
 # ── Multi-lens relationship profile ──────────────────────────────────────────
 
 def scan_relationship(rows: list[dict], x_col: str, y_col: str,
@@ -119,6 +139,7 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
     # ── 1. Correlation ───────────────────────────────────────────────
     pr, pp = sp_stats.pearsonr(xa, ya)
     sr, sp_val = sp_stats.spearmanr(xa, ya)
+    mi_val = _mutual_information(xa, ya)
 
     # ── 2. Bucket profile ────────────────────────────────────────────
     buckets_xy = _bucket_with_x(pairs, n_buckets)
@@ -214,6 +235,7 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
         best_zone_sharpe=best_zone_sharpe,
         n=n,
         extreme_coverage=robustness.get("extreme_coverage", 1.0),
+        mi=mi_val,
     )
 
     return _jsonify({
@@ -227,6 +249,8 @@ def scan_relationship(rows: list[dict], x_col: str, y_col: str,
         "pearson_p":   round(float(pp), 6),
         "spearman_r":  round(float(sr), 4),
         "spearman_p":  round(float(sp_val), 6),
+        "mi":          round(mi_val, 6),
+        "pearson_spearman_div": round(abs(float(pr)) - abs(float(sr)), 4),
 
         # Bucket profile
         "bucket_stats":   bucket_stats,
@@ -432,10 +456,11 @@ def _robustness_diagnostics(pairs, x_col: str, y_col: str,
 def _composite_score(rank_corr: float, monotonicity: float,
                      consistency_pct: float, half_stability: bool,
                      concentration: float, best_zone_sharpe: float,
-                     n: int, extreme_coverage: float = 1.0) -> float:
+                     n: int, extreme_coverage: float = 1.0,
+                     mi: float = 0.0) -> float:
     """
     0-100 composite score. Higher = more robust signal.
-    8 components, each normalized to 0-1, divided by max possible.
+    9 components, each normalized to 0-1, divided by max possible.
     """
     # 1. Rank correlation strength (0-1, capped at |r|=0.20)
     c_rank = min(rank_corr / 0.20, 1.0)
@@ -463,8 +488,11 @@ def _composite_score(rank_corr: float, monotonicity: float,
     # (e.g., D1 fires only in 2020-2022 but not 2023-2025)
     c_coverage = extreme_coverage
 
+    # 9. Mutual information (capped at 0.10 nats — strong for financial data)
+    c_mi = min(mi / 0.10, 1.0)
+
     raw = (c_rank + c_mono + c_consistency + c_half + c_concentration
-           + c_sharpe + c_sample + c_coverage) / 7.5
+           + c_sharpe + c_sample + c_coverage + c_mi) / 8.5
     return round(raw * 100, 1)
 
 
