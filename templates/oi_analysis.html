@@ -52,6 +52,14 @@
     .decile-btn.on { background:rgba(52,152,219,.2); border-color:var(--accent); color:var(--accent); }
     .decile-btn:hover { border-color:var(--dim); }
 
+    /* 2F metric picker pills */
+    .if-pill {
+      background:var(--raised); border:1px solid var(--border); color:var(--dim);
+      padding:3px 10px; border-radius:3px; font-size:10px; cursor:pointer; font-family:monospace;
+    }
+    .if-pill.on { background:rgba(52,152,219,.2); border-color:var(--accent); color:var(--accent); font-weight:700; }
+    .if-pill:hover { border-color:var(--dim); }
+
     /* Equity mode toggle */
     .mode-seg { display:inline-flex; border:1px solid var(--border); border-radius:3px; overflow:hidden; }
     .mode-seg span {
@@ -642,10 +650,9 @@
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
             <template x-for="m in smMeta.metrics" :key="m">
-              <button @click="ifToggleMetric(m)"
-                      :style="ifSelectedMetrics.includes(m)
-                        ? 'font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:monospace;background:rgba(52,152,219,.25);border:1px solid #3498db;color:#3498db;font-weight:700'
-                        : 'font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:monospace;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.55)'"
+              <button type="button" class="if-pill"
+                      :class="{ on: ifSelectedMetrics.includes(m) }"
+                      @click="ifSelectedMetrics = ifSelectedMetrics.includes(m) ? ifSelectedMetrics.filter(x => x !== m) : [...ifSelectedMetrics, m]"
                       x-text="m">
               </button>
             </template>
