@@ -981,6 +981,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── Interaction Scan ──
     ifClusters: [],
+    ifMetrics: [],
     ifSelectedMetrics: [],
     ifStatus: { running: false, message: '', last_run: null },
     ifPollTimer: null,
@@ -1016,7 +1017,7 @@ document.addEventListener('alpine:init', () => {
           fetch('/api/oi-analysis/score-matrix/meta'),
           fetch('/api/oi-analysis/batch-score-status'),
         ]);
-        if (metaRes.ok) this.smMeta = await metaRes.json();
+        if (metaRes.ok) { this.smMeta = await metaRes.json(); this.ifMetrics = [...this.smMeta.metrics]; }
         if (statusRes.ok) this.smStatus = await statusRes.json();
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();

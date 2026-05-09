@@ -649,12 +649,11 @@
                   x-text="' ' + ifSelectedMetrics.length + ' selected → ' + ifPairCount() + ' pair(s)'"></span>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
-            <template x-for="m in smMeta.metrics" :key="m">
-              <button type="button" class="if-pill"
-                      :class="{ on: ifSelectedMetrics.includes(m) }"
-                      @click="ifToggleMetric(m)"
-                      x-text="m">
-              </button>
+            <template x-for="m in ifMetrics" :key="m">
+              <span class="if-pill"
+                    :class="{ on: ifSelectedMetrics.includes(m) }"
+                    @click="ifToggleMetric(m)"
+                    x-text="m"></span>
             </template>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
