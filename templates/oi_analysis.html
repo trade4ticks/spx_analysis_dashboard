@@ -652,7 +652,7 @@
             <template x-for="m in smMeta.metrics" :key="m">
               <button type="button" class="if-pill"
                       :class="{ on: ifSelectedMetrics.includes(m) }"
-                      @click="ifSelectedMetrics = ifSelectedMetrics.includes(m) ? ifSelectedMetrics.filter(x => x !== m) : [...ifSelectedMetrics, m]"
+                      @click="ifToggleMetric(m)"
                       x-text="m">
               </button>
             </template>
