@@ -1021,7 +1021,6 @@ document.addEventListener('alpine:init', () => {
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();
           await this.loadSmSummary();
-          await this.loadClusters();
           await this.loadInteractionMatrix();
           // Re-render ticker charts after layout settles (x-show may delay dimensions)
           setTimeout(() => {
@@ -1369,9 +1368,11 @@ document.addEventListener('alpine:init', () => {
 
     // ── 2F Interaction Scanner ────────────────────────────────────────
     ifToggleMetric(m) {
-      const idx = this.ifSelectedMetrics.indexOf(m);
-      if (idx >= 0) this.ifSelectedMetrics.splice(idx, 1);
-      else this.ifSelectedMetrics.push(m);
+      if (this.ifSelectedMetrics.includes(m)) {
+        this.ifSelectedMetrics = this.ifSelectedMetrics.filter(x => x !== m);
+      } else {
+        this.ifSelectedMetrics = [...this.ifSelectedMetrics, m];
+      }
     },
 
     ifPairCount() {
