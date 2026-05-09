@@ -136,28 +136,36 @@ async def compute_clusters(main_pool, threshold: float = 0.85) -> list[dict]:
     return clusters
 
 
-async def run_2f_scan(oi_pool, main_pool, log=print):
+async def run_2f_scan(oi_pool, main_pool, selected_metrics=None, log=print):
     """
-    Batch 2-factor interaction scan across all cross-family representative pairs.
+    Batch 2-factor interaction scan.
+    If selected_metrics is provided (list of >= 2 metric names), scans all
+    pairs from that list.  Otherwise falls back to cluster-based representatives.
     Stores results in oi_interaction_matrix.
     """
     _progress['running'] = True
-    _progress['message'] = 'Computing feature clusters...'
 
     try:
         await ensure_table(main_pool)
-        clusters = await compute_clusters(main_pool)
-        representatives = [c['representative'] for c in clusters]
-        log(f'Clusters: {len(clusters)}, representatives: {representatives}')
+
+        if selected_metrics and len(selected_metrics) >= 2:
+            representatives = list(selected_metrics)
+            _progress['message'] = f'Scanning {len(representatives)} selected metrics...'
+            log(f'Manual selection: {representatives}')
+        else:
+            _progress['message'] = 'Computing feature clusters...'
+            clusters = await compute_clusters(main_pool)
+            representatives = [c['representative'] for c in clusters]
+            log(f'Clusters: {len(clusters)}, representatives: {representatives}')
 
         if len(representatives) < 2:
-            _progress['message'] = 'Not enough clusters to scan (need >= 2).'
+            _progress['message'] = 'Need at least 2 metrics selected to scan.'
             return
 
         cross_pairs = [(representatives[i], representatives[j])
                        for i in range(len(representatives))
                        for j in range(i + 1, len(representatives))]
-        log(f'Cross-family pairs: {len(cross_pairs)}')
+        log(f'Pairs to scan: {len(cross_pairs)}')
 
         # Pre-load single-factor Sharpe baselines from score matrix
         async with main_pool.acquire() as conn:

@@ -654,26 +654,52 @@
 
       <!-- 2F Interaction Scanner -->
       <div x-show="smMeta.count > 0" style="margin-top:20px;padding-bottom:32px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">2-Factor Interaction Scanner</div>
-          <button @click="run2fScan()"
-                  :disabled="ifStatus.running"
-                  x-text="ifStatus.running ? 'Running...' : 'Run 2F Scan'"
-                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;
-                         cursor:pointer;font-weight:600">
-          </button>
-          <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
-                x-text="ifStatus.message"></span>
-          <!-- fwd_ret filter -->
-          <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
-                  style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
-                         color:var(--text);font-size:11px;padding:4px 6px;border-radius:4px">
-            <option value="">All Fwd Rets</option>
-            <template x-for="f in smMeta.fwd_rets" :key="f">
-              <option :value="f" x-text="f"></option>
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">2-Factor Interaction Scanner</div>
+
+        <!-- Metric picker -->
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:10px">
+          <div style="font-size:10px;color:var(--dim);margin-bottom:8px">
+            Select 2 or more metrics to compare — all pairs will be scanned across every ticker and forward return.
+            <span x-show="ifPairCount() > 0" style="color:#3498db;font-weight:700"
+                  x-text="' ' + ifSelectedMetrics.length + ' selected → ' + ifPairCount() + ' pair(s)'"></span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+            <template x-for="m in smMeta.metrics" :key="m">
+              <button @click="ifToggleMetric(m)"
+                      :style="ifSelectedMetrics.includes(m)
+                        ? 'background:rgba(52,152,219,.25);border:1px solid #3498db;color:#3498db;font-weight:700'
+                        : 'background:var(--raised);border:1px solid var(--border);color:var(--dim)'"
+                      style="font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer;font-family:monospace"
+                      x-text="m">
+              </button>
             </template>
-          </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button @click="run2fScan()"
+                    :disabled="ifStatus.running || ifSelectedMetrics.length < 2"
+                    x-text="ifStatus.running ? 'Running...' : 'Run 2F Scan'"
+                    :style="ifSelectedMetrics.length >= 2 && !ifStatus.running
+                      ? 'opacity:1;cursor:pointer' : 'opacity:.4;cursor:not-allowed'"
+                    style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                           color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;font-weight:600">
+            </button>
+            <button @click="ifSelectedMetrics = []"
+                    x-show="ifSelectedMetrics.length > 0 && !ifStatus.running"
+                    style="background:transparent;border:none;color:var(--dim);font-size:10px;cursor:pointer">
+              Clear
+            </button>
+            <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
+                  x-text="ifStatus.message"></span>
+            <!-- fwd_ret filter -->
+            <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
+                    style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
+                           color:var(--text);font-size:11px;padding:4px 6px;border-radius:4px">
+              <option value="">All Fwd Rets</option>
+              <template x-for="f in smMeta.fwd_rets" :key="f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+          </div>
         </div>
 
         <!-- Ranked table -->

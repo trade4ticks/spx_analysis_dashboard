@@ -2,11 +2,12 @@
 import json
 import math
 from collections import defaultdict
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 from scipy import stats as sp_stats
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
+from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 
@@ -756,16 +757,27 @@ async def feature_clusters(pool=Depends(get_pool)):
     return clusters
 
 
+class Run2fRequest(BaseModel):
+    metrics: List[str] = []
+
+
 @router.post("/run-2f-scan")
-async def trigger_2f_scan(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+async def trigger_2f_scan(
+    request: Run2fRequest,
+    pool=Depends(get_pool),
+    oi_pool=Depends(get_oi_pool),
+):
     """Trigger a 2-factor interaction scan in the background."""
     from research.interaction_scan import get_progress, run_2f_scan
     import asyncio
     progress = get_progress()
     if progress['running']:
         return {'status': 'already_running', 'message': progress['message']}
-    asyncio.get_event_loop().create_task(run_2f_scan(oi_pool, pool))
-    return {'status': 'started', 'message': '2F scan started...'}
+    metrics = request.metrics if len(request.metrics) >= 2 else None
+    n_pairs = len(metrics) * (len(metrics) - 1) // 2 if metrics else None
+    asyncio.get_event_loop().create_task(run_2f_scan(oi_pool, pool, selected_metrics=metrics))
+    msg = f'{n_pairs} pair(s) queued...' if n_pairs else '2F scan started...'
+    return {'status': 'started', 'message': msg}
 
 
 @router.get("/2f-scan-status")

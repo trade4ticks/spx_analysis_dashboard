@@ -981,6 +981,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── Interaction Scan ──
     ifClusters: [],
+    ifSelectedMetrics: [],
     ifStatus: { running: false, message: '', last_run: null },
     ifPollTimer: null,
     ifRows: [],          // ranked interaction-matrix rows
@@ -1367,9 +1368,25 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── 2F Interaction Scanner ────────────────────────────────────────
+    ifToggleMetric(m) {
+      const idx = this.ifSelectedMetrics.indexOf(m);
+      if (idx >= 0) this.ifSelectedMetrics.splice(idx, 1);
+      else this.ifSelectedMetrics.push(m);
+    },
+
+    ifPairCount() {
+      const n = this.ifSelectedMetrics.length;
+      return n >= 2 ? n * (n - 1) / 2 : 0;
+    },
+
     async run2fScan() {
+      if (this.ifSelectedMetrics.length < 2) return;
       try {
-        const r = await fetch('/api/oi-analysis/run-2f-scan', { method: 'POST' });
+        const r = await fetch('/api/oi-analysis/run-2f-scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ metrics: this.ifSelectedMetrics }),
+        });
         if (r.ok) {
           const d = await r.json();
           this.ifStatus = { running: true,
