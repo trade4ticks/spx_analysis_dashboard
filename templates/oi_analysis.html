@@ -536,6 +536,14 @@
                     x-text="row.best_sharpe?.toFixed(3)"></td>
                 <td style="padding:4px 8px;text-align:right;color:var(--dim)"
                     x-text="row.n_obs"></td>
+                <td style="padding:4px 8px;text-align:right;color:var(--text)"
+                    x-text="row.mi != null ? row.mi.toFixed(3) : '—'"></td>
+                <td style="padding:4px 8px;text-align:right"
+                    :style="(row.pearson_r||0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    x-text="row.pearson_r != null ? row.pearson_r.toFixed(3) : '—'"></td>
+                <td style="padding:4px 8px;text-align:center"
+                    :style="row.loyo_fragile ? 'color:#e84393;font-weight:700' : 'color:var(--dim)'"
+                    x-text="row.loyo_fragile == null ? '—' : (row.loyo_fragile ? '⚠' : '✓')"></td>
               </tr>
             </template>
           </tbody>
@@ -650,10 +658,10 @@
           <div style="font-size:12px;font-weight:700;color:var(--text)">2-Factor Interaction Scanner</div>
           <button @click="run2fScan()"
                   :disabled="ifStatus.running"
+                  x-text="ifStatus.running ? 'Running...' : 'Run 2F Scan'"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;
                          cursor:pointer;font-weight:600">
-            <span x-text="ifStatus.running ? 'Running...' : 'Run 2F Scan'"></span>
           </button>
           <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
                 x-text="ifStatus.message"></span>

@@ -567,7 +567,7 @@ async def get_score_matrix(
         SELECT ticker, metric, fwd_ret, composite_score, pattern,
                spearman_r, monotonicity, yearly_pct, concentration,
                tail_spread, n_obs, d10_avg, d1_avg, d10_wr, d1_wr,
-               best_sharpe, scanned_at
+               best_sharpe, mi, pearson_r, loyo_fragile, scanned_at
         FROM oi_score_matrix
         WHERE {where_clause}
         ORDER BY {sort_by} {direction} NULLS LAST

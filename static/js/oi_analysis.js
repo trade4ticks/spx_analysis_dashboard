@@ -1004,6 +1004,9 @@ document.addEventListener('alpine:init', () => {
       { key: 'd10_wr', label: 'D10 WR' },
       { key: 'best_sharpe', label: 'Sharpe' },
       { key: 'n_obs', label: 'N' },
+      { key: 'mi', label: 'MI' },
+      { key: 'pearson_r', label: 'Pearson' },
+      { key: 'loyo_fragile', label: 'LOYO' },
     ],
 
     async smInit() {
@@ -1019,6 +1022,11 @@ document.addEventListener('alpine:init', () => {
           await this.loadSmSummary();
           await this.loadClusters();
           await this.loadInteractionMatrix();
+          // Re-render ticker charts after layout settles (x-show may delay dimensions)
+          setTimeout(() => {
+            this._renderSmTickerChart();
+            this._renderSmTickerFwdChart();
+          }, 150);
         }
         if (this.smStatus.running) this._smStartPoll();
         if (this.ifStatus.running) this._ifStartPoll();
@@ -1364,7 +1372,7 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/oi-analysis/run-2f-scan', { method: 'POST' });
         if (r.ok) {
           const d = await r.json();
-          this.ifStatus = { running: d.status !== 'already_running' || true,
+          this.ifStatus = { running: true,
                             message: d.message, last_run: this.ifStatus.last_run };
           this._ifStartPoll();
         }
