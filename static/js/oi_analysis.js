@@ -976,7 +976,8 @@ document.addEventListener('alpine:init', () => {
     smPollTimer: null,
     smSelectedMetric: '',
     smSelectedFwd: '',
-    smSummary: { by_metric: [], by_fwd: [] },
+    smSelectedTicker: '',
+    smSummary: { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] },
     smColumns: [
       { key: 'composite_score', label: 'Score' },
       { key: 'ticker', label: 'Ticker' },
@@ -1076,26 +1077,32 @@ document.addEventListener('alpine:init', () => {
       }, 3000);
     },
 
-    async loadSmSummary(metric, fwdRet) {
+    async loadSmSummary(metric, fwdRet, ticker) {
       // Use current selections if args not provided
       if (metric === undefined) metric = this.smSelectedMetric;
       if (fwdRet === undefined) fwdRet = this.smSelectedFwd;
+      if (ticker === undefined) ticker = this.smSelectedTicker;
       const params = new URLSearchParams();
       if (metric) params.set('metric', metric);
       if (fwdRet) params.set('fwd_ret', fwdRet);
+      if (ticker) params.set('ticker', ticker);
       try {
         const r = await fetch('/api/oi-analysis/score-matrix/summary?' + params);
         if (r.ok) {
           this.smSummary = await r.json();
           this.smSelectedMetric = metric || '';
           this.smSelectedFwd = fwdRet || '';
+          this.smSelectedTicker = ticker || '';
           // Sync table filters to match chart selections
           this.smFilterMetric = this.smSelectedMetric;
           this.smFilterFwd = this.smSelectedFwd;
+          this.smFilterTicker = this.smSelectedTicker;
           this.loadScoreMatrix();
           this.$nextTick(() => {
             this._renderSmMetricChart();
             this._renderSmFwdChart();
+            this._renderSmTickerChart();
+            this._renderSmTickerFwdChart();
           });
         }
       } catch (_) {}
@@ -1104,11 +1111,12 @@ document.addEventListener('alpine:init', () => {
     smClearFilters() {
       this.smSelectedMetric = '';
       this.smSelectedFwd = '';
+      this.smSelectedTicker = '';
       this.smFilterMetric = '';
       this.smFilterFwd = '';
       this.smFilterTicker = '';
       this.smMinScore = 0;
-      this.loadSmSummary('', '');
+      this.loadSmSummary('', '', '');
     },
 
     _smTooltipCallback(data) {
@@ -1208,6 +1216,105 @@ document.addEventListener('alpine:init', () => {
               const clicked = data[elements[0].index].fwd_ret;
               const newFwd = clicked === self.smSelectedFwd ? '' : clicked;
               self.loadSmSummary(self.smSelectedMetric, newFwd);
+            }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { afterLabel: self._smTooltipCallback(data) },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 8 } },
+                 grid: { color: 'rgba(255,255,255,0.03)' }, border: { color: 'transparent' } },
+            y: { ticks: { color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+          },
+        },
+      });
+    },
+
+    _renderSmTickerChart() {
+      const el = document.getElementById('chart-sm-ticker');
+      if (!el) return;
+      if (this._charts['sm-ticker']) this._charts['sm-ticker'].destroy();
+      const data = this.smSummary.by_ticker || [];
+      if (!data.length) return;
+
+      const self = this;
+      this._charts['sm-ticker'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: data.map(d => d.ticker),
+          datasets: [{
+            label: 'Avg Score',
+            data: data.map(d => d.avg_score),
+            backgroundColor: data.map(d =>
+              d.ticker === self.smSelectedTicker ? '#3498db' :
+              d.avg_score >= 40 ? 'rgba(52,152,219,0.5)' :
+              d.avg_score >= 30 ? 'rgba(149,165,166,0.5)' :
+              'rgba(232,67,147,0.3)'),
+            borderWidth: data.map(d => d.ticker === self.smSelectedTicker ? 2 : 0),
+            borderColor: '#3498db',
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (evt, elements) => {
+            if (elements.length > 0) {
+              const clicked = data[elements[0].index].ticker;
+              const newTicker = clicked === self.smSelectedTicker ? '' : clicked;
+              self.loadSmSummary(self.smSelectedMetric, self.smSelectedFwd, newTicker);
+            }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { afterLabel: self._smTooltipCallback(data) },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 8 }, maxRotation: 45, minRotation: 45 },
+                 grid: { color: 'rgba(255,255,255,0.03)' }, border: { color: 'transparent' } },
+            y: { ticks: { color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,0.05)' }, border: { color: 'transparent' } },
+          },
+        },
+      });
+    },
+
+    _renderSmTickerFwdChart() {
+      const el = document.getElementById('chart-sm-ticker-fwd');
+      if (!el) return;
+      if (this._charts['sm-ticker-fwd']) this._charts['sm-ticker-fwd'].destroy();
+      const data = this.smSummary.by_fwd_ticker || [];
+      if (!data.length) return;
+
+      const self = this;
+      this._charts['sm-ticker-fwd'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: data.map(d => d.fwd_ret),
+          datasets: [{
+            label: 'Avg Score',
+            data: data.map(d => d.avg_score),
+            backgroundColor: data.map(d =>
+              d.fwd_ret === self.smSelectedFwd ? '#3498db' :
+              d.avg_score >= 40 ? 'rgba(52,152,219,0.5)' :
+              d.avg_score >= 30 ? 'rgba(149,165,166,0.5)' : 'rgba(232,67,147,0.3)'),
+            borderWidth: data.map(d => d.fwd_ret === self.smSelectedFwd ? 2 : 0),
+            borderColor: '#3498db',
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (evt, elements) => {
+            if (elements.length > 0) {
+              const clicked = data[elements[0].index].fwd_ret;
+              const newFwd = clicked === self.smSelectedFwd ? '' : clicked;
+              self.loadSmSummary(self.smSelectedMetric, newFwd, self.smSelectedTicker);
             }
           },
           plugins: {

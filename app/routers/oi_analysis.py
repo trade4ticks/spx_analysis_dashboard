@@ -622,6 +622,7 @@ async def score_matrix_summary(
     pool=Depends(get_pool),
     metric: Optional[str] = None,
     fwd_ret: Optional[str] = None,
+    ticker: Optional[str] = None,
 ):
     """Aggregated score stats with optional cross-filtering."""
     from research.batch_score import ensure_table
@@ -668,6 +669,42 @@ async def score_matrix_summary(
                 GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
             """)
 
+        # By ticker — filtered by metric and fwd_ret if selected
+        ticker_wheres, ticker_params = [], []
+        if metric:
+            ticker_params.append(metric)
+            ticker_wheres.append(f"metric = ${len(ticker_params)}")
+        if fwd_ret:
+            ticker_params.append(fwd_ret)
+            ticker_wheres.append(f"fwd_ret = ${len(ticker_params)}")
+        ticker_where_sql = ("WHERE " + " AND ".join(ticker_wheres)) if ticker_wheres else ""
+        by_ticker = await conn.fetch(f"""
+            SELECT ticker, AVG(composite_score) as avg_score,
+                   STDDEV(composite_score) as std_score, COUNT(*) as n,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   MAX(composite_score) as max_score
+            FROM oi_score_matrix {ticker_where_sql}
+            GROUP BY ticker ORDER BY AVG(composite_score) DESC
+        """, *ticker_params)
+
+        # By fwd_ret scoped to a ticker — filtered by ticker (and metric if selected)
+        tfwd_wheres, tfwd_params = [], []
+        if ticker:
+            tfwd_params.append(ticker)
+            tfwd_wheres.append(f"ticker = ${len(tfwd_params)}")
+        if metric:
+            tfwd_params.append(metric)
+            tfwd_wheres.append(f"metric = ${len(tfwd_params)}")
+        tfwd_where_sql = ("WHERE " + " AND ".join(tfwd_wheres)) if tfwd_wheres else ""
+        by_fwd_ticker = await conn.fetch(f"""
+            SELECT fwd_ret, AVG(composite_score) as avg_score,
+                   STDDEV(composite_score) as std_score, COUNT(*) as n,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   MAX(composite_score) as max_score
+            FROM oi_score_matrix {tfwd_where_sql}
+            GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
+        """, *tfwd_params)
+
     def _row(r, key):
         return {key: r[key],
                 "avg_score": round(float(r["avg_score"] or 0), 1),
@@ -676,10 +713,13 @@ async def score_matrix_summary(
                 "max_score": round(float(r["max_score"] or 0), 1)}
 
     return {
-        "by_metric": [_row(r, "metric") for r in by_metric],
-        "by_fwd": [_row(r, "fwd_ret") for r in by_fwd],
-        "selected_metric": metric,
+        "by_metric":     [_row(r, "metric")  for r in by_metric],
+        "by_fwd":        [_row(r, "fwd_ret") for r in by_fwd],
+        "by_ticker":     [_row(r, "ticker")  for r in by_ticker],
+        "by_fwd_ticker": [_row(r, "fwd_ret") for r in by_fwd_ticker],
+        "selected_metric":  metric,
         "selected_fwd_ret": fwd_ret,
+        "selected_ticker":  ticker,
     }
 
 
