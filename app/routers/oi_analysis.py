@@ -310,9 +310,10 @@ async def analyze(
 
     # ── Yearly breakdown (all deciles combined) ───────────────────────────
     by_year: dict = defaultdict(list)
-    for x, y, d in pairs:
+    for pair in pairs:
+        y_val, d = pair[1], pair[2]
         yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
-        by_year[yr].append(y)
+        by_year[yr].append(y_val)
 
     yearly = []
     for yr in sorted(by_year):
@@ -332,10 +333,11 @@ async def analyze(
         sorted_trades = sorted(bucket, key=lambda p: p[2])
         if mode == "non_overlapping":
             trades, last_date = [], None
-            for x, y, d in sorted_trades:
+            for p in sorted_trades:
+                d = p[2]
                 dd = d.date() if hasattr(d, 'date') else d
                 if last_date is None or (dd - last_date).days >= horizon:
-                    trades.append((dd, y))
+                    trades.append((dd, p[1]))
                     last_date = dd
         else:
             trades = [(p[2], p[1]) for p in sorted_trades]
@@ -376,8 +378,8 @@ async def analyze(
         for yr in all_years:
             yr_by_ticker: dict = defaultdict(list)
             for tkr, tkr_pairs in by_ticker.items():
-                yr_ps = [(x, y, d) for x, y, d in tkr_pairs
-                         if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
+                yr_ps = [p for p in tkr_pairs
+                         if ((p[2].year if hasattr(p[2], 'year') else int(str(p[2])[:4])) == yr)]
                 if yr_ps:
                     yr_by_ticker[tkr] = yr_ps
             yr_buckets = _bucket_pairs_per_ticker(yr_by_ticker, 10)
