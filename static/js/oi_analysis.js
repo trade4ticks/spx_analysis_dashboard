@@ -1010,6 +1010,32 @@ document.addEventListener('alpine:init', () => {
       { key: 'loyo_fragile', label: 'LOYO' },
     ],
 
+    _initPills() {
+      const container = document.getElementById('if-pills-container');
+      if (!container || !this.smMeta.metrics.length) return;
+      container.innerHTML = '';
+      const self = this;
+      this.smMeta.metrics.forEach(m => {
+        const span = document.createElement('span');
+        span.className = 'if-pill';
+        span.textContent = m;
+        span.addEventListener('click', () => {
+          if (self.ifSelectedMetrics.includes(m)) {
+            self.ifSelectedMetrics = self.ifSelectedMetrics.filter(x => x !== m);
+          } else {
+            self.ifSelectedMetrics = [...self.ifSelectedMetrics, m];
+          }
+        });
+        container.appendChild(span);
+      });
+      // Keep pill highlight classes in sync whenever ifSelectedMetrics changes
+      this.$watch('ifSelectedMetrics', val => {
+        container.querySelectorAll('.if-pill').forEach(el => {
+          el.classList.toggle('on', val.includes(el.textContent));
+        });
+      });
+    },
+
     async smInit() {
       try {
         const [metaRes, statusRes] = await Promise.all([
@@ -1022,6 +1048,7 @@ document.addEventListener('alpine:init', () => {
           await this.loadScoreMatrix();
           await this.loadSmSummary();
           await this.loadInteractionMatrix();
+          this._initPills();
           // Re-render ticker charts after layout settles (x-show may delay dimensions)
           setTimeout(() => {
             this._renderSmTickerChart();
