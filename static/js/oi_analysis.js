@@ -82,6 +82,7 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
+        if (this.heatmapMetric) await this.loadHeatmap();
       } catch (e) {
         this.error = e.message;
       } finally {

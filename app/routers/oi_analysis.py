@@ -644,23 +644,32 @@ async def heatmap_2d(
     metric_y: str = Query(...),
     outcome: str = Query(...),
     bins: int = Query(5, ge=3, le=10),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell."""
     if not pool:
         return {"error": "OI database not configured"}
 
+    date_conditions = ""
+    params: list = []
+    p = 1
+    if ticker != "ALL":
+        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
+    if date_from:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
+
     async with pool.acquire() as conn:
-        if ticker == "ALL":
-            rows = await conn.fetch(
-                f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
-                f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL "
-                f"ORDER BY trade_date")
-        else:
-            rows = await conn.fetch(
-                f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
-                f"WHERE ticker = $1 AND {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL "
-                f"AND {outcome} IS NOT NULL ORDER BY trade_date", ticker)
+        rows = await conn.fetch(
+            f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
+            f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL"
+            f"{date_conditions} ORDER BY trade_date",
+            *params)
 
     valid = []
     for r in rows:
