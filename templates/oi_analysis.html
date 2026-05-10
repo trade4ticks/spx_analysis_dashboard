@@ -228,8 +228,8 @@
                  x-text="data.half_sample_stable ? 'Stable' : 'Unstable'"></div>
           </div>
           <div class="stat-item">
-            <div class="stat-label">Today</div>
-            <div class="stat-value" x-text="data.today_decile ? 'D' + data.today_decile + ' (' + data.today_percentile + '%)' : '—'"></div>
+            <div class="stat-label" x-text="data.all_mode ? 'Tickers' : 'Today'"></div>
+            <div class="stat-value" x-text="data.all_mode ? (data.n_tickers ?? '—') + ' tickers' : (data.today_decile ? 'D' + data.today_decile + ' (' + data.today_percentile + '%)' : '—')"></div>
           </div>
           <div class="stat-item">
             <div class="stat-label">N</div>
