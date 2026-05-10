@@ -32,6 +32,12 @@ document.addEventListener('alpine:init', () => {
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
       }
+      // Keep pill highlight classes in sync with selection
+      this.$watch('ifSelectedMetrics', val => {
+        document.querySelectorAll('.if-pill').forEach(el => {
+          el.classList.toggle('on', val.includes(el.textContent.trim()));
+        });
+      });
       // Load score matrix (independent of analysis)
       this.smInit();
     },
