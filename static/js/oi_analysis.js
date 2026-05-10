@@ -26,7 +26,7 @@ document.addEventListener('alpine:init', () => {
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
-    equityXMode: 'sequential', // 'sequential' | 'calendar'
+    equityXMode: 'calendar',   // 'calendar' | 'sequential'
     decileBins: 10,
     decileBinsData: null,
 
@@ -1135,21 +1135,38 @@ document.addEventListener('alpine:init', () => {
       const horizon = this.data.horizon || 1;
       const horizonCalDays = Math.round(horizon * 1.4);
 
-      // Count entries per date
+      // Build per-date lookup for open-position calculation
       const entriesByDate = {};
-      for (const c of filtered) {
-        entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
-      }
-      const allDates = Object.keys(entriesByDate).sort();
-      const dateMs = allDates.map(d => new Date(d).getTime());
-      const entered = allDates.map(d => entriesByDate[d]);
+      for (const c of filtered) entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
 
-      // Count open positions: entries within the past horizonCalDays calendar days of each date
-      const open = allDates.map((_, i) => {
-        const cutoffMs = dateMs[i] - horizonCalDays * 86400000;
+      // True calendar: generate every month from first to last trade date
+      const sortedDates = Object.keys(entriesByDate).sort();
+      const minMonth = sortedDates[0].slice(0, 7);
+      const maxMonth = sortedDates[sortedDates.length - 1].slice(0, 7);
+      const months = [];
+      { let cur = new Date(minMonth + '-02'); // use 2nd to avoid UTC-offset issues
+        const maxMs = new Date(maxMonth + '-02').getTime();
+        while (cur.getTime() <= maxMs) {
+          months.push(cur.toISOString().slice(0, 7));
+          cur.setMonth(cur.getMonth() + 1);
+        }
+      }
+
+      const entriesByMonth = {};
+      for (const c of filtered) {
+        const m = c.date.slice(0, 7);
+        entriesByMonth[m] = (entriesByMonth[m] || 0) + 1;
+      }
+      const entered = months.map(m => entriesByMonth[m] || 0);
+
+      // Open positions at mid-month: entries in the preceding horizonCalDays window
+      const open = months.map(m => {
+        const refMs = new Date(m + '-15').getTime();
+        const cutoffMs = refMs - horizonCalDays * 86400000;
         let count = 0;
-        for (let j = i; j >= 0 && dateMs[j] >= cutoffMs; j--) {
-          count += entriesByDate[allDates[j]];
+        for (const [d, n] of Object.entries(entriesByDate)) {
+          const dMs = new Date(d).getTime();
+          if (dMs >= cutoffMs && dMs <= refMs) count += n;
         }
         return count;
       });
@@ -1157,7 +1174,7 @@ document.addEventListener('alpine:init', () => {
       this._charts['activity'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: allDates.map(d => d.slice(0, 7)),
+          labels: months,
           datasets: [
             {
               type: 'line',
@@ -1186,7 +1203,7 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               mode: 'index', intersect: false,
               callbacks: {
-                title: ctx => allDates[ctx[0]?.dataIndex] || '',
+                title: ctx => months[ctx[0]?.dataIndex] || '',
                 label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
               },
             },
