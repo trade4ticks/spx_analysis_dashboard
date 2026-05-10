@@ -982,7 +982,6 @@ document.addEventListener('alpine:init', () => {
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();
           await this.loadSmSummary();
-          await this.loadInteractionMatrix();
           // Re-render ticker charts after layout settles (x-show may delay dimensions)
           setTimeout(() => {
             this._renderSmTickerChart();
@@ -1392,7 +1391,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await fetch('/api/oi-analysis/interaction-detail?' + params);
         if (r.ok) {
-          this.ifDetail = await r.json();
+          this.ifDetail = (await r.json()).sort((a, b) => (b.interaction_lift || 0) - (a.interaction_lift || 0));
           this.ifDetailRow = this.ifDetail[0] || null;
           this._pickDetailRow();
         }

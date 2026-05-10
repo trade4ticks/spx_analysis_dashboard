@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=14"></script>
+  <script src="/static/js/oi_analysis.js?v=15"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -892,7 +892,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <template x-for="d in ifDetail.slice().sort((a,b) => (b.interaction_lift||0) - (a.interaction_lift||0))" :key="d.ticker + '|' + d.fwd_ret">
+                  <template x-for="d in ifDetail" :key="d.ticker + '|' + d.fwd_ret">
                     <tr @click="ifDetailTicker = d.ticker; ifDetailFwd = d.fwd_ret; _pickDetailRow()"
                         style="cursor:pointer"
                         :style="d.ticker === ifDetailTicker && d.fwd_ret === ifDetailFwd
