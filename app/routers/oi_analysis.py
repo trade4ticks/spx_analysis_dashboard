@@ -501,7 +501,6 @@ async def analyze(
         "trade_calendar":     trade_calendar,
         "dow_data":           dow_data,
         "spot_series":        spot_series,
-        "trades_activity":    trades_activity,
 
         # Today (null in ALL mode)
         "today_value":      round(float(today_val), 6) if today_val is not None else None,
