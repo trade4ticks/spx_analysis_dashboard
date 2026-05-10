@@ -550,10 +550,13 @@ document.addEventListener('alpine:init', () => {
     heatmapMetric: '',
     heatmapData: null,
     heatmapLoading: false,
+    _hmRange: null,
 
     async loadHeatmap() {
       if (!this.heatmapMetric || !this.data) return;
       this.heatmapLoading = true;
+      this.heatmapData = null;
+      this._hmRange = null;
       try {
         const r = await fetch(
           `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
@@ -561,84 +564,25 @@ document.addEventListener('alpine:init', () => {
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}&bins=5`);
         if (r.ok) {
-          this.heatmapData = await r.json();
-          await this.$nextTick();
-          this._renderHeatmap();
+          const d = await r.json();
+          let max = 0;
+          for (const row of (d.grid || [])) {
+            for (const c of row) {
+              if (c && c.n) max = Math.max(max, Math.abs(c.avg_ret || 0));
+            }
+          }
+          this._hmRange = max || 0.01;
+          this.heatmapData = d;
         }
       } catch (_) {}
       this.heatmapLoading = false;
     },
 
-    _renderHeatmap() {
-      const el = document.getElementById('chart-heatmap');
-      if (!el || !this.heatmapData?.grid) return;
-      if (this._charts['heatmap']) this._charts['heatmap'].destroy();
-
-      const grid = this.heatmapData.grid;
-      const xLabels = this.heatmapData.x_labels;
-      const yLabels = this.heatmapData.y_labels;
-      const bins = grid.length;
-
-      // Build scatter dataset with colored points
-      const points = [];
-      let minRet = Infinity, maxRet = -Infinity;
-      for (let i = 0; i < bins; i++) {
-        for (let j = 0; j < bins; j++) {
-          const cell = grid[i][j];
-          if (!cell) continue;
-          points.push({ x: i, y: j, r: Math.min(Math.max(cell.n / 5, 8), 25),
-                        avg: cell.avg_ret, wr: cell.win_rate, n: cell.n });
-          minRet = Math.min(minRet, cell.avg_ret);
-          maxRet = Math.max(maxRet, cell.avg_ret);
-        }
-      }
-
-      const range = Math.max(Math.abs(minRet), Math.abs(maxRet)) || 0.01;
-      const colors = points.map(p => {
-        const t = p.avg / range;
-        return t >= 0
-          ? `rgba(52,152,219,${Math.min(Math.abs(t)*0.8+0.2, 1)})`
-          : `rgba(232,67,147,${Math.min(Math.abs(t)*0.8+0.2, 1)})`;
-      });
-
-      this._charts['heatmap'] = new Chart(el, {
-        type: 'bubble',
-        data: {
-          datasets: [{
-            data: points,
-            backgroundColor: colors,
-            borderWidth: 0,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const p = points[ctx.dataIndex];
-                  return [
-                    `X: ${xLabels[p.x]}`, `Y: ${yLabels[p.y]}`,
-                    `Avg: ${(p.avg*100).toFixed(3)}%`,
-                    `WR: ${(p.wr*100).toFixed(1)}%`, `n: ${p.n}`,
-                  ];
-                },
-              },
-            },
-          },
-          scales: {
-            x: { ...this._darkScales().x, type:'linear', min:-0.5, max:bins-0.5,
-                 ticks: { ...this._darkScales().x.ticks, autoSkip: false, stepSize: 1,
-                          callback: v => Number.isInteger(v) && v >= 0 && v < bins ? xLabels[v] : '' },
-                 title: { display:true, text:this.heatmapData.metric_x, color:'#888', font:{size:10} } },
-            y: { ...this._darkScales().y, type:'linear', min:-0.5, max:bins-0.5,
-                 ticks: { ...this._darkScales().y.ticks, autoSkip: false, stepSize: 1,
-                          callback: v => Number.isInteger(v) && v >= 0 && v < bins ? yLabels[v] : '' },
-                 title: { display:true, text:this.heatmapData.metric_y, color:'#888', font:{size:10} } },
-          },
-        },
-      });
+    hmCellBg(cell) {
+      if (!cell || !cell.n) return 'rgba(40,40,40,0.5)';
+      const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (this._hmRange || 0.01)));
+      if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
+      return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
     },
 
     // ── AI Summary ──────────────────────────────────────────────────────

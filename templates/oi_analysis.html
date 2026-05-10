@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=13"></script>
+  <script src="/static/js/oi_analysis.js?v=14"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -342,11 +342,11 @@
             <div class="chart-canvas"><canvas id="chart-calendar"></canvas></div>
           </div>
 
-          <!-- 2D Heatmap -->
+          <!-- 2D Heatmap (table grid) -->
           <div class="chart-box" style="grid-column:span 2">
             <div class="chart-title">
               2-Metric Heatmap
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins</span>
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins · rows=Y, cols=X</span>
               <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
                 <label style="font-size:9px;color:var(--dim)">Y metric:</label>
                 <select x-model="heatmapMetric"
@@ -365,7 +365,50 @@
                 <span x-show="heatmapLoading" style="font-size:9px;color:var(--dim)">Loading…</span>
               </div>
             </div>
-            <div class="chart-canvas" style="height:300px"><canvas id="chart-heatmap"></canvas></div>
+            <!-- Table grid -->
+            <template x-if="heatmapData && heatmapData.grid">
+              <div style="overflow-x:auto;padding:8px 0">
+                <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
+                  cols = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_x"></span>
+                  &nbsp;·&nbsp; rows = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_y"></span>
+                </div>
+                <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
+                  <thead>
+                    <tr>
+                      <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:10px">Y↓ / X→</th>
+                      <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
+                        <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
+                      </template>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
+                      <tr>
+                        <th x-text="heatmapData.y_labels[iy]"
+                            style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
+                        <template x-for="(cell, ix) in row" :key="'hmcell-'+ix">
+                          <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
+                              :title="cell && cell.n ? 'n=' + cell.n + '  avg=' + ((cell.avg_ret||0)*100).toFixed(3) + '%  wr=' + ((cell.win_rate||0)*100).toFixed(1) + '%' : 'n=0'">
+                            <template x-if="cell && cell.n > 0">
+                              <div>
+                                <span style="font-size:12px;font-weight:700;display:block;color:#fff"
+                                      x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
+                                <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+                              </div>
+                            </template>
+                          </td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <div x-show="!heatmapData || !heatmapData.grid"
+                 style="height:180px;display:flex;align-items:center;justify-content:center;
+                        color:var(--dim);font-size:12px">
+              Select a Y metric and click Load
+            </div>
           </div>
         </div>
 
@@ -826,6 +869,58 @@
           </div>
           <div x-show="!ifDetailRow?.quadrants?.length"
                style="color:var(--dim);font-size:11px;padding:16px">No quadrant data for this selection.</div>
+
+          <!-- Per-ticker breakdown -->
+          <div x-show="ifDetail.length > 0" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+            <div style="font-size:9px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">
+              Per-Ticker Breakdown
+              <span style="font-weight:400;color:var(--dim)">— click row to update quadrant view</span>
+            </div>
+            <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:4px">
+              <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
+                <thead>
+                  <tr style="border-bottom:1px solid var(--border)">
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">TICKER</th>
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">FWD</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">LIFT</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">SCORE</th>
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">BEST QUAD</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">SHARPE</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">AVG RET</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">WIN%</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">N</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="d in ifDetail.slice().sort((a,b) => (b.interaction_lift||0) - (a.interaction_lift||0))" :key="d.ticker + '|' + d.fwd_ret">
+                    <tr @click="ifDetailTicker = d.ticker; ifDetailFwd = d.fwd_ret; _pickDetailRow()"
+                        style="cursor:pointer"
+                        :style="d.ticker === ifDetailTicker && d.fwd_ret === ifDetailFwd
+                                ? 'background:rgba(52,152,219,.1)' : ''"
+                        @mouseover="$event.currentTarget.style.background='rgba(255,255,255,.03)'"
+                        @mouseout="$event.currentTarget.style.background=(d.ticker===ifDetailTicker&&d.fwd_ret===ifDetailFwd?'rgba(52,152,219,.1)':'')">
+                      <td style="padding:3px 8px;color:var(--text);font-weight:600" x-text="d.ticker"></td>
+                      <td style="padding:3px 8px;color:var(--dim)" x-text="d.fwd_ret"></td>
+                      <td style="padding:3px 8px;text-align:right"
+                          :style="'color:' + ((d.interaction_lift||0) >= 0 ? '#3498db' : '#e84393')"
+                          x-text="(d.interaction_lift||0).toFixed(3)"></td>
+                      <td style="padding:3px 8px;text-align:right;color:var(--muted)"
+                          x-text="(d.composite_interaction_score||0).toFixed(1)"></td>
+                      <td style="padding:3px 8px;color:var(--dim);font-size:10px" x-text="d.best_quadrant || '—'"></td>
+                      <td style="padding:3px 8px;text-align:right;color:var(--muted)"
+                          x-text="d.best_quad_sharpe != null ? d.best_quad_sharpe.toFixed(3) : '—'"></td>
+                      <td style="padding:3px 8px;text-align:right"
+                          :style="(d.best_quad_avg_ret||0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                          x-text="d.best_quad_avg_ret != null ? ((d.best_quad_avg_ret*100).toFixed(3) + '%') : '—'"></td>
+                      <td style="padding:3px 8px;text-align:right;color:var(--muted)"
+                          x-text="d.best_quad_win_rate != null ? ((d.best_quad_win_rate*100).toFixed(1) + '%') : '—'"></td>
+                      <td style="padding:3px 8px;text-align:right;color:var(--dim)" x-text="d.n || '—'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
