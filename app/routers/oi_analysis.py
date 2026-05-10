@@ -163,7 +163,7 @@ async def analyze(
                 continue
             if math.isnan(xf) or math.isnan(yf):
                 continue
-            by_ticker[r['ticker']].append((xf, yf, r['trade_date']))
+            by_ticker[r['ticker']].append((xf, yf, r['trade_date'], r['ticker']))
 
         buckets = _bucket_pairs_per_ticker(by_ticker, 10)
         buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
@@ -469,18 +469,28 @@ async def analyze(
                     rolling_corr.append({"date": str(window[-1][2]), "spearman": round(float(rc), 4)})
 
     # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
+    spot_by_date = {s["date"]: s["value"] for s in spot_series} if spot_series else {}
+
     trade_calendar = []
     dow_data = []
-    for idx, (x, y, d) in enumerate(pairs):
+    for idx, pair in enumerate(pairs):
+        x, y, d = pair[0], pair[1], pair[2]
+        tkr = pair[3] if len(pair) > 3 else ticker
         yr  = d.year     if hasattr(d, 'year')    else int(str(d)[:4])
         mo  = d.month    if hasattr(d, 'month')   else int(str(d)[5:7])
         dow = d.weekday() if hasattr(d, 'weekday') else 0
         date_str = str(d.date() if hasattr(d, 'date') else d)
         dec  = pairs_decile[idx]
         dec20 = (pairs_decile20[idx] or None) if pairs_decile20 else None
-        entry = {"year": yr, "month": mo, "date": date_str, "ret": round(y, 6), "decile": dec}
+        entry = {
+            "ticker": tkr, "metric_val": round(x, 6),
+            "year": yr, "month": mo, "date": date_str,
+            "ret": round(y, 6), "decile": dec,
+        }
         if dec20 is not None:
             entry["decile20"] = dec20
+        if spot_by_date and date_str in spot_by_date:
+            entry["spot_entry"] = spot_by_date[date_str]
         trade_calendar.append(entry)
         dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
         if dec20 is not None:

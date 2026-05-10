@@ -60,9 +60,8 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !this.metric || !this.outcome) return;
       this.loading = true;
       this.error = null;
-      this.decileBins = 10;
-      this.decileBinsData = null;
-      this.selectedBins20 = new Set([1, 2, 19, 20]);
+      // Preserve decileBins and selectedBins20 across re-analyze.
+      // decileBinsData is recomputed below once new data arrives.
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
@@ -77,6 +76,8 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
         if (this.data.error) { this.error = this.data.error; return; }
+        // Recompute bar chart data for current mode with fresh decile_stats_20.
+        this.decileBinsData = this.decileBins !== 10 ? this._computeDecileNBins(this.decileBins) : null;
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
@@ -145,6 +146,7 @@ document.addEventListener('alpine:init', () => {
       this._renderTradeCalendar();
       this._renderDOW();
       this._renderActivity();
+      this._renderTradeTable();
     },
 
 
@@ -265,13 +267,19 @@ document.addEventListener('alpine:init', () => {
 
     setDecileBins(n) {
       if (!this.data) return;
+      // Translate selectedBins20 to new granularity before changing decileBins.
+      // Map each currently-selected 20-bin index to its display bucket in the new mode,
+      // then expand back to full 20-bin groups — so "top bucket" stays "top bucket".
+      const newG = 20 / n;
+      const mappedDisplayBuckets = new Set();
+      for (const b of this.selectedBins20) mappedDisplayBuckets.add(Math.ceil(b / newG));
+      const newBins20 = new Set();
+      for (const db of mappedDisplayBuckets) {
+        const lo = (db - 1) * newG + 1;
+        for (let b = lo; b < lo + newG; b++) newBins20.add(b);
+      }
+      this.selectedBins20 = newBins20;
       this.decileBins = n;
-      // Reset selection to the two extremes at the new granularity
-      const g = 20 / n;
-      const lo = Array.from({length: g}, (_, i) => i + 1);
-      const hi = Array.from({length: g}, (_, i) => 21 - g + i);
-      this.selectedBins20 = new Set([...lo, ...hi]);
-      // Bar chart data always derived from decile_stats_20
       this.decileBinsData = n === 10 ? null : this._computeDecileNBins(n);
       this._renderDecileBar();
       this._renderEquity();
@@ -329,10 +337,21 @@ document.addEventListener('alpine:init', () => {
         if (has20) {
           const lo = (db - 1) * g + 1, hi = db * g;
           const binCal = cal.filter(c => c.decile20 >= lo && c.decile20 <= hi);
+          const concCurve = this._getEquityCurveFromCal(binCal, 'concurrent');
           eqData[db] = {
-            concurrent:      this._getEquityCurveFromCal(binCal, 'concurrent'),
+            concurrent:      concCurve,
             non_overlapping: this._getEquityCurveFromCal(binCal, 'non_overlapping'),
           };
+          // Sanity check: cumulative return must equal sum of individual returns.
+          // If this fails it means the data source for the bar chart and equity diverged.
+          const ds20Group = (this.data.decile_stats_20 || []).slice(lo - 1, hi).filter(Boolean);
+          if (ds20Group.length) {
+            const expectedCum = ds20Group.reduce((a, d) => a + d.avg_ret * d.n, 0);
+            const actualCum = concCurve.cum_return;
+            if (Math.abs(expectedCum - actualCum) > 0.01) {
+              console.warn(`[equity sanity] B${lo}-B${hi}: expected Σ=${expectedCum.toFixed(4)}, got ${actualCum.toFixed(4)} — data source mismatch!`);
+            }
+          }
         } else {
           // Fallback: server-side equity_by_decile (10-bin only)
           const ebd = this.data.equity_by_decile || {};
@@ -1170,7 +1189,98 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Update _renderCharts to include new charts ──────────────────────
+    // ── Trade data table ──────────────────────────────────────────────────
+    _renderTradeTable() {
+      const el = document.getElementById('trade-table-body');
+      const cntEl = document.getElementById('trade-table-count');
+      if (!el || !this.data?.trade_calendar) return;
+
+      const cal = this.data.trade_calendar || [];
+      const has20 = !!(cal[0]?.decile20);
+      const filtered = has20 && this.selectedBins20.size > 0
+        ? cal.filter(c => this.selectedBins20.has(c.decile20))
+        : cal;
+
+      // Build spot index for exit-date lookup (single-ticker only)
+      const spotSeries = this.data.spot_series || [];
+      const spotDates = spotSeries.map(s => s.date);
+      const spotByDate = {};
+      spotSeries.forEach(s => spotByDate[s.date] = s.value);
+      const spotDateIdx = {};
+      spotDates.forEach((d, i) => spotDateIdx[d] = i);
+      const horizon = this.data.horizon || 1;
+
+      const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date));
+      const LIMIT = 250;
+      const rows = sorted.slice(0, LIMIT);
+
+      if (cntEl) {
+        cntEl.textContent = filtered.length > LIMIT
+          ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades (newest first) — export CSV for all`
+          : `${filtered.length.toLocaleString()} trades`;
+      }
+
+      el.innerHTML = rows.map(c => {
+        const eIdx = spotDateIdx[c.date];
+        const exitIdx = eIdx !== undefined ? eIdx + horizon : undefined;
+        const exitDate = exitIdx !== undefined && exitIdx < spotDates.length ? spotDates[exitIdx] : '';
+        const exitSpot = exitDate ? spotByDate[exitDate] : null;
+        const entrySpot = c.spot_entry ?? null;
+        const retPct = (c.ret * 100).toFixed(3);
+        const sign = c.ret >= 0 ? '+' : '';
+        const color = c.ret >= 0 ? '#3498db' : '#e84393';
+        return `<tr>
+          <td>${c.date}</td>
+          <td>${c.ticker || ''}</td>
+          <td class="num">${c.metric_val != null ? c.metric_val.toFixed(4) : ''}</td>
+          <td class="num">${entrySpot != null ? entrySpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
+          <td class="num">${exitSpot != null ? exitSpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
+          <td class="num" style="color:${color}">${sign}${retPct}%</td>
+          <td>${exitDate}</td>
+          <td class="num" style="color:#888">${c.decile20 || c.decile || ''}</td>
+        </tr>`;
+      }).join('');
+    },
+
+    exportTradeCSV() {
+      if (!this.data?.trade_calendar) return;
+      const cal = this.data.trade_calendar || [];
+      const has20 = !!(cal[0]?.decile20);
+      const filtered = has20 && this.selectedBins20.size > 0
+        ? cal.filter(c => this.selectedBins20.has(c.decile20))
+        : cal;
+
+      const spotSeries = this.data.spot_series || [];
+      const spotDates = spotSeries.map(s => s.date);
+      const spotByDate = {};
+      spotSeries.forEach(s => spotByDate[s.date] = s.value);
+      const spotDateIdx = {};
+      spotDates.forEach((d, i) => spotDateIdx[d] = i);
+      const horizon = this.data.horizon || 1;
+      const metric = this.metric || 'metric';
+
+      const header = `trade_date,ticker,${metric},entry_spot,exit_spot,ret_pct,exit_date,bin20`;
+      const rows = filtered.slice().sort((a, b) => a.date.localeCompare(b.date)).map(c => {
+        const eIdx = spotDateIdx[c.date];
+        const exitIdx = eIdx !== undefined ? eIdx + horizon : undefined;
+        const exitDate = exitIdx !== undefined && exitIdx < spotDates.length ? spotDates[exitIdx] : '';
+        const exitSpot = exitDate ? (spotByDate[exitDate] ?? '') : '';
+        return [
+          c.date, c.ticker || '', c.metric_val ?? '', c.spot_entry ?? '',
+          exitSpot, (c.ret * 100).toFixed(6), exitDate, c.decile20 || c.decile || '',
+        ].join(',');
+      });
+
+      const csv = [header, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `trades_${this.ticker}_${this.metric}_${new Date().toISOString().slice(0,10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+
     _renderAllCharts() {
       this._renderDecileBar();
       this._renderEquity();
@@ -1183,6 +1293,7 @@ document.addEventListener('alpine:init', () => {
       this._renderDOW();
       this._renderWinRate();
       this._renderActivity();
+      this._renderTradeTable();
     },
 
     // Fullscreen — re-render the chart into the fullscreen canvas
