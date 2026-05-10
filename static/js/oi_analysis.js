@@ -25,6 +25,8 @@ document.addEventListener('alpine:init', () => {
     dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
     selectedDeciles: new Set([1, 10]),
     equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
+    decileBins: 10,
+    decileBinsData: null,
 
     // Data
     data: null,
@@ -57,6 +59,11 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !this.metric || !this.outcome) return;
       this.loading = true;
       this.error = null;
+      this.decileBins = 10;
+      this.decileBinsData = null;
+      this.heatmapData = null;
+      this.hmXData = null;
+      this.hmYData = null;
       this._destroyCharts();
       try {
         let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
@@ -129,33 +136,47 @@ document.addEventListener('alpine:init', () => {
       if (!el) return;
       if (this._charts['decile']) this._charts['decile'].destroy();
 
-      const stats = (this.data.decile_stats || []).filter(d => d);
+      const bins = this.decileBins;
+      const stats = (this.decileBinsData || this.data.decile_stats || []).filter(d => d);
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
+
+      const _isSelected = (d) => {
+        if (bins === 10) return self.selectedDeciles.has(d.bucket);
+        if (bins === 5)  return self.selectedDeciles.has(d.bucket*2-1) || self.selectedDeciles.has(d.bucket*2);
+        return false;
+      };
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: stats.map(d => 'D' + d.bucket),
+          labels: stats.map(d => (bins === 10 ? 'D' : 'B') + d.bucket),
           datasets: [{
             data: avgs,
-            backgroundColor: stats.map(d =>
-              self.selectedDeciles.has(d.bucket)
-                ? (d.avg_ret >= 0 ? '#3498db' : '#e84393')
-                : 'rgba(100,100,100,0.3)'),
-            borderColor: stats.map(d =>
-              self.selectedDeciles.has(d.bucket) ? '#fff' : 'transparent'),
-            borderWidth: stats.map(d => self.selectedDeciles.has(d.bucket) ? 1 : 0),
+            backgroundColor: stats.map(d => _isSelected(d)
+              ? (d.avg_ret >= 0 ? '#3498db' : '#e84393') : 'rgba(100,100,100,0.3)'),
+            borderColor:     stats.map(d => _isSelected(d) ? '#fff' : 'transparent'),
+            borderWidth:     stats.map(d => _isSelected(d) ? 1 : 0),
           }],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          onClick: (e, elements) => {
-            if (elements.length) {
-              const idx = elements[0].index;
-              self.toggleDecile(stats[idx].bucket);
-              self._renderDecileBar(); // re-render colors
+          onClick: bins === 20 ? undefined : (e, elements) => {
+            if (!elements.length) return;
+            const d = stats[elements[0].index];
+            if (bins === 10) {
+              self.toggleDecile(d.bucket);
+            } else if (bins === 5) {
+              const lo = d.bucket * 2 - 1, hi = d.bucket * 2;
+              if (self.selectedDeciles.has(lo) && self.selectedDeciles.has(hi)) {
+                self.selectedDeciles.delete(lo); self.selectedDeciles.delete(hi);
+              } else {
+                self.selectedDeciles.add(lo); self.selectedDeciles.add(hi);
+              }
+              self.selectedDeciles = new Set(self.selectedDeciles);
+              self._onDecileChange();
             }
+            self._renderDecileBar();
           },
           plugins: {
             legend: { display: false },
@@ -168,10 +189,10 @@ document.addEventListener('alpine:init', () => {
                   return [
                     `Avg: ${(d.avg_ret*100).toFixed(3)}%`,
                     `WR: ${(d.win_rate*100).toFixed(1)}%`,
-                    `Sharpe: ${d.sharpe.toFixed(3)}`,
+                    `Sharpe: ${d.sharpe?.toFixed(3) ?? '—'}`,
                     `n: ${d.n}`,
-                    `Range: ${d.min_val.toFixed(4)} – ${d.max_val.toFixed(4)}`,
-                  ];
+                    d.min_val != null ? `Range: ${d.min_val.toFixed(4)} – ${d.max_val.toFixed(4)}` : '',
+                  ].filter(Boolean);
                 },
               },
             },
@@ -179,6 +200,48 @@ document.addEventListener('alpine:init', () => {
           scales: this._darkScales(),
         },
       });
+    },
+
+    _computeDecile5Bins() {
+      const ds = (this.data?.decile_stats || []).filter(Boolean);
+      const bins = [];
+      for (let i = 0; i < 5; i++) {
+        const d1 = ds.find(d => d.bucket === i*2+1) || {};
+        const d2 = ds.find(d => d.bucket === i*2+2) || {};
+        const n1 = d1.n || 0, n2 = d2.n || 0, n = n1 + n2;
+        if (!n) continue;
+        bins.push({
+          bucket:   i + 1,
+          n,
+          avg_ret:  ((d1.avg_ret||0)*n1 + (d2.avg_ret||0)*n2) / n,
+          win_rate: ((d1.win_rate||0)*n1 + (d2.win_rate||0)*n2) / n,
+          sharpe:   ((d1.sharpe||0) + (d2.sharpe||0)) / 2,
+          std_dev:  ((d1.std_dev||0) + (d2.std_dev||0)) / 2,
+          min_val:  d1.min_val, max_val: d2.max_val ?? d1.max_val,
+        });
+      }
+      return bins;
+    },
+
+    async setDecileBins(n) {
+      if (!this.data) return;
+      this.decileBins = n;
+      if (n === 5) {
+        this.decileBinsData = this._computeDecile5Bins();
+      } else if (n === 10) {
+        this.decileBinsData = null;
+      } else {
+        try {
+          const r = await fetch(
+            `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
+            + `&metric=${encodeURIComponent(this.metric)}`
+            + `&outcome=${encodeURIComponent(this.outcome)}&bins=20`
+            + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
+            + (this.dateTo ? `&date_to=${this.dateTo}` : ''));
+          if (r.ok) { const d = await r.json(); this.decileBinsData = d.buckets || null; }
+        } catch (_) {}
+      }
+      this._renderDecileBar();
     },
 
     _renderEquity() {
@@ -550,19 +613,25 @@ document.addEventListener('alpine:init', () => {
     heatmapMetric: '',
     heatmapData: null,
     heatmapLoading: false,
+    heatmapBins: 5,
+    hmBins1d: 10,
+    hmXData: null,
+    hmYData: null,
     _hmRange: null,
 
     async loadHeatmap() {
       if (!this.heatmapMetric || !this.data) return;
       this.heatmapLoading = true;
       this.heatmapData = null;
+      this.hmXData = null;
+      this.hmYData = null;
       this._hmRange = null;
       try {
         const r = await fetch(
           `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric_x=${encodeURIComponent(this.metric)}`
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}&bins=5`);
+          + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`);
         if (r.ok) {
           const d = await r.json();
           let max = 0;
@@ -574,8 +643,85 @@ document.addEventListener('alpine:init', () => {
           this._hmRange = max || 0.01;
           this.heatmapData = d;
         }
+        await this.loadHmBins1d();
       } catch (_) {}
       this.heatmapLoading = false;
+    },
+
+    setHeatmapBins(n) {
+      this.heatmapBins = n;
+      this.loadHeatmap();
+    },
+
+    async setHmBins1d(n) {
+      this.hmBins1d = n;
+      await this.loadHmBins1d();
+    },
+
+    async loadHmBins1d() {
+      if (!this.data || !this.heatmapMetric) return;
+      const base = `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
+        + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.hmBins1d}`
+        + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
+        + (this.dateTo ? `&date_to=${this.dateTo}` : '');
+      try {
+        const [rx, ry] = await Promise.all([
+          fetch(base + `&metric=${encodeURIComponent(this.metric)}`),
+          fetch(base + `&metric=${encodeURIComponent(this.heatmapMetric)}`),
+        ]);
+        if (rx.ok) { const d = await rx.json(); this.hmXData = d.buckets || null; }
+        if (ry.ok) { const d = await ry.json(); this.hmYData = d.buckets || null; }
+      } catch (_) {}
+      await this.$nextTick();
+      this._renderHmBar1d('chart-hm-x', this.hmXData, this.metric);
+      this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
+    },
+
+    _renderHmBar1d(canvasId, buckets, title) {
+      const el = document.getElementById(canvasId);
+      if (!el || !buckets?.length) return;
+      if (this._charts[canvasId]) this._charts[canvasId].destroy();
+      const stats = buckets.filter(Boolean);
+      const avgs = stats.map(d => d.avg_ret * 100);
+      const maxAbs = Math.max(...avgs.map(Math.abs), 0.001);
+      this._charts[canvasId] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: stats.map(d => 'B' + d.bucket),
+          datasets: [{
+            data: avgs,
+            backgroundColor: avgs.map(v => {
+              const t = Math.min(Math.abs(v) / maxAbs, 1);
+              return v >= 0
+                ? `rgba(52,152,219,${(0.2 + t * 0.7).toFixed(2)})`
+                : `rgba(232,67,147,${(0.2 + t * 0.7).toFixed(2)})`;
+            }),
+            borderWidth: 0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            title: { display: true, text: title, color: '#666', font: { size: 9 }, padding: { top: 0, bottom: 3 } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const d = stats[ctx.dataIndex];
+                  return [
+                    `Avg: ${(d.avg_ret*100).toFixed(3)}%`,
+                    `WR: ${(d.win_rate*100).toFixed(1)}%`,
+                    `Sharpe: ${d.sharpe?.toFixed(3) ?? '—'}`,
+                    `n: ${d.n}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: this._darkScales(),
+        },
+      });
     },
 
     hmCellBg(cell) {

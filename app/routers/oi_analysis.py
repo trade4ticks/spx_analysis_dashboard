@@ -457,6 +457,61 @@ async def heatmap_2d(
     }
 
 
+@router.get("/metric-bins")
+async def metric_bins_1d(
+    ticker: str = Query(...),
+    metric: str = Query(...),
+    outcome: str = Query(...),
+    bins: int = Query(10, ge=2, le=20),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze)."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    bins = max(2, min(20, bins))
+    date_conditions = ""
+    params: list = []
+    p = 1
+    if ticker != "ALL":
+        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
+    if date_from:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT {metric}, {outcome} FROM daily_features "
+            f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
+            f"ORDER BY trade_date", *params)
+    row_dicts = [dict(r) for r in rows]
+    pairs = _clean_pairs(row_dicts, metric, outcome)
+    if len(pairs) < 20:
+        return {"error": f"Insufficient data: {len(pairs)} rows"}
+    buckets_data = _bucket_pairs(pairs, bins)
+    result = []
+    for i, bucket in enumerate(buckets_data):
+        if not bucket:
+            result.append(None)
+            continue
+        ys = np.array([p[1] for p in bucket])
+        xs = [p[0] for p in bucket]
+        result.append({
+            "bucket":   i + 1,
+            "n":        len(bucket),
+            "avg_ret":  round(float(ys.mean()), 6),
+            "win_rate": round(float((ys > 0).mean()), 4),
+            "std_dev":  round(float(ys.std()), 6),
+            "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
+            "min_val":  round(float(min(xs)), 6),
+            "max_val":  round(float(max(xs)), 6),
+        })
+    return {"metric": metric, "outcome": outcome, "bins": bins, "n": len(pairs), "buckets": result}
+
+
 @router.get("/ai-summary")
 async def ai_summary(
     ticker: str = Query(...),

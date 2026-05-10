@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=15"></script>
+  <script src="/static/js/oi_analysis.js?v=16"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -245,6 +245,11 @@
             <div class="chart-title">
               Decile Avg Return
               <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bars to select</span>
+              <div class="mode-seg" style="margin-left:8px">
+                <span :class="{on: decileBins===5}"  @click="setDecileBins(5)">5</span>
+                <span :class="{on: decileBins===10}" @click="setDecileBins(10)">10</span>
+                <span :class="{on: decileBins===20}" @click="setDecileBins(20)">20</span>
+              </div>
               <button class="fs-btn" @click="openFullscreen('chart-decile')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
@@ -346,7 +351,12 @@
           <div class="chart-box" style="grid-column:span 2">
             <div class="chart-title">
               2-Metric Heatmap
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins · rows=Y, cols=X</span>
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins</span>
+              <div class="mode-seg" style="margin-left:8px">
+                <span :class="{on: heatmapBins===3}"  @click="setHeatmapBins(3)">3×3</span>
+                <span :class="{on: heatmapBins===5}"  @click="setHeatmapBins(5)">5×5</span>
+                <span :class="{on: heatmapBins===10}" @click="setHeatmapBins(10)">10×10</span>
+              </div>
               <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
                 <label style="font-size:9px;color:var(--dim)">Y metric:</label>
                 <select x-model="heatmapMetric"
@@ -365,43 +375,63 @@
                 <span x-show="heatmapLoading" style="font-size:9px;color:var(--dim)">Loading…</span>
               </div>
             </div>
-            <!-- Table grid -->
+            <!-- Content: 2D grid + 1D bar charts -->
             <template x-if="heatmapData && heatmapData.grid">
-              <div style="overflow-x:auto;padding:8px 0">
-                <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
-                  cols = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_x"></span>
-                  &nbsp;·&nbsp; rows = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_y"></span>
-                </div>
-                <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
-                  <thead>
-                    <tr>
-                      <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:10px">Y↓ / X→</th>
-                      <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
-                        <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
-                      </template>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
+              <div style="display:flex;gap:16px;align-items:flex-start;padding:8px 0">
+                <!-- Left: 2D heatmap table -->
+                <div style="flex:0 0 auto;overflow-x:auto">
+                  <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
+                    cols = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_x"></span>
+                    &nbsp;·&nbsp; rows = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_y"></span>
+                  </div>
+                  <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
+                    <thead>
                       <tr>
-                        <th x-text="heatmapData.y_labels[iy]"
-                            style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
-                        <template x-for="(cell, ix) in row" :key="'hmcell-'+ix">
-                          <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
-                              :title="cell && cell.n ? 'n=' + cell.n + '  avg=' + ((cell.avg_ret||0)*100).toFixed(3) + '%  wr=' + ((cell.win_rate||0)*100).toFixed(1) + '%' : 'n=0'">
-                            <template x-if="cell && cell.n > 0">
-                              <div>
-                                <span style="font-size:12px;font-weight:700;display:block;color:#fff"
-                                      x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                                <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
-                              </div>
-                            </template>
-                          </td>
+                        <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:10px">Y↓ / X→</th>
+                        <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
+                          <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
                         </template>
                       </tr>
-                    </template>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
+                        <tr>
+                          <th x-text="heatmapData.y_labels[iy]"
+                              style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
+                          <template x-for="(cell, ix) in row" :key="'hmcell-'+ix">
+                            <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
+                                :title="cell && cell.n ? 'n=' + cell.n + '  avg=' + ((cell.avg_ret||0)*100).toFixed(3) + '%  wr=' + ((cell.win_rate||0)*100).toFixed(1) + '%' : 'n=0'">
+                              <template x-if="cell && cell.n > 0">
+                                <div>
+                                  <span style="font-size:12px;font-weight:700;display:block;color:#fff"
+                                        x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
+                                  <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+                                </div>
+                              </template>
+                            </td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+                <!-- Right: 1D metric bar charts -->
+                <div style="flex:1;min-width:180px;display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <span style="font-size:9px;color:var(--dim)">Bins:</span>
+                    <div class="mode-seg">
+                      <span :class="{on: hmBins1d===5}"  @click="setHmBins1d(5)">5</span>
+                      <span :class="{on: hmBins1d===10}" @click="setHmBins1d(10)">10</span>
+                      <span :class="{on: hmBins1d===20}" @click="setHmBins1d(20)">20</span>
+                    </div>
+                  </div>
+                  <div style="height:160px;position:relative">
+                    <canvas id="chart-hm-x"></canvas>
+                  </div>
+                  <div style="height:160px;position:relative">
+                    <canvas id="chart-hm-y"></canvas>
+                  </div>
+                </div>
               </div>
             </template>
             <div x-show="!heatmapData || !heatmapData.grid"
