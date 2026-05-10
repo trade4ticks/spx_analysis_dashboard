@@ -1,6 +1,23 @@
 'use strict';
 
 document.addEventListener('alpine:init', () => {
+  Alpine.store('metricPicker', {
+    selected: [],
+    toggle(m) {
+      if (!m) return;
+      if (this.selected.includes(m)) {
+        this.selected = this.selected.filter(x => x !== m);
+      } else {
+        this.selected = [...this.selected, m];
+      }
+    },
+    clear() { this.selected = []; },
+    get pairCount() {
+      const n = this.selected.length;
+      return n >= 2 ? n * (n - 1) / 2 : 0;
+    },
+  });
+
   Alpine.data('oiAnalysis', () => ({
     // Selectors
     tickers: [], features: [], outcomes: [],
@@ -32,12 +49,6 @@ document.addEventListener('alpine:init', () => {
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
       }
-      // Keep pill highlight classes in sync with selection
-      this.$watch('ifSelectedMetrics', val => {
-        document.querySelectorAll('.if-pill').forEach(el => {
-          el.classList.toggle('on', val.includes(el.textContent.trim()));
-        });
-      });
       // Load score matrix (independent of analysis)
       this.smInit();
     },
@@ -987,8 +998,6 @@ document.addEventListener('alpine:init', () => {
 
     // ── Interaction Scan ──
     ifClusters: [],
-    ifMetricsList: [],
-    ifSelectedMetrics: [],
     ifStatus: { running: false, message: '', last_run: null },
     ifPollTimer: null,
     ifRows: [],          // ranked interaction-matrix rows
@@ -1378,27 +1387,14 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── 2F Interaction Scanner ────────────────────────────────────────
-    ifToggleMetric(m) {
-      if (!m) return;
-      if (this.ifSelectedMetrics.includes(m)) {
-        this.ifSelectedMetrics = this.ifSelectedMetrics.filter(x => x !== m);
-      } else {
-        this.ifSelectedMetrics = [...this.ifSelectedMetrics, m];
-      }
-    },
-
-    ifPairCount() {
-      const n = this.ifSelectedMetrics.length;
-      return n >= 2 ? n * (n - 1) / 2 : 0;
-    },
-
     async run2fScan() {
-      if (this.ifSelectedMetrics.length < 2) return;
+      const metrics = this.$store.metricPicker.selected;
+      if (metrics.length < 2) return;
       try {
         const r = await fetch('/api/oi-analysis/run-2f-scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ metrics: this.ifSelectedMetrics }),
+          body: JSON.stringify({ metrics }),
         });
         if (r.ok) {
           const d = await r.json();
