@@ -508,7 +508,7 @@ async def analyze(
         elif spot_by_date and date_str in spot_by_date:
             entry["spot_entry"] = spot_by_date[date_str]  # fallback to close if no open col
         if all_spot_date_idx and date_str in all_spot_date_idx:
-            ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
+            ei = all_spot_date_idx[date_str] + horizon
             if ei < len(all_spot_dates):
                 entry["exit_date"] = all_spot_dates[ei]
         trade_calendar.append(entry)
