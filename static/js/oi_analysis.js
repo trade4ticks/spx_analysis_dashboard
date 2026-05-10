@@ -1133,31 +1133,28 @@ document.addEventListener('alpine:init', () => {
       if (!filtered.length) return;
 
       const horizon = this.data.horizon || 1;
-      const horizonCalDays = Math.round(horizon * 1.4);
 
       // Count entries per trade-entry date
       const entriesByDate = {};
       for (const c of filtered) entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
 
-      // True calendar x-axis: use spot_series (all trading days, single-ticker)
-      // or union of all entry dates (ALL mode) as the trading-day sequence
+      // True calendar x-axis: spot_series = all trading days (single-ticker);
+      // ALL mode: union of entry dates (covers most trading days across tickers)
       const spotSeries = this.data.spot_series || [];
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
         : [...new Set(cal.map(c => c.date))].sort();
 
-      // Pre-compute entries array for O(n) open-position scan
-      const entryMs = Object.entries(entriesByDate)
-        .map(([d, n]) => ({ ms: new Date(d).getTime(), n }));
-
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
-      const open = tradingDays.map(d => {
-        const dMs = new Date(d).getTime();
-        const cutoffMs = dMs - horizonCalDays * 86400000;
+
+      // Open positions on day i = entries in the N-trading-day window ending at i.
+      // A trade entered on day T is open for exactly N trading days (T..T+N-1),
+      // so on day D (index i) count entries from index max(0, i-N+1) to i.
+      // Maximum open count can never exceed N.
+      const open = tradingDays.map((_, i) => {
+        const startIdx = Math.max(0, i - horizon + 1);
         let count = 0;
-        for (const e of entryMs) {
-          if (e.ms >= cutoffMs && e.ms <= dMs) count += e.n;
-        }
+        for (let j = startIdx; j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
         return count;
       });
 
