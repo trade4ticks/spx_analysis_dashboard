@@ -648,12 +648,12 @@
             <span x-show="ifPairCount() > 0" style="color:#3498db;font-weight:700"
                   x-text="' ' + ifSelectedMetrics.length + ' selected → ' + ifPairCount() + ' pair(s)'"></span>
           </div>
-          <div id="if-pills-container" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
             <template x-for="m in smMeta.metrics" :key="m">
-              <span class="if-pill"
-                    :class="{ on: ifSelectedMetrics.includes(m) }"
-                    :data-metric="m"
-                    x-text="m"></span>
+              <label class="if-pill" :class="{ on: ifSelectedMetrics.includes(m) }">
+                <input type="checkbox" :value="m" x-model="ifSelectedMetrics" style="display:none">
+                <span x-text="m"></span>
+              </label>
             </template>
           </div>
           <div style="display:flex;align-items:center;gap:10px">

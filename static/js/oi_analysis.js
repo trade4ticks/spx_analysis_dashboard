@@ -1011,15 +1011,6 @@ document.addEventListener('alpine:init', () => {
     ],
 
     async smInit() {
-      // Wire pill clicks with vanilla JS — Alpine @click inside x-show(false) is unreliable
-      const pillsEl = document.getElementById('if-pills-container');
-      if (pillsEl) {
-        pillsEl.addEventListener('click', (e) => {
-          const m = e.target.getAttribute('data-metric');
-          if (m) this.ifToggleMetric(m);
-        });
-      }
-
       try {
         const [metaRes, statusRes] = await Promise.all([
           fetch('/api/oi-analysis/score-matrix/meta'),
