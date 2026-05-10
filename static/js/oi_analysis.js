@@ -144,13 +144,14 @@ document.addEventListener('alpine:init', () => {
       const _isSelected = (d) => {
         if (bins === 10) return self.selectedDeciles.has(d.bucket);
         if (bins === 5)  return self.selectedDeciles.has(d.bucket*2-1) || self.selectedDeciles.has(d.bucket*2);
+        if (bins === 20) return self.selectedDeciles.has(Math.ceil(d.bucket/2));
         return false;
       };
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: stats.map(d => (bins === 10 ? 'D' : 'B') + d.bucket),
+          labels: stats.map(d => 'B' + d.bucket),
           datasets: [{
             data: avgs,
             backgroundColor: stats.map(d => _isSelected(d)
@@ -161,7 +162,7 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          onClick: bins === 20 ? undefined : (e, elements) => {
+          onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
             if (bins === 10) {
@@ -175,6 +176,9 @@ document.addEventListener('alpine:init', () => {
               }
               self.selectedDeciles = new Set(self.selectedDeciles);
               self._onDecileChange();
+            } else if (bins === 20) {
+              const dec = Math.ceil(d.bucket / 2);
+              self.toggleDecile(dec);
             }
             self._renderDecileBar();
           },

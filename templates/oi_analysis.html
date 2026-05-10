@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=16"></script>
+  <script src="/static/js/oi_analysis.js?v=17"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -243,7 +243,7 @@
           <!-- Decile bar (clickable) -->
           <div class="chart-box">
             <div class="chart-title">
-              Decile Avg Return
+              Quantile Avg Return
               <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bars to select</span>
               <div class="mode-seg" style="margin-left:8px">
                 <span :class="{on: decileBins===5}"  @click="setDecileBins(5)">5</span>
