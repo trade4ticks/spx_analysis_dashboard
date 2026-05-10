@@ -147,12 +147,14 @@ async def analyze(
         # Per-ticker normalization: fetch all tickers, decile each independently
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT ticker, trade_date, {metric}, {outcome} FROM daily_features "
+                f"SELECT ticker, trade_date, {metric}, {outcome}, spot_co, spot_pc "
+                f"FROM daily_features "
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
                 f"ORDER BY ticker, trade_date", *params)
         row_dicts = [dict(r) for r in rows]
 
         by_ticker: dict = defaultdict(list)
+        all_open_by_tkr_date: dict = {}
         for r in row_dicts:
             xv, yv = r.get(metric), r.get(outcome)
             if xv is None or yv is None:
@@ -164,6 +166,11 @@ async def analyze(
             if math.isnan(xf) or math.isnan(yf):
                 continue
             by_ticker[r['ticker']].append((xf, yf, r['trade_date'], r['ticker']))
+            if r.get('spot_co') is not None:
+                try:
+                    all_open_by_tkr_date[(r['ticker'], str(r['trade_date']))] = round(float(r['spot_co']), 2)
+                except (ValueError, TypeError):
+                    pass
 
         buckets = _bucket_pairs_per_ticker(by_ticker, 10)
         buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
@@ -189,6 +196,35 @@ async def analyze(
         all_spot_dates = []
         open_by_date = {}
         close_by_date = {}
+
+        # Fetch complete per-ticker date lists for accurate exit_date/exit_close
+        tickers_in_data = list(by_ticker.keys())
+        async with pool.acquire() as conn:
+            all_spot_rows = await conn.fetch(
+                "SELECT ticker, trade_date, spot_pc FROM daily_features "
+                "WHERE ticker = ANY($1) AND spot_co IS NOT NULL "
+                "ORDER BY ticker, trade_date", tickers_in_data)
+        _all_dates_by_tkr: dict = defaultdict(list)
+        _pc_by_tkr_date: dict = {}
+        for r in all_spot_rows:
+            tkr = r['ticker']; d = str(r['trade_date'])
+            _all_dates_by_tkr[tkr].append(d)
+            if r['spot_pc'] is not None:
+                try:
+                    _pc_by_tkr_date[(tkr, d)] = round(float(r['spot_pc']), 2)
+                except (ValueError, TypeError):
+                    pass
+        all_dates_list_by_tkr: dict = dict(_all_dates_by_tkr)  # tkr → [sorted dates]
+        all_date_idx_by_tkr: dict = {tkr: {d: i for i, d in enumerate(dates)}
+                                      for tkr, dates in _all_dates_by_tkr.items()}
+        all_close_by_tkr: dict = {}
+        for tkr, dates in _all_dates_by_tkr.items():
+            closes = {}
+            for i in range(len(dates) - 1):
+                npc = _pc_by_tkr_date.get((tkr, dates[i + 1]))
+                if npc is not None:
+                    closes[dates[i]] = npc
+            all_close_by_tkr[tkr] = closes
 
     else:
         # Single-ticker mode
@@ -222,6 +258,10 @@ async def analyze(
         decile_stats_20 = _compute_bucket_stats(buckets_20)
         by_ticker = None  # not needed in single-ticker mode
         n_tickers_used = 1
+        all_open_by_tkr_date = {}
+        all_date_idx_by_tkr = {}
+        all_dates_list_by_tkr = {}
+        all_close_by_tkr = {}
 
         # spot_co = current open; used for entry_spot and chart overlay
         spot_series = []
@@ -515,17 +555,32 @@ async def analyze(
         if dec20 is not None:
             entry["decile20"] = dec20
         # entry = open of trade_date; exit = close of trade_date + (N-1) trading days
-        if open_by_date and date_str in open_by_date:
-            entry["spot_entry"] = open_by_date[date_str]
-        elif spot_by_date and date_str in spot_by_date:
-            entry["spot_entry"] = spot_by_date[date_str]
-        if all_spot_date_idx and date_str in all_spot_date_idx:
-            ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
-            if ei < len(all_spot_dates):
-                exit_date_str = all_spot_dates[ei]
-                entry["exit_date"] = exit_date_str
-                if exit_date_str in close_by_date:
-                    entry["spot_exit"] = close_by_date[exit_date_str]
+        if is_all:
+            eo = all_open_by_tkr_date.get((tkr, date_str))
+            if eo is not None:
+                entry["spot_entry"] = eo
+            tkr_idx = all_date_idx_by_tkr.get(tkr, {})
+            tkr_dates = all_dates_list_by_tkr.get(tkr, [])
+            if date_str in tkr_idx:
+                ei = tkr_idx[date_str] + max(horizon - 1, 0)
+                if ei < len(tkr_dates):
+                    ed = tkr_dates[ei]
+                    entry["exit_date"] = ed
+                    ec = all_close_by_tkr.get(tkr, {}).get(ed)
+                    if ec is not None:
+                        entry["spot_exit"] = ec
+        else:
+            if open_by_date and date_str in open_by_date:
+                entry["spot_entry"] = open_by_date[date_str]
+            elif spot_by_date and date_str in spot_by_date:
+                entry["spot_entry"] = spot_by_date[date_str]
+            if all_spot_date_idx and date_str in all_spot_date_idx:
+                ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
+                if ei < len(all_spot_dates):
+                    exit_date_str = all_spot_dates[ei]
+                    entry["exit_date"] = exit_date_str
+                    if exit_date_str in close_by_date:
+                        entry["spot_exit"] = close_by_date[exit_date_str]
         trade_calendar.append(entry)
         dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
         if dec20 is not None:

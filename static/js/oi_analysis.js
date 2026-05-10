@@ -25,7 +25,8 @@ document.addEventListener('alpine:init', () => {
     dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
-    equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
+    equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
+    equityXMode: 'sequential', // 'sequential' | 'calendar'
     decileBins: 10,
     decileBinsData: null,
 
@@ -150,7 +151,8 @@ document.addEventListener('alpine:init', () => {
     },
 
 
-    setEquityMode(m) { this.equityMode = m; this._renderEquity(); this._renderDrawdown(); this._renderRollingCorr(); },
+    setEquityMode(m)  { this.equityMode = m;  this._renderEquity(); this._renderDrawdown(); this._renderRollingCorr(); },
+    setEquityXMode(m) { this.equityXMode = m; this._renderEquity(); },
 
     _destroyCharts() {
       Object.values(this._charts).forEach(c => c.destroy());
@@ -359,15 +361,28 @@ document.addEventListener('alpine:init', () => {
         }
       }
 
-      // Build timeline from spot or longest equity curve
-      const timeline = spotSeries.length > 0 ? spotSeries.map(s => s.date) : [];
-      if (!timeline.length) {
-        let longest = [];
+      // Build timeline
+      let timeline;
+      if (this.equityXMode === 'calendar') {
+        // Union of all trade dates across selected curves — one x position per unique date
+        const allDates = new Set();
         for (const db of selectedDisplayBuckets) {
           const pts = eqData[db]?.[this.equityMode]?.points || [];
-          if (pts.length > longest.length) longest = pts;
+          for (const p of pts) allDates.add(p.date);
         }
-        timeline.push(...longest.map(p => p.date));
+        if (spotSeries.length > 0) spotSeries.forEach(s => allDates.add(s.date));
+        timeline = Array.from(allDates).sort();
+      } else {
+        // Sequential: spot_series (all trading days) or longest equity curve
+        timeline = spotSeries.length > 0 ? spotSeries.map(s => s.date) : [];
+        if (!timeline.length) {
+          let longest = [];
+          for (const db of selectedDisplayBuckets) {
+            const pts = eqData[db]?.[this.equityMode]?.points || [];
+            if (pts.length > longest.length) longest = pts;
+          }
+          timeline.push(...longest.map(p => p.date));
+        }
       }
       const dateIndex = {};
       timeline.forEach((d, i) => dateIndex[d] = i);

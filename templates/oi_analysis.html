@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=23"></script>
+  <script src="/static/js/oi_analysis.js?v=24"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -263,6 +263,10 @@
               <div class="mode-seg" style="margin-left:auto">
                 <span :class="{on: equityMode==='concurrent'}" @click="setEquityMode('concurrent')">Concurrent</span>
                 <span :class="{on: equityMode==='non_overlapping'}" @click="setEquityMode('non_overlapping')">Non-Overlap</span>
+              </div>
+              <div class="mode-seg" style="margin-left:6px">
+                <span :class="{on: equityXMode==='sequential'}" @click="setEquityXMode('sequential')">Sequential</span>
+                <span :class="{on: equityXMode==='calendar'}" @click="setEquityXMode('calendar')">Calendar</span>
               </div>
             </div>
             <div class="decile-btns">
