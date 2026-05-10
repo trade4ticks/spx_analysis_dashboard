@@ -188,6 +188,7 @@ async def analyze(
         spot_series = []
         all_spot_dates = []
         open_by_date = {}
+        close_by_date = {}
 
     else:
         # Single-ticker mode
@@ -236,13 +237,24 @@ async def analyze(
                     spot_series.append({"date": date_s, "value": fv})
                 except (ValueError, TypeError):
                     pass
-        # Complete date list for exit_date offset (unfiltered by metric/outcome nulls)
+        # Complete date list + spot_pc for exit close lookup (unfiltered by metric/outcome nulls)
+        # close of day T = spot_pc of day T+1 in the trading day sequence
         async with pool.acquire() as conn:
             all_dates_rows = await conn.fetch(
-                f"SELECT trade_date FROM daily_features "
+                f"SELECT trade_date, spot_pc FROM daily_features "
                 f"WHERE ticker = $1 AND {spot_col} IS NOT NULL "
                 f"ORDER BY trade_date", ticker)
         all_spot_dates = [str(r["trade_date"]) for r in all_dates_rows]
+        # close_by_date[d] = spot_pc of the next trading day = close price of day d
+        _pc_map = {str(r["trade_date"]): r["spot_pc"] for r in all_dates_rows}
+        close_by_date: dict = {}
+        for i in range(len(all_spot_dates) - 1):
+            next_pc = _pc_map.get(all_spot_dates[i + 1])
+            if next_pc is not None:
+                try:
+                    close_by_date[all_spot_dates[i]] = round(float(next_pc), 2)
+                except (ValueError, TypeError):
+                    pass
 
     n = len(pairs)
     if n < 30:
@@ -502,15 +514,18 @@ async def analyze(
         }
         if dec20 is not None:
             entry["decile20"] = dec20
-        # entry_spot = open of trade_date; exit_date = trade_date + (N-1) trading days
+        # entry = open of trade_date; exit = close of trade_date + (N-1) trading days
         if open_by_date and date_str in open_by_date:
             entry["spot_entry"] = open_by_date[date_str]
         elif spot_by_date and date_str in spot_by_date:
-            entry["spot_entry"] = spot_by_date[date_str]  # fallback to close if no open col
+            entry["spot_entry"] = spot_by_date[date_str]
         if all_spot_date_idx and date_str in all_spot_date_idx:
-            ei = all_spot_date_idx[date_str] + horizon
+            ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
             if ei < len(all_spot_dates):
-                entry["exit_date"] = all_spot_dates[ei]
+                exit_date_str = all_spot_dates[ei]
+                entry["exit_date"] = exit_date_str
+                if exit_date_str in close_by_date:
+                    entry["spot_exit"] = close_by_date[exit_date_str]
         trade_calendar.append(entry)
         dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
         if dec20 is not None:

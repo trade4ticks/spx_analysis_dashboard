@@ -1213,8 +1213,7 @@ document.addEventListener('alpine:init', () => {
 
       el.innerHTML = rows.map(c => {
         const entrySpot = c.spot_entry ?? null;
-        // exit_spot derived from stored return — exact by definition, no date-index gaps
-        const exitSpot = (entrySpot != null && c.ret != null) ? entrySpot * (1 + c.ret) : null;
+        const exitSpot = c.spot_exit ?? null;
         const exitDate = c.exit_date || '';
         const retPct = (c.ret * 100).toFixed(3);
         const sign = c.ret >= 0 ? '+' : '';
@@ -1245,8 +1244,7 @@ document.addEventListener('alpine:init', () => {
       const header = `trade_date,ticker,${metric},entry_spot,exit_spot,ret_pct,exit_date,bin20`;
       const rows = filtered.slice().sort((a, b) => a.date.localeCompare(b.date)).map(c => {
         const entrySpot = c.spot_entry ?? '';
-        const exitSpot = (c.spot_entry != null && c.ret != null)
-          ? (c.spot_entry * (1 + c.ret)).toFixed(2) : '';
+        const exitSpot = c.spot_exit != null ? c.spot_exit.toFixed(2) : '';
         return [
           c.date, c.ticker || '', c.metric_val ?? '', entrySpot,
           exitSpot, (c.ret * 100).toFixed(6), c.exit_date || '', c.decile20 || c.decile || '',
