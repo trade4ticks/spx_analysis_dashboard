@@ -1135,38 +1135,28 @@ document.addEventListener('alpine:init', () => {
       const horizon = this.data.horizon || 1;
       const horizonCalDays = Math.round(horizon * 1.4);
 
-      // Build per-date lookup for open-position calculation
+      // Count entries per trade-entry date
       const entriesByDate = {};
       for (const c of filtered) entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
 
-      // True calendar: generate every month from first to last trade date
-      const sortedDates = Object.keys(entriesByDate).sort();
-      const minMonth = sortedDates[0].slice(0, 7);
-      const maxMonth = sortedDates[sortedDates.length - 1].slice(0, 7);
-      const months = [];
-      { let cur = new Date(minMonth + '-02'); // use 2nd to avoid UTC-offset issues
-        const maxMs = new Date(maxMonth + '-02').getTime();
-        while (cur.getTime() <= maxMs) {
-          months.push(cur.toISOString().slice(0, 7));
-          cur.setMonth(cur.getMonth() + 1);
-        }
-      }
+      // True calendar x-axis: use spot_series (all trading days, single-ticker)
+      // or union of all entry dates (ALL mode) as the trading-day sequence
+      const spotSeries = this.data.spot_series || [];
+      const tradingDays = spotSeries.length > 0
+        ? spotSeries.map(s => s.date)
+        : [...new Set(cal.map(c => c.date))].sort();
 
-      const entriesByMonth = {};
-      for (const c of filtered) {
-        const m = c.date.slice(0, 7);
-        entriesByMonth[m] = (entriesByMonth[m] || 0) + 1;
-      }
-      const entered = months.map(m => entriesByMonth[m] || 0);
+      // Pre-compute entries array for O(n) open-position scan
+      const entryMs = Object.entries(entriesByDate)
+        .map(([d, n]) => ({ ms: new Date(d).getTime(), n }));
 
-      // Open positions at mid-month: entries in the preceding horizonCalDays window
-      const open = months.map(m => {
-        const refMs = new Date(m + '-15').getTime();
-        const cutoffMs = refMs - horizonCalDays * 86400000;
+      const entered = tradingDays.map(d => entriesByDate[d] || 0);
+      const open = tradingDays.map(d => {
+        const dMs = new Date(d).getTime();
+        const cutoffMs = dMs - horizonCalDays * 86400000;
         let count = 0;
-        for (const [d, n] of Object.entries(entriesByDate)) {
-          const dMs = new Date(d).getTime();
-          if (dMs >= cutoffMs && dMs <= refMs) count += n;
+        for (const e of entryMs) {
+          if (e.ms >= cutoffMs && e.ms <= dMs) count += e.n;
         }
         return count;
       });
@@ -1174,7 +1164,7 @@ document.addEventListener('alpine:init', () => {
       this._charts['activity'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: months,
+          labels: tradingDays.map(d => d.slice(0, 7)),
           datasets: [
             {
               type: 'line',
@@ -1203,7 +1193,7 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               mode: 'index', intersect: false,
               callbacks: {
-                title: ctx => months[ctx[0]?.dataIndex] || '',
+                title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
                 label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
               },
             },
