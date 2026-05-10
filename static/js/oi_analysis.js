@@ -154,10 +154,12 @@ document.addEventListener('alpine:init', () => {
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
 
+      const _has20 = !!(self.data?.trade_calendar?.[0]?.decile20);
       const _isSelected = (d) => {
         if (bins === 10) return self.selectedDeciles.has(d.bucket);
         if (bins === 5)  return self.selectedDeciles.has(d.bucket*2-1) || self.selectedDeciles.has(d.bucket*2);
-        if (bins === 20) return self.selectedBins20.has(d.bucket);
+        if (bins === 20) return _has20 ? self.selectedBins20.has(d.bucket)
+                                       : self.selectedDeciles.has(Math.ceil(d.bucket/2));
         return false;
       };
 
@@ -190,12 +192,19 @@ document.addEventListener('alpine:init', () => {
               self.selectedDeciles = new Set(self.selectedDeciles);
               self._onDecileChange();
             } else if (bins === 20) {
-              if (self.selectedBins20.has(d.bucket)) {
-                if (self.selectedBins20.size > 1) self.selectedBins20.delete(d.bucket);
+              if (_has20) {
+                // Single-ticker: true independent 20-bin selection
+                if (self.selectedBins20.has(d.bucket)) {
+                  if (self.selectedBins20.size > 1) self.selectedBins20.delete(d.bucket);
+                } else {
+                  self.selectedBins20.add(d.bucket);
+                }
+                self.selectedBins20 = new Set(self.selectedBins20);
               } else {
-                self.selectedBins20.add(d.bucket);
+                // ALL mode: map to parent decile
+                self.toggleDecile(Math.ceil(d.bucket / 2));
+                return; // toggleDecile calls _onDecileChange + _renderDecileBar
               }
-              self.selectedBins20 = new Set(self.selectedBins20);
               self._onDecileChange();
             }
             self._renderDecileBar();

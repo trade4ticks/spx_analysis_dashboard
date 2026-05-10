@@ -160,7 +160,7 @@ async def analyze(
     else:
         # Single-ticker mode
         single_ticker_cond = f" AND ticker = ${p}"
-        params_single = [ticker] + params
+        params_single = params + [ticker]
         async with pool.acquire() as conn:
             col_check = await conn.fetch(
                 "SELECT column_name FROM information_schema.columns "
@@ -456,22 +456,28 @@ async def analyze(
 
     # ── Trade activity (entries + open trades per day, single-ticker only) ──
     trades_activity = []
-    if not is_all and spot_series:
+    if not is_all and pairs:
         import datetime as _dt
         from collections import Counter as _Counter
         date_to_entered: dict = _Counter()
         for p in pairs:
-            d_obj = p[2].date() if hasattr(p[2], 'date') else _dt.date.fromisoformat(str(p[2]))
+            d_obj = p[2].date() if hasattr(p[2], 'date') else p[2]
             date_to_entered[str(d_obj)] += 1
-        for s in spot_series:
-            entered = date_to_entered.get(s['date'], 0)
-            d_obj = _dt.date.fromisoformat(s['date'])
-            open_ct = sum(
-                date_to_entered.get(str(d_obj - _dt.timedelta(days=k)), 0)
-                for k in range(horizon)
-            )
-            if entered > 0 or open_ct > 0:
-                trades_activity.append({"date": s['date'], "entered": entered, "open": open_ct})
+        if date_to_entered:
+            min_d = _dt.date.fromisoformat(min(date_to_entered))
+            max_d = _dt.date.fromisoformat(max(date_to_entered))
+            cur = min_d
+            while cur <= max_d:
+                if cur.weekday() < 5:  # business days only
+                    ds = str(cur)
+                    entered = date_to_entered.get(ds, 0)
+                    open_ct = sum(
+                        date_to_entered.get(str(cur - _dt.timedelta(days=k)), 0)
+                        for k in range(horizon)
+                    )
+                    if entered > 0 or open_ct > 0:
+                        trades_activity.append({"date": ds, "entered": entered, "open": open_ct})
+                cur += _dt.timedelta(days=1)
 
     # ── Today's value (single-ticker only) ───────────────────────────────
     today_val = today_pct = today_decile = None
