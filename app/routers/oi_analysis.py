@@ -44,6 +44,22 @@ def _bucket_pairs(pairs, n=10):
     return buckets
 
 
+def _bucket_pairs_per_ticker(by_ticker, n=10):
+    """
+    Per-ticker decile normalization: each ticker's trades are independently
+    ranked 1..n, then pooled. Returns n buckets (same structure as _bucket_pairs).
+    Tickers with fewer than n observations are excluded.
+    """
+    buckets = [[] for _ in range(n)]
+    for tkr_pairs in by_ticker.values():
+        if len(tkr_pairs) < n:
+            continue
+        tkr_buckets = _bucket_pairs(tkr_pairs, n)
+        for i, bucket in enumerate(tkr_buckets):
+            buckets[i].extend(bucket)
+    return buckets
+
+
 def _parse_horizon(col_name: str) -> int:
     import re
     m = re.search(r'(\d+)d', col_name)
@@ -89,12 +105,12 @@ async def analyze(
     if not pool:
         return {"error": "OI database not configured"}
 
-    # Fetch data with optional date range
+    is_all = (ticker == "ALL")
+
+    # Build date filter params (shared by both modes)
     date_conditions = ""
-    params = []
+    params: list = []
     p = 1
-    if ticker != "ALL":
-        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
     if date_from:
         from datetime import date as _date
         date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(date_from)); p += 1
@@ -102,45 +118,95 @@ async def analyze(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    # Check for spot price column (prefer spot_co, fallback to spot_close)
-    async with pool.acquire() as conn:
-        col_check = await conn.fetch(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'daily_features' AND column_name IN ('spot_co', 'spot_close')")
-    spot_cols_found = {r["column_name"] for r in col_check}
-    spot_col = "spot_co" if "spot_co" in spot_cols_found else ("spot_close" if "spot_close" in spot_cols_found else None)
-    has_spot = spot_col is not None
-    spot_select = f", {spot_col}" if has_spot else ""
+    horizon = _parse_horizon(outcome)
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT trade_date, {metric}, {outcome}{spot_select} FROM daily_features "
-            f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
-            f"ORDER BY trade_date", *params)
+    # ── Data fetch & bucketing ────────────────────────────────────────────
+    if is_all:
+        # Per-ticker normalization: fetch all tickers, decile each independently
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT ticker, trade_date, {metric}, {outcome} FROM daily_features "
+                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
+                f"ORDER BY ticker, trade_date", *params)
+        row_dicts = [dict(r) for r in rows]
 
-    row_dicts = [dict(r) for r in rows]
-    pairs = _clean_pairs(row_dicts, metric, outcome)
+        by_ticker: dict = defaultdict(list)
+        for r in row_dicts:
+            xv, yv = r.get(metric), r.get(outcome)
+            if xv is None or yv is None:
+                continue
+            try:
+                xf, yf = float(xv), float(yv)
+            except (ValueError, TypeError):
+                continue
+            if math.isnan(xf) or math.isnan(yf):
+                continue
+            by_ticker[r['ticker']].append((xf, yf, r['trade_date']))
+
+        buckets = _bucket_pairs_per_ticker(by_ticker, 10)
+
+        # pairs + parallel decile list from pre-assigned buckets
+        pairs_with_d = sorted(
+            [(p, i + 1) for i, bucket in enumerate(buckets) for p in bucket],
+            key=lambda x: x[0][2]  # chronological
+        )
+        pairs = [pd[0] for pd in pairs_with_d]
+        pairs_decile = [pd[1] for pd in pairs_with_d]
+
+        n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
+        spot_series = []
+
+    else:
+        # Single-ticker mode
+        single_ticker_cond = f" AND ticker = ${p}"
+        params_single = [ticker] + params
+        async with pool.acquire() as conn:
+            col_check = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'daily_features' AND column_name IN ('spot_co', 'spot_close')")
+        spot_cols_found = {r["column_name"] for r in col_check}
+        spot_col = "spot_co" if "spot_co" in spot_cols_found else (
+            "spot_close" if "spot_close" in spot_cols_found else None)
+        spot_select = f", {spot_col}" if spot_col else ""
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT trade_date, {metric}, {outcome}{spot_select} FROM daily_features "
+                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {single_ticker_cond}"
+                f"{date_conditions} ORDER BY trade_date", *params_single)
+        row_dicts = [dict(r) for r in rows]
+        pairs = _clean_pairs(row_dicts, metric, outcome)
+
+        buckets = _bucket_pairs(pairs, 10)
+
+        # Build decile assignments from flat rank order
+        sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
+        dm: dict = {}
+        for rank, idx in enumerate(sorted_by_x):
+            dm[idx] = min(int(rank / len(pairs) * 10) + 1, 10)
+        pairs_decile = [dm[i] for i in range(len(pairs))]
+
+        by_ticker = None  # not needed in single-ticker mode
+        n_tickers_used = 1
+
+        spot_series = []
+        if spot_col:
+            for r in row_dicts:
+                sv = r.get(spot_col)
+                if sv is not None:
+                    try:
+                        spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
+                    except (ValueError, TypeError):
+                        pass
+
     n = len(pairs)
     if n < 30:
         return {"error": f"Insufficient data: {n} valid rows", "n": n}
 
     xa = np.array([p[0] for p in pairs])
     ya = np.array([p[1] for p in pairs])
-    horizon = _parse_horizon(outcome)
 
-    # Spot price time series (for equity overlay)
-    spot_series = []
-    if has_spot:
-        for r in row_dicts:
-            sv = r.get(spot_col)
-            if sv is not None:
-                try:
-                    spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
-                except (ValueError, TypeError):
-                    pass
-
-    # ── Decile stats ─────────────────────────────────────────────────────
-    buckets = _bucket_pairs(pairs, 10)
+    # ── Decile stats (same structure for both modes) ──────────────────────
     decile_stats = []
     for i, bucket in enumerate(buckets):
         if not bucket:
@@ -158,14 +224,30 @@ async def analyze(
             "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
             "min_val":  round(float(min(xs)), 6),
             "max_val":  round(float(max(xs)), 6),
-            "returns":  [round(float(y), 6) for y in ys],  # raw returns for boxplot
+            "returns":  [round(float(y), 6) for y in ys],
         })
 
     # ── Correlations ─────────────────────────────────────────────────────
-    pr, pp = sp_stats.pearsonr(xa, ya)
-    sr, sp_val = sp_stats.spearmanr(xa, ya)
+    if is_all and by_ticker:
+        # Average per-ticker Spearman/Pearson (cross-ticker pooling is misleading)
+        ticker_corrs = []
+        for tkr_pairs in by_ticker.values():
+            if len(tkr_pairs) < 20:
+                continue
+            tx = np.array([p[0] for p in tkr_pairs])
+            ty = np.array([p[1] for p in tkr_pairs])
+            if tx.std() > 0 and ty.std() > 0:
+                pr_t, _ = sp_stats.pearsonr(tx, ty)
+                sr_t, _ = sp_stats.spearmanr(tx, ty)
+                ticker_corrs.append((float(pr_t), float(sr_t)))
+        pr = float(np.mean([c[0] for c in ticker_corrs])) if ticker_corrs else 0.0
+        sr = float(np.mean([c[1] for c in ticker_corrs])) if ticker_corrs else 0.0
+        pp, sp_val = 0.5, 0.5
+    else:
+        pr, pp = sp_stats.pearsonr(xa, ya)
+        sr, sp_val = sp_stats.spearmanr(xa, ya)
 
-    # ── Monotonicity ─────────────────────────────────────────────────────
+    # ── Monotonicity & pattern ────────────────────────────────────────────
     avgs = [d["avg_ret"] for d in decile_stats if d is not None]
     if len(avgs) >= 2:
         transitions = sum(1 for i in range(len(avgs)-1) if avgs[i+1] > avgs[i])
@@ -174,7 +256,6 @@ async def analyze(
     else:
         monotonicity = 0
 
-    # ── Pattern classification ───────────────────────────────────────────
     overall_range = max(avgs) - min(avgs) if avgs else 0
     if overall_range < 1e-8:
         pattern = "flat"
@@ -190,29 +271,28 @@ async def analyze(
         else:
             pattern = "no_clear_pattern"
 
-    # ── Yearly breakdown ─────────────────────────────────────────────────
-    by_year = defaultdict(list)
+    # ── Yearly breakdown (all deciles combined) ───────────────────────────
+    by_year: dict = defaultdict(list)
     for x, y, d in pairs:
         yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
         by_year[yr].append(y)
 
     yearly = []
     for yr in sorted(by_year):
-        ys = np.array(by_year[yr])
+        ys_yr = np.array(by_year[yr])
         yearly.append({
             "year":     yr,
-            "n":        len(ys),
-            "avg_ret":  round(float(ys.mean()), 6),
-            "win_rate": round(float((ys > 0).mean()), 4),
+            "n":        len(ys_yr),
+            "avg_ret":  round(float(ys_yr.mean()), 6),
+            "win_rate": round(float((ys_yr > 0).mean()), 4),
         })
 
-    # ── Equity curve (both modes) ────────────────────────────────────────
+    # ── Equity curve ─────────────────────────────────────────────────────
     def _equity_for_decile(decile_idx, mode="concurrent"):
         bucket = buckets[decile_idx] if 0 <= decile_idx < len(buckets) else []
         if not bucket:
             return {"points": [], "n_trades": 0}
         sorted_trades = sorted(bucket, key=lambda p: p[2])
-
         if mode == "non_overlapping":
             trades, last_date = [], None
             for x, y, d in sorted_trades:
@@ -222,9 +302,7 @@ async def analyze(
                     last_date = dd
         else:
             trades = [(p[2], p[1]) for p in sorted_trades]
-
-        cum = 0.0
-        peak = 0.0
+        cum = peak = 0.0
         max_dd = 0.0
         points = []
         wins = 0
@@ -235,7 +313,6 @@ async def analyze(
             if ret > 0:
                 wins += 1
             points.append({"date": str(date), "value": round(cum, 6)})
-
         nn = len(trades)
         return {
             "points":     points,
@@ -249,133 +326,163 @@ async def analyze(
     equity_by_decile = {}
     for i in range(10):
         equity_by_decile[i+1] = {
-            "concurrent":     _equity_for_decile(i, "concurrent"),
+            "concurrent":      _equity_for_decile(i, "concurrent"),
             "non_overlapping": _equity_for_decile(i, "non_overlapping"),
         }
 
-    # ── Yearly consistency (top vs bottom) ───────────────────────────────
+    # ── Yearly consistency ────────────────────────────────────────────────
     yearly_consistency = []
     years_top_wins = 0
-    for yr in sorted(by_year):
-        yr_pairs = [(x, y, d) for x, y, d in pairs
-                    if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
-        if len(yr_pairs) < 30:
-            continue
-        yr_buckets = _bucket_pairs(yr_pairs, 10)
-        top_ys = [p[1] for p in yr_buckets[9]] if yr_buckets[9] else []
-        bot_ys = [p[1] for p in yr_buckets[0]] if yr_buckets[0] else []
-        t_avg = float(np.mean(top_ys)) if top_ys else 0
-        b_avg = float(np.mean(bot_ys)) if bot_ys else 0
-        top_beats = t_avg > b_avg
-        if top_beats:
-            years_top_wins += 1
-        yearly_consistency.append({
-            "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
-            "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
-        })
+
+    if is_all and by_ticker:
+        all_years = sorted(by_year.keys())
+        for yr in all_years:
+            yr_by_ticker: dict = defaultdict(list)
+            for tkr, tkr_pairs in by_ticker.items():
+                yr_ps = [(x, y, d) for x, y, d in tkr_pairs
+                         if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
+                if yr_ps:
+                    yr_by_ticker[tkr] = yr_ps
+            yr_buckets = _bucket_pairs_per_ticker(yr_by_ticker, 10)
+            top_ys = [p[1] for p in yr_buckets[9]]
+            bot_ys = [p[1] for p in yr_buckets[0]]
+            if len(top_ys) + len(bot_ys) < 20:
+                continue
+            t_avg = float(np.mean(top_ys)) if top_ys else 0.0
+            b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
+            top_beats = t_avg > b_avg
+            if top_beats:
+                years_top_wins += 1
+            yearly_consistency.append({
+                "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
+                "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
+            })
+    else:
+        for yr in sorted(by_year):
+            yr_pairs = [(x, y, d) for x, y, d in pairs
+                        if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
+            if len(yr_pairs) < 30:
+                continue
+            yr_buckets = _bucket_pairs(yr_pairs, 10)
+            top_ys = [p[1] for p in yr_buckets[9]] if yr_buckets[9] else []
+            bot_ys = [p[1] for p in yr_buckets[0]] if yr_buckets[0] else []
+            t_avg = float(np.mean(top_ys)) if top_ys else 0.0
+            b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
+            top_beats = t_avg > b_avg
+            if top_beats:
+                years_top_wins += 1
+            yearly_consistency.append({
+                "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
+                "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
+            })
 
     n_years = len(yearly_consistency)
     consistency_pct = round(years_top_wins / n_years * 100, 1) if n_years else None
 
-    # ── Half-sample stability ────────────────────────────────────────────
-    mid = n // 2
-    h1 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[:mid], 10)
-    h2 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[mid:], 10)
-    h1_spread = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
-    h2_spread = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
-    half_stable = (h1_spread > 0 and h2_spread > 0) or (h1_spread < 0 and h2_spread < 0)
+    # ── Half-sample stability ─────────────────────────────────────────────
+    if is_all and by_ticker:
+        ticker_stable = []
+        for tkr_pairs in by_ticker.values():
+            if len(tkr_pairs) < 20:
+                continue
+            tkr_sorted = sorted(tkr_pairs, key=lambda p: p[2])
+            mid_t = len(tkr_sorted) // 2
+            h1 = _bucket_pairs(tkr_sorted[:mid_t], 10)
+            h2 = _bucket_pairs(tkr_sorted[mid_t:], 10)
+            h1_s = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
+            h2_s = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
+            ticker_stable.append((h1_s > 0 and h2_s > 0) or (h1_s < 0 and h2_s < 0))
+        half_stable = (sum(ticker_stable) / len(ticker_stable) >= 0.5) if ticker_stable else False
+    else:
+        mid = n // 2
+        h1 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[:mid], 10)
+        h2 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[mid:], 10)
+        h1_spread = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
+        h2_spread = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
+        half_stable = (h1_spread > 0 and h2_spread > 0) or (h1_spread < 0 and h2_spread < 0)
 
-    # ── Concentration risk ───────────────────────────────────────────────
-    yearly_spreads = {}
-    for yc in yearly_consistency:
-        yearly_spreads[yc["year"]] = yc["top_avg"] - yc["bot_avg"]
+    # ── Concentration risk ────────────────────────────────────────────────
+    yearly_spreads = {yc["year"]: yc["top_avg"] - yc["bot_avg"] for yc in yearly_consistency}
     total_abs = sum(abs(v) for v in yearly_spreads.values())
     concentration = round(max(abs(v) for v in yearly_spreads.values()) / total_abs, 4) if total_abs > 0 else 1.0
 
-    # ── Composite score ──────────────────────────────────────────────────
+    # ── Composite score ───────────────────────────────────────────────────
     best_sharpe = max(abs(d["sharpe"]) for d in decile_stats if d) if decile_stats else 0
-    c_rank = min(abs(float(sr)) / 0.20, 1.0)
-    c_mono = monotonicity
+    c_rank    = min(abs(float(sr)) / 0.20, 1.0)
+    c_mono    = monotonicity
     c_consist = (consistency_pct / 100.0) if consistency_pct else 0
-    c_half = 1.0 if half_stable else 0
-    c_conc = max(0, 1.0 - concentration)
-    c_sharpe = min(best_sharpe / 0.5, 1.0)
-    c_sample = min(n / 1000, 0.5)
+    c_half    = 1.0 if half_stable else 0
+    c_conc    = max(0, 1.0 - concentration)
+    c_sharpe  = min(best_sharpe / 0.5, 1.0)
+    c_sample  = min(n / 1000, 0.5)
     composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
 
-    # ── Rolling correlation (252-day window) ───────────────────────────
-    sorted_by_date = sorted(pairs, key=lambda p: p[2])
-    rolling_window = 252
+    # ── Rolling correlation (252-day window; skipped in ALL mode) ─────────
     rolling_corr = []
-    if len(sorted_by_date) > rolling_window:
-        for end in range(rolling_window, len(sorted_by_date)):
-            window = sorted_by_date[end - rolling_window:end]
-            wx = np.array([p[0] for p in window])
-            wy = np.array([p[1] for p in window])
-            if wx.std() > 0 and wy.std() > 0:
-                rc, _ = sp_stats.spearmanr(wx, wy)
-                rolling_corr.append({
-                    "date": str(window[-1][2]),
-                    "spearman": round(float(rc), 4),
-                })
+    if not is_all:
+        sorted_by_date = sorted(pairs, key=lambda p: p[2])
+        rolling_window = 252
+        if len(sorted_by_date) > rolling_window:
+            for end in range(rolling_window, len(sorted_by_date)):
+                window = sorted_by_date[end - rolling_window:end]
+                wx = np.array([p[0] for p in window])
+                wy = np.array([p[1] for p in window])
+                if wx.std() > 0 and wy.std() > 0:
+                    rc, _ = sp_stats.spearmanr(wx, wy)
+                    rolling_corr.append({"date": str(window[-1][2]), "spearman": round(float(rc), 4)})
 
-    # ── Trade calendar (month × year avg return per decile) ──────────────
-    # Pre-assign decile to each pair efficiently
-    sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
-    decile_map = {}
-    for rank, idx in enumerate(sorted_by_x):
-        decile_map[idx] = min(int(rank / len(pairs) * 10) + 1, 10)
-
+    # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
     trade_calendar = []
-    dow_data = []  # day-of-week returns
+    dow_data = []
     for idx, (x, y, d) in enumerate(pairs):
         yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
         mo = d.month if hasattr(d, 'month') else int(str(d)[5:7])
-        # Day of week: 0=Mon ... 4=Fri
         dow = d.weekday() if hasattr(d, 'weekday') else 0
-        trade_calendar.append({"year": yr, "month": mo, "ret": round(y, 6), "decile": decile_map[idx]})
-        dow_data.append({"dow": dow, "ret": round(y, 6), "decile": decile_map[idx]})
+        dec = pairs_decile[idx]
+        trade_calendar.append({"year": yr, "month": mo, "ret": round(y, 6), "decile": dec})
+        dow_data.append({"dow": dow, "ret": round(y, 6), "decile": dec})
 
-    # ── Today's value ────────────────────────────────────────────────────
-    today_val = pairs[-1][0] if pairs else None
-    today_pct = None
-    today_decile = None
-    if today_val is not None:
+    # ── Today's value (single-ticker only) ───────────────────────────────
+    today_val = today_pct = today_decile = None
+    if not is_all and pairs:
+        today_val = pairs[-1][0]
         all_x = sorted(p[0] for p in pairs)
         today_pct = round(sum(1 for v in all_x if v <= today_val) / len(all_x) * 100, 1)
         today_decile = min(int(today_pct / 10) + 1, 10)
 
     return {
-        "ticker":      ticker,
-        "metric":      metric,
-        "outcome":     outcome,
-        "n":           n,
-        "horizon":     horizon,
+        "ticker":   ticker,
+        "metric":   metric,
+        "outcome":  outcome,
+        "n":        n,
+        "horizon":  horizon,
+        "all_mode": is_all,
+        "n_tickers": n_tickers_used,
 
         # Stats
-        "pearson_r":    round(float(pr), 4),
-        "pearson_p":    round(float(pp), 6),
-        "spearman_r":   round(float(sr), 4),
-        "monotonicity": monotonicity,
-        "pattern":      pattern,
-        "composite_score": composite,
-        "consistency_pct": consistency_pct,
+        "pearson_r":          round(float(pr), 4),
+        "pearson_p":          round(float(pp), 6),
+        "spearman_r":         round(float(sr), 4),
+        "monotonicity":       monotonicity,
+        "pattern":            pattern,
+        "composite_score":    composite,
+        "consistency_pct":    consistency_pct,
         "concentration_risk": concentration,
         "half_sample_stable": bool(half_stable),
 
         # Decile data
-        "decile_stats":    decile_stats,
+        "decile_stats":     decile_stats,
         "equity_by_decile": equity_by_decile,
 
         # Time series
-        "yearly":              yearly,
-        "yearly_consistency":  yearly_consistency,
-        "rolling_corr":        rolling_corr,
-        "trade_calendar":      trade_calendar,
-        "dow_data":            dow_data,
-        "spot_series":         spot_series,
+        "yearly":             yearly,
+        "yearly_consistency": yearly_consistency,
+        "rolling_corr":       rolling_corr,
+        "trade_calendar":     trade_calendar,
+        "dow_data":           dow_data,
+        "spot_series":        spot_series,
 
-        # Today
+        # Today (null in ALL mode)
         "today_value":      round(float(today_val), 6) if today_val is not None else None,
         "today_percentile": today_pct,
         "today_decile":     today_decile,
