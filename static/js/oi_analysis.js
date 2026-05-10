@@ -998,6 +998,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── Interaction Scan ──
     ifClusters: [],
+    ifLastScannedMetrics: [],
     ifStatus: { running: false, message: '', last_run: null },
     ifPollTimer: null,
     ifRows: [],          // ranked interaction-matrix rows
@@ -1032,11 +1033,7 @@ document.addEventListener('alpine:init', () => {
           fetch('/api/oi-analysis/score-matrix/meta'),
           fetch('/api/oi-analysis/batch-score-status'),
         ]);
-        if (metaRes.ok) {
-          const meta = await metaRes.json();
-          this.ifMetricsList = Array.from(meta.metrics || []);
-          this.smMeta = meta;
-        }
+        if (metaRes.ok) this.smMeta = await metaRes.json();
         if (statusRes.ok) this.smStatus = await statusRes.json();
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();
@@ -1388,8 +1385,9 @@ document.addEventListener('alpine:init', () => {
 
     // ── 2F Interaction Scanner ────────────────────────────────────────
     async run2fScan() {
-      const metrics = this.$store.metricPicker.selected;
+      const metrics = [...this.$store.metricPicker.selected];
       if (metrics.length < 2) return;
+      this.ifLastScannedMetrics = metrics;
       try {
         const r = await fetch('/api/oi-analysis/run-2f-scan', {
           method: 'POST',
@@ -1425,6 +1423,7 @@ document.addEventListener('alpine:init', () => {
     async loadInteractionMatrix() {
       const params = new URLSearchParams();
       if (this.ifFwdFilter) params.set('fwd_ret', this.ifFwdFilter);
+      (this.ifLastScannedMetrics || []).forEach(m => params.append('metrics', m));
       try {
         const r = await fetch('/api/oi-analysis/interaction-matrix?' + params);
         if (r.ok) this.ifRows = await r.json();

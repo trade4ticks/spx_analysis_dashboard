@@ -790,6 +790,7 @@ async def scan_2f_status():
 async def interaction_matrix(
     pool=Depends(get_pool),
     fwd_ret: Optional[str] = None,
+    metrics: Optional[List[str]] = Query(None),
     min_lift: float = 0.0,
     limit: int = 100,
 ):
@@ -801,6 +802,9 @@ async def interaction_matrix(
     if fwd_ret:
         params.append(fwd_ret)
         wheres.append(f'fwd_ret = ${len(params)}')
+    if metrics and len(metrics) >= 2:
+        params.append(metrics)
+        wheres.append(f'feat_a = ANY(${len(params)}) AND feat_b = ANY(${len(params)})')
     where_sql = 'WHERE ' + ' AND '.join(wheres)
     sql = f"""
         SELECT feat_a, feat_b, fwd_ret,

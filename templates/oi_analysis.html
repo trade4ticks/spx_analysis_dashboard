@@ -672,21 +672,23 @@
             </button>
             <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
                   x-text="ifStatus.message"></span>
-            <!-- fwd_ret filter -->
-            <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
-                    style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
-                           color:var(--text);font-size:11px;padding:4px 6px;border-radius:4px">
-              <option value="">All Fwd Rets</option>
-              <template x-for="f in smMeta.fwd_rets" :key="f">
-                <option :value="f" x-text="f"></option>
-              </template>
-            </select>
           </div>
         </div>
 
         <!-- Ranked table -->
         <div x-show="ifRows.length > 0"
              style="background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:12px">
+          <div style="display:flex;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border)">
+            <span style="font-size:9px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.3px">Results</span>
+            <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
+                    style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
+                           color:var(--text);font-size:11px;padding:3px 6px;border-radius:4px">
+              <option value="">All Fwd Rets</option>
+              <template x-for="f in smMeta.fwd_rets" :key="f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+          </div>
           <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
             <thead>
               <tr style="border-bottom:1px solid var(--border)">
