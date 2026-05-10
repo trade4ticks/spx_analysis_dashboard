@@ -648,7 +648,12 @@
             <span x-show="ifPairCount() > 0" style="color:#3498db;font-weight:700"
                   x-text="' ' + ifSelectedMetrics.length + ' selected → ' + ifPairCount() + ' pair(s)'"></span>
           </div>
-          <div id="if-pills-container" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+            <template x-for="m in ifMetricsList" :key="m">
+              <span class="if-pill" :class="{ on: ifSelectedMetrics.includes(m) }"
+                    @click="ifToggleMetric(m)" x-text="m"></span>
+            </template>
+          </div>
           <div style="display:flex;align-items:center;gap:10px">
             <button @click="run2fScan()"
                     :disabled="ifStatus.running || ifSelectedMetrics.length < 2"

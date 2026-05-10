@@ -981,6 +981,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── Interaction Scan ──
     ifClusters: [],
+    ifMetricsList: [],
     ifSelectedMetrics: [],
     ifStatus: { running: false, message: '', last_run: null },
     ifPollTimer: null,
@@ -1010,45 +1011,22 @@ document.addEventListener('alpine:init', () => {
       { key: 'loyo_fragile', label: 'LOYO' },
     ],
 
-    _initPills() {
-      const container = document.getElementById('if-pills-container');
-      if (!container || !this.smMeta.metrics.length) return;
-      container.innerHTML = '';
-      const self = this;
-      this.smMeta.metrics.forEach(m => {
-        const span = document.createElement('span');
-        span.className = 'if-pill';
-        span.textContent = m;
-        span.addEventListener('click', () => {
-          if (self.ifSelectedMetrics.includes(m)) {
-            self.ifSelectedMetrics = self.ifSelectedMetrics.filter(x => x !== m);
-          } else {
-            self.ifSelectedMetrics = [...self.ifSelectedMetrics, m];
-          }
-        });
-        container.appendChild(span);
-      });
-      // Keep pill highlight classes in sync whenever ifSelectedMetrics changes
-      this.$watch('ifSelectedMetrics', val => {
-        container.querySelectorAll('.if-pill').forEach(el => {
-          el.classList.toggle('on', val.includes(el.textContent));
-        });
-      });
-    },
-
     async smInit() {
       try {
         const [metaRes, statusRes] = await Promise.all([
           fetch('/api/oi-analysis/score-matrix/meta'),
           fetch('/api/oi-analysis/batch-score-status'),
         ]);
-        if (metaRes.ok) this.smMeta = await metaRes.json();
+        if (metaRes.ok) {
+          const meta = await metaRes.json();
+          this.ifMetricsList = Array.from(meta.metrics || []);
+          this.smMeta = meta;
+        }
         if (statusRes.ok) this.smStatus = await statusRes.json();
         if (this.smMeta.count > 0) {
           await this.loadScoreMatrix();
           await this.loadSmSummary();
           await this.loadInteractionMatrix();
-          this._initPills();
           // Re-render ticker charts after layout settles (x-show may delay dimensions)
           setTimeout(() => {
             this._renderSmTickerChart();
