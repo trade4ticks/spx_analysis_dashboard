@@ -152,6 +152,7 @@ async def analyze(
         )
         pairs = [pd[0] for pd in pairs_with_d]
         pairs_decile = [pd[1] for pd in pairs_with_d]
+        pairs_decile20 = []  # 20-bin not supported in ALL mode
 
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
         spot_series = []
@@ -182,9 +183,12 @@ async def analyze(
         # Build decile assignments from flat rank order
         sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
         dm: dict = {}
+        dm20: dict = {}
         for rank, idx in enumerate(sorted_by_x):
-            dm[idx] = min(int(rank / len(pairs) * 10) + 1, 10)
-        pairs_decile = [dm[i] for i in range(len(pairs))]
+            dm[idx]   = min(int(rank / len(pairs) * 10) + 1, 10)
+            dm20[idx] = min(int(rank / len(pairs) * 20) + 1, 20)
+        pairs_decile   = [dm[i]   for i in range(len(pairs))]
+        pairs_decile20 = [dm20[i] for i in range(len(pairs))]
 
         by_ticker = None  # not needed in single-ticker mode
         n_tickers_used = 1
@@ -435,12 +439,39 @@ async def analyze(
     trade_calendar = []
     dow_data = []
     for idx, (x, y, d) in enumerate(pairs):
-        yr = d.year if hasattr(d, 'year') else int(str(d)[:4])
-        mo = d.month if hasattr(d, 'month') else int(str(d)[5:7])
+        yr  = d.year     if hasattr(d, 'year')    else int(str(d)[:4])
+        mo  = d.month    if hasattr(d, 'month')   else int(str(d)[5:7])
         dow = d.weekday() if hasattr(d, 'weekday') else 0
-        dec = pairs_decile[idx]
-        trade_calendar.append({"year": yr, "month": mo, "ret": round(y, 6), "decile": dec})
-        dow_data.append({"dow": dow, "ret": round(y, 6), "decile": dec})
+        date_str = str(d.date() if hasattr(d, 'date') else d)
+        dec  = pairs_decile[idx]
+        dec20 = pairs_decile20[idx] if pairs_decile20 else None
+        entry = {"year": yr, "month": mo, "date": date_str, "ret": round(y, 6), "decile": dec}
+        if dec20 is not None:
+            entry["decile20"] = dec20
+        trade_calendar.append(entry)
+        dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
+        if dec20 is not None:
+            dow_entry["decile20"] = dec20
+        dow_data.append(dow_entry)
+
+    # ── Trade activity (entries + open trades per day, single-ticker only) ──
+    trades_activity = []
+    if not is_all and spot_series:
+        import datetime as _dt
+        from collections import Counter as _Counter
+        date_to_entered: dict = _Counter()
+        for p in pairs:
+            d_obj = p[2].date() if hasattr(p[2], 'date') else _dt.date.fromisoformat(str(p[2]))
+            date_to_entered[str(d_obj)] += 1
+        for s in spot_series:
+            entered = date_to_entered.get(s['date'], 0)
+            d_obj = _dt.date.fromisoformat(s['date'])
+            open_ct = sum(
+                date_to_entered.get(str(d_obj - _dt.timedelta(days=k)), 0)
+                for k in range(horizon)
+            )
+            if entered > 0 or open_ct > 0:
+                trades_activity.append({"date": s['date'], "entered": entered, "open": open_ct})
 
     # ── Today's value (single-ticker only) ───────────────────────────────
     today_val = today_pct = today_decile = None
@@ -481,6 +512,7 @@ async def analyze(
         "trade_calendar":     trade_calendar,
         "dow_data":           dow_data,
         "spot_series":        spot_series,
+        "trades_activity":    trades_activity,
 
         # Today (null in ALL mode)
         "today_value":      round(float(today_val), 6) if today_val is not None else None,

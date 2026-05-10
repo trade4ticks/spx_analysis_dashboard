@@ -24,6 +24,7 @@ document.addEventListener('alpine:init', () => {
     ticker: '', metric: '', outcome: '',
     dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
     selectedDeciles: new Set([1, 10]),
+    selectedBins20: new Set([1, 20]),
     equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
     decileBins: 10,
     decileBinsData: null,
@@ -95,9 +96,21 @@ document.addEventListener('alpine:init', () => {
       this._onDecileChange();
     },
 
-    selectAllDeciles() { this.selectedDeciles = new Set([1,2,3,4,5,6,7,8,9,10]); this._onDecileChange(); },
-    selectExtremes()   { this.selectedDeciles = new Set([1,10]); this._onDecileChange(); },
-    selectNone()       { this.selectedDeciles = new Set(); this._onDecileChange(); },
+    selectAllDeciles() {
+      if (this.decileBins === 20) this.selectedBins20 = new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]);
+      else this.selectedDeciles = new Set([1,2,3,4,5,6,7,8,9,10]);
+      this._onDecileChange();
+    },
+    selectExtremes() {
+      if (this.decileBins === 20) this.selectedBins20 = new Set([1, 20]);
+      else this.selectedDeciles = new Set([1, 10]);
+      this._onDecileChange();
+    },
+    selectNone() {
+      if (this.decileBins === 20) this.selectedBins20 = new Set();
+      else this.selectedDeciles = new Set();
+      this._onDecileChange();
+    },
 
     _onDecileChange() {
       this._renderDecileBar();
@@ -144,7 +157,7 @@ document.addEventListener('alpine:init', () => {
       const _isSelected = (d) => {
         if (bins === 10) return self.selectedDeciles.has(d.bucket);
         if (bins === 5)  return self.selectedDeciles.has(d.bucket*2-1) || self.selectedDeciles.has(d.bucket*2);
-        if (bins === 20) return self.selectedDeciles.has(Math.ceil(d.bucket/2));
+        if (bins === 20) return self.selectedBins20.has(d.bucket);
         return false;
       };
 
@@ -177,8 +190,13 @@ document.addEventListener('alpine:init', () => {
               self.selectedDeciles = new Set(self.selectedDeciles);
               self._onDecileChange();
             } else if (bins === 20) {
-              const dec = Math.ceil(d.bucket / 2);
-              self.toggleDecile(dec);
+              if (self.selectedBins20.has(d.bucket)) {
+                if (self.selectedBins20.size > 1) self.selectedBins20.delete(d.bucket);
+              } else {
+                self.selectedBins20.add(d.bucket);
+              }
+              self.selectedBins20 = new Set(self.selectedBins20);
+              self._onDecileChange();
             }
             self._renderDecileBar();
           },
@@ -234,7 +252,9 @@ document.addEventListener('alpine:init', () => {
         this.decileBinsData = this._computeDecile5Bins();
       } else if (n === 10) {
         this.decileBinsData = null;
+        this.selectedDeciles = new Set([1, 10]);
       } else {
+        this.selectedBins20 = new Set([1, 20]);
         try {
           const r = await fetch(
             `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
@@ -246,6 +266,31 @@ document.addEventListener('alpine:init', () => {
         } catch (_) {}
       }
       this._renderDecileBar();
+      this._renderEquity();
+      this._renderYearly();
+      this._renderDOW();
+    },
+
+    _getEquity20Curve(bin, mode) {
+      const horizon = this.data.horizon || 1;
+      const cal = (this.data.trade_calendar || []).filter(c => c.decile20 === bin);
+      if (!cal.length) return { points: [], n_trades: 0, cum_return: 0, win_rate: 0 };
+      const sorted = cal.slice().sort((a, b) => a.date.localeCompare(b.date));
+      let cum = 0, peak = 0, wins = 0, lastDate = null;
+      const points = [];
+      for (const c of sorted) {
+        if (mode === 'non_overlapping' && lastDate !== null) {
+          const diffDays = (new Date(c.date) - new Date(lastDate)) / 86400000;
+          if (diffDays < horizon) continue;
+        }
+        lastDate = c.date;
+        cum += c.ret;
+        peak = Math.max(peak, cum);
+        if (c.ret > 0) wins++;
+        points.push({ date: c.date, value: cum });
+      }
+      const n = points.length;
+      return { points, n_trades: n, cum_return: cum, win_rate: n ? wins / n : 0 };
     },
 
     _renderEquity() {
@@ -253,7 +298,23 @@ document.addEventListener('alpine:init', () => {
       if (!el || !this.data) return;
       if (this._charts['equity']) this._charts['equity'].destroy();
 
-      const eqData = this.data.equity_by_decile || {};
+      const use20 = this.decileBins === 20 && !!(this.data.trade_calendar?.[0]?.decile20);
+      const selectedKeys = use20 ? this.selectedBins20 : this.selectedDeciles;
+      const binLabel = use20 ? 'B' : 'D';
+
+      let eqData;
+      if (use20) {
+        eqData = {};
+        for (const bin of selectedKeys) {
+          eqData[bin] = {
+            concurrent:      this._getEquity20Curve(bin, 'concurrent'),
+            non_overlapping: this._getEquity20Curve(bin, 'non_overlapping'),
+          };
+        }
+      } else {
+        eqData = this.data.equity_by_decile || {};
+      }
+
       const spotSeries = this.data.spot_series || [];
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
@@ -266,7 +327,7 @@ document.addEventListener('alpine:init', () => {
       // If no spot, use the longest equity curve dates as timeline
       if (!timeline.length) {
         let longest = [];
-        for (const d of this.selectedDeciles) {
+        for (const d of selectedKeys) {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
           if (pts.length > longest.length) longest = pts;
         }
@@ -278,7 +339,7 @@ document.addEventListener('alpine:init', () => {
 
       // Map equity curve onto the timeline (null for dates without trades, spanGaps)
       const datasets = [];
-      for (const d of this.selectedDeciles) {
+      for (const d of selectedKeys) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
         const mapped = new Array(timeline.length).fill(null);
@@ -287,7 +348,7 @@ document.addEventListener('alpine:init', () => {
           if (idx !== undefined) mapped[idx] = p.value * 100;
         }
         datasets.push({
-          label: `D${d}`,
+          label: `${binLabel}${d}`,
           data: mapped,
           borderColor: colors[(d-1) % colors.length],
           backgroundColor: 'transparent',
@@ -296,9 +357,9 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      // Aggregate line — sum all trades from all selected deciles (additive portfolio)
-      if (this.selectedDeciles.size >= 2) {
-        const selArr = Array.from(this.selectedDeciles);
+      // Aggregate line — sum all trades from all selected bins (additive portfolio)
+      if (selectedKeys.size >= 2) {
+        const selArr = Array.from(selectedKeys);
         // Build a carried-forward cumulative for each decile across the full timeline
         const carried = selArr.map(d => {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
@@ -373,10 +434,12 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['yearly']) this._charts['yearly'].destroy();
 
       const cal = this.data.trade_calendar || [];
-      const selDec = this.selectedDeciles;
-      // Filter to selected deciles, group by year
-      const filtered = selDec.size > 0
-        ? cal.filter(c => selDec.has(c.decile))
+      const use20y = this.decileBins === 20 && !!(cal[0]?.decile20);
+      const selDecY = use20y ? this.selectedBins20 : this.selectedDeciles;
+      const decFieldY = use20y ? 'decile20' : 'decile';
+      // Filter to selected deciles/bins, group by year
+      const filtered = selDecY.size > 0
+        ? cal.filter(c => selDecY.has(c[decFieldY]))
         : cal;
       const byYear = {};
       for (const c of filtered) {
@@ -389,7 +452,8 @@ document.addEventListener('alpine:init', () => {
         const r = byYear[yr].rets;
         return r.length ? r.reduce((a,b) => a+b, 0) / r.length * 100 : 0;
       });
-      const decLabel = selDec.size > 0 ? Array.from(selDec).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'All';
+      const _lbl = use20y ? 'B' : 'D';
+      const decLabel = selDecY.size > 0 ? Array.from(selDecY).sort((a,b)=>a-b).map(d=>_lbl+d).join('+') : 'All';
 
       this._charts['yearly'] = new Chart(el, {
         type: 'bar',
@@ -933,9 +997,11 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['dow']) this._charts['dow'].destroy();
 
       const dowNames = ['Mon','Tue','Wed','Thu','Fri'];
-      const selDec = this.selectedDeciles;
-      const filtered = selDec.size > 0
-        ? this.data.dow_data.filter(d => selDec.has(d.decile))
+      const use20d = this.decileBins === 20 && !!(this.data.dow_data?.[0]?.decile20);
+      const selDecD = use20d ? this.selectedBins20 : this.selectedDeciles;
+      const decFieldD = use20d ? 'decile20' : 'decile';
+      const filtered = selDecD.size > 0
+        ? this.data.dow_data.filter(d => selDecD.has(d[decFieldD]))
         : this.data.dow_data;
 
       const byDow = {};
@@ -948,6 +1014,10 @@ document.addEventListener('alpine:init', () => {
         return rets.length ? rets.reduce((a,b)=>a+b,0) / rets.length * 100 : 0;
       });
       const counts = dowNames.map((_, i) => (byDow[i] || []).length);
+      const wrs = dowNames.map((_, i) => {
+        const rets = byDow[i] || [];
+        return rets.length ? rets.filter(r => r > 0).length / rets.length * 100 : 0;
+      });
 
       this._charts['dow'] = new Chart(el, {
         type: 'bar',
@@ -963,6 +1033,7 @@ document.addEventListener('alpine:init', () => {
             legend: { display: false },
             tooltip: { callbacks: { label: ctx => [
               `Avg: ${avgs[ctx.dataIndex].toFixed(3)}%`,
+              `WR: ${wrs[ctx.dataIndex].toFixed(1)}%`,
               `n: ${counts[ctx.dataIndex]}`,
             ] } },
           },
@@ -1010,6 +1081,66 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // ── Trade activity: entries/open per day ────────────────────────────
+    _renderActivity() {
+      const el = document.getElementById('chart-activity');
+      if (!el || !this.data?.trades_activity?.length) return;
+      if (this._charts['activity']) this._charts['activity'].destroy();
+
+      const act = this.data.trades_activity;
+      const dates   = act.map(a => a.date);
+      const entered = act.map(a => a.entered);
+      const open    = act.map(a => a.open);
+
+      this._charts['activity'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: dates.map(d => d.slice(0,7)),
+          datasets: [
+            {
+              type: 'line',
+              label: 'Open Trades',
+              data: open,
+              borderColor: 'rgba(46,204,113,0.6)',
+              backgroundColor: 'rgba(46,204,113,0.08)',
+              fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5,
+              order: 1,
+              yAxisID: 'y',
+            },
+            {
+              type: 'bar',
+              label: 'Entered',
+              data: entered,
+              backgroundColor: 'rgba(52,152,219,0.7)',
+              barThickness: 2,
+              order: 2,
+              yAxisID: 'y',
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels: { color:'#aaa', font:{size:10} } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1,
+              mode: 'index', intersect: false,
+              callbacks: {
+                title: ctx => dates[ctx[0]?.dataIndex] || '',
+                label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
+              },
+            },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            y: { ...this._darkScales().y, title: { display:true, text:'Count', color:'#888', font:{size:9} },
+                 ticks: { ...this._darkScales().y.ticks, callback: v => Math.round(v) } },
+          },
+        },
+      });
+    },
+
     // ── Update _renderCharts to include new charts ──────────────────────
     _renderAllCharts() {
       this._renderDecileBar();
@@ -1022,6 +1153,7 @@ document.addEventListener('alpine:init', () => {
       this._renderTradeCalendar();
       this._renderDOW();
       this._renderWinRate();
+      this._renderActivity();
     },
 
     // Fullscreen — re-render the chart into the fullscreen canvas
@@ -1049,6 +1181,7 @@ document.addEventListener('alpine:init', () => {
           'chart-calendar': () => this._renderTradeCalendar(),
           'chart-dow': () => this._renderDOW(),
           'chart-winrate': () => this._renderWinRate(),
+          'chart-activity': () => this._renderActivity(),
         };
         const fn = renderMap[chartId];
         if (fn) {

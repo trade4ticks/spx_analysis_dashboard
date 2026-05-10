@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=17"></script>
+  <script src="/static/js/oi_analysis.js?v=18"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -267,31 +267,44 @@
             </div>
             <div class="decile-btns">
               <span class="decile-btn" @click="selectNone()" style="font-size:9px">None</span>
-              <span class="decile-btn" @click="selectExtremes()" style="font-size:9px">D1+D10</span>
+              <span class="decile-btn" @click="selectExtremes()" style="font-size:9px"
+                    x-text="decileBins===20 ? 'B1+B20' : 'D1+D10'"></span>
               <span class="decile-btn" @click="selectAllDeciles()" style="font-size:9px">All</span>
-              <template x-for="d in [1,2,3,4,5,6,7,8,9,10]" :key="'db-'+d">
-                <span class="decile-btn" :class="{on: isDecileSelected(d)}"
-                      @click="toggleDecile(d)" x-text="'D'+d"></span>
+              <template x-if="decileBins !== 20">
+                <template x-for="d in [1,2,3,4,5,6,7,8,9,10]" :key="'db-'+d">
+                  <span class="decile-btn" :class="{on: isDecileSelected(d)}"
+                        @click="toggleDecile(d)" x-text="'D'+d"></span>
+                </template>
               </template>
             </div>
             <div class="chart-canvas"><canvas id="chart-equity"></canvas></div>
           </div>
 
-          <!-- Yearly avg return (decile-filtered) -->
-          <div class="chart-box">
-            <div class="chart-title">Avg Return by Year
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
-              <button class="fs-btn" @click="openFullscreen('chart-yearly')" title="Fullscreen">⛶</button>
+          <!-- Yearly + Day of Week side by side (one column) -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="chart-box" style="min-height:0">
+              <div class="chart-title">Avg Return by Year
+                <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected</span>
+                <button class="fs-btn" @click="openFullscreen('chart-yearly')" title="Fullscreen">⛶</button>
+              </div>
+              <div class="chart-canvas" style="height:200px"><canvas id="chart-yearly"></canvas></div>
             </div>
-            <div class="chart-canvas"><canvas id="chart-yearly"></canvas></div>
+            <div class="chart-box" style="min-height:0">
+              <div class="chart-title">Avg Return by Day of Week
+                <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected</span>
+                <button class="fs-btn" @click="openFullscreen('chart-dow')" title="Fullscreen">⛶</button>
+              </div>
+              <div class="chart-canvas" style="height:200px"><canvas id="chart-dow"></canvas></div>
+            </div>
           </div>
 
-          <!-- Rolling correlation -->
+          <!-- Trade Activity: entries + open positions over time -->
           <div class="chart-box">
-            <div class="chart-title">Rolling Signal Strength (252d Spearman)
-              <button class="fs-btn" @click="openFullscreen('chart-rolling')" title="Fullscreen">⛶</button>
+            <div class="chart-title">Trade Activity
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— entries &amp; open positions</span>
+              <button class="fs-btn" @click="openFullscreen('chart-activity')" title="Fullscreen">⛶</button>
             </div>
-            <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
+            <div class="chart-canvas"><canvas id="chart-activity"></canvas></div>
           </div>
 
           <!-- Boxplot -->
@@ -312,13 +325,12 @@
             <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
           </div>
 
-          <!-- Day of Week P&L -->
+          <!-- Rolling correlation (moved here) -->
           <div class="chart-box">
-            <div class="chart-title">P&L by Day of Week
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
-              <button class="fs-btn" @click="openFullscreen('chart-dow')" title="Fullscreen">⛶</button>
+            <div class="chart-title">Rolling Signal Strength (252d Spearman)
+              <button class="fs-btn" @click="openFullscreen('chart-rolling')" title="Fullscreen">⛶</button>
             </div>
-            <div class="chart-canvas"><canvas id="chart-dow"></canvas></div>
+            <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
           </div>
 
           <!-- Win Rate by Decile -->
