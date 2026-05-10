@@ -1201,15 +1201,6 @@ document.addEventListener('alpine:init', () => {
         ? cal.filter(c => this.selectedBins20.has(c.decile20))
         : cal;
 
-      // Build spot index for exit-date lookup (single-ticker only)
-      const spotSeries = this.data.spot_series || [];
-      const spotDates = spotSeries.map(s => s.date);
-      const spotByDate = {};
-      spotSeries.forEach(s => spotByDate[s.date] = s.value);
-      const spotDateIdx = {};
-      spotDates.forEach((d, i) => spotDateIdx[d] = i);
-      const horizon = this.data.horizon || 1;
-
       const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date));
       const LIMIT = 250;
       const rows = sorted.slice(0, LIMIT);
@@ -1221,11 +1212,10 @@ document.addEventListener('alpine:init', () => {
       }
 
       el.innerHTML = rows.map(c => {
-        const eIdx = spotDateIdx[c.date];
-        const exitIdx = eIdx !== undefined ? eIdx + horizon : undefined;
-        const exitDate = exitIdx !== undefined && exitIdx < spotDates.length ? spotDates[exitIdx] : '';
-        const exitSpot = exitDate ? spotByDate[exitDate] : null;
         const entrySpot = c.spot_entry ?? null;
+        // exit_spot derived from stored return — exact by definition, no date-index gaps
+        const exitSpot = (entrySpot != null && c.ret != null) ? entrySpot * (1 + c.ret) : null;
+        const exitDate = c.exit_date || '';
         const retPct = (c.ret * 100).toFixed(3);
         const sign = c.ret >= 0 ? '+' : '';
         const color = c.ret >= 0 ? '#3498db' : '#e84393';
@@ -1250,24 +1240,16 @@ document.addEventListener('alpine:init', () => {
         ? cal.filter(c => this.selectedBins20.has(c.decile20))
         : cal;
 
-      const spotSeries = this.data.spot_series || [];
-      const spotDates = spotSeries.map(s => s.date);
-      const spotByDate = {};
-      spotSeries.forEach(s => spotByDate[s.date] = s.value);
-      const spotDateIdx = {};
-      spotDates.forEach((d, i) => spotDateIdx[d] = i);
-      const horizon = this.data.horizon || 1;
       const metric = this.metric || 'metric';
 
       const header = `trade_date,ticker,${metric},entry_spot,exit_spot,ret_pct,exit_date,bin20`;
       const rows = filtered.slice().sort((a, b) => a.date.localeCompare(b.date)).map(c => {
-        const eIdx = spotDateIdx[c.date];
-        const exitIdx = eIdx !== undefined ? eIdx + horizon : undefined;
-        const exitDate = exitIdx !== undefined && exitIdx < spotDates.length ? spotDates[exitIdx] : '';
-        const exitSpot = exitDate ? (spotByDate[exitDate] ?? '') : '';
+        const entrySpot = c.spot_entry ?? '';
+        const exitSpot = (c.spot_entry != null && c.ret != null)
+          ? (c.spot_entry * (1 + c.ret)).toFixed(2) : '';
         return [
-          c.date, c.ticker || '', c.metric_val ?? '', c.spot_entry ?? '',
-          exitSpot, (c.ret * 100).toFixed(6), exitDate, c.decile20 || c.decile || '',
+          c.date, c.ticker || '', c.metric_val ?? '', entrySpot,
+          exitSpot, (c.ret * 100).toFixed(6), c.exit_date || '', c.decile20 || c.decile || '',
         ].join(',');
       });
 

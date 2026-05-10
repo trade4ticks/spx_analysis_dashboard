@@ -226,6 +226,7 @@ async def analyze(
         n_tickers_used = 1
 
         spot_series = []
+        all_spot_dates: list = []   # complete ordered trading-day list (unfiltered by metric/outcome)
         if spot_col:
             for r in row_dicts:
                 sv = r.get(spot_col)
@@ -234,6 +235,13 @@ async def analyze(
                         spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
                     except (ValueError, TypeError):
                         pass
+            # Fetch complete date list so exit_date offset is always correct
+            async with pool.acquire() as conn:
+                all_dates_rows = await conn.fetch(
+                    f"SELECT trade_date FROM daily_features "
+                    f"WHERE ticker = $1 AND {spot_col} IS NOT NULL "
+                    f"ORDER BY trade_date", ticker)
+            all_spot_dates = [str(r["trade_date"]) for r in all_dates_rows]
 
     n = len(pairs)
     if n < 30:
@@ -472,6 +480,8 @@ async def analyze(
 
     # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
     spot_by_date = {s["date"]: s["value"] for s in spot_series} if spot_series else {}
+    # Index into the complete (unfiltered) trading-day list for correct exit_date offsets
+    all_spot_date_idx = {d: i for i, d in enumerate(all_spot_dates)} if all_spot_dates else {}
 
     trade_calendar = []
     dow_data = []
@@ -493,6 +503,11 @@ async def analyze(
             entry["decile20"] = dec20
         if spot_by_date and date_str in spot_by_date:
             entry["spot_entry"] = spot_by_date[date_str]
+        # Compute exit_date from complete trading-day list (avoids metric/outcome gap errors)
+        if all_spot_date_idx and date_str in all_spot_date_idx:
+            ei = all_spot_date_idx[date_str] + horizon
+            if ei < len(all_spot_dates):
+                entry["exit_date"] = all_spot_dates[ei]
         trade_calendar.append(entry)
         dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
         if dec20 is not None:
