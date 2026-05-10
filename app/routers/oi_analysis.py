@@ -546,7 +546,7 @@ async def get_score_matrix(
         sort_by = "composite_score"
     direction = "DESC" if order == "desc" else "ASC"
 
-    where = ["composite_score >= $1"]
+    where = ["composite_score >= $1", "metric NOT ILIKE 'spot%'"]
     params = [min_score]
     idx = 2
 
@@ -596,7 +596,7 @@ async def score_matrix_meta(pool=Depends(get_pool)):
         tickers = [r["ticker"] for r in await conn.fetch(
             "SELECT DISTINCT ticker FROM oi_score_matrix ORDER BY ticker")]
         metrics = [r["metric"] for r in await conn.fetch(
-            "SELECT DISTINCT metric FROM oi_score_matrix ORDER BY metric")]
+            "SELECT DISTINCT metric FROM oi_score_matrix WHERE metric NOT ILIKE 'spot%' ORDER BY metric")]
         fwd_rets = [r["fwd_ret"] for r in await conn.fetch(
             "SELECT DISTINCT fwd_ret FROM oi_score_matrix ORDER BY fwd_ret")]
         stats = await conn.fetchrow("""
@@ -638,7 +638,7 @@ async def score_matrix_summary(
                        STDDEV(composite_score) as std_score, COUNT(*) as n,
                        COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                        MAX(composite_score) as max_score
-                FROM oi_score_matrix WHERE fwd_ret = $1
+                FROM oi_score_matrix WHERE fwd_ret = $1 AND metric NOT ILIKE 'spot%'
                 GROUP BY metric ORDER BY AVG(composite_score) DESC
             """, fwd_ret)
         else:
@@ -647,7 +647,7 @@ async def score_matrix_summary(
                        STDDEV(composite_score) as std_score, COUNT(*) as n,
                        COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                        MAX(composite_score) as max_score
-                FROM oi_score_matrix
+                FROM oi_score_matrix WHERE metric NOT ILIKE 'spot%'
                 GROUP BY metric ORDER BY AVG(composite_score) DESC
             """)
 

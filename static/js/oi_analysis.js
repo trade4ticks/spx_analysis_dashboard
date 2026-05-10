@@ -229,7 +229,7 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      // Aggregate line — carry forward last known value per decile, average all
+      // Aggregate line — sum all trades from all selected deciles (additive portfolio)
       if (this.selectedDeciles.size >= 2) {
         const selArr = Array.from(this.selectedDeciles);
         // Build a carried-forward cumulative for each decile across the full timeline
@@ -246,10 +246,10 @@ document.addEventListener('alpine:init', () => {
           return arr;
         });
 
-        // Average the carried-forward values at each point
+        // Sum all deciles at each point — combined portfolio of all selected decile trades
         const mapped = timeline.map((_, i) => {
           const sum = carried.reduce((a, c) => a + c[i], 0);
-          return (sum / carried.length) * 100;
+          return sum * 100;
         });
 
         datasets.push({
