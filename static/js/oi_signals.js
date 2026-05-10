@@ -1,190 +1,362 @@
-/**
- * oi_signals.js — OI Signal Dashboard
- * Inline decile sparklines with today's position marker.
- */
 'use strict';
+
+const _SIG_PALETTE = [
+  '#3498db','#e84393','#2ecc71','#f39c12',
+  '#9b59b6','#1abc9c','#e74c3c','#f1c40f',
+  '#16a085','#d35400','#8e44ad','#27ae60',
+];
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('oiSignals', () => ({
-    loading:    true,
-    error:      null,
-    metrics:    [],
-    outcome:    '',
-    tickers:    [],
-    sortCol:    '',      // metric name to sort by
-    sortDir:    'asc',   // 'asc' = D1 first (bullish extremes first)
-    _charts:    {},
 
-    // Co-occurrence
-    coocMetric:  '',
-    coocDecile:  1,
-    coocData:    null,
-    coocLoading: false,
+    // ── Triggers ─────────────────────────────────────────────────────────
+    triggers: [],
+    showForm: false,
+    formLoading: false,
+    editForm: {
+      id: null, name: '', ticker: '', metric: '', outcome: '',
+      min_val: '', max_val: '', color: '#3498db',
+    },
 
+    // Dropdown options
+    availTickers: [],
+    availMetrics: [],
+    availOutcomes: [],
+
+    // ── Firing ────────────────────────────────────────────────────────────
+    firingDate: '',
+    firingResults: [],
+    firingLoading: false,
+    _miniCharts: {},
+
+    // ── Calendar ─────────────────────────────────────────────────────────
+    calEntries: [],
+    calLoading: false,
+    _ganttRange: { start: new Date(), end: new Date(), totalDays: 60 },
+
+    // ─────────────────────────────────────────────────────────────────────
     async init() {
-      await this.loadData();
+      await this._loadMeta();
+      await Promise.all([this.loadTriggers(), this.loadCalendar()]);
+      await this.loadFiring();
     },
 
-    async loadData() {
-      this.loading = true;
-      this.error   = null;
+    async _loadMeta() {
       try {
-        const r = await fetch('/api/oi-signals/data');
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        if (data.error) throw new Error(data.error);
-        this.metrics  = data.metrics || [];
-        this.outcome  = data.outcome || '';
-        this.tickers  = data.tickers || [];
-        if (!this.sortCol && this.metrics.length) this.sortCol = this.metrics[0];
-        if (!this.coocMetric && this.metrics.length) this.coocMetric = this.metrics[0];
-
-        await this.$nextTick();
-        await this.$nextTick();
-        setTimeout(() => this.renderAllSparklines(), 100);
-      } catch (e) {
-        this.error = e.message;
-      } finally {
-        this.loading = false;
-      }
+        const [tr, cr] = await Promise.all([
+          fetch('/api/oi-analysis/tickers'),
+          fetch('/api/oi-analysis/columns'),
+        ]);
+        if (tr.ok) this.availTickers = await tr.json();
+        if (cr.ok) {
+          const d = await cr.json();
+          this.availMetrics  = d.features  || [];
+          this.availOutcomes = d.outcomes  || [];
+        }
+      } catch (_) {}
     },
 
-    get sortedTickers() {
-      if (!this.sortCol) return this.tickers;
-      if (this.sortCol === '_ticker') {
-        return [...this.tickers].sort((a, b) =>
-          this.sortDir === 'asc'
-            ? a.ticker.localeCompare(b.ticker)
-            : b.ticker.localeCompare(a.ticker));
-      }
-      return [...this.tickers].sort((a, b) => {
-        const da = a.metrics?.[this.sortCol]?.today_decile ?? 5;
-        const db = b.metrics?.[this.sortCol]?.today_decile ?? 5;
-        return this.sortDir === 'asc' ? da - db : db - da;
+    // ── Triggers CRUD ────────────────────────────────────────────────────
+    async loadTriggers() {
+      try {
+        const r = await fetch('/api/oi-signals/triggers');
+        if (r.ok) this.triggers = await r.json();
+      } catch (_) {}
+    },
+
+    openNewForm() {
+      this.editForm = {
+        id: null, name: '',
+        ticker:  this.availTickers[0]  || '',
+        metric:  this.availMetrics[0]  || '',
+        outcome: this.availOutcomes[0] || '',
+        min_val: '', max_val: '',
+        color: _SIG_PALETTE[this.triggers.length % _SIG_PALETTE.length],
+      };
+      this.showForm = true;
+    },
+
+    editTrigger(t) {
+      this.editForm = {
+        id: t.id, name: t.name,
+        ticker: t.ticker, metric: t.metric, outcome: t.outcome,
+        min_val: t.min_val ?? '', max_val: t.max_val ?? '',
+        color: t.color || '#3498db',
+      };
+      this.showForm = true;
+    },
+
+    async saveTrigger() {
+      const f = this.editForm;
+      if (!f.name || !f.ticker || !f.metric || !f.outcome) return;
+      this.formLoading = true;
+      try {
+        const body = {
+          name: f.name, ticker: f.ticker, metric: f.metric, outcome: f.outcome,
+          min_val: f.min_val !== '' && f.min_val !== null ? parseFloat(f.min_val) : null,
+          max_val: f.max_val !== '' && f.max_val !== null ? parseFloat(f.max_val) : null,
+          color: f.color,
+        };
+        const url    = f.id ? `/api/oi-signals/triggers/${f.id}` : '/api/oi-signals/triggers';
+        const method = f.id ? 'PUT' : 'POST';
+        const r = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (r.ok) {
+          this.showForm = false;
+          await this.loadTriggers();
+          await this.loadFiring();
+        }
+      } catch (_) {}
+      this.formLoading = false;
+    },
+
+    async deleteTrigger(id) {
+      if (!confirm('Delete this trigger? Its calendar entries will also be removed.')) return;
+      await fetch(`/api/oi-signals/triggers/${id}`, { method: 'DELETE' });
+      await this.loadTriggers();
+      await this.loadFiring();
+      await this.loadCalendar();
+    },
+
+    rangeText(t) {
+      const lo = t.min_val, hi = t.max_val;
+      if (lo != null && hi != null) return `${lo} – ${hi}`;
+      if (lo != null) return `≥ ${lo}`;
+      if (hi != null) return `≤ ${hi}`;
+      return 'any';
+    },
+
+    // ── Firing ────────────────────────────────────────────────────────────
+    async loadFiring() {
+      this.firingLoading = true;
+      // Destroy existing mini charts
+      for (const c of Object.values(this._miniCharts)) c.destroy();
+      this._miniCharts = {};
+      try {
+        const qs = this.firingDate ? `?date=${this.firingDate}` : '';
+        const r = await fetch('/api/oi-signals/firing' + qs);
+        if (r.ok) {
+          const d = await r.json();
+          this.firingResults = d.results || [];
+          // Auto-populate date from first result with a current_date
+          if (!this.firingDate) {
+            const hit = this.firingResults.find(x => x.current_date);
+            if (hit) this.firingDate = hit.current_date;
+          }
+        }
+      } catch (_) {}
+      this.firingLoading = false;
+      await this._renderMiniCharts();
+    },
+
+    get sortedFiring() {
+      return [...this.firingResults].sort((a, b) => {
+        if (a.firing && !b.firing) return -1;
+        if (!a.firing && b.firing) return 1;
+        return 0;
       });
     },
 
-    toggleSort(col) {
-      if (this.sortCol === col) {
-        this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
-      } else {
-        this.sortCol = col;
-        this.sortDir = 'asc';
-      }
-    },
-
-    sortArrow(metric) {
-      if (this.sortCol !== metric) return '';
-      return this.sortDir === 'asc' ? ' ▲' : ' ▼';
-    },
-
-    metricShort(m) {
-      return m.replace('zscore_oi_', 'z_').replace('_3m', '').replace('d1_oi_', 'd1_')
-              .replace('weighted_strike_all_div_spot', 'wt_k/s')
-              .replace('above_below_ratio', 'ab_ratio')
-              .replace('_change', '_chg');
-    },
-
-    decileClass(d) {
-      if (d == null) return '';
-      if (d === 1) return 'decile-d1';
-      if (d === 2) return 'decile-d2';
-      if (d === 9) return 'decile-d9';
-      if (d === 10) return 'decile-d10';
-      return '';
-    },
-
-    // Get the avg return for today's decile
-    todayAvgRet(md) {
-      if (!md || !md.today_decile || !md.deciles) return null;
-      const d = md.deciles.find(b => b && b.bucket === md.today_decile);
-      return d ? d.avg_ret : null;
-    },
-
-    renderAllSparklines() {
-      // Destroy existing
-      Object.values(this._charts).forEach(c => c.destroy());
-      this._charts = {};
-
-      for (const t of this.tickers) {
-        for (const m of this.metrics) {
-          const md = t.metrics?.[m];
-          if (!md || md.error || !md.deciles) continue;
-          const key = `spark-${t.ticker}-${m}`;
-          const el = document.getElementById(key);
+    async _renderMiniCharts() {
+      await this.$nextTick();
+      setTimeout(() => {
+        for (const r of this.firingResults) {
+          if (!r.bins || !r.bins.length) continue;
+          const el = document.getElementById('mini-' + r.trigger.id);
           if (!el) continue;
+          if (this._miniCharts[r.trigger.id]) {
+            this._miniCharts[r.trigger.id].destroy();
+          }
+          this._miniCharts[r.trigger.id] = _makeMiniChart(el, r);
+        }
+      }, 80);
+    },
 
-          const deciles = md.deciles.filter(d => d != null);
-          const avgs = deciles.map(d => d.avg_ret);
-          const todayD = md.today_decile;
+    // ── Calendar ─────────────────────────────────────────────────────────
+    async addToCalendar(triggerId, entryDate) {
+      if (!entryDate) return;
+      try {
+        const r = await fetch('/api/oi-signals/calendar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trigger_id: triggerId, entry_date: entryDate }),
+        });
+        if (r.ok) await this.loadCalendar();
+      } catch (_) {}
+    },
 
-          const bgColors = deciles.map((d, i) => {
-            if (d.bucket === todayD) return '#ffffff';
-            return d.avg_ret >= 0 ? 'rgba(52,152,219,0.6)' : 'rgba(232,67,147,0.6)';
-          });
-          const borderColors = deciles.map(d =>
-            d.bucket === todayD ? '#ffffff' : 'transparent');
+    async loadCalendar() {
+      this.calLoading = true;
+      try {
+        const r = await fetch('/api/oi-signals/calendar');
+        if (r.ok) {
+          this.calEntries = await r.json();
+          this._updateGanttRange();
+        }
+      } catch (_) {}
+      this.calLoading = false;
+    },
 
-          this._charts[key] = new Chart(el, {
-            type: 'bar',
-            data: {
-              labels: deciles.map(d => d.bucket),
-              datasets: [{
-                data: avgs,
-                backgroundColor: bgColors,
-                borderColor: borderColors,
-                borderWidth: deciles.map(d => d.bucket === todayD ? 2 : 0),
-              }],
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              animation: false,
-              plugins: {
-                legend: { display: false },
-                tooltip: {
-                  backgroundColor: 'rgba(20,20,20,0.95)',
-                  titleColor: '#999', bodyColor: '#ddd',
-                  borderColor: '#444', borderWidth: 1,
-                  callbacks: {
-                    title: (items) => `D${items[0].label}`,
-                    label: (ctx) => {
-                      const d = deciles[ctx.dataIndex];
-                      return [
-                        `Avg: ${d.avg_ret.toFixed(3)}%`,
-                        `WR: ${d.win_rate.toFixed(0)}%`,
-                        `n: ${d.n}`,
-                      ];
-                    },
-                  },
-                },
-              },
-              scales: {
-                x: { display: false },
-                y: { display: false },
-              },
-            },
-          });
+    async removeFromCalendar(id) {
+      await fetch(`/api/oi-signals/calendar/${id}`, { method: 'DELETE' });
+      this.calEntries = this.calEntries.filter(e => e.id !== id);
+      this._updateGanttRange();
+    },
+
+    // ── Gantt helpers ─────────────────────────────────────────────────────
+    _updateGanttRange() {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      let start = new Date(today);
+      start.setDate(start.getDate() - 14);
+      let end = new Date(today);
+      end.setDate(end.getDate() + 45);
+
+      for (const e of this.calEntries) {
+        if (e.entry_date) {
+          const d = new Date(e.entry_date + 'T00:00:00');
+          if (d < start) { start = new Date(d); start.setDate(start.getDate() - 3); }
+        }
+        if (e.exit_date) {
+          const d = new Date(e.exit_date + 'T00:00:00');
+          if (d > end) { end = new Date(d); end.setDate(end.getDate() + 3); }
         }
       }
+
+      const totalDays = Math.round((end - start) / 86400000) + 1;
+      this._ganttRange = { start, end, totalDays };
     },
 
-    // Co-occurrence
-    async loadCooccurrence() {
-      this.coocLoading = true;
-      try {
-        const r = await fetch(
-          `/api/oi-signals/cooccurrence?metric=${this.coocMetric}&decile=${this.coocDecile}`);
-        if (r.ok) this.coocData = await r.json();
-      } catch (_) {}
-      this.coocLoading = false;
+    barStyle(entry) {
+      const { start, totalDays } = this._ganttRange;
+      const s = new Date((entry.entry_date || '') + 'T00:00:00');
+      const e = new Date((entry.exit_date  || entry.entry_date || '') + 'T00:00:00');
+      const startOff = Math.max(0, (s - start) / 86400000);
+      const endOff   = Math.min(totalDays, (e - start) / 86400000 + 1);
+      const leftPct  = (startOff / totalDays) * 100;
+      const widthPct = Math.max(0.8, (endOff - startOff) / totalDays * 100);
+      const col = entry.color || '#3498db';
+      return `left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%;background:${col}`;
     },
 
-    coocColor(pct) {
-      if (pct >= 80) return 'color:#e84393';     // high overlap = warning
-      if (pct >= 50) return 'color:#f39c12';
-      if (pct >= 30) return 'color:#ccc';
-      return 'color:#3498db';                     // low overlap = good
+    get ganttTodayStyle() {
+      const { start, totalDays } = this._ganttRange;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const off = (today - start) / 86400000;
+      const pct = (off / totalDays) * 100;
+      if (pct < 0 || pct > 100) return 'display:none';
+      return `left:${pct.toFixed(2)}%`;
+    },
+
+    get ganttHeaderTicks() {
+      const { start, totalDays } = this._ganttRange;
+      const ticks = [];
+      const d = new Date(start);
+      // Align to nearest upcoming Sunday
+      const dow = d.getDay();
+      if (dow !== 0) d.setDate(d.getDate() + (7 - dow));
+      const rangeEnd = new Date(start.getTime() + totalDays * 86400000);
+      while (d <= rangeEnd) {
+        const off = (d - start) / 86400000;
+        const pct = (off / totalDays) * 100;
+        ticks.push({
+          pct: pct.toFixed(2),
+          label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        });
+        d.setDate(d.getDate() + 7);
+      }
+      return ticks;
     },
   }));
 });
+
+// ── Mini chart factory (module-level, not on Alpine component) ─────────────
+function _makeMiniChart(el, result) {
+  const bins     = result.bins || [];
+  const todayBin = result.today_bin;
+
+  const labels = bins.map((b, i) => b ? `B${b.bin}` : `B${i + 1}`);
+  const data   = bins.map(b => b ? +b.avg_ret.toFixed(3) : 0);
+
+  const bgColors = bins.map(b => {
+    const isToday = b && b.bin === todayBin;
+    const pos     = !b || b.avg_ret >= 0;
+    if (isToday) return pos ? '#3498db' : '#e84393';
+    return pos ? 'rgba(52,152,219,0.3)' : 'rgba(232,67,147,0.3)';
+  });
+  const borderColors = bins.map(b => b && b.bin === todayBin ? '#fff' : 'transparent');
+  const borderWidths = bins.map(b => b && b.bin === todayBin ? 1.5 : 0);
+
+  const todayPlugin = {
+    id: 'todayLine',
+    afterDraw(chart) {
+      if (todayBin == null) return;
+      const { ctx, scales: { x } } = chart;
+      const px = x.getPixelForValue(todayBin - 1);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      ctx.moveTo(px, chart.chartArea.top);
+      ctx.lineTo(px, chart.chartArea.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    },
+  };
+
+  return new Chart(el, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        backgroundColor: bgColors,
+        borderColor:      borderColors,
+        borderWidth:      borderWidths,
+        borderSkipped:    false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title:  items => `Bin ${bins[items[0].dataIndex]?.bin ?? '?'} of 20`,
+            label:  item  => {
+              const b = bins[item.dataIndex];
+              if (!b) return [];
+              return [
+                `Avg ret: ${b.avg_ret.toFixed(2)}%`,
+                `Win rate: ${b.win_rate.toFixed(0)}%`,
+                `Range: ${b.min_val} – ${b.max_val}`,
+                `n = ${b.n}`,
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks:  { display: false },
+          grid:   { display: false },
+          border: { display: false },
+        },
+        y: {
+          ticks:  { color: '#555', font: { size: 8 }, maxTicksLimit: 3 },
+          grid:   { color: 'rgba(255,255,255,0.05)' },
+          border: { display: false },
+        },
+      },
+    },
+    plugins: [todayPlugin],
+  });
+}

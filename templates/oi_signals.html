@@ -6,51 +6,139 @@
   <title>SPX IV — OI Signals</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
-    .oi-body { flex: 1; overflow: auto; padding: 16px; }
+    .sig-body { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 28px; }
 
-    /* Signal table */
-    .sig-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .sig-table th {
-      background: var(--raised); color: var(--dim); font-size: 11px;
+    /* ── Section shell ── */
+    .sig-section { display: flex; flex-direction: column; gap: 10px; }
+    .sig-section-hdr {
+      display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid var(--border); padding-bottom: 8px;
+    }
+    .sig-section-title { font-size: 13px; font-weight: 700; color: var(--text); }
+    .sig-section-sub   { font-size: 11px; color: var(--dim); }
+
+    /* ── Trigger table ── */
+    .trig-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .trig-table th {
+      background: var(--raised); color: var(--dim); font-size: 10px;
       font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
-      padding: 8px 10px; border-bottom: 1px solid var(--border);
-      position: sticky; top: 0; z-index: 2; cursor: pointer; user-select: none;
+      padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left;
+    }
+    .trig-table td { padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: middle; }
+    .trig-table tr:hover td { background: rgba(255,255,255,.03); }
+    .color-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+
+    /* ── Form card ── */
+    .form-card {
+      background: var(--raised); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr 2fr 1fr 100px 100px 44px; gap: 8px; align-items: end; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-label { font-size: 10px; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
+    .form-input {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--text); font-size: 12px; padding: 5px 8px; outline: none;
+    }
+    .form-input:focus { border-color: var(--accent); }
+    .form-input option { background: var(--raised); }
+    .color-input { width: 40px; height: 30px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; padding: 2px; background: transparent; }
+    .form-actions { display: flex; gap: 8px; }
+    .btn-sm {
+      font-size: 11px; padding: 4px 12px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border);
+      background: var(--raised); color: var(--text);
+    }
+    .btn-sm:hover { background: var(--border); }
+    .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-sm.danger  { border-color: rgba(232,67,147,.4); color: #e84393; }
+    .btn-sm.danger:hover { background: rgba(232,67,147,.15); }
+    .btn-icon { background: none; border: none; cursor: pointer; padding: 2px 6px; font-size: 14px; color: var(--dim); border-radius: 3px; }
+    .btn-icon:hover { color: var(--text); background: rgba(255,255,255,.06); }
+
+    /* ── Today section ── */
+    .firing-controls { display: flex; align-items: center; gap: 8px; }
+    .firing-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+    .firing-card {
+      background: var(--raised); border: 1px solid var(--border); border-radius: 6px;
+      padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+      position: relative;
+    }
+    .firing-card.on {
+      border-color: rgba(52,152,219,.5);
+      box-shadow: 0 0 0 1px rgba(52,152,219,.2), inset 0 0 20px rgba(52,152,219,.04);
+    }
+    .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .card-title { font-size: 13px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 6px; }
+    .fire-badge {
+      font-size: 9px; font-weight: 700; letter-spacing: .5px;
+      padding: 2px 6px; border-radius: 3px; text-transform: uppercase;
+    }
+    .fire-badge.on  { background: rgba(52,152,219,.25); color: #3498db; }
+    .fire-badge.off { background: rgba(100,100,100,.2);  color: #666; }
+    .card-meta  { font-size: 11px; color: var(--dim); line-height: 1.6; }
+    .card-meta b { color: var(--text); }
+    .card-val   { font-size: 12px; color: var(--dim); }
+    .card-val b { color: var(--text); font-size: 14px; }
+    .mini-wrap  { height: 90px; }
+    .btn-cal {
+      font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 4px;
+      background: rgba(52,152,219,.12); border: 1px solid rgba(52,152,219,.3);
+      color: #3498db; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+    }
+    .btn-cal:hover { background: rgba(52,152,219,.22); }
+
+    /* ── Gantt ── */
+    .gantt-outer { display: flex; flex-direction: column; gap: 0; min-height: 60px; }
+    .gantt-hdr-row, .gantt-row {
+      display: flex; align-items: stretch;
+    }
+    .gantt-label {
+      width: 190px; flex-shrink: 0;
+      font-size: 11px; color: var(--dim); padding: 0 8px 0 0;
+      display: flex; align-items: center; justify-content: space-between;
+      border-right: 1px solid var(--border);
+    }
+    .gantt-label-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+    .gantt-bar-area { flex: 1; position: relative; height: 32px; }
+    .gantt-hdr-area { flex: 1; position: relative; height: 20px; }
+    .gantt-bar {
+      position: absolute; top: 5px; bottom: 5px; border-radius: 3px;
+      opacity: .85; transition: opacity .15s;
+    }
+    .gantt-bar:hover { opacity: 1; }
+    .gantt-today {
+      position: absolute; top: 0; bottom: 0; width: 1px;
+      background: rgba(255,255,255,.35); pointer-events: none;
+    }
+    .gantt-today::after {
+      content: 'today';
+      position: absolute; top: -14px; left: 3px;
+      font-size: 8px; color: rgba(255,255,255,.4);
       white-space: nowrap;
     }
-    .sig-table th:hover { color: var(--accent); }
-    .sig-table td {
-      padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.04);
-      vertical-align: middle;
+    .gantt-tick {
+      position: absolute; top: 0; font-size: 8px; color: var(--dim);
+      white-space: nowrap; transform: translateX(-50%);
     }
-    .sig-table tr:hover td { background: rgba(255,255,255,.03); }
-
-    .ticker-cell { font-weight: 700; color: var(--text); font-size: 14px; }
-    .decile-badge {
-      display: inline-block; padding: 2px 8px; border-radius: 3px;
-      font-weight: 700; font-size: 12px; min-width: 32px; text-align: center;
+    .gantt-tick::before {
+      content: '';
+      position: absolute; bottom: -2px; left: 50%; width: 1px; height: 4px;
+      background: var(--border); transform: translateX(-50%);
     }
-    .decile-d1 .decile-badge  { background: rgba(52,152,219,.3);  color: #5dade2; }
-    .decile-d2 .decile-badge  { background: rgba(52,152,219,.15); color: #3498db; }
-    .decile-d9 .decile-badge  { background: rgba(232,67,147,.15); color: #e84393; }
-    .decile-d10 .decile-badge { background: rgba(232,67,147,.3);  color: #f06292; }
-    .pct-text { font-size: 10px; color: var(--dim); margin-left: 4px; }
-    .avg-ret-text { font-size: 10px; margin-left: 6px; font-weight: 600; }
-
-    /* sparklines are inline in the data cell now */
-
-    /* Co-occurrence */
-    .cooc-section { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 16px; }
-    .cooc-controls { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
-    .cooc-table { border-collapse: collapse; font-size: 9px; }
-    .cooc-table th, .cooc-table td {
-      padding: 3px 6px; border: 1px solid rgba(255,255,255,.06); text-align: center;
+    .gantt-row-sep { height: 1px; background: rgba(255,255,255,.04); margin: 0 0 0 190px; }
+    .btn-remove {
+      background: none; border: none; cursor: pointer;
+      font-size: 14px; color: var(--dim); line-height: 1; padding: 0 2px;
+      border-radius: 3px; flex-shrink: 0;
     }
-    .cooc-table th { background: var(--raised); color: var(--dim); font-weight: 600; }
-    .cooc-wrap { overflow: auto; max-height: 500px; }
+    .btn-remove:hover { color: #e84393; background: rgba(232,67,147,.12); }
+
+    .empty-hint { color: var(--dim); font-size: 12px; padding: 20px 0; }
+    .loading-hint { color: var(--dim); font-size: 12px; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=2"></script>
+  <script src="/static/js/oi_signals.js?v=1"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -69,138 +157,231 @@
       <a class="nav-link" href="/research2">Research 2</a>
       <a class="nav-link" href="/backtest-iv-analysis">Backtest IV</a>
     </nav>
-    <div class="topbar-right" x-text="tickers.length ? tickers.length + ' tickers' : ''"></div>
   </div>
 
   <!-- Body -->
-  <div class="oi-body">
+  <div class="sig-body">
 
-    <!-- Loading -->
-    <div x-show="loading" style="text-align:center;padding:40px;color:var(--dim)">
-      Loading signal data for all tickers…
-    </div>
-    <div x-show="error" style="color:var(--danger);padding:16px" x-text="error"></div>
+    <!-- ══ SECTION 1: Signal Triggers ══════════════════════════════════ -->
+    <div class="sig-section">
+      <div class="sig-section-hdr">
+        <span class="sig-section-title">Signal Triggers</span>
+        <span class="sig-section-sub" x-text="triggers.length + ' defined'"></span>
+        <button class="btn-sm primary" style="margin-left:auto" @click="openNewForm()">+ New Signal</button>
+      </div>
 
-    <!-- Signal table -->
-    <template x-if="!loading && tickers.length > 0">
-      <div>
-        <div style="font-size:13px;color:var(--text);font-weight:700;margin-bottom:8px">
-          OI Signal Dashboard
-          <span style="font-weight:400;color:var(--dim);font-size:11px">
-            — today's metric decile placement vs historical avg return
-            <span x-text="'(' + outcome + ')'"></span>
+      <!-- Create / Edit form -->
+      <div class="form-card" x-show="showForm" x-transition>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Name</label>
+            <input class="form-input" x-model="editForm.name" placeholder="e.g. PCR High">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ticker</label>
+            <select class="form-input" x-model="editForm.ticker">
+              <template x-for="t in availTickers" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Metric</label>
+            <select class="form-input" x-model="editForm.metric">
+              <template x-for="m in availMetrics" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Outcome</label>
+            <select class="form-input" x-model="editForm.outcome">
+              <template x-for="o in availOutcomes" :key="o">
+                <option :value="o" x-text="o"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Min Value</label>
+            <input class="form-input" type="number" step="any" x-model="editForm.min_val" placeholder="(none)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max Value</label>
+            <input class="form-input" type="number" step="any" x-model="editForm.max_val" placeholder="(none)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Color</label>
+            <input class="color-input" type="color" x-model="editForm.color">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn-sm primary" @click="saveTrigger()" :disabled="formLoading"
+                  x-text="formLoading ? 'Saving…' : (editForm.id ? 'Update' : 'Create')"></button>
+          <button class="btn-sm" @click="showForm = false">Cancel</button>
+          <span style="font-size:10px;color:var(--dim);align-self:center">
+            Leave Min/Max blank for unbounded (fires on any value)
           </span>
         </div>
+      </div>
 
-        <div style="overflow:auto;max-height:calc(100vh - 200px)">
-          <table class="sig-table">
-            <thead>
+      <!-- Triggers table -->
+      <template x-if="triggers.length > 0">
+        <table class="trig-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Ticker</th>
+              <th>Metric</th>
+              <th>Outcome</th>
+              <th>Fires When</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="t in triggers" :key="t.id">
               <tr>
-                <th @click="toggleSort('_ticker')" x-text="'Ticker' + sortArrow('_ticker')"></th>
-                <th style="cursor:default">Date</th>
-                <template x-for="m in metrics" :key="m">
-                  <th @click="toggleSort(m)"
-                      style="text-align:center;border-left:1px solid var(--border);min-width:300px"
-                      x-text="metricShort(m) + sortArrow(m)"></th>
-                </template>
+                <td>
+                  <span class="color-dot" :style="'background:' + (t.color || '#3498db')"></span>
+                  <span x-text="t.name" style="font-weight:600"></span>
+                </td>
+                <td x-text="t.ticker" style="color:var(--text);font-weight:600"></td>
+                <td x-text="t.metric" style="font-size:11px;color:var(--dim);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+                <td x-text="t.outcome"></td>
+                <td x-text="rangeText(t)" style="font-family:monospace;font-size:12px"></td>
+                <td style="white-space:nowrap">
+                  <button class="btn-sm" @click="editTrigger(t)">Edit</button>
+                  <button class="btn-sm danger" @click="deleteTrigger(t.id)" style="margin-left:4px">Del</button>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              <template x-for="t in sortedTickers" :key="t.ticker">
-                <tr>
-                  <td class="ticker-cell" x-text="t.ticker"></td>
-                  <td style="font-size:10px;color:var(--dim)" x-text="t.latest_date"></td>
-                  <template x-for="m in metrics" :key="t.ticker+'-'+m">
-                    <!-- Data + sparkline paired under the colspan=2 header -->
-                    <td :class="decileClass(t.metrics?.[m]?.today_decile)"
-                        style="border-left:1px solid rgba(255,255,255,.06)">
-                      <div style="display:flex;align-items:center;gap:8px">
-                        <div style="white-space:nowrap;min-width:120px">
-                          <span class="decile-badge"
-                                x-text="t.metrics?.[m]?.today_decile != null ? 'D' + t.metrics[m].today_decile : '—'"></span>
-                          <span class="pct-text"
-                                x-text="t.metrics?.[m]?.today_percentile != null ? t.metrics[m].today_percentile + '%' : ''"></span>
-                          <span class="avg-ret-text"
-                                :style="(todayAvgRet(t.metrics?.[m]) || 0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
-                                x-text="todayAvgRet(t.metrics?.[m]) != null ? (todayAvgRet(t.metrics[m]) >= 0 ? '+' : '') + todayAvgRet(t.metrics[m]).toFixed(2) + '%' : ''"></span>
-                        </div>
-                        <div style="width:180px;height:60px;flex-shrink:0">
-                          <canvas :id="'spark-' + t.ticker + '-' + m"
-                                  style="width:100%!important;height:100%!important"></canvas>
-                        </div>
-                      </div>
-                    </td>
-                  </template>
-                </tr>
-              </template>
-            </tbody>
-          </table>
+            </template>
+          </tbody>
+        </table>
+      </template>
+      <div class="empty-hint" x-show="!triggers.length">
+        No signals defined yet — click <strong>+ New Signal</strong> to create your first trigger.
+      </div>
+    </div><!-- /section 1 -->
+
+
+    <!-- ══ SECTION 2: Today's Signals ════════════════════════════════════ -->
+    <div class="sig-section">
+      <div class="sig-section-hdr">
+        <span class="sig-section-title">Today's Signals</span>
+        <div class="firing-controls">
+          <input class="form-input" type="date" x-model="firingDate"
+                 style="font-size:11px;padding:3px 8px;width:140px"
+                 @change="loadFiring()">
+          <button class="btn-sm" @click="loadFiring()">Refresh</button>
+          <span class="loading-hint" x-show="firingLoading">Loading…</span>
+        </div>
+        <span class="sig-section-sub" x-show="!firingLoading && firingResults.length"
+              x-text="firingResults.filter(r=>r.firing).length + ' firing of ' + firingResults.length"></span>
+      </div>
+
+      <div x-show="!firingLoading && !firingResults.length && triggers.length > 0" class="empty-hint">
+        Loading signal data…
+      </div>
+      <div x-show="!triggers.length" class="empty-hint">
+        Create triggers above to see firing signals here.
+      </div>
+
+      <div class="firing-grid">
+        <template x-for="r in sortedFiring" :key="r.trigger.id">
+          <div class="firing-card" :class="{ on: r.firing }">
+            <div class="card-top">
+              <div class="card-title">
+                <span class="color-dot" :style="'background:' + (r.trigger.color || '#3498db')"></span>
+                <span x-text="r.trigger.name"></span>
+                <span class="fire-badge" :class="{ on: r.firing, off: !r.firing }"
+                      x-text="r.firing ? 'FIRING' : 'IDLE'"></span>
+              </div>
+              <button class="btn-cal" x-show="r.firing && r.current_date"
+                      @click="addToCalendar(r.trigger.id, r.current_date)">
+                + Calendar
+              </button>
+            </div>
+
+            <div class="card-meta">
+              <b x-text="r.trigger.ticker"></b>
+              &nbsp;·&nbsp;<span x-text="r.trigger.metric" style="font-family:monospace;font-size:10px"></span>
+              &nbsp;·&nbsp;<span x-text="r.trigger.outcome"></span>
+              &nbsp;·&nbsp;fires when <span style="font-family:monospace" x-text="rangeText(r.trigger)"></span>
+            </div>
+
+            <div class="card-val" x-show="r.current_val != null">
+              Current value: <b x-text="r.current_val?.toFixed(4)"></b>
+              <span style="color:var(--dim);font-size:10px;margin-left:4px"
+                    x-text="'(Bin ' + r.today_bin + '/20 · as of ' + r.current_date + ')'"></span>
+            </div>
+            <div class="card-val" x-show="r.error && !r.current_val"
+                 style="color:var(--dim);font-size:11px" x-text="r.error || ''"></div>
+
+            <div class="mini-wrap">
+              <canvas :id="'mini-' + r.trigger.id"
+                      style="width:100%!important;height:100%!important"></canvas>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div><!-- /section 2 -->
+
+
+    <!-- ══ SECTION 3: Open Positions Calendar ══════════════════════════ -->
+    <div class="sig-section">
+      <div class="sig-section-hdr">
+        <span class="sig-section-title">Open Positions Calendar</span>
+        <span class="sig-section-sub" x-text="calEntries.length ? calEntries.length + ' trades' : 'No trades added'"></span>
+        <span class="loading-hint" x-show="calLoading" style="margin-left:8px">Loading…</span>
+      </div>
+
+      <div class="empty-hint" x-show="!calLoading && !calEntries.length">
+        Click <strong>+ Calendar</strong> on a firing signal above to add a trade.
+      </div>
+
+      <div class="gantt-outer" x-show="calEntries.length > 0">
+        <!-- Header: date ticks -->
+        <div class="gantt-hdr-row">
+          <div class="gantt-label" style="border-bottom:1px solid var(--border)"></div>
+          <div class="gantt-hdr-area" style="border-bottom:1px solid var(--border);margin-bottom:0">
+            <template x-for="tick in ganttHeaderTicks" :key="tick.pct">
+              <div class="gantt-tick" :style="'left:' + tick.pct + '%'" x-text="tick.label"></div>
+            </template>
+          </div>
         </div>
 
-        <!-- Co-occurrence matrix -->
-        <div class="cooc-section">
-          <div style="font-size:13px;color:var(--text);font-weight:700;margin-bottom:8px">
-            Signal Co-occurrence
-            <span style="font-weight:400;color:var(--dim);font-size:11px">
-              — % of days two tickers land in the same decile together (low = independent)
-            </span>
-          </div>
-          <div class="cooc-controls">
-            <span style="font-size:10px;color:var(--dim)">Metric:</span>
-            <select x-model="coocMetric"
-                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:11px;padding:3px 6px;border-radius:3px">
-              <template x-for="m in metrics" :key="'cooc-'+m">
-                <option :value="m" x-text="metricShort(m)"></option>
-              </template>
-            </select>
-            <span style="font-size:10px;color:var(--dim)">Decile:</span>
-            <select x-model.number="coocDecile"
-                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:11px;padding:3px 6px;border-radius:3px">
-              <option value="1">D1 (lowest)</option>
-              <option value="2">D2</option>
-              <option value="9">D9</option>
-              <option value="10">D10 (highest)</option>
-            </select>
-            <button @click="loadCooccurrence()"
-                    style="background:rgba(52,152,219,.1);border:1px solid rgba(52,152,219,.2);
-                           color:#3498db;font-size:11px;padding:4px 12px;border-radius:3px;cursor:pointer">
-              Load
-            </button>
-            <span x-show="coocLoading" style="color:var(--dim);font-size:10px">Loading…</span>
-          </div>
-
-          <template x-if="coocData && coocData.tickers">
-            <div class="cooc-wrap">
-              <table class="cooc-table">
-                <thead>
-                  <tr>
-                    <th></th>
-                    <template x-for="tk in coocData.tickers" :key="'ch-'+tk">
-                      <th x-text="tk" style="font-size:8px;writing-mode:vertical-rl;
-                                             text-orientation:mixed;height:60px"></th>
-                    </template>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-for="ta in coocData.tickers" :key="'cr-'+ta">
-                    <tr>
-                      <th x-text="ta" style="text-align:left"></th>
-                      <template x-for="tb in coocData.tickers" :key="'cv-'+ta+tb">
-                        <td :style="ta === tb ? 'background:#333' : coocColor(coocData.matrix?.[ta]?.[tb] || 0)"
-                            x-text="ta === tb ? '—' : (coocData.matrix?.[ta]?.[tb]?.toFixed(0) || '0') + '%'">
-                        </td>
-                      </template>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
+        <!-- Rows -->
+        <template x-for="(entry, idx) in calEntries" :key="entry.id">
+          <div>
+            <div class="gantt-row">
+              <div class="gantt-label">
+                <span class="gantt-label-name"
+                      :title="entry.name + ' (' + entry.ticker + ')'"
+                      x-text="entry.name + ' (' + entry.ticker + ')'"></span>
+                <button class="btn-remove" @click="removeFromCalendar(entry.id)" title="Remove">×</button>
+              </div>
+              <div class="gantt-bar-area">
+                <!-- Today line -->
+                <div class="gantt-today" :style="ganttTodayStyle" x-show="idx === 0"></div>
+                <div class="gantt-bar" :style="barStyle(entry)"
+                     :title="entry.name + ' · ' + entry.entry_date + ' → ' + (entry.exit_date || '?')"></div>
+              </div>
             </div>
+            <div class="gantt-row-sep"></div>
+          </div>
+        </template>
+
+        <!-- Legend row -->
+        <div style="margin-top:6px;padding-left:194px;font-size:10px;color:var(--dim)">
+          <template x-for="entry in calEntries" :key="'leg-'+entry.id">
+            <span style="margin-right:12px">
+              <span class="color-dot" :style="'background:' + (entry.color || '#3498db')"></span>
+              <span x-text="entry.name + ' (' + entry.outcome + ')'"></span>
+            </span>
           </template>
         </div>
       </div>
-    </template>
-  </div>
+    </div><!-- /section 3 -->
+
+  </div><!-- /sig-body -->
 </body>
 </html>

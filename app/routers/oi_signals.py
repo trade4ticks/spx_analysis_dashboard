@@ -1,202 +1,319 @@
-"""OI Signals 'Today' page — daily signal dashboard for all tickers."""
+"""OI Signals — trigger definitions, firing status, and position calendar."""
 import math
-from collections import defaultdict
+import re
+from datetime import date as _date, timedelta
+from typing import Optional
 
 import numpy as np
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
-from app.db import get_oi_pool
+from app.db import get_pool, get_oi_pool
 
 router = APIRouter(tags=["oi_signals"])
 
-_METRICS = [
-    "zscore_oi_above_below_ratio_3m_pc",
-    "zscore_oi_weighted_all_div_spot_3m_pc",
-    "d1_oi_weighted_all_div_spot_change_pc",
-]
+_DDL = """
+CREATE TABLE IF NOT EXISTS oi_signal_triggers (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    metric      TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    min_val     REAL,
+    max_val     REAL,
+    color       TEXT DEFAULT '#3498db',
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS oi_signal_calendar (
+    id          SERIAL PRIMARY KEY,
+    trigger_id  INTEGER REFERENCES oi_signal_triggers(id) ON DELETE CASCADE,
+    entry_date  DATE NOT NULL,
+    added_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(trigger_id, entry_date)
+);
+"""
 
-_OUTCOME = "ret_1d_fwd_oc"
+
+def _parse_horizon(outcome: str) -> int:
+    m = re.search(r'(\d+)', outcome)
+    return int(m.group(1)) if m else 1
 
 
-@router.get("/data")
-async def get_signal_data(pool=Depends(get_oi_pool)):
-    """
-    For every ticker: compute historical decile avg returns per metric,
-    and where today's value falls (as percentile + decile bucket).
-    Returns one payload for the entire page.
-    """
-    if pool is None:
-        return {"error": "OI database not configured", "tickers": []}
+async def _ensure_tables(pool):
+    async with pool.acquire() as conn:
+        await conn.execute(_DDL)
 
-    cols = list(dict.fromkeys(["trade_date"] + _METRICS + [_OUTCOME]))
-    col_sql = ", ".join(cols)
 
+class TriggerIn(BaseModel):
+    name: str
+    ticker: str
+    metric: str
+    outcome: str
+    min_val: Optional[float] = None
+    max_val: Optional[float] = None
+    color: str = '#3498db'
+
+
+class CalendarIn(BaseModel):
+    trigger_id: int
+    entry_date: str
+
+
+@router.get("/triggers")
+async def list_triggers(pool=Depends(get_pool)):
+    await _ensure_tables(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, {col_sql} FROM daily_features ORDER BY ticker, trade_date"
-        )
+            "SELECT id, name, ticker, metric, outcome, min_val, max_val, color "
+            "FROM oi_signal_triggers ORDER BY created_at")
+    return [dict(r) for r in rows]
 
-    # Group by ticker
-    by_ticker: dict[str, list] = defaultdict(list)
-    for r in rows:
-        by_ticker[r["ticker"]].append(dict(r))
 
-    result_tickers = []
+@router.post("/triggers")
+async def create_trigger(body: TriggerIn, pool=Depends(get_pool)):
+    await _ensure_tables(pool)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO oi_signal_triggers (name, ticker, metric, outcome, min_val, max_val, color) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7) "
+            "RETURNING id, name, ticker, metric, outcome, min_val, max_val, color",
+            body.name, body.ticker, body.metric, body.outcome,
+            body.min_val, body.max_val, body.color)
+    return dict(row)
 
-    for ticker in sorted(by_ticker.keys()):
-        t_rows = by_ticker[ticker]
-        if len(t_rows) < 30:
+
+@router.put("/triggers/{tid}")
+async def update_trigger(tid: int, body: TriggerIn, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE oi_signal_triggers SET name=$1, ticker=$2, metric=$3, outcome=$4, "
+            "min_val=$5, max_val=$6, color=$7 WHERE id=$8 "
+            "RETURNING id, name, ticker, metric, outcome, min_val, max_val, color",
+            body.name, body.ticker, body.metric, body.outcome,
+            body.min_val, body.max_val, body.color, tid)
+    if not row:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    return dict(row)
+
+
+@router.delete("/triggers/{tid}")
+async def delete_trigger(tid: int, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM oi_signal_triggers WHERE id=$1", tid)
+    return {"ok": True}
+
+
+@router.get("/firing")
+async def get_firing(
+    date: Optional[str] = Query(None),
+    pool=Depends(get_pool),
+    oi_pool=Depends(get_oi_pool),
+):
+    """
+    For each trigger: check if it fires on the given date (defaults to latest available).
+    Returns 20-bin distribution + today's bin for mini chart.
+    """
+    await _ensure_tables(pool)
+    if not oi_pool:
+        return {"error": "OI database not configured", "results": []}
+
+    async with pool.acquire() as conn:
+        triggers = await conn.fetch(
+            "SELECT id, name, ticker, metric, outcome, min_val, max_val, color "
+            "FROM oi_signal_triggers ORDER BY created_at")
+
+    if not triggers:
+        return {"date": date, "results": []}
+
+    n_bins = 20
+    results = []
+
+    for t in triggers:
+        ticker = t["ticker"]
+        metric = t["metric"]
+        outcome = t["outcome"]
+        min_val = t["min_val"]
+        max_val = t["max_val"]
+
+        try:
+            async with oi_pool.acquire() as conn:
+                if date:
+                    d = _date.fromisoformat(date)
+                    rows = await conn.fetch(
+                        f"SELECT {metric}, {outcome} FROM daily_features "
+                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
+                        f"AND trade_date <= $2 ORDER BY trade_date",
+                        ticker, d)
+                    cur = await conn.fetchrow(
+                        f"SELECT trade_date, {metric} FROM daily_features "
+                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND trade_date <= $2 "
+                        f"ORDER BY trade_date DESC LIMIT 1",
+                        ticker, d)
+                else:
+                    rows = await conn.fetch(
+                        f"SELECT {metric}, {outcome} FROM daily_features "
+                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
+                        f"ORDER BY trade_date",
+                        ticker)
+                    cur = await conn.fetchrow(
+                        f"SELECT trade_date, {metric} FROM daily_features "
+                        f"WHERE ticker=$1 AND {metric} IS NOT NULL "
+                        f"ORDER BY trade_date DESC LIMIT 1",
+                        ticker)
+        except Exception as e:
+            results.append({"trigger": dict(t), "error": str(e), "firing": False})
             continue
 
-        ticker_data = {"ticker": ticker, "n_days": len(t_rows), "metrics": {}}
-        latest = t_rows[-1]
-
-        for metric in _METRICS:
-            # Get valid (metric, outcome) pairs
-            valid = []
-            for r in t_rows:
-                mv = r.get(metric)
-                ov = r.get(_OUTCOME)
-                if mv is None or ov is None:
-                    continue
-                try:
-                    mf, of = float(mv), float(ov)
-                except (ValueError, TypeError):
-                    continue
-                if math.isnan(mf) or math.isnan(of):
-                    continue
-                valid.append((mf, of))
-
-            if len(valid) < 30:
-                ticker_data["metrics"][metric] = {"error": "insufficient data", "n": len(valid)}
+        valid = []
+        for r in rows:
+            try:
+                mv, ov = float(r[metric]), float(r[outcome])
+                if not (math.isnan(mv) or math.isnan(ov)):
+                    valid.append((mv, ov))
+            except (ValueError, TypeError):
                 continue
 
-            # Sort by metric value, bucket into deciles
-            sorted_pairs = sorted(valid, key=lambda p: p[0])
-            n = len(sorted_pairs)
-            n_buckets = 10
-            buckets = [[] for _ in range(n_buckets)]
-            bucket_ranges = [[] for _ in range(n_buckets)]
-            for i, (mv, ov) in enumerate(sorted_pairs):
-                b = min(int(i / n * n_buckets), n_buckets - 1)
-                buckets[b].append(ov)
-                bucket_ranges[b].append(mv)
+        if len(valid) < 20:
+            results.append({
+                "trigger": dict(t),
+                "error": f"insufficient data (n={len(valid)})",
+                "firing": False,
+                "bins": [],
+            })
+            continue
 
-            decile_stats = []
-            for i, (rets, vals) in enumerate(zip(buckets, bucket_ranges)):
-                if not rets:
-                    decile_stats.append(None)
-                    continue
+        sorted_pairs = sorted(valid, key=lambda p: p[0])
+        n = len(sorted_pairs)
+        bins_data = [[] for _ in range(n_bins)]
+        bin_mvals = [[] for _ in range(n_bins)]
+        for i, (mv, ov) in enumerate(sorted_pairs):
+            b = min(int(i / n * n_bins), n_bins - 1)
+            bins_data[b].append(ov)
+            bin_mvals[b].append(mv)
+
+        bin_stats = []
+        for i, (rets, vals) in enumerate(zip(bins_data, bin_mvals)):
+            if rets:
                 a = np.array(rets)
-                decile_stats.append({
-                    "bucket": i + 1,
+                bin_stats.append({
+                    "bin": i + 1,
                     "n": len(rets),
-                    "avg_ret": round(float(a.mean()) * 100, 3),  # as percentage
+                    "avg_ret": round(float(a.mean()) * 100, 3),
                     "win_rate": round(float((a > 0).mean()) * 100, 1),
                     "min_val": round(float(min(vals)), 6),
                     "max_val": round(float(max(vals)), 6),
                 })
+            else:
+                bin_stats.append(None)
 
-            # Today's value and percentile
-            today_val = latest.get(metric)
-            today_pct = None
-            today_decile = None
-            if today_val is not None:
-                try:
-                    tv = float(today_val)
-                    if not math.isnan(tv):
-                        all_vals = [p[0] for p in sorted_pairs]
-                        today_pct = round(sum(1 for v in all_vals if v <= tv) / len(all_vals) * 100, 1)
-                        today_decile = min(int(today_pct / 10) + 1, 10)
-                except (ValueError, TypeError):
-                    pass
+        current_val = None
+        current_date = None
+        today_bin = None
+        if cur:
+            try:
+                cv = float(cur[metric])
+                if not math.isnan(cv):
+                    current_val = round(cv, 6)
+                    current_date = str(cur["trade_date"])
+                    all_sorted_vals = [p[0] for p in sorted_pairs]
+                    rank = sum(1 for v in all_sorted_vals if v < current_val)
+                    today_bin = min(int(rank / n * n_bins) + 1, n_bins)
+            except (ValueError, TypeError):
+                pass
 
-            ticker_data["metrics"][metric] = {
-                "n": n,
-                "deciles": decile_stats,
-                "today_value": round(float(today_val), 6) if today_val is not None else None,
-                "today_percentile": today_pct,
-                "today_decile": today_decile,
-            }
+        firing = False
+        if current_val is not None:
+            above_min = (min_val is None) or (current_val >= min_val)
+            below_max = (max_val is None) or (current_val <= max_val)
+            firing = above_min and below_max
 
-        ticker_data["latest_date"] = str(latest.get("trade_date", ""))
-        result_tickers.append(ticker_data)
+        results.append({
+            "trigger": dict(t),
+            "current_val": current_val,
+            "current_date": current_date,
+            "today_bin": today_bin,
+            "firing": firing,
+            "n": n,
+            "bins": bin_stats,
+        })
 
-    return {
-        "metrics": _METRICS,
-        "outcome": _OUTCOME,
-        "tickers": result_tickers,
-    }
+    return {"date": date, "results": results}
 
 
-@router.get("/cooccurrence")
-async def get_cooccurrence(
-    metric: str = Query(_METRICS[0]),
-    decile: int = Query(1, ge=1, le=10),
-    pool=Depends(get_oi_pool),
-):
-    """
-    Co-occurrence matrix: for each pair of tickers, what % of days where
-    Ticker A is in the target decile does Ticker B ALSO land in the same decile?
-    High overlap = correlated signals (redundant). Low overlap = independent.
-    """
-    if pool is None:
-        return {"error": "OI database not configured"}
-
+@router.get("/calendar")
+async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """List calendar entries with computed exit dates."""
+    await _ensure_tables(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, trade_date, {metric} FROM daily_features "
-            f"WHERE {metric} IS NOT NULL ORDER BY ticker, trade_date"
-        )
+            """SELECT c.id, c.trigger_id, c.entry_date,
+                      t.name, t.ticker, t.outcome, t.color
+               FROM oi_signal_calendar c
+               JOIN oi_signal_triggers t ON t.id = c.trigger_id
+               ORDER BY c.entry_date""")
 
-    # Group by ticker, compute decile thresholds per ticker
-    by_ticker: dict[str, list] = defaultdict(list)
-    for r in rows:
-        try:
-            v = float(r[metric])
-            if not math.isnan(v):
-                by_ticker[r["ticker"]].append((r["trade_date"], v))
-        except (ValueError, TypeError):
-            continue
+    if not rows:
+        return []
 
-    # For each ticker, find which dates are in the target decile
-    ticker_decile_dates: dict[str, set] = {}
-    tickers = sorted(by_ticker.keys())
+    if not oi_pool:
+        return [{**dict(r), "entry_date": str(r["entry_date"]), "exit_date": None} for r in rows]
 
+    tickers = list({r["ticker"] for r in rows})
+    td_by_ticker: dict = {}
     for ticker in tickers:
-        vals = by_ticker[ticker]
-        if len(vals) < 30:
-            continue
-        sorted_vals = sorted(vals, key=lambda x: x[1])
-        n = len(sorted_vals)
-        # Get dates in the target decile
-        dates_in_decile = set()
-        for i, (d, v) in enumerate(sorted_vals):
-            b = min(int(i / n * 10) + 1, 10)
-            if b == decile:
-                dates_in_decile.add(d)
-        if dates_in_decile:
-            ticker_decile_dates[ticker] = dates_in_decile
+        async with oi_pool.acquire() as conn:
+            td_rows = await conn.fetch(
+                "SELECT DISTINCT trade_date FROM daily_features WHERE ticker=$1 "
+                "ORDER BY trade_date", ticker)
+        td_by_ticker[ticker] = [r["trade_date"] for r in td_rows]
 
-    # Build co-occurrence matrix
-    active_tickers = sorted(ticker_decile_dates.keys())
-    matrix = {}
-    for ta in active_tickers:
-        dates_a = ticker_decile_dates[ta]
-        row = {}
-        for tb in active_tickers:
-            if ta == tb:
-                row[tb] = 100.0
-                continue
-            dates_b = ticker_decile_dates[tb]
-            overlap = len(dates_a & dates_b)
-            pct = round(overlap / len(dates_a) * 100, 1) if dates_a else 0
-            row[tb] = pct
-        matrix[ta] = row
+    result = []
+    for r in rows:
+        ticker = r["ticker"]
+        outcome = r["outcome"]
+        entry_date = r["entry_date"]
+        horizon = _parse_horizon(outcome)
+        td = td_by_ticker.get(ticker, [])
 
-    return {
-        "metric": metric,
-        "decile": decile,
-        "tickers": active_tickers,
-        "matrix": matrix,
-    }
+        exit_date = None
+        if td and horizon > 0:
+            try:
+                idx = next((i for i, x in enumerate(td) if x >= entry_date), None)
+                if idx is not None:
+                    exit_idx = idx + max(horizon - 1, 0)
+                    if exit_idx < len(td):
+                        exit_date = str(td[exit_idx])
+                    else:
+                        extra = exit_idx - len(td) + 1
+                        exit_date = str(td[-1] + timedelta(days=int(extra * 1.4)))
+            except Exception:
+                pass
+
+        result.append({**dict(r), "entry_date": str(entry_date), "exit_date": exit_date})
+
+    return result
+
+
+@router.post("/calendar")
+async def add_calendar(body: CalendarIn, pool=Depends(get_pool)):
+    await _ensure_tables(pool)
+    entry = _date.fromisoformat(body.entry_date)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO oi_signal_calendar (trigger_id, entry_date) VALUES ($1,$2) "
+            "ON CONFLICT (trigger_id, entry_date) DO NOTHING "
+            "RETURNING id, trigger_id, entry_date",
+            body.trigger_id, entry)
+        if not row:
+            row = await conn.fetchrow(
+                "SELECT id, trigger_id, entry_date FROM oi_signal_calendar "
+                "WHERE trigger_id=$1 AND entry_date=$2",
+                body.trigger_id, entry)
+    return {"id": row["id"], "trigger_id": row["trigger_id"], "entry_date": str(row["entry_date"])}
+
+
+@router.delete("/calendar/{cid}")
+async def delete_calendar(cid: int, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM oi_signal_calendar WHERE id=$1", cid)
+    return {"ok": True}
