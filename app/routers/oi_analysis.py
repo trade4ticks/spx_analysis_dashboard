@@ -797,7 +797,8 @@ async def interaction_matrix(
     """Ranked cross-family 2F results, aggregated across tickers."""
     from research.interaction_scan import ensure_table
     await ensure_table(pool)
-    wheres = ['interaction_lift >= $1']
+    wheres = ["interaction_lift >= $1",
+              "feat_a NOT ILIKE 'spot%'", "feat_b NOT ILIKE 'spot%'"]
     params: list = [min_lift]
     if fwd_ret:
         params.append(fwd_ret)
