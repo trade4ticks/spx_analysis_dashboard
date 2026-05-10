@@ -186,6 +186,8 @@ async def analyze(
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
         spot_series = []
+        all_spot_dates = []
+        open_by_date = {}
 
     else:
         # Single-ticker mode
@@ -194,11 +196,17 @@ async def analyze(
         async with pool.acquire() as conn:
             col_check = await conn.fetch(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'daily_features' AND column_name IN ('spot_co', 'spot_close')")
+                "WHERE table_name = 'daily_features' AND column_name IN "
+                "('spot_op','spot_open','spot_co','spot_close','open','close')")
         spot_cols_found = {r["column_name"] for r in col_check}
-        spot_col = "spot_co" if "spot_co" in spot_cols_found else (
-            "spot_close" if "spot_close" in spot_cols_found else None)
-        spot_select = f", {spot_col}" if spot_col else ""
+        # Entry = open of trade_date; Exit = close of trade_date + (N-1) trading days
+        spot_open_col  = next((c for c in ('spot_op','spot_open','open')  if c in spot_cols_found), None)
+        spot_close_col = next((c for c in ('spot_co','spot_close','close') if c in spot_cols_found), None)
+        spot_select = ""
+        if spot_open_col:
+            spot_select += f", {spot_open_col}"
+        if spot_close_col and spot_close_col != spot_open_col:
+            spot_select += f", {spot_close_col}"
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -225,16 +233,28 @@ async def analyze(
         by_ticker = None  # not needed in single-ticker mode
         n_tickers_used = 1
 
+        # spot_series for chart display uses close; entry_spot uses open
+        spot_col = spot_close_col or spot_open_col  # fallback for spot_series chart
         spot_series = []
         all_spot_dates: list = []   # complete ordered trading-day list (unfiltered by metric/outcome)
-        if spot_col:
-            for r in row_dicts:
+        open_by_date: dict = {}     # trade_date → open price (for entry_spot)
+        for r in row_dicts:
+            date_s = str(r["trade_date"])
+            if spot_open_col:
+                ov = r.get(spot_open_col)
+                if ov is not None:
+                    try:
+                        open_by_date[date_s] = round(float(ov), 2)
+                    except (ValueError, TypeError):
+                        pass
+            if spot_col:
                 sv = r.get(spot_col)
                 if sv is not None:
                     try:
-                        spot_series.append({"date": str(r["trade_date"]), "value": round(float(sv), 2)})
+                        spot_series.append({"date": date_s, "value": round(float(sv), 2)})
                     except (ValueError, TypeError):
                         pass
+        if spot_col:
             # Fetch complete date list so exit_date offset is always correct
             async with pool.acquire() as conn:
                 all_dates_rows = await conn.fetch(
@@ -501,11 +521,13 @@ async def analyze(
         }
         if dec20 is not None:
             entry["decile20"] = dec20
-        if spot_by_date and date_str in spot_by_date:
-            entry["spot_entry"] = spot_by_date[date_str]
-        # Compute exit_date from complete trading-day list (avoids metric/outcome gap errors)
+        # entry_spot = open of trade_date; exit_date = trade_date + (N-1) trading days
+        if open_by_date and date_str in open_by_date:
+            entry["spot_entry"] = open_by_date[date_str]
+        elif spot_by_date and date_str in spot_by_date:
+            entry["spot_entry"] = spot_by_date[date_str]  # fallback to close if no open col
         if all_spot_date_idx and date_str in all_spot_date_idx:
-            ei = all_spot_date_idx[date_str] + horizon
+            ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
             if ei < len(all_spot_dates):
                 entry["exit_date"] = all_spot_dates[ei]
         trade_calendar.append(entry)
