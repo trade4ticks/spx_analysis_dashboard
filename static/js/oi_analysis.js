@@ -734,7 +734,9 @@ document.addEventListener('alpine:init', () => {
           `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric_x=${encodeURIComponent(this.metric)}`
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`);
+          + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`
+          + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
+          + (this.dateTo   ? `&date_to=${this.dateTo}`     : ''));
         if (r.ok) {
           const d = await r.json();
           let max = 0;
