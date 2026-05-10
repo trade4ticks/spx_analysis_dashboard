@@ -23,8 +23,8 @@ document.addEventListener('alpine:init', () => {
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
     dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
-    selectedDeciles: new Set([1, 10]),
-    selectedBins20: new Set([1, 20]),
+    // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
+    selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',  // 'concurrent' | 'non_overlapping'
     decileBins: 10,
     decileBinsData: null,
@@ -62,6 +62,7 @@ document.addEventListener('alpine:init', () => {
       this.error = null;
       this.decileBins = 10;
       this.decileBinsData = null;
+      this.selectedBins20 = new Set([1, 2, 19, 20]);
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
@@ -86,29 +87,51 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // Map a display-bucket number (1..decileBins) to the set of 20-bin indices it covers.
+    _bins20For(displayBin) {
+      const g = 20 / this.decileBins;
+      const lo = (displayBin - 1) * g + 1;
+      return Array.from({length: g}, (_, i) => lo + i);
+    },
+
+    // Derive the effective 10-bin decile set from selectedBins20 (for charts using equity_by_decile).
+    _effectiveDeciles() {
+      const s = new Set();
+      for (const b of this.selectedBins20) s.add(Math.ceil(b / 2));
+      return s;
+    },
+
+    // D1–D10 quick-buttons (hidden in 20-bin mode): toggle both 20-bin members of that decile.
     toggleDecile(d) {
-      if (this.selectedDeciles.has(d)) {
-        if (this.selectedDeciles.size > 1) this.selectedDeciles.delete(d);
+      const lo = d * 2 - 1, hi = d * 2;
+      const allOn = this.selectedBins20.has(lo) && this.selectedBins20.has(hi);
+      if (allOn) {
+        if (this.selectedBins20.size > 2) { this.selectedBins20.delete(lo); this.selectedBins20.delete(hi); }
       } else {
-        this.selectedDeciles.add(d);
+        this.selectedBins20.add(lo); this.selectedBins20.add(hi);
       }
-      this.selectedDeciles = new Set(this.selectedDeciles); // trigger reactivity
+      this.selectedBins20 = new Set(this.selectedBins20);
       this._onDecileChange();
     },
 
+    // isDecileSelected: used by D1–D10 buttons and the decile stats table row highlight.
+    isDecileSelected(d) {
+      return this.selectedBins20.has(d * 2 - 1) || this.selectedBins20.has(d * 2);
+    },
+
     selectAllDeciles() {
-      if (this.decileBins === 20) this.selectedBins20 = new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]);
-      else this.selectedDeciles = new Set([1,2,3,4,5,6,7,8,9,10]);
+      this.selectedBins20 = new Set(Array.from({length: 20}, (_, i) => i + 1));
       this._onDecileChange();
     },
     selectExtremes() {
-      if (this.decileBins === 20) this.selectedBins20 = new Set([1, 20]);
-      else this.selectedDeciles = new Set([1, 10]);
+      const g = 20 / this.decileBins;
+      const lo = Array.from({length: g}, (_, i) => i + 1);
+      const hi = Array.from({length: g}, (_, i) => 21 - g + i);
+      this.selectedBins20 = new Set([...lo, ...hi]);
       this._onDecileChange();
     },
     selectNone() {
-      if (this.decileBins === 20) this.selectedBins20 = new Set();
-      else this.selectedDeciles = new Set();
+      this.selectedBins20 = new Set();
       this._onDecileChange();
     },
 
@@ -124,7 +147,6 @@ document.addEventListener('alpine:init', () => {
       this._renderActivity();
     },
 
-    isDecileSelected(d) { return this.selectedDeciles.has(d); },
 
     setEquityMode(m) { this.equityMode = m; this._renderEquity(); this._renderDrawdown(); this._renderRollingCorr(); },
 
@@ -151,16 +173,15 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['decile']) this._charts['decile'].destroy();
 
       const bins = this.decileBins;
+      const g = 20 / bins;  // group size: bins 20→1, 10→2, 5→4
       const stats = (this.decileBinsData || this.data.decile_stats || []).filter(d => d);
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
 
-      const _has20 = !!(self.data?.trade_calendar?.[0]?.decile20);
+      // A display bucket is selected if ANY of its 20-bin members are in selectedBins20.
       const _isSelected = (d) => {
-        if (bins === 10) return self.selectedDeciles.has(d.bucket);
-        if (bins === 5)  return self.selectedDeciles.has(d.bucket*2-1) || self.selectedDeciles.has(d.bucket*2);
-        if (bins === 20) return _has20 ? self.selectedBins20.has(d.bucket)
-                                       : self.selectedDeciles.has(Math.ceil(d.bucket/2));
+        const lo = (d.bucket - 1) * g + 1;
+        for (let b = lo; b < lo + g; b++) { if (self.selectedBins20.has(b)) return true; }
         return false;
       };
 
@@ -181,33 +202,16 @@ document.addEventListener('alpine:init', () => {
           onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
-            if (bins === 10) {
-              self.toggleDecile(d.bucket);
-            } else if (bins === 5) {
-              const lo = d.bucket * 2 - 1, hi = d.bucket * 2;
-              if (self.selectedDeciles.has(lo) && self.selectedDeciles.has(hi)) {
-                self.selectedDeciles.delete(lo); self.selectedDeciles.delete(hi);
-              } else {
-                self.selectedDeciles.add(lo); self.selectedDeciles.add(hi);
-              }
-              self.selectedDeciles = new Set(self.selectedDeciles);
-              self._onDecileChange();
-            } else if (bins === 20) {
-              if (_has20) {
-                // Single-ticker: true independent 20-bin selection
-                if (self.selectedBins20.has(d.bucket)) {
-                  if (self.selectedBins20.size > 1) self.selectedBins20.delete(d.bucket);
-                } else {
-                  self.selectedBins20.add(d.bucket);
-                }
-                self.selectedBins20 = new Set(self.selectedBins20);
-              } else {
-                // ALL mode: map to parent decile
-                self.toggleDecile(Math.ceil(d.bucket / 2));
-                return; // toggleDecile calls _onDecileChange + _renderDecileBar
-              }
-              self._onDecileChange();
+            const lo = (d.bucket - 1) * g + 1;
+            const binSet = Array.from({length: g}, (_, i) => lo + i);
+            const allSelected = binSet.every(b => self.selectedBins20.has(b));
+            if (allSelected) {
+              if (self.selectedBins20.size > binSet.length) binSet.forEach(b => self.selectedBins20.delete(b));
+            } else {
+              binSet.forEach(b => self.selectedBins20.add(b));
             }
+            self.selectedBins20 = new Set(self.selectedBins20);
+            self._onDecileChange();
             self._renderDecileBar();
           },
           plugins: {
@@ -234,59 +238,54 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _computeDecile5Bins() {
-      const ds = (this.data?.decile_stats || []).filter(Boolean);
+    // Aggregate decile_stats_20 (always 20 bins) into n display groups.
+    _computeDecileNBins(n) {
+      const ds20 = (this.data?.decile_stats_20 || []).filter(Boolean);
+      if (!ds20.length) return null;
+      const g = 20 / n;
       const bins = [];
-      for (let i = 0; i < 5; i++) {
-        const d1 = ds.find(d => d.bucket === i*2+1) || {};
-        const d2 = ds.find(d => d.bucket === i*2+2) || {};
-        const n1 = d1.n || 0, n2 = d2.n || 0, n = n1 + n2;
-        if (!n) continue;
+      for (let i = 0; i < n; i++) {
+        const group = ds20.slice(i * g, (i + 1) * g).filter(Boolean);
+        if (!group.length) { bins.push(null); continue; }
+        const totalN = group.reduce((a, d) => a + d.n, 0);
+        if (!totalN) { bins.push(null); continue; }
         bins.push({
           bucket:   i + 1,
-          n,
-          avg_ret:  ((d1.avg_ret||0)*n1 + (d2.avg_ret||0)*n2) / n,
-          win_rate: ((d1.win_rate||0)*n1 + (d2.win_rate||0)*n2) / n,
-          sharpe:   ((d1.sharpe||0) + (d2.sharpe||0)) / 2,
-          std_dev:  ((d1.std_dev||0) + (d2.std_dev||0)) / 2,
-          min_val:  d1.min_val, max_val: d2.max_val ?? d1.max_val,
+          n:        totalN,
+          avg_ret:  group.reduce((a, d) => a + d.avg_ret * d.n, 0) / totalN,
+          win_rate: group.reduce((a, d) => a + d.win_rate * d.n, 0) / totalN,
+          sharpe:   group.reduce((a, d) => a + (d.sharpe || 0), 0) / group.length,
+          std_dev:  group.reduce((a, d) => a + (d.std_dev || 0), 0) / group.length,
+          min_val:  group[0].min_val,
+          max_val:  group[group.length - 1].max_val,
         });
       }
       return bins;
     },
 
-    async setDecileBins(n) {
+    setDecileBins(n) {
       if (!this.data) return;
       this.decileBins = n;
-      if (n === 5) {
-        this.decileBinsData = this._computeDecile5Bins();
-      } else if (n === 10) {
-        this.decileBinsData = null;
-        this.selectedDeciles = new Set([1, 10]);
-      } else {
-        this.selectedBins20 = new Set([1, 20]);
-        try {
-          const r = await fetch(
-            `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
-            + `&metric=${encodeURIComponent(this.metric)}`
-            + `&outcome=${encodeURIComponent(this.outcome)}&bins=20`
-            + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
-            + (this.dateTo ? `&date_to=${this.dateTo}` : ''));
-          if (r.ok) { const d = await r.json(); this.decileBinsData = d.buckets || null; }
-        } catch (_) {}
-      }
+      // Reset selection to the two extremes at the new granularity
+      const g = 20 / n;
+      const lo = Array.from({length: g}, (_, i) => i + 1);
+      const hi = Array.from({length: g}, (_, i) => 21 - g + i);
+      this.selectedBins20 = new Set([...lo, ...hi]);
+      // Bar chart data always derived from decile_stats_20
+      this.decileBinsData = n === 10 ? null : this._computeDecileNBins(n);
       this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
       this._renderDOW();
+      this._renderActivity();
     },
 
-    _getEquity20Curve(bin, mode) {
+    // Core equity curve builder from any trade_calendar subset.
+    _getEquityCurveFromCal(cal, mode) {
       const horizon = this.data.horizon || 1;
-      const cal = (this.data.trade_calendar || []).filter(c => c.decile20 === bin);
       if (!cal.length) return { points: [], n_trades: 0, cum_return: 0, win_rate: 0 };
       const sorted = cal.slice().sort((a, b) => a.date.localeCompare(b.date));
-      let cum = 0, peak = 0, wins = 0, lastDate = null;
+      let cum = 0, wins = 0, lastDate = null;
       const points = [];
       for (const c of sorted) {
         if (mode === 'non_overlapping' && lastDate !== null) {
@@ -295,7 +294,6 @@ document.addEventListener('alpine:init', () => {
         }
         lastDate = c.date;
         cum += c.ret;
-        peak = Math.max(peak, cum);
         if (c.ret > 0) wins++;
         points.push({ date: c.date, value: cum });
       }
@@ -303,54 +301,61 @@ document.addEventListener('alpine:init', () => {
       return { points, n_trades: n, cum_return: cum, win_rate: n ? wins / n : 0 };
     },
 
+    _getEquity20Curve(bin, mode) {
+      const cal = (this.data.trade_calendar || []).filter(c => c.decile20 === bin);
+      return this._getEquityCurveFromCal(cal, mode);
+    },
+
     _renderEquity() {
       const el = document.getElementById('chart-equity');
       if (!el || !this.data) return;
       if (this._charts['equity']) this._charts['equity'].destroy();
 
-      const use20 = this.decileBins === 20 && !!(this.data.trade_calendar?.[0]?.decile20);
-      const selectedKeys = use20 ? this.selectedBins20 : this.selectedDeciles;
-      const binLabel = use20 ? 'B' : 'D';
-
-      let eqData;
-      if (use20) {
-        eqData = {};
-        for (const bin of selectedKeys) {
-          eqData[bin] = {
-            concurrent:      this._getEquity20Curve(bin, 'concurrent'),
-            non_overlapping: this._getEquity20Curve(bin, 'non_overlapping'),
-          };
-        }
-      } else {
-        eqData = this.data.equity_by_decile || {};
-      }
-
+      const cal = this.data.trade_calendar || [];
+      const has20 = !!(cal[0]?.decile20);
+      const g = 20 / this.decileBins;
+      const binLabel = this.decileBins === 20 ? 'B' : 'D';
       const spotSeries = this.data.spot_series || [];
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
 
-      // Build a master timeline from spot (dense) — all other datasets map onto this
-      const timeline = spotSeries.length > 0
-        ? spotSeries.map(s => s.date)
-        : [];  // fallback: build from first equity dataset
+      // Which display buckets are selected?
+      const selectedDisplayBuckets = new Set();
+      for (const b of this.selectedBins20) selectedDisplayBuckets.add(Math.ceil(b / g));
 
-      // If no spot, use the longest equity curve dates as timeline
+      // Build equity curve per display bucket
+      const eqData = {};
+      for (const db of selectedDisplayBuckets) {
+        if (has20) {
+          const lo = (db - 1) * g + 1, hi = db * g;
+          const binCal = cal.filter(c => c.decile20 >= lo && c.decile20 <= hi);
+          eqData[db] = {
+            concurrent:      this._getEquityCurveFromCal(binCal, 'concurrent'),
+            non_overlapping: this._getEquityCurveFromCal(binCal, 'non_overlapping'),
+          };
+        } else {
+          // Fallback: server-side equity_by_decile (10-bin only)
+          const ebd = this.data.equity_by_decile || {};
+          eqData[db] = ebd[db] || { concurrent: { points: [] }, non_overlapping: { points: [] } };
+        }
+      }
+
+      // Build timeline from spot or longest equity curve
+      const timeline = spotSeries.length > 0 ? spotSeries.map(s => s.date) : [];
       if (!timeline.length) {
         let longest = [];
-        for (const d of selectedKeys) {
-          const pts = eqData[d]?.[this.equityMode]?.points || [];
+        for (const db of selectedDisplayBuckets) {
+          const pts = eqData[db]?.[this.equityMode]?.points || [];
           if (pts.length > longest.length) longest = pts;
         }
         timeline.push(...longest.map(p => p.date));
       }
-
       const dateIndex = {};
       timeline.forEach((d, i) => dateIndex[d] = i);
 
-      // Map equity curve onto the timeline (null for dates without trades, spanGaps)
       const datasets = [];
-      for (const d of selectedKeys) {
-        const eq = eqData[d]?.[this.equityMode];
+      for (const db of selectedDisplayBuckets) {
+        const eq = eqData[db]?.[this.equityMode];
         if (!eq?.points?.length) continue;
         const mapped = new Array(timeline.length).fill(null);
         for (const p of eq.points) {
@@ -358,21 +363,19 @@ document.addEventListener('alpine:init', () => {
           if (idx !== undefined) mapped[idx] = p.value * 100;
         }
         datasets.push({
-          label: `${binLabel}${d}`,
+          label: `${binLabel}${db}`,
           data: mapped,
-          borderColor: colors[(d-1) % colors.length],
+          borderColor: colors[(db - 1) % colors.length],
           backgroundColor: 'transparent',
-          borderWidth: 1.5, pointRadius: 0, tension: 0.1,
-          spanGaps: true,
+          borderWidth: 1.5, pointRadius: 0, tension: 0.1, spanGaps: true,
         });
       }
 
-      // Aggregate line — sum all trades from all selected bins (additive portfolio)
-      if (selectedKeys.size >= 2) {
-        const selArr = Array.from(selectedKeys);
-        // Build a carried-forward cumulative for each decile across the full timeline
-        const carried = selArr.map(d => {
-          const pts = eqData[d]?.[this.equityMode]?.points || [];
+      // Aggregate line
+      if (selectedDisplayBuckets.size >= 2) {
+        const selArr = Array.from(selectedDisplayBuckets);
+        const carried = selArr.map(db => {
+          const pts = eqData[db]?.[this.equityMode]?.points || [];
           const valByDate = {};
           for (const p of pts) valByDate[p.date] = p.value;
           const arr = new Array(timeline.length).fill(null);
@@ -383,39 +386,29 @@ document.addEventListener('alpine:init', () => {
           }
           return arr;
         });
-
-        // Sum all deciles at each point — combined portfolio of all selected decile trades
-        const mapped = timeline.map((_, i) => {
-          const sum = carried.reduce((a, c) => a + c[i], 0);
-          return sum * 100;
-        });
-
+        const mapped = timeline.map((_, i) => carried.reduce((a, c) => a + c[i], 0) * 100);
         datasets.push({
           label: 'Aggregate', data: mapped,
           borderColor: '#fff', backgroundColor: 'transparent',
-          borderWidth: 2.5, pointRadius: 0, tension: 0.1,
-          borderDash: [6, 3],
+          borderWidth: 2.5, pointRadius: 0, tension: 0.1, borderDash: [6, 3],
         });
       }
 
-      // Spot overlay
       if (spotSeries.length > 0) {
         datasets.push({
-          label: 'Spot Price',
-          data: spotSeries.map(s => s.value),
+          label: 'Spot Price', data: spotSeries.map(s => s.value),
           borderColor: 'rgba(255,255,255,0.15)', backgroundColor: 'transparent',
-          borderWidth: 1, pointRadius: 0, tension: 0.1,
-          yAxisID: 'y1',
+          borderWidth: 1, pointRadius: 0, tension: 0.1, yAxisID: 'y1',
         });
       }
 
       this._charts['equity'] = new Chart(el, {
         type: 'line',
-        data: { labels: timeline.map(d => d?.slice(0,7)), datasets },
+        data: { labels: timeline.map(d => d?.slice(0, 7)), datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { labels: { color:'#aaa', font:{size:10} } },
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)',
               borderColor: '#444', borderWidth: 1,
@@ -428,11 +421,11 @@ document.addEventListener('alpine:init', () => {
             x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(0) + '%' },
-                 title: { display:true, text:'Cum Return %', color:'#888', font:{size:9} } },
+                 title: { display: true, text: 'Cum Return %', color: '#888', font: { size: 9 } } },
             y1: { display: spotSeries.length > 0, position: 'right',
                   grid: { drawOnChartArea: false },
-                  ticks: { color:'rgba(255,255,255,0.2)', font:{size:8} },
-                  title: { display:true, text:'Spot', color:'rgba(255,255,255,0.2)', font:{size:8} } },
+                  ticks: { color: 'rgba(255,255,255,0.2)', font: { size: 8 } },
+                  title: { display: true, text: 'Spot', color: 'rgba(255,255,255,0.2)', font: { size: 8 } } },
           },
         },
       });
@@ -444,12 +437,9 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['yearly']) this._charts['yearly'].destroy();
 
       const cal = this.data.trade_calendar || [];
-      const use20y = this.decileBins === 20 && !!(cal[0]?.decile20);
-      const selDecY = use20y ? this.selectedBins20 : this.selectedDeciles;
-      const decFieldY = use20y ? 'decile20' : 'decile';
-      // Filter to selected deciles/bins, group by year
-      const filtered = selDecY.size > 0
-        ? cal.filter(c => selDecY.has(c[decFieldY]))
+      const has20y = !!(cal[0]?.decile20);
+      const filtered = has20y && this.selectedBins20.size > 0
+        ? cal.filter(c => this.selectedBins20.has(c.decile20))
         : cal;
       const byYear = {};
       for (const c of filtered) {
@@ -462,8 +452,10 @@ document.addEventListener('alpine:init', () => {
         const r = byYear[yr].rets;
         return r.length ? r.reduce((a,b) => a+b, 0) / r.length * 100 : 0;
       });
-      const _lbl = use20y ? 'B' : 'D';
-      const decLabel = selDecY.size > 0 ? Array.from(selDecY).sort((a,b)=>a-b).map(d=>_lbl+d).join('+') : 'All';
+      const g_y = 20 / this.decileBins;
+      const _lbl = this.decileBins === 20 ? 'B' : 'D';
+      const selDispY = new Set([...this.selectedBins20].map(b => Math.ceil(b / g_y)));
+      const decLabel = selDispY.size > 0 ? Array.from(selDispY).sort((a,b)=>a-b).map(d=>_lbl+d).join('+') : 'All';
 
       this._charts['yearly'] = new Chart(el, {
         type: 'bar',
@@ -596,14 +588,14 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['drawdown']) this._charts['drawdown'].destroy();
 
       const eqData = this.data.equity_by_decile;
+      const effDec = this._effectiveDeciles();
       const spotSeries = this.data.spot_series || [];
       const colors = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c',
                        '#3498db','#9b59b6','#e84393','#fd79a8','#636e72'];
 
-      // Reuse the spot timeline for consistent x-axis
       const timeline = spotSeries.length > 0 ? spotSeries.map(s => s.date) : [];
       if (!timeline.length) {
-        for (const d of this.selectedDeciles) {
+        for (const d of effDec) {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
           if (pts.length > timeline.length) { timeline.length = 0; timeline.push(...pts.map(p => p.date)); }
         }
@@ -612,7 +604,7 @@ document.addEventListener('alpine:init', () => {
       timeline.forEach((d, i) => dateIndex[d] = i);
 
       const datasets = [];
-      for (const d of this.selectedDeciles) {
+      for (const d of effDec) {
         const eq = eqData[d]?.[this.equityMode];
         if (!eq?.points?.length) continue;
         // Compute drawdown then map onto timeline
@@ -636,9 +628,8 @@ document.addEventListener('alpine:init', () => {
         });
       }
 
-      // Aggregate drawdown — carry forward last known value per decile, average all
-      if (this.selectedDeciles.size >= 2) {
-        const selArr = Array.from(this.selectedDeciles);
+      if (effDec.size >= 2) {
+        const selArr = Array.from(effDec);
         // Build a carried-forward cumulative for each decile across the full timeline
         const carried = selArr.map(d => {
           const pts = eqData[d]?.[this.equityMode]?.points || [];
@@ -872,12 +863,13 @@ document.addEventListener('alpine:init', () => {
       if (!el || !this.data?.decile_stats) return;
       if (this._charts['dist']) this._charts['dist'].destroy();
 
+      const effDec2 = this._effectiveDeciles();
       const allRets = [];
       const selRets = [];
       for (const d of (this.data.decile_stats || [])) {
         if (!d?.returns) continue;
         allRets.push(...d.returns.map(r => r * 100));
-        if (this.selectedDeciles.has(d.bucket)) {
+        if (effDec2.has(d.bucket)) {
           selRets.push(...d.returns.map(r => r * 100));
         }
       }
@@ -901,8 +893,8 @@ document.addEventListener('alpine:init', () => {
         if (b >= 0) selCounts[b]++;
       }
 
-      const decLabel = this.selectedDeciles.size > 0
-        ? Array.from(this.selectedDeciles).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'None';
+      const decLabel = effDec2.size > 0
+        ? Array.from(effDec2).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'None';
 
       this._charts['dist'] = new Chart(el, {
         type: 'bar',
@@ -937,8 +929,10 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['calendar']) this._charts['calendar'].destroy();
 
       const cal = this.data.trade_calendar || [];
-      const selDec = this.selectedDeciles;
-      const filtered = selDec.size > 0 ? cal.filter(c => selDec.has(c.decile)) : cal;
+      const has20c = !!(cal[0]?.decile20);
+      const filtered = has20c && this.selectedBins20.size > 0
+        ? cal.filter(c => this.selectedBins20.has(c.decile20))
+        : cal;
 
       // Group by year × month
       const byYM = {};
@@ -1007,11 +1001,9 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['dow']) this._charts['dow'].destroy();
 
       const dowNames = ['Mon','Tue','Wed','Thu','Fri'];
-      const use20d = this.decileBins === 20 && !!(this.data.dow_data?.[0]?.decile20);
-      const selDecD = use20d ? this.selectedBins20 : this.selectedDeciles;
-      const decFieldD = use20d ? 'decile20' : 'decile';
-      const filtered = selDecD.size > 0
-        ? this.data.dow_data.filter(d => selDecD.has(d[decFieldD]))
+      const has20d = !!(this.data.dow_data?.[0]?.decile20);
+      const filtered = has20d && this.selectedBins20.size > 0
+        ? this.data.dow_data.filter(d => this.selectedBins20.has(d.decile20))
         : this.data.dow_data;
 
       const byDow = {};
@@ -1100,10 +1092,10 @@ document.addEventListener('alpine:init', () => {
       const cal = this.data.trade_calendar || [];
       if (!cal.length) return;
 
-      const use20a = this.decileBins === 20 && !!(cal[0]?.decile20);
-      const selDec = use20a ? this.selectedBins20 : this.selectedDeciles;
-      const decField = use20a ? 'decile20' : 'decile';
-      const filtered = selDec.size > 0 ? cal.filter(c => selDec.has(c[decField])) : cal;
+      const has20a = !!(cal[0]?.decile20);
+      const filtered = has20a && this.selectedBins20.size > 0
+        ? cal.filter(c => this.selectedBins20.has(c.decile20))
+        : cal;
       if (!filtered.length) return;
 
       const horizon = this.data.horizon || 1;

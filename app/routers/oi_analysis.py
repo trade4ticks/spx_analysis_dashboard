@@ -60,6 +60,28 @@ def _bucket_pairs_per_ticker(by_ticker, n=10):
     return buckets
 
 
+def _compute_bucket_stats(buckets: list) -> list:
+    """Compute per-bucket stats for any list of buckets (10-bin or 20-bin)."""
+    result = []
+    for i, bucket in enumerate(buckets):
+        if not bucket:
+            result.append(None)
+            continue
+        ys = np.array([p[1] for p in bucket])
+        xs = [p[0] for p in bucket]
+        result.append({
+            "bucket":   i + 1,
+            "n":        len(bucket),
+            "avg_ret":  round(float(ys.mean()), 6),
+            "win_rate": round(float((ys > 0).mean()), 4),
+            "std_dev":  round(float(ys.std()), 6),
+            "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
+            "min_val":  round(float(min(xs)), 6),
+            "max_val":  round(float(max(xs)), 6),
+        })
+    return result
+
+
 def _parse_horizon(col_name: str) -> int:
     import re
     m = re.search(r'(\d+)d', col_name)
@@ -161,6 +183,7 @@ async def analyze(
                 pair_to_dec20[id(p)] = bin_idx + 1
         pairs_decile20 = [pair_to_dec20.get(id(pd[0]), 0) for pd in pairs_with_d]
 
+        decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
         spot_series = []
 
@@ -186,6 +209,7 @@ async def analyze(
         pairs = _clean_pairs(row_dicts, metric, outcome)
 
         buckets = _bucket_pairs(pairs, 10)
+        buckets_20 = _bucket_pairs(pairs, 20)
 
         # Build decile assignments from flat rank order
         sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
@@ -197,6 +221,7 @@ async def analyze(
         pairs_decile   = [dm[i]   for i in range(len(pairs))]
         pairs_decile20 = [dm20[i] for i in range(len(pairs))]
 
+        decile_stats_20 = _compute_bucket_stats(buckets_20)
         by_ticker = None  # not needed in single-ticker mode
         n_tickers_used = 1
 
@@ -237,6 +262,7 @@ async def analyze(
             "max_val":  round(float(max(xs)), 6),
             "returns":  [round(float(y), 6) for y in ys],
         })
+    # decile_stats_20 already computed above (same bucketing as trade_calendar.decile20)
 
     # ── Correlations ─────────────────────────────────────────────────────
     if is_all and by_ticker:
@@ -492,6 +518,7 @@ async def analyze(
 
         # Decile data
         "decile_stats":     decile_stats,
+        "decile_stats_20":  decile_stats_20,
         "equity_by_decile": equity_by_decile,
 
         # Time series

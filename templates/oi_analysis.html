@@ -107,7 +107,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=20"></script>
+  <script src="/static/js/oi_analysis.js?v=21"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -468,7 +468,7 @@
               </thead>
               <tbody>
                 <template x-for="d in (data.decile_stats || []).filter(x => x)" :key="d.bucket">
-                  <tr :style="selectedDeciles.has(d.bucket) ? 'background:rgba(52,152,219,.08)' : ''">
+                  <tr :style="isDecileSelected(d.bucket) ? 'background:rgba(52,152,219,.08)' : ''">
                     <td style="font-weight:700" x-text="'D' + d.bucket"></td>
                     <td class="num" x-text="d.n"></td>
                     <td class="num" :style="d.avg_ret >= 0 ? 'color:#3498db' : 'color:#e84393'"
