@@ -650,10 +650,10 @@
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
             <template x-for="m in smMeta.metrics" :key="m">
-              <label class="if-pill" :class="{ on: ifSelectedMetrics.includes(m) }">
-                <input type="checkbox" :value="m" x-model="ifSelectedMetrics" style="display:none">
-                <span x-text="m"></span>
-              </label>
+              <span class="if-pill"
+                    :class="{ on: $data.ifSelectedMetrics.includes(m) }"
+                    @click="$data.ifSelectedMetrics = $data.ifSelectedMetrics.includes(m) ? $data.ifSelectedMetrics.filter(x => x !== m) : [...$data.ifSelectedMetrics, m]"
+                    x-text="m"></span>
             </template>
           </div>
           <div style="display:flex;align-items:center;gap:10px">
