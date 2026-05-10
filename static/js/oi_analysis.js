@@ -121,6 +121,7 @@ document.addEventListener('alpine:init', () => {
       this._renderReturnDist();
       this._renderTradeCalendar();
       this._renderDOW();
+      this._renderActivity();
     },
 
     isDecileSelected(d) { return this.selectedDeciles.has(d); },
@@ -1090,21 +1091,47 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Trade activity: entries/open per day ────────────────────────────
+    // ── Trade activity: entries/open per day (computed client-side from trade_calendar) ──
     _renderActivity() {
       const el = document.getElementById('chart-activity');
-      if (!el || !this.data?.trades_activity?.length) return;
+      if (!el || !this.data?.trade_calendar) return;
       if (this._charts['activity']) this._charts['activity'].destroy();
 
-      const act = this.data.trades_activity;
-      const dates   = act.map(a => a.date);
-      const entered = act.map(a => a.entered);
-      const open    = act.map(a => a.open);
+      const cal = this.data.trade_calendar || [];
+      if (!cal.length) return;
+
+      const use20a = this.decileBins === 20 && !!(cal[0]?.decile20);
+      const selDec = use20a ? this.selectedBins20 : this.selectedDeciles;
+      const decField = use20a ? 'decile20' : 'decile';
+      const filtered = selDec.size > 0 ? cal.filter(c => selDec.has(c[decField])) : cal;
+      if (!filtered.length) return;
+
+      const horizon = this.data.horizon || 1;
+      const horizonCalDays = Math.round(horizon * 1.4);
+
+      // Count entries per date
+      const entriesByDate = {};
+      for (const c of filtered) {
+        entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
+      }
+      const allDates = Object.keys(entriesByDate).sort();
+      const dateMs = allDates.map(d => new Date(d).getTime());
+      const entered = allDates.map(d => entriesByDate[d]);
+
+      // Count open positions: entries within the past horizonCalDays calendar days of each date
+      const open = allDates.map((_, i) => {
+        const cutoffMs = dateMs[i] - horizonCalDays * 86400000;
+        let count = 0;
+        for (let j = i; j >= 0 && dateMs[j] >= cutoffMs; j--) {
+          count += entriesByDate[allDates[j]];
+        }
+        return count;
+      });
 
       this._charts['activity'] = new Chart(el, {
         type: 'bar',
         data: {
-          labels: dates.map(d => d.slice(0,7)),
+          labels: allDates.map(d => d.slice(0, 7)),
           datasets: [
             {
               type: 'line',
@@ -1114,7 +1141,6 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(46,204,113,0.08)',
               fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5,
               order: 1,
-              yAxisID: 'y',
             },
             {
               type: 'bar',
@@ -1123,19 +1149,18 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(52,152,219,0.7)',
               barThickness: 2,
               order: 2,
-              yAxisID: 'y',
             },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { labels: { color:'#aaa', font:{size:10} } },
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
             tooltip: {
-              backgroundColor: 'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1,
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               mode: 'index', intersect: false,
               callbacks: {
-                title: ctx => dates[ctx[0]?.dataIndex] || '',
+                title: ctx => allDates[ctx[0]?.dataIndex] || '',
                 label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
               },
             },
@@ -1143,8 +1168,11 @@ document.addEventListener('alpine:init', () => {
           scales: {
             ...this._darkScales(),
             x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
-            y: { ...this._darkScales().y, title: { display:true, text:'Count', color:'#888', font:{size:9} },
-                 ticks: { ...this._darkScales().y.ticks, callback: v => Math.round(v) } },
+            y: {
+              ...this._darkScales().y,
+              title: { display: true, text: 'Count', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, stepSize: 1 },
+            },
           },
         },
       });

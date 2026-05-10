@@ -144,15 +144,22 @@ async def analyze(
             by_ticker[r['ticker']].append((xf, yf, r['trade_date']))
 
         buckets = _bucket_pairs_per_ticker(by_ticker, 10)
+        buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
 
-        # pairs + parallel decile list from pre-assigned buckets
+        # pairs + parallel decile lists from pre-assigned buckets
         pairs_with_d = sorted(
             [(p, i + 1) for i, bucket in enumerate(buckets) for p in bucket],
             key=lambda x: x[0][2]  # chronological
         )
         pairs = [pd[0] for pd in pairs_with_d]
         pairs_decile = [pd[1] for pd in pairs_with_d]
-        pairs_decile20 = []  # 20-bin not supported in ALL mode
+
+        # 20-bin per-ticker normalization (same pattern, 20 buckets)
+        pair_to_dec20: dict = {}
+        for bin_idx, bucket in enumerate(buckets_20_all):
+            for p in bucket:
+                pair_to_dec20[id(p)] = bin_idx + 1
+        pairs_decile20 = [pair_to_dec20.get(id(pd[0]), 0) for pd in pairs_with_d]
 
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
         spot_series = []
@@ -444,7 +451,7 @@ async def analyze(
         dow = d.weekday() if hasattr(d, 'weekday') else 0
         date_str = str(d.date() if hasattr(d, 'date') else d)
         dec  = pairs_decile[idx]
-        dec20 = pairs_decile20[idx] if pairs_decile20 else None
+        dec20 = (pairs_decile20[idx] or None) if pairs_decile20 else None
         entry = {"year": yr, "month": mo, "date": date_str, "ret": round(y, 6), "decile": dec}
         if dec20 is not None:
             entry["decile20"] = dec20
@@ -454,30 +461,6 @@ async def analyze(
             dow_entry["decile20"] = dec20
         dow_data.append(dow_entry)
 
-    # ── Trade activity (entries + open trades per day, single-ticker only) ──
-    trades_activity = []
-    if not is_all and pairs:
-        import datetime as _dt
-        from collections import Counter as _Counter
-        date_to_entered: dict = _Counter()
-        for p in pairs:
-            d_obj = p[2].date() if hasattr(p[2], 'date') else p[2]
-            date_to_entered[str(d_obj)] += 1
-        if date_to_entered:
-            min_d = _dt.date.fromisoformat(min(date_to_entered))
-            max_d = _dt.date.fromisoformat(max(date_to_entered))
-            cur = min_d
-            while cur <= max_d:
-                if cur.weekday() < 5:  # business days only
-                    ds = str(cur)
-                    entered = date_to_entered.get(ds, 0)
-                    open_ct = sum(
-                        date_to_entered.get(str(cur - _dt.timedelta(days=k)), 0)
-                        for k in range(horizon)
-                    )
-                    if entered > 0 or open_ct > 0:
-                        trades_activity.append({"date": ds, "entered": entered, "open": open_ct})
-                cur += _dt.timedelta(days=1)
 
     # ── Today's value (single-ticker only) ───────────────────────────────
     today_val = today_pct = today_decile = None
