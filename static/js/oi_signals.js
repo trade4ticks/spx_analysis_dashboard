@@ -315,18 +315,16 @@ document.addEventListener('alpine:init', () => {
       const popupTitle  = document.getElementById('trig-spark-popup-title');
       if (!popup || !popupCanvas) return;
 
-      let popupChart    = null;
-      let currentTrigId = null;   // track which trigger is showing to avoid thrash
+      let currentTrigId = null;
       const PW = 480, PH = 150;
 
       const show = (wrap) => {
         const id = parseInt(wrap.dataset.trigId);
-        if (id === currentTrigId) return;   // already showing this trigger — skip
+        if (id === currentTrigId) return;
         currentTrigId = id;
 
         const result = this.firingResults.find(r => r.trigger.id === id);
         if (!result || !result.bins?.length) {
-          // No data for this trigger — hide any stale popup
           popup.style.display = 'none';
           return;
         }
@@ -346,14 +344,12 @@ document.addEventListener('alpine:init', () => {
         popup.style.top     = top  + 'px';
         popup.style.display = 'block';
 
-        if (popupChart) { popupChart.destroy(); popupChart = null; }
-        popupChart = _makePopupChart(popupCanvas, result, PW, PH);
+        _drawPopupChart(popupCanvas, result, PW, PH);
       };
 
       const hide = () => {
         currentTrigId = null;
         popup.style.display = 'none';
-        if (popupChart) { popupChart.destroy(); popupChart = null; }
       };
 
       document.addEventListener('mouseover', (e) => {
@@ -453,87 +449,104 @@ function _makeMiniChart(el, result) {
   });
 }
 
-// ── Popup (expanded) chart factory ────────────────────────────────────────
-function _makePopupChart(el, result, w, h) {
-  // Destroy any lingering Chart.js instance on this canvas before resizing.
-  const existing = Chart.getChart(el);
+// ── Popup chart: raw Canvas 2D (no Chart.js) ─────────────────────────────
+function _drawPopupChart(canvas, result, w, h) {
+  // Destroy any Chart.js instance that might be on this canvas from earlier
+  const existing = Chart.getChart(canvas);
   if (existing) existing.destroy();
 
-  el.width        = w;
-  el.height       = h;
-  el.style.width  = w + 'px';
-  el.style.height = h + 'px';
+  canvas.width        = w;
+  canvas.height       = h;
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
 
   const bins     = result.bins || [];
   const todayBin = result.today_bin;
-  const data     = bins.map(b => b ? +b.avg_ret.toFixed(3) : 0);
 
-  const bgColors = bins.map(b => {
+  const PL = 36, PR = 6, PT = 18, PB = 18;
+  const cw = w - PL - PR;
+  const ch = h - PT - PB;
+  const bw = cw / bins.length;
+
+  const vals = bins.map(b => b ? b.avg_ret * 100 : 0);
+  const maxV = Math.max(0, ...vals);
+  const minV = Math.min(0, ...vals);
+  const range = (maxV - minV) || 1;
+  const zeroY = PT + ch * maxV / range;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Subtle horizontal grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth   = 1;
+  const nLines = 4;
+  for (let i = 0; i <= nLines; i++) {
+    const y = PT + (ch / nLines) * i;
+    ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(w - PR, y); ctx.stroke();
+  }
+
+  // Zero line
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth   = 1;
+  ctx.beginPath(); ctx.moveTo(PL, zeroY); ctx.lineTo(w - PR, zeroY); ctx.stroke();
+
+  // Y-axis labels
+  ctx.fillStyle  = '#555';
+  ctx.font       = '8px sans-serif';
+  ctx.textAlign  = 'right';
+  ctx.textBaseline = 'middle';
+  [[maxV, PT], [0, zeroY], [minV, PT + ch]].forEach(([v, y]) => {
+    ctx.fillText(v.toFixed(1) + '%', PL - 3, y);
+  });
+
+  // Bars
+  for (let i = 0; i < bins.length; i++) {
+    const b       = bins[i];
+    const v       = b ? b.avg_ret * 100 : 0;
     const isToday = b && b.bin === todayBin;
-    const pos     = !b || b.avg_ret >= 0;
-    if (isToday) return pos ? '#3498db' : '#e84393';
-    return pos ? 'rgba(52,152,219,0.35)' : 'rgba(232,67,147,0.35)';
-  });
-  const borderColors = bins.map(b => b && b.bin === todayBin ? '#fff' : 'transparent');
-  const borderWidths = bins.map(b => b && b.bin === todayBin ? 2 : 0);
+    const pos     = v >= 0;
+    const barH    = Math.abs(v) / range * ch;
+    const x       = PL + i * bw + 1;
+    const y       = pos ? zeroY - barH : zeroY;
 
-  const todayPlugin = {
-    id: 'todayLinePopup',
-    afterDraw(chart) {
-      if (todayBin == null) return;
-      const { ctx, scales: { x } } = chart;
-      const px = x.getPixelForValue(todayBin - 1);
-      ctx.save();
-      ctx.strokeStyle = 'rgba(255,255,255,0.65)';
-      ctx.lineWidth   = 2;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(px, chart.chartArea.top);
-      ctx.lineTo(px, chart.chartArea.bottom);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // "Today" label
-      ctx.fillStyle    = 'rgba(255,255,255,0.5)';
-      ctx.font         = '9px sans-serif';
-      ctx.textAlign    = 'center';
-      ctx.fillText('today', px, chart.chartArea.top - 4);
-      ctx.restore();
-    },
-  };
+    ctx.fillStyle = isToday
+      ? (pos ? '#3498db' : '#e84393')
+      : (pos ? 'rgba(52,152,219,0.38)' : 'rgba(232,67,147,0.38)');
+    ctx.fillRect(x, y, bw - 2, Math.max(barH, 1));
 
-  return new Chart(el, {
-    type: 'bar',
-    data: {
-      labels: bins.map((b, i) => b ? `B${b.bin}` : `B${i + 1}`),
-      datasets: [{
-        data,
-        backgroundColor: bgColors,
-        borderColor:      borderColors,
-        borderWidth:      borderWidths,
-        borderSkipped:    false,
-      }],
-    },
-    options: {
-      responsive:          false,
-      maintainAspectRatio: false,
-      animation:           false,
-      plugins: {
-        legend:  { display: false },
-        tooltip: { enabled: false },
-      },
-      scales: {
-        x: {
-          ticks:  { color: '#666', font: { size: 9 } },
-          grid:   { display: false },
-          border: { display: false },
-        },
-        y: {
-          ticks:  { color: '#666', font: { size: 9 }, maxTicksLimit: 5 },
-          grid:   { color: 'rgba(255,255,255,0.07)' },
-          border: { display: false },
-        },
-      },
-    },
-    plugins: [todayPlugin],
-  });
+    if (isToday) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(x, y, bw - 2, Math.max(barH, 1));
+    }
+  }
+
+  // Today dashed vertical line + label
+  if (todayBin != null) {
+    const tx = PL + (todayBin - 0.5) * bw;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath(); ctx.moveTo(tx, PT); ctx.lineTo(tx, PT + ch); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle    = 'rgba(255,255,255,0.4)';
+    ctx.font         = '8px sans-serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('today', tx, PT - 2);
+    ctx.restore();
+  }
+
+  // X-axis bin labels every 4th bin
+  ctx.fillStyle    = '#555';
+  ctx.font         = '8px sans-serif';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i < bins.length; i += 4) {
+    ctx.fillText('B' + (i + 1), PL + i * bw + bw / 2, PT + ch + 3);
+  }
 }
