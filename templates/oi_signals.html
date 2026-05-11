@@ -80,6 +80,16 @@
     .card-val   { font-size: 12px; color: var(--dim); }
     .card-val b { color: var(--text); font-size: 14px; }
     .mini-wrap  { height: 90px; }
+    /* Inline sparkline inside the triggers table row */
+    .trig-mini-wrap {
+      position: relative;
+      width: 150px;
+      height: 36px;
+    }
+    .trig-mini-wrap canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
     .btn-cal {
       font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 4px;
       background: rgba(52,152,219,.12); border: 1px solid rgba(52,152,219,.3);
@@ -138,7 +148,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=1"></script>
+  <script src="/static/js/oi_signals.js?v=2"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -162,108 +172,7 @@
   <!-- Body -->
   <div class="sig-body">
 
-    <!-- ══ SECTION 1: Signal Triggers ══════════════════════════════════ -->
-    <div class="sig-section">
-      <div class="sig-section-hdr">
-        <span class="sig-section-title">Signal Triggers</span>
-        <span class="sig-section-sub" x-text="triggers.length + ' defined'"></span>
-        <button class="btn-sm primary" style="margin-left:auto" @click="openNewForm()">+ New Signal</button>
-      </div>
-
-      <!-- Create / Edit form -->
-      <div class="form-card" x-show="showForm" x-transition>
-        <div class="form-grid">
-          <div class="form-group">
-            <label class="form-label">Name</label>
-            <input class="form-input" x-model="editForm.name" placeholder="e.g. PCR High">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Ticker</label>
-            <select class="form-input" x-model="editForm.ticker">
-              <template x-for="t in availTickers" :key="t">
-                <option :value="t" x-text="t"></option>
-              </template>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Metric</label>
-            <select class="form-input" x-model="editForm.metric">
-              <template x-for="m in availMetrics" :key="m">
-                <option :value="m" x-text="m"></option>
-              </template>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Outcome</label>
-            <select class="form-input" x-model="editForm.outcome">
-              <template x-for="o in availOutcomes" :key="o">
-                <option :value="o" x-text="o"></option>
-              </template>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Min Value</label>
-            <input class="form-input" type="number" step="any" x-model="editForm.min_val" placeholder="(none)">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Max Value</label>
-            <input class="form-input" type="number" step="any" x-model="editForm.max_val" placeholder="(none)">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Color</label>
-            <input class="color-input" type="color" x-model="editForm.color">
-          </div>
-        </div>
-        <div class="form-actions">
-          <button class="btn-sm primary" @click="saveTrigger()" :disabled="formLoading"
-                  x-text="formLoading ? 'Saving…' : (editForm.id ? 'Update' : 'Create')"></button>
-          <button class="btn-sm" @click="showForm = false">Cancel</button>
-          <span style="font-size:10px;color:var(--dim);align-self:center">
-            Leave Min/Max blank for unbounded (fires on any value)
-          </span>
-        </div>
-      </div>
-
-      <!-- Triggers table -->
-      <template x-if="triggers.length > 0">
-        <table class="trig-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Ticker</th>
-              <th>Metric</th>
-              <th>Outcome</th>
-              <th>Fires When</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="t in triggers" :key="t.id">
-              <tr>
-                <td>
-                  <span class="color-dot" :style="'background:' + (t.color || '#3498db')"></span>
-                  <span x-text="t.name" style="font-weight:600"></span>
-                </td>
-                <td x-text="t.ticker" style="color:var(--text);font-weight:600"></td>
-                <td x-text="t.metric" style="font-size:11px;color:var(--dim);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
-                <td x-text="t.outcome"></td>
-                <td x-text="rangeText(t)" style="font-family:monospace;font-size:12px"></td>
-                <td style="white-space:nowrap">
-                  <button class="btn-sm" @click="editTrigger(t)">Edit</button>
-                  <button class="btn-sm danger" @click="deleteTrigger(t.id)" style="margin-left:4px">Del</button>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </template>
-      <div class="empty-hint" x-show="!triggers.length">
-        No signals defined yet — click <strong>+ New Signal</strong> to create your first trigger.
-      </div>
-    </div><!-- /section 1 -->
-
-
-    <!-- ══ SECTION 2: Today's Signals ════════════════════════════════════ -->
+    <!-- ══ SECTION 1: Today's Signals (firing only) ═══════════════════════ -->
     <div class="sig-section">
       <div class="sig-section-hdr">
         <span class="sig-section-title">Today's Signals</span>
@@ -275,14 +184,17 @@
           <span class="loading-hint" x-show="firingLoading">Loading…</span>
         </div>
         <span class="sig-section-sub" x-show="!firingLoading && firingResults.length"
-              x-text="firingResults.filter(r=>r.firing).length + ' firing of ' + firingResults.length"></span>
+              x-text="sortedFiring.length + ' firing of ' + firingResults.length"></span>
       </div>
 
       <div x-show="!firingLoading && !firingResults.length && triggers.length > 0" class="empty-hint">
         Loading signal data…
       </div>
+      <div x-show="!firingLoading && firingResults.length > 0 && sortedFiring.length === 0" class="empty-hint">
+        No signals firing right now. Idle triggers live in the table at the bottom.
+      </div>
       <div x-show="!triggers.length" class="empty-hint">
-        Create triggers above to see firing signals here.
+        Define triggers in the table at the bottom to see firing signals here.
       </div>
 
       <div class="firing-grid">
@@ -381,6 +293,119 @@
         </div>
       </div>
     </div><!-- /section 3 -->
+
+
+    <!-- ══ SECTION 4: Signal Triggers (CRUD + per-trigger sparkline) ═══ -->
+    <div class="sig-section">
+      <div class="sig-section-hdr">
+        <span class="sig-section-title">Signal Triggers</span>
+        <span class="sig-section-sub" x-text="triggers.length + ' defined'"></span>
+        <button class="btn-sm primary" style="margin-left:auto" @click="openNewForm()">+ New Signal</button>
+      </div>
+
+      <!-- Create / Edit form -->
+      <div class="form-card" x-show="showForm" x-transition>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Name</label>
+            <input class="form-input" x-model="editForm.name" placeholder="e.g. PCR High">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ticker</label>
+            <select class="form-input" x-model="editForm.ticker">
+              <template x-for="t in availTickers" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Metric</label>
+            <select class="form-input" x-model="editForm.metric">
+              <template x-for="m in availMetrics" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Outcome</label>
+            <select class="form-input" x-model="editForm.outcome">
+              <template x-for="o in availOutcomes" :key="o">
+                <option :value="o" x-text="o"></option>
+              </template>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Min Value</label>
+            <input class="form-input" type="number" step="any" x-model="editForm.min_val" placeholder="(none)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max Value</label>
+            <input class="form-input" type="number" step="any" x-model="editForm.max_val" placeholder="(none)">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Color</label>
+            <input class="color-input" type="color" x-model="editForm.color">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn-sm primary" @click="saveTrigger()" :disabled="formLoading"
+                  x-text="formLoading ? 'Saving…' : (editForm.id ? 'Update' : 'Create')"></button>
+          <button class="btn-sm" @click="showForm = false">Cancel</button>
+          <span style="font-size:10px;color:var(--dim);align-self:center">
+            Leave Min/Max blank for unbounded (fires on any value)
+          </span>
+        </div>
+      </div>
+
+      <!-- Triggers table — sparkline column shows the same 20-bin
+           distribution as the firing cards above, with today's bin
+           highlighted. Lets you see the regime of every trigger
+           regardless of firing state. -->
+      <template x-if="triggers.length > 0">
+        <table class="trig-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Ticker</th>
+              <th>Metric</th>
+              <th>Outcome</th>
+              <th>Fires When</th>
+              <th style="width:160px">Distribution (today highlighted)</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="t in triggers" :key="t.id">
+              <tr>
+                <td>
+                  <span class="color-dot" :style="'background:' + (t.color || '#3498db')"></span>
+                  <span x-text="t.name" style="font-weight:600"></span>
+                  <span x-show="firingByTrigger[t.id]?.firing"
+                        class="fire-badge on"
+                        style="margin-left:6px">FIRING</span>
+                </td>
+                <td x-text="t.ticker" style="color:var(--text);font-weight:600"></td>
+                <td x-text="t.metric" style="font-size:11px;color:var(--dim);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+                <td x-text="t.outcome"></td>
+                <td x-text="rangeText(t)" style="font-family:monospace;font-size:12px"></td>
+                <td>
+                  <div class="trig-mini-wrap">
+                    <canvas :id="'trig-mini-' + t.id"></canvas>
+                  </div>
+                </td>
+                <td style="white-space:nowrap">
+                  <button class="btn-sm" @click="editTrigger(t)">Edit</button>
+                  <button class="btn-sm danger" @click="deleteTrigger(t.id)" style="margin-left:4px">Del</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </template>
+      <div class="empty-hint" x-show="!triggers.length">
+        No signals defined yet — click <strong>+ New Signal</strong> to create your first trigger.
+      </div>
+    </div><!-- /section 4 -->
 
   </div><!-- /sig-body -->
 </body>

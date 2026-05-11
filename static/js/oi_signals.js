@@ -34,6 +34,9 @@ document.addEventListener('alpine:init', () => {
     calLoading: false,
     _ganttRange: { start: new Date(), end: new Date(), totalDays: 60 },
 
+    // ── Per-trigger sparkline charts (bottom triggers table) ─────────────
+    _trigMiniCharts: {},
+
     // ─────────────────────────────────────────────────────────────────────
     async init() {
       await this._loadMeta();
@@ -80,7 +83,8 @@ document.addEventListener('alpine:init', () => {
       this.editForm = {
         id: t.id, name: t.name,
         ticker: t.ticker, metric: t.metric, outcome: t.outcome,
-        min_val: t.min_val ?? '', max_val: t.max_val ?? '',
+        min_val: t.min_val != null ? this._clean(t.min_val) : '',
+        max_val: t.max_val != null ? this._clean(t.max_val) : '',
         color: t.color || '#3498db',
       };
       this.showForm = true;
@@ -121,20 +125,44 @@ document.addEventListener('alpine:init', () => {
       await this.loadCalendar();
     },
 
+    // Round-trip a stored float to its most likely "human" value. Older
+    // rows were stored as REAL (single-precision) which loses precision
+    // around 1.08 → 1.0800000429153442. Rounding to 7 significant digits
+    // recovers the user's typed value in the common case without
+    // mangling legitimately precise inputs.
+    _clean(v) {
+      if (v == null || v === '') return v;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return v;
+      return Number(n.toPrecision(7));
+    },
+
     rangeText(t) {
-      const lo = t.min_val, hi = t.max_val;
+      const lo = this._clean(t.min_val);
+      const hi = this._clean(t.max_val);
       if (lo != null && hi != null) return `${lo} – ${hi}`;
       if (lo != null) return `≥ ${lo}`;
       if (hi != null) return `≤ ${hi}`;
       return 'any';
     },
 
+    // Quick {trigger_id → firing result} lookup so the triggers-table row
+    // can show its firing badge and reuse the same bin data for its
+    // inline sparkline.
+    get firingByTrigger() {
+      const m = {};
+      for (const r of this.firingResults) m[r.trigger?.id] = r;
+      return m;
+    },
+
     // ── Firing ────────────────────────────────────────────────────────────
     async loadFiring() {
       this.firingLoading = true;
-      // Destroy existing mini charts
+      // Destroy existing mini charts (cards + trigger-row sparklines)
       for (const c of Object.values(this._miniCharts)) c.destroy();
       this._miniCharts = {};
+      for (const c of Object.values(this._trigMiniCharts || {})) c.destroy();
+      this._trigMiniCharts = {};
       try {
         const qs = this.firingDate ? `?date=${this.firingDate}` : '';
         const r = await fetch('/api/oi-signals/firing' + qs);
@@ -153,11 +181,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     get sortedFiring() {
-      return [...this.firingResults].sort((a, b) => {
-        if (a.firing && !b.firing) return -1;
-        if (!a.firing && b.firing) return 1;
-        return 0;
-      });
+      // Today's Signals section only shows the cards for triggers that are
+      // currently firing — idle ones still live in the triggers table at
+      // the bottom with their own mini chart.
+      return this.firingResults.filter(r => r.firing);
     },
 
     async _renderMiniCharts() {
@@ -165,12 +192,20 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => {
         for (const r of this.firingResults) {
           if (!r.bins || !r.bins.length) continue;
-          const el = document.getElementById('mini-' + r.trigger.id);
-          if (!el) continue;
-          if (this._miniCharts[r.trigger.id]) {
-            this._miniCharts[r.trigger.id].destroy();
+          // Firing card mini chart (top section — only renders when r.firing
+          // since the card itself is filtered).
+          const card = document.getElementById('mini-' + r.trigger.id);
+          if (card) {
+            if (this._miniCharts[r.trigger.id]) this._miniCharts[r.trigger.id].destroy();
+            this._miniCharts[r.trigger.id] = _makeMiniChart(card, r);
           }
-          this._miniCharts[r.trigger.id] = _makeMiniChart(el, r);
+          // Per-trigger row sparkline (bottom table — always renders for every
+          // trigger, firing or idle).
+          const row = document.getElementById('trig-mini-' + r.trigger.id);
+          if (row) {
+            if (this._trigMiniCharts[r.trigger.id]) this._trigMiniCharts[r.trigger.id].destroy();
+            this._trigMiniCharts[r.trigger.id] = _makeMiniChart(row, r);
+          }
         }
       }, 80);
     },

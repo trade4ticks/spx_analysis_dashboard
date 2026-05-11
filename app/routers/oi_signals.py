@@ -19,11 +19,19 @@ CREATE TABLE IF NOT EXISTS oi_signal_triggers (
     ticker      TEXT NOT NULL,
     metric      TEXT NOT NULL,
     outcome     TEXT NOT NULL,
-    min_val     REAL,
-    max_val     REAL,
+    min_val     DOUBLE PRECISION,
+    max_val     DOUBLE PRECISION,
     color       TEXT DEFAULT '#3498db',
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+-- Migrate REAL → DOUBLE PRECISION for any pre-existing tables. REAL stores
+-- only ~7 decimal digits, so values like 1.08 get round-tripped to
+-- 1.0800000429153442 on display. Widening the type is idempotent and
+-- preserves existing values; rows already affected by REAL precision loss
+-- need to be re-entered to fully recover, but new writes will be exact.
+ALTER TABLE oi_signal_triggers
+    ALTER COLUMN min_val TYPE DOUBLE PRECISION,
+    ALTER COLUMN max_val TYPE DOUBLE PRECISION;
 CREATE TABLE IF NOT EXISTS oi_signal_calendar (
     id          SERIAL PRIMARY KEY,
     trigger_id  INTEGER REFERENCES oi_signal_triggers(id) ON DELETE CASCADE,
