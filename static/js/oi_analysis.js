@@ -36,7 +36,7 @@ document.addEventListener('alpine:init', () => {
     //   'by_ticker' — pivoted: one row per ticker with n / avg_ret /
     //                 win_rate / min / max, sortable on any column.
     tradeView:    'trades',
-    tradeSortKey: 'avg_ret',
+    tradeSortKey: 'date',
     tradeSortDir: 'desc',
 
     // Data
@@ -1233,6 +1233,9 @@ document.addEventListener('alpine:init', () => {
       if (mode === 'by_ticker') {
         this.tradeSortKey = 'avg_ret';
         this.tradeSortDir = 'desc';
+      } else {
+        this.tradeSortKey = 'date';
+        this.tradeSortDir = 'desc';
       }
       this._renderTradeTable();
     },
@@ -1269,42 +1272,70 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderTradeTableFlat(headEl, bodyEl, cntEl, filtered) {
-      const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date));
+      const key = this.tradeSortKey;
+      const dir = this.tradeSortDir === 'asc' ? 1 : -1;
+      const strKeys = new Set(['date', 'ticker', 'exit_date']);
+      const sortVal = (c) => {
+        switch (key) {
+          case 'date':       return c.date       || '';
+          case 'ticker':     return c.ticker     || '';
+          case 'metric_val': return c.metric_val ?? -Infinity;
+          case 'spot_entry': return c.spot_entry ?? -Infinity;
+          case 'spot_exit':  return c.spot_exit  ?? -Infinity;
+          case 'ret':        return c.ret        ?? -Infinity;
+          case 'exit_date':  return c.exit_date  || '';
+          case 'bin':        return c.decile20   || c.decile || 0;
+          default:           return '';
+        }
+      };
+      const sorted = filtered.slice().sort((a, b) => {
+        const va = sortVal(a), vb = sortVal(b);
+        if (strKeys.has(key)) return dir * String(va).localeCompare(String(vb));
+        return dir * (va - vb);
+      });
       const LIMIT = 250;
       const rows = sorted.slice(0, LIMIT);
 
       if (cntEl) {
         cntEl.textContent = filtered.length > LIMIT
-          ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades (newest first) — export CSV for all`
+          ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades — export CSV for all`
           : `${filtered.length.toLocaleString()} trades`;
       }
-      // Column widths — sum to 100%. Tabular columns get fixed widths;
-      // the metric column flexes to absorb extra space.
+      // Column widths
       const colsEl = document.getElementById('trade-table-cols');
       if (colsEl) {
         colsEl.innerHTML = `
-          <col style="width:11%">  <!-- Date -->
-          <col style="width:9%">   <!-- Ticker -->
-          <col>                    <!-- Metric -->
-          <col style="width:11%">  <!-- Entry Spot -->
-          <col style="width:11%">  <!-- Exit Spot -->
-          <col style="width:11%">  <!-- Ret % -->
-          <col style="width:11%">  <!-- Exit Date -->
-          <col style="width:7%">   <!-- Bin -->
+          <col style="width:11%">
+          <col style="width:9%">
+          <col>
+          <col style="width:11%">
+          <col style="width:11%">
+          <col style="width:11%">
+          <col style="width:11%">
+          <col style="width:7%">
         `;
       }
+      const arrow = (k) => this.tradeSortKey === k ? (this.tradeSortDir === 'desc' ? ' ▼' : ' ▲') : '';
+      const hdr = (k, label, isNum) => {
+        const color = this.tradeSortKey === k ? '#3498db' : 'var(--dim)';
+        const cls   = isNum ? 'class="num"' : '';
+        const align = isNum ? '' : 'text-align:left;';
+        return `<th ${cls}
+                    style="${align}color:${color};font-weight:600;cursor:pointer;user-select:none"
+                    onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail:'${k}'}))">
+                  ${label}${arrow(k)}
+                </th>`;
+      };
       if (headEl) {
-        const thL = 'style="text-align:left;color:var(--dim);font-weight:600"';
-        const thR = 'class="num" style="color:var(--dim);font-weight:600"';
         headEl.innerHTML = `<tr style="border-bottom:1px solid var(--border)">
-          <th ${thL}>Date</th>
-          <th ${thL}>Ticker</th>
-          <th ${thR}>${this.metric || 'Metric'}</th>
-          <th ${thR}>Entry Spot</th>
-          <th ${thR}>Exit Spot</th>
-          <th ${thR}>Ret %</th>
-          <th ${thL}>Exit Date</th>
-          <th ${thR}>Bin</th>
+          ${hdr('date',       'Date',                  false)}
+          ${hdr('ticker',     'Ticker',                false)}
+          ${hdr('metric_val', this.metric || 'Metric', true)}
+          ${hdr('spot_entry', 'Entry Spot',            true)}
+          ${hdr('spot_exit',  'Exit Spot',             true)}
+          ${hdr('ret',        'Ret %',                 true)}
+          ${hdr('exit_date',  'Exit Date',             false)}
+          ${hdr('bin',        'Bin',                   true)}
         </tr>`;
       }
       bodyEl.innerHTML = rows.map(c => {
