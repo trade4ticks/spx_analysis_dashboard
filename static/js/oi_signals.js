@@ -310,24 +310,32 @@ document.addEventListener('alpine:init', () => {
 
     // ── Sparkline hover popup ─────────────────────────────────────────────
     _initSparkHover() {
-      const popup      = document.getElementById('trig-spark-popup');
+      const popup       = document.getElementById('trig-spark-popup');
       const popupCanvas = document.getElementById('trig-spark-popup-canvas');
       const popupTitle  = document.getElementById('trig-spark-popup-title');
       if (!popup || !popupCanvas) return;
 
-      let popupChart = null;
+      let popupChart    = null;
+      let currentTrigId = null;   // track which trigger is showing to avoid thrash
       const PW = 480, PH = 150;
 
       const show = (wrap) => {
-        const id     = parseInt(wrap.dataset.trigId);
+        const id = parseInt(wrap.dataset.trigId);
+        if (id === currentTrigId) return;   // already showing this trigger — skip
+        currentTrigId = id;
+
         const result = this.firingResults.find(r => r.trigger.id === id);
-        if (!result || !result.bins?.length) return;
+        if (!result || !result.bins?.length) {
+          // No data for this trigger — hide any stale popup
+          popup.style.display = 'none';
+          return;
+        }
 
         const rect = wrap.getBoundingClientRect();
         let left = rect.left;
         let top  = rect.bottom + 6;
         if (left + PW > window.innerWidth  - 8) left = window.innerWidth  - PW - 8;
-        if (top  + PH + 32 > window.innerHeight) top = rect.top - PH - 32;
+        if (top  + PH + 32 > window.innerHeight) top  = rect.top - PH - 32;
 
         if (popupTitle) {
           popupTitle.textContent =
@@ -343,6 +351,7 @@ document.addEventListener('alpine:init', () => {
       };
 
       const hide = () => {
+        currentTrigId = null;
         popup.style.display = 'none';
         if (popupChart) { popupChart.destroy(); popupChart = null; }
       };
@@ -446,8 +455,14 @@ function _makeMiniChart(el, result) {
 
 // ── Popup (expanded) chart factory ────────────────────────────────────────
 function _makePopupChart(el, result, w, h) {
-  el.width  = w;
-  el.height = h;
+  // Destroy any lingering Chart.js instance on this canvas before resizing.
+  const existing = Chart.getChart(el);
+  if (existing) existing.destroy();
+
+  el.width        = w;
+  el.height       = h;
+  el.style.width  = w + 'px';
+  el.style.height = h + 'px';
 
   const bins     = result.bins || [];
   const todayBin = result.today_bin;
