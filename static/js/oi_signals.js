@@ -42,6 +42,7 @@ document.addEventListener('alpine:init', () => {
       await this._loadMeta();
       await Promise.all([this.loadTriggers(), this.loadCalendar()]);
       await this.loadFiring();
+      this._initSparkHover();
     },
 
     async _loadMeta() {
@@ -306,6 +307,53 @@ document.addEventListener('alpine:init', () => {
       }
       return ticks;
     },
+
+    // ── Sparkline hover popup ─────────────────────────────────────────────
+    _initSparkHover() {
+      const popup      = document.getElementById('trig-spark-popup');
+      const popupCanvas = document.getElementById('trig-spark-popup-canvas');
+      const popupTitle  = document.getElementById('trig-spark-popup-title');
+      if (!popup || !popupCanvas) return;
+
+      let popupChart = null;
+      const PW = 480, PH = 150;
+
+      const show = (wrap) => {
+        const id     = parseInt(wrap.dataset.trigId);
+        const result = this.firingResults.find(r => r.trigger.id === id);
+        if (!result || !result.bins?.length) return;
+
+        const rect = wrap.getBoundingClientRect();
+        let left = rect.left;
+        let top  = rect.bottom + 6;
+        if (left + PW > window.innerWidth  - 8) left = window.innerWidth  - PW - 8;
+        if (top  + PH + 32 > window.innerHeight) top = rect.top - PH - 32;
+
+        if (popupTitle) {
+          popupTitle.textContent =
+            `${result.trigger.name}  ·  ${result.trigger.ticker}  ·  ${result.trigger.metric}  ·  ${result.trigger.outcome}`;
+        }
+
+        popup.style.left    = left + 'px';
+        popup.style.top     = top  + 'px';
+        popup.style.display = 'block';
+
+        if (popupChart) { popupChart.destroy(); popupChart = null; }
+        popupChart = _makePopupChart(popupCanvas, result, PW, PH);
+      };
+
+      const hide = () => {
+        popup.style.display = 'none';
+        if (popupChart) { popupChart.destroy(); popupChart = null; }
+      };
+
+      document.addEventListener('mouseover', (e) => {
+        const wrap = e.target.closest('[data-trig-id]');
+        if (wrap) show(wrap); else hide();
+      }, { passive: true });
+
+      document.addEventListener('mouseleave', hide, { passive: true });
+    },
   }));
 });
 
@@ -388,6 +436,85 @@ function _makeMiniChart(el, result) {
         y: {
           ticks:  { color: '#555', font: { size: 8 }, maxTicksLimit: 3 },
           grid:   { color: 'rgba(255,255,255,0.05)' },
+          border: { display: false },
+        },
+      },
+    },
+    plugins: [todayPlugin],
+  });
+}
+
+// ── Popup (expanded) chart factory ────────────────────────────────────────
+function _makePopupChart(el, result, w, h) {
+  el.width  = w;
+  el.height = h;
+
+  const bins     = result.bins || [];
+  const todayBin = result.today_bin;
+  const data     = bins.map(b => b ? +b.avg_ret.toFixed(3) : 0);
+
+  const bgColors = bins.map(b => {
+    const isToday = b && b.bin === todayBin;
+    const pos     = !b || b.avg_ret >= 0;
+    if (isToday) return pos ? '#3498db' : '#e84393';
+    return pos ? 'rgba(52,152,219,0.35)' : 'rgba(232,67,147,0.35)';
+  });
+  const borderColors = bins.map(b => b && b.bin === todayBin ? '#fff' : 'transparent');
+  const borderWidths = bins.map(b => b && b.bin === todayBin ? 2 : 0);
+
+  const todayPlugin = {
+    id: 'todayLinePopup',
+    afterDraw(chart) {
+      if (todayBin == null) return;
+      const { ctx, scales: { x } } = chart;
+      const px = x.getPixelForValue(todayBin - 1);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+      ctx.lineWidth   = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(px, chart.chartArea.top);
+      ctx.lineTo(px, chart.chartArea.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // "Today" label
+      ctx.fillStyle    = 'rgba(255,255,255,0.5)';
+      ctx.font         = '9px sans-serif';
+      ctx.textAlign    = 'center';
+      ctx.fillText('today', px, chart.chartArea.top - 4);
+      ctx.restore();
+    },
+  };
+
+  return new Chart(el, {
+    type: 'bar',
+    data: {
+      labels: bins.map((b, i) => b ? `B${b.bin}` : `B${i + 1}`),
+      datasets: [{
+        data,
+        backgroundColor: bgColors,
+        borderColor:      borderColors,
+        borderWidth:      borderWidths,
+        borderSkipped:    false,
+      }],
+    },
+    options: {
+      responsive:          false,
+      maintainAspectRatio: false,
+      animation:           false,
+      plugins: {
+        legend:  { display: false },
+        tooltip: { enabled: false },
+      },
+      scales: {
+        x: {
+          ticks:  { color: '#666', font: { size: 9 } },
+          grid:   { display: false },
+          border: { display: false },
+        },
+        y: {
+          ticks:  { color: '#666', font: { size: 9 }, maxTicksLimit: 5 },
+          grid:   { color: 'rgba(255,255,255,0.07)' },
           border: { display: false },
         },
       },

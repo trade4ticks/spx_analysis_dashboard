@@ -148,7 +148,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=2"></script>
+  <script src="/static/js/oi_signals.js?v=3"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -389,7 +389,7 @@
                 <td x-text="t.outcome"></td>
                 <td x-text="rangeText(t)" style="font-family:monospace;font-size:12px"></td>
                 <td>
-                  <div class="trig-mini-wrap">
+                  <div class="trig-mini-wrap" :data-trig-id="t.id">
                     <canvas :id="'trig-mini-' + t.id"></canvas>
                   </div>
                 </td>
@@ -408,5 +408,16 @@
     </div><!-- /section 4 -->
 
   </div><!-- /sig-body -->
+
+  <!-- Sparkline hover popup (fixed, outside table overflow) -->
+  <div id="trig-spark-popup" style="display:none;position:fixed;z-index:9999;pointer-events:none;
+       background:#222;border:1px solid #444;border-radius:6px;padding:8px 10px 10px;
+       box-shadow:0 8px 32px rgba(0,0,0,.75)">
+    <div id="trig-spark-popup-title"
+         style="font-size:9px;color:#666;margin-bottom:5px;white-space:nowrap;
+                overflow:hidden;text-overflow:ellipsis;max-width:480px"></div>
+    <canvas id="trig-spark-popup-canvas"></canvas>
+  </div>
+
 </body>
 </html>
