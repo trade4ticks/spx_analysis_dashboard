@@ -1278,16 +1278,33 @@ document.addEventListener('alpine:init', () => {
           ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades (newest first) — export CSV for all`
           : `${filtered.length.toLocaleString()} trades`;
       }
+      // Column widths — sum to 100%. Tabular columns get fixed widths;
+      // the metric column flexes to absorb extra space.
+      const colsEl = document.getElementById('trade-table-cols');
+      if (colsEl) {
+        colsEl.innerHTML = `
+          <col style="width:11%">  <!-- Date -->
+          <col style="width:9%">   <!-- Ticker -->
+          <col>                    <!-- Metric -->
+          <col style="width:11%">  <!-- Entry Spot -->
+          <col style="width:11%">  <!-- Exit Spot -->
+          <col style="width:11%">  <!-- Ret % -->
+          <col style="width:11%">  <!-- Exit Date -->
+          <col style="width:7%">   <!-- Bin -->
+        `;
+      }
       if (headEl) {
+        const thL = 'style="text-align:left;color:var(--dim);font-weight:600"';
+        const thR = 'class="num" style="color:var(--dim);font-weight:600"';
         headEl.innerHTML = `<tr style="border-bottom:1px solid var(--border)">
-          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Date</th>
-          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Ticker</th>
-          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">${this.metric || 'Metric'}</th>
-          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Entry Spot</th>
-          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Exit Spot</th>
-          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Ret %</th>
-          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Exit Date</th>
-          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Bin</th>
+          <th ${thL}>Date</th>
+          <th ${thL}>Ticker</th>
+          <th ${thR}>${this.metric || 'Metric'}</th>
+          <th ${thR}>Entry Spot</th>
+          <th ${thR}>Exit Spot</th>
+          <th ${thR}>Ret %</th>
+          <th ${thL}>Exit Date</th>
+          <th ${thR}>Bin</th>
         </tr>`;
       }
       bodyEl.innerHTML = rows.map(c => {
@@ -1354,22 +1371,40 @@ document.addEventListener('alpine:init', () => {
         cntEl.textContent = `${stats.length} tickers · ${filtered.length.toLocaleString()} trades · ${binsTxt}`;
       }
 
-      // Sortable headers — show an arrow on the active column.
+      // Column widths — every column gets a deterministic share so the
+      // headers and cells stay aligned regardless of content length.
+      const colsEl = document.getElementById('trade-table-cols');
+      if (colsEl) {
+        colsEl.innerHTML = `
+          <col>                    <!-- Ticker (flex) -->
+          <col style="width:11%">  <!-- N -->
+          <col style="width:18%">  <!-- Avg Ret % -->
+          <col style="width:15%">  <!-- Win Rate -->
+          <col style="width:15%">  <!-- Min Ret % -->
+          <col style="width:15%">  <!-- Max Ret % -->
+        `;
+      }
+      // Sortable headers — arrow on the active column, blue highlight.
       const arrow = (k) => this.tradeSortKey === k
         ? (this.tradeSortDir === 'desc' ? ' ▼' : ' ▲') : '';
-      const hdr = (k, label, align = 'right') =>
-        `<th style="text-align:${align};padding:3px 6px;color:${this.tradeSortKey === k ? '#3498db' : 'var(--dim)'};font-weight:600;cursor:pointer;user-select:none"
-             onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail: '${k}'}))">
-           ${label}${arrow(k)}
-         </th>`;
+      const hdr = (k, label, isNum) => {
+        const color = this.tradeSortKey === k ? '#3498db' : 'var(--dim)';
+        const cls   = isNum ? 'class="num"' : '';
+        const align = isNum ? '' : 'text-align:left;';
+        return `<th ${cls}
+                    style="${align}color:${color};font-weight:600;cursor:pointer;user-select:none"
+                    onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail:'${k}'}))">
+                  ${label}${arrow(k)}
+                </th>`;
+      };
       if (headEl) {
         headEl.innerHTML = `<tr style="border-bottom:1px solid var(--border)">
-          ${hdr('ticker',  'Ticker', 'left')}
-          ${hdr('n',       'N')}
-          ${hdr('avg_ret', 'Avg Ret %')}
-          ${hdr('win_rate','Win Rate')}
-          ${hdr('min_ret', 'Min Ret %')}
-          ${hdr('max_ret', 'Max Ret %')}
+          ${hdr('ticker',  'Ticker',    false)}
+          ${hdr('n',       'N',         true)}
+          ${hdr('avg_ret', 'Avg Ret %', true)}
+          ${hdr('win_rate','Win Rate',  true)}
+          ${hdr('min_ret', 'Min Ret %', true)}
+          ${hdr('max_ret', 'Max Ret %', true)}
         </tr>`;
       }
       bodyEl.innerHTML = stats.map(s => {

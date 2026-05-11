@@ -79,7 +79,17 @@
       padding:5px 10px; border-bottom:1px solid rgba(255,255,255,.04); color:var(--muted);
     }
     .dec-table tr:hover td { background:rgba(255,255,255,.03); }
-    .dec-table .num { text-align:right; font-variant-numeric:tabular-nums; }
+    .dec-table .num,
+    .trade-table .num,
+    .trade-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
+    /* Trade Data table — explicit layout so headers and cells stay
+       column-aligned regardless of content width. Per-view colgroup
+       overrides set the actual widths. */
+    .trade-table { table-layout:fixed; width:100%; }
+    .trade-table th, .trade-table td {
+      padding:3px 6px;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
 
     /* Fullscreen */
     .fs-btn {
@@ -107,7 +117,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=30"></script>
+  <script src="/static/js/oi_analysis.js?v=31"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -359,21 +369,13 @@
             <div class="chart-title">
               Trade Data
               <span id="trade-table-count" style="font-weight:400;font-size:9px;color:var(--dim);margin-left:6px"></span>
-              <!-- View toggle: flat per-trade rows vs grouped-by-ticker pivot.
+              <!-- View toggle — same look as the Equity Curve mode-seg.
                    The bin filter selected in the quantile pane above (D1..D10
                    or B1..B20) applies to both views, so toggling preserves
                    the current selection context. -->
-              <div style="display:inline-flex;margin-left:10px;border:1px solid var(--border);border-radius:3px;overflow:hidden">
-                <button @click="setTradeView('trades')"
-                        :style="tradeView==='trades' ? 'background:rgba(52,152,219,.2);color:#3498db' : 'background:transparent;color:var(--dim)'"
-                        style="border:none;font-size:10px;padding:2px 10px;cursor:pointer">
-                  Trades
-                </button>
-                <button @click="setTradeView('by_ticker')"
-                        :style="tradeView==='by_ticker' ? 'background:rgba(52,152,219,.2);color:#3498db' : 'background:transparent;color:var(--dim)'"
-                        style="border:none;font-size:10px;padding:2px 10px;cursor:pointer;border-left:1px solid var(--border)">
-                  By Ticker
-                </button>
+              <div class="mode-seg" style="margin-left:10px">
+                <span :class="{on: tradeView==='trades'}"    @click="setTradeView('trades')">Trades</span>
+                <span :class="{on: tradeView==='by_ticker'}" @click="setTradeView('by_ticker')">By Ticker</span>
               </div>
               <button @click="exportTradeCSV()"
                 style="margin-left:auto;background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
@@ -382,7 +384,8 @@
               </button>
             </div>
             <div style="overflow-y:auto;max-height:280px;font-size:10px">
-              <table style="width:100%;border-collapse:collapse;font-family:monospace">
+              <table class="trade-table" style="border-collapse:collapse;font-family:monospace">
+                <colgroup id="trade-table-cols"></colgroup>
                 <thead id="trade-table-head" style="position:sticky;top:0;background:var(--panel);z-index:1"></thead>
                 <tbody id="trade-table-body"></tbody>
               </table>
