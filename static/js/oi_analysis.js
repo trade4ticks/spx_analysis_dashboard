@@ -30,6 +30,15 @@ document.addEventListener('alpine:init', () => {
     decileBins: 10,
     decileBinsData: null,
 
+    // Trade Data table view mode + sort. The bin filter is shared with
+    // the flat trade view via selectedBins20 already.
+    //   'trades'    — flat per-trade list (default; existing behaviour)
+    //   'by_ticker' — pivoted: one row per ticker with n / avg_ret /
+    //                 win_rate / min / max, sortable on any column.
+    tradeView:    'trades',
+    tradeSortKey: 'avg_ret',
+    tradeSortDir: 'desc',
+
     // Data
     data: null,
     loading: false,
@@ -38,6 +47,10 @@ document.addEventListener('alpine:init', () => {
     fsChartId: null,
 
     async init() {
+      // Trade-table column sort: header onclick dispatches a CustomEvent
+      // since the headers are built via innerHTML (no Alpine bindings).
+      document.addEventListener('tradeSort', (e) => this._tradeSort(e.detail));
+
       const [tkRes, colRes] = await Promise.all([
         fetch('/api/oi-analysis/tickers'),
         fetch('/api/oi-analysis/columns'),
@@ -1212,17 +1225,50 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Trade data table ──────────────────────────────────────────────────
+    setTradeView(mode) {
+      if (mode !== 'trades' && mode !== 'by_ticker') return;
+      if (this.tradeView === mode) return;
+      this.tradeView = mode;
+      // Reset sort to a sensible default for each view.
+      if (mode === 'by_ticker') {
+        this.tradeSortKey = 'avg_ret';
+        this.tradeSortDir = 'desc';
+      }
+      this._renderTradeTable();
+    },
+
+    _tradeSort(key) {
+      // Click a column header to sort. Same key flips direction.
+      if (this.tradeSortKey === key) {
+        this.tradeSortDir = this.tradeSortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        this.tradeSortKey = key;
+        this.tradeSortDir = 'desc';
+      }
+      this._renderTradeTable();
+    },
+
     _renderTradeTable() {
-      const el = document.getElementById('trade-table-body');
-      const cntEl = document.getElementById('trade-table-count');
-      if (!el || !this.data?.trade_calendar) return;
+      const headEl = document.getElementById('trade-table-head');
+      const bodyEl = document.getElementById('trade-table-body');
+      const cntEl  = document.getElementById('trade-table-count');
+      if (!bodyEl || !this.data?.trade_calendar) return;
 
       const cal = this.data.trade_calendar || [];
       const has20 = !!(cal[0]?.decile20);
+      // Bin filter from the decile pane above — same filter both views see.
       const filtered = has20 && this.selectedBins20.size > 0
         ? cal.filter(c => this.selectedBins20.has(c.decile20))
         : cal;
 
+      if (this.tradeView === 'by_ticker') {
+        this._renderTradeTableByTicker(headEl, bodyEl, cntEl, filtered);
+      } else {
+        this._renderTradeTableFlat(headEl, bodyEl, cntEl, filtered);
+      }
+    },
+
+    _renderTradeTableFlat(headEl, bodyEl, cntEl, filtered) {
       const sorted = filtered.slice().sort((a, b) => b.date.localeCompare(a.date));
       const LIMIT = 250;
       const rows = sorted.slice(0, LIMIT);
@@ -1232,23 +1278,115 @@ document.addEventListener('alpine:init', () => {
           ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades (newest first) — export CSV for all`
           : `${filtered.length.toLocaleString()} trades`;
       }
-
-      el.innerHTML = rows.map(c => {
+      if (headEl) {
+        headEl.innerHTML = `<tr style="border-bottom:1px solid var(--border)">
+          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Date</th>
+          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Ticker</th>
+          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">${this.metric || 'Metric'}</th>
+          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Entry Spot</th>
+          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Exit Spot</th>
+          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Ret %</th>
+          <th style="text-align:left;padding:3px 6px;color:var(--dim);font-weight:600">Exit Date</th>
+          <th style="text-align:right;padding:3px 6px;color:var(--dim);font-weight:600">Bin</th>
+        </tr>`;
+      }
+      bodyEl.innerHTML = rows.map(c => {
         const entrySpot = c.spot_entry ?? null;
-        const exitSpot = c.spot_exit ?? null;
-        const exitDate = c.exit_date || '';
-        const retPct = (c.ret * 100).toFixed(3);
-        const sign = c.ret >= 0 ? '+' : '';
-        const color = c.ret >= 0 ? '#3498db' : '#e84393';
+        const exitSpot  = c.spot_exit  ?? null;
+        const exitDate  = c.exit_date  || '';
+        const retPct    = (c.ret * 100).toFixed(3);
+        const sign      = c.ret >= 0 ? '+' : '';
+        const color     = c.ret >= 0 ? '#3498db' : '#e84393';
         return `<tr>
           <td>${c.date}</td>
           <td>${c.ticker || ''}</td>
           <td class="num">${c.metric_val != null ? c.metric_val.toFixed(4) : ''}</td>
           <td class="num">${entrySpot != null ? entrySpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
-          <td class="num">${exitSpot != null ? exitSpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
+          <td class="num">${exitSpot  != null ? exitSpot .toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
           <td class="num" style="color:${color}">${sign}${retPct}%</td>
           <td>${exitDate}</td>
           <td class="num" style="color:#888">${c.decile20 || c.decile || ''}</td>
+        </tr>`;
+      }).join('');
+    },
+
+    _renderTradeTableByTicker(headEl, bodyEl, cntEl, filtered) {
+      // Group filtered rows by ticker → aggregate. Sort by selected column.
+      const groups = new Map();
+      for (const c of filtered) {
+        const k = c.ticker || '(unknown)';
+        let g = groups.get(k);
+        if (!g) { g = []; groups.set(k, g); }
+        g.push(c.ret);
+      }
+      const stats = [];
+      for (const [ticker, rets] of groups.entries()) {
+        const n = rets.length;
+        if (!n) continue;
+        let sum = 0, wins = 0, minV = rets[0], maxV = rets[0];
+        for (const r of rets) {
+          sum += r;
+          if (r > 0) wins += 1;
+          if (r < minV) minV = r;
+          if (r > maxV) maxV = r;
+        }
+        stats.push({
+          ticker,
+          n,
+          avg_ret:  sum / n,
+          win_rate: wins / n,
+          min_ret:  minV,
+          max_ret:  maxV,
+        });
+      }
+      const dir = this.tradeSortDir === 'asc' ? 1 : -1;
+      const key = this.tradeSortKey;
+      stats.sort((a, b) => {
+        const va = a[key], vb = b[key];
+        if (key === 'ticker') return dir * String(va).localeCompare(String(vb));
+        return dir * ((va ?? 0) - (vb ?? 0));
+      });
+
+      if (cntEl) {
+        const binsTxt = (this.selectedBins20.size === 0)
+          ? 'all bins'
+          : `${this.selectedBins20.size} bin${this.selectedBins20.size > 1 ? 's' : ''} selected`;
+        cntEl.textContent = `${stats.length} tickers · ${filtered.length.toLocaleString()} trades · ${binsTxt}`;
+      }
+
+      // Sortable headers — show an arrow on the active column.
+      const arrow = (k) => this.tradeSortKey === k
+        ? (this.tradeSortDir === 'desc' ? ' ▼' : ' ▲') : '';
+      const hdr = (k, label, align = 'right') =>
+        `<th style="text-align:${align};padding:3px 6px;color:${this.tradeSortKey === k ? '#3498db' : 'var(--dim)'};font-weight:600;cursor:pointer;user-select:none"
+             onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail: '${k}'}))">
+           ${label}${arrow(k)}
+         </th>`;
+      if (headEl) {
+        headEl.innerHTML = `<tr style="border-bottom:1px solid var(--border)">
+          ${hdr('ticker',  'Ticker', 'left')}
+          ${hdr('n',       'N')}
+          ${hdr('avg_ret', 'Avg Ret %')}
+          ${hdr('win_rate','Win Rate')}
+          ${hdr('min_ret', 'Min Ret %')}
+          ${hdr('max_ret', 'Max Ret %')}
+        </tr>`;
+      }
+      bodyEl.innerHTML = stats.map(s => {
+        const avgPct  = (s.avg_ret * 100).toFixed(3);
+        const minPct  = (s.min_ret * 100).toFixed(2);
+        const maxPct  = (s.max_ret * 100).toFixed(2);
+        const avgSign = s.avg_ret >= 0 ? '+' : '';
+        const avgClr  = s.avg_ret >= 0 ? '#3498db' : '#e84393';
+        const wrPct   = (s.win_rate * 100).toFixed(1);
+        const wrClr   = s.win_rate >= 0.5 ? '#3498db' : '#e84393';
+        return `<tr>
+          <td style="font-weight:600">${s.ticker}</td>
+          <td class="num">${s.n}</td>
+          <td class="num" style="color:${avgClr};font-weight:600">${avgSign}${avgPct}%</td>
+          <td class="num" style="color:${wrClr}">${wrPct}%</td>
+          <td class="num" style="color:#888">${minPct}%</td>
+          <td class="num" style="color:#888">${maxPct}%</td>
         </tr>`;
       }).join('');
     },
