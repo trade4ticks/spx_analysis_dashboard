@@ -648,14 +648,22 @@ async def heatmap_2d(
     date_to: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
-    """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell."""
+    """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell.
+
+    ALL mode applies per-ticker independent quantile binning on each axis
+    then pools, matching the main quantile chart's methodology. Each
+    ticker contributes evenly to every cell rather than the universe's
+    absolute-range membership being dominated by tickers with naturally
+    extreme magnitudes.
+    """
     if not pool:
         return {"error": "OI database not configured"}
 
+    is_all = (ticker == "ALL")
     date_conditions = ""
     params: list = []
     p = 1
-    if ticker != "ALL":
+    if not is_all:
         date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
     if date_from:
         from datetime import date as _date
@@ -664,13 +672,82 @@ async def heatmap_2d(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
+    # Always select ticker so ALL mode can group per-ticker.
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT {metric_x}, {metric_y}, {outcome} FROM daily_features "
+            f"SELECT ticker, {metric_x}, {metric_y}, {outcome} FROM daily_features "
             f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL"
             f"{date_conditions} ORDER BY trade_date",
             *params)
 
+    if is_all:
+        # Group by ticker, independently bin each axis per ticker, then pool
+        # the joint membership into the global grid.
+        by_ticker: dict = defaultdict(list)
+        for r in rows:
+            try:
+                xv, yv, ov = float(r[metric_x]), float(r[metric_y]), float(r[outcome])
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
+                continue
+            by_ticker[r['ticker']].append((xv, yv, ov))
+
+        cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
+        n_tickers_used = 0
+        total_n = 0
+        for items in by_ticker.values():
+            if len(items) < bins:
+                continue
+            n_tickers_used += 1
+            n_t = len(items)
+            # Assign x-bin via rank, independently for this ticker.
+            order_x = sorted(range(n_t), key=lambda k: items[k][0])
+            x_bin = [0] * n_t
+            for rank, k in enumerate(order_x):
+                x_bin[k] = min(int(rank / n_t * bins), bins - 1)
+            # Assign y-bin via rank, independently.
+            order_y = sorted(range(n_t), key=lambda k: items[k][1])
+            y_bin = [0] * n_t
+            for rank, k in enumerate(order_y):
+                y_bin[k] = min(int(rank / n_t * bins), bins - 1)
+            # Pool outcomes into joint cells.
+            for k in range(n_t):
+                cell_rets[x_bin[k]][y_bin[k]].append(items[k][2])
+                total_n += 1
+
+        if total_n < 50:
+            return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
+
+        grid = []
+        for i in range(bins):
+            row = []
+            for j in range(bins):
+                rets = cell_rets[i][j]
+                if len(rets) >= 5:
+                    a = np.array(rets)
+                    row.append({
+                        "avg_ret":  round(float(a.mean()), 6),
+                        "win_rate": round(float((a > 0).mean()), 4),
+                        "n":        int(len(rets)),
+                    })
+                else:
+                    row.append(None)
+            grid.append(row)
+        # Bin labels — absolute ranges don't make sense in ALL mode since
+        # each ticker has its own boundaries. Use B1..BN.
+        x_labels = [f"B{i+1}" for i in range(bins)]
+        y_labels = [f"B{j+1}" for j in range(bins)]
+        return {
+            "metric_x":  metric_x, "metric_y": metric_y, "outcome": outcome,
+            "bins":      bins, "n": total_n,
+            "x_labels":  x_labels, "y_labels": y_labels,
+            "grid":      grid,
+            "per_ticker": True,
+            "n_tickers": n_tickers_used,
+        }
+
+    # Single-ticker mode — original absolute-percentile binning.
     valid = []
     for r in rows:
         try:
@@ -698,12 +775,12 @@ async def heatmap_2d(
         for j in range(bins):
             mask = ((xs >= x_edges[i]) & (xs < x_edges[i+1]) &
                     (ys >= y_edges[j]) & (ys < y_edges[j+1]))
-            cell_rets = os_[mask]
-            if len(cell_rets) >= 5:
+            crets = os_[mask]
+            if len(crets) >= 5:
                 row.append({
-                    "avg_ret": round(float(cell_rets.mean()), 6),
-                    "win_rate": round(float((cell_rets > 0).mean()), 4),
-                    "n": int(len(cell_rets)),
+                    "avg_ret":  round(float(crets.mean()), 6),
+                    "win_rate": round(float((crets > 0).mean()), 4),
+                    "n":        int(len(crets)),
                 })
             else:
                 row.append(None)
@@ -713,10 +790,11 @@ async def heatmap_2d(
     y_labels = [f"{y_edges[j]:.2f}–{y_edges[j+1]:.2f}" for j in range(bins)]
 
     return {
-        "metric_x": metric_x, "metric_y": metric_y, "outcome": outcome,
-        "bins": bins, "n": len(valid),
-        "x_labels": x_labels, "y_labels": y_labels,
-        "grid": grid,
+        "metric_x":  metric_x, "metric_y": metric_y, "outcome": outcome,
+        "bins":      bins, "n": len(valid),
+        "x_labels":  x_labels, "y_labels": y_labels,
+        "grid":      grid,
+        "per_ticker": False,
     }
 
 
@@ -730,14 +808,20 @@ async def metric_bins_1d(
     date_to: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
-    """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze)."""
+    """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze).
+
+    ALL mode uses per-ticker independent quantile binning then pools, matching
+    the main quantile chart's methodology. Single-ticker mode uses ordinary
+    percentile binning.
+    """
     if not pool:
         return {"error": "OI database not configured"}
+    is_all = (ticker == "ALL")
     bins = max(2, min(20, bins))
     date_conditions = ""
     params: list = []
     p = 1
-    if ticker != "ALL":
+    if not is_all:
         date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
     if date_from:
         from datetime import date as _date
@@ -745,16 +829,41 @@ async def metric_bins_1d(
     if date_to:
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
+
+    # Always select ticker so ALL mode can group; ignored in single-ticker.
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT {metric}, {outcome} FROM daily_features "
+            f"SELECT ticker, {metric}, {outcome} FROM daily_features "
             f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
             f"ORDER BY trade_date", *params)
-    row_dicts = [dict(r) for r in rows]
-    pairs = _clean_pairs(row_dicts, metric, outcome)
-    if len(pairs) < 20:
-        return {"error": f"Insufficient data: {len(pairs)} rows"}
-    buckets_data = _bucket_pairs(pairs, bins)
+
+    if is_all:
+        # Per-ticker independent quantile, then pool. Tickers with < `bins`
+        # observations are excluded (same rule as _bucket_pairs_per_ticker).
+        by_ticker: dict = defaultdict(list)
+        for r in rows:
+            xv, yv = r.get(metric), r.get(outcome)
+            if xv is None or yv is None:
+                continue
+            try:
+                xf, yf = float(xv), float(yv)
+            except (ValueError, TypeError):
+                continue
+            if math.isnan(xf) or math.isnan(yf):
+                continue
+            by_ticker[r['ticker']].append((xf, yf, r['trade_date']))
+        buckets_data = _bucket_pairs_per_ticker(by_ticker, bins)
+        total_n = sum(len(b) for b in buckets_data)
+        if total_n < 20:
+            return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
+    else:
+        row_dicts = [dict(r) for r in rows]
+        pairs = _clean_pairs(row_dicts, metric, outcome)
+        if len(pairs) < 20:
+            return {"error": f"Insufficient data: {len(pairs)} rows"}
+        buckets_data = _bucket_pairs(pairs, bins)
+        total_n = len(pairs)
+
     result = []
     for i, bucket in enumerate(buckets_data):
         if not bucket:
@@ -769,10 +878,20 @@ async def metric_bins_1d(
             "win_rate": round(float((ys > 0).mean()), 4),
             "std_dev":  round(float(ys.std()), 6),
             "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
+            # In ALL mode these are the cross-ticker min/max of observed
+            # values that landed in this bin — informational only, since
+            # each ticker's bin boundary is independent.
             "min_val":  round(float(min(xs)), 6),
             "max_val":  round(float(max(xs)), 6),
         })
-    return {"metric": metric, "outcome": outcome, "bins": bins, "n": len(pairs), "buckets": result}
+    return {
+        "metric":     metric,
+        "outcome":    outcome,
+        "bins":       bins,
+        "n":          total_n,
+        "buckets":    result,
+        "per_ticker": is_all,
+    }
 
 
 @router.get("/ai-summary")
