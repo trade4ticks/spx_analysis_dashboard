@@ -693,6 +693,8 @@ async def heatmap_2d(
                 continue
             by_ticker[r['ticker']].append((xv, yv, ov))
 
+        # cell_rets[y_bin][x_bin] — outer index is y so the returned grid
+        # matches the frontend's grid[iy][ix] convention (rows=y, cols=x).
         cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
         n_tickers_used = 0
         total_n = 0
@@ -711,19 +713,20 @@ async def heatmap_2d(
             y_bin = [0] * n_t
             for rank, k in enumerate(order_y):
                 y_bin[k] = min(int(rank / n_t * bins), bins - 1)
-            # Pool outcomes into joint cells.
+            # Pool outcomes into joint cells. Index order: [y][x] so rows
+            # represent the y-axis bins as the template expects.
             for k in range(n_t):
-                cell_rets[x_bin[k]][y_bin[k]].append(items[k][2])
+                cell_rets[y_bin[k]][x_bin[k]].append(items[k][2])
                 total_n += 1
 
         if total_n < 50:
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
 
         grid = []
-        for i in range(bins):
+        for iy in range(bins):
             row = []
-            for j in range(bins):
-                rets = cell_rets[i][j]
+            for ix in range(bins):
+                rets = cell_rets[iy][ix]
                 if len(rets) >= 5:
                     a = np.array(rets)
                     row.append({
@@ -769,12 +772,13 @@ async def heatmap_2d(
     x_edges[-1] += 1e-9
     y_edges[-1] += 1e-9
 
+    # grid[iy][ix] so rows match the y-axis (matches frontend convention).
     grid = []
-    for i in range(bins):
+    for iy in range(bins):
         row = []
-        for j in range(bins):
-            mask = ((xs >= x_edges[i]) & (xs < x_edges[i+1]) &
-                    (ys >= y_edges[j]) & (ys < y_edges[j+1]))
+        for ix in range(bins):
+            mask = ((xs >= x_edges[ix]) & (xs < x_edges[ix+1]) &
+                    (ys >= y_edges[iy]) & (ys < y_edges[iy+1]))
             crets = os_[mask]
             if len(crets) >= 5:
                 row.append({

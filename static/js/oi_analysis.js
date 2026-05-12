@@ -797,9 +797,18 @@ document.addEventListener('alpine:init', () => {
       this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
     },
 
-    _renderHmBar1d(canvasId, buckets, title) {
+    _renderHmBar1d(canvasId, buckets, title, retries = 6) {
       const el = document.getElementById(canvasId);
-      if (!el || !buckets?.length) return;
+      if (!el) {
+        // Canvas lives inside an x-if that's flipped by heatmapData changes
+        // — Alpine sometimes hasn't (re)created it yet by the time we get
+        // here. Retry briefly so the chart actually paints.
+        if (retries > 0) {
+          setTimeout(() => this._renderHmBar1d(canvasId, buckets, title, retries - 1), 80);
+        }
+        return;
+      }
+      if (!buckets?.length) return;
       if (this._charts[canvasId]) this._charts[canvasId].destroy();
       const stats = buckets.filter(Boolean);
       const avgs = stats.map(d => d.avg_ret * 100);
