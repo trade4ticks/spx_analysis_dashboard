@@ -117,7 +117,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=32"></script>
+  <script src="/static/js/oi_analysis.js?v=33"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -634,6 +634,7 @@
                            text-transform:uppercase;letter-spacing:.3px;padding:6px 8px;
                            border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2;
                            cursor:pointer;user-select:none;white-space:nowrap"
+                    :style="`text-align:${col.align||'left'};color:${smSortKey===col.key?'#3498db':'var(--dim)'}`"
                     x-text="col.label + (smSortKey === col.key ? (smSortDir === 'desc' ? ' ▼' : ' ▲') : '')">
                 </th>
               </template>
@@ -645,7 +646,7 @@
                   style="cursor:pointer"
                   :style="{'background': row._highlight ? 'rgba(52,152,219,.08)' : 'transparent'}"
                   @mouseenter="row._highlight=true" @mouseleave="row._highlight=false">
-                <td style="padding:4px 8px;font-weight:700;color:var(--accent)"
+                <td style="padding:4px 8px;font-weight:700;color:var(--accent);text-align:right"
                     x-text="row.composite_score?.toFixed(0)"></td>
                 <td style="padding:4px 8px;font-weight:600;color:var(--text)"
                     x-text="row.ticker"></td>
