@@ -47,9 +47,10 @@ document.addEventListener('alpine:init', () => {
     fsChartId: null,
 
     async init() {
-      // Trade-table column sort: header onclick dispatches a CustomEvent
-      // since the headers are built via innerHTML (no Alpine bindings).
-      document.addEventListener('tradeSort', (e) => this._tradeSort(e.detail));
+      // Trade-table column sort: header onclick calls a window function
+      // directly since the headers are built via innerHTML (no Alpine bindings).
+      // Using window avoids duplicate document listeners if init fires again.
+      window._oiTradeSort = (key) => this._tradeSort(key);
 
       const [tkRes, colRes] = await Promise.all([
         fetch('/api/oi-analysis/tickers'),
@@ -1322,7 +1323,7 @@ document.addEventListener('alpine:init', () => {
         const align = isNum ? '' : 'text-align:left;';
         return `<th ${cls}
                     style="${align}color:${color};font-weight:600;cursor:pointer;user-select:none"
-                    onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail:'${k}'}))">
+                    onclick="window._oiTradeSort('${k}')">
                   ${label}${arrow(k)}
                 </th>`;
       };
@@ -1424,7 +1425,7 @@ document.addEventListener('alpine:init', () => {
         const align = isNum ? '' : 'text-align:left;';
         return `<th ${cls}
                     style="${align}color:${color};font-weight:600;cursor:pointer;user-select:none"
-                    onclick="document.dispatchEvent(new CustomEvent('tradeSort', {detail:'${k}'}))">
+                    onclick="window._oiTradeSort('${k}')">
                   ${label}${arrow(k)}
                 </th>`;
       };

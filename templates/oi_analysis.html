@@ -117,7 +117,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=33"></script>
+  <script src="/static/js/oi_analysis.js?v=34"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -657,14 +657,14 @@
                 <td style="padding:4px 8px;color:var(--dim);font-size:10px"
                     x-text="row.pattern"></td>
                 <td style="padding:4px 8px;text-align:right"
-                    :style="(row.spearman_r||0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    :style="{color: (row.spearman_r||0) >= 0 ? '#3498db' : '#e84393'}"
                     x-text="row.spearman_r?.toFixed(3)"></td>
                 <td style="padding:4px 8px;text-align:right;color:var(--text)"
                     x-text="row.monotonicity?.toFixed(2)"></td>
                 <td style="padding:4px 8px;text-align:right;color:var(--text)"
                     x-text="row.yearly_pct != null ? row.yearly_pct.toFixed(0) + '%' : '—'"></td>
                 <td style="padding:4px 8px;text-align:right"
-                    :style="((row.d10_avg||0) - (row.d1_avg||0)) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    :style="{color: ((row.d10_avg||0) - (row.d1_avg||0)) >= 0 ? '#3498db' : '#e84393'}"
                     x-text="row.d10_avg != null && row.d1_avg != null ? (((row.d10_avg - row.d1_avg)*100).toFixed(3) + '%') : '—'"></td>
                 <td style="padding:4px 8px;text-align:right;color:var(--text)"
                     x-text="row.d10_wr != null ? (row.d10_wr*100).toFixed(1) + '%' : '—'"></td>
@@ -675,10 +675,10 @@
                 <td style="padding:4px 8px;text-align:right;color:var(--text)"
                     x-text="row.mi != null ? row.mi.toFixed(3) : '—'"></td>
                 <td style="padding:4px 8px;text-align:right"
-                    :style="(row.pearson_r||0) >= 0 ? 'color:#3498db' : 'color:#e84393'"
+                    :style="{color: (row.pearson_r||0) >= 0 ? '#3498db' : '#e84393'}"
                     x-text="row.pearson_r != null ? row.pearson_r.toFixed(3) : '—'"></td>
                 <td style="padding:4px 8px;text-align:center"
-                    :style="row.loyo_fragile ? 'color:#e84393;font-weight:700' : 'color:var(--dim)'"
+                    :style="{color: row.loyo_fragile ? '#e84393' : 'var(--dim)', 'font-weight': row.loyo_fragile ? '700' : 'normal'}"
                     x-text="row.loyo_fragile == null ? '—' : (row.loyo_fragile ? '⚠' : '✓')"></td>
               </tr>
             </template>
