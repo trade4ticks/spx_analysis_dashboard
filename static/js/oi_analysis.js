@@ -789,9 +789,21 @@ document.addEventListener('alpine:init', () => {
           fetch(base + `&metric=${encodeURIComponent(this.metric)}`),
           fetch(base + `&metric=${encodeURIComponent(this.heatmapMetric)}`),
         ]);
-        if (rx.ok) { const d = await rx.json(); this.hmXData = d.buckets || null; }
-        if (ry.ok) { const d = await ry.json(); this.hmYData = d.buckets || null; }
-      } catch (_) {}
+        if (rx.ok) {
+          const d = await rx.json();
+          console.log('[hmBins1d X]', this.metric, d.error || `n=${d.n} buckets=${(d.buckets||[]).length}`, d);
+          this.hmXData = d.buckets || null;
+        } else {
+          console.warn('[hmBins1d X] HTTP', rx.status, await rx.text());
+        }
+        if (ry.ok) {
+          const d = await ry.json();
+          console.log('[hmBins1d Y]', this.heatmapMetric, d.error || `n=${d.n} buckets=${(d.buckets||[]).length}`, d);
+          this.hmYData = d.buckets || null;
+        } else {
+          console.warn('[hmBins1d Y] HTTP', ry.status, await ry.text());
+        }
+      } catch (e) { console.error('[hmBins1d] fetch failed', e); }
       await this.$nextTick();
       this._renderHmBar1d('chart-hm-x', this.hmXData, this.metric);
       this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
@@ -805,10 +817,16 @@ document.addEventListener('alpine:init', () => {
         // here. Retry briefly so the chart actually paints.
         if (retries > 0) {
           setTimeout(() => this._renderHmBar1d(canvasId, buckets, title, retries - 1), 80);
+        } else {
+          console.warn('[hmBar1d]', canvasId, 'canvas never appeared');
         }
         return;
       }
-      if (!buckets?.length) return;
+      if (!buckets?.length) {
+        console.warn('[hmBar1d]', canvasId, 'no buckets — buckets =', buckets);
+        return;
+      }
+      console.log('[hmBar1d]', canvasId, 'rendering with', buckets.filter(Boolean).length, 'non-null buckets');
       if (this._charts[canvasId]) this._charts[canvasId].destroy();
       const stats = buckets.filter(Boolean);
       const avgs = stats.map(d => d.avg_ret * 100);

@@ -846,16 +846,13 @@ async def metric_bins_1d(
         # observations are excluded (same rule as _bucket_pairs_per_ticker).
         by_ticker: dict = defaultdict(list)
         for r in rows:
-            xv, yv = r.get(metric), r.get(outcome)
-            if xv is None or yv is None:
-                continue
             try:
-                xf, yf = float(xv), float(yv)
-            except (ValueError, TypeError):
+                xf, yf = float(r[metric]), float(r[outcome])
+            except (TypeError, ValueError):
                 continue
             if math.isnan(xf) or math.isnan(yf):
                 continue
-            by_ticker[r['ticker']].append((xf, yf, r['trade_date']))
+            by_ticker[r['ticker']].append((xf, yf))
         buckets_data = _bucket_pairs_per_ticker(by_ticker, bins)
         total_n = sum(len(b) for b in buckets_data)
         if total_n < 20:
