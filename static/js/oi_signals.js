@@ -310,12 +310,8 @@ document.addEventListener('alpine:init', () => {
 
     // ── Sparkline hover popup ─────────────────────────────────────────────
     _initSparkHover() {
-      const popup       = document.getElementById('trig-spark-popup');
-      const popupCanvas = document.getElementById('trig-spark-popup-canvas');
-      const popupTitle  = document.getElementById('trig-spark-popup-title');
-      if (!popup || !popupCanvas) return;
-
       let currentTrigId = null;
+      let popupEl       = null;
       const PW = 480, PH = 150;
 
       const show = (wrap) => {
@@ -324,10 +320,10 @@ document.addEventListener('alpine:init', () => {
         currentTrigId = id;
 
         const result = this.firingResults.find(r => r.trigger.id === id);
-        if (!result || !result.bins?.length) {
-          popup.style.display = 'none';
-          return;
-        }
+        if (!result || !result.bins?.length) { hide(); return; }
+
+        // Remove any previous popup
+        if (popupEl) { popupEl.remove(); popupEl = null; }
 
         const rect = wrap.getBoundingClientRect();
         let left = rect.left;
@@ -335,21 +331,37 @@ document.addEventListener('alpine:init', () => {
         if (left + PW > window.innerWidth  - 8) left = window.innerWidth  - PW - 8;
         if (top  + PH + 32 > window.innerHeight) top  = rect.top - PH - 32;
 
-        if (popupTitle) {
-          popupTitle.textContent =
-            `${result.trigger.name}  ·  ${result.trigger.ticker}  ·  ${result.trigger.metric}  ·  ${result.trigger.outcome}`;
-        }
+        // Build popup from scratch each time — avoids any stale canvas state
+        const div = document.createElement('div');
+        div.style.cssText = [
+          'position:fixed', `left:${left}px`, `top:${top}px`,
+          'z-index:9999', 'pointer-events:none',
+          'background:#1e1e1e', 'border:1px solid #444',
+          'border-radius:6px', 'padding:8px 10px 10px',
+          'box-shadow:0 8px 32px rgba(0,0,0,.75)',
+        ].join(';');
 
-        popup.style.left    = left + 'px';
-        popup.style.top     = top  + 'px';
-        popup.style.display = 'block';
+        const titleEl = document.createElement('div');
+        titleEl.style.cssText = 'font-size:9px;color:#666;margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:480px';
+        titleEl.textContent = `${result.trigger.name}  ·  ${result.trigger.ticker}  ·  ${result.trigger.metric}  ·  ${result.trigger.outcome}`;
+        div.appendChild(titleEl);
 
-        _drawPopupChart(popupCanvas, result, PW, PH);
+        const canvas = document.createElement('canvas');
+        canvas.width        = PW;
+        canvas.height       = PH;
+        canvas.style.cssText = `display:block;width:${PW}px;height:${PH}px`;
+        div.appendChild(canvas);
+
+        document.body.appendChild(div);
+        popupEl = div;
+
+        console.log('[sparkHover] show id=', id, 'bins=', result.bins?.length, 'today_bin=', result.today_bin);
+        _drawPopupChart(canvas, result, PW, PH);
       };
 
       const hide = () => {
         currentTrigId = null;
-        popup.style.display = 'none';
+        if (popupEl) { popupEl.remove(); popupEl = null; }
       };
 
       document.addEventListener('mouseover', (e) => {
@@ -461,17 +473,22 @@ function _drawPopupChart(canvas, result, w, h) {
   canvas.style.height = h + 'px';
 
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) { console.warn('[sparkHover] no canvas context'); return; }
 
   const bins     = result.bins || [];
   const todayBin = result.today_bin;
+  console.log('[sparkHover] drawing', bins.length, 'bins, todayBin=', todayBin);
+
+  // Debug: solid background to confirm canvas is reachable
+  ctx.fillStyle = '#2a1a1a';
+  ctx.fillRect(0, 0, w, h);
 
   const PL = 36, PR = 6, PT = 18, PB = 18;
   const cw = w - PL - PR;
   const ch = h - PT - PB;
   const bw = cw / bins.length;
 
-  const vals = bins.map(b => b ? b.avg_ret * 100 : 0);
+  const vals = bins.map(b => b ? b.avg_ret : 0);
   const maxV = Math.max(0, ...vals);
   const minV = Math.min(0, ...vals);
   const range = (maxV - minV) || 1;
@@ -505,7 +522,7 @@ function _drawPopupChart(canvas, result, w, h) {
   // Bars
   for (let i = 0; i < bins.length; i++) {
     const b       = bins[i];
-    const v       = b ? b.avg_ret * 100 : 0;
+    const v       = b ? b.avg_ret : 0;
     const isToday = b && b.bin === todayBin;
     const pos     = v >= 0;
     const barH    = Math.abs(v) / range * ch;
