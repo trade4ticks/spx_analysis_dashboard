@@ -38,15 +38,19 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
                        log) -> tuple[dict[str, list[dict]], list[str]]:
     """Fetch all required columns once per ticker. Returns (cache, errors)."""
     needed = list(dict.fromkeys(["trade_date"] + x_cols + y_cols))
-    col_list = ", ".join(needed)
     cache, errors = {}, []
     keys = tickers if tickers else [None]
 
     async with pool.acquire() as conn:
         for ticker in keys:
             conditions, params, p = [], [], 1
+            # When fetching all tickers in one query, include ticker column so
+            # per-ticker rank normalization can group rows correctly downstream.
             if ticker:
                 conditions.append(f"ticker = ${p}"); params.append(ticker); p += 1
+                col_list = ", ".join(needed)
+            else:
+                col_list = "ticker, " + ", ".join(needed)
             if date_from:
                 df_val = _date.fromisoformat(date_from) if isinstance(date_from, str) else date_from
                 conditions.append(f"trade_date >= ${p}"); params.append(df_val); p += 1
@@ -74,6 +78,34 @@ async def _fetch_cache(pool: asyncpg.Pool, table: str,
                 log(f"  No data found for {ticker or 'all'}")
 
     return cache, errors
+
+
+def _rank_normalize_x_cols(rows: list[dict], x_cols: list[str]) -> list[dict]:
+    """
+    Replace each x_col value with within-ticker percentile rank (0..1).
+
+    Mirrors the OI Analysis ALL-ticker bucketing: each ticker's metric values
+    are independently ranked against that ticker's own history, then pooled.
+    Bin 10 therefore means "metric in the top decile *for that ticker*" rather
+    than "highest absolute values across all tickers combined."
+    """
+    rows = [dict(r) for r in rows]  # shallow copy — don't mutate caller's list
+    for x_col in x_cols:
+        by_ticker: dict = defaultdict(list)
+        for i, r in enumerate(rows):
+            tkr = r.get("ticker") or "_global"
+            v = r.get(x_col)
+            if v is not None:
+                try:
+                    by_ticker[tkr].append((i, float(v)))
+                except (ValueError, TypeError):
+                    pass
+        for id_vals in by_ticker.values():
+            sorted_ids = sorted(id_vals, key=lambda t: t[1])
+            n = len(sorted_ids)
+            for rank, (idx, _) in enumerate(sorted_ids):
+                rows[idx][x_col] = rank / n  # 0 = lowest, ~1 = highest within ticker
+    return rows
 
 
 # ── Formatting helpers ───────────────────────────────────────────────────────
@@ -314,6 +346,21 @@ async def run_pipeline(
     if not cache:
         detail = "\n".join(fetch_errors) if fetch_errors else "query returned 0 rows"
         raise ValueError(f"No data loaded.\n{detail}")
+
+    # ── Per-ticker rank normalization for all-ticker flat pools ───────────
+    # When all tickers are fetched into one flat list ("_all"), bin edges are
+    # dominated by absolute metric scale differences between tickers. Replacing
+    # each x value with its within-ticker percentile rank (0..1) mirrors the
+    # OI Analysis ALL-mode bucketing: bin 10 = "metric in top decile for THAT
+    # ticker's own history." Single-ticker cache entries are unchanged (ranking
+    # within one ticker equals global ranking for that key).
+    if "_all" in cache:
+        rows_all = cache["_all"]
+        distinct_tickers = {r.get("ticker") for r in rows_all if r.get("ticker")}
+        if len(distinct_tickers) > 1:
+            log(f"  Applying per-ticker rank normalization across "
+                f"{len(distinct_tickers)} tickers for {len(x_cols)} x-cols...")
+            cache["_all"] = _rank_normalize_x_cols(rows_all, x_cols)
 
     # ── Step 2: Broad relationship scan ──────────────────────────────────
     total_combos = sum(1 for _ in cache for _ in x_cols for _ in y_cols)
