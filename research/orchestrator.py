@@ -4555,7 +4555,7 @@ async def execute_v2_pipeline(
             log=log,
         )
 
-    from research.engine import _fetch_cache  # reuse fetch logic
+    from research.engine import _fetch_cache, _rank_normalize_x_cols
 
     table = config.get("table", "daily_features")
     tickers = config.get("tickers") or []
@@ -4580,6 +4580,37 @@ async def execute_v2_pipeline(
         data_pool, table, tickers, x_cols, y_cols, date_from, date_to, log)
     if not cache:
         raise ValueError(f"No data loaded. {'; '.join(fetch_errors)}")
+
+    # ── Per-ticker rank normalization → pooled cross-ticker scan ─────────
+    # Mirror engine.run_pipeline (Research 1) and OI Analysis ALL-mode
+    # (_bucket_pairs_per_ticker): each ticker is independently ranked
+    # within its own history, then pooled, so bin 10 = "top decile for
+    # THAT ticker" not "highest absolute value across all tickers."
+    # Only the _all cache entry is normalized; per-ticker entries keep
+    # raw values so single-ticker scans still report real magnitudes.
+    if len(cache) > 1 and "_all" not in cache:
+        # Case (a): individual ticker caches — build a pooled _all entry
+        # so the scanner runs a cross-ticker scan alongside per-ticker ones.
+        all_rows = []
+        for key, ticker_rows in cache.items():
+            for r in ticker_rows:
+                r2 = dict(r)
+                if "ticker" not in r2:
+                    r2["ticker"] = key
+                all_rows.append(r2)
+        log(f"  Building pooled cross-ticker scan: {len(all_rows)} rows from "
+            f"{len(cache)} tickers, applying per-ticker rank normalization "
+            f"for {len(x_cols)} x-col(s)...")
+        cache["_all"] = _rank_normalize_x_cols(all_rows, x_cols)
+    elif "_all" in cache:
+        # Case (b): flat pool fetched in one query — normalize in place
+        # if rows span multiple tickers.
+        rows_flat = cache["_all"]
+        distinct = {r.get("ticker") for r in rows_flat if r.get("ticker")}
+        if len(distinct) > 1:
+            log(f"  Applying per-ticker rank normalization across "
+                f"{len(distinct)} tickers for {len(x_cols)} x-col(s)...")
+            cache["_all"] = _rank_normalize_x_cols(rows_flat, x_cols)
 
     # ── 2. Scan ───────────────────────────────────────────────────────────
     n_pairs = sum(
