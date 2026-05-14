@@ -287,16 +287,29 @@ def _classify_pattern(avgs: list[float], pearson: float, spearman: float,
     if monotonicity > 0.75 and abs(spearman) > 0.03:
         return "monotonic_positive" if spearman > 0 else "monotonic_negative"
 
-    # U or inverted-U
-    if abs(u_score) > overall_range * 0.3 and monotonicity < 0.5:
-        return "u_shape" if u_score > 0 else "inverted_u"
-
-    # Threshold / step: check if most of the spread comes from one transition
+    # Threshold / step first — a single extreme decile (e.g. only D10 elevated)
+    # would otherwise be miscategorised as U-shape because the wing AVERAGE
+    # gets pulled up by that one extreme even though the other wing is normal.
     diffs = [avgs[i + 1] - avgs[i] for i in range(len(avgs) - 1)]
     if diffs:
         max_diff = max(abs(d) for d in diffs)
         if max_diff > overall_range * 0.5:
             return "threshold"
+
+    # U or inverted-U — require BOTH wings to be on the correct side of the
+    # center, not just the average. Without this guard, a one-sided extreme
+    # (e.g. D10 huge, D1 normal) fires u_shape because (D1+D10)/2 still
+    # exceeds the middle.
+    if len(avgs) >= 4 and abs(u_score) > overall_range * 0.3 and monotonicity < 0.5:
+        center_mean = float(np.mean(avgs[len(avgs) // 4: 3 * len(avgs) // 4]))
+        if u_score > 0:
+            # U-shape: both extremes should sit above the middle.
+            if min(avgs[0], avgs[-1]) > center_mean + overall_range * 0.15:
+                return "u_shape"
+        else:
+            # Inverted-U: both extremes should sit below the middle.
+            if max(avgs[0], avgs[-1]) < center_mean - overall_range * 0.15:
+                return "inverted_u"
 
     # Moderate linear
     if abs(pearson) > 0.03:
