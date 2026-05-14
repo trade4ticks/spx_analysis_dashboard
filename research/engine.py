@@ -347,20 +347,36 @@ async def run_pipeline(
         detail = "\n".join(fetch_errors) if fetch_errors else "query returned 0 rows"
         raise ValueError(f"No data loaded.\n{detail}")
 
-    # ── Per-ticker rank normalization for all-ticker flat pools ───────────
-    # When all tickers are fetched into one flat list ("_all"), bin edges are
-    # dominated by absolute metric scale differences between tickers. Replacing
-    # each x value with its within-ticker percentile rank (0..1) mirrors the
-    # OI Analysis ALL-mode bucketing: bin 10 = "metric in top decile for THAT
-    # ticker's own history." Single-ticker cache entries are unchanged (ranking
-    # within one ticker equals global ranking for that key).
-    if "_all" in cache:
-        rows_all = cache["_all"]
-        distinct_tickers = {r.get("ticker") for r in rows_all if r.get("ticker")}
+    # ── Per-ticker rank normalization → pooled cross-ticker scan ─────────
+    # OI Analysis ALL-mode ranks each ticker within its own history then pools,
+    # so bin 10 = "metric in top decile for THAT ticker" not "highest absolute
+    # value across all tickers." We mirror this by:
+    #   (a) multiple individual tickers fetched: pool their rows with each
+    #       ticker's x values replaced by within-ticker percentile ranks, then
+    #       store as "_all" so the scanner also runs a cross-ticker scan.
+    #   (b) single flat all-ticker fetch ("_all" already in cache): apply the
+    #       same rank transform in-place if rows contain multiple distinct tickers.
+    if len(cache) > 1 and "_all" not in cache:
+        # Case (a): individual ticker caches — build pooled normalized entry
+        all_rows = []
+        for key, ticker_rows in cache.items():
+            for r in ticker_rows:
+                r2 = dict(r)
+                if "ticker" not in r2:
+                    r2["ticker"] = key
+                all_rows.append(r2)
+        log(f"  Building pooled cross-ticker scan: {len(all_rows)} rows from "
+            f"{len(cache)} tickers, applying per-ticker rank normalization "
+            f"for {len(x_cols)} x-col(s)...")
+        cache["_all"] = _rank_normalize_x_cols(all_rows, x_cols)
+    elif "_all" in cache:
+        # Case (b): flat pool — normalize if rows span multiple tickers
+        rows_flat = cache["_all"]
+        distinct_tickers = {r.get("ticker") for r in rows_flat if r.get("ticker")}
         if len(distinct_tickers) > 1:
             log(f"  Applying per-ticker rank normalization across "
-                f"{len(distinct_tickers)} tickers for {len(x_cols)} x-cols...")
-            cache["_all"] = _rank_normalize_x_cols(rows_all, x_cols)
+                f"{len(distinct_tickers)} tickers for {len(x_cols)} x-col(s)...")
+            cache["_all"] = _rank_normalize_x_cols(rows_flat, x_cols)
 
     # ── Step 2: Broad relationship scan ──────────────────────────────────
     total_combos = sum(1 for _ in cache for _ in x_cols for _ in y_cols)
