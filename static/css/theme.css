@@ -264,6 +264,7 @@ input[type=range]::-webkit-slider-thumb {
   white-space: nowrap;
 }
 .p-type-btn:hover { background: rgba(52,152,219,.25); }
+.fast-badge { margin-left: 4px; font-size: 10px; opacity: 0.8; }
 .p-type-menu {
   position: absolute;
   top: 38px;

@@ -20,6 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.db import get_pool
+from app.routers import _precomputed
 
 router = APIRouter(tags=["skew_slope"])
 
@@ -56,6 +57,13 @@ async def get_skew_slope(
     end_d   = date_type.fromisoformat(end)
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
+
+    fast = await _precomputed.try_skew_slope_fast(
+        pool, dte_list=dte_list, delta_a=delta_a, delta_b=delta_b,
+        start_d=start_d, end_d=end_d, target_time_str=target_time, freq=freq,
+    )
+    if fast is not None:
+        return fast
 
     pair = [delta_a, delta_b]
 
@@ -188,4 +196,5 @@ async def get_skew_slope(
         "delta_a":   delta_a,
         "delta_b":   delta_b,
         "series":    series,
+        "source":    "computed",
     }

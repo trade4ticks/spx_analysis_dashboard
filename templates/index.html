@@ -156,8 +156,11 @@
           <!-- Type selector — blue button is the actual control (popover lives outside header) -->
           <div class="p-type-btn"
                @click="panel.typeMenuOpen = !panel.typeMenuOpen"
-               @click.outside="panel.typeMenuOpen=false"
-               x-text="panel.type.toUpperCase() + ' ▾'">
+               @click.outside="panel.typeMenuOpen=false">
+            <span x-text="panel.type.toUpperCase()"></span><span
+                  x-show="panel.dataSource === 'precomputed'"
+                  class="fast-badge"
+                  title="Served from surface_metrics_core (precomputed)">⚡</span><span> ▾</span>
           </div>
 
           <!-- Raw / Interp toggle (skew + term only) -->

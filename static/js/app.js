@@ -42,6 +42,8 @@ function defaultPanel(id) {
     error:   null,
     stats:   null,
     legend:  [],
+    dataSource: null,   // 'precomputed' (⚡) | 'computed' | null
+
     expanded:           false,
     typeMenuOpen:       false,
     dateMenuOpen:       false,
@@ -231,6 +233,9 @@ document.addEventListener('alpine:init', () => {
         const data = await this.fetchPanelData(panel);
         panel.stats  = data.stats  ?? null;
         panel.legend = this.buildLegend(panel.type, data);
+        // Tracks whether this pane was served from surface_metrics_core (⚡).
+        // Endpoints that never set `source` leave the badge hidden.
+        panel.dataSource = data.source || null;
         // Chart renders after Alpine reacts (canvas must be in DOM)
         this.$nextTick(() => renderPanel(panel.id, panel.type, data, this.metric, this.showTooltips));
       } catch(e) {

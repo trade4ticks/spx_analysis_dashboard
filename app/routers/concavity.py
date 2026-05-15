@@ -26,6 +26,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.db import get_pool
+from app.routers import _precomputed
 
 router = APIRouter(tags=["convexity"])
 
@@ -71,6 +72,14 @@ async def get_convexity(
 
     if freq == "intraday" and (end_d - start_d).days > INTRADAY_MAX_DAYS:
         raise HTTPException(400, f"Intraday limited to {INTRADAY_MAX_DAYS} days")
+
+    fast = await _precomputed.try_convexity_fast(
+        pool, dte_list=dte_list,
+        left_delta=left_delta, center_delta=center_delta, right_delta=right_delta,
+        start_d=start_d, end_d=end_d, target_time_str=target_time, freq=freq,
+    )
+    if fast is not None:
+        return fast
 
     needed_deltas = [left_delta, center_delta, right_delta]
 
@@ -206,4 +215,5 @@ async def get_convexity(
         "center_delta": center_delta,
         "right_delta":  right_delta,
         "series":       series,
+        "source":       "computed",
     }
