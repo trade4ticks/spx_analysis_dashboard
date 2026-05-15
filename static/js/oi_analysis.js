@@ -2121,8 +2121,11 @@ document.addEventListener('alpine:init', () => {
     _secFilteredDates() {
       const cal = this.data?.trade_calendar || [];
       const has20 = !!(cal[0]?.decile20);
-      if (!has20 || this.selectedBins20.size === 0) return cal.map(c => c.date);
-      return cal.filter(c => this.selectedBins20.has(c.decile20)).map(c => c.date);
+      const entries = (!has20 || this.selectedBins20.size === 0)
+        ? cal
+        : cal.filter(c => this.selectedBins20.has(c.decile20));
+      // Always encode as "ticker|date" so the backend can filter per-(ticker,date) in ALL mode.
+      return entries.map(c => `${c.ticker}|${c.date}`);
     },
 
     async secLoad() {

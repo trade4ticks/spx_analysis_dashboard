@@ -1312,6 +1312,27 @@ def _sec_cache_key(ticker: str, metric: str, outcome: str, date_from: str, date_
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
+def _parse_tkr_date_set(filtered_dates: list) -> set:
+    """Convert 'ticker|date' strings (sent by the frontend) into a (ticker, date) tuple set."""
+    s = set()
+    for fd in filtered_dates:
+        if '|' in fd:
+            t, d = fd.split('|', 1)
+            s.add((t, d))
+        else:
+            s.add(('', fd))
+    return s
+
+
+def _filter_by_tkr_date(rows: list, tkr_date_set: set) -> list:
+    """Keep only rows whose (ticker, trade_date) is in tkr_date_set."""
+    has_tickers = any(k[0] for k in tkr_date_set)
+    if has_tickers:
+        return [r for r in rows if (r.get("ticker", ""), r.get("trade_date", "")) in tkr_date_set]
+    date_set = {k[1] for k in tkr_date_set}
+    return [r for r in rows if r.get("trade_date") in date_set]
+
+
 def _sec_score_metrics(
     all_rows: list,
     filtered_dates: list,
@@ -1321,8 +1342,10 @@ def _sec_score_metrics(
     n_bins: int = 5,
 ) -> list:
     """Score each secondary feature by its lift over baseline in the filtered date subset."""
-    date_set = set(filtered_dates)
-    filtered = [r for r in all_rows if r.get("trade_date") in date_set]
+    if not filtered_dates:
+        filtered = all_rows
+    else:
+        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(filtered_dates))
     if len(filtered) < n_bins * 2:
         return []
 
@@ -1497,12 +1520,13 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     rows = cached["rows"]
     feature_cols = cached["features"]
 
-    filtered_dates = req.filtered_dates if req.filtered_dates else list({r["trade_date"] for r in rows})
-    metrics_result = _sec_score_metrics(rows, filtered_dates, req.outcome, feature_cols, is_all)
+    metrics_result = _sec_score_metrics(rows, req.filtered_dates, req.outcome, feature_cols, is_all)
 
-    date_set = set(filtered_dates)
-    baseline_rets = [float(r[req.outcome]) for r in rows
-                     if r.get("trade_date") in date_set and r.get(req.outcome) is not None]
+    if req.filtered_dates:
+        baseline_subset = _filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+    else:
+        baseline_subset = rows
+    baseline_rets = [float(r[req.outcome]) for r in baseline_subset if r.get(req.outcome) is not None]
     baseline = {
         "n": len(baseline_rets),
         "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
@@ -1526,9 +1550,11 @@ async def secondary_scan(req: SecScanReq):
 
     metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
 
-    date_set = set(req.filtered_dates)
-    baseline_rets = [float(r[outcome_col]) for r in rows
-                     if r.get("trade_date") in date_set and r.get(outcome_col) is not None]
+    if req.filtered_dates:
+        baseline_subset = _filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+    else:
+        baseline_subset = rows
+    baseline_rets = [float(r[outcome_col]) for r in baseline_subset if r.get(outcome_col) is not None]
     baseline = {
         "n": len(baseline_rets),
         "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
@@ -1550,8 +1576,7 @@ async def secondary_detail(req: SecDetailReq):
     outcome_col = cached["outcome"]
     n_bins = max(2, min(20, req.sec_bin_count))
 
-    date_set = set(req.filtered_dates)
-    filtered = [r for r in all_rows if r.get("trade_date") in date_set]
+    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
 
