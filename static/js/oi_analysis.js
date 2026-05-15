@@ -22,7 +22,7 @@ document.addEventListener('alpine:init', () => {
     // Selectors
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
-    dateFrom: '2020-01-01', dateTo: new Date().toISOString().slice(0, 10),
+    dateFrom: '', dateTo: new Date().toISOString().slice(0, 10),
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
