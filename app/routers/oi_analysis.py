@@ -1,4 +1,5 @@
 """OI Analysis workbench — interactive decile analytics for a single ticker/metric/outcome."""
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -10,6 +11,9 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
+
+# ── Secondary Signal Scanner cache ────────────────────────────────────────────
+_SEC_CACHE: dict = {}  # cache_key -> {rows, features, outcome}
 
 router = APIRouter(tags=["oi_analysis"])
 
@@ -1299,3 +1303,371 @@ async def interaction_detail(
         d['quadrants'] = json.loads(d['quadrants']) if d['quadrants'] else []
         result.append(d)
     return result
+
+
+# ── Secondary Signal Scanner endpoints ────────────────────────────────────────
+
+def _sec_cache_key(ticker: str, metric: str, outcome: str, date_from: str, date_to: str) -> str:
+    raw = f"{ticker}|{metric}|{outcome}|{date_from}|{date_to}"
+    return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _sec_score_metrics(
+    all_rows: list,
+    filtered_dates: list,
+    outcome_col: str,
+    feature_cols: list,
+    is_all: bool = False,
+    n_bins: int = 5,
+) -> list:
+    """Score each secondary feature by its lift over baseline in the filtered date subset."""
+    date_set = set(filtered_dates)
+    filtered = [r for r in all_rows if r.get("trade_date") in date_set]
+    if len(filtered) < n_bins * 2:
+        return []
+
+    all_rets = [float(r[outcome_col]) for r in filtered
+                if r.get(outcome_col) is not None and not math.isnan(float(r[outcome_col]))]
+    if not all_rets:
+        return []
+    baseline_avg = float(np.mean(all_rets))
+    baseline_wr  = float(np.mean([1.0 if r > 0 else 0.0 for r in all_rets]))
+
+    results = []
+    for feat in feature_cols:
+        if is_all:
+            # Per-ticker rank-normalize within filtered subset
+            by_tkr: dict = defaultdict(list)
+            for r in filtered:
+                v = r.get(feat)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv, fo = float(v), float(o)
+                    if not (math.isnan(fv) or math.isnan(fo)):
+                        by_tkr[r.get("ticker", "_")].append((fv, fo))
+                except (TypeError, ValueError):
+                    pass
+            # Rank-normalize each ticker, pool into global list
+            norm_vals = []
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < n_bins:
+                    continue
+                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+                n_t = len(sorted_t)
+                for rank, (_, y) in enumerate(sorted_t):
+                    norm_vals.append((rank / n_t, y))
+        else:
+            norm_vals = []
+            for r in filtered:
+                v = r.get(feat)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv, fo = float(v), float(o)
+                    if not (math.isnan(fv) or math.isnan(fo)):
+                        norm_vals.append((fv, fo))
+                except (TypeError, ValueError):
+                    pass
+
+        if len(norm_vals) < n_bins * 2:
+            continue
+
+        sorted_vals = sorted(norm_vals, key=lambda x: x[0])
+        n = len(sorted_vals)
+        buckets: list = [[] for _ in range(n_bins)]
+        for i, (_, y) in enumerate(sorted_vals):
+            b = min(int(i / n * n_bins), n_bins - 1)
+            buckets[b].append(y)
+
+        bucket_avgs = [float(np.mean(b)) if b else None for b in buckets]
+        valid = [(i, a) for i, a in enumerate(bucket_avgs) if a is not None]
+        if not valid:
+            continue
+        best_i, best_avg = max(valid, key=lambda x: x[1])
+        lift = best_avg - baseline_avg
+        best_wr = float(np.mean([1.0 if y > 0 else 0.0 for y in buckets[best_i]])) if buckets[best_i] else 0.0
+        win_lift = best_wr - baseline_wr
+
+        results.append({
+            "name":     feat,
+            "lift":     round(lift, 6),
+            "win_lift": round(win_lift, 4),
+            "top_bin":  best_i + 1,
+            "n_top":    len(buckets[best_i]),
+            "n":        n,
+        })
+
+    results.sort(key=lambda x: x["lift"], reverse=True)
+    return results
+
+
+def _sec_equity_curve(rows_sorted: list, outcome_col: str) -> list:
+    """Cumulative return curve from a list of rows sorted by date."""
+    cum = 0.0
+    curve = []
+    for r in rows_sorted:
+        y = r.get(outcome_col)
+        if y is None:
+            continue
+        try:
+            cum += float(y)
+        except (TypeError, ValueError):
+            continue
+        curve.append({"date": r.get("trade_date", ""), "value": round(cum, 6)})
+    return curve
+
+
+class SecLoadReq(BaseModel):
+    ticker: str
+    metric: str
+    outcome: str
+    date_from: str = ""
+    date_to: str = ""
+    filtered_dates: List[str] = []
+
+
+class SecScanReq(BaseModel):
+    cache_key: str
+    filtered_dates: List[str]
+    ticker: str = "SPX"
+
+
+class SecDetailReq(BaseModel):
+    cache_key: str
+    metric_b: str
+    filtered_dates: List[str]
+    sec_bins: List[int] = [5]
+    ticker: str = "SPX"
+
+
+@router.post("/secondary-load")
+async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
+    """Fetch all feature columns for the analysis date range and cache; compute initial secondary scores."""
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    is_all = (req.ticker == "ALL")
+    cache_key = _sec_cache_key(req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
+
+    if cache_key not in _SEC_CACHE:
+        # Build date filter
+        date_conditions = ""
+        params: list = []
+        p = 1
+        if not is_all:
+            date_conditions += f" AND ticker = ${p}"; params.append(req.ticker); p += 1
+        if req.date_from:
+            from datetime import date as _date
+            date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(req.date_from)); p += 1
+        if req.date_to:
+            from datetime import date as _date
+            date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(req.date_to)); p += 1
+
+        # Discover all numeric columns
+        async with pool.acquire() as conn:
+            col_rows = await conn.fetch(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'daily_features' AND table_schema = 'public'
+                   AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+                   AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+                   ORDER BY ordinal_position""")
+        all_num_cols = [r["column_name"] for r in col_rows]
+        outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
+        feature_cols = [c for c in all_num_cols
+                        if c not in outcome_cols_all and c != req.metric and not c.startswith("spot")]
+
+        select_cols = ", ".join(["ticker", "trade_date", req.outcome] + feature_cols)
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(
+                f"SELECT {select_cols} FROM daily_features "
+                f"WHERE {req.metric} IS NOT NULL AND {req.outcome} IS NOT NULL"
+                f"{date_conditions} ORDER BY trade_date", *params)
+
+        rows = [dict(r) for r in db_rows]
+        for r in rows:
+            r["trade_date"] = str(r["trade_date"])
+
+        _SEC_CACHE[cache_key] = {"rows": rows, "features": feature_cols, "outcome": req.outcome}
+
+    cached = _SEC_CACHE[cache_key]
+    rows = cached["rows"]
+    feature_cols = cached["features"]
+
+    filtered_dates = req.filtered_dates if req.filtered_dates else list({r["trade_date"] for r in rows})
+    metrics_result = _sec_score_metrics(rows, filtered_dates, req.outcome, feature_cols, is_all)
+
+    date_set = set(filtered_dates)
+    baseline_rets = [float(r[req.outcome]) for r in rows
+                     if r.get("trade_date") in date_set and r.get(req.outcome) is not None]
+    baseline = {
+        "n": len(baseline_rets),
+        "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
+        "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
+    }
+
+    return {"cache_key": cache_key, "baseline": baseline, "metrics": metrics_result}
+
+
+@router.post("/secondary-scan")
+async def secondary_scan(req: SecScanReq):
+    """Re-score secondary metrics for a new bin selection (in-memory from cache)."""
+    cached = _SEC_CACHE.get(req.cache_key)
+    if not cached:
+        return {"error": "cache_miss"}
+
+    is_all = (req.ticker == "ALL")
+    rows = cached["rows"]
+    feature_cols = cached["features"]
+    outcome_col = cached["outcome"]
+
+    metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
+
+    date_set = set(req.filtered_dates)
+    baseline_rets = [float(r[outcome_col]) for r in rows
+                     if r.get("trade_date") in date_set and r.get(outcome_col) is not None]
+    baseline = {
+        "n": len(baseline_rets),
+        "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
+        "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
+    }
+
+    return {"baseline": baseline, "metrics": metrics_result}
+
+
+@router.post("/secondary-detail")
+async def secondary_detail(req: SecDetailReq):
+    """2-factor deep dive: bins, equity curves, yearly for a selected secondary metric."""
+    cached = _SEC_CACHE.get(req.cache_key)
+    if not cached:
+        return {"error": "cache_miss"}
+
+    is_all = (req.ticker == "ALL")
+    all_rows = cached["rows"]
+    outcome_col = cached["outcome"]
+    n_bins = 5
+
+    date_set = set(req.filtered_dates)
+    filtered = [r for r in all_rows if r.get("trade_date") in date_set]
+    if len(filtered) < n_bins * 2:
+        return {"error": "insufficient_data"}
+
+    # Build (secondary_value, outcome, date, ticker) for filtered rows
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for r in filtered:
+            v = r.get(req.metric_b)
+            o = r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    by_tkr[r.get("ticker", "_")].append(
+                        (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
+                    )
+            except (TypeError, ValueError):
+                pass
+        # Rank-normalize per ticker then pool
+        norm_rows = []
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, y, d, tkr) in enumerate(sorted_t):
+                norm_rows.append((rank / n_t, y, d, tkr))
+    else:
+        norm_rows = []
+        for r in filtered:
+            v = r.get(req.metric_b)
+            o = r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
+            except (TypeError, ValueError):
+                pass
+
+    if len(norm_rows) < n_bins * 2:
+        return {"error": "insufficient_data"}
+
+    sorted_norm = sorted(norm_rows, key=lambda x: x[0])
+    n = len(sorted_norm)
+    buckets: list = [[] for _ in range(n_bins)]
+    for i, row_t in enumerate(sorted_norm):
+        b = min(int(i / n * n_bins), n_bins - 1)
+        buckets[b].append(row_t)
+
+    # Bin stats
+    bins_out = []
+    for bi, bucket in enumerate(buckets):
+        if not bucket:
+            bins_out.append(None)
+            continue
+        ys = [r[1] for r in bucket]
+        bins_out.append({
+            "bin":      bi + 1,
+            "n":        len(ys),
+            "avg_ret":  round(float(np.mean(ys)), 6),
+            "win_rate": round(float(np.mean([1.0 if y > 0 else 0.0 for y in ys])), 4),
+        })
+
+    # Which secondary bins are selected (1-based)?
+    sec_bin_set = set(req.sec_bins) if req.sec_bins else {n_bins}
+    combined_tkr_date_set: set = set()
+    for bi in sec_bin_set:
+        if 1 <= bi <= n_bins:
+            for row_t in buckets[bi - 1]:
+                combined_tkr_date_set.add((row_t[3], row_t[2]))  # (ticker, date)
+
+    # Equity curves (sorted by date, then ticker for determinism)
+    primary_sorted  = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+    combined_sorted = [r for r in primary_sorted
+                       if (r.get("ticker", ""), r.get("trade_date", "")) in combined_tkr_date_set]
+
+    eq_primary  = _sec_equity_curve(primary_sorted, outcome_col)
+    eq_combined = _sec_equity_curve(combined_sorted, outcome_col)
+
+    # Yearly breakdown
+    yearly_primary: dict  = defaultdict(list)
+    yearly_combined: dict = defaultdict(list)
+    for r in primary_sorted:
+        yr = int(r.get("trade_date", "0000")[:4])
+        o = r.get(outcome_col)
+        if o is not None:
+            yearly_primary[yr].append(float(o))
+    for r in combined_sorted:
+        yr = int(r.get("trade_date", "0000")[:4])
+        o = r.get(outcome_col)
+        if o is not None:
+            yearly_combined[yr].append(float(o))
+
+    all_years = sorted(set(yearly_primary) | set(yearly_combined))
+    yearly_out = []
+    for yr in all_years:
+        p_rets = yearly_primary.get(yr, [])
+        c_rets = yearly_combined.get(yr, [])
+        yearly_out.append({
+            "year":         yr,
+            "primary_n":    len(p_rets),
+            "primary_avg":  round(float(np.mean(p_rets)), 6) if p_rets else 0,
+            "primary_wr":   round(float(np.mean([1.0 if v > 0 else 0.0 for v in p_rets])), 4) if p_rets else 0,
+            "combined_n":   len(c_rets),
+            "combined_avg": round(float(np.mean(c_rets)), 6) if c_rets else 0,
+            "combined_wr":  round(float(np.mean([1.0 if v > 0 else 0.0 for v in c_rets])), 4) if c_rets else 0,
+        })
+
+    return {
+        "metric_b":    req.metric_b,
+        "bins":        bins_out,
+        "equity_primary":  eq_primary,
+        "equity_combined": eq_combined,
+        "yearly":      yearly_out,
+        "baseline_n":  len(filtered),
+        "combined_n":  len(combined_sorted),
+    }

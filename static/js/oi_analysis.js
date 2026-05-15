@@ -46,6 +46,17 @@ document.addEventListener('alpine:init', () => {
     _charts: {},
     fsChartId: null,
 
+    // Secondary Signal Scanner
+    secStatus: { loaded: false, loading: false, error: null },
+    secCacheKey: null,
+    secBaseline: null,
+    secMetrics: [],
+    secMaxAbsLift: 0,
+    secSelectedMetric: null,
+    secDetail: null,
+    secDetailLoading: false,
+    secSelectedSecBins: [5],
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -81,6 +92,13 @@ document.addEventListener('alpine:init', () => {
       this.hmXData = null;
       this.hmYData = null;
       this._destroyCharts();
+      // Clear secondary scanner cache when primary analysis changes
+      this.secStatus = { loaded: false, loading: false, error: null };
+      this.secCacheKey = null;
+      this.secBaseline = null;
+      this.secMetrics = [];
+      this.secSelectedMetric = null;
+      this.secDetail = null;
       try {
         let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
@@ -163,6 +181,7 @@ document.addEventListener('alpine:init', () => {
       this._renderDOW();
       this._renderActivity();
       this._renderTradeTable();
+      if (this.secStatus.loaded && !this.secStatus.loading) this.secScan();
     },
 
 
@@ -2093,6 +2112,377 @@ document.addEventListener('alpine:init', () => {
       this.$nextTick(() => this.loadAnalysis());
       // Scroll to top
       document.querySelector('.oi-body')?.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+
+    // ── Secondary Signal Scanner ──────────────────────────────────────────────
+    _secFilteredDates() {
+      const cal = this.data?.trade_calendar || [];
+      const has20 = !!(cal[0]?.decile20);
+      if (!has20 || this.selectedBins20.size === 0) return cal.map(c => c.date);
+      return cal.filter(c => this.selectedBins20.has(c.decile20)).map(c => c.date);
+    },
+
+    async secLoad() {
+      if (!this.data || this.secStatus.loading) return;
+      this.secStatus = { loaded: false, loading: true, error: null };
+      this.secSelectedMetric = null;
+      this.secDetail = null;
+      try {
+        const r = await fetch('/api/oi-analysis/secondary-load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker:         this.ticker,
+            metric:         this.metric,
+            outcome:        this.outcome,
+            date_from:      this.dateFrom || '',
+            date_to:        this.dateTo || '',
+            filtered_dates: this._secFilteredDates(),
+          }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.secCacheKey = d.cache_key;
+        this.secBaseline = d.baseline;
+        this.secMetrics  = d.metrics || [];
+        this.secMaxAbsLift = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.lift)));
+        this.secStatus = { loaded: true, loading: false, error: null };
+        await this.$nextTick();
+        await this.$nextTick();
+        setTimeout(() => this._renderSecBar(), 60);
+      } catch (e) {
+        this.secStatus = { loaded: false, loading: false, error: e.message };
+      }
+    },
+
+    async secScan() {
+      if (!this.secCacheKey || this.secStatus.loading) return;
+      this.secStatus.loading = true;
+      try {
+        const r = await fetch('/api/oi-analysis/secondary-scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cache_key:      this.secCacheKey,
+            filtered_dates: this._secFilteredDates(),
+            ticker:         this.ticker,
+          }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) {
+          if (d.error === 'cache_miss') {
+            this.secStatus = { loaded: false, loading: false, error: null };
+            return;
+          }
+          throw new Error(d.error);
+        }
+        this.secBaseline = d.baseline;
+        this.secMetrics  = d.metrics || [];
+        this.secMaxAbsLift = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.lift)));
+        // Reset detail if the selected metric's position changed significantly
+        if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+        this._renderSecBar();
+      } catch (_) {}
+      finally { this.secStatus.loading = false; }
+    },
+
+    async secDrillMetric(metricName, resetBins = true) {
+      if (!this.secCacheKey) return;
+      this.secSelectedMetric = metricName;
+      if (resetBins) this.secSelectedSecBins = [5];
+      this.secDetailLoading = true;
+      this.secDetail = null;
+      try {
+        const r = await fetch('/api/oi-analysis/secondary-detail', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cache_key:      this.secCacheKey,
+            metric_b:       metricName,
+            filtered_dates: this._secFilteredDates(),
+            sec_bins:       this.secSelectedSecBins,
+            ticker:         this.ticker,
+          }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.secDetail = d;
+        await this.$nextTick();
+        await this.$nextTick();
+        setTimeout(() => this._renderSecDetail(), 60);
+      } catch (_) {}
+      finally { this.secDetailLoading = false; }
+    },
+
+    async secToggleSecBin(bin) {
+      const idx = this.secSelectedSecBins.indexOf(bin);
+      if (idx >= 0) {
+        if (this.secSelectedSecBins.length > 1) {
+          this.secSelectedSecBins = this.secSelectedSecBins.filter(b => b !== bin);
+        }
+      } else {
+        this.secSelectedSecBins = [...this.secSelectedSecBins, bin];
+      }
+      if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+    },
+
+    _renderSecBar() {
+      const canvas = document.getElementById('sec-bar-canvas');
+      if (!canvas || !this.secMetrics.length) return;
+      const ctx = canvas.getContext('2d');
+      if (this._charts['sec-bar']) { this._charts['sec-bar'].destroy(); delete this._charts['sec-bar']; }
+
+      const metrics = this.secMetrics;
+      const maxAbs = this.secMaxAbsLift;
+      const labels = metrics.map(m => m.name);
+      const lifts  = metrics.map(m => m.lift * 100);
+      const colors = lifts.map(l => l >= 0 ? 'rgba(52,152,219,0.7)' : 'rgba(232,67,147,0.7)');
+      const borderColors = lifts.map(l => l >= 0 ? '#3498db' : '#e84393');
+
+      // Set canvas height based on number of metrics
+      const rowH = 18;
+      const chartH = Math.max(200, metrics.length * rowH + 40);
+      canvas.parentElement.style.height = chartH + 'px';
+
+      this._charts['sec-bar'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data: lifts,
+            backgroundColor: colors,
+            borderColor: borderColors,
+            borderWidth: 1,
+            barThickness: Math.max(10, rowH - 4),
+          }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const name = metrics[elements[0].index]?.name;
+            if (name) this.secDrillMetric(name);
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const m = metrics[ctx.dataIndex];
+                  return [
+                    `Lift: ${(m.lift * 100).toFixed(3)}%`,
+                    `WR lift: ${(m.win_lift * 100).toFixed(1)}%`,
+                    `Best bin: ${m.top_bin}/${this.secMetrics.length > 0 ? 5 : '?'}`,
+                    `n (top): ${m.n_top}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: '#888', font: { size: 9 } },
+              grid: { color: '#2a2a2a' },
+              title: { display: true, text: 'Lift (% return)', color: '#666', font: { size: 9 } },
+            },
+            y: {
+              ticks: {
+                color: ctx => {
+                  const m = metrics[ctx.index];
+                  return m?.name === this.secSelectedMetric ? '#3498db' : '#888';
+                },
+                font: { size: 9, family: 'monospace' },
+              },
+              grid: { display: false },
+            },
+          },
+        },
+      });
+    },
+
+    _renderSecDetail() {
+      if (!this.secDetail) return;
+      this._renderSecBinsChart();
+      this._renderSecEquity();
+      this._renderSecYearly();
+    },
+
+    _renderSecBinsChart() {
+      const canvas = document.getElementById('sec-bins-canvas');
+      if (!canvas) return;
+      if (this._charts['sec-bins']) { this._charts['sec-bins'].destroy(); delete this._charts['sec-bins']; }
+      const bins = (this.secDetail.bins || []).filter(b => b);
+      if (!bins.length) return;
+      const ctx = canvas.getContext('2d');
+      const avgRets = bins.map(b => (b.avg_ret || 0) * 100);
+      const selected = this.secSelectedSecBins;
+      this._charts['sec-bins'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: bins.map(b => `B${b.bin}`),
+          datasets: [{
+            data: avgRets,
+            backgroundColor: bins.map(b =>
+              selected.includes(b.bin)
+                ? (b.avg_ret >= 0 ? 'rgba(52,152,219,0.85)' : 'rgba(232,67,147,0.85)')
+                : (b.avg_ret >= 0 ? 'rgba(52,152,219,0.25)' : 'rgba(232,67,147,0.25)')
+            ),
+            borderColor: bins.map(b => b.avg_ret >= 0 ? '#3498db' : '#e84393'),
+            borderWidth: 1,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            this.secToggleSecBin(bins[elements[0].index].bin);
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const b = bins[ctx.dataIndex];
+                  return [`Avg: ${(b.avg_ret*100).toFixed(3)}%`, `WR: ${(b.win_rate*100).toFixed(1)}%`, `n: ${b.n}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#222' } },
+            y: {
+              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+              grid: { color: '#222' },
+            },
+          },
+        },
+      });
+    },
+
+    _renderSecEquity() {
+      const canvas = document.getElementById('sec-equity-canvas');
+      if (!canvas || !this.secDetail) return;
+      if (this._charts['sec-equity']) { this._charts['sec-equity'].destroy(); delete this._charts['sec-equity']; }
+      const eqP = this.secDetail.equity_primary || [];
+      const eqC = this.secDetail.equity_combined || [];
+      if (!eqP.length) return;
+      const ctx = canvas.getContext('2d');
+
+      // Align combined curve to primary date axis: hold last value on non-combined dates
+      const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
+      let lastCombined = 0;
+      const combinedAligned = eqP.map(p => {
+        if (cMap[p.date] !== undefined) lastCombined = cMap[p.date];
+        return lastCombined;
+      });
+
+      this._charts['sec-equity'] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: eqP.map(p => p.date),
+          datasets: [
+            {
+              label: 'Primary filter',
+              data: eqP.map(p => +(p.value * 100).toFixed(4)),
+              borderColor: '#3498db',
+              backgroundColor: 'rgba(52,152,219,0.08)',
+              borderWidth: 1.5,
+              pointRadius: 0,
+              fill: false,
+              tension: 0,
+            },
+            {
+              label: '+ Secondary filter',
+              data: combinedAligned,
+              borderColor: '#e84393',
+              backgroundColor: 'transparent',
+              borderWidth: 1.5,
+              pointRadius: 0,
+              fill: false,
+              tension: 0,
+              spanGaps: true,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: {
+              display: true,
+              labels: { color: '#888', font: { size: 9 }, boxWidth: 12 },
+            },
+            tooltip: { mode: 'index', intersect: false },
+          },
+          scales: {
+            x: { display: false },
+            y: {
+              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(1) + '%' },
+              grid: { color: '#222' },
+            },
+          },
+        },
+      });
+    },
+
+    _renderSecYearly() {
+      const canvas = document.getElementById('sec-yearly-canvas');
+      if (!canvas || !this.secDetail?.yearly?.length) return;
+      if (this._charts['sec-yearly']) { this._charts['sec-yearly'].destroy(); delete this._charts['sec-yearly']; }
+      const yearly = this.secDetail.yearly;
+      const ctx = canvas.getContext('2d');
+      this._charts['sec-yearly'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: yearly.map(y => y.year),
+          datasets: [
+            {
+              label: 'Primary',
+              data: yearly.map(y => +(y.primary_avg * 100).toFixed(3)),
+              backgroundColor: 'rgba(52,152,219,0.45)',
+              borderColor: '#3498db',
+              borderWidth: 1,
+            },
+            {
+              label: '+ Secondary',
+              data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
+              backgroundColor: 'rgba(232,67,147,0.45)',
+              borderColor: '#e84393',
+              borderWidth: 1,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: {
+              display: true,
+              labels: { color: '#888', font: { size: 9 }, boxWidth: 12 },
+            },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const y = yearly[ctx.dataIndex];
+                  if (ctx.datasetIndex === 0) return [`Avg: ${(y.primary_avg*100).toFixed(3)}%`, `WR: ${(y.primary_wr*100).toFixed(1)}%`, `n: ${y.primary_n}`];
+                  return [`Avg: ${(y.combined_avg*100).toFixed(3)}%`, `WR: ${(y.combined_wr*100).toFixed(1)}%`, `n: ${y.combined_n}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
+            y: {
+              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+              grid: { color: '#222' },
+            },
+          },
+        },
+      });
     },
   }));
 });
