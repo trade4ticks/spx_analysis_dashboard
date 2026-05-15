@@ -1637,9 +1637,10 @@ document.addEventListener('alpine:init', () => {
         if (metaRes.ok) this.smMeta = await metaRes.json();
         if (statusRes.ok) this.smStatus = await statusRes.json();
         if (this.smMeta.count > 0) {
-          await this.loadScoreMatrix();
+          // loadSmSummary internally calls loadScoreMatrix, so the table
+          // populates as part of this single await. The setTimeout below
+          // re-renders the two ticker charts after layout settles.
           await this.loadSmSummary();
-          // Re-render ticker charts after layout settles (x-show may delay dimensions)
           setTimeout(() => {
             this._renderSmTickerChart();
             this._renderSmTickerFwdChart();

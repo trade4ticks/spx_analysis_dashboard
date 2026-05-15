@@ -79,6 +79,10 @@
       padding:5px 10px; border-bottom:1px solid rgba(255,255,255,.04); color:var(--muted);
     }
     .dec-table tr:hover td { background:rgba(255,255,255,.03); }
+    /* Score Matrix rows — CSS-only hover so we don't pay per-row Alpine
+       reactivity for 500 reactive proxies and 1500 mouse listeners. */
+    .sm-row { cursor:pointer; }
+    .sm-row:hover { background:rgba(52,152,219,.08); }
     .dec-table .num,
     .trade-table .num,
     .trade-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
@@ -117,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=37"></script>
+  <script src="/static/js/oi_analysis.js?v=38"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -642,10 +646,7 @@
           </thead>
           <tbody>
             <template x-for="row in smRows" :key="row.ticker+row.metric+row.fwd_ret">
-              <tr @click="drillIntoScore(row)"
-                  style="cursor:pointer"
-                  :style="{'background': row._highlight ? 'rgba(52,152,219,.08)' : 'transparent'}"
-                  @mouseenter="row._highlight=true" @mouseleave="row._highlight=false">
+              <tr class="sm-row" @click="drillIntoScore(row)">
                 <td style="padding:4px 8px;font-weight:700;color:var(--accent);text-align:right"
                     x-text="row.composite_score?.toFixed(0)"></td>
                 <td style="padding:4px 8px;font-weight:600;color:var(--text)"
