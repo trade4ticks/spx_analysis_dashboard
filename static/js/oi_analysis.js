@@ -55,7 +55,8 @@ document.addEventListener('alpine:init', () => {
     secSelectedMetric: null,
     secDetail: null,
     secDetailLoading: false,
-    secSelectedSecBins: [5],
+    secBinCount: 10,
+    secSelectedSecBins: [10],
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -99,6 +100,8 @@ document.addEventListener('alpine:init', () => {
       this.secMetrics = [];
       this.secSelectedMetric = null;
       this.secDetail = null;
+      this.secBinCount = 10;
+      this.secSelectedSecBins = [10];
       try {
         let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
@@ -2127,6 +2130,7 @@ document.addEventListener('alpine:init', () => {
       this.secStatus = { loaded: false, loading: true, error: null };
       this.secSelectedMetric = null;
       this.secDetail = null;
+      this.secSelectedSecBins = [this.secBinCount];
       try {
         const r = await fetch('/api/oi-analysis/secondary-load', {
           method: 'POST',
@@ -2203,6 +2207,7 @@ document.addEventListener('alpine:init', () => {
             metric_b:       metricName,
             filtered_dates: this._secFilteredDates(),
             sec_bins:       this.secSelectedSecBins,
+            sec_bin_count:  this.secBinCount,
             ticker:         this.ticker,
           }),
         });
@@ -2229,38 +2234,42 @@ document.addEventListener('alpine:init', () => {
       if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
     },
 
+    async secSetBinCount(n) {
+      this.secBinCount = n;
+      this.secSelectedSecBins = [n];  // reset to top bin
+      if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+    },
+
     _renderSecBar() {
+      const inner = document.getElementById('sec-bar-inner');
       const canvas = document.getElementById('sec-bar-canvas');
-      if (!canvas || !this.secMetrics.length) return;
-      const ctx = canvas.getContext('2d');
+      if (!canvas || !inner || !this.secMetrics.length) return;
       if (this._charts['sec-bar']) { this._charts['sec-bar'].destroy(); delete this._charts['sec-bar']; }
 
       const metrics = this.secMetrics;
-      const maxAbs = this.secMaxAbsLift;
-      const labels = metrics.map(m => m.name);
-      const lifts  = metrics.map(m => m.lift * 100);
-      const colors = lifts.map(l => l >= 0 ? 'rgba(52,152,219,0.7)' : 'rgba(232,67,147,0.7)');
-      const borderColors = lifts.map(l => l >= 0 ? '#3498db' : '#e84393');
+      const lifts   = metrics.map(m => +(m.lift * 100).toFixed(4));
+      const colors   = lifts.map(l => l >= 0 ? 'rgba(52,152,219,0.75)' : 'rgba(232,67,147,0.75)');
+      const borders  = lifts.map(l => l >= 0 ? '#3498db' : '#e84393');
 
-      // Set canvas height based on number of metrics
-      const rowH = 18;
-      const chartH = Math.max(200, metrics.length * rowH + 40);
-      canvas.parentElement.style.height = chartH + 'px';
+      // Dynamic width: at least container width, at most barW*n
+      const barW = Math.max(10, Math.min(22, 1400 / metrics.length));
+      const chartW = Math.max(inner.parentElement.clientWidth || 600, metrics.length * (barW + 3) + 60);
+      inner.style.width = chartW + 'px';
 
+      const ctx = canvas.getContext('2d');
       this._charts['sec-bar'] = new Chart(ctx, {
         type: 'bar',
         data: {
-          labels,
+          labels: metrics.map(m => m.name),
           datasets: [{
             data: lifts,
             backgroundColor: colors,
-            borderColor: borderColors,
+            borderColor: borders,
             borderWidth: 1,
-            barThickness: Math.max(10, rowH - 4),
+            barThickness: barW,
           }],
         },
         options: {
-          indexAxis: 'y',
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
@@ -2278,8 +2287,8 @@ document.addEventListener('alpine:init', () => {
                   return [
                     `Lift: ${(m.lift * 100).toFixed(3)}%`,
                     `WR lift: ${(m.win_lift * 100).toFixed(1)}%`,
-                    `Best bin: ${m.top_bin}/${this.secMetrics.length > 0 ? 5 : '?'}`,
-                    `n (top): ${m.n_top}`,
+                    `Best bin: B${m.top_bin} of ${this.secBinCount}`,
+                    `n top bin: ${m.n_top}  total: ${m.n}`,
                   ];
                 },
               },
@@ -2287,19 +2296,18 @@ document.addEventListener('alpine:init', () => {
           },
           scales: {
             x: {
-              ticks: { color: '#888', font: { size: 9 } },
-              grid: { color: '#2a2a2a' },
-              title: { display: true, text: 'Lift (% return)', color: '#666', font: { size: 9 } },
+              ticks: {
+                color: ctx => metrics[ctx.index]?.name === this.secSelectedMetric ? '#3498db' : '#666',
+                font: { size: 8, family: 'monospace' },
+                maxRotation: 90,
+                minRotation: 45,
+              },
+              grid: { color: '#1e1e1e' },
             },
             y: {
-              ticks: {
-                color: ctx => {
-                  const m = metrics[ctx.index];
-                  return m?.name === this.secSelectedMetric ? '#3498db' : '#888';
-                },
-                font: { size: 9, family: 'monospace' },
-              },
-              grid: { display: false },
+              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+              grid: { color: '#2a2a2a' },
+              title: { display: true, text: 'Lift (%)', color: '#555', font: { size: 9 } },
             },
           },
         },
@@ -2311,6 +2319,7 @@ document.addEventListener('alpine:init', () => {
       this._renderSecBinsChart();
       this._renderSecEquity();
       this._renderSecYearly();
+      this._renderSecActivity();
     },
 
     _renderSecBinsChart() {
@@ -2480,6 +2489,77 @@ document.addEventListener('alpine:init', () => {
               ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
               grid: { color: '#222' },
             },
+          },
+        },
+      });
+    },
+
+    _renderSecActivity() {
+      const canvas = document.getElementById('sec-activity-canvas');
+      if (!canvas || !this.secDetail?.combined_trade_dates?.length) return;
+      if (this._charts['sec-activity']) { this._charts['sec-activity'].destroy(); delete this._charts['sec-activity']; }
+
+      const dates = this.secDetail.combined_trade_dates;
+      const horizon = this.secDetail.horizon || 5;
+      // Approx calendar days for one holding period (1.4 trading→calendar factor)
+      const horizonMs = Math.ceil(horizon * 1.4) * 86400000;
+
+      // Group entries by month
+      const byMonth = {};
+      for (const d of dates) {
+        const ym = d.slice(0, 7);
+        byMonth[ym] = (byMonth[ym] || 0) + 1;
+      }
+      const months = Object.keys(byMonth).sort();
+      if (!months.length) return;
+
+      // Convert all trade dates to timestamps for open-position calculation
+      const tradeTimes = dates.map(d => new Date(d).getTime());
+
+      // For each month mid-point: count trades whose holding period overlaps it
+      const openPos = months.map(ym => {
+        const mid = new Date(ym + '-15').getTime();
+        return tradeTimes.filter(t => t <= mid && t + horizonMs >= mid).length;
+      });
+
+      const ctx = canvas.getContext('2d');
+      this._charts['sec-activity'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: months,
+          datasets: [
+            {
+              type: 'bar',
+              label: 'Entries',
+              data: months.map(m => byMonth[m]),
+              backgroundColor: 'rgba(52,152,219,0.45)',
+              borderColor: '#3498db',
+              borderWidth: 1,
+              yAxisID: 'y',
+            },
+            {
+              type: 'line',
+              label: 'Open (est.)',
+              data: openPos,
+              borderColor: '#e84393',
+              backgroundColor: 'transparent',
+              borderWidth: 1.5,
+              pointRadius: 0,
+              tension: 0.3,
+              yAxisID: 'y2',
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: true, labels: { color: '#888', font: { size: 9 }, boxWidth: 12 } },
+            tooltip: { mode: 'index', intersect: false },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 8 }, maxRotation: 45 }, grid: { color: '#222' } },
+            y:  { position: 'left',  ticks: { color: '#888',   font: { size: 9 } }, grid: { color: '#222' }, title: { display: true, text: 'Entries', color: '#555', font: { size: 9 } } },
+            y2: { position: 'right', ticks: { color: '#e84393', font: { size: 9 } }, grid: { display: false }, title: { display: true, text: 'Open', color: '#e84393', font: { size: 9 } } },
           },
         },
       });

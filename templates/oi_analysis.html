@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=39"></script>
+  <script src="/static/js/oi_analysis.js?v=40"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -556,7 +556,9 @@
     <!-- ── Secondary Signal Scanner sub-panel ───────────────────────────── -->
     <template x-if="data && !data.error">
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:4px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+
+        <!-- Header row -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
           <div style="font-size:12px;font-weight:700;color:var(--text)">Secondary Signal Scanner</div>
           <button @click="secLoad()"
                   :disabled="secStatus.loading"
@@ -567,135 +569,117 @@
           </button>
           <template x-if="secStatus.loaded && secBaseline">
             <span style="font-size:10px;color:var(--dim)">
-              Baseline: <b style="color:var(--text)" x-text="secBaseline.n + ' trades'"></b>
-              · avg <b :style="'color:' + (secBaseline.avg_ret >= 0 ? '#3498db' : '#e84393')"
-                       x-text="(secBaseline.avg_ret * 100).toFixed(3) + '%'"></b>
+              Baseline (primary filter): <b style="color:var(--text)" x-text="secBaseline.n + ' trades'"></b>
+              · <b :style="'color:' + (secBaseline.avg_ret >= 0 ? '#3498db' : '#e84393')"
+                   x-text="(secBaseline.avg_ret * 100).toFixed(3) + '%'"></b>
               · WR <b style="color:var(--muted)" x-text="(secBaseline.win_rate * 100).toFixed(1) + '%'"></b>
-              · <span style="color:var(--dim)" x-text="secMetrics.length + ' metrics scored'"></span>
+              · <span x-text="secMetrics.length + ' metrics ranked'"></span>
             </span>
           </template>
-          <span x-show="secStatus.loading" style="font-size:10px;color:var(--dim)">Computing secondary scores…</span>
+          <span x-show="secStatus.loading" style="font-size:10px;color:#3498db">Computing secondary scores…</span>
           <span x-show="secStatus.error" style="font-size:10px;color:#e84393" x-text="secStatus.error"></span>
         </div>
 
-        <!-- Bar chart: all secondary metrics ranked by lift -->
-        <template x-if="secStatus.loaded && secMetrics.length > 0">
-          <div style="display:flex;gap:16px;align-items:flex-start">
+        <!-- Empty state -->
+        <div x-show="!secStatus.loaded && !secStatus.loading"
+             style="font-size:11px;color:var(--dim);padding:4px 0 12px">
+          Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
+        </div>
 
-            <!-- Left: horizontal bar ranking -->
-            <div style="flex:0 0 360px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px">
-              <div style="font-size:10px;color:var(--dim);margin-bottom:6px">
-                Click a bar to drill into 2-factor detail
-                <span x-show="secStatus.loading" style="color:#3498db"> · updating…</span>
-              </div>
-              <div style="position:relative;overflow-y:auto;max-height:480px">
+        <!-- Row 1: Full-width column chart of ranked secondary metrics -->
+        <template x-if="secStatus.loaded && secMetrics.length > 0">
+          <div class="chart-box" style="margin-bottom:12px">
+            <div class="chart-title">
+              Secondary Metrics by Lift
+              <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
+              <span x-show="secStatus.loading" style="color:#3498db;font-size:9px;margin-left:6px">updating…</span>
+            </div>
+            <div style="overflow-x:auto;position:relative">
+              <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
                 <canvas id="sec-bar-canvas"></canvas>
               </div>
             </div>
+          </div>
+        </template>
 
-            <!-- Right: 2-factor detail (shown when a secondary metric is selected) -->
-            <template x-if="secSelectedMetric">
-              <div style="flex:1;min-width:0;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
+        <!-- Detail rows: only shown when a secondary metric is selected -->
+        <template x-if="secSelectedMetric">
+          <div>
 
-                <!-- Detail header -->
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-                  <div style="font-size:11px;font-weight:700;color:var(--text)" x-text="secSelectedMetric"></div>
-                  <button @click="secSelectedMetric=null;secDetail=null"
-                          style="background:transparent;border:none;color:var(--dim);font-size:10px;cursor:pointer">✕ Close</button>
-                  <span x-show="secDetailLoading" style="font-size:10px;color:var(--dim)">Loading…</span>
-                  <template x-if="secDetail">
-                    <span style="font-size:10px;color:var(--dim)">
-                      Primary filter: <b style="color:var(--muted)" x-text="secDetail.baseline_n"></b> trades
-                      · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b> trades
-                    </span>
-                  </template>
-                </div>
-
-                <!-- Secondary bin selector + bin chart -->
-                <template x-if="secDetail && secDetail.bins">
-                  <div style="margin-bottom:12px">
-                    <div style="font-size:10px;color:var(--dim);margin-bottom:4px">
-                      Secondary metric bins (click to toggle, pink = selected)
-                    </div>
-                    <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
-                      <template x-for="b in secDetail.bins.filter(x => x)" :key="'sb-'+b.bin">
-                        <span style="padding:3px 10px;border-radius:3px;font-size:10px;cursor:pointer;border:1px solid;font-family:monospace"
-                              :style="{
-                                background: secSelectedSecBins.includes(b.bin) ? 'rgba(232,67,147,.2)' : 'var(--raised)',
-                                borderColor: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--border)',
-                                color: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--dim)',
-                              }"
-                              @click="secToggleSecBin(b.bin)"
-                              x-text="'B' + b.bin + ' (' + (b.avg_ret*100).toFixed(2) + '%)'"></span>
-                      </template>
-                    </div>
-                    <div style="height:160px;position:relative">
-                      <canvas id="sec-bins-canvas"></canvas>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- Equity curves -->
-                <template x-if="secDetail && secDetail.equity_primary?.length">
-                  <div style="margin-bottom:12px">
-                    <div style="font-size:10px;color:var(--dim);margin-bottom:4px">Equity curves — blue: primary filter only · pink: +secondary filter</div>
-                    <div style="height:200px;position:relative">
-                      <canvas id="sec-equity-canvas"></canvas>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- Year-by-year table -->
-                <template x-if="secDetail && secDetail.yearly?.length">
-                  <div>
-                    <div style="font-size:10px;color:var(--dim);margin-bottom:6px">Year-by-year comparison</div>
-                    <div style="overflow-x:auto">
-                      <table style="border-collapse:collapse;font-size:10px;font-family:monospace;width:100%">
-                        <thead>
-                          <tr style="border-bottom:1px solid var(--border)">
-                            <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Year</th>
-                            <th style="text-align:right;padding:3px 8px;color:#3498db;font-weight:600">Primary N</th>
-                            <th style="text-align:right;padding:3px 8px;color:#3498db;font-weight:600">Primary Avg</th>
-                            <th style="text-align:right;padding:3px 8px;color:#3498db;font-weight:600">Primary WR</th>
-                            <th style="text-align:right;padding:3px 8px;color:#e84393;font-weight:600">+Sec N</th>
-                            <th style="text-align:right;padding:3px 8px;color:#e84393;font-weight:600">+Sec Avg</th>
-                            <th style="text-align:right;padding:3px 8px;color:#e84393;font-weight:600">+Sec WR</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <template x-for="y in secDetail.yearly" :key="'scy-'+y.year">
-                            <tr style="border-bottom:1px solid #1a1a1a">
-                              <td style="padding:3px 8px;color:var(--dim)" x-text="y.year"></td>
-                              <td style="padding:3px 8px;text-align:right;color:var(--muted)" x-text="y.primary_n"></td>
-                              <td style="padding:3px 8px;text-align:right"
-                                  :style="'color:' + (y.primary_avg >= 0 ? '#3498db' : '#e84393')"
-                                  x-text="(y.primary_avg*100).toFixed(3)+'%'"></td>
-                              <td style="padding:3px 8px;text-align:right;color:var(--muted)"
-                                  x-text="(y.primary_wr*100).toFixed(1)+'%'"></td>
-                              <td style="padding:3px 8px;text-align:right;color:var(--muted)" x-text="y.combined_n"></td>
-                              <td style="padding:3px 8px;text-align:right"
-                                  :style="'color:' + (y.combined_avg >= 0 ? '#e84393' : '#888')"
-                                  x-text="(y.combined_avg*100).toFixed(3)+'%'"></td>
-                              <td style="padding:3px 8px;text-align:right;color:var(--muted)"
-                                  x-text="(y.combined_wr*100).toFixed(1)+'%'"></td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </template>
-
+            <!-- Detail sub-header: metric name, bin count selector, bin pills, close -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;
+                        background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px">
+              <div style="font-size:11px;font-weight:700;color:var(--text);font-family:monospace"
+                   x-text="secSelectedMetric"></div>
+              <div class="mode-seg" style="margin-left:4px">
+                <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
+                <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
+                <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
               </div>
-            </template>
+              <span style="font-size:10px;color:var(--dim);margin-left:4px">bins · click to toggle →</span>
+              <template x-if="secDetail && secDetail.bins">
+                <template x-for="b in secDetail.bins.filter(x => x)" :key="'sb-'+b.bin">
+                  <span style="padding:2px 8px;border-radius:3px;font-size:9px;cursor:pointer;border:1px solid;font-family:monospace"
+                        :style="{
+                          background: secSelectedSecBins.includes(b.bin) ? 'rgba(232,67,147,.2)' : 'var(--raised)',
+                          borderColor: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--border)',
+                          color: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--dim)',
+                        }"
+                        @click="secToggleSecBin(b.bin)"
+                        x-text="'B' + b.bin"></span>
+                </template>
+              </template>
+              <span x-show="secDetailLoading" style="font-size:10px;color:var(--dim)">Loading…</span>
+              <template x-if="secDetail">
+                <span style="font-size:10px;color:var(--dim);margin-left:auto">
+                  Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
+                  · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
+                </span>
+              </template>
+              <button @click="secSelectedMetric=null;secDetail=null"
+                      style="background:transparent;border:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px">✕</button>
+            </div>
+
+            <!-- Row 2: Secondary bins (left) + Equity curves (right) -->
+            <div class="chart-grid" style="margin-bottom:12px">
+              <div class="chart-box">
+                <div class="chart-title">
+                  Quantile — Secondary Metric
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bins to toggle filter</span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-bins-canvas"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">
+                  Equity Curves
+                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
+                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+              </div>
+            </div>
+
+            <!-- Row 3: Avg return by year (left) + Trade activity (right) -->
+            <div class="chart-grid">
+              <div class="chart-box">
+                <div class="chart-title">
+                  Avg Return by Year
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs +secondary</span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">
+                  Trade Activity
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
+              </div>
+            </div>
 
           </div>
         </template>
 
-        <div x-show="!secStatus.loaded && !secStatus.loading"
-             style="font-size:11px;color:var(--dim);padding:8px 0">
-          Select primary bins, then click <b>Load All Metrics</b> to discover which secondary metrics add value within the filtered subset.
-        </div>
       </div>
     </template>
 

@@ -1439,7 +1439,8 @@ class SecDetailReq(BaseModel):
     cache_key: str
     metric_b: str
     filtered_dates: List[str]
-    sec_bins: List[int] = [5]
+    sec_bins: List[int] = [10]
+    sec_bin_count: int = 10
     ticker: str = "SPX"
 
 
@@ -1547,7 +1548,7 @@ async def secondary_detail(req: SecDetailReq):
     is_all = (req.ticker == "ALL")
     all_rows = cached["rows"]
     outcome_col = cached["outcome"]
-    n_bins = 5
+    n_bins = max(2, min(20, req.sec_bin_count))
 
     date_set = set(req.filtered_dates)
     filtered = [r for r in all_rows if r.get("trade_date") in date_set]
@@ -1670,4 +1671,6 @@ async def secondary_detail(req: SecDetailReq):
         "yearly":      yearly_out,
         "baseline_n":  len(filtered),
         "combined_n":  len(combined_sorted),
+        "horizon":     _parse_horizon(outcome_col),
+        "combined_trade_dates": [r.get("trade_date", "") for r in combined_sorted],
     }
