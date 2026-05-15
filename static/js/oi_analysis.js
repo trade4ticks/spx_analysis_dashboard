@@ -2500,66 +2500,76 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['sec-activity']) { this._charts['sec-activity'].destroy(); delete this._charts['sec-activity']; }
 
       const dates = this.secDetail.combined_trade_dates;
-      const horizon = this.secDetail.horizon || 5;
-      // Approx calendar days for one holding period (1.4 trading→calendar factor)
-      const horizonMs = Math.ceil(horizon * 1.4) * 86400000;
+      const horizon = this.secDetail.horizon || 1;
 
-      // Group entries by month
-      const byMonth = {};
-      for (const d of dates) {
-        const ym = d.slice(0, 7);
-        byMonth[ym] = (byMonth[ym] || 0) + 1;
-      }
-      const months = Object.keys(byMonth).sort();
-      if (!months.length) return;
+      // Entry count per trading day
+      const entriesByDate = {};
+      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
 
-      // Convert all trade dates to timestamps for open-position calculation
-      const tradeTimes = dates.map(d => new Date(d).getTime());
+      // Use the primary analysis spot_series as the trading-day timeline (single-ticker).
+      // ALL mode: spot_series may be empty — fall back to sorted union of entry dates.
+      const spotSeries = this.data?.spot_series || [];
+      const tradingDays = spotSeries.length > 0
+        ? spotSeries.map(s => s.date)
+        : [...new Set(dates)].sort();
 
-      // For each month mid-point: count trades whose holding period overlaps it
-      const openPos = months.map(ym => {
-        const mid = new Date(ym + '-15').getTime();
-        return tradeTimes.filter(t => t <= mid && t + horizonMs >= mid).length;
+      const entered = tradingDays.map(d => entriesByDate[d] || 0);
+
+      // Open positions on day i = entries in the N-trading-day window [i-N+1 .. i]
+      // (exact same logic as the primary _renderActivity)
+      const open = tradingDays.map((_, i) => {
+        const start = Math.max(0, i - horizon + 1);
+        let count = 0;
+        for (let j = start; j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
+        return count;
       });
 
       const ctx = canvas.getContext('2d');
       this._charts['sec-activity'] = new Chart(ctx, {
         type: 'bar',
         data: {
-          labels: months,
+          labels: tradingDays.map(d => d.slice(0, 7)),
           datasets: [
             {
-              type: 'bar',
-              label: 'Entries',
-              data: months.map(m => byMonth[m]),
-              backgroundColor: 'rgba(52,152,219,0.45)',
-              borderColor: '#3498db',
-              borderWidth: 1,
-              yAxisID: 'y',
+              type: 'line',
+              label: 'Open Trades',
+              data: open,
+              borderColor: 'rgba(46,204,113,0.6)',
+              backgroundColor: 'rgba(46,204,113,0.08)',
+              fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5,
+              order: 1,
             },
             {
-              type: 'line',
-              label: 'Open (est.)',
-              data: openPos,
-              borderColor: '#e84393',
-              backgroundColor: 'transparent',
-              borderWidth: 1.5,
-              pointRadius: 0,
-              tension: 0.3,
-              yAxisID: 'y2',
+              type: 'bar',
+              label: 'Entered',
+              data: entered,
+              backgroundColor: 'rgba(52,152,219,0.7)',
+              barThickness: 2,
+              order: 2,
             },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { display: true, labels: { color: '#888', font: { size: 9 }, boxWidth: 12 } },
-            tooltip: { mode: 'index', intersect: false },
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              mode: 'index', intersect: false,
+              callbacks: {
+                title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
+                label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
+              },
+            },
           },
           scales: {
-            x: { ticks: { color: '#888', font: { size: 8 }, maxRotation: 45 }, grid: { color: '#222' } },
-            y:  { position: 'left',  ticks: { color: '#888',   font: { size: 9 } }, grid: { color: '#222' }, title: { display: true, text: 'Entries', color: '#555', font: { size: 9 } } },
-            y2: { position: 'right', ticks: { color: '#e84393', font: { size: 9 } }, grid: { display: false }, title: { display: true, text: 'Open', color: '#e84393', font: { size: 9 } } },
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            y: {
+              ...this._darkScales().y,
+              title: { display: true, text: 'Count', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, stepSize: 1 },
+            },
           },
         },
       });
