@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=44"></script>
+  <script src="/static/js/oi_analysis.js?v=45"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -595,6 +595,7 @@
                 Secondary Metrics by Lift
                 <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
                 <span x-show="secStatus.loading" style="color:#3498db;font-size:9px;margin-left:6px">updating…</span>
+                <button class="fs-btn" @click="openFullscreen('sec-bar-canvas')" title="Fullscreen">⛶</button>
               </div>
               <div style="overflow-x:auto;position:relative">
                 <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
@@ -609,6 +610,7 @@
                   Equity Curves
                   <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
                   <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
               </div>
@@ -660,6 +662,7 @@
                 <div class="chart-title">
                   Quantile — Secondary Metric
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bins to toggle filter</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-bins-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-bins-canvas"></canvas></div>
               </div>
@@ -667,6 +670,7 @@
                 <div class="chart-title">
                   Trade Activity
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-activity-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
               </div>
@@ -685,6 +689,7 @@
                            style="width:60px;vertical-align:middle;accent-color:#3498db">
                     <b x-text="secBubbleMinN" style="color:var(--text)"></b>
                   </span>
+                  <button class="fs-btn" @click="openFullscreen('sec-bubble-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-bubble-canvas"></canvas></div>
               </div>
@@ -692,6 +697,7 @@
                 <div class="chart-title">
                   Avg Return by Year
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs +secondary</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-yearly-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
               </div>

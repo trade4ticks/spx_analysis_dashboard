@@ -1556,7 +1556,16 @@ document.addEventListener('alpine:init', () => {
 
     // Fullscreen — re-render the chart into the fullscreen canvas
     openFullscreen(chartId) {
-      const key = chartId.replace('chart-', '');
+      // Map canvas IDs to their _charts key (for non-standard naming)
+      const keyOverride = {
+        'sec-bar-canvas':      'sec-bar',
+        'sec-equity-canvas':   'sec-equity',
+        'sec-bins-canvas':     'sec-bins',
+        'sec-activity-canvas': 'sec-activity',
+        'sec-bubble-canvas':   'sec-bubble',
+        'sec-yearly-canvas':   'sec-yearly',
+      };
+      const key = keyOverride[chartId] || chartId.replace('chart-', '');
       this.fsChartId = chartId;
       this.$nextTick(() => {
         if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
@@ -1569,17 +1578,24 @@ document.addEventListener('alpine:init', () => {
         fsEl.id = chartId;
         // Call the appropriate render method
         const renderMap = {
-          'chart-decile': () => this._renderDecileBar(),
-          'chart-equity': () => this._renderEquity(),
-          'chart-yearly': () => this._renderYearly(),
-          'chart-rolling': () => this._renderRollingCorr(),
-          'chart-boxplot': () => this._renderBoxplot(),
-          'chart-drawdown': () => this._renderDrawdown(),
-          'chart-dist': () => this._renderReturnDist(),
-          'chart-calendar': () => this._renderTradeCalendar(),
-          'chart-dow': () => this._renderDOW(),
-          'chart-winrate': () => this._renderWinRate(),
-          'chart-activity': () => this._renderActivity(),
+          'chart-decile':        () => this._renderDecileBar(),
+          'chart-equity':        () => this._renderEquity(),
+          'chart-yearly':        () => this._renderYearly(),
+          'chart-rolling':       () => this._renderRollingCorr(),
+          'chart-boxplot':       () => this._renderBoxplot(),
+          'chart-drawdown':      () => this._renderDrawdown(),
+          'chart-dist':          () => this._renderReturnDist(),
+          'chart-calendar':      () => this._renderTradeCalendar(),
+          'chart-dow':           () => this._renderDOW(),
+          'chart-winrate':       () => this._renderWinRate(),
+          'chart-activity':      () => this._renderActivity(),
+          // Secondary scanner
+          'sec-bar-canvas':      () => this._renderSecBar(),
+          'sec-equity-canvas':   () => this._renderSecEquity(),
+          'sec-bins-canvas':     () => this._renderSecBinsChart(),
+          'sec-activity-canvas': () => this._renderSecActivity(),
+          'sec-bubble-canvas':   () => this._renderSecBubble(),
+          'sec-yearly-canvas':   () => this._renderSecYearly(),
         };
         const fn = renderMap[chartId];
         if (fn) {
@@ -1597,8 +1613,10 @@ document.addEventListener('alpine:init', () => {
     closeFullscreen() {
       if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
       this.fsChartId = null;
-      // Re-render the chart back into its original canvas
-      this.$nextTick(() => this._renderAllCharts());
+      this.$nextTick(() => {
+        this._renderAllCharts();
+        if (this.secDetail) this._renderSecDetail();
+      });
     },
 
     // Helpers
