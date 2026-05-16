@@ -2406,6 +2406,25 @@ document.addEventListener('alpine:init', () => {
       this._renderSecBubble();
     },
 
+    secDownloadCSV() {
+      const trades = this.secDetail?.combined_trades;
+      if (!trades?.length) return;
+      const metric = this.secSelectedMetric || 'metric';
+      const outcome = this.secDetail.metric_b || 'outcome';
+      const header = `ticker,date,${metric},ret_pct`;
+      const rows = trades.map(t =>
+        [t.ticker, t.date, t.metric_val ?? '', t.ret != null ? (t.ret * 100).toFixed(6) : ''].join(',')
+      );
+      const csv = [header, ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sec_${this.metric}_${metric}_${new Date().toISOString().slice(0,10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+
     _renderSecBinsChart() {
       const canvas = document.getElementById('sec-bins-canvas');
       if (!canvas) return;

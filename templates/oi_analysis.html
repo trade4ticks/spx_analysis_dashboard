@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=45"></script>
+  <script src="/static/js/oi_analysis.js?v=46"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -651,6 +651,13 @@
                   Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
                   · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
                 </span>
+              </template>
+              <template x-if="secDetail?.combined_trades?.length">
+                <button @click="secDownloadCSV()"
+                        style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                               color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                  ↓ CSV
+                </button>
               </template>
               <button @click="secSelectedMetric=null;secDetail=null"
                       style="background:transparent;border:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px">✕</button>

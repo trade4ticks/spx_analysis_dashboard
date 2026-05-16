@@ -1711,6 +1711,16 @@ async def secondary_detail(req: SecDetailReq):
             "contrib_pct": round(contrib, 2),
         })
 
+    combined_trades = [
+        {
+            "ticker":     r.get("ticker", ""),
+            "date":       r.get("trade_date", ""),
+            "metric_val": round(float(r[req.metric_b]), 6) if r.get(req.metric_b) is not None else None,
+            "ret":        round(float(r[outcome_col]), 6)  if r.get(outcome_col)  is not None else None,
+        }
+        for r in combined_sorted
+    ]
+
     return {
         "metric_b":    req.metric_b,
         "bins":        bins_out,
@@ -1722,4 +1732,5 @@ async def secondary_detail(req: SecDetailReq):
         "horizon":     _parse_horizon(outcome_col),
         "combined_trade_dates": [r.get("trade_date", "") for r in combined_sorted],
         "tickers":     tickers_out,
+        "combined_trades": combined_trades,
     }
