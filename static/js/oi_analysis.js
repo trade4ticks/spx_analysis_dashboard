@@ -2509,12 +2509,14 @@ document.addEventListener('alpine:init', () => {
       const entriesByDate = {};
       for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
 
-      // Use the primary analysis spot_series as the trading-day timeline (single-ticker).
-      // ALL mode: spot_series may be empty — fall back to sorted union of entry dates.
+      // True calendar x-axis: spot_series covers all trading days in single-ticker mode.
+      // In ALL mode spot_series is empty — fall back to trade_calendar (all tickers, all bins),
+      // which spans the full date range. Mirrors primary _renderActivity() exactly.
       const spotSeries = this.data?.spot_series || [];
+      const cal = this.data?.trade_calendar || [];
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
-        : [...new Set(dates)].sort();
+        : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
 
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
 
