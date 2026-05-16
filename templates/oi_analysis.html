@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=43"></script>
+  <script src="/static/js/oi_analysis.js?v=44"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -586,19 +586,33 @@
           Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
         </div>
 
-        <!-- Row 1: Full-width column chart of ranked secondary metrics -->
+        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right, when drilling) -->
         <template x-if="secStatus.loaded && secMetrics.length > 0">
-          <div class="chart-box" style="margin-bottom:12px">
-            <div class="chart-title">
-              Secondary Metrics by Lift
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
-              <span x-show="secStatus.loading" style="color:#3498db;font-size:9px;margin-left:6px">updating…</span>
-            </div>
-            <div style="overflow-x:auto;position:relative">
-              <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
-                <canvas id="sec-bar-canvas"></canvas>
+          <div class="chart-grid" style="margin-bottom:12px">
+            <!-- Left: ranked secondary metrics -->
+            <div class="chart-box">
+              <div class="chart-title">
+                Secondary Metrics by Lift
+                <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
+                <span x-show="secStatus.loading" style="color:#3498db;font-size:9px;margin-left:6px">updating…</span>
+              </div>
+              <div style="overflow-x:auto;position:relative">
+                <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
+                  <canvas id="sec-bar-canvas"></canvas>
+                </div>
               </div>
             </div>
+            <!-- Right: equity curves (only when a metric is drilled) -->
+            <template x-if="secSelectedMetric">
+              <div class="chart-box">
+                <div class="chart-title">
+                  Equity Curves
+                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
+                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+              </div>
+            </template>
           </div>
         </template>
 
@@ -640,7 +654,7 @@
                       style="background:transparent;border:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px">✕</button>
             </div>
 
-            <!-- Row 2: Secondary bins (left) + Equity curves (right) -->
+            <!-- Row 2: Secondary quantile bins (left) + Trade activity (right) -->
             <div class="chart-grid" style="margin-bottom:12px">
               <div class="chart-box">
                 <div class="chart-title">
@@ -651,29 +665,35 @@
               </div>
               <div class="chart-box">
                 <div class="chart-title">
-                  Equity Curves
-                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
-                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                  Trade Activity
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
                 </div>
-                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+                <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
               </div>
             </div>
 
-            <!-- Row 3: Avg return by year (left) + Trade activity (right) -->
+            <!-- Row 3: Ticker bubble scatter (left) + Avg return by year (right) -->
             <div class="chart-grid">
+              <div class="chart-box">
+                <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                  <span>Ticker Breakdown</span>
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
+                    <input type="range" min="1" max="10" step="1"
+                           :value="secBubbleMinN"
+                           @input="secSetBubbleMinN($event.target.value)"
+                           style="width:60px;vertical-align:middle;accent-color:#3498db">
+                    <b x-text="secBubbleMinN" style="color:var(--text)"></b>
+                  </span>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-bubble-canvas"></canvas></div>
+              </div>
               <div class="chart-box">
                 <div class="chart-title">
                   Avg Return by Year
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs +secondary</span>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
-              </div>
-              <div class="chart-box">
-                <div class="chart-title">
-                  Trade Activity
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
               </div>
             </div>
 

@@ -1688,6 +1688,29 @@ async def secondary_detail(req: SecDetailReq):
             "combined_wr":  round(float(np.mean([1.0 if v > 0 else 0.0 for v in c_rets])), 4) if c_rets else 0,
         })
 
+    # Per-ticker breakdown for bubble chart
+    ticker_rets: dict = defaultdict(list)
+    for r in combined_sorted:
+        o = r.get(outcome_col)
+        if o is not None:
+            ticker_rets[r.get("ticker", "?")].append(float(o))
+
+    total_pnl = sum(sum(v) for v in ticker_rets.values())
+    tickers_out = []
+    for tkr, rets in sorted(ticker_rets.items()):
+        n_t = len(rets)
+        avg_r = float(np.mean(rets)) if rets else 0.0
+        wr = float(np.mean([1.0 if r > 0 else 0.0 for r in rets])) if rets else 0.0
+        tkr_pnl = sum(rets)
+        contrib = (tkr_pnl / total_pnl * 100) if total_pnl != 0 else 0.0
+        tickers_out.append({
+            "ticker":      tkr,
+            "n":           n_t,
+            "avg_ret":     round(avg_r, 6),
+            "win_rate":    round(wr, 4),
+            "contrib_pct": round(contrib, 2),
+        })
+
     return {
         "metric_b":    req.metric_b,
         "bins":        bins_out,
@@ -1698,4 +1721,5 @@ async def secondary_detail(req: SecDetailReq):
         "combined_n":  len(combined_sorted),
         "horizon":     _parse_horizon(outcome_col),
         "combined_trade_dates": [r.get("trade_date", "") for r in combined_sorted],
+        "tickers":     tickers_out,
     }

@@ -57,6 +57,7 @@ document.addEventListener('alpine:init', () => {
     secDetailLoading: false,
     secBinCount: 10,
     secSelectedSecBins: [10],
+    secBubbleMinN: 1,
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -102,6 +103,7 @@ document.addEventListener('alpine:init', () => {
       this.secDetail = null;
       this.secBinCount = 10;
       this.secSelectedSecBins = [10];
+      this.secBubbleMinN = 1;
       try {
         let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
@@ -2323,6 +2325,67 @@ document.addEventListener('alpine:init', () => {
       this._renderSecEquity();
       this._renderSecYearly();
       this._renderSecActivity();
+      this._renderSecBubble();
+    },
+
+    _renderSecBubble() {
+      const canvas = document.getElementById('sec-bubble-canvas');
+      if (!canvas || !this.secDetail?.tickers?.length) return;
+      if (this._charts['sec-bubble']) { this._charts['sec-bubble'].destroy(); delete this._charts['sec-bubble']; }
+
+      const minN = this.secBubbleMinN || 1;
+      const tickers = this.secDetail.tickers.filter(t => t.n >= minN);
+      if (!tickers.length) return;
+
+      // Radius: positive contrib scaled 3–20; negative → 2
+      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
+      // Color: pink (#e84393) at wr=0, blue (#3498db) at wr=1
+      const mkColor = (wr, a) => {
+        const r = Math.round(232 + (52  - 232) * wr);
+        const g = Math.round(67  + (152 - 67)  * wr);
+        const b = Math.round(147 + (219 - 147) * wr);
+        return `rgba(${r},${g},${b},${a})`;
+      };
+
+      const datasets = tickers.map(t => ({
+        label: t.ticker,
+        data: [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4), r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 20) : 2 }],
+        backgroundColor: mkColor(t.win_rate, 0.65),
+        borderColor:     mkColor(t.win_rate, 1),
+        borderWidth: 1,
+      }));
+
+      this._charts['sec-bubble'] = new Chart(canvas.getContext('2d'), {
+        type: 'bubble',
+        data: { datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const t = tickers[ctx.datasetIndex];
+                  return [`${t.ticker}  n:${t.n}  avg:${(t.avg_ret*100).toFixed(3)}%  WR:${(t.win_rate*100).toFixed(1)}%  contrib:${t.contrib_pct.toFixed(1)}%`];
+                },
+              },
+            },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x,
+                 title: { display: true, text: 'Trade Count', color: '#888', font: { size: 9 } } },
+            y: { ...this._darkScales().y,
+                 title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
+    },
+
+    secSetBubbleMinN(n) {
+      this.secBubbleMinN = +n;
+      this._renderSecBubble();
     },
 
     _renderSecBinsChart() {
