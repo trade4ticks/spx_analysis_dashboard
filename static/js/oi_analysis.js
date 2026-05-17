@@ -59,6 +59,15 @@ document.addEventListener('alpine:init', () => {
     secSelectedSecBins: [10],
     secBubbleMinN: 1,
 
+    // Multi-Metric Correlation Explorer
+    corrPanelOpen: false,
+    corrBinCount: 10,
+    corrMiniData: null,
+    corrMiniLoading: false,
+    corrSelections: {},
+    corrResult: null,
+    corrLoading: false,
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -104,6 +113,10 @@ document.addEventListener('alpine:init', () => {
       this.secBinCount = 10;
       this.secSelectedSecBins = [10];
       this.secBubbleMinN = 1;
+      this.corrPanelOpen = false;
+      this.corrMiniData = null;
+      this.corrSelections = {};
+      this.corrResult = null;
       try {
         let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
@@ -2154,6 +2167,9 @@ document.addEventListener('alpine:init', () => {
       this.secSelectedMetric = null;
       this.secDetail = null;
       this.secSelectedSecBins = [this.secBinCount];
+      this.corrMiniData = null;
+      this.corrSelections = {};
+      this.corrResult = null;
       try {
         const r = await fetch('/api/oi-analysis/secondary-load', {
           method: 'POST',
@@ -2423,6 +2439,119 @@ document.addEventListener('alpine:init', () => {
       a.download = `sec_${this.metric}_${metric}_${new Date().toISOString().slice(0,10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
+    },
+
+    // ── Multi-Metric Correlation Explorer ────────────────────────────────────
+
+    async corrTogglePanel() {
+      this.corrPanelOpen = !this.corrPanelOpen;
+      if (this.corrPanelOpen && !this.corrMiniData && this.secCacheKey) {
+        await this.corrLoadMiniData();
+      }
+    },
+
+    async corrSetBinCount(n) {
+      this.corrBinCount = n;
+      this.corrMiniData = null;
+      this.corrSelections = {};
+      this.corrResult = null;
+      if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
+    },
+
+    async corrLoadMiniData() {
+      this.corrMiniLoading = true;
+      try {
+        const r = await fetch('/api/oi-analysis/secondary-corr-bins', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            cache_key:      this.secCacheKey,
+            filtered_dates: this._secFilteredDates(),
+            ticker:         this.ticker,
+            n_bins:         this.corrBinCount,
+          }),
+        });
+        const d = await r.json();
+        if (!d.error) {
+          d.metrics.forEach(m => {
+            m.maxAbsRet = Math.max(0.0001, ...m.bins.map(v => Math.abs(v)));
+          });
+        }
+        this.corrMiniData = d;
+      } catch (e) {
+        this.corrMiniData = { error: e.message };
+      } finally {
+        this.corrMiniLoading = false;
+      }
+    },
+
+    corrToggleBin(metric, bin) {
+      const sel = { ...this.corrSelections };
+      const cur = sel[metric] ? [...sel[metric]] : [];
+      const idx = cur.indexOf(bin);
+      if (idx >= 0) {
+        cur.splice(idx, 1);
+        if (cur.length === 0) delete sel[metric]; else sel[metric] = cur;
+      } else {
+        sel[metric] = [...cur, bin];
+      }
+      this.corrSelections = sel;
+    },
+
+    corrIsBinSelected(metric, bin) {
+      return (this.corrSelections[metric] || []).includes(bin);
+    },
+
+    corrSelectedCount() {
+      return Object.keys(this.corrSelections).length;
+    },
+
+    corrClearAll() {
+      this.corrSelections = {};
+      this.corrResult = null;
+    },
+
+    async runCorrelation() {
+      if (this.corrSelectedCount() < 2 || !this.secCacheKey) return;
+      this.corrLoading = true;
+      this.corrResult = null;
+      try {
+        const selections = Object.entries(this.corrSelections)
+          .map(([metric, bins]) => ({ metric, bins }));
+        const r = await fetch('/api/oi-analysis/secondary-correlation', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            cache_key:      this.secCacheKey,
+            filtered_dates: this._secFilteredDates(),
+            ticker:         this.ticker,
+            n_bins:         this.corrBinCount,
+            selections,
+          }),
+        });
+        const d = await r.json();
+        this.corrResult = d;
+      } catch (_) {}
+      finally { this.corrLoading = false; }
+    },
+
+    corrCellStyle(phi, isDiag) {
+      if (isDiag) return 'background:#1c1c1c;color:#444;text-align:center;padding:5px 8px;border:1px solid rgba(255,255,255,0.04);min-width:48px;border-radius:2px';
+      const a = (0.12 + Math.min(1, Math.abs(phi)) * 0.72).toFixed(2);
+      const fg = Math.abs(phi) > 0.4 ? '#fff' : '#999';
+      const bg = phi >= 0
+        ? `rgba(52,152,219,${a})`
+        : `rgba(232,67,147,${a})`;
+      return `background:${bg};color:${fg};text-align:center;padding:5px 8px;border:1px solid rgba(255,255,255,0.04);min-width:48px;border-radius:2px`;
+    },
+
+    corrCellTitle(i, j) {
+      if (!this.corrResult) return '';
+      if (i === j) return `${this.corrResult.metrics[i]}  n=${this.corrResult.n_each[i]}`;
+      const m1 = this.corrResult.metrics[i], m2 = this.corrResult.metrics[j];
+      const phi = this.corrResult.phi[i][j];
+      const ov  = this.corrResult.overlap[i][j];
+      return `${m1} × ${m2}\nφ = ${phi.toFixed(3)}\nOverlap: ${ov} trades`;
     },
 
     _renderSecBinsChart() {

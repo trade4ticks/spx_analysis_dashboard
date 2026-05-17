@@ -1734,3 +1734,186 @@ async def secondary_detail(req: SecDetailReq):
         "tickers":     tickers_out,
         "combined_trades": combined_trades,
     }
+
+
+# ── Multi-Metric Correlation Explorer endpoints ───────────────────────────────
+
+def _compute_bins_for_metric(filtered: list, feat: str, outcome_col: str,
+                              n_bins: int, is_all: bool) -> dict | None:
+    """Return per-bin avg_ret (and n) for one feature over a filtered row set."""
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for r in filtered:
+            v, o = r.get(feat), r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    by_tkr[r.get("ticker", "_")].append((fv, fo))
+            except (TypeError, ValueError):
+                pass
+        norm_vals = []
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, y) in enumerate(sorted_t):
+                norm_vals.append((rank / n_t, y))
+    else:
+        norm_vals = []
+        for r in filtered:
+            v, o = r.get(feat), r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    norm_vals.append((fv, fo))
+            except (TypeError, ValueError):
+                pass
+
+    if len(norm_vals) < n_bins * 2:
+        return None
+
+    sorted_vals = sorted(norm_vals, key=lambda x: x[0])
+    n = len(sorted_vals)
+    buckets: list = [[] for _ in range(n_bins)]
+    for i, (_, y) in enumerate(sorted_vals):
+        b = min(int(i / n * n_bins), n_bins - 1)
+        buckets[b].append(y)
+
+    return {
+        "name":    feat,
+        "bins":    [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+        "bin_ns":  [len(b) for b in buckets],
+    }
+
+
+class CorrBinsReq(BaseModel):
+    cache_key: str
+    filtered_dates: List[str]
+    ticker: str = "SPX"
+    n_bins: int = 10
+
+
+@router.post("/secondary-corr-bins")
+async def secondary_corr_bins(req: CorrBinsReq):
+    """Per-bin avg return for every secondary metric — drives the correlation explorer mini charts."""
+    cached = _SEC_CACHE.get(req.cache_key)
+    if not cached:
+        return {"error": "cache_miss"}
+
+    all_rows  = cached["rows"]
+    feat_cols = cached["features"]
+    outcome_col = cached["outcome"]
+    is_all  = (req.ticker == "ALL")
+    n_bins  = max(2, min(20, req.n_bins))
+
+    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
+    if not filtered:
+        return {"error": "no_data"}
+
+    results = []
+    for feat in feat_cols:
+        r = _compute_bins_for_metric(filtered, feat, outcome_col, n_bins, is_all)
+        if r:
+            results.append(r)
+
+    return {"metrics": results, "n_bins": n_bins}
+
+
+class CorrReq(BaseModel):
+    cache_key: str
+    filtered_dates: List[str]
+    ticker: str = "SPX"
+    n_bins: int = 10
+    selections: List[dict]  # [{metric: str, bins: [int]}]
+
+
+@router.post("/secondary-correlation")
+async def secondary_correlation(req: CorrReq):
+    """Phi correlation matrix between selected secondary metrics' binary bin-membership vectors."""
+    cached = _SEC_CACHE.get(req.cache_key)
+    if not cached:
+        return {"error": "cache_miss"}
+    if len(req.selections) < 2:
+        return {"error": "need_at_least_2_metrics"}
+
+    all_rows = cached["rows"]
+    is_all   = (req.ticker == "ALL")
+    n_bins   = max(2, min(20, req.n_bins))
+
+    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
+    if not filtered:
+        return {"error": "no_data"}
+
+    ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+    n_rows  = len(ordered)
+
+    def binary_vec(metric: str, selected_bins: set) -> np.ndarray:
+        assignments: list = [None] * n_rows
+        if is_all:
+            by_tkr: dict = defaultdict(list)
+            for idx, r in enumerate(ordered):
+                v = r.get(metric)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                    if not math.isnan(fv):
+                        by_tkr[r.get("ticker", "_")].append((fv, idx))
+                except (TypeError, ValueError):
+                    pass
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < n_bins:
+                    continue
+                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+                n_t = len(sorted_t)
+                for rank, (_, orig_idx) in enumerate(sorted_t):
+                    assignments[orig_idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+        else:
+            pairs = []
+            for idx, r in enumerate(ordered):
+                v = r.get(metric)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                    if not math.isnan(fv):
+                        pairs.append((fv, idx))
+                except (TypeError, ValueError):
+                    pass
+            sorted_p = sorted(pairs, key=lambda x: x[0])
+            n_t = len(sorted_p)
+            for rank, (_, idx) in enumerate(sorted_p):
+                assignments[idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+
+        return np.array([1.0 if assignments[i] in selected_bins else 0.0
+                         for i in range(n_rows)])
+
+    vectors, metric_names, n_each = [], [], []
+    for sel in req.selections:
+        metric = sel.get("metric", "")
+        bins   = set(sel.get("bins", []))
+        if not metric or not bins:
+            continue
+        vec = binary_vec(metric, bins)
+        vectors.append(vec)
+        metric_names.append(metric)
+        n_each.append(int(vec.sum()))
+
+    if len(vectors) < 2:
+        return {"error": "insufficient_data"}
+
+    M = np.array(vectors)                          # (n_metrics, n_rows)
+    phi = np.nan_to_num(np.corrcoef(M), nan=0.0)
+    overlap = (M @ M.T).astype(int)
+
+    return {
+        "metrics": metric_names,
+        "n_each":  n_each,
+        "phi":     [[round(float(v), 4) for v in row] for row in phi],
+        "overlap": [[int(v) for v in row] for row in overlap],
+    }
