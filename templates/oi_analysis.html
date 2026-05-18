@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=52"></script>
+  <script src="/static/js/oi_analysis.js?v=53"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -990,7 +990,10 @@
     </template>
 
     <!-- ── System Portfolio (third tier — anchors saved system compositions) ──── -->
-    <template x-if="data && !data.error">
+    <!-- Always visible: portfolios + library persist server-side and don't
+         require a primary Analyze to view. Editing a system will trigger a
+         primary reload only if the page's current state doesn't match. -->
+    <template x-if="true">
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:8px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
           <div style="font-size:12px;font-weight:700;color:var(--text)">System Portfolio</div>
@@ -1052,6 +1055,62 @@
           </div>
         </template>
 
+        <!-- System Library — anchor-agnostic templates reusable across portfolios -->
+        <div style="margin-bottom:10px">
+          <div @click="libraryExpanded = !libraryExpanded"
+               style="cursor:pointer;font-size:11px;color:var(--muted);
+                      display:inline-flex;align-items:center;gap:6px;user-select:none">
+            <span x-text="libraryExpanded ? '▾' : '▸'"></span>
+            <span><b>Library</b></span>
+            <span x-text="'(' + librarySystems.length + ' saved)'" style="color:var(--dim)"></span>
+            <span style="color:var(--dim);font-size:10px;margin-left:4px">— click Save (💾) on any system card to add it here</span>
+          </div>
+          <template x-if="libraryExpanded">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+                        gap:6px;margin-top:8px;padding:8px;background:rgba(255,255,255,.02);
+                        border:1px solid var(--border);border-radius:6px">
+              <template x-if="!librarySystems.length">
+                <div style="font-size:11px;color:var(--dim);grid-column:1/-1;padding:6px">
+                  No saved library systems yet. Save (💾) any system in this portfolio to start your library.
+                </div>
+              </template>
+              <template x-for="lib in librarySystems" :key="'lib-'+lib.id">
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:8px">
+                  <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                    <span style="font-size:11px;font-weight:700;color:var(--text);flex:1"
+                          x-text="lib.name"></span>
+                    <span class="if-pill" style="cursor:pointer"
+                          :class="!portfolioId ? '' : ''"
+                          :style="portfolioId ? '' : 'opacity:.4;cursor:not-allowed'"
+                          @click="portfolioId && addLibrarySystemToPortfolio(lib.id)"
+                          :title="portfolioId ? 'Add to current portfolio' : 'Select a portfolio first'">+ Add</span>
+                    <span class="if-pill" style="cursor:pointer"
+                          @click="renameLibrarySystem(lib.id, lib.name)" title="Rename">✎</span>
+                    <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"
+                          @click="deleteLibrarySystem(lib.id)" title="Delete from library">×</span>
+                  </div>
+                  <div style="font-size:9px;color:var(--muted);font-family:monospace;line-height:1.5">
+                    <div>
+                      <span style="color:var(--dim)">P:</span>
+                      <span x-text="lib.primary_metric"></span>
+                      <span style="color:var(--dim)">bins</span>
+                      <span x-text="(lib.primary_bins || []).join(',') + ' / ' + lib.primary_bin_count"></span>
+                    </div>
+                    <template x-for="(sec, i) in (lib.secondaries || [])" :key="'lsec-'+lib.id+'-'+i">
+                      <div>
+                        <span style="color:var(--dim)">S:</span>
+                        <span x-text="sec.metric"></span>
+                        <span style="color:var(--dim)">bins</span>
+                        <span x-text="(sec.bins || []).join(',') + ' / ' + sec.bin_count"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+
         <!-- System cards -->
         <template x-if="portfolio && portfolio.systems && portfolio.systems.length">
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;margin-bottom:14px">
@@ -1063,6 +1122,7 @@
                          style="cursor:pointer">
                   <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
                         x-text="sys.name"></span>
+                  <span class="if-pill" style="cursor:pointer" @click="saveSystemToLibrary(sys)" title="Save to Library">💾</span>
                   <span class="if-pill" style="cursor:pointer" @click="renameSystem(sys.id, sys.name)" title="Rename">✎</span>
                   <span class="if-pill" style="cursor:pointer" @click="editSystem(sys)">Edit</span>
                   <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"

@@ -53,6 +53,20 @@ CREATE TABLE IF NOT EXISTS oi_research_systems (
     created_at        TIMESTAMPTZ DEFAULT NOW(),
     updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
+-- System library: anchor-agnostic templates that can be added to any
+-- portfolio. Stores the system definition (primary metric + bins +
+-- secondaries) without binding to any specific ticker/outcome/dates.
+CREATE TABLE IF NOT EXISTS oi_research_system_library (
+    id                SERIAL PRIMARY KEY,
+    name              TEXT NOT NULL,
+    description       TEXT,
+    primary_metric    TEXT NOT NULL,
+    primary_bins      INTEGER[] NOT NULL,
+    primary_bin_count INTEGER NOT NULL DEFAULT 20,
+    secondaries       JSONB NOT NULL,
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 
@@ -82,6 +96,24 @@ class SecondarySpec(BaseModel):
     metric: str
     bins: List[int]
     bin_count: int = 10
+
+
+class LibraryItemIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    primary_metric: str
+    primary_bins: List[int]
+    primary_bin_count: int = 20
+    secondaries: List[SecondarySpec] = []
+
+
+class LibraryItemUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    primary_metric: Optional[str] = None
+    primary_bins: Optional[List[int]] = None
+    primary_bin_count: Optional[int] = None
+    secondaries: Optional[List[SecondarySpec]] = None
 
 
 class SystemIn(BaseModel):
@@ -671,3 +703,135 @@ async def portfolio_aggregate(pid: int,
         "pair_labels":       pair_labels,
         "system_boundaries": system_boundaries,
     }
+
+
+# ── System Library (anchor-agnostic template store) ───────────────────────
+
+
+def _library_row_to_dict(r) -> dict:
+    d = dict(r)
+    for k in ("created_at", "updated_at"):
+        if d.get(k) is not None:
+            d[k] = str(d[k])[:19]
+    if isinstance(d.get("secondaries"), str):
+        import json as _json
+        d["secondaries"] = _json.loads(d["secondaries"])
+    return d
+
+
+@router.get("/library/systems")
+async def list_library_systems(pool=Depends(get_pool)):
+    await _ensure_tables(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, name, description, primary_metric, primary_bins,
+                      primary_bin_count, secondaries, created_at, updated_at
+               FROM oi_research_system_library
+               ORDER BY updated_at DESC""")
+    return [_library_row_to_dict(r) for r in rows]
+
+
+@router.post("/library/systems")
+async def add_library_system(body: LibraryItemIn, pool=Depends(get_pool)):
+    await _ensure_tables(pool)
+    import json as _json
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO oi_research_system_library
+                 (name, description, primary_metric, primary_bins,
+                  primary_bin_count, secondaries)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+               RETURNING id, name, description, primary_metric, primary_bins,
+                         primary_bin_count, secondaries, created_at, updated_at""",
+            body.name, body.description, body.primary_metric, body.primary_bins,
+            body.primary_bin_count,
+            _json.dumps([s.dict() for s in body.secondaries]))
+    return _library_row_to_dict(row)
+
+
+@router.put("/library/systems/{lid}")
+async def update_library_system(lid: int, body: LibraryItemUpdate,
+                                pool=Depends(get_pool)):
+    import json as _json
+    sets, params, p = [], [], 1
+    if body.name is not None:
+        sets.append(f"name = ${p}"); params.append(body.name); p += 1
+    if body.description is not None:
+        sets.append(f"description = ${p}"); params.append(body.description); p += 1
+    if body.primary_metric is not None:
+        sets.append(f"primary_metric = ${p}"); params.append(body.primary_metric); p += 1
+    if body.primary_bins is not None:
+        sets.append(f"primary_bins = ${p}"); params.append(body.primary_bins); p += 1
+    if body.primary_bin_count is not None:
+        sets.append(f"primary_bin_count = ${p}"); params.append(body.primary_bin_count); p += 1
+    if body.secondaries is not None:
+        sets.append(f"secondaries = ${p}::jsonb")
+        params.append(_json.dumps([s.dict() for s in body.secondaries])); p += 1
+    if not sets:
+        raise HTTPException(400, "no fields to update")
+    sets.append("updated_at = NOW()")
+    params.append(lid)
+    sql = (f"UPDATE oi_research_system_library SET {', '.join(sets)} "
+           f"WHERE id = ${p} RETURNING id, name, description, primary_metric, "
+           f"primary_bins, primary_bin_count, secondaries, created_at, updated_at")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql, *params)
+    if not row:
+        raise HTTPException(404, "library system not found")
+    return _library_row_to_dict(row)
+
+
+@router.delete("/library/systems/{lid}")
+async def delete_library_system(lid: int, pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM oi_research_system_library WHERE id = $1", lid)
+    return {"ok": True}
+
+
+@router.post("/portfolios/{pid}/systems/from-library/{lid}")
+async def add_system_from_library(pid: int, lid: int, pool=Depends(get_pool)):
+    """Copy a library system into the portfolio as a new system."""
+    await _ensure_tables(pool)
+    import json as _json
+    async with pool.acquire() as conn:
+        port = await conn.fetchrow(
+            "SELECT id FROM oi_research_portfolios WHERE id = $1", pid)
+        if not port:
+            raise HTTPException(404, "portfolio not found")
+        lib = await conn.fetchrow(
+            """SELECT name, primary_metric, primary_bins, primary_bin_count, secondaries
+               FROM oi_research_system_library WHERE id = $1""", lid)
+        if not lib:
+            raise HTTPException(404, "library system not found")
+        cnt = await conn.fetchval(
+            "SELECT COUNT(*) FROM oi_research_systems WHERE portfolio_id = $1", pid)
+        # Build a default name. If the library name collides with an existing
+        # system in this portfolio, suffix with "(copy)" or "(N)".
+        base_name = lib["name"]
+        exists = {r["name"] for r in await conn.fetch(
+            "SELECT name FROM oi_research_systems WHERE portfolio_id = $1", pid)}
+        name = base_name
+        if name in exists:
+            for k in range(2, 100):
+                cand = f"{base_name} ({k})"
+                if cand not in exists:
+                    name = cand
+                    break
+        secs = lib["secondaries"]
+        if isinstance(secs, str):
+            secs = _json.loads(secs)
+        row = await conn.fetchrow(
+            """INSERT INTO oi_research_systems
+                 (portfolio_id, name, position, primary_metric, primary_bins,
+                  primary_bin_count, secondaries)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+               RETURNING id, portfolio_id, name, enabled, position,
+                         primary_metric, primary_bins, primary_bin_count,
+                         secondaries, created_at, updated_at""",
+            pid, name, cnt, lib["primary_metric"], lib["primary_bins"],
+            lib["primary_bin_count"], _json.dumps(secs))
+        await conn.execute(
+            "UPDATE oi_research_portfolios SET updated_at = NOW() WHERE id = $1",
+            pid)
+    return _system_row_to_dict(row)

@@ -77,6 +77,9 @@ document.addEventListener('alpine:init', () => {
     portLoading: false,
     editingSystemId: null,   // when set, the "Add" button becomes "Save Changes"
     portBubbleMinN: 1,       // bubble chart min-n filter
+    // System Library — anchor-agnostic system templates reusable across portfolios
+    librarySystems: [],      // [{id, name, primary_metric, primary_bins, secondaries, ...}]
+    libraryExpanded: false,
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -103,6 +106,8 @@ document.addEventListener('alpine:init', () => {
       this.smInit();
       // Portfolios list (third-tier — research portfolios persisted server-side)
       this.loadPortfolios();
+      // System library (anchor-agnostic reusable system templates)
+      this.loadLibrarySystems();
     },
 
     async loadAnalysis() {
@@ -219,8 +224,14 @@ document.addEventListener('alpine:init', () => {
     setEquityXMode(m) { this.equityXMode = m; this._renderEquity(); },
 
     _destroyCharts() {
-      Object.values(this._charts).forEach(c => c.destroy());
-      this._charts = {};
+      // Preserve charts that aren't tied to the primary analysis — Score
+      // Matrix bars (sm-*) and System Portfolio visuals (port-*) live
+      // independently and shouldn't blank out every time Analyze runs.
+      for (const k of Object.keys(this._charts)) {
+        if (k.startsWith('sm-') || k.startsWith('port-')) continue;
+        this._charts[k].destroy();
+        delete this._charts[k];
+      }
     },
 
     _darkScales() {
@@ -3061,7 +3072,12 @@ document.addEventListener('alpine:init', () => {
     // ── System Portfolio (third tier) ──────────────────────────────────────
 
     get canAddSystem() {
+      // Need: a portfolio loaded, a primary analysis loaded with a metric,
+      // at least one primary bin selected, and at least one secondary in the
+      // corr explorer. The Portfolio section can be browsed without an
+      // Analyze, but adding/editing requires one.
       if (!this.portfolioId || !this.portfolio) return false;
+      if (!this.data || !this.metric) return false;
       if (!this.selectedBins20 || this.selectedBins20.size === 0) return false;
       const sels = this.corrSelections || {};
       return Object.values(sels).some(b => Array.isArray(b) && b.length > 0);
@@ -3569,6 +3585,76 @@ document.addEventListener('alpine:init', () => {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    },
+
+    // ── System Library ────────────────────────────────────────────────────
+
+    async loadLibrarySystems() {
+      try {
+        const r = await fetch('/api/oi-analysis/library/systems');
+        if (r.ok) this.librarySystems = await r.json();
+      } catch (_) {}
+    },
+
+    async saveSystemToLibrary(sys) {
+      // POST a copy of the portfolio system into the library. Default name
+      // is the system's current name; user can rename in the library
+      // section after.
+      const proposed = prompt('Save to Library as:', sys.name || 'System');
+      if (!proposed) return;
+      const body = {
+        name:              proposed.trim(),
+        primary_metric:    sys.primary_metric,
+        primary_bins:      sys.primary_bins || [],
+        primary_bin_count: sys.primary_bin_count || 20,
+        secondaries:       (sys.secondaries || []).map(s => ({
+          metric: s.metric, bins: s.bins || [], bin_count: s.bin_count || 10,
+        })),
+      };
+      try {
+        const r = await fetch('/api/oi-analysis/library/systems', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { alert('Save to Library failed: ' + await r.text()); return; }
+        await this.loadLibrarySystems();
+      } catch (e) { alert('Save to Library error: ' + e.message); }
+    },
+
+    async addLibrarySystemToPortfolio(lid) {
+      if (!this.portfolioId) {
+        alert('Select or create a portfolio first.');
+        return;
+      }
+      try {
+        const r = await fetch(
+          `/api/oi-analysis/portfolios/${this.portfolioId}/systems/from-library/${lid}`,
+          { method: 'POST' });
+        if (!r.ok) { alert('Add from library failed: ' + await r.text()); return; }
+        await this.selectPortfolio(this.portfolioId);
+        await this.loadPortfolios();
+      } catch (e) { alert('Add from library error: ' + e.message); }
+    },
+
+    async renameLibrarySystem(lid, currentName) {
+      const name = prompt('Rename library system:', currentName);
+      if (!name || name.trim() === currentName) return;
+      try {
+        await fetch(`/api/oi-analysis/library/systems/${lid}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        await this.loadLibrarySystems();
+      } catch (_) {}
+    },
+
+    async deleteLibrarySystem(lid) {
+      const item = this.librarySystems.find(x => x.id === lid);
+      if (!confirm(`Delete library system "${item?.name || '?'}"? (Existing portfolio copies are untouched.)`)) return;
+      try {
+        await fetch(`/api/oi-analysis/library/systems/${lid}`, { method: 'DELETE' });
+        await this.loadLibrarySystems();
+      } catch (_) {}
     },
   }));
 });
