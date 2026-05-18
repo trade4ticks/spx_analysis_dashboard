@@ -2579,6 +2579,27 @@ document.addEventListener('alpine:init', () => {
       this._renderCorrBubble();
     },
 
+    _tickerCoverage(tickers) {
+      const total = new Set((this.data?.trade_calendar || []).map(c => c.ticker)).size;
+      const n = (tickers || []).length;
+      return `${n} / ${total} tkrs (${total > 0 ? Math.round(n / total * 100) : 0}%)`;
+    },
+
+    corrStats() {
+      const yearly = this.corrResult?.yearly;
+      if (!yearly?.length) return null;
+      const totalN  = yearly.reduce((s, y) => s + (y.combined_n  || 0), 0);
+      if (!totalN) return null;
+      const avgRet  = yearly.reduce((s, y) => s + (y.combined_avg || 0) * (y.combined_n || 0), 0) / totalN;
+      const winRate = yearly.reduce((s, y) => s + (y.combined_wr  || 0) * (y.combined_n || 0), 0) / totalN;
+      const winners = Math.round(winRate * totalN);
+      const best  = yearly.reduce((b, y) => y.combined_avg > b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg: -Infinity });
+      const worst = yearly.reduce((b, y) => y.combined_avg < b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg:  Infinity });
+      const eq  = this.corrResult.equity_combined || [];
+      const cum = eq.length ? +(eq[eq.length - 1].value * 100).toFixed(2) : null;
+      return { totalN, avgRet, winRate, winners, losers: totalN - winners, best, worst, cum };
+    },
+
     _renderCorrDetail() {
       if (!this.corrResult || this.corrResult.error) return;
       this._renderCorrEquity();
@@ -2608,7 +2629,7 @@ document.addEventListener('alpine:init', () => {
             { label: 'Primary',  data: eqP.map(p => +(p.value * 100).toFixed(4)),
               borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.06)',
               borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true },
-            { label: 'Intersection', data: combinedAligned,
+            { label: 'Union', data: combinedAligned,
               borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.06)',
               borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true, spanGaps: true },
           ],
@@ -2641,14 +2662,18 @@ document.addEventListener('alpine:init', () => {
           datasets: [
             { label: 'Primary',  data: yearly.map(y => +(y.primary_avg  * 100).toFixed(3)),
               backgroundColor: 'rgba(52,152,219,0.65)', borderColor: '#3498db', borderWidth: 1 },
-            { label: 'Intersection', data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
+            { label: 'Union', data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
               backgroundColor: 'rgba(232,67,147,0.65)', borderColor: '#e84393', borderWidth: 1 },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
-            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw?.toFixed(3)}%` } } },
+            tooltip: { callbacks: { label: ctx => {
+              const y = yearly[ctx.dataIndex];
+              if (ctx.datasetIndex === 0) return [`Avg: ${(y.primary_avg*100).toFixed(3)}%`, `WR: ${(y.primary_wr*100).toFixed(1)}%`, `n: ${y.primary_n}`];
+              return [`Avg: ${(y.combined_avg*100).toFixed(3)}%`, `WR: ${(y.combined_wr*100).toFixed(1)}%`, `n: ${y.combined_n}`];
+            } } } },
           scales: {
             ...this._darkScales(),
             y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },

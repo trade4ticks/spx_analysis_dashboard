@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=48"></script>
+  <script src="/static/js/oi_analysis.js?v=49"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -689,6 +689,10 @@
                 <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                   <span>Ticker Breakdown</span>
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span x-show="secDetail?.tickers?.length"
+                        style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                               border-radius:3px;padding:1px 6px;color:var(--dim)"
+                        x-text="_tickerCoverage(secDetail?.tickers)"></span>
                   <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
                     <input type="range" min="1" max="10" step="1"
                            :value="secBubbleMinN"
@@ -807,6 +811,57 @@
               </div>
             </template>
 
+            <!-- Stats pane -->
+            <template x-if="corrResult && !corrResult.error">
+              <div class="stats-card" style="margin-bottom:12px">
+                <div class="stat-item">
+                  <div class="stat-label">Union Trades</div>
+                  <div class="stat-value" x-text="corrResult.combined_n"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Baseline n</div>
+                  <div class="stat-value" x-text="corrResult.baseline_n"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Winners</div>
+                  <div class="stat-value pos" x-text="corrStats()?.winners ?? '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Losers</div>
+                  <div class="stat-value neg" x-text="corrStats()?.losers ?? '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Win Rate</div>
+                  <div class="stat-value" :class="(corrStats()?.winRate ?? 0) >= 0.5 ? 'pos' : 'neg'"
+                       x-text="corrStats() ? (corrStats().winRate*100).toFixed(1)+'%' : '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Avg Return</div>
+                  <div class="stat-value" :class="(corrStats()?.avgRet ?? 0) >= 0 ? 'pos' : 'neg'"
+                       x-text="corrStats() ? (corrStats().avgRet*100).toFixed(3)+'%' : '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Best Year</div>
+                  <div class="stat-value pos"
+                       x-text="corrStats()?.best ? corrStats().best.yr+' ('+( corrStats().best.avg*100).toFixed(2)+'%)' : '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Worst Year</div>
+                  <div class="stat-value neg"
+                       x-text="corrStats()?.worst ? corrStats().worst.yr+' ('+(corrStats().worst.avg*100).toFixed(2)+'%)' : '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Cum Return</div>
+                  <div class="stat-value" :class="(corrStats()?.cum ?? 0) >= 0 ? 'pos' : 'neg'"
+                       x-text="corrStats()?.cum != null ? corrStats().cum.toFixed(2)+'%' : '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Tickers</div>
+                  <div class="stat-value" x-text="_tickerCoverage(corrResult.tickers)"></div>
+                </div>
+              </div>
+            </template>
+
             <!-- Correlation heatmap -->
             <template x-if="corrResult && !corrResult.error">
               <div class="chart-box" style="margin-bottom:12px">
@@ -891,6 +946,10 @@
                     <div class="chart-title">
                       Ticker Breakdown
                       <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                      <span x-show="corrResult?.tickers?.length"
+                            style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                                   border-radius:3px;padding:1px 6px;color:var(--dim)"
+                            x-text="_tickerCoverage(corrResult?.tickers)"></span>
                       <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
                         <input type="range" min="1" max="50" :value="corrBubbleMinN"
                                @input="corrSetBubbleMinN($event.target.value)"
