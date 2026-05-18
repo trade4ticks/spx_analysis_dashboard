@@ -1911,10 +1911,10 @@ async def secondary_correlation(req: CorrReq):
     phi = np.nan_to_num(np.corrcoef(M), nan=0.0)
     overlap = (M @ M.T).astype(int)
 
-    # Intersection: rows where every metric's binary vector = 1
+    # Union: rows where at least one metric's binary vector = 1
     outcome_col = cached["outcome"]
-    intersection_mask = np.all(M == 1, axis=0)
-    combined_sorted = [ordered[i] for i, v in enumerate(intersection_mask) if v]
+    union_mask = np.any(M == 1, axis=0)
+    combined_sorted = [ordered[i] for i, v in enumerate(union_mask) if v]
 
     eq_primary  = _sec_equity_curve(ordered, outcome_col)
     eq_combined = _sec_equity_curve(combined_sorted, outcome_col)

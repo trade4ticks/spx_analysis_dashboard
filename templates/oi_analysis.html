@@ -849,13 +849,13 @@
               </div>
             </template>
 
-            <!-- Intersection detail charts -->
+            <!-- Union detail charts -->
             <template x-if="corrResult && !corrResult.error && corrResult.combined_n > 0">
               <div>
                 <div style="font-size:11px;font-weight:700;color:var(--muted);margin:12px 0 8px">
-                  Intersection Detail
+                  Selected Metrics — Aggregate View
                   <span style="font-weight:400;font-size:9px;color:var(--dim)"
-                        x-text="'— ' + corrResult.combined_n + ' trades (vs baseline ' + corrResult.baseline_n + ')'"></span>
+                        x-text="'— ' + corrResult.combined_n + ' trades in any selected bin (vs baseline ' + corrResult.baseline_n + ')'"></span>
                 </div>
                 <!-- Equity + Activity -->
                 <div class="chart-grid" style="margin-bottom:12px">
@@ -863,7 +863,7 @@
                     <div class="chart-title">
                       Equity Curve
                       <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
-                      <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +intersection</span>
+                      <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: selected bins (union)</span>
                       <button class="fs-btn" @click="openFullscreen('corr-equity-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-equity-canvas"></canvas></div>
@@ -871,7 +871,7 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Trade Activity
-                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— intersection entries &amp; open positions</span>
+                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected bins entries &amp; open positions</span>
                       <button class="fs-btn" @click="openFullscreen('corr-activity-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-activity-canvas"></canvas></div>
@@ -882,7 +882,7 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Yearly Returns
-                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs +intersection</span>
+                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs selected bins (union)</span>
                       <button class="fs-btn" @click="openFullscreen('corr-yearly-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-yearly-canvas"></canvas></div>
