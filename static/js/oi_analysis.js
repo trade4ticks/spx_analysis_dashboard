@@ -61,7 +61,7 @@ document.addEventListener('alpine:init', () => {
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
-    corrBinCount: 10,
+    corrBinCount: 20,
     corrMiniData: null,
     corrMiniLoading: false,
     corrSelections: {},
@@ -80,6 +80,11 @@ document.addEventListener('alpine:init', () => {
     // System Library — anchor-agnostic system templates reusable across portfolios
     librarySystems: [],      // [{id, name, primary_metric, primary_bins, secondaries, ...}]
     libraryExpanded: false,
+
+    // Trade Activity dedupe — when on, a new entry for a ticker is skipped
+    // while a previous trade of the same ticker is still inside its horizon.
+    // Independent per chart so the user can A/B them visually.
+    dedupeConc: { primary: false, sec: false, corr: false, port: false },
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -1238,16 +1243,20 @@ document.addEventListener('alpine:init', () => {
 
       const horizon = this.data.horizon || 1;
 
-      // Count entries per trade-entry date
-      const entriesByDate = {};
-      for (const c of filtered) entriesByDate[c.date] = (entriesByDate[c.date] || 0) + 1;
-
       // True calendar x-axis: spot_series = all trading days (single-ticker);
       // ALL mode: union of entry dates (covers most trading days across tickers)
       const spotSeries = this.data.spot_series || [];
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
         : [...new Set(cal.map(c => c.date))].sort();
+
+      // Optionally drop entries that overlap a still-open trade of the same ticker.
+      const entries = filtered.map(c => ({ ticker: c.ticker, date: c.date }));
+      const kept = this.dedupeConc.primary
+        ? this._dedupeConcurrent(entries, tradingDays, horizon)
+        : entries;
+      const entriesByDate = {};
+      for (const t of kept) entriesByDate[t.date] = (entriesByDate[t.date] || 0) + 1;
 
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
 
@@ -2468,20 +2477,71 @@ document.addEventListener('alpine:init', () => {
     secDownloadCSV() {
       const trades = this.secDetail?.combined_trades;
       if (!trades?.length) return;
-      const metric = this.secSelectedMetric || 'metric';
-      const outcome = this.secDetail.metric_b || 'outcome';
-      const header = `ticker,date,${metric},ret_pct`;
-      const rows = trades.map(t =>
-        [t.ticker, t.date, t.metric_val ?? '', t.ret != null ? (t.ret * 100).toFixed(6) : ''].join(',')
-      );
-      const csv = [header, ...rows].join('\n');
-      const blob = new Blob([csv], { type: 'text/csv' });
+      const sec_metric  = this.secSelectedMetric || 'secondary';
+      const prim_metric = this.metric             || 'primary';
+      const header = [
+        'ticker', 'trade_date', `${prim_metric}_val`, `${sec_metric}_val`,
+        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+      ].join(',');
+      const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
+      const rows = trades.map(t => [
+        t.ticker || '',
+        t.trade_date || '',
+        fmt(t.primary_val),
+        fmt(t.secondary_val),
+        fmt(t.spot_entry, 2),
+        t.exit_date || '',
+        fmt(t.spot_exit, 2),
+        t.ret != null ? (t.ret * 100).toFixed(6) : '',
+      ].join(','));
+      this._downloadCsv([header, ...rows].join('\n'),
+        `sec_${this.metric}_${sec_metric}_${new Date().toISOString().slice(0,10)}.csv`);
+    },
+
+    _downloadCsv(csvText, filename) {
+      const blob = new Blob([csvText], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
-      a.download = `sec_${this.metric}_${metric}_${new Date().toISOString().slice(0,10)}.csv`;
-      a.click();
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    },
+
+    // Filter trade entries so a new entry for ticker T is skipped while a
+    // prior entry for T is still inside its horizon (i.e. an "open trade"
+    // of that ticker). Entries can be `{ticker, date}` or `{ticker, trade_date}`.
+    _dedupeConcurrent(entries, tradingDays, horizon) {
+      if (!entries?.length || !tradingDays?.length || !(horizon > 0)) return entries || [];
+      const idxBy = new Map();
+      tradingDays.forEach((d, i) => idxBy.set(d, i));
+      const sorted = [...entries].sort((a, b) => {
+        const ad = a.date || a.trade_date || '';
+        const bd = b.date || b.trade_date || '';
+        return ad < bd ? -1 : (ad > bd ? 1 : 0);
+      });
+      const lastByTkr = new Map();
+      const keep = [];
+      for (const e of sorted) {
+        const t  = e.ticker || '?';
+        const dk = e.date || e.trade_date || '';
+        const i  = idxBy.get(dk);
+        if (i == null) { keep.push(e); continue; }
+        const last = lastByTkr.get(t);
+        if (last == null || (i - last) >= horizon) {
+          keep.push(e);
+          lastByTkr.set(t, i);
+        }
+      }
+      return keep;
+    },
+
+    toggleDedupeConc(key) {
+      this.dedupeConc[key] = !this.dedupeConc[key];
+      this.dedupeConc = { ...this.dedupeConc };  // nudge Alpine reactivity
+      if (key === 'primary') this._renderActivity();
+      else if (key === 'sec')  this._renderSecActivity();
+      else if (key === 'corr') this._renderCorrActivity();
+      else if (key === 'port') this._renderPortActivity();
     },
 
     // ── Multi-Metric Correlation Explorer ────────────────────────────────────
@@ -2617,6 +2677,35 @@ document.addEventListener('alpine:init', () => {
       return `${n} / ${total} tkrs (${total > 0 ? Math.round(n / total * 100) : 0}%)`;
     },
 
+    corrDownloadCSV() {
+      const trades = this.corrResult?.combined_trades;
+      if (!trades?.length) return;
+      const prim = this.metric || 'primary';
+      // Selected secondary metrics, in the same order the response uses
+      const secMetrics = this.corrResult?.metrics || [];
+      const header = [
+        'ticker', 'trade_date', `${prim}_val`,
+        ...secMetrics.map(m => `${m}_val`),
+        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+      ].join(',');
+      const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
+      const rows = trades.map(t => {
+        const extras = (t.extra || {});
+        return [
+          t.ticker || '',
+          t.trade_date || '',
+          fmt(t.primary_val),
+          ...secMetrics.map(m => fmt(extras[m])),
+          fmt(t.spot_entry, 2),
+          t.exit_date || '',
+          fmt(t.spot_exit, 2),
+          t.ret != null ? (t.ret * 100).toFixed(6) : '',
+        ].join(',');
+      });
+      this._downloadCsv([header, ...rows].join('\n'),
+        `corr_${prim}_${new Date().toISOString().slice(0,10)}.csv`);
+    },
+
     corrStats() {
       const yearly = this.corrResult?.yearly;
       if (!yearly?.length) return null;
@@ -2728,17 +2817,26 @@ document.addEventListener('alpine:init', () => {
 
     _renderCorrActivity() {
       const canvas = document.getElementById('corr-activity-canvas');
-      if (!canvas || !this.corrResult?.combined_trade_dates?.length) return;
+      if (!canvas || !this.corrResult) return;
       if (this._charts['corr-activity']) { this._charts['corr-activity'].destroy(); delete this._charts['corr-activity']; }
-      const dates   = this.corrResult.combined_trade_dates;
+      const trades = this.corrResult.combined_trades
+        || (this.corrResult.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
+      if (!trades.length) return;
       const horizon = this.corrResult.horizon || 1;
-      const entriesByDate = {};
-      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
       const spotSeries  = this.data?.spot_series || [];
       const cal         = this.data?.trade_calendar || [];
+      const dates = trades.map(t => t.trade_date || t.date);
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
         : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
+      const kept = this.dedupeConc.corr
+        ? this._dedupeConcurrent(trades, tradingDays, horizon)
+        : trades;
+      const entriesByDate = {};
+      for (const t of kept) {
+        const d = t.trade_date || t.date;
+        entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+      }
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
       const open    = tradingDays.map((_, i) => {
         let count = 0;
@@ -2988,24 +3086,32 @@ document.addEventListener('alpine:init', () => {
 
     _renderSecActivity() {
       const canvas = document.getElementById('sec-activity-canvas');
-      if (!canvas || !this.secDetail?.combined_trade_dates?.length) return;
+      if (!canvas || !this.secDetail) return;
       if (this._charts['sec-activity']) { this._charts['sec-activity'].destroy(); delete this._charts['sec-activity']; }
 
-      const dates = this.secDetail.combined_trade_dates;
+      // Prefer the enriched combined_trades (has ticker per entry) so the
+      // dedupe-concurrent toggle can work per ticker. Fall back to plain
+      // combined_trade_dates for older payloads.
+      const trades = this.secDetail.combined_trades
+        || (this.secDetail.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
+      if (!trades.length) return;
       const horizon = this.secDetail.horizon || 1;
 
-      // Entry count per trading day
-      const entriesByDate = {};
-      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
-
-      // True calendar x-axis: spot_series covers all trading days in single-ticker mode.
-      // In ALL mode spot_series is empty — fall back to trade_calendar (all tickers, all bins),
-      // which spans the full date range. Mirrors primary _renderActivity() exactly.
       const spotSeries = this.data?.spot_series || [];
       const cal = this.data?.trade_calendar || [];
+      const dates = trades.map(t => t.trade_date || t.date);
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
         : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
+
+      const kept = this.dedupeConc.sec
+        ? this._dedupeConcurrent(trades, tradingDays, horizon)
+        : trades;
+      const entriesByDate = {};
+      for (const t of kept) {
+        const d = t.trade_date || t.date;
+        entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+      }
 
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
 
@@ -3464,18 +3570,26 @@ document.addEventListener('alpine:init', () => {
       // open trades line. Trading days come from the backend's primary
       // universe (every trade-eligible date in the anchor date range).
       const canvas = document.getElementById('chart-port-activity');
-      if (!canvas || !this.portAggregate?.combined_trade_dates?.length) return;
+      if (!canvas || !this.portAggregate) return;
       if (this._charts['port-activity']) { this._charts['port-activity'].destroy(); delete this._charts['port-activity']; }
-      const dates   = this.portAggregate.combined_trade_dates;
+      const trades = this.portAggregate.combined_trades
+        || (this.portAggregate.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
+      if (!trades.length) return;
       const horizon = this.portAggregate.horizon || 1;
-      const entriesByDate = {};
-      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
-      // Trading days: prefer equity_primary's date spine (one row per
-      // primary-universe trade), fall back to the union dates if empty.
+      // Trading days: prefer equity_primary's date spine, fall back to union dates.
       const spine = this.portAggregate.equity_primary || [];
+      const dates = trades.map(t => t.trade_date || t.date);
       const tradingDays = spine.length
         ? [...new Set(spine.map(p => p.date))].sort()
         : [...new Set(dates)].sort();
+      const kept = this.dedupeConc.port
+        ? this._dedupeConcurrent(trades, tradingDays, horizon)
+        : trades;
+      const entriesByDate = {};
+      for (const t of kept) {
+        const d = t.trade_date || t.date;
+        entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+      }
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
       const open    = tradingDays.map((_, i) => {
         let count = 0;
@@ -3573,19 +3687,25 @@ document.addEventListener('alpine:init', () => {
 
     async portCsvDownload() {
       if (!this.portAggregate) return;
-      const dates = this.portAggregate.combined_trade_dates || [];
-      if (!dates.length) return;
-      const rows = ['trade_date'];
-      for (const d of dates) rows.push(d);
-      const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `portfolio_${this.portfolioId}_union.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const trades = this.portAggregate.combined_trades || [];
+      if (!trades.length) return;
+      const header = [
+        'ticker', 'trade_date', 'spot_entry', 'exit_date', 'spot_exit',
+        'ret_pct', 'fired_systems',
+      ].join(',');
+      const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
+      const rows = trades.map(t => [
+        t.ticker || '',
+        t.trade_date || '',
+        fmt(t.spot_entry, 2),
+        t.exit_date || '',
+        fmt(t.spot_exit, 2),
+        t.ret != null ? (t.ret * 100).toFixed(6) : '',
+        // Quote the fired_systems list since it can contain commas
+        '"' + (t.fired_systems || []).join(' | ') + '"',
+      ].join(','));
+      this._downloadCsv([header, ...rows].join('\n'),
+        `portfolio_${this.portfolioId}_union_${new Date().toISOString().slice(0,10)}.csv`);
     },
 
     // ── System Library ────────────────────────────────────────────────────

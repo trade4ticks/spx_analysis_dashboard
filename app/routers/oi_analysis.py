@@ -1427,6 +1427,119 @@ def _sec_score_metrics(
     return results
 
 
+async def _fetch_ticker_calendars(oi_pool, tickers: list) -> dict:
+    """Per-ticker trading-day calendar with open/close lookups.
+
+    Returns {ticker: {dates: [sorted ISO dates], date_idx: {date: i},
+                      open: {date: spot_co}, close: {date: close_price}}}.
+    close[d] = spot_pc of the NEXT trading day (= close of d).
+    """
+    if not tickers:
+        return {}
+    async with oi_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT ticker, trade_date, spot_co, spot_pc FROM daily_features "
+            "WHERE ticker = ANY($1) AND spot_co IS NOT NULL "
+            "ORDER BY ticker, trade_date", tickers)
+    by_tkr: dict = defaultdict(list)
+    for r in rows:
+        by_tkr[r["ticker"]].append({
+            "date":    str(r["trade_date"]),
+            "spot_co": r["spot_co"],
+            "spot_pc": r["spot_pc"],
+        })
+    out: dict = {}
+    for tkr, entries in by_tkr.items():
+        dates = [e["date"] for e in entries]
+        open_by_date: dict = {}
+        for e in entries:
+            try:
+                if e["spot_co"] is not None:
+                    open_by_date[e["date"]] = round(float(e["spot_co"]), 2)
+            except (TypeError, ValueError):
+                pass
+        close_by_date: dict = {}
+        for i in range(len(entries) - 1):
+            npc = entries[i + 1]["spot_pc"]
+            if npc is None:
+                continue
+            try:
+                close_by_date[entries[i]["date"]] = round(float(npc), 2)
+            except (TypeError, ValueError):
+                pass
+        out[tkr] = {
+            "dates":    dates,
+            "date_idx": {d: i for i, d in enumerate(dates)},
+            "open":     open_by_date,
+            "close":    close_by_date,
+        }
+    return out
+
+
+def _trade_exit(cal: dict, entry_date: str, horizon: int):
+    """Given a ticker calendar and an entry date, return (exit_date, spot_exit).
+
+    Exit date = entry_date + (horizon - 1) trading days. Spot exit = close of
+    exit_date (= spot_pc of the day AFTER exit_date in the ticker's sequence).
+    """
+    if not cal or not entry_date:
+        return None, None
+    idx = cal.get("date_idx", {}).get(entry_date)
+    if idx is None:
+        return None, None
+    ei = idx + max(horizon - 1, 0)
+    dates = cal.get("dates") or []
+    if ei >= len(dates):
+        return None, None
+    exit_date = dates[ei]
+    return exit_date, cal.get("close", {}).get(exit_date)
+
+
+def _build_enriched_trade(row: dict, calendars: dict, horizon: int,
+                          primary_metric: Optional[str],
+                          outcome_col: str,
+                          secondary_metric: Optional[str] = None,
+                          extra_metrics: Optional[list] = None) -> dict:
+    """Build an enriched trade record for CSV / activity panes.
+
+    Includes ticker, trade_date, primary_val (when primary_metric given),
+    optional secondary_val (single) or extra metric values (dict), entry/exit
+    spot prices, exit_date, and ret. Missing fields stay None.
+    """
+    def _f(v):
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+            if math.isnan(fv):
+                return None
+            return fv
+        except (TypeError, ValueError):
+            return None
+
+    tkr     = row.get("ticker", "")
+    date_s  = row.get("trade_date", "")
+    cal     = calendars.get(tkr) or {}
+    exit_d, spot_exit = _trade_exit(cal, date_s, horizon)
+    spot_entry = _f(row.get("spot_co"))
+    if spot_entry is None:
+        spot_entry = cal.get("open", {}).get(date_s)
+
+    rec = {
+        "ticker":     tkr,
+        "trade_date": date_s,
+        "primary_val":  _f(row.get(primary_metric)) if primary_metric else None,
+        "secondary_val": _f(row.get(secondary_metric)) if secondary_metric else None,
+        "spot_entry": spot_entry,
+        "exit_date":  exit_d,
+        "spot_exit":  spot_exit,
+        "ret":        _f(row.get(outcome_col)),
+    }
+    if extra_metrics:
+        rec["extra"] = {m: _f(row.get(m)) for m in extra_metrics}
+    return rec
+
+
 def _sec_equity_curve(rows_sorted: list, outcome_col: str) -> list:
     """Cumulative return curve from a list of rows sorted by date."""
     cum = 0.0
@@ -1580,7 +1693,11 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         feature_cols = [c for c in all_num_cols
                         if c not in outcome_cols_all and c != req.metric and not c.startswith("spot")]
 
-        select_cols = ", ".join(["ticker", "trade_date", req.outcome] + feature_cols)
+        # Pull req.metric, spot_co, spot_pc alongside the features so the CSV /
+        # trade-record builders can populate primary_val + spot_entry + spot_exit.
+        select_cols = ", ".join(
+            ["ticker", "trade_date", req.outcome, req.metric, "spot_co", "spot_pc"]
+            + feature_cols)
         async with pool.acquire() as conn:
             db_rows = await conn.fetch(
                 f"SELECT {select_cols} FROM daily_features "
@@ -1591,7 +1708,19 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         for r in rows:
             r["trade_date"] = str(r["trade_date"])
 
-        _SEC_CACHE[cache_key] = {"rows": rows, "features": feature_cols, "outcome": req.outcome}
+        # Build per-ticker calendar (open/close lookup + date sequence) so
+        # combined_trades can compute exit_date + spot_exit (close of
+        # entry_date + horizon-1 trading days).
+        tickers_used = list({r.get("ticker") for r in rows if r.get("ticker")})
+        cal_by_tkr = await _fetch_ticker_calendars(pool, tickers_used) if tickers_used else {}
+
+        _SEC_CACHE[cache_key] = {
+            "rows":           rows,
+            "features":       feature_cols,
+            "outcome":        req.outcome,
+            "primary_metric": req.metric,
+            "calendars":      cal_by_tkr,
+        }
 
     cached = _SEC_CACHE[cache_key]
     rows = cached["rows"]
@@ -1788,13 +1917,16 @@ async def secondary_detail(req: SecDetailReq):
             "contrib_pct": round(contrib, 2),
         })
 
+    horizon_n   = _parse_horizon(outcome_col)
+    primary_m   = cached.get("primary_metric")
+    calendars   = cached.get("calendars") or {}
     combined_trades = [
-        {
-            "ticker":     r.get("ticker", ""),
-            "date":       r.get("trade_date", ""),
-            "metric_val": round(float(r[req.metric_b]), 6) if r.get(req.metric_b) is not None else None,
-            "ret":        round(float(r[outcome_col]), 6)  if r.get(outcome_col)  is not None else None,
-        }
+        _build_enriched_trade(
+            r, calendars, horizon_n,
+            primary_metric=primary_m,
+            outcome_col=outcome_col,
+            secondary_metric=req.metric_b,
+        )
         for r in combined_sorted
     ]
 
@@ -2007,6 +2139,18 @@ async def secondary_correlation(req: CorrReq):
     winner_avg   = round(float(np.mean(winner_rets)), 6) if winner_rets else 0.0
     loser_avg    = round(float(np.mean(loser_rets)),  6) if loser_rets  else 0.0
 
+    horizon_n = _parse_horizon(outcome_col)
+    primary_m = cached.get("primary_metric")
+    calendars = cached.get("calendars") or {}
+    combined_trades = [
+        _build_enriched_trade(
+            r, calendars, horizon_n,
+            primary_metric=primary_m,
+            outcome_col=outcome_col,
+            extra_metrics=metric_names,    # include each selected secondary's value
+        )
+        for r in combined_sorted
+    ]
     return {
         "metrics": metric_names,
         "n_each":  n_each,
@@ -2014,12 +2158,13 @@ async def secondary_correlation(req: CorrReq):
         "overlap": [[int(v) for v in row] for row in overlap],
         "baseline_n":  len(ordered),
         "combined_n":  len(combined_sorted),
-        "horizon":     _parse_horizon(outcome_col),
+        "horizon":     horizon_n,
         "equity_primary":        eq_primary,
         "equity_combined":       eq_combined,
         "yearly":                yearly_out,
         "tickers":               tickers_out,
         "combined_trade_dates":  [r.get("trade_date", "") for r in combined_sorted],
+        "combined_trades":       combined_trades,
         "winner_avg_ret": winner_avg,
         "loser_avg_ret":  loser_avg,
     }

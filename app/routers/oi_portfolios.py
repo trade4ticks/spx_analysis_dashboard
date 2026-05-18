@@ -23,6 +23,8 @@ from app.routers.oi_analysis import (
     _bin_membership,
     _sec_equity_curve,
     _parse_horizon,
+    _fetch_ticker_calendars,
+    _build_enriched_trade,
 )
 
 router = APIRouter(tags=["oi_portfolios"])
@@ -661,6 +663,28 @@ async def portfolio_aggregate(pid: int,
     # Aggregate trade summary stats
     union_stats = _stats_from_trades(union_rows, outcome)
 
+    # Enriched per-trade records (for CSV + activity panes). Each row in
+    # the union of systems' trade sets gets entry/exit prices, exit_date,
+    # ret, and a list of system names that fired for it.
+    # (horizon is already computed earlier in the function — reuse it.)
+    tickers_in_union = sorted({r.get("ticker", "") for r in union_rows
+                                if r.get("ticker")})
+    calendars_for_trades = await _fetch_ticker_calendars(oi_pool, tickers_in_union)
+    combined_trades = []
+    for r_idx, vp in enumerate(V_port):
+        if vp != 1.0:
+            continue
+        fired = [enabled_systems[k]["name"]
+                 for k, vS in enumerate(system_vectors)
+                 if vS[r_idx] == 1.0]
+        rec = _build_enriched_trade(
+            rows[r_idx], calendars_for_trades, horizon,
+            primary_metric=None,     # multi-system → no single primary
+            outcome_col=outcome,
+        )
+        rec["fired_systems"] = fired
+        combined_trades.append(rec)
+
     # phi correlations restricted to the trade-eligible universe so the
     # denominator matches the corr explorer's filtered subset.
     def _phi_restricted(vectors: list) -> tuple:
@@ -698,6 +722,7 @@ async def portfolio_aggregate(pid: int,
         "yearly":          yearly_out,
         "tickers":         tickers_out,
         "combined_trade_dates": [r.get("trade_date", "") for r in union_rows],
+        "combined_trades":      combined_trades,
         "winner_avg_ret":  winner_avg,
         "loser_avg_ret":   loser_avg,
         "n_each":          n_each_pair,

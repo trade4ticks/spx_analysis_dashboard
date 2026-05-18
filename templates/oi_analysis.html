@@ -102,6 +102,9 @@
       cursor:pointer; margin-left:auto;
     }
     .fs-btn:hover { background:rgba(255,255,255,.12); color:var(--muted); }
+    .fs-btn.dedupe-btn.on {
+      background: rgba(46,204,113,.18); border-color: rgba(46,204,113,.4); color: #2ecc71;
+    }
     .fs-overlay {
       position:fixed; inset:0; z-index:500; background:rgba(10,10,10,.95);
       display:flex; flex-direction:column;
@@ -121,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=54"></script>
+  <script src="/static/js/oi_analysis.js?v=55"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -320,6 +323,9 @@
           <div class="chart-box">
             <div class="chart-title">Trade Activity
               <span style="font-weight:400;font-size:9px;color:var(--dim)">— entries &amp; open positions</span>
+              <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.primary }"
+                      @click="toggleDedupeConc('primary')"
+                      title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
               <button class="fs-btn" @click="openFullscreen('chart-activity')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-activity"></canvas></div>
@@ -586,10 +592,12 @@
           Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
         </div>
 
-        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right, when drilling) -->
+        <!-- Stack vertically so each pane fills page width. The Lift bar
+             chart can have many metrics, so its inner div is horizontally
+             scrollable with a wide min-width driven by metric count. -->
         <template x-if="secStatus.loaded && secMetrics.length > 0">
-          <div class="chart-grid" style="margin-bottom:12px">
-            <!-- Left: ranked secondary metrics -->
+          <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:12px">
+            <!-- Row 1: Ranked secondary metrics (full width, scrolls horizontally if needed) -->
             <div class="chart-box">
               <div class="chart-title">
                 Secondary Metrics by Lift
@@ -598,12 +606,13 @@
                 <button class="fs-btn" @click="openFullscreen('sec-bar-canvas')" title="Fullscreen">⛶</button>
               </div>
               <div style="overflow-x:auto;position:relative">
-                <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
+                <div id="sec-bar-inner"
+                     :style="'position:relative;height:260px;min-width:' + Math.max(800, (secMetrics.length || 0) * 32) + 'px'">
                   <canvas id="sec-bar-canvas"></canvas>
                 </div>
               </div>
             </div>
-            <!-- Right: equity curves (only when a metric is drilled) -->
+            <!-- Row 2: equity curves (only when a metric is drilled) -->
             <template x-if="secSelectedMetric">
               <div class="chart-box">
                 <div class="chart-title">
@@ -677,6 +686,9 @@
                 <div class="chart-title">
                   Trade Activity
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
+                  <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.sec }"
+                          @click="toggleDedupeConc('sec')"
+                          title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
                   <button class="fs-btn" @click="openFullscreen('sec-activity-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
@@ -751,6 +763,14 @@
               </button>
               <span x-show="corrSelectedCount() > 0" style="font-size:10px;color:var(--dim)"
                     x-text="corrSelectedCount() + ' metric' + (corrSelectedCount()===1?'':'s') + ' selected'"></span>
+              <template x-if="corrResult?.combined_trades?.length">
+                <button @click="corrDownloadCSV()"
+                        title="Download enriched trades CSV"
+                        style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                               color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                  ↓ CSV
+                </button>
+              </template>
             </div>
           </template>
         </div>
@@ -942,6 +962,9 @@
                     <div class="chart-title">
                       Trade Activity
                       <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected bins entries &amp; open positions</span>
+                      <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.corr }"
+                              @click="toggleDedupeConc('corr')"
+                              title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
                       <button class="fs-btn" @click="openFullscreen('corr-activity-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-activity-canvas"></canvas></div>
@@ -1243,6 +1266,9 @@
                 <div class="chart-title">
                   Trade Activity
                   <span style="font-weight:400;font-size:9px;color:var(--dim)">— union entries &amp; open positions</span>
+                  <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.port }"
+                          @click="toggleDedupeConc('port')"
+                          title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
                   <button class="fs-btn" @click="openFullscreen('chart-port-activity')">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-activity"></canvas></div>
