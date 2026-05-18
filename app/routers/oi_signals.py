@@ -404,9 +404,17 @@ async def firing_portfolios(
             for sec in (s.get("secondaries") or []):
                 needed.add(sec["metric"])
 
-        # Historical rows for stats + binning (outcome NOT NULL).
+        # Historical rows for stats + binning (outcome NOT NULL). When the
+        # user picks a past date, truncate the historical universe at that
+        # date so today's bin is computed against the distribution that
+        # existed AS OF that date — not against the future.
+        effective_date_to = p["date_to"]
+        if date_param:
+            d_str = date_param.isoformat()
+            if not effective_date_to or d_str < effective_date_to:
+                effective_date_to = d_str
         anchor_rows = await _fetch_anchor_rows(
-            oi_pool, ticker, outcome, p["date_from"], p["date_to"], sorted(needed))
+            oi_pool, ticker, outcome, p["date_from"], effective_date_to, sorted(needed))
         if not anchor_rows:
             continue
 

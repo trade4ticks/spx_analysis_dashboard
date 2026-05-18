@@ -2441,9 +2441,16 @@ document.addEventListener('alpine:init', () => {
         borderWidth: 1,
       }));
 
+      // Trade-weighted avg ret across the visible tickers (n-weighted) → %
+      const totalN = tickers.reduce((s, t) => s + (t.n || 0), 0);
+      const avgPct = totalN > 0
+        ? tickers.reduce((s, t) => s + (t.avg_ret || 0) * (t.n || 0), 0) / totalN * 100
+        : 0;
+
       this._charts['sec-bubble'] = new Chart(canvas.getContext('2d'), {
         type: 'bubble',
         data: { datasets },
+        plugins: [this._avgRetLinePlugin(avgPct, 'avg')],
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
@@ -2542,6 +2549,39 @@ document.addEventListener('alpine:init', () => {
       else if (key === 'sec')  this._renderSecActivity();
       else if (key === 'corr') this._renderCorrActivity();
       else if (key === 'port') this._renderPortActivity();
+    },
+
+    // Faint horizontal dotted gray line on bubble charts marking the
+    // section's weighted-average return across visible tickers.
+    _avgRetLinePlugin(avgPct, label) {
+      return {
+        id: 'avgRetLine',
+        afterDraw(chart) {
+          if (!Number.isFinite(avgPct)) return;
+          const yScale = chart.scales.y;
+          const xScale = chart.scales.x;
+          if (!yScale || !xScale) return;
+          const y = yScale.getPixelForValue(avgPct);
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(170,170,170,0.55)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(xScale.left,  y);
+          ctx.lineTo(xScale.right, y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = 'rgba(170,170,170,0.75)';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(
+            (label || 'avg') + ' ' + avgPct.toFixed(3) + '%',
+            xScale.right - 4, y - 2);
+          ctx.restore();
+        },
+      };
     },
 
     // ── Multi-Metric Correlation Explorer ────────────────────────────────────
@@ -2892,9 +2932,14 @@ document.addEventListener('alpine:init', () => {
         borderColor:     mkColor(t.win_rate, 1),
         borderWidth: 1,
       }));
+      const totalN = tickers.reduce((s, t) => s + (t.n || 0), 0);
+      const avgPct = totalN > 0
+        ? tickers.reduce((s, t) => s + (t.avg_ret || 0) * (t.n || 0), 0) / totalN * 100
+        : 0;
       this._charts['corr-bubble'] = new Chart(canvas.getContext('2d'), {
         type: 'bubble',
         data: { datasets },
+        plugins: [this._avgRetLinePlugin(avgPct, 'avg')],
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: { legend: { display: false },
@@ -3647,9 +3692,14 @@ document.addEventListener('alpine:init', () => {
         borderColor:     mkColor(t.win_rate, 1),
         borderWidth: 1,
       }));
+      const totalN = tickers.reduce((s, t) => s + (t.n || 0), 0);
+      const avgPct = totalN > 0
+        ? tickers.reduce((s, t) => s + (t.avg_ret || 0) * (t.n || 0), 0) / totalN * 100
+        : 0;
       this._charts['port-bubble'] = new Chart(canvas.getContext('2d'), {
         type: 'bubble',
         data: { datasets },
+        plugins: [this._avgRetLinePlugin(avgPct, 'avg')],
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: { legend: { display: false },
