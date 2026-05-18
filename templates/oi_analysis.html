@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=53"></script>
+  <script src="/static/js/oi_analysis.js?v=54"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1126,7 +1126,8 @@
                   <span class="if-pill" style="cursor:pointer" @click="renameSystem(sys.id, sys.name)" title="Rename">✎</span>
                   <span class="if-pill" style="cursor:pointer" @click="editSystem(sys)">Edit</span>
                   <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"
-                        @click="deleteSystem(sys.id)">×</span>
+                        @click="deleteSystem(sys.id)"
+                        title="Remove from this portfolio (does not delete from the Library)">×</span>
                 </div>
                 <div style="font-size:10px;color:var(--muted);font-family:monospace;line-height:1.5">
                   <div>

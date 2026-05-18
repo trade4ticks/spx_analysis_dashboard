@@ -3276,7 +3276,8 @@ document.addEventListener('alpine:init', () => {
 
     async deleteSystem(sid) {
       const sys = this.portfolio?.systems?.find(s => s.id === sid);
-      if (!confirm(`Delete ${sys?.name || 'system'}?`)) return;
+      if (!confirm(`Remove "${sys?.name || 'system'}" from this portfolio?\n\n` +
+                   `This does not delete it from the Library — saved copies stay available for other portfolios.`)) return;
       try {
         await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, { method: 'DELETE' });
         await this.selectPortfolio(this.portfolioId);
