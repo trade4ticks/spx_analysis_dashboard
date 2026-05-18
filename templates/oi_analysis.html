@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=51"></script>
+  <script src="/static/js/oi_analysis.js?v=52"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1018,16 +1018,33 @@
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
             <div style="font-size:10px;color:var(--dim);margin-bottom:6px">
               Anchor:
-              <span style="color:var(--text);font-weight:600" x-text="portfolio.ticker"></span> ·
-              <span style="color:var(--text);font-weight:600" x-text="portfolio.outcome"></span> ·
-              <span x-text="(portfolio.date_from || 'earliest') + ' → ' + (portfolio.date_to || 'today')"></span>
+              <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.ticker"></span> ·
+              <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.outcome"></span> ·
+              <span x-text="(portfolio.portfolio?.date_from || 'earliest') + ' → ' + (portfolio.portfolio?.date_to || 'today')"></span>
             </div>
+            <!-- Edit-mode banner -->
+            <template x-if="editingSystemId">
+              <div style="background:rgba(232,67,147,0.08);border:1px solid rgba(232,67,147,0.4);
+                          border-radius:4px;padding:6px 10px;margin-bottom:6px;
+                          display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span style="font-size:11px;color:#e84393;font-weight:600">
+                  Editing <span x-text="editingSystemName"></span>
+                </span>
+                <span style="font-size:10px;color:var(--dim)">
+                  Adjust primary bins above and/or secondary selections in the Correlation Explorer, then click Save Changes.
+                </span>
+                <button @click="cancelEditSystem()"
+                        style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--dim);
+                               font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                  Cancel Edit
+                </button>
+              </div>
+            </template>
             <button @click="addCurrentSystem()"
                     :disabled="!canAddSystem"
-                    :style="canAddSystem ? 'background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.4);color:#3498db;cursor:pointer' : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:not-allowed;opacity:.6'"
-                    style="font-size:11px;padding:5px 14px;border-radius:4px;font-weight:600">
-              + Add Current Setup as System
-            </button>
+                    :style="canAddSystem ? (editingSystemId ? 'background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);color:#e84393;cursor:pointer' : 'background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.4);color:#3498db;cursor:pointer') : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:not-allowed;opacity:.6'"
+                    style="font-size:11px;padding:5px 14px;border-radius:4px;font-weight:600"
+                    x-text="editingSystemId ? ('Save Changes to ' + editingSystemName) : '+ Add Current Setup as System'"></button>
             <span x-show="!canAddSystem && portfolio"
                   style="font-size:10px;color:var(--dim);margin-left:10px">
               Select primary bins above AND at least one secondary in the Correlation Explorer
@@ -1037,17 +1054,16 @@
 
         <!-- System cards -->
         <template x-if="portfolio && portfolio.systems && portfolio.systems.length">
-          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;margin-bottom:14px">
             <template x-for="sys in portfolio.systems" :key="'sys-'+sys.id">
-              <div :style="(sys.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:10px'">
+              <div :style="(sys.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + (editingSystemId === sys.id ? ';outline:2px solid #e84393;outline-offset:-1px' : '') + ';border-radius:6px;padding:10px'">
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
                   <input type="checkbox" :checked="sys.enabled"
                          @change="toggleSystem(sys.id, $event.target.checked)"
                          style="cursor:pointer">
-                  <span style="font-size:12px;font-weight:700;color:var(--text);flex:1;cursor:text"
-                        @dblclick="renameSystem(sys.id, sys.name)"
-                        x-text="sys.name"
-                        title="Double-click to rename"></span>
+                  <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
+                        x-text="sys.name"></span>
+                  <span class="if-pill" style="cursor:pointer" @click="renameSystem(sys.id, sys.name)" title="Rename">✎</span>
                   <span class="if-pill" style="cursor:pointer" @click="editSystem(sys)">Edit</span>
                   <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"
                         @click="deleteSystem(sys.id)">×</span>
@@ -1068,7 +1084,6 @@
                     </div>
                   </template>
                 </div>
-                <!-- per-system stats from aggregate (populated when portAggregate is loaded) -->
                 <template x-if="portAggSysMap[sys.id]">
                   <div style="display:flex;gap:8px;margin-top:6px;font-size:10px;color:var(--muted)">
                     <span><b x-text="(portAggSysMap[sys.id].n_trades || 0).toLocaleString()"></b> trades</span>
@@ -1084,109 +1099,161 @@
           </div>
         </template>
 
-        <!-- Aggregate stats + charts -->
-        <template x-if="portAggregate && portAggregate.n_trades > 0">
+        <!-- Aggregate stats card — same shape as the corr explorer's -->
+        <template x-if="portAggregate && portAggregate.combined_n > 0">
+          <div class="stats-card" style="margin-bottom:12px">
+            <div class="stat-item">
+              <div class="stat-label">Union Trades</div>
+              <div class="stat-value" x-text="portAggregate.combined_n"></div>
+            </div>
+            <div class="stat-item"
+                 title="Normalized exclusivity across pair firings: 0% = all pairs fire identical trades, 100% = zero overlap. Formula: (union − min_n) / (sum_n − min_n)">
+              <div class="stat-label">Trade Util.</div>
+              <div class="stat-value" x-text="portStats() ? portStats().util+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Baseline n</div>
+              <div class="stat-value" x-text="portAggregate.baseline_n"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Winners</div>
+              <div class="stat-value pos" x-text="portStats()?.winners ?? '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Winner Avg Ret</div>
+              <div class="stat-value pos"
+                   x-text="portStats()?.winnerAvg != null ? (portStats().winnerAvg*100).toFixed(3)+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Losers</div>
+              <div class="stat-value neg" x-text="portStats()?.losers ?? '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Loser Avg Ret</div>
+              <div class="stat-value neg"
+                   x-text="portStats()?.loserAvg != null ? (portStats().loserAvg*100).toFixed(3)+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Win Rate</div>
+              <div class="stat-value" :class="(portStats()?.winRate ?? 0) >= 0.5 ? 'pos' : 'neg'"
+                   x-text="portStats() ? (portStats().winRate*100).toFixed(1)+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Avg Return</div>
+              <div class="stat-value" :class="(portStats()?.avgRet ?? 0) >= 0 ? 'pos' : 'neg'"
+                   x-text="portStats() ? (portStats().avgRet*100).toFixed(3)+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Best Yr (avg ret)</div>
+              <div class="stat-value pos"
+                   x-text="portStats()?.best?.yr ? portStats().best.yr+' ('+(portStats().best.avg*100).toFixed(2)+'%)' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Worst Yr (avg ret)</div>
+              <div class="stat-value neg"
+                   x-text="portStats()?.worst?.yr ? portStats().worst.yr+' ('+(portStats().worst.avg*100).toFixed(2)+'%)' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Cum Return</div>
+              <div class="stat-value" :class="(portStats()?.cum ?? 0) >= 0 ? 'pos' : 'neg'"
+                   x-text="portStats()?.cum != null ? portStats().cum.toFixed(2)+'%' : '—'"></div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Tickers</div>
+              <div class="stat-value" x-text="_tickerCoverage(portAggregate.tickers)"></div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Charts grid — same layout/classes as corr explorer (.chart-grid + .chart-box + .chart-canvas) -->
+        <template x-if="portAggregate && portAggregate.combined_n > 0">
           <div>
-            <!-- Stats card -->
-            <div class="stats-card" style="margin-bottom:12px">
-              <div class="stat-item">
-                <div class="stat-label">Trades</div>
-                <div class="stat-value" x-text="portAggregate.n_trades.toLocaleString()"></div>
+            <div class="chart-grid" style="margin-bottom:12px">
+              <div class="chart-box" style="position:relative">
+                <div class="chart-title">
+                  Equity Curve
+                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: any-system primary universe</span>
+                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: portfolio union</span>
+                  <button class="fs-btn" @click="openFullscreen('chart-port-equity')">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="chart-port-equity"></canvas></div>
               </div>
-              <div class="stat-item">
-                <div class="stat-label">Win Rate</div>
-                <div class="stat-value"
-                     :class="portAggregate.win_rate >= 0.5 ? 'pos' : 'neg'"
-                     x-text="(portAggregate.win_rate * 100).toFixed(1) + '%'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Avg Ret</div>
-                <div class="stat-value"
-                     :class="portAggregate.avg_ret >= 0 ? 'pos' : 'neg'"
-                     x-text="(portAggregate.avg_ret * 100).toFixed(3) + '%'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label" title="0% = systems trade together, 100% = systems trade exclusively">Util.</div>
-                <div class="stat-value"
-                     x-text="(portAggregate.utilisation || 0).toFixed(1) + '%'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Winner Avg</div>
-                <div class="stat-value pos"
-                     x-text="((portAggregate.winner_avg_ret || 0) * 100).toFixed(3) + '%'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Loser Avg</div>
-                <div class="stat-value neg"
-                     x-text="((portAggregate.loser_avg_ret || 0) * 100).toFixed(3) + '%'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Cum Return</div>
-                <div class="stat-value"
-                     x-text="portCumReturn"
-                     :class="portCumReturnNum >= 0 ? 'pos' : 'neg'"></div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Ticker Coverage</div>
-                <div class="stat-value"
-                     style="font-size:12px"
-                     x-text="(portAggregate.tickers || []).length + ' tkrs'"></div>
+              <div class="chart-box" style="position:relative">
+                <div class="chart-title">
+                  Trade Activity
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— union entries &amp; open positions</span>
+                  <button class="fs-btn" @click="openFullscreen('chart-port-activity')">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="chart-port-activity"></canvas></div>
               </div>
             </div>
-
-            <!-- Charts grid -->
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-              <div class="chart-box">
-                <div class="chart-title">Equity Curve (Union)</div>
-                <div class="chart-canvas" style="height:200px"><canvas id="chart-port-equity"></canvas></div>
+            <div class="chart-grid" style="margin-bottom:12px">
+              <div class="chart-box" style="position:relative">
+                <div class="chart-title">
+                  Yearly Returns
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary universe vs portfolio union</span>
+                  <button class="fs-btn" @click="openFullscreen('chart-port-yearly')">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="chart-port-yearly"></canvas></div>
               </div>
-              <div class="chart-box">
-                <div class="chart-title">Yearly Returns (Union)</div>
-                <div class="chart-canvas" style="height:200px"><canvas id="chart-port-yearly"></canvas></div>
-              </div>
-              <div class="chart-box">
-                <div class="chart-title">Trade Activity (Open Positions)</div>
-                <div class="chart-canvas" style="height:200px"><canvas id="chart-port-activity"></canvas></div>
-              </div>
-              <div class="chart-box">
-                <div class="chart-title">Ticker Contribution</div>
-                <div class="chart-canvas" style="height:200px"><canvas id="chart-port-bubble"></canvas></div>
+              <div class="chart-box" style="position:relative">
+                <div class="chart-title">
+                  Ticker Breakdown
+                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span x-show="portAggregate?.tickers?.length"
+                        style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                               border-radius:3px;padding:1px 6px;color:var(--dim)"
+                        x-text="_tickerCoverage(portAggregate?.tickers)"></span>
+                  <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
+                    <input type="range" min="1" max="50" :value="portBubbleMinN"
+                           @input="portSetBubbleMinN($event.target.value)"
+                           style="width:60px;vertical-align:middle">
+                    <span x-text="portBubbleMinN"></span>
+                  </span>
+                  <button class="fs-btn" @click="openFullscreen('chart-port-bubble')">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="chart-port-bubble"></canvas></div>
               </div>
             </div>
 
             <!-- System × System phi heatmap -->
-            <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
-              <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">
+            <div class="chart-box" style="margin-bottom:12px">
+              <div class="chart-title">
                 System × System Correlation
-                <span style="font-weight:400;color:var(--dim);font-size:10px;margin-left:8px">
-                  high φ = systems trade together / low or negative = diversifying
-                </span>
+                <span style="font-weight:400;font-size:9px;color:var(--dim)">— high φ = systems trade together · low/negative = diversifying</span>
               </div>
               <template x-if="portAggregate.phi_systems && portAggregate.phi_systems.length">
-                <table style="border-collapse:separate;border-spacing:3px;font-size:11px;font-family:monospace">
-                  <thead>
-                    <tr>
-                      <th></th>
-                      <template x-for="(lab, j) in portAggregate.system_labels" :key="'psh-'+j">
-                        <th style="padding:4px 8px;color:var(--dim);writing-mode:vertical-lr;transform:rotate(180deg);font-weight:500;font-size:10px"
-                            :title="lab" x-text="lab"></th>
-                      </template>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="(row, i) in portAggregate.phi_systems" :key="'psr-'+i">
+                <div style="overflow:auto;padding:8px 4px">
+                  <table style="border-collapse:separate;border-spacing:3px;font-size:11px;font-family:monospace">
+                    <thead>
                       <tr>
-                        <td style="padding:4px 8px;color:var(--text);font-weight:600;text-align:right"
-                            x-text="portAggregate.system_labels[i]"></td>
-                        <template x-for="(val, j) in row" :key="'psc-'+j">
-                          <td :style="corrCellStyle(val, i===j)"
-                              :title="portSysCellTitle(i, j)"
-                              x-text="i===j ? ('n=' + (portAggregate.overlap_systems[i][i] || 0)) : val.toFixed(2)"></td>
+                        <th style="padding:0"></th>
+                        <template x-for="lab in portAggregate.system_labels" :key="'psh-'+lab">
+                          <th style="padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;
+                                     max-width:110px;overflow:hidden;text-overflow:ellipsis;
+                                     writing-mode:vertical-lr;transform:rotate(180deg);
+                                     height:80px;vertical-align:bottom;text-align:left;font-size:11px"
+                              :title="lab" x-text="lab"></th>
                         </template>
                       </tr>
-                    </template>
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      <template x-for="(row, i) in portAggregate.phi_systems" :key="'psr-'+i">
+                        <tr>
+                          <td style="padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;
+                                     max-width:130px;overflow:hidden;text-overflow:ellipsis;font-size:11px"
+                              :title="portAggregate.system_labels[i] + '  n=' + (portAggregate.overlap_systems[i]?.[i] ?? 0)"
+                              x-text="portAggregate.system_labels[i]"></td>
+                          <template x-for="(val, j) in row" :key="'psc-'+j">
+                            <td :style="corrCellStyle(val, i===j)"
+                                :title="portSysCellTitle(i, j)"
+                                x-text="i===j ? ('n=' + (portAggregate.overlap_systems[i]?.[i] ?? 0)) : val.toFixed(2)"></td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
               </template>
               <div x-show="!portAggregate.phi_systems || !portAggregate.phi_systems.length"
                    style="font-size:11px;color:var(--dim);padding:8px">
@@ -1195,34 +1262,33 @@
             </div>
 
             <!-- Pair × Pair phi heatmap -->
-            <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:12px">
-              <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">
+            <div class="chart-box" style="margin-bottom:12px">
+              <div class="chart-title">
                 Pair × Pair Correlation
-                <span style="font-weight:400;color:var(--dim);font-size:10px;margin-left:8px">
-                  every primary × each-secondary; thicker lines separate systems
-                </span>
+                <span style="font-weight:400;font-size:9px;color:var(--dim)">— each system's primary × every secondary; separators between systems</span>
               </div>
               <template x-if="portAggregate.phi_pairs && portAggregate.phi_pairs.length">
-                <div style="overflow:auto">
+                <div style="overflow:auto;padding:8px 4px">
                   <table style="border-collapse:separate;border-spacing:2px;font-size:10px;font-family:monospace">
                     <thead>
                       <tr>
-                        <th></th>
+                        <th style="padding:0"></th>
                         <template x-for="(lab, j) in portAggregate.pair_labels" :key="'pph-'+j">
-                          <th :style="'padding:3px 5px;color:var(--dim);writing-mode:vertical-lr;transform:rotate(180deg);font-weight:500;font-size:9px;' + (portAggregate.system_boundaries.includes(j) && j > 0 ? 'border-left:2px solid #444' : '')"
+                          <th :style="'padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;writing-mode:vertical-lr;transform:rotate(180deg);height:100px;vertical-align:bottom;text-align:left;font-size:10px;' + (portAggregate.system_boundaries.includes(j) && j > 0 ? 'border-left:2px solid #444' : '')"
                               :title="lab" x-text="lab"></th>
                         </template>
                       </tr>
                     </thead>
                     <tbody>
                       <template x-for="(row, i) in portAggregate.phi_pairs" :key="'ppr-'+i">
-                        <tr :style="portAggregate.system_boundaries.includes(i) && i > 0 ? 'border-top:2px solid #444' : ''">
-                          <td :style="'padding:3px 6px;color:var(--text);font-weight:500;text-align:right;font-size:9px;white-space:nowrap;' + (portAggregate.system_boundaries.includes(i) && i > 0 ? 'border-top:2px solid #444' : '')"
+                        <tr>
+                          <td :style="'padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:10px;' + (portAggregate.system_boundaries.includes(i) && i > 0 ? 'border-top:2px solid #444' : '')"
+                              :title="portAggregate.pair_labels[i] + '  n=' + (portAggregate.overlap_pairs[i]?.[i] ?? 0)"
                               x-text="portAggregate.pair_labels[i]"></td>
                           <template x-for="(val, j) in row" :key="'ppc-'+j">
-                            <td :style="corrCellStyle(val, i===j) + ';font-size:9px;padding:4px 6px;' + (portAggregate.system_boundaries.includes(j) && j > 0 ? 'border-left:2px solid #444' : '')"
+                            <td :style="corrCellStyle(val, i===j) + (portAggregate.system_boundaries.includes(j) && j > 0 ? ';border-left:2px solid #444' : '') + (portAggregate.system_boundaries.includes(i) && i > 0 ? ';border-top:2px solid #444' : '')"
                                 :title="portPairCellTitle(i, j)"
-                                x-text="i===j ? ('n=' + (portAggregate.overlap_pairs[i][i] || 0)) : val.toFixed(2)"></td>
+                                x-text="i===j ? ('n=' + (portAggregate.overlap_pairs[i]?.[i] ?? 0)) : val.toFixed(2)"></td>
                           </template>
                         </tr>
                       </template>
@@ -1244,12 +1310,12 @@
                 ⬇ Download Union CSV
               </button>
               <span style="font-size:10px;color:var(--dim);margin-left:8px"
-                    x-text="portAggregate.n_trades.toLocaleString() + ' trades'"></span>
+                    x-text="(portAggregate.combined_n || 0).toLocaleString() + ' trades'"></span>
             </div>
           </div>
         </template>
 
-        <template x-if="portfolio && portAggregate && portAggregate.n_trades === 0">
+        <template x-if="portfolio && portAggregate && (portAggregate.combined_n || 0) === 0">
           <div style="font-size:11px;color:var(--dim);padding:8px">
             No union trades. Add systems with primary bins and at least one secondary.
           </div>

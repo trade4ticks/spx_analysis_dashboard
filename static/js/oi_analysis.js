@@ -75,6 +75,8 @@ document.addEventListener('alpine:init', () => {
     portfolio: null,         // {portfolio: {...}, systems: [...]}
     portAggregate: null,     // last /aggregate response
     portLoading: false,
+    editingSystemId: null,   // when set, the "Add" button becomes "Save Changes"
+    portBubbleMinN: 1,       // bubble chart min-n filter
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -1591,6 +1593,10 @@ document.addEventListener('alpine:init', () => {
         'corr-yearly-canvas':   'corr-yearly',
         'corr-activity-canvas': 'corr-activity',
         'corr-bubble-canvas':   'corr-bubble',
+        'chart-port-equity':    'port-equity',
+        'chart-port-yearly':    'port-yearly',
+        'chart-port-activity':  'port-activity',
+        'chart-port-bubble':    'port-bubble',
       };
       const key = keyOverride[chartId] || chartId.replace('chart-', '');
       this.fsChartId = chartId;
@@ -1628,6 +1634,11 @@ document.addEventListener('alpine:init', () => {
           'corr-yearly-canvas':   () => this._renderCorrYearly(),
           'corr-activity-canvas': () => this._renderCorrActivity(),
           'corr-bubble-canvas':   () => this._renderCorrBubble(),
+          // System Portfolio
+          'chart-port-equity':    () => this._renderPortEquity(),
+          'chart-port-yearly':    () => this._renderPortYearly(),
+          'chart-port-activity':  () => this._renderPortActivity(),
+          'chart-port-bubble':    () => this._renderPortBubble(),
         };
         const fn = renderMap[chartId];
         if (fn) {
@@ -1649,6 +1660,7 @@ document.addEventListener('alpine:init', () => {
         this._renderAllCharts();
         if (this.secDetail) this._renderSecDetail();
         if (this.corrResult && !this.corrResult.error) this._renderCorrDetail();
+        if (this.portAggregate && this.portAggregate.combined_n > 0) this._renderPortCharts();
       });
     },
 
@@ -3049,27 +3061,55 @@ document.addEventListener('alpine:init', () => {
     // ── System Portfolio (third tier) ──────────────────────────────────────
 
     get canAddSystem() {
-      // Need a portfolio loaded, at least one primary bin selected, and at
-      // least one secondary with a non-empty bin set in the corr explorer.
       if (!this.portfolioId || !this.portfolio) return false;
       if (!this.selectedBins20 || this.selectedBins20.size === 0) return false;
       const sels = this.corrSelections || {};
       return Object.values(sels).some(b => Array.isArray(b) && b.length > 0);
     },
 
-    get portCumReturnNum() {
-      const eq = this.portAggregate?.equity || [];
-      return eq.length ? eq[eq.length - 1].value * 100 : 0;
-    },
-
-    get portCumReturn() {
-      return this.portCumReturnNum.toFixed(2) + '%';
-    },
-
     get portAggSysMap() {
       const m = {};
       for (const s of (this.portAggregate?.systems || [])) m[s.id] = s;
       return m;
+    },
+
+    get editingSystemName() {
+      if (!this.editingSystemId || !this.portfolio?.systems) return '';
+      const s = this.portfolio.systems.find(x => x.id === this.editingSystemId);
+      return s ? s.name : '';
+    },
+
+    // Mirrors corrStats() — same shape so the stats card template can render.
+    portStats() {
+      const r = this.portAggregate;
+      if (!r) return null;
+      const yearly = r.yearly || [];
+      if (!yearly.length) return null;
+      const totalN  = yearly.reduce((s, y) => s + (y.combined_n  || 0), 0);
+      if (!totalN) return null;
+      const avgRet  = yearly.reduce((s, y) => s + (y.combined_avg || 0) * (y.combined_n || 0), 0) / totalN;
+      const winRate = yearly.reduce((s, y) => s + (y.combined_wr  || 0) * (y.combined_n || 0), 0) / totalN;
+      const winners = Math.round(winRate * totalN);
+      const best  = yearly.reduce((b, y) => y.combined_avg > b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg: -Infinity });
+      const worst = yearly.reduce((b, y) => y.combined_avg < b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg:  Infinity });
+      const eq  = r.equity_combined || [];
+      const cum = eq.length ? +(eq[eq.length - 1].value * 100).toFixed(2) : null;
+      // Trade utilization across pair firings (matches corr explorer).
+      const nEach = r.n_each || [];
+      const sumN  = nEach.reduce((s, n) => s + n, 0);
+      const minN  = nEach.length ? Math.min(...nEach) : 0;
+      const union = r.combined_n || 0;
+      const util  = sumN > minN ? +((union - minN) / (sumN - minN) * 100).toFixed(1) : 100;
+      return {
+        totalN, avgRet, winRate, winners, losers: totalN - winners, best, worst, cum, util,
+        winnerAvg: r.winner_avg_ret ?? null,
+        loserAvg:  r.loser_avg_ret  ?? null,
+      };
+    },
+
+    portSetBubbleMinN(n) {
+      this.portBubbleMinN = +n;
+      this._renderPortBubble();
     },
 
     async loadPortfolios() {
@@ -3148,9 +3188,7 @@ document.addEventListener('alpine:init', () => {
 
     async addCurrentSystem() {
       if (!this.canAddSystem) return;
-      // Capture primary bins (the corr explorer uses selectedBins20 — always 20-bin internally)
       const primary_bins = [...this.selectedBins20].sort((a, b) => a - b);
-      // Capture secondaries from corrSelections
       const secondaries = [];
       for (const [metric, bins] of Object.entries(this.corrSelections || {})) {
         if (Array.isArray(bins) && bins.length) {
@@ -3162,20 +3200,34 @@ document.addEventListener('alpine:init', () => {
         }
       }
       const body = {
-        primary_metric: this.metric,
+        primary_metric:    this.metric,
         primary_bins,
         primary_bin_count: 20,
         secondaries,
       };
+      const editingId = this.editingSystemId;
+      const url = editingId
+        ? `/api/oi-analysis/portfolios/${this.portfolioId}/systems/${editingId}`
+        : `/api/oi-analysis/portfolios/${this.portfolioId}/systems`;
+      const method = editingId ? 'PUT' : 'POST';
       try {
-        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+        const r = await fetch(url, {
+          method, headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        if (!r.ok) { alert('Add system failed: ' + await r.text()); return; }
+        if (!r.ok) {
+          alert((editingId ? 'Save changes' : 'Add system') + ' failed: ' + await r.text());
+          return;
+        }
+        // Clear edit mode on success
+        this.editingSystemId = null;
         await this.selectPortfolio(this.portfolioId);
         await this.loadPortfolios();
-      } catch (e) { alert('Add system error: ' + e.message); }
+      } catch (e) { alert((editingId ? 'Save changes' : 'Add system') + ' error: ' + e.message); }
+    },
+
+    cancelEditSystem() {
+      this.editingSystemId = null;
     },
 
     async toggleSystem(sid, enabled) {
@@ -3217,24 +3269,48 @@ document.addEventListener('alpine:init', () => {
     },
 
     async editSystem(sys) {
-      // Sync page state to the portfolio's anchor first so the analysis
-      // produced matches what the system was saved against.
-      if (this.portfolio?.portfolio) {
-        const anchor = this.portfolio.portfolio;
+      // Mark the system as the one being edited. The "+ Add Current Setup
+      // as System" button will become "Save Changes to <name>" and will
+      // PUT instead of POST.
+      this.editingSystemId = sys.id;
+
+      const anchor = this.portfolio?.portfolio;
+      if (!anchor) return;
+
+      // Decide whether we need to re-run /analyze. Skip it when the page
+      // is already on the same anchor + primary metric — only the primary
+      // bin selection and corr selections need adjusting in that case.
+      const anchorMatches =
+        this.ticker   === anchor.ticker &&
+        this.outcome  === anchor.outcome &&
+        (this.dateFrom || '') === (anchor.date_from || '') &&
+        (this.dateTo   || '') === (anchor.date_to   || '');
+      const metricMatches = this.metric === sys.primary_metric;
+
+      if (!anchorMatches || !metricMatches) {
+        // Full reload path — only when something material changed.
         this.ticker   = anchor.ticker;
         this.outcome  = anchor.outcome;
         this.dateFrom = anchor.date_from || '';
         this.dateTo   = anchor.date_to   || '';
+        this.metric   = sys.primary_metric;
+        this.selectedBins20 = new Set(sys.primary_bins || []);
+        await this.loadAnalysis();
+        if (this.error) return;
+        await this.secLoad();
+        if (!this.secStatus.loaded) return;
+      } else {
+        // Fast path — page already on the right anchor + metric. Just
+        // swap the primary bin selection and re-prime the corr cache.
+        this.selectedBins20 = new Set(sys.primary_bins || []);
+        // Re-running secLoad refreshes the cache against the new
+        // primary bin filter (its `_secFilteredDates()` reads
+        // selectedBins20).
+        await this.secLoad();
+        if (!this.secStatus.loaded) return;
       }
-      this.metric         = sys.primary_metric;
-      this.selectedBins20 = new Set(sys.primary_bins || []);
-      // Re-run primary analysis with the saved anchor + primary metric/bins.
-      await this.loadAnalysis();
-      if (this.error) return;
-      // Load the secondary cache so the corr explorer has its membership data.
-      await this.secLoad();
-      if (!this.secStatus.loaded) return;
-      // Open the corr panel and restore mini data + selections.
+
+      // Restore the corr explorer state.
       this.corrPanelOpen = true;
       this.corrBinCount  = (sys.secondaries?.[0]?.bin_count) || 10;
       this.corrMiniData  = null;
@@ -3244,6 +3320,7 @@ document.addEventListener('alpine:init', () => {
         sels[sec.metric] = [...(sec.bins || [])];
       }
       this.corrSelections = sels;
+
       // Scroll the corr explorer into view so the user sees the restored state.
       this.$nextTick(() => {
         const el = document.getElementById('corr-equity-canvas')
@@ -3275,7 +3352,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderPortCharts() {
-      if (!this.portAggregate || this.portAggregate.n_trades === 0) {
+      if (!this.portAggregate || !(this.portAggregate.combined_n > 0)) {
         this._destroyPortCharts();
         return;
       }
@@ -3287,126 +3364,173 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderPortEquity() {
+      // Mirrors _renderCorrEquity: dual line (primary universe vs portfolio
+      // union), tooltip title is the full date (daily), labels are YYYY-MM
+      // for legibility on the axis.
       const canvas = document.getElementById('chart-port-equity');
       if (!canvas || !this.portAggregate) return;
-      const eq = this.portAggregate.equity || [];
-      if (!eq.length) return;
+      if (this._charts['port-equity']) { this._charts['port-equity'].destroy(); delete this._charts['port-equity']; }
+      const eqP = this.portAggregate.equity_primary  || [];
+      const eqC = this.portAggregate.equity_combined || [];
+      if (!eqP.length) return;
+      const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
+      let lastC = 0;
+      const combinedAligned = eqP.map(p => {
+        if (cMap[p.date] !== undefined) lastC = cMap[p.date];
+        return lastC;
+      });
       this._charts['port-equity'] = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
-          labels: eq.map(p => p.date.slice(0, 7)),
-          datasets: [{
-            label: 'Union', data: eq.map(p => +(p.value * 100).toFixed(4)),
-            borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.08)',
-            borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true,
-          }],
+          labels: eqP.map(p => p.date.slice(0, 7)),
+          datasets: [
+            { label: 'Primary', data: eqP.map(p => +(p.value * 100).toFixed(4)),
+              borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.06)',
+              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true },
+            { label: 'Union', data: combinedAligned,
+              borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.06)',
+              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true, spanGaps: true },
+          ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false } },
-          scales: this._darkScales(),
+          plugins: {
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { title: ctx => eqP[ctx[0]?.dataIndex]?.date || '' } },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 10 } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Cum Return %', color: '#888', font: { size: 9 } } },
+          },
         },
       });
     },
 
     _renderPortYearly() {
+      // Mirrors _renderCorrYearly: two bar series (primary vs union) per year
+      // with n + WR in the tooltip.
       const canvas = document.getElementById('chart-port-yearly');
-      if (!canvas || !this.portAggregate) return;
-      const yr = this.portAggregate.yearly || [];
-      if (!yr.length) return;
-      const labels = yr.map(y => String(y.year));
-      const avgs = yr.map(y => +(y.avg_ret * 100).toFixed(4));
+      if (!canvas || !this.portAggregate?.yearly?.length) return;
+      if (this._charts['port-yearly']) { this._charts['port-yearly'].destroy(); delete this._charts['port-yearly']; }
+      const yearly = this.portAggregate.yearly;
       this._charts['port-yearly'] = new Chart(canvas.getContext('2d'), {
         type: 'bar',
         data: {
-          labels,
-          datasets: [{
-            label: 'Avg Ret %', data: avgs,
-            backgroundColor: avgs.map(v => v >= 0 ? 'rgba(52,152,219,0.6)' : 'rgba(232,67,147,0.6)'),
-            borderWidth: 0,
-          }],
+          labels: yearly.map(y => y.year),
+          datasets: [
+            { label: 'Primary',  data: yearly.map(y => +(y.primary_avg  * 100).toFixed(3)),
+              backgroundColor: 'rgba(52,152,219,0.65)', borderColor: '#3498db', borderWidth: 1 },
+            { label: 'Union', data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
+              backgroundColor: 'rgba(232,67,147,0.65)', borderColor: '#e84393', borderWidth: 1 },
+          ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                afterLabel: (ctx) => {
-                  const y = yr[ctx.dataIndex];
-                  return `n=${y.n}  ·  win ${(y.win_rate * 100).toFixed(1)}%`;
-                },
-              },
-            },
+          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { callbacks: { label: ctx => {
+              const y = yearly[ctx.dataIndex];
+              if (ctx.datasetIndex === 0) return [`Avg: ${(y.primary_avg*100).toFixed(3)}%`, `WR: ${(y.primary_wr*100).toFixed(1)}%`, `n: ${y.primary_n}`];
+              return [`Avg: ${(y.combined_avg*100).toFixed(3)}%`, `WR: ${(y.combined_wr*100).toFixed(1)}%`, `n: ${y.combined_n}`];
+            } } } },
+          scales: {
+            ...this._darkScales(),
+            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
           },
-          scales: this._darkScales(),
         },
       });
     },
 
     _renderPortActivity() {
+      // Mirrors _renderCorrActivity: daily granularity with entered bars +
+      // open trades line. Trading days come from the backend's primary
+      // universe (every trade-eligible date in the anchor date range).
       const canvas = document.getElementById('chart-port-activity');
-      if (!canvas || !this.portAggregate) return;
-      const act = this.portAggregate.activity || [];
-      if (!act.length) return;
-      // Down-sample to a manageable number of points (~400) so the chart paints fast.
-      const stride = Math.max(1, Math.floor(act.length / 400));
-      const sampled = [];
-      for (let i = 0; i < act.length; i += stride) sampled.push(act[i]);
+      if (!canvas || !this.portAggregate?.combined_trade_dates?.length) return;
+      if (this._charts['port-activity']) { this._charts['port-activity'].destroy(); delete this._charts['port-activity']; }
+      const dates   = this.portAggregate.combined_trade_dates;
+      const horizon = this.portAggregate.horizon || 1;
+      const entriesByDate = {};
+      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+      // Trading days: prefer equity_primary's date spine (one row per
+      // primary-universe trade), fall back to the union dates if empty.
+      const spine = this.portAggregate.equity_primary || [];
+      const tradingDays = spine.length
+        ? [...new Set(spine.map(p => p.date))].sort()
+        : [...new Set(dates)].sort();
+      const entered = tradingDays.map(d => entriesByDate[d] || 0);
+      const open    = tradingDays.map((_, i) => {
+        let count = 0;
+        for (let j = Math.max(0, i - horizon + 1); j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
+        return count;
+      });
       this._charts['port-activity'] = new Chart(canvas.getContext('2d'), {
-        type: 'line',
+        type: 'bar',
         data: {
-          labels: sampled.map(p => p.date.slice(0, 7)),
-          datasets: [{
-            label: 'Open positions', data: sampled.map(p => p.n_open),
-            borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.10)',
-            borderWidth: 1, pointRadius: 0, tension: 0.1, fill: true, stepped: 'before',
-          }],
+          labels: tradingDays.map(d => d.slice(0, 7)),
+          datasets: [
+            { type: 'line', label: 'Open Trades', data: open,
+              borderColor: 'rgba(46,204,113,0.6)', backgroundColor: 'rgba(46,204,113,0.08)',
+              fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5, order: 1 },
+            { type: 'bar',  label: 'Entered', data: entered,
+              backgroundColor: 'rgba(52,152,219,0.7)', barThickness: 2, order: 2 },
+          ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false } },
-          scales: this._darkScales(),
+          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
+                           label: ctx => `${ctx.dataset.label}: ${ctx.raw}` } } },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Count', color: '#888', font: { size: 9 } } },
+          },
         },
       });
     },
 
     _renderPortBubble() {
+      // Mirrors _renderCorrBubble: x = trade count, y = avg ret %, bubble
+      // size = contribution to total P&L, color = win rate (pink→blue).
       const canvas = document.getElementById('chart-port-bubble');
-      if (!canvas || !this.portAggregate) return;
-      const tickers = this.portAggregate.tickers || [];
+      if (!canvas || !this.portAggregate?.tickers?.length) return;
+      if (this._charts['port-bubble']) { this._charts['port-bubble'].destroy(); delete this._charts['port-bubble']; }
+      const minN = this.portBubbleMinN || 1;
+      const tickers = this.portAggregate.tickers.filter(t => t.n >= minN);
       if (!tickers.length) return;
-      const pts = tickers.map(t => ({
-        x: t.win_rate * 100, y: t.avg_ret * 100, r: Math.max(4, Math.sqrt(t.n) * 0.8),
-        ticker: t.ticker, n: t.n, contrib: t.contrib_pct,
+      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
+      const mkColor = (wr, a) => {
+        const r = Math.round(232 + (52  - 232) * wr);
+        const g = Math.round(67  + (152 - 67)  * wr);
+        const b = Math.round(147 + (219 - 147) * wr);
+        return `rgba(${r},${g},${b},${a})`;
+      };
+      const datasets = tickers.map(t => ({
+        label: t.ticker,
+        data: [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4),
+                 r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 20) : 2 }],
+        backgroundColor: mkColor(t.win_rate, 0.65),
+        borderColor:     mkColor(t.win_rate, 1),
+        borderWidth: 1,
       }));
       this._charts['port-bubble'] = new Chart(canvas.getContext('2d'), {
         type: 'bubble',
-        data: {
-          datasets: [{
-            data: pts,
-            backgroundColor: pts.map(p => p.y >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)'),
-            borderColor: '#222', borderWidth: 1,
-          }],
-        },
+        data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: (ctx) => {
-                  const d = ctx.raw;
-                  return `${d.ticker}: n=${d.n} · wr=${d.x.toFixed(1)}% · avg=${d.y.toFixed(3)}% · contrib=${d.contrib.toFixed(1)}%`;
-                },
-              },
-            },
-          },
+          plugins: { legend: { display: false },
+            tooltip: { backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { label: ctx => {
+                const t = tickers[ctx.datasetIndex];
+                return [`${t.ticker}  n:${t.n}  avg:${(t.avg_ret*100).toFixed(3)}%  WR:${(t.win_rate*100).toFixed(1)}%  contrib:${t.contrib_pct.toFixed(1)}%`];
+              } } } },
           scales: {
-            x: { title: { display: true, text: 'Win rate %', color: '#888' },
-                 ...this._darkScales().x },
-            y: { title: { display: true, text: 'Avg ret %', color: '#888' },
-                 ...this._darkScales().y },
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, title: { display: true, text: 'Trade Count', color: '#888', font: { size: 9 } } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
           },
         },
       });
@@ -3432,7 +3556,7 @@ document.addEventListener('alpine:init', () => {
 
     async portCsvDownload() {
       if (!this.portAggregate) return;
-      const dates = this.portAggregate.union_trade_dates || [];
+      const dates = this.portAggregate.combined_trade_dates || [];
       if (!dates.length) return;
       const rows = ['trade_date'];
       for (const d of dates) rows.push(d);

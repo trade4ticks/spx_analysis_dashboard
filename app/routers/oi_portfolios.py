@@ -397,13 +397,14 @@ async def portfolio_aggregate(pid: int,
             "systems": [{"id": s["id"], "name": s["name"], "enabled": s["enabled"],
                          "n_trades": 0, "win_rate": 0.0, "avg_ret": 0.0,
                          "contrib_pct": 0.0} for s in systems_all],
-            "n_trades": 0, "win_rate": 0.0, "avg_ret": 0.0,
-            "equity": [], "yearly": [], "activity": [], "tickers": [],
-            "winner_avg_ret": 0.0, "loser_avg_ret": 0.0, "utilisation": 0.0,
+            "baseline_n": 0, "combined_n": 0, "horizon": _parse_horizon(portfolio["outcome"]),
+            "equity_primary": [], "equity_combined": [], "yearly": [], "tickers": [],
+            "combined_trade_dates": [],
+            "winner_avg_ret": 0.0, "loser_avg_ret": 0.0,
+            "n_each": [], "utilisation": 100.0,
             "phi_systems": [], "overlap_systems": [], "system_labels": [],
             "phi_pairs": [], "overlap_pairs": [], "pair_labels": [],
             "system_boundaries": [],
-            "horizon": _parse_horizon(portfolio["outcome"]),
         }
 
     # Collect every metric referenced (primary + secondaries) so the fetch is minimal.
@@ -431,12 +432,14 @@ async def portfolio_aggregate(pid: int,
     pair_labels = []
     system_boundaries = []   # cumulative pair count after each system
     per_system_pair_n = []
+    primary_vectors = []     # per-system V_primary (for the trade-eligible universe)
 
     for s in enabled_systems:
         prim_bins = set(int(b) for b in (s.get("primary_bins") or []))
         prim_count = int(s.get("primary_bin_count") or 20)
         V_p = _bin_membership(rows, s["primary_metric"], prim_bins,
                               prim_count, is_all)
+        primary_vectors.append(V_p)
         # Indices of rows that pass the primary bin filter.
         primary_indices = [i for i, v in enumerate(V_p) if v == 1.0]
         primary_rows = [rows[i] for i in primary_indices]
@@ -483,6 +486,18 @@ async def portfolio_aggregate(pid: int,
     V_port = (M_sys.sum(axis=0) > 0).astype(float)
     union_rows = [rows[i] for i, v in enumerate(V_port) if v == 1.0]
 
+    # Trade-eligible universe: union of all enabled systems' primary filters.
+    # phi correlations restrict to this universe so values match the corr
+    # explorer (which only sees primary-filtered rows). The "primary" equity
+    # curve / yearly baseline use this universe too.
+    if primary_vectors:
+        M_prim = np.stack(primary_vectors)
+        universe_mask = (M_prim.sum(axis=0) > 0)
+    else:
+        universe_mask = np.zeros(len(rows), dtype=bool)
+    universe_idx = np.where(universe_mask)[0]
+    universe_rows = [rows[i] for i in universe_idx.tolist()]
+
     # Per-system summary
     sys_stats = []
     total_sum_ret_union = 0.0
@@ -516,50 +531,47 @@ async def portfolio_aggregate(pid: int,
     by_id = {x["id"]: x for x in sys_stats}
     sys_stats = [by_id[s["id"]] for s in systems_all if s["id"] in by_id]
 
-    # Equity curve
-    equity = _sec_equity_curve(union_rows, outcome)
+    # Equity curves — primary universe (blue) and union (pink) — match the
+    # corr explorer's two-line plot exactly.
+    equity_primary  = _sec_equity_curve(universe_rows, outcome)
+    equity_combined = _sec_equity_curve(union_rows, outcome)
 
-    # Yearly breakdown
-    yearly_buckets: dict = defaultdict(list)
-    for r in union_rows:
-        td = r.get("trade_date", "0000")
-        yr = int(str(td)[:4])
+    # Yearly breakdown with both primary baseline + combined union, same
+    # field names the corr explorer's yearly chart expects.
+    yp: dict = defaultdict(list)
+    yc: dict = defaultdict(list)
+    for r in universe_rows:
+        yr = int(str(r.get("trade_date", "0000"))[:4])
         v = r.get(outcome)
-        if v is not None:
-            try:
-                yearly_buckets[yr].append(float(v))
-            except (TypeError, ValueError):
-                pass
-    yearly = []
-    for yr in sorted(yearly_buckets):
-        rets = yearly_buckets[yr]
-        a = np.array(rets) if rets else np.array([0.0])
-        yearly.append({
-            "year": yr, "n": len(rets),
-            "avg_ret":  round(float(a.mean()), 6) if rets else 0.0,
-            "win_rate": round(float((a > 0).mean()), 4) if rets else 0.0,
-        })
-
-    # Trade activity (open positions per day, horizon-based)
-    horizon = _parse_horizon(outcome)
-    activity_by_date: dict = defaultdict(int)
-    # Each union trade contributes +1 from entry_date through entry_date+horizon-1 (calendar days proxy)
-    # We don't have a trading-day calendar here; the existing corr explorer uses entry-date density.
-    # Match its pattern: count entries per date, then forward-fill horizon days via the row order.
-    entry_dates = [r.get("trade_date", "") for r in union_rows]
-    # Build a sorted unique list of dates from anchor rows for the spine
-    all_dates_sorted = sorted({r.get("trade_date", "") for r in rows})
-    date_idx = {d: i for i, d in enumerate(all_dates_sorted)}
-    open_count = [0] * len(all_dates_sorted)
-    for ed in entry_dates:
-        i = date_idx.get(ed)
-        if i is None:
+        if v is None:
             continue
-        end = min(i + horizon, len(open_count))
-        for j in range(i, end):
-            open_count[j] += 1
-    activity = [{"date": all_dates_sorted[i], "n_open": open_count[i]}
-                for i in range(len(all_dates_sorted))]
+        try:
+            yp[yr].append(float(v))
+        except (TypeError, ValueError):
+            pass
+    for r in union_rows:
+        yr = int(str(r.get("trade_date", "0000"))[:4])
+        v = r.get(outcome)
+        if v is None:
+            continue
+        try:
+            yc[yr].append(float(v))
+        except (TypeError, ValueError):
+            pass
+    yearly_out = []
+    for yr in sorted(set(yp) | set(yc)):
+        p = yp.get(yr, [])
+        c = yc.get(yr, [])
+        yearly_out.append({
+            "year":         yr,
+            "primary_n":    len(p),
+            "primary_avg":  round(float(np.mean(p)), 6) if p else 0.0,
+            "primary_wr":   round(float(np.mean([1.0 if v > 0 else 0.0 for v in p])), 4) if p else 0.0,
+            "combined_n":   len(c),
+            "combined_avg": round(float(np.mean(c)), 6) if c else 0.0,
+            "combined_wr":  round(float(np.mean([1.0 if v > 0 else 0.0 for v in c])), 4) if c else 0.0,
+        })
+    horizon = _parse_horizon(outcome)
 
     # Ticker breakdown
     ticker_rets: dict = defaultdict(list)
@@ -593,70 +605,69 @@ async def portfolio_aggregate(pid: int,
     winner_avg = round(float(np.mean(winners)), 6) if winners else 0.0
     loser_avg  = round(float(np.mean(losers)),  6) if losers  else 0.0
 
-    # Utilisation: normalised exclusivity across enabled systems
-    n_each_sys = [int(v.sum()) for v in system_vectors]
+    # Utilisation matches the corr explorer's normalised-exclusivity formula
+    # computed over PAIR firing counts (each "leg" of any system). Single-pair
+    # case returns 100% by convention.
+    n_each_pair = [int(v.sum()) for v in pair_vectors]
     union_n = int(V_port.sum())
-    sum_n = sum(n_each_sys)
-    min_n = min(n_each_sys) if n_each_sys else 0
+    sum_n = sum(n_each_pair)
+    min_n = min(n_each_pair) if n_each_pair else 0
     if sum_n > min_n:
         utilisation = (union_n - min_n) / (sum_n - min_n) * 100
     else:
-        utilisation = 0.0
+        utilisation = 100.0
     utilisation = round(float(utilisation), 1)
 
     # Aggregate trade summary stats
     union_stats = _stats_from_trades(union_rows, outcome)
 
-    # System × System heatmap
-    if len(system_vectors) >= 1:
-        Msys = np.stack(system_vectors)
-        if len(system_vectors) == 1:
-            phi_sys = [[1.0]]
-            overlap_sys = [[int(Msys[0].sum())]]
+    # phi correlations restricted to the trade-eligible universe so the
+    # denominator matches the corr explorer's filtered subset.
+    def _phi_restricted(vectors: list) -> tuple:
+        if not vectors:
+            return [], []
+        if len(universe_idx) == 0:
+            n = len(vectors)
+            return ([[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)],
+                    [[0 for _ in range(n)] for _ in range(n)])
+        M = np.stack([v[universe_idx] for v in vectors])
+        if M.shape[0] == 1:
+            phi = [[1.0]]
+            ov  = [[int(M[0].sum())]]
         else:
-            phi_sys = np.nan_to_num(np.corrcoef(Msys), nan=0.0)
-            phi_sys = [[round(float(v), 4) for v in row] for row in phi_sys]
-            overlap_sys = (Msys @ Msys.T).astype(int)
-            overlap_sys = [[int(v) for v in row] for row in overlap_sys]
-    else:
-        phi_sys = []
-        overlap_sys = []
+            phi_arr = np.nan_to_num(np.corrcoef(M), nan=0.0)
+            phi = [[round(float(v), 4) for v in row] for row in phi_arr]
+            ov_arr = (M @ M.T).astype(int)
+            ov  = [[int(v) for v in row] for row in ov_arr]
+        return phi, ov
 
-    # Pair × Pair heatmap
-    if len(pair_vectors) >= 1:
-        Mpairs = np.stack(pair_vectors)
-        if len(pair_vectors) == 1:
-            phi_pairs = [[1.0]]
-            overlap_pairs = [[int(Mpairs[0].sum())]]
-        else:
-            phi_pairs = np.nan_to_num(np.corrcoef(Mpairs), nan=0.0)
-            phi_pairs = [[round(float(v), 4) for v in row] for row in phi_pairs]
-            overlap_pairs = (Mpairs @ Mpairs.T).astype(int)
-            overlap_pairs = [[int(v) for v in row] for row in overlap_pairs]
-    else:
-        phi_pairs = []
-        overlap_pairs = []
+    phi_sys,   overlap_sys   = _phi_restricted(system_vectors)
+    phi_pairs, overlap_pairs = _phi_restricted(pair_vectors)
 
+    # Fields named to mirror the corr explorer's /secondary-correlation
+    # response — the frontend reuses corrStats() and the corr render
+    # functions verbatim.
     return {
         "portfolio": portfolio,
         "systems":   sys_stats,
-        "n_trades":  union_stats["n"],
-        "win_rate":  union_stats["win_rate"],
-        "avg_ret":   union_stats["avg_ret"],
         "horizon":   horizon,
-        "equity":    equity,
-        "yearly":    yearly,
-        "activity":  activity,
-        "tickers":   tickers_out,
-        "winner_avg_ret": winner_avg,
-        "loser_avg_ret":  loser_avg,
-        "utilisation":    utilisation,
-        "phi_systems":      phi_sys,
-        "overlap_systems":  overlap_sys,
-        "system_labels":    system_labels,
-        "phi_pairs":        phi_pairs,
-        "overlap_pairs":    overlap_pairs,
-        "pair_labels":      pair_labels,
+        "baseline_n": int(universe_mask.sum()),
+        "combined_n": int(union_n),
+        "equity_primary":  equity_primary,
+        "equity_combined": equity_combined,
+        "yearly":          yearly_out,
+        "tickers":         tickers_out,
+        "combined_trade_dates": [r.get("trade_date", "") for r in union_rows],
+        "winner_avg_ret":  winner_avg,
+        "loser_avg_ret":   loser_avg,
+        "n_each":          n_each_pair,
+        "utilisation":     utilisation,
+        # Heatmaps
+        "phi_systems":       phi_sys,
+        "overlap_systems":   overlap_sys,
+        "system_labels":     system_labels,
+        "phi_pairs":         phi_pairs,
+        "overlap_pairs":     overlap_pairs,
+        "pair_labels":       pair_labels,
         "system_boundaries": system_boundaries,
-        "union_trade_dates": [r.get("trade_date", "") for r in union_rows],
     }
