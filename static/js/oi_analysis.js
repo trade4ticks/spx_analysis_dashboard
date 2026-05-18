@@ -2597,7 +2597,19 @@ document.addEventListener('alpine:init', () => {
       const worst = yearly.reduce((b, y) => y.combined_avg < b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg:  Infinity });
       const eq  = this.corrResult.equity_combined || [];
       const cum = eq.length ? +(eq[eq.length - 1].value * 100).toFixed(2) : null;
-      return { totalN, avgRet, winRate, winners, losers: totalN - winners, best, worst, cum };
+      // Trade utilization: normalized overlap metric
+      // 0% = perfect correlation (all bins fire same trades), 100% = fully exclusive (zero overlap)
+      // Formula: (union - min_n) / (sum_n - min_n)
+      const nEach = this.corrResult.n_each || [];
+      const sumN  = nEach.reduce((s, n) => s + n, 0);
+      const minN  = nEach.length ? Math.min(...nEach) : 0;
+      const union = this.corrResult.combined_n || 0;
+      const util  = sumN > minN ? +((union - minN) / (sumN - minN) * 100).toFixed(1) : 100;
+      return {
+        totalN, avgRet, winRate, winners, losers: totalN - winners, best, worst, cum, util,
+        winnerAvg: this.corrResult.winner_avg_ret ?? null,
+        loserAvg:  this.corrResult.loser_avg_ret  ?? null,
+      };
     },
 
     _renderCorrDetail() {

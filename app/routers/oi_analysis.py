@@ -1965,12 +1965,18 @@ async def secondary_correlation(req: CorrReq):
             "contrib_pct": round(contrib, 2),
         })
 
+    # Winner / loser avg returns for union trades
+    all_outcomes = [float(r[outcome_col]) for r in combined_sorted if r.get(outcome_col) is not None]
+    winner_rets  = [v for v in all_outcomes if v > 0]
+    loser_rets   = [v for v in all_outcomes if v <= 0]
+    winner_avg   = round(float(np.mean(winner_rets)), 6) if winner_rets else 0.0
+    loser_avg    = round(float(np.mean(loser_rets)),  6) if loser_rets  else 0.0
+
     return {
         "metrics": metric_names,
         "n_each":  n_each,
         "phi":     [[round(float(v), 4) for v in row] for row in phi],
         "overlap": [[int(v) for v in row] for row in overlap],
-        # Intersection detail (same shape as secondary_detail)
         "baseline_n":  len(ordered),
         "combined_n":  len(combined_sorted),
         "horizon":     _parse_horizon(outcome_col),
@@ -1979,4 +1985,6 @@ async def secondary_correlation(req: CorrReq):
         "yearly":                yearly_out,
         "tickers":               tickers_out,
         "combined_trade_dates":  [r.get("trade_date", "") for r in combined_sorted],
+        "winner_avg_ret": winner_avg,
+        "loser_avg_ret":  loser_avg,
     }

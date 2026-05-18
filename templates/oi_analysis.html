@@ -121,7 +121,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=49"></script>
+  <script src="/static/js/oi_analysis.js?v=50"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -818,6 +818,11 @@
                   <div class="stat-label">Union Trades</div>
                   <div class="stat-value" x-text="corrResult.combined_n"></div>
                 </div>
+                <div class="stat-item"
+                     title="Normalized exclusivity: 0% = all bins fire identical trades, 100% = zero overlap. Formula: (union − min_n) / (sum_n − min_n)">
+                  <div class="stat-label">Trade Util.</div>
+                  <div class="stat-value" x-text="corrStats() ? corrStats().util+'%' : '—'"></div>
+                </div>
                 <div class="stat-item">
                   <div class="stat-label">Baseline n</div>
                   <div class="stat-value" x-text="corrResult.baseline_n"></div>
@@ -827,8 +832,18 @@
                   <div class="stat-value pos" x-text="corrStats()?.winners ?? '—'"></div>
                 </div>
                 <div class="stat-item">
+                  <div class="stat-label">Winner Avg Ret</div>
+                  <div class="stat-value pos"
+                       x-text="corrStats()?.winnerAvg != null ? (corrStats().winnerAvg*100).toFixed(3)+'%' : '—'"></div>
+                </div>
+                <div class="stat-item">
                   <div class="stat-label">Losers</div>
                   <div class="stat-value neg" x-text="corrStats()?.losers ?? '—'"></div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">Loser Avg Ret</div>
+                  <div class="stat-value neg"
+                       x-text="corrStats()?.loserAvg != null ? (corrStats().loserAvg*100).toFixed(3)+'%' : '—'"></div>
                 </div>
                 <div class="stat-item">
                   <div class="stat-label">Win Rate</div>
@@ -841,14 +856,14 @@
                        x-text="corrStats() ? (corrStats().avgRet*100).toFixed(3)+'%' : '—'"></div>
                 </div>
                 <div class="stat-item">
-                  <div class="stat-label">Best Year</div>
+                  <div class="stat-label">Best Yr (avg ret)</div>
                   <div class="stat-value pos"
-                       x-text="corrStats()?.best ? corrStats().best.yr+' ('+( corrStats().best.avg*100).toFixed(2)+'%)' : '—'"></div>
+                       x-text="corrStats()?.best?.yr ? corrStats().best.yr+' ('+(corrStats().best.avg*100).toFixed(2)+'%)' : '—'"></div>
                 </div>
                 <div class="stat-item">
-                  <div class="stat-label">Worst Year</div>
+                  <div class="stat-label">Worst Yr (avg ret)</div>
                   <div class="stat-value neg"
-                       x-text="corrStats()?.worst ? corrStats().worst.yr+' ('+(corrStats().worst.avg*100).toFixed(2)+'%)' : '—'"></div>
+                       x-text="corrStats()?.worst?.yr ? corrStats().worst.yr+' ('+(corrStats().worst.avg*100).toFixed(2)+'%)' : '—'"></div>
                 </div>
                 <div class="stat-item">
                   <div class="stat-label">Cum Return</div>
