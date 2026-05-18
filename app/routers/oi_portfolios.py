@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS oi_research_portfolios (
     created_at  TIMESTAMPTZ DEFAULT NOW(),
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+-- Per-portfolio "watch this on the Signals page" flag. Default off so
+-- existing portfolios don't auto-fire signals until the user opts in.
+ALTER TABLE oi_research_portfolios
+    ADD COLUMN IF NOT EXISTS monitored BOOLEAN DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS oi_research_systems (
     id                SERIAL PRIMARY KEY,
     portfolio_id      INTEGER REFERENCES oi_research_portfolios(id) ON DELETE CASCADE,
@@ -88,8 +92,9 @@ class PortfolioIn(BaseModel):
 
 
 class PortfolioUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name:        Optional[str]  = None
+    description: Optional[str]  = None
+    monitored:   Optional[bool] = None
 
 
 class SecondarySpec(BaseModel):
@@ -166,7 +171,8 @@ async def list_portfolios(pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT p.id, p.name, p.description, p.ticker, p.outcome,
-                      p.date_from, p.date_to, p.created_at, p.updated_at,
+                      p.date_from, p.date_to, p.monitored,
+                      p.created_at, p.updated_at,
                       (SELECT COUNT(*) FROM oi_research_systems s
                         WHERE s.portfolio_id = p.id) AS system_count
                FROM oi_research_portfolios p
@@ -183,7 +189,7 @@ async def create_portfolio(body: PortfolioIn, pool=Depends(get_pool)):
                  (name, description, ticker, outcome, date_from, date_to)
                VALUES ($1, $2, $3, $4, $5, $6)
                RETURNING id, name, description, ticker, outcome,
-                         date_from, date_to, created_at, updated_at""",
+                         date_from, date_to, monitored, created_at, updated_at""",
             body.name, body.description, body.ticker, body.outcome,
             body.date_from, body.date_to)
     return _portfolio_row_to_dict(row)
@@ -197,13 +203,15 @@ async def update_portfolio(pid: int, body: PortfolioUpdate,
         sets.append(f"name = ${p}"); params.append(body.name); p += 1
     if body.description is not None:
         sets.append(f"description = ${p}"); params.append(body.description); p += 1
+    if body.monitored is not None:
+        sets.append(f"monitored = ${p}"); params.append(body.monitored); p += 1
     if not sets:
         raise HTTPException(400, "no fields to update")
     sets.append("updated_at = NOW()")
     params.append(pid)
     sql = (f"UPDATE oi_research_portfolios SET {', '.join(sets)} "
            f"WHERE id = ${p} RETURNING id, name, description, ticker, outcome, "
-           f"date_from, date_to, created_at, updated_at")
+           f"date_from, date_to, monitored, created_at, updated_at")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *params)
     if not row:
@@ -224,7 +232,7 @@ async def get_portfolio(pid: int, pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         prow = await conn.fetchrow(
             """SELECT id, name, description, ticker, outcome,
-                      date_from, date_to, created_at, updated_at
+                      date_from, date_to, monitored, created_at, updated_at
                FROM oi_research_portfolios WHERE id = $1""", pid)
         if not prow:
             raise HTTPException(404, "portfolio not found")

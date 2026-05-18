@@ -1495,6 +1495,31 @@ def _bin_membership(ordered: list, metric: str, selected_bins: set,
                      for i in range(n_rows)])
 
 
+def _bin_for_value(value, history_values: list, n_bins: int):
+    """Return the 1..n_bins bin that `value` would occupy in `history_values`.
+
+    Mirrors _bin_membership's ranking math: bin = min(int(rank / n * n_bins) + 1, n_bins)
+    where rank is the position in the sorted ascending list (number of
+    values strictly less than `value`).
+
+    Returns None if value is None/NaN or history is too short (< n_bins).
+    """
+    if value is None:
+        return None
+    try:
+        v = float(value)
+        if math.isnan(v):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not history_values or len(history_values) < n_bins:
+        return None
+    from bisect import bisect_left
+    rank = bisect_left(history_values, v)
+    n = len(history_values)
+    return min(int(rank / n * n_bins) + 1, n_bins)
+
+
 class SecLoadReq(BaseModel):
     ticker: str
     metric: str

@@ -37,10 +37,16 @@ document.addEventListener('alpine:init', () => {
     // ── Per-trigger sparkline charts (bottom triggers table) ─────────────
     _trigMiniCharts: {},
 
+    // ── Portfolios (Signals view) ────────────────────────────────────────
+    portfolios: [],                  // [{id, name, ticker, outcome, monitored, system_count}, ...]
+    portfolioFirings: [],            // [{type:"system", portfolio_id, system_id, ticker, all_stats, ticker_stats, ...}]
+    portfolioFiringsLoading: false,
+    monitoredExpanded: {},           // {portfolio_id: bool}
+
     // ─────────────────────────────────────────────────────────────────────
     async init() {
       await this._loadMeta();
-      await Promise.all([this.loadTriggers(), this.loadCalendar()]);
+      await Promise.all([this.loadTriggers(), this.loadCalendar(), this.loadPortfolios()]);
       await this.loadFiring();
       this._initSparkHover();
     },
@@ -177,15 +183,97 @@ document.addEventListener('alpine:init', () => {
           }
         }
       } catch (_) {}
+      // Fire portfolio firings in parallel — independent network call.
+      await this.loadPortfolioFirings();
       this.firingLoading = false;
       await this._renderMiniCharts();
     },
 
     get sortedFiring() {
-      // Today's Signals section only shows the cards for triggers that are
-      // currently firing — idle ones still live in the triggers table at
-      // the bottom with their own mini chart.
-      return this.firingResults.filter(r => r.firing);
+      // Unified firing list: legacy single-metric triggers + portfolio
+      // system firings, each tagged with a `type` so the template can
+      // dispatch to the right card markup. Sorted: strong systems first,
+      // then triggers, then mixed/weak systems.
+      const trigs = this.firingResults
+        .filter(r => r.firing)
+        .map(r => ({ ...r, type: 'trigger' }));
+      const sys = (this.portfolioFirings || []).filter(r => r.firing);
+      const verdictOrder = { strong: 0, mixed: 2, weak: 3 };
+      const all = [...sys, ...trigs];
+      all.sort((a, b) => {
+        const av = a.type === 'trigger' ? 1 : (verdictOrder[a.verdict] ?? 2);
+        const bv = b.type === 'trigger' ? 1 : (verdictOrder[b.verdict] ?? 2);
+        return av - bv;
+      });
+      return all;
+    },
+
+    get monitoredCount() {
+      return (this.portfolios || []).filter(p => p.monitored).length;
+    },
+
+    // ── Portfolio firings ─────────────────────────────────────────────────
+    async loadPortfolios() {
+      try {
+        const r = await fetch('/api/oi-analysis/portfolios');
+        if (r.ok) this.portfolios = await r.json();
+      } catch (_) {}
+    },
+
+    async loadPortfolioFirings() {
+      this.portfolioFiringsLoading = true;
+      try {
+        const qs = this.firingDate ? `?date=${this.firingDate}` : '';
+        const r = await fetch('/api/oi-signals/firing-portfolios' + qs);
+        if (r.ok) {
+          const d = await r.json();
+          this.portfolioFirings = d.results || [];
+        } else {
+          this.portfolioFirings = [];
+        }
+      } catch (_) { this.portfolioFirings = []; }
+      this.portfolioFiringsLoading = false;
+    },
+
+    async toggleMonitored(pid, monitored) {
+      try {
+        await fetch(`/api/oi-analysis/portfolios/${pid}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ monitored: !!monitored }),
+        });
+        const p = this.portfolios.find(x => x.id === pid);
+        if (p) p.monitored = !!monitored;
+        await this.loadPortfolioFirings();
+      } catch (_) {}
+    },
+
+    // Group portfolio firings for the Monitored Portfolios section:
+    // {portfolio_id: {portfolio_name, systems: {system_id: {system_name, tickers: [...]}}}}
+    get firingsByPortfolio() {
+      const out = {};
+      for (const r of (this.portfolioFirings || [])) {
+        if (!r.firing) continue;
+        const pid = r.portfolio_id;
+        if (!out[pid]) out[pid] = { name: r.portfolio_name, systems: {} };
+        if (!out[pid].systems[r.system_id]) {
+          out[pid].systems[r.system_id] = { name: r.system_name, tickers: [] };
+        }
+        out[pid].systems[r.system_id].tickers.push({
+          ticker:  r.ticker,
+          verdict: r.verdict,
+        });
+      }
+      return out;
+    },
+
+    portFiringSystemsFor(pid) {
+      return Object.values(this.firingsByPortfolio[pid]?.systems || {});
+    },
+
+    scrollToFiring(systemId, ticker) {
+      const id = `card-system-${systemId}-${ticker}`;
+      const el = document.getElementById(id);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     },
 
     async _renderMiniCharts() {

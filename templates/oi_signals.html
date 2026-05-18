@@ -75,6 +75,64 @@
     }
     .fire-badge.on  { background: rgba(52,152,219,.25); color: #3498db; }
     .fire-badge.off { background: rgba(100,100,100,.2);  color: #666; }
+    .fire-badge.kind-trigger { background: rgba(149,165,166,.18); color: #95a5a6; }
+    .fire-badge.kind-system  { background: rgba(52,152,219,.22); color: #3498db; }
+
+    /* Verdict (system firing card) */
+    .verdict { font-size: 10px; font-weight: 700; }
+    .verdict.strong { color: #2ecc71; }
+    .verdict.mixed  { color: #f39c12; }
+    .verdict.weak   { color: #e84393; }
+    .firing-card.verdict-strong { border-color: rgba(46,204,113,.4); }
+    .firing-card.verdict-mixed  { border-color: rgba(243,156,18,.4); }
+    .firing-card.verdict-weak   { border-color: rgba(232,67,147,.4); opacity: .85; }
+
+    /* System firing card — leg list + stats table */
+    .sys-legs { display: flex; flex-direction: column; gap: 4px; font-family: monospace; font-size: 10px; }
+    .sys-leg  { display: grid; grid-template-columns: 18px 1fr 60px 100px 1fr; gap: 4px; align-items: center; }
+    .sys-leg .leg-label { color: var(--dim); font-weight: 700; }
+    .sys-leg .leg-metric { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sys-leg .leg-val   { text-align: right; color: var(--text); }
+    .sys-leg .leg-bin   { color: var(--dim); }
+    .sys-leg .leg-targets { color: var(--dim); font-size: 9px; }
+    .sys-leg-off .leg-metric { opacity: .55; }
+    .sys-stats { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 4px; }
+    .sys-stats th { text-align: right; color: var(--dim); font-weight: 600; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+    .sys-stats th:first-child { text-align: left; }
+    .sys-stats td { text-align: right; padding: 3px 6px; color: var(--text); font-family: monospace; }
+    .sys-stats td:first-child { text-align: left; color: var(--dim); font-family: inherit; }
+    .sys-stats td.pos { color: #3498db; }
+    .sys-stats td.neg { color: #e84393; }
+
+    /* Monitored portfolios section */
+    .port-list { display: flex; flex-direction: column; gap: 6px; }
+    .port-row  {
+      display: flex; gap: 10px; align-items: flex-start;
+      background: var(--raised); border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 12px;
+    }
+    .port-row.on { border-color: rgba(52,152,219,.4); background: rgba(52,152,219,.03); }
+    .port-toggle { display: flex; align-items: center; padding-top: 2px; cursor: pointer; }
+    .port-info  { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .port-name  { font-size: 12px; color: var(--text); }
+    .port-name b { font-size: 13px; }
+    .port-anchor { color: var(--dim); margin-left: 8px; font-size: 10px; }
+    .port-systems { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+    .port-empty { font-size: 10px; color: var(--dim); }
+    .port-sysline {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+      font-size: 10px; color: var(--dim);
+    }
+    .sysline-name { color: var(--text); font-weight: 600; }
+    .ticker-chip {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 3px; padding: 1px 6px; font-family: monospace; font-size: 9px;
+      cursor: pointer; color: var(--text);
+    }
+    .ticker-chip:hover { border-color: var(--accent); }
+    .ticker-chip.verdict-strong { border-color: rgba(46,204,113,.5); color: #2ecc71; }
+    .ticker-chip.verdict-mixed  { border-color: rgba(243,156,18,.5); color: #f39c12; }
+    .ticker-chip.verdict-weak   { border-color: rgba(232,67,147,.5); color: #e84393; opacity: .7; }
     .card-meta  { font-size: 11px; color: var(--dim); line-height: 1.6; }
     .card-meta b { color: var(--text); }
     .card-val   { font-size: 12px; color: var(--dim); }
@@ -148,7 +206,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=4"></script>
+  <script src="/static/js/oi_signals.js?v=5"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -198,44 +256,181 @@
       </div>
 
       <div class="firing-grid">
-        <template x-for="r in sortedFiring" :key="r.trigger.id">
-          <div class="firing-card" :class="{ on: r.firing }">
-            <div class="card-top">
-              <div class="card-title">
-                <span class="color-dot" :style="'background:' + (r.trigger.color || '#3498db')"></span>
-                <span x-text="r.trigger.name"></span>
-                <span class="fire-badge" :class="{ on: r.firing, off: !r.firing }"
-                      x-text="r.firing ? 'FIRING' : 'IDLE'"></span>
+        <template x-for="r in sortedFiring"
+                  :key="r.type === 'system' ? ('s-'+r.system_id+'-'+r.ticker) : ('t-'+r.trigger.id)">
+          <div>
+
+            <!-- Legacy single-metric trigger card -->
+            <template x-if="r.type === 'trigger'">
+              <div class="firing-card on">
+                <div class="card-top">
+                  <div class="card-title">
+                    <span class="color-dot" :style="'background:' + (r.trigger.color || '#3498db')"></span>
+                    <span x-text="r.trigger.name"></span>
+                    <span class="fire-badge kind-trigger">TRIGGER</span>
+                  </div>
+                  <button class="btn-cal" x-show="r.firing && r.current_date"
+                          @click="addToCalendar(r.trigger.id, r.current_date)">
+                    + Calendar
+                  </button>
+                </div>
+                <div class="card-meta">
+                  <b x-text="r.trigger.ticker"></b>
+                  &nbsp;·&nbsp;<span x-text="r.trigger.metric" style="font-family:monospace;font-size:10px"></span>
+                  &nbsp;·&nbsp;<span x-text="r.trigger.outcome"></span>
+                  &nbsp;·&nbsp;fires when <span style="font-family:monospace" x-text="rangeText(r.trigger)"></span>
+                </div>
+                <div class="card-val" x-show="r.current_val != null">
+                  Current value: <b x-text="r.current_val?.toFixed(4)"></b>
+                  <span style="color:var(--dim);font-size:10px;margin-left:4px"
+                        x-text="'(Bin ' + r.today_bin + '/20 · as of ' + r.current_date + ')'"></span>
+                </div>
+                <div class="card-val" x-show="r.error && !r.current_val"
+                     style="color:var(--dim);font-size:11px" x-text="r.error || ''"></div>
+                <div class="mini-wrap">
+                  <canvas :id="'mini-' + r.trigger.id"
+                          style="width:100%!important;height:100%!important"></canvas>
+                </div>
               </div>
-              <button class="btn-cal" x-show="r.firing && r.current_date"
-                      @click="addToCalendar(r.trigger.id, r.current_date)">
-                + Calendar
-              </button>
-            </div>
+            </template>
 
-            <div class="card-meta">
-              <b x-text="r.trigger.ticker"></b>
-              &nbsp;·&nbsp;<span x-text="r.trigger.metric" style="font-family:monospace;font-size:10px"></span>
-              &nbsp;·&nbsp;<span x-text="r.trigger.outcome"></span>
-              &nbsp;·&nbsp;fires when <span style="font-family:monospace" x-text="rangeText(r.trigger)"></span>
-            </div>
+            <!-- Portfolio system firing card -->
+            <template x-if="r.type === 'system'">
+              <div class="firing-card on" :class="'verdict-' + r.verdict"
+                   :id="'card-system-' + r.system_id + '-' + r.ticker">
+                <div class="card-top">
+                  <div class="card-title">
+                    <span class="color-dot" style="background:#3498db"></span>
+                    <span x-text="r.system_name"></span>
+                    <span class="fire-badge kind-system">SYSTEM</span>
+                  </div>
+                  <span class="verdict" :class="r.verdict"
+                        x-text="r.verdict === 'strong' ? '⭐ Strong' : (r.verdict === 'weak' ? '✗ Weak' : '⚠ Mixed')"></span>
+                </div>
 
-            <div class="card-val" x-show="r.current_val != null">
-              Current value: <b x-text="r.current_val?.toFixed(4)"></b>
-              <span style="color:var(--dim);font-size:10px;margin-left:4px"
-                    x-text="'(Bin ' + r.today_bin + '/20 · as of ' + r.current_date + ')'"></span>
-            </div>
-            <div class="card-val" x-show="r.error && !r.current_val"
-                 style="color:var(--dim);font-size:11px" x-text="r.error || ''"></div>
+                <div class="card-meta">
+                  <b x-text="r.ticker"></b>
+                  &nbsp;·&nbsp;<span x-text="r.portfolio_name" style="font-size:10px;color:var(--dim)"></span>
+                  &nbsp;·&nbsp;<span style="font-size:10px;color:var(--dim)" x-text="'as of ' + r.today_date"></span>
+                </div>
 
-            <div class="mini-wrap">
-              <canvas :id="'mini-' + r.trigger.id"
-                      style="width:100%!important;height:100%!important"></canvas>
-            </div>
+                <div class="sys-legs">
+                  <!-- Primary leg -->
+                  <div class="sys-leg sys-leg-primary">
+                    <span class="leg-label">P</span>
+                    <span class="leg-metric" x-text="r.today_primary.metric"></span>
+                    <span class="leg-val" x-text="r.today_primary.value?.toFixed(4)"></span>
+                    <span class="leg-bin"
+                          x-text="'bin ' + r.today_primary.bin + '/' + r.today_primary.bin_count + '  ✓'"
+                          style="color:#2ecc71"></span>
+                    <span class="leg-targets"
+                          x-text="'(targets ' + r.today_primary.selected_bins.join(',') + ')'"></span>
+                  </div>
+                  <!-- Secondary legs -->
+                  <template x-for="(sec, i) in r.today_secondaries" :key="'sec-'+r.system_id+'-'+r.ticker+'-'+i">
+                    <div class="sys-leg" :class="sec.in_selected ? 'sys-leg-on' : 'sys-leg-off'">
+                      <span class="leg-label">S</span>
+                      <span class="leg-metric" x-text="sec.metric"></span>
+                      <span class="leg-val" x-text="sec.value != null ? sec.value.toFixed(4) : '—'"></span>
+                      <span class="leg-bin"
+                            x-text="sec.bin != null ? ('bin ' + sec.bin + '/' + sec.bin_count + (sec.in_selected ? '  ✓' : '  ✗')) : '—'"
+                            :style="sec.in_selected ? 'color:#2ecc71' : 'color:#e84393'"></span>
+                      <span class="leg-targets"
+                            x-text="'(targets ' + (sec.selected_bins || []).join(',') + ')'"></span>
+                    </div>
+                  </template>
+                </div>
+
+                <table class="sys-stats">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Portfolio (ALL)</th>
+                      <th x-text="r.ticker"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Trades</td>
+                      <td x-text="r.all_stats.n.toLocaleString()"></td>
+                      <td x-text="r.ticker_stats.n.toLocaleString()"></td>
+                    </tr>
+                    <tr>
+                      <td>Win Rate</td>
+                      <td x-text="(r.all_stats.win_rate*100).toFixed(1) + '%'"></td>
+                      <td :class="r.ticker_stats.win_rate >= 0.5 ? 'pos' : 'neg'"
+                          x-text="(r.ticker_stats.win_rate*100).toFixed(1) + '%'"></td>
+                    </tr>
+                    <tr>
+                      <td>Avg Ret</td>
+                      <td x-text="(r.all_stats.avg_ret*100).toFixed(3) + '%'"></td>
+                      <td :class="r.ticker_stats.avg_ret >= 0 ? 'pos' : 'neg'"
+                          x-text="(r.ticker_stats.avg_ret*100).toFixed(3) + '%'"></td>
+                    </tr>
+                    <tr>
+                      <td>Cum Return</td>
+                      <td x-text="(r.all_stats.cum_ret*100).toFixed(1) + '%'"></td>
+                      <td :class="r.ticker_stats.cum_ret >= 0 ? 'pos' : 'neg'"
+                          x-text="(r.ticker_stats.cum_ret*100).toFixed(1) + '%'"></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+
           </div>
         </template>
       </div>
     </div><!-- /section 2 -->
+
+
+    <!-- ══ SECTION 2: Monitored Portfolios ════════════════════════════ -->
+    <div class="sig-section">
+      <div class="sig-section-hdr">
+        <span class="sig-section-title">Monitored Portfolios</span>
+        <span class="sig-section-sub"
+              x-text="monitoredCount + ' of ' + portfolios.length + ' monitored'"></span>
+        <span class="loading-hint" x-show="portfolioFiringsLoading" style="margin-left:8px">Loading…</span>
+      </div>
+      <div x-show="!portfolios.length" class="empty-hint">
+        No saved portfolios yet — build one on the OI Analysis page.
+      </div>
+      <div class="port-list">
+        <template x-for="p in portfolios" :key="'port-'+p.id">
+          <div class="port-row" :class="{ on: p.monitored }">
+            <label class="port-toggle">
+              <input type="checkbox" :checked="p.monitored"
+                     @change="toggleMonitored(p.id, $event.target.checked)">
+            </label>
+            <div class="port-info">
+              <div class="port-name">
+                <b x-text="p.name"></b>
+                <span class="port-anchor"
+                      x-text="p.ticker + ' · ' + p.outcome + ' · ' + p.system_count + ' systems'"></span>
+              </div>
+              <template x-if="p.monitored">
+                <div class="port-systems">
+                  <template x-if="!portFiringSystemsFor(p.id).length">
+                    <div class="port-empty">No systems firing today.</div>
+                  </template>
+                  <template x-for="sys in portFiringSystemsFor(p.id)" :key="'pf-'+p.id+'-'+sys.name">
+                    <div class="port-sysline">
+                      <span class="sysline-name" x-text="sys.name"></span>
+                      <span class="sysline-fires" x-text="'fires on ' + sys.tickers.length + ':'"></span>
+                      <template x-for="t in sys.tickers" :key="'pf-tkr-'+p.id+'-'+sys.name+'-'+t.ticker">
+                        <span class="ticker-chip" :class="'verdict-'+t.verdict"
+                              @click="scrollToFiring(null, t.ticker)"
+                              x-text="t.ticker"></span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div><!-- /monitored portfolios -->
 
 
     <!-- ══ SECTION 3: Open Positions Calendar ══════════════════════════ -->

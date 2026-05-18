@@ -325,3 +325,316 @@ async def delete_calendar(cid: int, pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM oi_signal_calendar WHERE id=$1", cid)
     return {"ok": True}
+
+
+# ── Monitored portfolio firings ─────────────────────────────────────────────
+
+
+def _verdict_for(ticker_stats: dict) -> str:
+    """Tiny heuristic so the firing card can flag obvious skips."""
+    n  = ticker_stats.get("n", 0)
+    wr = ticker_stats.get("win_rate", 0.0)
+    ar = ticker_stats.get("avg_ret", 0.0)
+    if n >= 100 and wr >= 0.55 and ar > 0:
+        return "strong"
+    if n < 30 or wr < 0.45 or ar < 0:
+        return "weak"
+    return "mixed"
+
+
+@router.get("/firing-portfolios")
+async def firing_portfolios(
+    date: Optional[str] = Query(None),
+    pool=Depends(get_pool),
+    oi_pool=Depends(get_oi_pool),
+):
+    """For every portfolio with monitored=true, check each enabled system on
+    each ticker against the most recent fully-resolved row (≤ `date`).
+    Returns a flat list of firings with portfolio-context vs per-ticker stats."""
+    if not oi_pool:
+        return {"date": date, "results": []}
+
+    # Late imports to avoid circular and keep this endpoint self-contained.
+    from app.routers.oi_portfolios import _ensure_tables as _ensure_port_tables, _fetch_anchor_rows
+    from app.routers.oi_analysis import _bin_for_value
+    await _ensure_port_tables(pool)
+
+    # 1) Load monitored portfolios + their enabled systems.
+    async with pool.acquire() as conn:
+        ports = await conn.fetch(
+            """SELECT id, name, ticker, outcome, date_from, date_to
+               FROM oi_research_portfolios
+               WHERE monitored = TRUE
+               ORDER BY name""")
+        if not ports:
+            return {"date": date, "results": []}
+        sys_rows = await conn.fetch(
+            """SELECT id, portfolio_id, name, enabled, position,
+                      primary_metric, primary_bins, primary_bin_count, secondaries
+               FROM oi_research_systems
+               WHERE portfolio_id = ANY($1) AND enabled = TRUE
+               ORDER BY portfolio_id, position, id""",
+            [p["id"] for p in ports])
+
+    # Group systems by portfolio.
+    systems_by_pid: dict = {}
+    import json as _json
+    for r in sys_rows:
+        d = dict(r)
+        if isinstance(d.get("secondaries"), str):
+            d["secondaries"] = _json.loads(d["secondaries"])
+        systems_by_pid.setdefault(d["portfolio_id"], []).append(d)
+
+    date_param = _date.fromisoformat(date) if date else None
+    results = []
+
+    for p in ports:
+        pid     = p["id"]
+        pname   = p["name"]
+        ticker  = p["ticker"]
+        outcome = p["outcome"]
+        sys_list = systems_by_pid.get(pid, [])
+        if not sys_list:
+            continue
+
+        # All metrics referenced anywhere in this portfolio's systems.
+        needed = set()
+        for s in sys_list:
+            needed.add(s["primary_metric"])
+            for sec in (s.get("secondaries") or []):
+                needed.add(sec["metric"])
+
+        # Historical rows for stats + binning (outcome NOT NULL).
+        anchor_rows = await _fetch_anchor_rows(
+            oi_pool, ticker, outcome, p["date_from"], p["date_to"], sorted(needed))
+        if not anchor_rows:
+            continue
+
+        # Group historical rows by ticker so per-ticker primary distributions
+        # only see their own data (matches per-ticker rank normalisation).
+        rows_by_tkr: dict = {}
+        for r in anchor_rows:
+            rows_by_tkr.setdefault(r.get("ticker", "_"), []).append(r)
+
+        tickers_to_check = list(rows_by_tkr.keys()) if ticker == "ALL" else [ticker]
+
+        # Latest "today" rows per ticker — most recent row with the primary
+        # metric not null, on/before date_param. Independent of outcome
+        # availability so we can fire even when 5-day forward isn't in yet.
+        async with oi_pool.acquire() as conn:
+            cols_today = ["ticker", "trade_date"] + sorted(needed)
+            params, p_idx = [], 1
+            where = [f"ticker = ANY(${p_idx})"]; params.append(tickers_to_check); p_idx += 1
+            if date_param:
+                where.append(f"trade_date <= ${p_idx}"); params.append(date_param); p_idx += 1
+            today_sql = (
+                f"SELECT DISTINCT ON (ticker) {', '.join(cols_today)} "
+                f"FROM daily_features "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY ticker, trade_date DESC")
+            today_rows = await conn.fetch(today_sql, *params)
+        today_by_tkr = {r["ticker"]: dict(r) for r in today_rows}
+
+        for s in sys_list:
+            prim_metric = s["primary_metric"]
+            prim_bins   = set(int(b) for b in (s["primary_bins"] or []))
+            prim_count  = int(s["primary_bin_count"] or 20)
+            secs        = s.get("secondaries") or []
+            if not prim_bins or not secs:
+                continue
+
+            for tkr in tickers_to_check:
+                hist = rows_by_tkr.get(tkr) or []
+                if len(hist) < prim_count:
+                    continue
+                today = today_by_tkr.get(tkr)
+                if not today:
+                    continue
+
+                # Today's primary bin against ticker history.
+                prim_hist_sorted = sorted(
+                    float(r[prim_metric]) for r in hist
+                    if r.get(prim_metric) is not None)
+                today_prim_val = today.get(prim_metric)
+                today_prim_bin = _bin_for_value(today_prim_val, prim_hist_sorted, prim_count)
+                if today_prim_bin is None or today_prim_bin not in prim_bins:
+                    continue
+
+                # Ticker's primary-filtered subset for secondary binning.
+                hist_prim_subset = []
+                for r in hist:
+                    v = r.get(prim_metric)
+                    if v is None:
+                        continue
+                    try:
+                        fv = float(v)
+                        if math.isnan(fv):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    b = _bin_for_value(fv, prim_hist_sorted, prim_count)
+                    if b in prim_bins:
+                        hist_prim_subset.append(r)
+                if not hist_prim_subset:
+                    continue
+
+                # Walk each secondary; first one that fires marks the system
+                # as firing for this ticker. Record values + bin info for all
+                # so the card can show them.
+                today_secs = []
+                fires = False
+                for sec in secs:
+                    sm   = sec["metric"]
+                    sbins = set(int(b) for b in (sec.get("bins") or []))
+                    scnt  = int(sec.get("bin_count") or 10)
+                    sec_hist_sorted = sorted(
+                        float(r[sm]) for r in hist_prim_subset
+                        if r.get(sm) is not None)
+                    today_sec_val = today.get(sm)
+                    today_sec_bin = _bin_for_value(today_sec_val, sec_hist_sorted, scnt)
+                    in_selected = today_sec_bin is not None and today_sec_bin in sbins
+                    if in_selected:
+                        fires = True
+                    today_secs.append({
+                        "metric":      sm,
+                        "value":       round(float(today_sec_val), 6) if today_sec_val is not None else None,
+                        "bin":         today_sec_bin,
+                        "bin_count":   scnt,
+                        "selected_bins": sorted(list(sbins)),
+                        "in_selected": in_selected,
+                    })
+
+                if not fires:
+                    continue
+
+                # ── Historical stats: this ticker, this system ────────────
+                # Build the system's trade set restricted to this ticker:
+                # primary in primary_bins AND any selected secondary bin
+                # (computed within ticker's primary-filtered subset).
+                rets_ticker = []
+                # Pre-compute each secondary's per-subset bins for hist_prim_subset rows
+                sec_hist_bins = []
+                for sec in secs:
+                    sm    = sec["metric"]
+                    scnt  = int(sec.get("bin_count") or 10)
+                    sbins = set(int(b) for b in (sec.get("bins") or []))
+                    vals_for_bin = sorted(
+                        float(r[sm]) for r in hist_prim_subset
+                        if r.get(sm) is not None)
+                    sec_hist_bins.append({
+                        "metric": sm, "selected": sbins, "count": scnt,
+                        "sorted": vals_for_bin,
+                    })
+                for r in hist_prim_subset:
+                    # Check at least one secondary fires for this row.
+                    any_fires = False
+                    for shb in sec_hist_bins:
+                        v = r.get(shb["metric"])
+                        if v is None:
+                            continue
+                        b = _bin_for_value(v, shb["sorted"], shb["count"])
+                        if b is not None and b in shb["selected"]:
+                            any_fires = True
+                            break
+                    if not any_fires:
+                        continue
+                    yv = r.get(outcome)
+                    if yv is None:
+                        continue
+                    try:
+                        rets_ticker.append(float(yv))
+                    except (TypeError, ValueError):
+                        continue
+                if not rets_ticker:
+                    continue
+                arr = np.array(rets_ticker)
+                ticker_stats = {
+                    "n":        int(len(arr)),
+                    "win_rate": round(float((arr > 0).mean()), 4),
+                    "avg_ret":  round(float(arr.mean()), 6),
+                    "cum_ret":  round(float(arr.sum()), 6),
+                }
+
+                # ── ALL stats: same system across every ticker ─────────────
+                rets_all = []
+                for tkr_other, hist_other in rows_by_tkr.items():
+                    if len(hist_other) < prim_count:
+                        continue
+                    prim_sorted_o = sorted(
+                        float(rr[prim_metric]) for rr in hist_other
+                        if rr.get(prim_metric) is not None)
+                    prim_subset_o = []
+                    for rr in hist_other:
+                        v = rr.get(prim_metric)
+                        if v is None: continue
+                        try:
+                            fv = float(v);
+                            if math.isnan(fv): continue
+                        except (TypeError, ValueError):
+                            continue
+                        b = _bin_for_value(fv, prim_sorted_o, prim_count)
+                        if b in prim_bins:
+                            prim_subset_o.append(rr)
+                    # secondary bin within this ticker's primary subset
+                    sec_o_bins = []
+                    for sec in secs:
+                        sm = sec["metric"]
+                        scnt = int(sec.get("bin_count") or 10)
+                        sbins = set(int(b) for b in (sec.get("bins") or []))
+                        vals = sorted(
+                            float(rr[sm]) for rr in prim_subset_o
+                            if rr.get(sm) is not None)
+                        sec_o_bins.append({"metric": sm, "selected": sbins,
+                                           "count": scnt, "sorted": vals})
+                    for rr in prim_subset_o:
+                        ok = False
+                        for shb in sec_o_bins:
+                            v = rr.get(shb["metric"])
+                            if v is None: continue
+                            b = _bin_for_value(v, shb["sorted"], shb["count"])
+                            if b is not None and b in shb["selected"]:
+                                ok = True
+                                break
+                        if not ok:
+                            continue
+                        yv = rr.get(outcome)
+                        if yv is None: continue
+                        try:
+                            rets_all.append(float(yv))
+                        except (TypeError, ValueError):
+                            continue
+                if rets_all:
+                    arr_all = np.array(rets_all)
+                    all_stats = {
+                        "n":        int(len(arr_all)),
+                        "win_rate": round(float((arr_all > 0).mean()), 4),
+                        "avg_ret":  round(float(arr_all.mean()), 6),
+                        "cum_ret":  round(float(arr_all.sum()), 6),
+                    }
+                else:
+                    all_stats = {"n": 0, "win_rate": 0.0, "avg_ret": 0.0, "cum_ret": 0.0}
+
+                results.append({
+                    "type":         "system",
+                    "portfolio_id":   pid,
+                    "portfolio_name": pname,
+                    "system_id":      s["id"],
+                    "system_name":    s["name"],
+                    "ticker":         tkr,
+                    "outcome":        outcome,
+                    "firing":         True,
+                    "today_date":     str(today.get("trade_date") or ""),
+                    "today_primary": {
+                        "metric":        prim_metric,
+                        "value":         round(float(today_prim_val), 6) if today_prim_val is not None else None,
+                        "bin":           today_prim_bin,
+                        "bin_count":     prim_count,
+                        "selected_bins": sorted(list(prim_bins)),
+                    },
+                    "today_secondaries": today_secs,
+                    "all_stats":         all_stats,
+                    "ticker_stats":      ticker_stats,
+                    "verdict":           _verdict_for(ticker_stats),
+                })
+
+    return {"date": date, "results": results}
