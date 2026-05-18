@@ -69,6 +69,13 @@ document.addEventListener('alpine:init', () => {
     corrLoading: false,
     corrBubbleMinN: 1,
 
+    // System Portfolio (third tier — persisted research portfolios)
+    portfolios: [],          // [{id, name, ticker, outcome, date_from, date_to, system_count}, ...]
+    portfolioId: null,       // currently-selected portfolio id (or null)
+    portfolio: null,         // {portfolio: {...}, systems: [...]}
+    portAggregate: null,     // last /aggregate response
+    portLoading: false,
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -92,6 +99,8 @@ document.addEventListener('alpine:init', () => {
       }
       // Load score matrix (independent of analysis)
       this.smInit();
+      // Portfolios list (third-tier — research portfolios persisted server-side)
+      this.loadPortfolios();
     },
 
     async loadAnalysis() {
@@ -3035,6 +3044,407 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+    },
+
+    // ── System Portfolio (third tier) ──────────────────────────────────────
+
+    get canAddSystem() {
+      // Need a portfolio loaded, at least one primary bin selected, and at
+      // least one secondary with a non-empty bin set in the corr explorer.
+      if (!this.portfolioId || !this.portfolio) return false;
+      if (!this.selectedBins20 || this.selectedBins20.size === 0) return false;
+      const sels = this.corrSelections || {};
+      return Object.values(sels).some(b => Array.isArray(b) && b.length > 0);
+    },
+
+    get portCumReturnNum() {
+      const eq = this.portAggregate?.equity || [];
+      return eq.length ? eq[eq.length - 1].value * 100 : 0;
+    },
+
+    get portCumReturn() {
+      return this.portCumReturnNum.toFixed(2) + '%';
+    },
+
+    get portAggSysMap() {
+      const m = {};
+      for (const s of (this.portAggregate?.systems || [])) m[s.id] = s;
+      return m;
+    },
+
+    async loadPortfolios() {
+      try {
+        const r = await fetch('/api/oi-analysis/portfolios');
+        if (r.ok) this.portfolios = await r.json();
+      } catch (_) {}
+    },
+
+    async selectPortfolio(id) {
+      this._destroyPortCharts();
+      this.portAggregate = null;
+      if (!id) { this.portfolio = null; return; }
+      this.portLoading = true;
+      try {
+        const r = await fetch(`/api/oi-analysis/portfolios/${id}`);
+        if (r.ok) this.portfolio = await r.json();
+        else { this.portfolio = null; return; }
+        await this.loadPortfolioAggregate();
+      } finally { this.portLoading = false; }
+    },
+
+    async createPortfolio() {
+      const name = prompt('Portfolio name:', `Research ${new Date().toISOString().slice(0, 10)}`);
+      if (!name) return;
+      const body = {
+        name: name.trim(),
+        ticker:    this.ticker,
+        outcome:   this.outcome,
+        date_from: this.dateFrom || null,
+        date_to:   this.dateTo   || null,
+      };
+      try {
+        const r = await fetch('/api/oi-analysis/portfolios', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { alert('Create failed: ' + await r.text()); return; }
+        const p = await r.json();
+        await this.loadPortfolios();
+        this.portfolioId = p.id;
+        await this.selectPortfolio(p.id);
+      } catch (e) { alert('Create error: ' + e.message); }
+    },
+
+    async renamePortfolio() {
+      if (!this.portfolioId || !this.portfolio) return;
+      const current = this.portfolio.portfolio?.name || '';
+      const name = prompt('New name:', current);
+      if (!name || name.trim() === current) return;
+      try {
+        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        if (!r.ok) { alert('Rename failed: ' + await r.text()); return; }
+        await this.loadPortfolios();
+        if (this.portfolio?.portfolio) this.portfolio.portfolio.name = name.trim();
+      } catch (e) { alert('Rename error: ' + e.message); }
+    },
+
+    async deletePortfolio() {
+      if (!this.portfolioId) return;
+      const name = this.portfolio?.portfolio?.name || '?';
+      if (!confirm(`Delete portfolio "${name}" and all its systems?`)) return;
+      try {
+        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}`, { method: 'DELETE' });
+        if (!r.ok) { alert('Delete failed: ' + await r.text()); return; }
+        this.portfolioId = null;
+        this.portfolio = null;
+        this.portAggregate = null;
+        this._destroyPortCharts();
+        await this.loadPortfolios();
+      } catch (e) { alert('Delete error: ' + e.message); }
+    },
+
+    async addCurrentSystem() {
+      if (!this.canAddSystem) return;
+      // Capture primary bins (the corr explorer uses selectedBins20 — always 20-bin internally)
+      const primary_bins = [...this.selectedBins20].sort((a, b) => a - b);
+      // Capture secondaries from corrSelections
+      const secondaries = [];
+      for (const [metric, bins] of Object.entries(this.corrSelections || {})) {
+        if (Array.isArray(bins) && bins.length) {
+          secondaries.push({
+            metric,
+            bins: [...bins].sort((a, b) => a - b),
+            bin_count: this.corrBinCount || 10,
+          });
+        }
+      }
+      const body = {
+        primary_metric: this.metric,
+        primary_bins,
+        primary_bin_count: 20,
+        secondaries,
+      };
+      try {
+        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { alert('Add system failed: ' + await r.text()); return; }
+        await this.selectPortfolio(this.portfolioId);
+        await this.loadPortfolios();
+      } catch (e) { alert('Add system error: ' + e.message); }
+    },
+
+    async toggleSystem(sid, enabled) {
+      try {
+        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+        // Optimistic update
+        const sys = this.portfolio?.systems?.find(s => s.id === sid);
+        if (sys) sys.enabled = enabled;
+        await this.loadPortfolioAggregate();
+      } catch (_) {}
+    },
+
+    async renameSystem(sid, currentName) {
+      const name = prompt('Rename system:', currentName);
+      if (!name || name.trim() === currentName) return;
+      try {
+        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        const sys = this.portfolio?.systems?.find(s => s.id === sid);
+        if (sys) sys.name = name.trim();
+        // Re-render aggregate labels
+        await this.loadPortfolioAggregate();
+      } catch (_) {}
+    },
+
+    async deleteSystem(sid) {
+      const sys = this.portfolio?.systems?.find(s => s.id === sid);
+      if (!confirm(`Delete ${sys?.name || 'system'}?`)) return;
+      try {
+        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, { method: 'DELETE' });
+        await this.selectPortfolio(this.portfolioId);
+        await this.loadPortfolios();
+      } catch (_) {}
+    },
+
+    async editSystem(sys) {
+      // Sync page state to the portfolio's anchor first so the analysis
+      // produced matches what the system was saved against.
+      if (this.portfolio?.portfolio) {
+        const anchor = this.portfolio.portfolio;
+        this.ticker   = anchor.ticker;
+        this.outcome  = anchor.outcome;
+        this.dateFrom = anchor.date_from || '';
+        this.dateTo   = anchor.date_to   || '';
+      }
+      this.metric         = sys.primary_metric;
+      this.selectedBins20 = new Set(sys.primary_bins || []);
+      // Re-run primary analysis with the saved anchor + primary metric/bins.
+      await this.loadAnalysis();
+      if (this.error) return;
+      // Load the secondary cache so the corr explorer has its membership data.
+      await this.secLoad();
+      if (!this.secStatus.loaded) return;
+      // Open the corr panel and restore mini data + selections.
+      this.corrPanelOpen = true;
+      this.corrBinCount  = (sys.secondaries?.[0]?.bin_count) || 10;
+      this.corrMiniData  = null;
+      await this.corrLoadMiniData();
+      const sels = {};
+      for (const sec of (sys.secondaries || [])) {
+        sels[sec.metric] = [...(sec.bins || [])];
+      }
+      this.corrSelections = sels;
+      // Scroll the corr explorer into view so the user sees the restored state.
+      this.$nextTick(() => {
+        const el = document.getElementById('corr-equity-canvas')
+                || document.querySelector('.if-pill');
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    },
+
+    async loadPortfolioAggregate() {
+      if (!this.portfolioId) return;
+      this.portLoading = true;
+      try {
+        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/aggregate`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        if (!r.ok) { this.portAggregate = null; return; }
+        this.portAggregate = await r.json();
+        await this.$nextTick();
+        this._renderPortCharts();
+      } catch (e) {
+        console.error('portfolio aggregate', e);
+      } finally { this.portLoading = false; }
+    },
+
+    _destroyPortCharts() {
+      for (const k of ['port-equity', 'port-yearly', 'port-activity', 'port-bubble']) {
+        if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
+      }
+    },
+
+    _renderPortCharts() {
+      if (!this.portAggregate || this.portAggregate.n_trades === 0) {
+        this._destroyPortCharts();
+        return;
+      }
+      this._destroyPortCharts();
+      this._renderPortEquity();
+      this._renderPortYearly();
+      this._renderPortActivity();
+      this._renderPortBubble();
+    },
+
+    _renderPortEquity() {
+      const canvas = document.getElementById('chart-port-equity');
+      if (!canvas || !this.portAggregate) return;
+      const eq = this.portAggregate.equity || [];
+      if (!eq.length) return;
+      this._charts['port-equity'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: eq.map(p => p.date.slice(0, 7)),
+          datasets: [{
+            label: 'Union', data: eq.map(p => +(p.value * 100).toFixed(4)),
+            borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.08)',
+            borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false } },
+          scales: this._darkScales(),
+        },
+      });
+    },
+
+    _renderPortYearly() {
+      const canvas = document.getElementById('chart-port-yearly');
+      if (!canvas || !this.portAggregate) return;
+      const yr = this.portAggregate.yearly || [];
+      if (!yr.length) return;
+      const labels = yr.map(y => String(y.year));
+      const avgs = yr.map(y => +(y.avg_ret * 100).toFixed(4));
+      this._charts['port-yearly'] = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Avg Ret %', data: avgs,
+            backgroundColor: avgs.map(v => v >= 0 ? 'rgba(52,152,219,0.6)' : 'rgba(232,67,147,0.6)'),
+            borderWidth: 0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                afterLabel: (ctx) => {
+                  const y = yr[ctx.dataIndex];
+                  return `n=${y.n}  ·  win ${(y.win_rate * 100).toFixed(1)}%`;
+                },
+              },
+            },
+          },
+          scales: this._darkScales(),
+        },
+      });
+    },
+
+    _renderPortActivity() {
+      const canvas = document.getElementById('chart-port-activity');
+      if (!canvas || !this.portAggregate) return;
+      const act = this.portAggregate.activity || [];
+      if (!act.length) return;
+      // Down-sample to a manageable number of points (~400) so the chart paints fast.
+      const stride = Math.max(1, Math.floor(act.length / 400));
+      const sampled = [];
+      for (let i = 0; i < act.length; i += stride) sampled.push(act[i]);
+      this._charts['port-activity'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: sampled.map(p => p.date.slice(0, 7)),
+          datasets: [{
+            label: 'Open positions', data: sampled.map(p => p.n_open),
+            borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.10)',
+            borderWidth: 1, pointRadius: 0, tension: 0.1, fill: true, stepped: 'before',
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false } },
+          scales: this._darkScales(),
+        },
+      });
+    },
+
+    _renderPortBubble() {
+      const canvas = document.getElementById('chart-port-bubble');
+      if (!canvas || !this.portAggregate) return;
+      const tickers = this.portAggregate.tickers || [];
+      if (!tickers.length) return;
+      const pts = tickers.map(t => ({
+        x: t.win_rate * 100, y: t.avg_ret * 100, r: Math.max(4, Math.sqrt(t.n) * 0.8),
+        ticker: t.ticker, n: t.n, contrib: t.contrib_pct,
+      }));
+      this._charts['port-bubble'] = new Chart(canvas.getContext('2d'), {
+        type: 'bubble',
+        data: {
+          datasets: [{
+            data: pts,
+            backgroundColor: pts.map(p => p.y >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)'),
+            borderColor: '#222', borderWidth: 1,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  const d = ctx.raw;
+                  return `${d.ticker}: n=${d.n} · wr=${d.x.toFixed(1)}% · avg=${d.y.toFixed(3)}% · contrib=${d.contrib.toFixed(1)}%`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: { title: { display: true, text: 'Win rate %', color: '#888' },
+                 ...this._darkScales().x },
+            y: { title: { display: true, text: 'Avg ret %', color: '#888' },
+                 ...this._darkScales().y },
+          },
+        },
+      });
+    },
+
+    portSysCellTitle(i, j) {
+      if (!this.portAggregate) return '';
+      const labs = this.portAggregate.system_labels || [];
+      const ov = this.portAggregate.overlap_systems || [];
+      const phi = this.portAggregate.phi_systems || [];
+      if (i === j) return `${labs[i]}  n=${ov[i]?.[i] ?? 0}`;
+      return `${labs[i]} × ${labs[j]}\nφ = ${(phi[i]?.[j] ?? 0).toFixed(3)}\nOverlap: ${ov[i]?.[j] ?? 0} trades`;
+    },
+
+    portPairCellTitle(i, j) {
+      if (!this.portAggregate) return '';
+      const labs = this.portAggregate.pair_labels || [];
+      const ov = this.portAggregate.overlap_pairs || [];
+      const phi = this.portAggregate.phi_pairs || [];
+      if (i === j) return `${labs[i]}  n=${ov[i]?.[i] ?? 0}`;
+      return `${labs[i]} × ${labs[j]}\nφ = ${(phi[i]?.[j] ?? 0).toFixed(3)}\nOverlap: ${ov[i]?.[j] ?? 0} trades`;
+    },
+
+    async portCsvDownload() {
+      if (!this.portAggregate) return;
+      const dates = this.portAggregate.union_trade_dates || [];
+      if (!dates.length) return;
+      const rows = ['trade_date'];
+      for (const d of dates) rows.push(d);
+      const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `portfolio_${this.portfolioId}_union.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     },
   }));
 });

@@ -1443,6 +1443,58 @@ def _sec_equity_curve(rows_sorted: list, outcome_col: str) -> list:
     return curve
 
 
+def _bin_membership(ordered: list, metric: str, selected_bins: set,
+                    n_bins: int, is_all: bool) -> np.ndarray:
+    """Binary 0/1 vector across `ordered` rows: 1 where metric's bin is in selected_bins.
+
+    ALL mode applies per-ticker rank normalization (each ticker ranked
+    independently then pooled), matching the OI Analysis primary chart and
+    the secondary correlation explorer. Single-ticker mode uses a flat rank.
+    Tickers (ALL mode) with fewer than n_bins observations are excluded —
+    their rows stay 0.
+    """
+    n_rows = len(ordered)
+    assignments: list = [None] * n_rows
+    n_bins = max(2, min(20, n_bins))
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for idx, r in enumerate(ordered):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    by_tkr[r.get("ticker", "_")].append((fv, idx))
+            except (TypeError, ValueError):
+                pass
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, orig_idx) in enumerate(sorted_t):
+                assignments[orig_idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    else:
+        pairs = []
+        for idx, r in enumerate(ordered):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    pairs.append((fv, idx))
+            except (TypeError, ValueError):
+                pass
+        sorted_p = sorted(pairs, key=lambda x: x[0])
+        n_t = len(sorted_p)
+        for rank, (_, idx) in enumerate(sorted_p):
+            assignments[idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    return np.array([1.0 if assignments[i] in selected_bins else 0.0
+                     for i in range(n_rows)])
+
+
 class SecLoadReq(BaseModel):
     ticker: str
     metric: str
@@ -1850,48 +1902,6 @@ async def secondary_correlation(req: CorrReq):
         return {"error": "no_data"}
 
     ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
-    n_rows  = len(ordered)
-
-    def binary_vec(metric: str, selected_bins: set) -> np.ndarray:
-        assignments: list = [None] * n_rows
-        if is_all:
-            by_tkr: dict = defaultdict(list)
-            for idx, r in enumerate(ordered):
-                v = r.get(metric)
-                if v is None:
-                    continue
-                try:
-                    fv = float(v)
-                    if not math.isnan(fv):
-                        by_tkr[r.get("ticker", "_")].append((fv, idx))
-                except (TypeError, ValueError):
-                    pass
-            for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < n_bins:
-                    continue
-                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-                n_t = len(sorted_t)
-                for rank, (_, orig_idx) in enumerate(sorted_t):
-                    assignments[orig_idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
-        else:
-            pairs = []
-            for idx, r in enumerate(ordered):
-                v = r.get(metric)
-                if v is None:
-                    continue
-                try:
-                    fv = float(v)
-                    if not math.isnan(fv):
-                        pairs.append((fv, idx))
-                except (TypeError, ValueError):
-                    pass
-            sorted_p = sorted(pairs, key=lambda x: x[0])
-            n_t = len(sorted_p)
-            for rank, (_, idx) in enumerate(sorted_p):
-                assignments[idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
-
-        return np.array([1.0 if assignments[i] in selected_bins else 0.0
-                         for i in range(n_rows)])
 
     vectors, metric_names, n_each = [], [], []
     for sel in req.selections:
@@ -1899,7 +1909,7 @@ async def secondary_correlation(req: CorrReq):
         bins   = set(sel.get("bins", []))
         if not metric or not bins:
             continue
-        vec = binary_vec(metric, bins)
+        vec = _bin_membership(ordered, metric, bins, n_bins, is_all)
         vectors.append(vec)
         metric_names.append(metric)
         n_each.append(int(vec.sum()))
