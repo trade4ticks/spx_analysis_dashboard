@@ -1911,9 +1911,72 @@ async def secondary_correlation(req: CorrReq):
     phi = np.nan_to_num(np.corrcoef(M), nan=0.0)
     overlap = (M @ M.T).astype(int)
 
+    # Intersection: rows where every metric's binary vector = 1
+    outcome_col = cached["outcome"]
+    intersection_mask = np.all(M == 1, axis=0)
+    combined_sorted = [ordered[i] for i, v in enumerate(intersection_mask) if v]
+
+    eq_primary  = _sec_equity_curve(ordered, outcome_col)
+    eq_combined = _sec_equity_curve(combined_sorted, outcome_col)
+
+    yearly_primary: dict  = defaultdict(list)
+    yearly_combined: dict = defaultdict(list)
+    for r in ordered:
+        yr = int(r.get("trade_date", "0000")[:4])
+        o = r.get(outcome_col)
+        if o is not None:
+            yearly_primary[yr].append(float(o))
+    for r in combined_sorted:
+        yr = int(r.get("trade_date", "0000")[:4])
+        o = r.get(outcome_col)
+        if o is not None:
+            yearly_combined[yr].append(float(o))
+
+    all_years = sorted(set(yearly_primary) | set(yearly_combined))
+    yearly_out = []
+    for yr in all_years:
+        p = yearly_primary.get(yr, [])
+        c = yearly_combined.get(yr, [])
+        yearly_out.append({
+            "year":         yr,
+            "primary_n":    len(p),
+            "primary_avg":  round(float(np.mean(p)), 6) if p else 0,
+            "primary_wr":   round(float(np.mean([1.0 if v > 0 else 0.0 for v in p])), 4) if p else 0,
+            "combined_n":   len(c),
+            "combined_avg": round(float(np.mean(c)), 6) if c else 0,
+            "combined_wr":  round(float(np.mean([1.0 if v > 0 else 0.0 for v in c])), 4) if c else 0,
+        })
+
+    ticker_rets: dict = defaultdict(list)
+    for r in combined_sorted:
+        o = r.get(outcome_col)
+        if o is not None:
+            ticker_rets[r.get("ticker", "?")].append(float(o))
+    total_pnl = sum(sum(v) for v in ticker_rets.values())
+    tickers_out = []
+    for tkr, rets in sorted(ticker_rets.items()):
+        n_t = len(rets)
+        avg_r = float(np.mean(rets)) if rets else 0.0
+        wr = float(np.mean([1.0 if r > 0 else 0.0 for r in rets])) if rets else 0.0
+        contrib = (sum(rets) / total_pnl * 100) if total_pnl != 0 else 0.0
+        tickers_out.append({
+            "ticker": tkr, "n": n_t,
+            "avg_ret": round(avg_r, 6), "win_rate": round(wr, 4),
+            "contrib_pct": round(contrib, 2),
+        })
+
     return {
         "metrics": metric_names,
         "n_each":  n_each,
         "phi":     [[round(float(v), 4) for v in row] for row in phi],
         "overlap": [[int(v) for v in row] for row in overlap],
+        # Intersection detail (same shape as secondary_detail)
+        "baseline_n":  len(ordered),
+        "combined_n":  len(combined_sorted),
+        "horizon":     _parse_horizon(outcome_col),
+        "equity_primary":        eq_primary,
+        "equity_combined":       eq_combined,
+        "yearly":                yearly_out,
+        "tickers":               tickers_out,
+        "combined_trade_dates":  [r.get("trade_date", "") for r in combined_sorted],
     }

@@ -67,6 +67,7 @@ document.addEventListener('alpine:init', () => {
     corrSelections: {},
     corrResult: null,
     corrLoading: false,
+    corrBubbleMinN: 1,
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -1571,12 +1572,16 @@ document.addEventListener('alpine:init', () => {
     openFullscreen(chartId) {
       // Map canvas IDs to their _charts key (for non-standard naming)
       const keyOverride = {
-        'sec-bar-canvas':      'sec-bar',
-        'sec-equity-canvas':   'sec-equity',
-        'sec-bins-canvas':     'sec-bins',
-        'sec-activity-canvas': 'sec-activity',
-        'sec-bubble-canvas':   'sec-bubble',
-        'sec-yearly-canvas':   'sec-yearly',
+        'sec-bar-canvas':       'sec-bar',
+        'sec-equity-canvas':    'sec-equity',
+        'sec-bins-canvas':      'sec-bins',
+        'sec-activity-canvas':  'sec-activity',
+        'sec-bubble-canvas':    'sec-bubble',
+        'sec-yearly-canvas':    'sec-yearly',
+        'corr-equity-canvas':   'corr-equity',
+        'corr-yearly-canvas':   'corr-yearly',
+        'corr-activity-canvas': 'corr-activity',
+        'corr-bubble-canvas':   'corr-bubble',
       };
       const key = keyOverride[chartId] || chartId.replace('chart-', '');
       this.fsChartId = chartId;
@@ -1603,12 +1608,17 @@ document.addEventListener('alpine:init', () => {
           'chart-winrate':       () => this._renderWinRate(),
           'chart-activity':      () => this._renderActivity(),
           // Secondary scanner
-          'sec-bar-canvas':      () => this._renderSecBar(),
-          'sec-equity-canvas':   () => this._renderSecEquity(),
-          'sec-bins-canvas':     () => this._renderSecBinsChart(),
-          'sec-activity-canvas': () => this._renderSecActivity(),
-          'sec-bubble-canvas':   () => this._renderSecBubble(),
-          'sec-yearly-canvas':   () => this._renderSecYearly(),
+          'sec-bar-canvas':       () => this._renderSecBar(),
+          'sec-equity-canvas':    () => this._renderSecEquity(),
+          'sec-bins-canvas':      () => this._renderSecBinsChart(),
+          'sec-activity-canvas':  () => this._renderSecActivity(),
+          'sec-bubble-canvas':    () => this._renderSecBubble(),
+          'sec-yearly-canvas':    () => this._renderSecYearly(),
+          // Correlation intersection detail
+          'corr-equity-canvas':   () => this._renderCorrEquity(),
+          'corr-yearly-canvas':   () => this._renderCorrYearly(),
+          'corr-activity-canvas': () => this._renderCorrActivity(),
+          'corr-bubble-canvas':   () => this._renderCorrBubble(),
         };
         const fn = renderMap[chartId];
         if (fn) {
@@ -1629,6 +1639,7 @@ document.addEventListener('alpine:init', () => {
       this.$nextTick(() => {
         this._renderAllCharts();
         if (this.secDetail) this._renderSecDetail();
+        if (this.corrResult && !this.corrResult.error) this._renderCorrDetail();
       });
     },
 
@@ -2474,7 +2485,12 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (!d.error) {
           d.metrics.forEach(m => {
-            m.maxAbsRet = Math.max(0.0001, ...m.bins.map(v => Math.abs(v)));
+            const maxPos = Math.max(0, ...m.bins);
+            const maxNeg = Math.abs(Math.min(0, ...m.bins));
+            // 6% headroom so tallest bar doesn't touch edge
+            m._total    = Math.max(0.0001, (maxPos + maxNeg) * 1.06);
+            m._maxPos   = maxPos;
+            m._zeroTopPct = (maxPos / m._total * 100).toFixed(2);  // zero-line % from top
           });
         }
         this.corrMiniData = d;
@@ -2531,18 +2547,22 @@ document.addEventListener('alpine:init', () => {
         });
         const d = await r.json();
         this.corrResult = d;
+        if (!d.error) {
+          await this.$nextTick();
+          await this.$nextTick();
+          setTimeout(() => this._renderCorrDetail(), 60);
+        }
       } catch (_) {}
       finally { this.corrLoading = false; }
     },
 
     corrCellStyle(phi, isDiag) {
-      if (isDiag) return 'background:#1c1c1c;color:#444;text-align:center;padding:5px 8px;border:1px solid rgba(255,255,255,0.04);min-width:48px;border-radius:2px';
+      const base = 'text-align:center;padding:7px 14px;border:1px solid rgba(255,255,255,0.05);min-width:58px;border-radius:2px;font-size:11px';
+      if (isDiag) return `background:#1c1c1c;color:#555;${base}`;
       const a = (0.12 + Math.min(1, Math.abs(phi)) * 0.72).toFixed(2);
       const fg = Math.abs(phi) > 0.4 ? '#fff' : '#999';
-      const bg = phi >= 0
-        ? `rgba(52,152,219,${a})`
-        : `rgba(232,67,147,${a})`;
-      return `background:${bg};color:${fg};text-align:center;padding:5px 8px;border:1px solid rgba(255,255,255,0.04);min-width:48px;border-radius:2px`;
+      const bg = phi >= 0 ? `rgba(52,152,219,${a})` : `rgba(232,67,147,${a})`;
+      return `background:${bg};color:${fg};${base}`;
     },
 
     corrCellTitle(i, j) {
@@ -2552,6 +2572,177 @@ document.addEventListener('alpine:init', () => {
       const phi = this.corrResult.phi[i][j];
       const ov  = this.corrResult.overlap[i][j];
       return `${m1} × ${m2}\nφ = ${phi.toFixed(3)}\nOverlap: ${ov} trades`;
+    },
+
+    corrSetBubbleMinN(n) {
+      this.corrBubbleMinN = +n;
+      this._renderCorrBubble();
+    },
+
+    _renderCorrDetail() {
+      if (!this.corrResult || this.corrResult.error) return;
+      this._renderCorrEquity();
+      this._renderCorrYearly();
+      this._renderCorrActivity();
+      this._renderCorrBubble();
+    },
+
+    _renderCorrEquity() {
+      const canvas = document.getElementById('corr-equity-canvas');
+      if (!canvas || !this.corrResult) return;
+      if (this._charts['corr-equity']) { this._charts['corr-equity'].destroy(); delete this._charts['corr-equity']; }
+      const eqP = this.corrResult.equity_primary  || [];
+      const eqC = this.corrResult.equity_combined || [];
+      if (!eqP.length) return;
+      const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
+      let lastC = 0;
+      const combinedAligned = eqP.map(p => {
+        if (cMap[p.date] !== undefined) lastC = cMap[p.date];
+        return lastC;
+      });
+      this._charts['corr-equity'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: eqP.map(p => p.date.slice(0, 7)),
+          datasets: [
+            { label: 'Primary',  data: eqP.map(p => +(p.value * 100).toFixed(4)),
+              borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.06)',
+              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true },
+            { label: 'Intersection', data: combinedAligned,
+              borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.06)',
+              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true, spanGaps: true },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { title: ctx => eqP[ctx[0]?.dataIndex]?.date || '' } },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 10 } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Cum Return %', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
+    },
+
+    _renderCorrYearly() {
+      const canvas = document.getElementById('corr-yearly-canvas');
+      if (!canvas || !this.corrResult?.yearly?.length) return;
+      if (this._charts['corr-yearly']) { this._charts['corr-yearly'].destroy(); delete this._charts['corr-yearly']; }
+      const yearly = this.corrResult.yearly;
+      this._charts['corr-yearly'] = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: yearly.map(y => y.year),
+          datasets: [
+            { label: 'Primary',  data: yearly.map(y => +(y.primary_avg  * 100).toFixed(3)),
+              backgroundColor: 'rgba(52,152,219,0.65)', borderColor: '#3498db', borderWidth: 1 },
+            { label: 'Intersection', data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
+              backgroundColor: 'rgba(232,67,147,0.65)', borderColor: '#e84393', borderWidth: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.raw?.toFixed(3)}%` } } },
+          scales: {
+            ...this._darkScales(),
+            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
+    },
+
+    _renderCorrActivity() {
+      const canvas = document.getElementById('corr-activity-canvas');
+      if (!canvas || !this.corrResult?.combined_trade_dates?.length) return;
+      if (this._charts['corr-activity']) { this._charts['corr-activity'].destroy(); delete this._charts['corr-activity']; }
+      const dates   = this.corrResult.combined_trade_dates;
+      const horizon = this.corrResult.horizon || 1;
+      const entriesByDate = {};
+      for (const d of dates) entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+      const spotSeries  = this.data?.spot_series || [];
+      const cal         = this.data?.trade_calendar || [];
+      const tradingDays = spotSeries.length > 0
+        ? spotSeries.map(s => s.date)
+        : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
+      const entered = tradingDays.map(d => entriesByDate[d] || 0);
+      const open    = tradingDays.map((_, i) => {
+        let count = 0;
+        for (let j = Math.max(0, i - horizon + 1); j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
+        return count;
+      });
+      this._charts['corr-activity'] = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: tradingDays.map(d => d.slice(0, 7)),
+          datasets: [
+            { type: 'line', label: 'Open Trades', data: open,
+              borderColor: 'rgba(46,204,113,0.6)', backgroundColor: 'rgba(46,204,113,0.08)',
+              fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5, order: 1 },
+            { type: 'bar',  label: 'Entered', data: entered,
+              backgroundColor: 'rgba(52,152,219,0.7)', barThickness: 2, order: 2 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
+                           label: ctx => `${ctx.dataset.label}: ${ctx.raw}` } } },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Count', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
+    },
+
+    _renderCorrBubble() {
+      const canvas = document.getElementById('corr-bubble-canvas');
+      if (!canvas || !this.corrResult?.tickers?.length) return;
+      if (this._charts['corr-bubble']) { this._charts['corr-bubble'].destroy(); delete this._charts['corr-bubble']; }
+      const minN = this.corrBubbleMinN || 1;
+      const tickers = this.corrResult.tickers.filter(t => t.n >= minN);
+      if (!tickers.length) return;
+      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
+      const mkColor = (wr, a) => {
+        const r = Math.round(232 + (52  - 232) * wr);
+        const g = Math.round(67  + (152 - 67)  * wr);
+        const b = Math.round(147 + (219 - 147) * wr);
+        return `rgba(${r},${g},${b},${a})`;
+      };
+      const datasets = tickers.map(t => ({
+        label: t.ticker,
+        data: [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4),
+                 r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 20) : 2 }],
+        backgroundColor: mkColor(t.win_rate, 0.65),
+        borderColor:     mkColor(t.win_rate, 1),
+        borderWidth: 1,
+      }));
+      this._charts['corr-bubble'] = new Chart(canvas.getContext('2d'), {
+        type: 'bubble',
+        data: { datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false },
+            tooltip: { backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { label: ctx => {
+                const t = tickers[ctx.datasetIndex];
+                return [`${t.ticker}  n:${t.n}  avg:${(t.avg_ret*100).toFixed(3)}%  WR:${(t.win_rate*100).toFixed(1)}%  contrib:${t.contrib_pct.toFixed(1)}%`];
+              } } } },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x, title: { display: true, text: 'Trade Count', color: '#888', font: { size: 9 } } },
+            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
     },
 
     _renderSecBinsChart() {
