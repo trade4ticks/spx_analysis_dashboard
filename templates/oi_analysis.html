@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=55"></script>
+  <script src="/static/js/oi_analysis.js?v=56"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -592,12 +592,10 @@
           Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
         </div>
 
-        <!-- Stack vertically so each pane fills page width. The Lift bar
-             chart can have many metrics, so its inner div is horizontally
-             scrollable with a wide min-width driven by metric count. -->
+        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right, when drilling) -->
         <template x-if="secStatus.loaded && secMetrics.length > 0">
-          <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:12px">
-            <!-- Row 1: Ranked secondary metrics (full width, scrolls horizontally if needed) -->
+          <div class="chart-grid" style="margin-bottom:12px">
+            <!-- Left: ranked secondary metrics — bars fill the half-width cell -->
             <div class="chart-box">
               <div class="chart-title">
                 Secondary Metrics by Lift
@@ -606,13 +604,12 @@
                 <button class="fs-btn" @click="openFullscreen('sec-bar-canvas')" title="Fullscreen">⛶</button>
               </div>
               <div style="overflow-x:auto;position:relative">
-                <div id="sec-bar-inner"
-                     :style="'position:relative;height:260px;min-width:' + Math.max(800, (secMetrics.length || 0) * 32) + 'px'">
+                <div id="sec-bar-inner" style="position:relative;height:260px;min-width:100%">
                   <canvas id="sec-bar-canvas"></canvas>
                 </div>
               </div>
             </div>
-            <!-- Row 2: equity curves (only when a metric is drilled) -->
+            <!-- Right: equity curves (only when a metric is drilled) -->
             <template x-if="secSelectedMetric">
               <div class="chart-box">
                 <div class="chart-title">
