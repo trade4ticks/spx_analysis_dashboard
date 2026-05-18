@@ -86,6 +86,12 @@ document.addEventListener('alpine:init', () => {
     // Independent per chart so the user can A/B them visually.
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
 
+    // All-Ticker Metric Bins (top-of-page browser, independent of analysis)
+    topBinsExpanded: false,
+    topBinsLoading:  false,
+    topBinsData:     null,
+    topBinsOutcome:  'ret_5d_fwd_oc',
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -2549,6 +2555,47 @@ document.addEventListener('alpine:init', () => {
       else if (key === 'sec')  this._renderSecActivity();
       else if (key === 'corr') this._renderCorrActivity();
       else if (key === 'port') this._renderPortActivity();
+    },
+
+    // All-Ticker Metric Bins (top-of-page collapsable browser)
+    async toggleTopBins() {
+      this.topBinsExpanded = !this.topBinsExpanded;
+      if (this.topBinsExpanded && !this.topBinsData) {
+        await this.loadTopBins();
+      }
+    },
+
+    async loadTopBins(forceRefresh = false) {
+      this.topBinsLoading = true;
+      try {
+        if (forceRefresh) {
+          try {
+            await fetch('/api/oi-analysis/global-metric-bins/invalidate', { method: 'POST' });
+          } catch (_) {}
+        }
+        const params = new URLSearchParams({
+          outcome: this.topBinsOutcome || 'ret_5d_fwd_oc',
+          ticker:  'ALL',
+          n_bins:  '20',
+        });
+        const r = await fetch('/api/oi-analysis/global-metric-bins?' + params);
+        if (!r.ok) { this.topBinsData = { metrics: [], total_rows: 0 }; return; }
+        const d = await r.json();
+        // Compute _zeroTopPct + _total per metric for the diverging-bar layout
+        // (same pattern the corr explorer uses for its mini charts).
+        for (const m of (d.metrics || [])) {
+          const maxPos = Math.max(0, ...m.bins);
+          const maxNeg = Math.abs(Math.min(0, ...m.bins));
+          m._total      = Math.max(0.0001, (maxPos + maxNeg) * 1.06);
+          m._zeroTopPct = (maxPos / m._total * 100).toFixed(2);
+        }
+        this.topBinsData = d;
+      } catch (e) {
+        console.error('loadTopBins', e);
+        this.topBinsData = { metrics: [], total_rows: 0 };
+      } finally {
+        this.topBinsLoading = false;
+      }
     },
 
     // Faint horizontal dotted gray line on bubble charts marking the

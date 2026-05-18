@@ -2168,3 +2168,101 @@ async def secondary_correlation(req: CorrReq):
         "winner_avg_ret": winner_avg,
         "loser_avg_ret":  loser_avg,
     }
+
+
+# ── Global Metric Bins (standalone top-of-page browser) ───────────────────
+
+_GLOBAL_BINS_CACHE: dict = {}
+
+
+@router.get("/global-metric-bins")
+async def global_metric_bins(
+    outcome:   str = Query("ret_5d_fwd_oc"),
+    ticker:    str = Query("ALL"),
+    n_bins:    int = Query(20, ge=2, le=20),
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Per-bin avg return for every feature column at the given outcome, with
+    no primary filter. Used by the standalone "All-Ticker Metric Bins" pane
+    at the top of the OI Analysis page.
+
+    For `ticker = ALL` each ticker is independently ranked into n_bins then
+    pooled (per-ticker rank normalization). For a single ticker, flat rank.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    n_bins = max(2, min(20, n_bins))
+    cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}"
+    if cache_key in _GLOBAL_BINS_CACHE:
+        return _GLOBAL_BINS_CACHE[cache_key]
+
+    # Build date filter
+    where = [f"{outcome} IS NOT NULL"]
+    params: list = []
+    p = 1
+    if ticker and ticker != "ALL":
+        where.append(f"ticker = ${p}"); params.append(ticker); p += 1
+    if date_from:
+        where.append(f"trade_date >= ${p}")
+        params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        where.append(f"trade_date <= ${p}")
+        params.append(_date.fromisoformat(date_to)); p += 1
+
+    async with pool.acquire() as conn:
+        col_rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'daily_features' AND table_schema = 'public'
+               AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+               AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+               ORDER BY ordinal_position""")
+    all_num_cols = [r["column_name"] for r in col_rows]
+    outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
+    feature_cols = [c for c in all_num_cols
+                    if c not in outcome_cols_all and not c.startswith("spot")]
+
+    select_cols = ", ".join(["ticker", "trade_date", outcome] + feature_cols)
+    async with pool.acquire() as conn:
+        db_rows = await conn.fetch(
+            f"SELECT {select_cols} FROM daily_features "
+            f"WHERE {' AND '.join(where)} ORDER BY ticker, trade_date",
+            *params)
+    rows = [dict(r) for r in db_rows]
+    if not rows:
+        out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
+               "metrics": [], "total_rows": 0}
+        _GLOBAL_BINS_CACHE[cache_key] = out
+        return out
+
+    is_all = (ticker == "ALL")
+    metrics_out = []
+    for feat in feature_cols:
+        data = _compute_bins_for_metric(rows, feat, outcome, n_bins, is_all)
+        if data:
+            metrics_out.append(data)
+
+    # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
+    def _lift(m):
+        bs = m.get("bins") or []
+        return (max(bs) - min(bs)) if bs else 0
+    metrics_out.sort(key=_lift, reverse=True)
+
+    out = {
+        "outcome":    outcome,
+        "ticker":     ticker,
+        "n_bins":     n_bins,
+        "total_rows": len(rows),
+        "metrics":    metrics_out,
+    }
+    _GLOBAL_BINS_CACHE[cache_key] = out
+    return out
+
+
+@router.post("/global-metric-bins/invalidate")
+async def global_metric_bins_invalidate():
+    """Drop the in-memory cache so a fresh fetch is computed (e.g. after the
+    user adds new metric columns to daily_features)."""
+    _GLOBAL_BINS_CACHE.clear()
+    return {"ok": True}
