@@ -437,10 +437,14 @@ async def portfolio_aggregate(pid: int,
         prim_count = int(s.get("primary_bin_count") or 20)
         V_p = _bin_membership(rows, s["primary_metric"], prim_bins,
                               prim_count, is_all)
+        # Indices of rows that pass the primary bin filter.
+        primary_indices = [i for i, v in enumerate(V_p) if v == 1.0]
+        primary_rows = [rows[i] for i in primary_indices]
+
         secs = s.get("secondaries") or []
-        if not secs or not prim_bins:
-            # Degenerate system — no secondaries OR no primary bins.
-            # Skip but keep slot so labels stay aligned with systems list.
+        if not secs or not prim_bins or not primary_rows:
+            # Degenerate system — no secondaries OR no primary bins OR
+            # primary filter empty. Keep slot so labels stay aligned.
             zero = np.zeros(len(rows))
             system_vectors.append(zero)
             system_labels.append(s["name"])
@@ -448,22 +452,30 @@ async def portfolio_aggregate(pid: int,
             system_boundaries.append(len(pair_vectors))
             continue
 
-        sec_vecs = []
+        # Bin each secondary metric WITHIN the primary-filtered subset, then
+        # expand back to the full-row vector space (0 outside primary).
+        # This matches the Multi-Metric Correlation Explorer's semantics —
+        # it calls _bin_membership against the primary-filtered rows too.
+        expanded_sec_vecs = []
         for sec in secs:
-            sec_bins = set(int(b) for b in (sec.get("bins") or []))
+            sec_bins  = set(int(b) for b in (sec.get("bins") or []))
             sec_count = int(sec.get("bin_count") or 10)
-            V_si = _bin_membership(rows, sec["metric"], sec_bins,
-                                   sec_count, is_all)
-            sec_vecs.append(V_si)
-            # Pair vector = primary AND this single secondary
-            V_pair = np.minimum(V_p, V_si)
-            pair_vectors.append(V_pair)
+            V_si_sub = _bin_membership(primary_rows, sec["metric"],
+                                       sec_bins, sec_count, is_all)
+            V_si_full = np.zeros(len(rows))
+            for sub_idx, orig_idx in enumerate(primary_indices):
+                V_si_full[orig_idx] = V_si_sub[sub_idx]
+            expanded_sec_vecs.append(V_si_full)
+            # Pair vector = this secondary alone (already constrained to primary).
+            pair_vectors.append(V_si_full)
             pair_labels.append(f"{s['name']}: {sec['metric']}")
-        V_sec_union = np.max(np.stack(sec_vecs), axis=0) if sec_vecs else np.zeros(len(rows))
-        V_S = np.minimum(V_p, V_sec_union)
+
+        # System vector = union of secondaries (each already AND'd with primary
+        # via the expansion). No need to AND with V_p again.
+        V_S = np.max(np.stack(expanded_sec_vecs), axis=0)
         system_vectors.append(V_S)
         system_labels.append(s["name"])
-        per_system_pair_n.append(len(sec_vecs))
+        per_system_pair_n.append(len(expanded_sec_vecs))
         system_boundaries.append(len(pair_vectors))
 
     # Portfolio union = OR across enabled systems
