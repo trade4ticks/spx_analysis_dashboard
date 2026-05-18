@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=56"></script>
+  <script src="/static/js/oi_analysis.js?v=57"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -592,11 +592,13 @@
           Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
         </div>
 
-        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right, when drilling) -->
+        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right).
+             Both cells always render so the grid stays a true 50/50 — the
+             equity cell shows a "click a bar" hint until a metric is drilled. -->
         <template x-if="secStatus.loaded && secMetrics.length > 0">
           <div class="chart-grid" style="margin-bottom:12px">
             <!-- Left: ranked secondary metrics — bars fill the half-width cell -->
-            <div class="chart-box">
+            <div class="chart-box" style="min-width:0">
               <div class="chart-title">
                 Secondary Metrics by Lift
                 <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
@@ -609,18 +611,30 @@
                 </div>
               </div>
             </div>
-            <!-- Right: equity curves (only when a metric is drilled) -->
-            <template x-if="secSelectedMetric">
-              <div class="chart-box">
-                <div class="chart-title">
-                  Equity Curves
-                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
-                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
-                  <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen">⛶</button>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+            <!-- Right: equity curves (placeholder until a metric is drilled) -->
+            <div class="chart-box" style="min-width:0">
+              <div class="chart-title">
+                Equity Curves
+                <template x-if="secSelectedMetric">
+                  <span>
+                    <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
+                    <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                  </span>
+                </template>
+                <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen"
+                        :disabled="!secSelectedMetric"
+                        :style="secSelectedMetric ? '' : 'opacity:.4;cursor:not-allowed'">⛶</button>
               </div>
-            </template>
+              <template x-if="secSelectedMetric">
+                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+              </template>
+              <template x-if="!secSelectedMetric">
+                <div class="chart-canvas"
+                     style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px">
+                  Click a bar on the left to drill in
+                </div>
+              </template>
+            </div>
           </div>
         </template>
 
