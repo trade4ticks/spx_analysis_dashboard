@@ -206,7 +206,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=6"></script>
+  <script src="/static/js/oi_signals.js?v=7"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -468,15 +468,15 @@
             <div class="gantt-row">
               <div class="gantt-label">
                 <span class="gantt-label-name"
-                      :title="entry.name + ' (' + entry.ticker + ')'"
-                      x-text="entry.name + ' (' + entry.ticker + ')'"></span>
+                      :title="entry.ticker + ' · ' + entry.name"
+                      x-text="entry.ticker + ' · ' + entry.name"></span>
                 <button class="btn-remove" @click="removeFromCalendar(entry.id)" title="Remove">×</button>
               </div>
               <div class="gantt-bar-area">
                 <!-- Today line -->
                 <div class="gantt-today" :style="ganttTodayStyle" x-show="idx === 0"></div>
                 <div class="gantt-bar" :style="barStyle(entry)"
-                     :title="entry.name + ' · ' + entry.entry_date + ' → ' + (entry.exit_date || '?')"></div>
+                     :title="entry.ticker + ' · ' + entry.name + ' · ' + entry.entry_date + ' → ' + (entry.exit_date || '?')"></div>
               </div>
             </div>
             <div class="gantt-row-sep"></div>
@@ -488,7 +488,7 @@
           <template x-for="entry in calEntries" :key="'leg-'+entry.id">
             <span style="margin-right:12px">
               <span class="color-dot" :style="'background:' + (entry.color || '#3498db')"></span>
-              <span x-text="entry.name + ' (' + entry.outcome + ')'"></span>
+              <span x-text="entry.ticker + ' · ' + entry.name + ' (' + entry.outcome + ')'"></span>
             </span>
           </template>
         </div>
