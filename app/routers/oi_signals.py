@@ -39,6 +39,26 @@ CREATE TABLE IF NOT EXISTS oi_signal_calendar (
     added_at    TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(trigger_id, entry_date)
 );
+-- Portfolio/system calendar entries piggyback on the same table so the
+-- Gantt view stays unified. trigger_id is now optional; system entries
+-- carry (portfolio_id, system_id, ticker) instead. Partial unique indexes
+-- enforce no-duplicates per-source-type. The original UNIQUE(trigger_id,
+-- entry_date) constraint stays as a partial too.
+ALTER TABLE oi_signal_calendar
+    ADD COLUMN IF NOT EXISTS portfolio_id INTEGER
+        REFERENCES oi_research_portfolios(id) ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS system_id    INTEGER
+        REFERENCES oi_research_systems(id)    ON DELETE CASCADE,
+    ADD COLUMN IF NOT EXISTS ticker       TEXT;
+-- Allow system entries (trigger_id NULL) by relaxing the old UNIQUE.
+-- Old constraint name was auto-generated; drop both possible names.
+ALTER TABLE oi_signal_calendar DROP CONSTRAINT IF EXISTS oi_signal_calendar_trigger_id_entry_date_key;
+CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_trigger_uniq
+    ON oi_signal_calendar (trigger_id, entry_date)
+    WHERE trigger_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_system_uniq
+    ON oi_signal_calendar (system_id, ticker, entry_date)
+    WHERE system_id IS NOT NULL;
 """
 
 
@@ -63,8 +83,13 @@ class TriggerIn(BaseModel):
 
 
 class CalendarIn(BaseModel):
-    trigger_id: int
-    entry_date: str
+    # Either a single-metric trigger entry…
+    trigger_id:   Optional[int] = None
+    # …or a portfolio system entry (provide all three).
+    portfolio_id: Optional[int] = None
+    system_id:    Optional[int] = None
+    ticker:       Optional[str] = None
+    entry_date:   str
 
 
 @router.get("/triggers")
@@ -250,74 +275,134 @@ async def get_firing(
 
 @router.get("/calendar")
 async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
-    """List calendar entries with computed exit dates."""
+    """List calendar entries with computed exit dates.
+
+    Returns a unified shape regardless of whether the entry came from a
+    legacy trigger or a portfolio system. Each row has:
+      id, type ('trigger' | 'system'), name, ticker, outcome, color,
+      entry_date, exit_date, plus the source fields trigger_id /
+      portfolio_id / system_id (one set, depending on type).
+    """
     await _ensure_tables(pool)
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        trig_rows = await conn.fetch(
             """SELECT c.id, c.trigger_id, c.entry_date,
                       t.name, t.ticker, t.outcome, t.color
                FROM oi_signal_calendar c
                JOIN oi_signal_triggers t ON t.id = c.trigger_id
+               WHERE c.trigger_id IS NOT NULL
+               ORDER BY c.entry_date""")
+        sys_rows = await conn.fetch(
+            """SELECT c.id, c.entry_date, c.portfolio_id, c.system_id, c.ticker,
+                      s.name AS system_name, p.outcome AS outcome, p.name AS portfolio_name
+               FROM oi_signal_calendar c
+               JOIN oi_research_systems    s ON s.id = c.system_id
+               JOIN oi_research_portfolios p ON p.id = c.portfolio_id
+               WHERE c.system_id IS NOT NULL
                ORDER BY c.entry_date""")
 
-    if not rows:
+    if not trig_rows and not sys_rows:
         return []
 
-    if not oi_pool:
-        return [{**dict(r), "entry_date": str(r["entry_date"]), "exit_date": None} for r in rows]
-
-    tickers = list({r["ticker"] for r in rows})
+    # Aggregate trading-day calendars per (ticker) for exit_date lookup.
+    all_tickers = list({r["ticker"] for r in list(trig_rows) + list(sys_rows) if r["ticker"]})
     td_by_ticker: dict = {}
-    for ticker in tickers:
+    if oi_pool and all_tickers:
         async with oi_pool.acquire() as conn:
-            td_rows = await conn.fetch(
-                "SELECT DISTINCT trade_date FROM daily_features WHERE ticker=$1 "
-                "ORDER BY trade_date", ticker)
-        td_by_ticker[ticker] = [r["trade_date"] for r in td_rows]
+            for ticker in all_tickers:
+                td_rows = await conn.fetch(
+                    "SELECT DISTINCT trade_date FROM daily_features WHERE ticker=$1 "
+                    "ORDER BY trade_date", ticker)
+                td_by_ticker[ticker] = [r["trade_date"] for r in td_rows]
 
-    result = []
-    for r in rows:
-        ticker = r["ticker"]
-        outcome = r["outcome"]
-        entry_date = r["entry_date"]
-        horizon = _parse_horizon(outcome)
+    def _exit(ticker: str, entry_date, horizon: int):
         td = td_by_ticker.get(ticker, [])
+        if not td or horizon <= 0:
+            return None
+        try:
+            idx = next((i for i, x in enumerate(td) if x >= entry_date), None)
+            if idx is None:
+                return None
+            exit_idx = idx + max(horizon - 1, 0)
+            if exit_idx < len(td):
+                return str(td[exit_idx])
+            extra = exit_idx - len(td) + 1
+            return str(td[-1] + timedelta(days=int(extra * 1.4)))
+        except Exception:
+            return None
 
-        exit_date = None
-        if td and horizon > 0:
-            try:
-                idx = next((i for i, x in enumerate(td) if x >= entry_date), None)
-                if idx is not None:
-                    exit_idx = idx + max(horizon - 1, 0)
-                    if exit_idx < len(td):
-                        exit_date = str(td[exit_idx])
-                    else:
-                        extra = exit_idx - len(td) + 1
-                        exit_date = str(td[-1] + timedelta(days=int(extra * 1.4)))
-            except Exception:
-                pass
-
-        result.append({**dict(r), "entry_date": str(entry_date), "exit_date": exit_date})
-
-    return result
+    out = []
+    for r in trig_rows:
+        out.append({
+            "id":          r["id"],
+            "type":        "trigger",
+            "trigger_id":  r["trigger_id"],
+            "name":        r["name"],
+            "ticker":      r["ticker"],
+            "outcome":     r["outcome"],
+            "color":       r["color"],
+            "entry_date":  str(r["entry_date"]),
+            "exit_date":   _exit(r["ticker"], r["entry_date"], _parse_horizon(r["outcome"])),
+        })
+    for r in sys_rows:
+        out.append({
+            "id":            r["id"],
+            "type":          "system",
+            "portfolio_id":  r["portfolio_id"],
+            "system_id":     r["system_id"],
+            # Compact "System X · KO" label that fits the existing Gantt label width.
+            "name":          r["system_name"],
+            "portfolio_name": r["portfolio_name"],
+            "ticker":        r["ticker"],
+            "outcome":       r["outcome"],
+            # Systems don't store a colour — distinguish them visually with pink
+            # (the SYSTEM badge colour) so the Gantt legend separates trigger
+            # vs system at a glance.
+            "color":         "#e84393",
+            "entry_date":    str(r["entry_date"]),
+            "exit_date":     _exit(r["ticker"], r["entry_date"], _parse_horizon(r["outcome"])),
+        })
+    out.sort(key=lambda x: x["entry_date"])
+    return out
 
 
 @router.post("/calendar")
 async def add_calendar(body: CalendarIn, pool=Depends(get_pool)):
     await _ensure_tables(pool)
     entry = _date.fromisoformat(body.entry_date)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO oi_signal_calendar (trigger_id, entry_date) VALUES ($1,$2) "
-            "ON CONFLICT (trigger_id, entry_date) DO NOTHING "
-            "RETURNING id, trigger_id, entry_date",
-            body.trigger_id, entry)
-        if not row:
+
+    # Trigger entry path (legacy single-metric)
+    if body.trigger_id is not None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO oi_signal_calendar (trigger_id, entry_date) "
+                "VALUES ($1,$2) "
+                "ON CONFLICT DO NOTHING",
+                body.trigger_id, entry)
             row = await conn.fetchrow(
                 "SELECT id, trigger_id, entry_date FROM oi_signal_calendar "
                 "WHERE trigger_id=$1 AND entry_date=$2",
                 body.trigger_id, entry)
-    return {"id": row["id"], "trigger_id": row["trigger_id"], "entry_date": str(row["entry_date"])}
+        return {"id": row["id"], "type": "trigger",
+                "trigger_id": row["trigger_id"], "entry_date": str(row["entry_date"])}
+
+    # System entry path (portfolio + system + ticker)
+    if body.system_id is None or body.portfolio_id is None or not body.ticker:
+        raise HTTPException(400, "must supply trigger_id, or portfolio_id+system_id+ticker")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO oi_signal_calendar (portfolio_id, system_id, ticker, entry_date) "
+            "VALUES ($1,$2,$3,$4) "
+            "ON CONFLICT DO NOTHING",
+            body.portfolio_id, body.system_id, body.ticker, entry)
+        row = await conn.fetchrow(
+            "SELECT id, portfolio_id, system_id, ticker, entry_date "
+            "FROM oi_signal_calendar "
+            "WHERE system_id=$1 AND ticker=$2 AND entry_date=$3",
+            body.system_id, body.ticker, entry)
+    return {"id": row["id"], "type": "system",
+            "portfolio_id": row["portfolio_id"], "system_id": row["system_id"],
+            "ticker": row["ticker"], "entry_date": str(row["entry_date"])}
 
 
 @router.delete("/calendar/{cid}")

@@ -312,6 +312,23 @@ document.addEventListener('alpine:init', () => {
       } catch (_) {}
     },
 
+    async addPortfolioToCalendar(portfolioId, systemId, ticker, entryDate) {
+      if (!entryDate || !systemId || !portfolioId || !ticker) return;
+      try {
+        const r = await fetch('/api/oi-signals/calendar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            portfolio_id: portfolioId,
+            system_id:    systemId,
+            ticker:       ticker,
+            entry_date:   entryDate,
+          }),
+        });
+        if (r.ok) await this.loadCalendar();
+      } catch (_) {}
+    },
+
     async loadCalendar() {
       this.calLoading = true;
       try {

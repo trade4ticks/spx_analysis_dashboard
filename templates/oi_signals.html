@@ -206,7 +206,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=5"></script>
+  <script src="/static/js/oi_signals.js?v=6"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -304,8 +304,14 @@
                     <span x-text="r.system_name"></span>
                     <span class="fire-badge kind-system">SYSTEM</span>
                   </div>
-                  <span class="verdict" :class="r.verdict"
-                        x-text="r.verdict === 'strong' ? '⭐ Strong' : (r.verdict === 'weak' ? '✗ Weak' : '⚠ Mixed')"></span>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span class="verdict" :class="r.verdict"
+                          x-text="r.verdict === 'strong' ? '⭐ Strong' : (r.verdict === 'weak' ? '✗ Weak' : '⚠ Mixed')"></span>
+                    <button class="btn-cal" x-show="r.today_date"
+                            @click="addPortfolioToCalendar(r.portfolio_id, r.system_id, r.ticker, r.today_date)">
+                      + Calendar
+                    </button>
+                  </div>
                 </div>
 
                 <div class="card-meta">
