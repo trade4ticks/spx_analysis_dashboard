@@ -2743,13 +2743,104 @@ def _compute_all_bins_fast(rows: list, feature_cols: list, outcome_col: str,
     return results
 
 
+def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
+                                   outcome_col: str, n_bins: int, is_all: bool,
+                                   warmup: int = _DEFAULT_WALKFWD_WARMUP) -> tuple:
+    """Walk-forward batch bin computation for global-metric-bins.
+
+    Column-major implementation: iterates each ticker × feature pair
+    chronologically, maintaining one bisect-sorted running list per (ticker,
+    feature). Bin assignments begin only after max(warmup, n_bins) prior
+    observations exist for that ticker+feature.
+
+    Returns:
+        (results, dropped_warmup_n, start_date)
+        results: list of {"name", "bins", "bin_ns"} — same format as
+                 _compute_all_bins_fast.
+        dropped_warmup_n: rows with valid outcome excluded to warmup (approx
+                          at outcome-column level across all tickers).
+        start_date: earliest trade_date string that cleared warmup (or None).
+    """
+    import bisect
+
+    n_bins = max(2, min(20, n_bins))
+    warm = max(int(warmup), n_bins)
+
+    def _sf(v):
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+            return fv if not math.isnan(fv) else None
+        except (TypeError, ValueError):
+            return None
+
+    # Group by ticker and sort chronologically.
+    by_ticker: dict = {}
+    for r in rows:
+        tkr = r.get("ticker", "_") if is_all else "_"
+        by_ticker.setdefault(tkr, []).append(r)
+    for tkr in by_ticker:
+        by_ticker[tkr].sort(key=lambda r: r.get("trade_date", ""))
+
+    # Dropped rows and start_date computed at the outcome-column level.
+    dropped_total = 0
+    start_date = None
+    for tkr_rows in by_ticker.values():
+        n_valid = 0
+        for r in tkr_rows:
+            if _sf(r.get(outcome_col)) is None:
+                continue
+            n_valid += 1
+            if n_valid <= warm:
+                dropped_total += 1
+            else:
+                d = r.get("trade_date")
+                if d is not None:
+                    ds = str(d)
+                    if start_date is None or ds < start_date:
+                        start_date = ds
+                break  # have the start_date for this ticker; stop iterating
+
+    results = []
+    for feat in feature_cols:
+        feat_bins_lists: list = [[] for _ in range(n_bins)]
+        for tkr_rows in by_ticker.values():
+            sorted_vals: list = []
+            for r in tkr_rows:
+                outcome_v = _sf(r.get(outcome_col))
+                fv = _sf(r.get(feat))
+                if outcome_v is None or fv is None:
+                    continue
+                rank = bisect.bisect_left(sorted_vals, fv)
+                bisect.insort(sorted_vals, fv)
+                n_after = len(sorted_vals)
+                if n_after < warm:
+                    continue
+                b = min(int(rank / n_after * n_bins), n_bins - 1)
+                feat_bins_lists[b].append(outcome_v)
+
+        total = sum(len(b) for b in feat_bins_lists)
+        if total < n_bins * 2:
+            continue
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                       for b in feat_bins_lists],
+            "bin_ns": [len(b) for b in feat_bins_lists],
+        })
+
+    return results, dropped_total, start_date
+
+
 @router.get("/global-metric-bins")
 async def global_metric_bins(
-    outcome:   str = Query("ret_5d_fwd_oc"),
-    ticker:    str = Query("ALL"),
-    n_bins:    int = Query(20, ge=2, le=20),
-    date_from: Optional[str] = Query(None),
-    date_to:   Optional[str] = Query(None),
+    outcome:      str  = Query("ret_5d_fwd_oc"),
+    ticker:       str  = Query("ALL"),
+    n_bins:       int  = Query(20, ge=2, le=20),
+    date_from:    Optional[str] = Query(None),
+    date_to:      Optional[str] = Query(None),
+    walk_forward: bool = Query(False),
     pool=Depends(get_oi_pool),
 ):
     """Per-bin avg return for every feature column at the given outcome, with
@@ -2762,7 +2853,8 @@ async def global_metric_bins(
     if not pool:
         return {"error": "OI database not configured"}
     n_bins = max(2, min(20, n_bins))
-    cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}"
+    mode_tag = "wf" if walk_forward else "is"
+    cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
     if cache_key in _GLOBAL_BINS_CACHE:
         return _GLOBAL_BINS_CACHE[cache_key]
 
@@ -2809,9 +2901,18 @@ async def global_metric_bins(
             return out
 
         is_all = (ticker == "ALL")
-        # Vectorised batch helper — ~10x faster than the per-metric Python
-        # loop for large daily_features fetches.
-        metrics_out = _compute_all_bins_fast(rows, feature_cols, outcome, n_bins, is_all)
+
+        if walk_forward:
+            metrics_out, dropped_n, wf_start = _compute_all_bins_walk_forward(
+                rows, feature_cols, outcome, n_bins, is_all,
+                warmup=_DEFAULT_WALKFWD_WARMUP,
+            )
+        else:
+            # Vectorised batch helper — ~10x faster than the per-metric Python
+            # loop for large daily_features fetches.
+            metrics_out = _compute_all_bins_fast(rows, feature_cols, outcome, n_bins, is_all)
+            dropped_n = None
+            wf_start = None
 
         # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
         def _lift(m):
@@ -2819,14 +2920,20 @@ async def global_metric_bins(
             return (max(bs) - min(bs)) if bs else 0
         metrics_out.sort(key=_lift, reverse=True)
 
-        out = {
+        out: dict = {
             "outcome":           outcome,
             "ticker":            ticker,
             "n_bins":            n_bins,
             "total_rows":        len(rows),
             "metrics_attempted": len(feature_cols),
             "metrics":           metrics_out,
+            "mode":              "walk_forward" if walk_forward else "in_sample",
         }
+        if walk_forward:
+            out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
+            out["dropped_warmup_n"] = dropped_n
+            out["start_date"]       = wf_start
+
         _GLOBAL_BINS_CACHE[cache_key] = out
         return out
     except Exception as exc:

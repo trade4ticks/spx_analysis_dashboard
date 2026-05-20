@@ -2840,9 +2840,10 @@ document.addEventListener('alpine:init', () => {
           } catch (_) {}
         }
         const params = new URLSearchParams({
-          outcome: this.topBinsOutcome || 'ret_5d_fwd_oc',
-          ticker:  'ALL',
-          n_bins:  '20',
+          outcome:      this.topBinsOutcome || 'ret_5d_fwd_oc',
+          ticker:       'ALL',
+          n_bins:       '20',
+          walk_forward: this.pageMode === 'walk_forward' ? '1' : '0',
         });
         const r = await fetch('/api/oi-analysis/global-metric-bins?' + params);
         if (!r.ok) {
@@ -2920,13 +2921,19 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Page-wide mode toggle. Cascades:
-    //   1. Re-runs /analyze (primary chart suite picks up new bins)
-    //   2. Re-runs corr explorer mini data + (if a result is shown) correlation
-    // Secondary scanner and System Portfolio aggregate will follow as the
-    // page-wide rollout reaches them.
+    //   1. All-Ticker Metric Bins (top-of-page)
+    //   2. Re-runs /analyze (primary chart suite)
+    //   3. Re-runs corr explorer mini data + (if a result is shown) correlation
+    // System Portfolio, Secondary Scanner, Score Matrix follow as 3b/c/d land.
     async setPageMode(m) {
       if (m === this.pageMode) return;
       this.pageMode = m;
+      // Top bins: always clear so the next open (or current expanded view)
+      // re-fetches in the new mode.
+      this.topBinsData = null;
+      if (this.topBinsExpanded) {
+        this.loadTopBins();  // fire-and-forget; don't block primary reloads
+      }
       this.corrMiniData = null;
       const hadCorrResult = !!(this.corrResult && !this.corrResult.error);
       this.corrResult = null;
