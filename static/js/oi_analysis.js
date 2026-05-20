@@ -1670,6 +1670,10 @@ document.addEventListener('alpine:init', () => {
       this.fsChartId = chartId;
       this.$nextTick(() => {
         if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
+        // Destroy the original chart before the ID swap so its canvas is free
+        // when closeFullscreen re-renders into it. Without this the orphaned
+        // Chart.js instance on the original canvas blocks re-render silently.
+        if (this._charts[key]) { this._charts[key].destroy(); delete this._charts[key]; }
         // Re-render the specific chart into the fs canvas by calling its render method
         const fsEl = document.getElementById('fs-canvas');
         if (!fsEl) return;
