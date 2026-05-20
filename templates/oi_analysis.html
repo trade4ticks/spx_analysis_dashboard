@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=67"></script>
+  <script src="/static/js/oi_analysis.js?v=68"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -182,7 +182,7 @@
              window before triggering a load. -->
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
           <span style="font-size:10px;color:var(--dim)">Outcome:</span>
-          <select autocomplete="off"
+          <select id="select-topbins-outcome" autocomplete="off"
                   :value="topBinsOutcome"
                   @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
@@ -268,7 +268,7 @@
             </template>
           </select>
           <span style="font-size:10px;color:var(--dim)">Outcome:</span>
-          <select autocomplete="off"
+          <select id="select-td-outcome" autocomplete="off"
                   :value="tdOutcome"
                   @change="tdOutcome = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);

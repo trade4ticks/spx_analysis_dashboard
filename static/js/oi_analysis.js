@@ -127,23 +127,26 @@ document.addEventListener('alpine:init', () => {
         if (this.features.length && !this.tdMetric) this.tdMetric = this.features[0];
 
         // ALWAYS prefer ret_5d_fwd_oc for the standalone analysis panes
-        // (user has asked for 5d default repeatedly). Alpine's x-model
-        // on a <select> with dynamic x-for options has a race: when
-        // options arrive AFTER the state default, the browser
-        // auto-selects the first option and Alpine syncs the state
-        // backwards to it. Setting the model AFTER awaiting nextTick
-        // (so the options are rendered) sidesteps that.
+        // (user has asked for 5d default repeatedly).
         const _preferred = 'ret_5d_fwd_oc';
         const _pick = this.outcomes.includes(_preferred) ? _preferred : (this.outcomes[0] || '');
-        await this.$nextTick();   // ensure x-for options are in the DOM
-        this.topBinsOutcome = _pick;
-        this.tdOutcome      = _pick;
-        // Second tick: some browsers fire a stray 'change' event on the
-        // SELECT after first paint that wipes the value. Reassign once
-        // more after another tick to be sure.
+        // Set state AND force the DOM SELECT directly. Belt-and-suspenders
+        // because some browsers restore the previously-chosen option from
+        // form-state cache even with autocomplete="off", and Alpine's
+        // reactivity won't re-fire if state hasn't changed.
         await this.$nextTick();
         this.topBinsOutcome = _pick;
         this.tdOutcome      = _pick;
+        await this.$nextTick();
+        // Belt-and-suspenders: walk every SELECT with our marker IDs and
+        // force its DOM value directly. Necessary when the browser has
+        // form-state cache that overrides JS-assigned defaults.
+        const _forceSelect = (id, val) => {
+          const el = document.getElementById(id);
+          if (el && val) el.value = val;
+        };
+        _forceSelect('select-topbins-outcome', _pick);
+        _forceSelect('select-td-outcome',      _pick);
       }
       // Load score matrix (independent of analysis)
       this.smInit();
