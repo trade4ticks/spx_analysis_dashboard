@@ -23,6 +23,11 @@ document.addEventListener('alpine:init', () => {
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
     dateFrom: '', dateTo: new Date().toISOString().slice(0, 10),
+    // Page-wide bin mode. Drives every binning analysis on the page so
+    // primary / corr explorer / portfolio aggregate all use the same flavor.
+    //   'in_sample'    — full-history bin thresholds (default; current behavior)
+    //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
+    pageMode: 'in_sample',
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
@@ -68,7 +73,6 @@ document.addEventListener('alpine:init', () => {
     corrResult: null,
     corrLoading: false,
     corrBubbleMinN: 1,
-    corrMode: 'in_sample',     // 'in_sample' | 'walk_forward'
 
     // System Portfolio (third tier — persisted research portfolios)
     portfolios: [],          // [{id, name, ticker, outcome, date_from, date_to, system_count}, ...]
@@ -187,6 +191,7 @@ document.addEventListener('alpine:init', () => {
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
         if (this.dateTo) url += `&date_to=${this.dateTo}`;
+        if (this.pageMode === 'walk_forward') url += '&walk_forward=true';
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
@@ -2914,17 +2919,23 @@ document.addEventListener('alpine:init', () => {
       if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
     },
 
-    async corrSetMode(m) {
-      if (m === this.corrMode) return;
-      this.corrMode = m;
-      // Selections are bin IDs; they're meaningful in either mode, so keep them.
-      // But the cached mini data and any existing result are no longer valid.
+    // Page-wide mode toggle. Cascades:
+    //   1. Re-runs /analyze (primary chart suite picks up new bins)
+    //   2. Re-runs corr explorer mini data + (if a result is shown) correlation
+    // Secondary scanner and System Portfolio aggregate will follow as the
+    // page-wide rollout reaches them.
+    async setPageMode(m) {
+      if (m === this.pageMode) return;
+      this.pageMode = m;
       this.corrMiniData = null;
-      const hadResult = !!(this.corrResult && !this.corrResult.error);
+      const hadCorrResult = !!(this.corrResult && !this.corrResult.error);
       this.corrResult = null;
+      if (this.data && !this.error) {
+        await this.loadAnalysis();
+      }
       if (this.corrPanelOpen && this.secCacheKey) {
         await this.corrLoadMiniData();
-        if (hadResult && this.corrSelectedCount() >= 2) {
+        if (hadCorrResult && this.corrSelectedCount() >= 2) {
           await this.runCorrelation();
         }
       }
@@ -2941,7 +2952,7 @@ document.addEventListener('alpine:init', () => {
             filtered_dates: this._secFilteredDates(),
             ticker:         this.ticker,
             n_bins:         this.corrBinCount,
-            walk_forward:   this.corrMode === 'walk_forward',
+            walk_forward:   this.pageMode === 'walk_forward',
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -3006,7 +3017,7 @@ document.addEventListener('alpine:init', () => {
             ticker:         this.ticker,
             n_bins:         this.corrBinCount,
             selections,
-            walk_forward:   this.corrMode === 'walk_forward',
+            walk_forward:   this.pageMode === 'walk_forward',
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });

@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=70"></script>
+  <script src="/static/js/oi_analysis.js?v=71"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -367,6 +367,14 @@
       <div style="padding-top:14px">
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
       </div>
+      <div style="padding-top:14px"
+           title="Page-wide bin mode. Drives the primary chart, Multi-Metric Correlation Explorer, and (rolling out) Score Matrix / Signal Scanner / System Portfolio. Walk-forward computes per-ticker bins via bisect_left against a running sorted list — 252-day warmup excluded.">
+        <label style="font-size:11px;color:var(--dim)">Mode</label><br>
+        <div class="mode-seg" style="margin-top:2px">
+          <span :class="{on: pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
+          <span :class="{on: pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
+        </div>
+      </div>
       <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
     </div>
 
@@ -375,6 +383,12 @@
     <!-- Results -->
     <template x-if="data && !data.error">
       <div>
+
+        <!-- Walk-forward subtitle (only when this analyze was walk-forward) -->
+        <template x-if="data.mode === 'walk_forward'">
+          <div style="font-size:10px;color:#e6a23c;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
+               x-text="'WALK-FORWARD · ' + (data.n||0).toLocaleString() + ' trades since ' + (data.start_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (data.warmup||252) + 'd)'"></div>
+        </template>
 
         <!-- Stats card -->
         <div class="stats-card">
@@ -929,12 +943,6 @@
                 <span :class="{on: corrBinCount===5}"  @click="corrSetBinCount(5)">5</span>
                 <span :class="{on: corrBinCount===10}" @click="corrSetBinCount(10)">10</span>
                 <span :class="{on: corrBinCount===20}" @click="corrSetBinCount(20)">20</span>
-              </div>
-              <span style="font-size:10px;color:var(--dim);margin-left:6px"
-                    title="Walk-forward computes bins using only data prior to each row's date (per-ticker bisect_left against a running sorted list). The primary bin filter and every secondary bin assignment both honour this. ~252-day warmup drops earliest rows.">Mode:</span>
-              <div class="mode-seg">
-                <span :class="{on: corrMode==='in_sample'}"    @click="corrSetMode('in_sample')">In-sample</span>
-                <span :class="{on: corrMode==='walk_forward'}" @click="corrSetMode('walk_forward')">Walk-forward</span>
               </div>
               <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
                       style="background:var(--raised);border:1px solid var(--border);color:var(--dim);

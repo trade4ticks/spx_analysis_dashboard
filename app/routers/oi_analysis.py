@@ -64,6 +64,80 @@ def _bucket_pairs_per_ticker(by_ticker, n=10):
     return buckets
 
 
+def _walk_forward_bucket_pairs(pairs, n_bins_list, warmup):
+    """Walk-forward equivalent of `_bucket_pairs` (single-ticker) for one or
+    more bin counts simultaneously.
+
+    Each pair is (x, y, date[, ticker]). Pairs MUST be in chronological order
+    at the call site (we don't re-sort here — for ALL mode the caller iterates
+    per-ticker chronologically).
+
+    For each pair, the running per-history rank is computed via bisect_left
+    against a sorted list of prior x values. After the per-history count
+    reaches `max(warmup, max(n_bins_list))`, the bin is emitted as
+    `min(int(rank / n_after * n_bins) + 1, n_bins)`. Pairs in warmup are
+    skipped.
+
+    Returns:
+      assignments: list of (pair, {n_bins: bin_int}) for pairs that cleared
+                   warmup, in the chronological order they were provided.
+      dropped_warmup_n: count of pairs that didn't clear warmup.
+    """
+    import bisect
+    max_bins = max(n_bins_list)
+    warm = max(int(warmup), int(max_bins))
+    assignments: list = []
+    dropped = 0
+    sorted_vals: list = []
+    for pair in pairs:
+        val = pair[0]
+        rank = bisect.bisect_left(sorted_vals, val)
+        bisect.insort(sorted_vals, val)
+        n_after = len(sorted_vals)
+        if n_after < warm:
+            dropped += 1
+            continue
+        bins_for_pair = {nb: min(int(rank / n_after * nb) + 1, nb) for nb in n_bins_list}
+        assignments.append((pair, bins_for_pair))
+    return assignments, dropped
+
+
+def _walk_forward_bucket_per_ticker(by_ticker, n_bins_list,
+                                    warmup=None) -> tuple:
+    """Walk-forward equivalent of `_bucket_pairs_per_ticker`.
+
+    For each ticker, walks the pairs chronologically (sorted by trade_date)
+    and emits walk-forward bin assignments at every requested granularity in
+    a single bisect_left pass. Pairs whose per-ticker history hasn't reached
+    `max(warmup, max(n_bins_list))` are dropped.
+
+    Returns:
+      buckets_per_granularity: dict {n_bins: list of n_bins buckets, each a
+                                     list of pair tuples assigned to that bin}
+      assignments_chrono: list of (pair, {n_bins: bin_int}) sorted
+                          chronologically across all tickers — convenient for
+                          building `pairs_with_d`-style structures downstream.
+      dropped_warmup_n: total count of pairs dropped to warmup (across all
+                        tickers).
+    """
+    if warmup is None:
+        warmup = _DEFAULT_WALKFWD_WARMUP
+    buckets_by_n: dict = {nb: [[] for _ in range(nb)] for nb in n_bins_list}
+    all_assignments: list = []
+    dropped = 0
+    for tkr_pairs in by_ticker.values():
+        chrono = sorted(tkr_pairs, key=lambda p: p[2])
+        a_t, d_t = _walk_forward_bucket_pairs(chrono, n_bins_list, warmup)
+        dropped += d_t
+        all_assignments.extend(a_t)
+        for pair, bins_for_pair in a_t:
+            for nb, b in bins_for_pair.items():
+                buckets_by_n[nb][b - 1].append(pair)
+    # Sort chronologically across tickers (pair[2] is the date)
+    all_assignments.sort(key=lambda ab: ab[0][2])
+    return buckets_by_n, all_assignments, dropped
+
+
 def _compute_bucket_stats(buckets: list) -> list:
     """Compute per-bucket stats for any list of buckets (10-bin or 20-bin)."""
     result = []
@@ -125,6 +199,7 @@ async def analyze(
     outcome: str = Query(...),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    walk_forward: bool = Query(False),
     pool=Depends(get_oi_pool),
 ):
     """Full analysis payload for one ticker/metric/outcome combo."""
@@ -176,23 +251,37 @@ async def analyze(
                 except (ValueError, TypeError):
                     pass
 
-        buckets = _bucket_pairs_per_ticker(by_ticker, 10)
-        buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
+        if walk_forward:
+            # Walk-forward bin assignment per ticker. Both 10-bin and 20-bin
+            # bucketing computed in one bisect pass per ticker. Warmup rows
+            # (per-ticker history < 252) are dropped.
+            buckets_by_n, wf_assignments, wf_dropped = _walk_forward_bucket_per_ticker(
+                by_ticker, [10, 20]
+            )
+            buckets        = buckets_by_n[10]
+            buckets_20_all = buckets_by_n[20]
+            pairs          = [a[0]        for a in wf_assignments]
+            pairs_decile   = [a[1][10]    for a in wf_assignments]
+            pairs_decile20 = [a[1][20]    for a in wf_assignments]
+        else:
+            buckets = _bucket_pairs_per_ticker(by_ticker, 10)
+            buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
+            wf_dropped = 0
 
-        # pairs + parallel decile lists from pre-assigned buckets
-        pairs_with_d = sorted(
-            [(p, i + 1) for i, bucket in enumerate(buckets) for p in bucket],
-            key=lambda x: x[0][2]  # chronological
-        )
-        pairs = [pd[0] for pd in pairs_with_d]
-        pairs_decile = [pd[1] for pd in pairs_with_d]
+            # pairs + parallel decile lists from pre-assigned buckets
+            pairs_with_d = sorted(
+                [(p, i + 1) for i, bucket in enumerate(buckets) for p in bucket],
+                key=lambda x: x[0][2]  # chronological
+            )
+            pairs = [pd[0] for pd in pairs_with_d]
+            pairs_decile = [pd[1] for pd in pairs_with_d]
 
-        # 20-bin per-ticker normalization (same pattern, 20 buckets)
-        pair_to_dec20: dict = {}
-        for bin_idx, bucket in enumerate(buckets_20_all):
-            for p in bucket:
-                pair_to_dec20[id(p)] = bin_idx + 1
-        pairs_decile20 = [pair_to_dec20.get(id(pd[0]), 0) for pd in pairs_with_d]
+            # 20-bin per-ticker normalization (same pattern, 20 buckets)
+            pair_to_dec20: dict = {}
+            for bin_idx, bucket in enumerate(buckets_20_all):
+                for p in bucket:
+                    pair_to_dec20[id(p)] = bin_idx + 1
+            pairs_decile20 = [pair_to_dec20.get(id(pd[0]), 0) for pd in pairs_with_d]
 
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
@@ -246,18 +335,33 @@ async def analyze(
         row_dicts = [dict(r) for r in rows]
         pairs = _clean_pairs(row_dicts, metric, outcome)
 
-        buckets = _bucket_pairs(pairs, 10)
-        buckets_20 = _bucket_pairs(pairs, 20)
+        if walk_forward:
+            # pairs is already chronological (SELECT ORDER BY trade_date).
+            wf_assignments, wf_dropped = _walk_forward_bucket_pairs(
+                pairs, [10, 20], _DEFAULT_WALKFWD_WARMUP
+            )
+            buckets    = [[] for _ in range(10)]
+            buckets_20 = [[] for _ in range(20)]
+            for pair, bins_for_pair in wf_assignments:
+                buckets[bins_for_pair[10] - 1].append(pair)
+                buckets_20[bins_for_pair[20] - 1].append(pair)
+            pairs          = [a[0]      for a in wf_assignments]
+            pairs_decile   = [a[1][10]  for a in wf_assignments]
+            pairs_decile20 = [a[1][20]  for a in wf_assignments]
+        else:
+            buckets = _bucket_pairs(pairs, 10)
+            buckets_20 = _bucket_pairs(pairs, 20)
+            wf_dropped = 0
 
-        # Build decile assignments from flat rank order
-        sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
-        dm: dict = {}
-        dm20: dict = {}
-        for rank, idx in enumerate(sorted_by_x):
-            dm[idx]   = min(int(rank / len(pairs) * 10) + 1, 10)
-            dm20[idx] = min(int(rank / len(pairs) * 20) + 1, 20)
-        pairs_decile   = [dm[i]   for i in range(len(pairs))]
-        pairs_decile20 = [dm20[i] for i in range(len(pairs))]
+            # Build decile assignments from flat rank order
+            sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
+            dm: dict = {}
+            dm20: dict = {}
+            for rank, idx in enumerate(sorted_by_x):
+                dm[idx]   = min(int(rank / len(pairs) * 10) + 1, 10)
+                dm20[idx] = min(int(rank / len(pairs) * 20) + 1, 20)
+            pairs_decile   = [dm[i]   for i in range(len(pairs))]
+            pairs_decile20 = [dm20[i] for i in range(len(pairs))]
 
         decile_stats_20 = _compute_bucket_stats(buckets_20)
         by_ticker = None  # not needed in single-ticker mode
@@ -638,6 +742,14 @@ async def analyze(
         "today_percentile": today_pct,
         "today_decile":     today_decile,
         "latest_date":      str(pairs[-1][2]) if pairs else None,
+
+        # Walk-forward metadata (in-sample mode → mode='in_sample',
+        # warmup=None, dropped_warmup_n=0; consumers use it to render the
+        # WALK-FORWARD subtitle on the primary chart).
+        "mode":             "walk_forward" if walk_forward else "in_sample",
+        "warmup":           _DEFAULT_WALKFWD_WARMUP if walk_forward else None,
+        "dropped_warmup_n": wf_dropped,
+        "start_date":       str(pairs[0][2]) if pairs else None,
     }
 
 
