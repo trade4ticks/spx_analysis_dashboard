@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=64"></script>
+  <script src="/static/js/oi_analysis.js?v=65"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -271,6 +271,22 @@
               <option :value="o" x-text="o"></option>
             </template>
           </select>
+          <span style="font-size:10px;color:var(--dim)">Mode:</span>
+          <select x-model="tdMode" @change="_renderTdChart()"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                         font-size:10px;padding:2px 6px;border-radius:3px">
+            <option value="ratio">Drift ratio (all tickers)</option>
+            <option value="native_single">Native units (one ticker)</option>
+          </select>
+          <template x-if="tdMode === 'native_single'">
+            <select x-model="tdSingleTicker" @change="_renderTdChart()"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:10px;padding:2px 6px;border-radius:3px;max-width:120px">
+              <template x-for="t in (tdData?.tickers_eligible || [])" :key="'tdt-'+t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+          </template>
           <span style="font-size:10px;color:var(--dim)">Bins:</span>
           <template x-for="b in [1,5,10,15,20]" :key="'tdb-'+b">
             <span style="padding:1px 6px;font-size:9px;border-radius:3px;cursor:pointer;font-family:monospace;border:1px solid"

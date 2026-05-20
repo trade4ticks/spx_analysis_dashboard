@@ -1721,18 +1721,28 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
     """Time-series of per-ticker bin-K UPPER thresholds at month-end.
 
     Returns:
-      - samples: list of {date, bin, threshold, ticker} — one record per
-        (last-trading-day-of-month, ticker, bin K in bins_to_track).
-      - full_thresholds: {bin: [per-ticker in-sample thresholds]} — the
-        end-of-history reference values used for the dotted line per bin.
+      - samples: list of {date, bin, ticker, threshold,
+                          threshold_full_ticker} — one record per
+        (last-trading-day-of-month, ticker, bin K). `threshold_full_ticker`
+        is the SAME ticker's full-history bin K threshold (so the caller
+        can compute a dimensionless ratio without needing a separate
+        lookup).
+      - full_per_ticker: {ticker: {bin: full_history_threshold}}.
+      - full_thresholds: {bin: [per-ticker in-sample thresholds]} — list
+        across tickers (useful for the dotted reference line on native
+        mode).
 
-    Rows must already be sorted (ticker, trade_date). Per ticker, we
-    walk values chronologically with bisect.insort; at each month
-    boundary we sample np.quantile(sorted_vals, K/n_bins) for each K.
+    Rows must already be sorted (ticker, trade_date). Per ticker, walk
+    values chronologically with bisect.insort; at each month boundary
+    sample np.quantile(sorted_vals, K/n_bins) per K. After the walk
+    completes for that ticker, the final sorted list yields the
+    full-history threshold per bin which we attach to every prior
+    sample for that ticker.
     """
     import bisect
     samples: list = []
     full_thresholds: dict = {b: [] for b in bins_to_track}
+    full_per_ticker: dict = {}
     n_bins = max(2, min(20, int(n_bins)))
     warm = max(int(warmup), n_bins)
 
@@ -1754,17 +1764,17 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
         sorted_vals: list = []
         last_month: str = ""
         last_date_in_prev_month: str = ""
+        # Collect this ticker's samples here so we can attach
+        # full-history thresholds at the end of the ticker's walk.
+        tkr_samples: list = []
         for date_s, val in items:
             month = date_s[:7]  # YYYY-MM
             if last_month and month != last_month:
-                # We just crossed from last_month → month; snapshot the
-                # state BEFORE adding val (so we're measuring as-of the
-                # last date of last_month).
                 n = len(sorted_vals)
                 if n >= warm:
                     for b in bins_to_track:
                         thr = float(np.quantile(sorted_vals, b / n_bins))
-                        samples.append({
+                        tkr_samples.append({
                             "date":      last_date_in_prev_month,
                             "bin":       b,
                             "ticker":    tkr,
@@ -1779,20 +1789,29 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
         if n >= warm and last_date_in_prev_month:
             for b in bins_to_track:
                 thr = float(np.quantile(sorted_vals, b / n_bins))
-                samples.append({
+                tkr_samples.append({
                     "date":      last_date_in_prev_month,
                     "bin":       b,
                     "ticker":    tkr,
                     "threshold": round(thr, 6),
                 })
 
-        # Full-history reference per ticker.
+        # Full-history reference per ticker. Now attach to all of this
+        # ticker's samples so the endpoint can compute drift ratios
+        # without a separate lookup.
+        ticker_full = {}
         if len(sorted_vals) >= n_bins:
             for b in bins_to_track:
-                full_thresholds[b].append(
-                    float(np.quantile(sorted_vals, b / n_bins)))
+                full_v = float(np.quantile(sorted_vals, b / n_bins))
+                ticker_full[b] = full_v
+                full_thresholds[b].append(full_v)
+        full_per_ticker[tkr] = ticker_full
+        for s in tkr_samples:
+            s["threshold_full_ticker"] = round(ticker_full.get(s["bin"], 0.0), 6) \
+                if s["bin"] in ticker_full else None
+        samples.extend(tkr_samples)
 
-    return samples, full_thresholds
+    return samples, full_per_ticker, full_thresholds
 
 
 class SecLoadReq(BaseModel):
@@ -2608,47 +2627,95 @@ async def threshold_drift(
         for r in rows:
             r["trade_date"] = str(r["trade_date"])
 
-        samples, full_thr = _walk_forward_thresholds(
+        samples, full_per_ticker, full_thr = _walk_forward_thresholds(
             rows, metric, n_bins, bins_to_track,
             warmup=_DEFAULT_WALKFWD_WARMUP)
 
-        # Aggregate samples across tickers per (date, bin).
-        # For ALL mode return median + q25 + q75 + n_tickers.
-        # For single-ticker mode the median == the only ticker's value.
+        # Tickers with enough full history to participate. Sort for the
+        # frontend single-ticker dropdown.
+        tickers_eligible = sorted(t for t, m in full_per_ticker.items() if m)
+
         from collections import defaultdict as _dd
-        grouped: dict = _dd(lambda: _dd(list))   # date -> bin -> [thresholds]
+
+        # ── Native (raw threshold values) aggregation — kept for the
+        # Single-ticker view where dimensionality is consistent.
+        grouped_native: dict = _dd(lambda: _dd(list))
         for s in samples:
-            grouped[s["date"]][s["bin"]].append(s["threshold"])
+            grouped_native[s["date"]][s["bin"]].append(s["threshold"])
 
-        series: dict = {str(b): [] for b in bins_to_track}
-        for date_s in sorted(grouped.keys()):
-            for b in bins_to_track:
-                vals = grouped[date_s].get(b, [])
-                if not vals:
-                    continue
-                series[str(b)].append({
-                    "date":      date_s,
-                    "median":    round(float(np.median(vals)), 6),
-                    "q25":       round(float(np.percentile(vals, 25)), 6),
-                    "q75":       round(float(np.percentile(vals, 75)), 6),
-                    "n_tickers": int(len(vals)),
-                })
+        # ── Drift-ratio aggregation — for each sample, divide its
+        # walk-forward threshold by its OWN ticker's full-history
+        # threshold (dimensionless). Aggregate ratios across tickers.
+        # This is the meaningful all-tickers view.
+        grouped_ratio: dict = _dd(lambda: _dd(list))
+        for s in samples:
+            full = s.get("threshold_full_ticker")
+            if full is None:
+                continue
+            if abs(full) < 1e-10:
+                continue   # avoid divide-by-near-zero (metrics that cross zero)
+            grouped_ratio[s["date"]][s["bin"]].append(s["threshold"] / full)
 
-        in_sample_ref: dict = {}
+        def _aggregate(grouped):
+            series_out = {str(b): [] for b in bins_to_track}
+            for date_s in sorted(grouped.keys()):
+                for b in bins_to_track:
+                    vals = grouped[date_s].get(b, [])
+                    if not vals:
+                        continue
+                    series_out[str(b)].append({
+                        "date":      date_s,
+                        "median":    round(float(np.median(vals)), 6),
+                        "q25":       round(float(np.percentile(vals, 25)), 6),
+                        "q75":       round(float(np.percentile(vals, 75)), 6),
+                        "n_tickers": int(len(vals)),
+                    })
+            return series_out
+
+        series_native = _aggregate(grouped_native)
+        series_ratio  = _aggregate(grouped_ratio)
+
+        # ── Per-ticker series (for the Single-ticker native view).
+        # Map: ticker -> {bin: [{date, threshold}, ...]}
+        per_ticker_series: dict = {}
+        for s in samples:
+            tkr = s["ticker"]
+            per_ticker_series.setdefault(tkr, {}).setdefault(str(s["bin"]), []).append({
+                "date":      s["date"],
+                "threshold": s["threshold"],
+            })
+
+        # Reference values for the dotted horizontal lines:
+        #   native_ref: median of per-ticker full-history thresholds per bin
+        #   ratio_ref:  1.0 (always)
+        native_ref: dict = {}
         for b in bins_to_track:
             vals = full_thr.get(b) or []
-            in_sample_ref[str(b)] = round(float(np.median(vals)), 6) if vals else None
+            native_ref[str(b)] = round(float(np.median(vals)), 6) if vals else None
+
+        full_per_ticker_out = {
+            t: {str(k): round(float(v), 6) for k, v in m.items()}
+            for t, m in full_per_ticker.items() if m
+        }
 
         out = {
-            "metric":         metric,
-            "outcome":        outcome,
-            "ticker":         ticker,
-            "n_bins":         n_bins,
-            "bins":           bins_to_track,
-            "warmup":         _DEFAULT_WALKFWD_WARMUP,
-            "total_rows":     len(rows),
-            "series":         series,
-            "in_sample_ref":  in_sample_ref,
+            "metric":           metric,
+            "outcome":          outcome,
+            "ticker":           ticker,
+            "n_bins":           n_bins,
+            "bins":             bins_to_track,
+            "warmup":           _DEFAULT_WALKFWD_WARMUP,
+            "total_rows":       len(rows),
+            "tickers_eligible": tickers_eligible,
+            # Drift ratio (dimensionless; default view across tickers)
+            "series_ratio":     series_ratio,
+            "ratio_ref":        1.0,
+            # Native units (raw threshold values)
+            "series_native":    series_native,
+            "native_ref":       native_ref,
+            # Per-ticker raw series — used by the Single-ticker view
+            "per_ticker":       per_ticker_series,
+            "per_ticker_full":  full_per_ticker_out,
         }
         _THRESHOLD_DRIFT_CACHE[cache_key] = out
         return out
@@ -2657,8 +2724,13 @@ async def threshold_drift(
             "error":   f"{type(exc).__name__}: {exc}",
             "metric":  metric, "outcome": outcome, "ticker": ticker,
             "bins":    bins_to_track,
-            "series":  {str(b): [] for b in bins_to_track},
-            "in_sample_ref": {str(b): None for b in bins_to_track},
+            "series_ratio":  {str(b): [] for b in bins_to_track},
+            "series_native": {str(b): [] for b in bins_to_track},
+            "ratio_ref":     1.0,
+            "native_ref":    {str(b): None for b in bins_to_track},
+            "tickers_eligible": [],
+            "per_ticker":       {},
+            "per_ticker_full":  {},
         }
 
 

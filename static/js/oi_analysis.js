@@ -94,12 +94,14 @@ document.addEventListener('alpine:init', () => {
     topBinsOutcome:  'ret_5d_fwd_oc',
 
     // Threshold Drift (walk-forward bin boundaries over time)
-    tdExpanded:    false,
-    tdLoading:     false,
-    tdData:        null,
-    tdMetric:      '',
-    tdOutcome:     'ret_5d_fwd_oc',
-    tdBinsToShow:  [1, 20],
+    tdExpanded:     false,
+    tdLoading:      false,
+    tdData:         null,
+    tdMetric:       '',
+    tdOutcome:      'ret_5d_fwd_oc',
+    tdBinsToShow:   [1, 20],
+    tdMode:         'ratio',   // 'ratio' (all tickers, dimensionless) | 'native_single'
+    tdSingleTicker: '',
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -121,17 +123,15 @@ document.addEventListener('alpine:init', () => {
         this.outcomes = cols.outcomes || [];
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
-        // All-Ticker Metric Bins should ALWAYS default to ret_5d_fwd_oc
-        // when it exists in the column set. Pin explicitly here so the
-        // dropdown's x-model doesn't fall back to outcomes[0] (often
-        // ret_1d_fwd_*) when options render after init.
-        if (this.outcomes.includes('ret_5d_fwd_oc')) {
-          this.topBinsOutcome = 'ret_5d_fwd_oc';
-          this.tdOutcome      = 'ret_5d_fwd_oc';
-        } else if (this.outcomes.length) {
-          this.topBinsOutcome = this.outcomes[0];
-          this.tdOutcome      = this.outcomes[0];
-        }
+        // ALWAYS prefer ret_5d_fwd_oc for the standalone analysis panes
+        // — user has asked for 5d as their default multiple times. Pin
+        // explicitly here so Alpine's x-model doesn't fall back to
+        // outcomes[0] when options arrive after init. Fall back to the
+        // first outcome only if the preferred column isn't present.
+        const _preferred = 'ret_5d_fwd_oc';
+        const _pick = this.outcomes.includes(_preferred) ? _preferred : (this.outcomes[0] || '');
+        this.topBinsOutcome = _pick;
+        this.tdOutcome      = _pick;
         // Pre-fill Threshold Drift's metric picker with the first feature.
         if (this.features.length && !this.tdMetric) this.tdMetric = this.features[0];
       }
@@ -2582,7 +2582,7 @@ document.addEventListener('alpine:init', () => {
 
     // Threshold Drift (walk-forward bin boundaries over time)
     get tdHasSeries() {
-      const s = this.tdData?.series || {};
+      const s = this.tdData?.series_ratio || this.tdData?.series_native || {};
       return Object.values(s).some(arr => Array.isArray(arr) && arr.length > 0);
     },
 
@@ -2640,11 +2640,39 @@ document.addEventListener('alpine:init', () => {
 
     _renderTdChart() {
       const canvas = document.getElementById('chart-threshold-drift');
-      if (!canvas || !this.tdData?.series) return;
+      if (!canvas || !this.tdData) return;
       if (this._charts['td']) { this._charts['td'].destroy(); delete this._charts['td']; }
-      // Union of all dates across bins (each bin's series is sorted ascending).
-      const series = this.tdData.series || {};
-      const inRef  = this.tdData.in_sample_ref || {};
+
+      // ── Select series + reference per the active mode ────────────────
+      // Mode 'ratio' (default): aggregate per-ticker drift ratios (walk-forward
+      // threshold / that ticker's full-history threshold). Dimensionless; the
+      // reference line is at 1.0 ("matches today's threshold").
+      // Mode 'native_single': raw threshold values for ONE picked ticker.
+      // Y-axis label and reference values differ per mode.
+      const mode = this.tdMode || 'ratio';
+      let series, refValues, yLabel;
+      if (mode === 'native_single') {
+        // Materialise this single ticker's per-bin time series in the same
+        // shape as the aggregated series so the chart code below is shared.
+        const t = this.tdSingleTicker || (this.tdData.tickers_eligible || [])[0];
+        if (t && !this.tdSingleTicker) this.tdSingleTicker = t;
+        const tkrData = this.tdData.per_ticker?.[t] || {};
+        const tkrFull = this.tdData.per_ticker_full?.[t] || {};
+        series = {};
+        refValues = {};
+        for (const b of (this.tdData.bins || [])) {
+          const arr = tkrData[String(b)] || [];
+          series[String(b)] = arr.map(p => ({ date: p.date, median: p.threshold }));
+          refValues[String(b)] = tkrFull[String(b)] ?? null;
+        }
+        yLabel = `Threshold value (${t || '?'})`;
+      } else {
+        series    = this.tdData.series_ratio || {};
+        refValues = {};
+        for (const b of (this.tdData.bins || [])) refValues[String(b)] = 1.0;
+        yLabel = "× today's full-history threshold (1.0 = stable)";
+      }
+
       const dateSet = new Set();
       for (const arr of Object.values(series)) for (const p of arr) dateSet.add(p.date);
       const dates = [...dateSet].sort();
@@ -2663,44 +2691,35 @@ document.addEventListener('alpine:init', () => {
       };
 
       // Build datasets: per bin → median line + IQR band (filled between q25/q75).
+      // In native_single mode there are no q25/q75 — just the single value.
       const datasets = [];
       const bins = (this.tdData.bins || []);
+      const showBand = mode === 'ratio';
       for (const b of bins) {
         const arr = series[String(b)] || [];
         if (!arr.length) continue;
         const byDate = Object.fromEntries(arr.map(p => [p.date, p]));
         const [stroke, fill] = binColor(b);
         const mid = dates.map(d => (d in byDate) ? +(byDate[d].median).toFixed(6) : null);
-        const lo  = dates.map(d => (d in byDate) ? +(byDate[d].q25).toFixed(6)    : null);
-        const hi  = dates.map(d => (d in byDate) ? +(byDate[d].q75).toFixed(6)    : null);
-        // The IQR shaded band is the area between q75 (top) and q25 (bottom).
-        // Chart.js trick: two line datasets, the second filled '-1' to the first.
+        if (showBand) {
+          const lo = dates.map(d => (d in byDate && byDate[d].q25 != null) ? +(byDate[d].q25).toFixed(6) : null);
+          const hi = dates.map(d => (d in byDate && byDate[d].q75 != null) ? +(byDate[d].q75).toFixed(6) : null);
+          datasets.push({
+            label: `B${b} q75`,
+            data:  hi,
+            borderColor: 'transparent', backgroundColor: 'transparent',
+            pointRadius: 0, fill: false, tension: 0, spanGaps: true,
+          });
+          datasets.push({
+            label: `B${b} band`,
+            data:  lo,
+            borderColor: 'transparent', backgroundColor: fill,
+            pointRadius: 0, fill: '-1', tension: 0, spanGaps: true,
+          });
+        }
         datasets.push({
-          label:  `B${b} q75`,
-          data:   hi,
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          pointRadius: 0,
-          fill: false,
-          tension: 0,
-          spanGaps: true,
-          // Don't show in legend or tooltip — pure scaffold for the band fill.
-          _hidden: true,
-        });
-        datasets.push({
-          label:  `B${b} band`,
-          data:   lo,
-          borderColor: 'transparent',
-          backgroundColor: fill,
-          pointRadius: 0,
-          fill: '-1',
-          tension: 0,
-          spanGaps: true,
-          _hidden: true,
-        });
-        datasets.push({
-          label:  `B${b} (median)`,
-          data:   mid,
+          label: showBand ? `B${b} (median)` : `B${b}`,
+          data:  mid,
           borderColor: stroke,
           backgroundColor: stroke,
           pointRadius: 0,
@@ -2713,10 +2732,7 @@ document.addEventListener('alpine:init', () => {
 
       this._charts['td'] = new Chart(canvas.getContext('2d'), {
         type: 'line',
-        data: {
-          labels: dates,
-          datasets,
-        },
+        data: { labels: dates, datasets },
         plugins: [{
           id: 'inSampleRefs',
           afterDraw: (chart) => {
@@ -2725,7 +2741,7 @@ document.addEventListener('alpine:init', () => {
             if (!yScale || !xScale) return;
             const ctx = chart.ctx;
             for (const b of bins) {
-              const ref = inRef[String(b)];
+              const ref = refValues[String(b)];
               if (ref == null) continue;
               const [stroke] = binColor(b);
               const y = yScale.getPixelForValue(ref);
@@ -2743,7 +2759,8 @@ document.addEventListener('alpine:init', () => {
               ctx.font = '9px sans-serif';
               ctx.textAlign = 'right';
               ctx.textBaseline = 'bottom';
-              ctx.fillText(`B${b} now=${ref.toFixed(4)}`, xScale.right - 4, y - 1);
+              const fmt = (mode === 'ratio') ? ref.toFixed(2) + 'x' : ref.toFixed(4);
+              ctx.fillText(`B${b} now=${fmt}`, xScale.right - 4, y - 1);
               ctx.restore();
             }
           },
@@ -2774,7 +2791,7 @@ document.addEventListener('alpine:init', () => {
             x: { ...this._darkScales().x,
                  ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
             y: { ...this._darkScales().y,
-                 title: { display: true, text: 'Threshold value',
+                 title: { display: true, text: yLabel,
                           color: '#888', font: { size: 9 } } },
           },
         },
