@@ -188,7 +188,7 @@ async def list_columns(pool=Depends(get_oi_pool)):
                ORDER BY ordinal_position""")
     all_cols = [r["column_name"] for r in rows]
     outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
-    features = [c for c in all_cols if c not in outcomes]
+    features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
     return {"features": features, "outcomes": outcomes}
 
 
@@ -1997,7 +1997,8 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         all_num_cols = [r["column_name"] for r in col_rows]
         outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
         feature_cols = [c for c in all_num_cols
-                        if c not in outcome_cols_all and c != req.metric and not c.startswith("spot")]
+                        if c not in outcome_cols_all and c != req.metric
+                        and not c.startswith("spot") and not c.endswith("_pc")]
 
         # Pull req.metric, spot_co, spot_pc alongside the features so the CSV /
         # trade-record builders can populate primary_val + spot_entry + spot_exit.
@@ -2907,7 +2908,8 @@ async def global_metric_bins(
         all_num_cols = [r["column_name"] for r in col_rows]
         outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
         feature_cols = [c for c in all_num_cols
-                        if c not in outcome_cols_all and not c.startswith("spot")]
+                        if c not in outcome_cols_all
+                        and not c.startswith("spot") and not c.endswith("_pc")]
 
         select_cols = ", ".join(["ticker", "trade_date", outcome] + feature_cols)
         async with pool.acquire() as conn:
