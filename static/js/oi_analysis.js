@@ -93,6 +93,14 @@ document.addEventListener('alpine:init', () => {
     topBinsData:     null,
     topBinsOutcome:  'ret_5d_fwd_oc',
 
+    // Threshold Drift (walk-forward bin boundaries over time)
+    tdExpanded:    false,
+    tdLoading:     false,
+    tdData:        null,
+    tdMetric:      '',
+    tdOutcome:     'ret_5d_fwd_oc',
+    tdBinsToShow:  [1, 20],
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -119,9 +127,13 @@ document.addEventListener('alpine:init', () => {
         // ret_1d_fwd_*) when options render after init.
         if (this.outcomes.includes('ret_5d_fwd_oc')) {
           this.topBinsOutcome = 'ret_5d_fwd_oc';
+          this.tdOutcome      = 'ret_5d_fwd_oc';
         } else if (this.outcomes.length) {
           this.topBinsOutcome = this.outcomes[0];
+          this.tdOutcome      = this.outcomes[0];
         }
+        // Pre-fill Threshold Drift's metric picker with the first feature.
+        if (this.features.length && !this.tdMetric) this.tdMetric = this.features[0];
       }
       // Load score matrix (independent of analysis)
       this.smInit();
@@ -246,10 +258,11 @@ document.addEventListener('alpine:init', () => {
 
     _destroyCharts() {
       // Preserve charts that aren't tied to the primary analysis — Score
-      // Matrix bars (sm-*) and System Portfolio visuals (port-*) live
-      // independently and shouldn't blank out every time Analyze runs.
+      // Matrix bars (sm-*), System Portfolio visuals (port-*), and the
+      // top-of-page Threshold Drift line (td) live independently and
+      // shouldn't blank out every time Analyze runs.
       for (const k of Object.keys(this._charts)) {
-        if (k.startsWith('sm-') || k.startsWith('port-')) continue;
+        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td') continue;
         this._charts[k].destroy();
         delete this._charts[k];
       }
@@ -2565,6 +2578,207 @@ document.addEventListener('alpine:init', () => {
       else if (key === 'sec')  this._renderSecActivity();
       else if (key === 'corr') this._renderCorrActivity();
       else if (key === 'port') this._renderPortActivity();
+    },
+
+    // Threshold Drift (walk-forward bin boundaries over time)
+    get tdHasSeries() {
+      const s = this.tdData?.series || {};
+      return Object.values(s).some(arr => Array.isArray(arr) && arr.length > 0);
+    },
+
+    tdToggleBin(b) {
+      const i = this.tdBinsToShow.indexOf(b);
+      if (i >= 0) this.tdBinsToShow.splice(i, 1);
+      else        this.tdBinsToShow.push(b);
+      this.tdBinsToShow = [...this.tdBinsToShow].sort((a, b) => a - b);
+      if (this.tdData) this.loadTd(true);
+    },
+
+    async toggleTd() {
+      this.tdExpanded = !this.tdExpanded;
+      if (this.tdExpanded && this.tdMetric && !this.tdData) {
+        await this.loadTd();
+      }
+      // Re-render even if data was already loaded — the canvas may have
+      // been hidden by the x-if.
+      this.$nextTick(() => this._renderTdChart());
+    },
+
+    async loadTd(forceRefresh = false) {
+      if (!this.tdMetric || !this.tdBinsToShow.length) return;
+      this.tdLoading = true;
+      try {
+        if (forceRefresh) {
+          try {
+            await fetch('/api/oi-analysis/threshold-drift/invalidate', { method: 'POST' });
+          } catch (_) {}
+        }
+        const params = new URLSearchParams({
+          metric:  this.tdMetric,
+          outcome: this.tdOutcome || 'ret_5d_fwd_oc',
+          ticker:  'ALL',
+          n_bins:  '20',
+          bins:    this.tdBinsToShow.join(','),
+        });
+        const r = await fetch('/api/oi-analysis/threshold-drift?' + params);
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          this.tdData = { error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}`,
+                          series: {}, in_sample_ref: {} };
+          return;
+        }
+        this.tdData = await r.json();
+        await this.$nextTick();
+        this._renderTdChart();
+      } catch (e) {
+        console.error('loadTd', e);
+        this.tdData = { error: e.message, series: {}, in_sample_ref: {} };
+      } finally {
+        this.tdLoading = false;
+      }
+    },
+
+    _renderTdChart() {
+      const canvas = document.getElementById('chart-threshold-drift');
+      if (!canvas || !this.tdData?.series) return;
+      if (this._charts['td']) { this._charts['td'].destroy(); delete this._charts['td']; }
+      // Union of all dates across bins (each bin's series is sorted ascending).
+      const series = this.tdData.series || {};
+      const inRef  = this.tdData.in_sample_ref || {};
+      const dateSet = new Set();
+      for (const arr of Object.values(series)) for (const p of arr) dateSet.add(p.date);
+      const dates = [...dateSet].sort();
+      if (!dates.length) return;
+
+      // Color palette per bin (consistent regardless of selection order).
+      const binColor = (b) => {
+        const map = {
+          1:  ['#e84393', 'rgba(232,67,147,0.18)'],
+          5:  ['#f39c12', 'rgba(243,156,18,0.18)'],
+          10: ['#95a5a6', 'rgba(149,165,166,0.18)'],
+          15: ['#1abc9c', 'rgba(26,188,156,0.18)'],
+          20: ['#3498db', 'rgba(52,152,219,0.18)'],
+        };
+        return map[b] || ['#aaa', 'rgba(170,170,170,0.18)'];
+      };
+
+      // Build datasets: per bin → median line + IQR band (filled between q25/q75).
+      const datasets = [];
+      const bins = (this.tdData.bins || []);
+      for (const b of bins) {
+        const arr = series[String(b)] || [];
+        if (!arr.length) continue;
+        const byDate = Object.fromEntries(arr.map(p => [p.date, p]));
+        const [stroke, fill] = binColor(b);
+        const mid = dates.map(d => (d in byDate) ? +(byDate[d].median).toFixed(6) : null);
+        const lo  = dates.map(d => (d in byDate) ? +(byDate[d].q25).toFixed(6)    : null);
+        const hi  = dates.map(d => (d in byDate) ? +(byDate[d].q75).toFixed(6)    : null);
+        // The IQR shaded band is the area between q75 (top) and q25 (bottom).
+        // Chart.js trick: two line datasets, the second filled '-1' to the first.
+        datasets.push({
+          label:  `B${b} q75`,
+          data:   hi,
+          borderColor: 'transparent',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          spanGaps: true,
+          // Don't show in legend or tooltip — pure scaffold for the band fill.
+          _hidden: true,
+        });
+        datasets.push({
+          label:  `B${b} band`,
+          data:   lo,
+          borderColor: 'transparent',
+          backgroundColor: fill,
+          pointRadius: 0,
+          fill: '-1',
+          tension: 0,
+          spanGaps: true,
+          _hidden: true,
+        });
+        datasets.push({
+          label:  `B${b} (median)`,
+          data:   mid,
+          borderColor: stroke,
+          backgroundColor: stroke,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          tension: 0,
+          spanGaps: true,
+          fill: false,
+        });
+      }
+
+      this._charts['td'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: dates,
+          datasets,
+        },
+        plugins: [{
+          id: 'inSampleRefs',
+          afterDraw: (chart) => {
+            const yScale = chart.scales.y;
+            const xScale = chart.scales.x;
+            if (!yScale || !xScale) return;
+            const ctx = chart.ctx;
+            for (const b of bins) {
+              const ref = inRef[String(b)];
+              if (ref == null) continue;
+              const [stroke] = binColor(b);
+              const y = yScale.getPixelForValue(ref);
+              ctx.save();
+              ctx.strokeStyle = stroke;
+              ctx.globalAlpha = 0.6;
+              ctx.lineWidth = 1;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(xScale.left,  y);
+              ctx.lineTo(xScale.right, y);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.fillStyle = stroke;
+              ctx.font = '9px sans-serif';
+              ctx.textAlign = 'right';
+              ctx.textBaseline = 'bottom';
+              ctx.fillText(`B${b} now=${ref.toFixed(4)}`, xScale.right - 4, y - 1);
+              ctx.restore();
+            }
+          },
+        }],
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: {
+              labels: {
+                color: '#aaa', font: { size: 10 },
+                filter: (item) => !item.text.includes('q75') && !item.text.includes('band'),
+              },
+            },
+            tooltip: {
+              mode: 'index', intersect: false,
+              filter: (item) => !item.dataset.label.includes('q75') && !item.dataset.label.includes('band'),
+              callbacks: {
+                title: ctx => dates[ctx[0]?.dataIndex] || '',
+                label: ctx => {
+                  if (ctx.raw == null) return '';
+                  return `${ctx.dataset.label}: ${ctx.raw.toFixed(4)}`;
+                },
+              },
+            },
+          },
+          scales: {
+            ...this._darkScales(),
+            x: { ...this._darkScales().x,
+                 ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
+            y: { ...this._darkScales().y,
+                 title: { display: true, text: 'Threshold value',
+                          color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
     },
 
     // All-Ticker Metric Bins (top-of-page collapsable browser)

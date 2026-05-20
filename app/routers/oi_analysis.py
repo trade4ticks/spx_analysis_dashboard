@@ -1633,6 +1633,168 @@ def _bin_for_value(value, history_values: list, n_bins: int):
     return min(int(rank / n * n_bins) + 1, n_bins)
 
 
+# ── Walk-forward bin primitives ──────────────────────────────────────────
+# These are the foundation for the three walk-forward features:
+#   1) /threshold-drift — bin thresholds over time
+#   2) /secondary-corr-bins + /secondary-correlation walk_forward=true mode
+#   3) /portfolios/{pid}/aggregate walk_forward=true mode
+# All three reuse the same "rank a value against prior history per ticker"
+# math via bisect_left on a running sorted list.
+
+_DEFAULT_WALKFWD_WARMUP = 252  # trading days; ~1 year. ~2019 worth of data.
+
+
+def _walk_forward_bins(rows_chrono: list, metric: str, n_bins: int,
+                       is_all: bool, warmup: int = _DEFAULT_WALKFWD_WARMUP) -> dict:
+    """Walk-forward bin assignment per row.
+
+    Returns {row_index_in_input: bin_or_None}. For each row, the bin is
+    computed using only data from prior dates AT THAT ROW'S TICKER
+    (ALL mode) or all prior rows (single ticker). Rows whose group has
+    < max(warmup, n_bins) prior observations get None and should be
+    excluded from any downstream stats.
+
+    Implementation: per group, iterate chronologically and maintain a
+    sorted insertion list of prior metric values. For each new value,
+    bisect_left gives the count strictly less than it (= its rank in
+    [0, n_so_far)). After inserting, compute
+    `min(int(rank / n_after_insert * n_bins) + 1, n_bins)` so the bin
+    formula matches the in-sample _bin_membership exactly.
+
+    Time complexity: O(N log N) per group (bisect_left is log; list
+    insertion is O(N), but Python's list.insert is implemented in C so
+    constants are small enough for our data sizes).
+    """
+    import bisect
+    out: dict = {}
+    n_bins = max(2, min(20, int(n_bins)))
+    warm = max(int(warmup), n_bins)
+
+    def _vals(items):
+        return items
+
+    if is_all:
+        groups: dict = {}
+        for i, r in enumerate(rows_chrono):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if math.isnan(fv):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            tkr = r.get("ticker", "_")
+            groups.setdefault(tkr, []).append((i, fv))
+    else:
+        flat = []
+        for i, r in enumerate(rows_chrono):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if math.isnan(fv):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            flat.append((i, fv))
+        groups = {"_": flat}
+
+    for _tkr, items in groups.items():
+        sorted_vals: list = []
+        for orig_idx, value in items:
+            rank = bisect.bisect_left(sorted_vals, value)
+            bisect.insort(sorted_vals, value)
+            n_after = len(sorted_vals)
+            if n_after < warm:
+                out[orig_idx] = None
+            else:
+                out[orig_idx] = min(int(rank / n_after * n_bins) + 1, n_bins)
+    return out
+
+
+def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
+                             bins_to_track: list,
+                             warmup: int = _DEFAULT_WALKFWD_WARMUP) -> tuple:
+    """Time-series of per-ticker bin-K UPPER thresholds at month-end.
+
+    Returns:
+      - samples: list of {date, bin, threshold, ticker} — one record per
+        (last-trading-day-of-month, ticker, bin K in bins_to_track).
+      - full_thresholds: {bin: [per-ticker in-sample thresholds]} — the
+        end-of-history reference values used for the dotted line per bin.
+
+    Rows must already be sorted (ticker, trade_date). Per ticker, we
+    walk values chronologically with bisect.insort; at each month
+    boundary we sample np.quantile(sorted_vals, K/n_bins) for each K.
+    """
+    import bisect
+    samples: list = []
+    full_thresholds: dict = {b: [] for b in bins_to_track}
+    n_bins = max(2, min(20, int(n_bins)))
+    warm = max(int(warmup), n_bins)
+
+    # Group rows by ticker preserving date order.
+    by_tkr: dict = defaultdict(list)
+    for r in rows_chrono:
+        v = r.get(metric)
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+            if math.isnan(fv):
+                continue
+        except (TypeError, ValueError):
+            continue
+        by_tkr[r.get("ticker", "_")].append((str(r.get("trade_date", "")), fv))
+
+    for tkr, items in by_tkr.items():
+        sorted_vals: list = []
+        last_month: str = ""
+        last_date_in_prev_month: str = ""
+        for date_s, val in items:
+            month = date_s[:7]  # YYYY-MM
+            if last_month and month != last_month:
+                # We just crossed from last_month → month; snapshot the
+                # state BEFORE adding val (so we're measuring as-of the
+                # last date of last_month).
+                n = len(sorted_vals)
+                if n >= warm:
+                    for b in bins_to_track:
+                        thr = float(np.quantile(sorted_vals, b / n_bins))
+                        samples.append({
+                            "date":      last_date_in_prev_month,
+                            "bin":       b,
+                            "ticker":    tkr,
+                            "threshold": round(thr, 6),
+                        })
+            bisect.insort(sorted_vals, val)
+            last_month = month
+            last_date_in_prev_month = date_s
+
+        # Final month snapshot.
+        n = len(sorted_vals)
+        if n >= warm and last_date_in_prev_month:
+            for b in bins_to_track:
+                thr = float(np.quantile(sorted_vals, b / n_bins))
+                samples.append({
+                    "date":      last_date_in_prev_month,
+                    "bin":       b,
+                    "ticker":    tkr,
+                    "threshold": round(thr, 6),
+                })
+
+        # Full-history reference per ticker.
+        if len(sorted_vals) >= n_bins:
+            for b in bins_to_track:
+                full_thresholds[b].append(
+                    float(np.quantile(sorted_vals, b / n_bins)))
+
+    return samples, full_thresholds
+
+
 class SecLoadReq(BaseModel):
     ticker: str
     metric: str
@@ -2375,4 +2537,132 @@ async def global_metric_bins_invalidate():
     """Drop the in-memory cache so a fresh fetch is computed (e.g. after the
     user adds new metric columns to daily_features)."""
     _GLOBAL_BINS_CACHE.clear()
+    return {"ok": True}
+
+
+# ── Threshold Drift (walk-forward bin boundaries over time) ──────────────
+
+_THRESHOLD_DRIFT_CACHE: dict = {}
+
+
+@router.get("/threshold-drift")
+async def threshold_drift(
+    metric:   str = Query(...),
+    outcome:  str = Query("ret_5d_fwd_oc"),
+    ticker:   str = Query("ALL"),
+    n_bins:   int = Query(20, ge=2, le=20),
+    bins:     str = Query("1,5,10,15,20",
+                          description="Comma-separated bin numbers to track"),
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """For each requested bin K (1..n_bins), return its upper-edge
+    threshold value sampled at month-end as the walk-forward universe
+    grows. Cross-ticker aggregation is median + IQR. Single-ticker mode
+    returns the raw ticker thresholds.
+
+    The 'in_sample_ref' map carries the full-history threshold per bin
+    (median across tickers in ALL mode, raw value in single-ticker
+    mode). Frontend draws it as a horizontal dotted reference line so
+    you can eyeball whether today's bin boundary is far from the
+    walk-forward boundary at any historical point.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    try:
+        bins_to_track = sorted({int(b.strip()) for b in bins.split(",") if b.strip()})
+        bins_to_track = [b for b in bins_to_track if 1 <= b <= n_bins]
+    except ValueError:
+        return {"error": "bins must be comma-separated integers"}
+    if not bins_to_track:
+        bins_to_track = [n_bins]
+
+    cache_key = (f"{ticker}|{metric}|{outcome}|{n_bins}|"
+                 f"{','.join(str(b) for b in bins_to_track)}|"
+                 f"{date_from or ''}|{date_to or ''}")
+    if cache_key in _THRESHOLD_DRIFT_CACHE:
+        return _THRESHOLD_DRIFT_CACHE[cache_key]
+
+    where = [f"{metric} IS NOT NULL", f"{outcome} IS NOT NULL"]
+    params: list = []
+    p = 1
+    if ticker and ticker != "ALL":
+        where.append(f"ticker = ${p}"); params.append(ticker); p += 1
+    if date_from:
+        where.append(f"trade_date >= ${p}")
+        params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        where.append(f"trade_date <= ${p}")
+        params.append(_date.fromisoformat(date_to)); p += 1
+
+    try:
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(
+                f"SELECT ticker, trade_date, {metric} "
+                f"FROM daily_features "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY ticker, trade_date",
+                *params, timeout=180)
+        rows = [dict(r) for r in db_rows]
+        for r in rows:
+            r["trade_date"] = str(r["trade_date"])
+
+        samples, full_thr = _walk_forward_thresholds(
+            rows, metric, n_bins, bins_to_track,
+            warmup=_DEFAULT_WALKFWD_WARMUP)
+
+        # Aggregate samples across tickers per (date, bin).
+        # For ALL mode return median + q25 + q75 + n_tickers.
+        # For single-ticker mode the median == the only ticker's value.
+        from collections import defaultdict as _dd
+        grouped: dict = _dd(lambda: _dd(list))   # date -> bin -> [thresholds]
+        for s in samples:
+            grouped[s["date"]][s["bin"]].append(s["threshold"])
+
+        series: dict = {str(b): [] for b in bins_to_track}
+        for date_s in sorted(grouped.keys()):
+            for b in bins_to_track:
+                vals = grouped[date_s].get(b, [])
+                if not vals:
+                    continue
+                series[str(b)].append({
+                    "date":      date_s,
+                    "median":    round(float(np.median(vals)), 6),
+                    "q25":       round(float(np.percentile(vals, 25)), 6),
+                    "q75":       round(float(np.percentile(vals, 75)), 6),
+                    "n_tickers": int(len(vals)),
+                })
+
+        in_sample_ref: dict = {}
+        for b in bins_to_track:
+            vals = full_thr.get(b) or []
+            in_sample_ref[str(b)] = round(float(np.median(vals)), 6) if vals else None
+
+        out = {
+            "metric":         metric,
+            "outcome":        outcome,
+            "ticker":         ticker,
+            "n_bins":         n_bins,
+            "bins":           bins_to_track,
+            "warmup":         _DEFAULT_WALKFWD_WARMUP,
+            "total_rows":     len(rows),
+            "series":         series,
+            "in_sample_ref":  in_sample_ref,
+        }
+        _THRESHOLD_DRIFT_CACHE[cache_key] = out
+        return out
+    except Exception as exc:
+        return {
+            "error":   f"{type(exc).__name__}: {exc}",
+            "metric":  metric, "outcome": outcome, "ticker": ticker,
+            "bins":    bins_to_track,
+            "series":  {str(b): [] for b in bins_to_track},
+            "in_sample_ref": {str(b): None for b in bins_to_track},
+        }
+
+
+@router.post("/threshold-drift/invalidate")
+async def threshold_drift_invalidate():
+    _THRESHOLD_DRIFT_CACHE.clear()
     return {"ok": True}
