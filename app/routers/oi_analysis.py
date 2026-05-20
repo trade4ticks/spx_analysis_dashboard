@@ -2748,13 +2748,10 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
                                    warmup: int = _DEFAULT_WALKFWD_WARMUP) -> tuple:
     """Walk-forward batch bin computation for global-metric-bins.
 
-    Uses a numpy outer-product to compute walk-forward ranks without Python-
-    level bisect loops. For each (ticker, feature) pair with N valid rows:
-      wf_rank[i] = (v[:, None] > v[None, :] & i > j).sum(axis=1)
-    i.e. count of prior rows with a strictly smaller value — matches
-    bisect_left semantics exactly. Each call allocates a (N, N) bool array
-    (~1.7 MB for N=1 300); 80 features × 124 tickers = ~9 920 sequential
-    alloc/free cycles, completing in ~5–15 s vs 100 s+ for the bisect path.
+    Per-ticker j-loop: for each row j, adds 1 to wf_rank[i, f] for all i > j
+    where X[i, f] > X[j, f]. This is equivalent to bisect_left rank counting
+    but operates on a (N-j, F) slice per step instead of one (N, N) matrix.
+    Peak memory: 2 × (N, F) arrays per ticker (~1.6 MB for N=1 300, F=80).
 
     Returns:
         (results, dropped_warmup_n, start_date)
@@ -2764,19 +2761,8 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
         start_date: earliest trade_date string that cleared warmup (or None).
     """
     n_bins = max(2, min(20, n_bins))
-    warm = max(int(warmup), n_bins)
-
-    # Group by ticker and sort chronologically.
-    by_ticker: dict = {}
-    for r in rows:
-        tkr = r.get("ticker", "_") if is_all else "_"
-        by_ticker.setdefault(tkr, []).append(r)
-    for tkr in by_ticker:
-        by_ticker[tkr].sort(key=lambda r: r.get("trade_date", ""))
-
-    # Precompute outcome + all feature arrays per ticker in one Python pass.
-    tkr_keys = list(by_ticker.keys())
-    tkr_rows_list = [by_ticker[k] for k in tkr_keys]
+    warm   = max(int(warmup), n_bins)
+    F      = len(feature_cols)
 
     def _to_f64(seq):
         a = np.empty(len(seq), dtype=np.float64)
@@ -2790,73 +2776,83 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
                 a[i] = np.nan
         return a
 
-    tkr_outcomes: list = []
-    tkr_feat_mats: list = []  # each: ndarray (N_rows, F_features)
-    for tkr_rows in tkr_rows_list:
-        n = len(tkr_rows)
-        tkr_outcomes.append(_to_f64([r.get(outcome_col) for r in tkr_rows]))
-        mat = np.empty((n, len(feature_cols)), dtype=np.float64)
-        for f_idx, feat in enumerate(feature_cols):
-            mat[:, f_idx] = _to_f64([r.get(feat) for r in tkr_rows])
-        tkr_feat_mats.append(mat)
+    # Group by ticker and sort chronologically.
+    by_ticker: dict = {}
+    for r in rows:
+        tkr = r.get("ticker", "_") if is_all else "_"
+        by_ticker.setdefault(tkr, []).append(r)
+    for tkr in by_ticker:
+        by_ticker[tkr].sort(key=lambda r: r.get("trade_date", ""))
 
-    # Dropped rows and start_date (outcome-column level approximation).
+    feat_bins: list = [[[] for _ in range(n_bins)] for _ in range(F)]
     dropped_total = 0
-    start_date = None
-    for t_idx, tkr_rows in enumerate(tkr_rows_list):
-        outs = tkr_outcomes[t_idx]
-        valid_idxs = np.where(~np.isnan(outs))[0]
-        n_valid = len(valid_idxs)
-        dropped_total += min(warm, n_valid)
-        if n_valid > warm:
-            first_past_idx = int(valid_idxs[warm])
-            d = tkr_rows[first_past_idx].get("trade_date")
+    start_date    = None
+
+    for tkr, tkr_rows in by_ticker.items():
+        N = len(tkr_rows)
+
+        # Extract (N, F) feature matrix and outcome vector.
+        outcomes = _to_f64([r.get(outcome_col) for r in tkr_rows])
+        X = np.empty((N, F), dtype=np.float64)
+        for f_idx, feat in enumerate(feature_cols):
+            X[:, f_idx] = _to_f64([r.get(feat) for r in tkr_rows])
+
+        outcome_valid = ~np.isnan(outcomes)
+
+        # Dropped / start_date at outcome-column level.
+        n_valid_outcome = int(outcome_valid.sum())
+        dropped_total += min(warm, n_valid_outcome)
+        if n_valid_outcome > warm:
+            first_past = int(np.where(outcome_valid)[0][warm])
+            d = tkr_rows[first_past].get("trade_date")
             if d is not None:
                 ds = str(d)
                 if start_date is None or ds < start_date:
                     start_date = ds
 
-    # Core walk-forward bin computation — numpy outer-product per (feat, ticker).
+        # wf_rank[i, f] = #{j < i : X[j, f] < X[i, f]}
+        # j-loop: each step contributes to all later rows simultaneously.
+        # NaN comparisons return False so NaN rows auto-contribute 0.
+        wf_rank = np.zeros((N, F), dtype=np.int32)
+        for j in range(N - 1):
+            wf_rank[j + 1:] += X[j + 1:] > X[j]   # bool adds as 0/1
+
+        # Per-feature cumulative non-NaN count → n_after denominator.
+        nan_mask    = np.isnan(X)
+        valid_cum   = np.cumsum(~nan_mask, axis=0, dtype=np.int32)   # (N, F)
+        safe_n      = np.where(valid_cum > 0, valid_cum, 1).astype(np.float64)
+        bin_mat     = np.minimum(
+            (wf_rank.astype(np.float64) / safe_n * n_bins).astype(np.int32),
+            n_bins - 1,
+        )   # (N, F)
+
+        # use_mask: valid feature value, valid outcome, past warmup.
+        past_warm_mat = (~nan_mask) & (valid_cum >= warm)           # (N, F)
+        use_mask      = past_warm_mat & outcome_valid[:, np.newaxis] # (N, F)
+
+        # Accumulate outcomes per feature per bin.
+        for f_idx in range(F):
+            col_mask = use_mask[:, f_idx]
+            if not col_mask.any():
+                continue
+            o_sel = outcomes[col_mask]
+            b_sel = bin_mat[col_mask, f_idx]
+            for b in range(n_bins):
+                hits = o_sel[b_sel == b]
+                if hits.size:
+                    feat_bins[f_idx][b].extend(hits.tolist())
+
+    # Build results in the same format as _compute_all_bins_fast.
     results = []
     for f_idx, feat in enumerate(feature_cols):
-        feat_bins: list = [[] for _ in range(n_bins)]
-
-        for t_idx in range(len(tkr_keys)):
-            outs = tkr_outcomes[t_idx]
-            fvals = tkr_feat_mats[t_idx][:, f_idx]
-            valid = ~np.isnan(fvals) & ~np.isnan(outs)
-            nv = int(valid.sum())
-            if nv < warm:
-                continue
-
-            v = fvals[valid]        # chronological valid values
-            o = outs[valid]         # corresponding outcomes
-
-            # wf_rank[i] = #{j < i : v[j] < v[i]} — bisect_left semantics.
-            # np.tril(val_lt, k=-1) zeros upper triangle + diagonal so only
-            # strictly-earlier-row comparisons survive; no separate time mask.
-            val_lt  = v[:, None] > v[None, :]   # (nv, nv): val_lt[i,j] = v[i]>v[j]
-            wf_rank = np.tril(val_lt, k=-1).sum(axis=1, dtype=np.int32)
-
-            n_after = np.arange(1, nv + 1)  # 1 … nv
-            bin_idx = np.minimum(
-                (wf_rank.astype(np.float64) / n_after * n_bins).astype(np.int32),
-                n_bins - 1,
-            )
-            past_warm = n_after >= warm
-
-            for b in range(n_bins):
-                mask = past_warm & (bin_idx == b)
-                if mask.any():
-                    feat_bins[b].extend(o[mask].tolist())
-
-        total = sum(len(b) for b in feat_bins)
+        total = sum(len(b) for b in feat_bins[f_idx])
         if total < n_bins * 2:
             continue
         results.append({
             "name":   feat,
-            "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in feat_bins],
-            "bin_ns": [len(b) for b in feat_bins],
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                       for b in feat_bins[f_idx]],
+            "bin_ns": [len(b) for b in feat_bins[f_idx]],
         })
 
     return results, dropped_total, start_date
