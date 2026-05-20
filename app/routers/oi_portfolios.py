@@ -725,7 +725,10 @@ async def portfolio_aggregate(pid: int,
             outcome_col=outcome,
         )
         rec["fired_systems"] = fired
-        rec["direction"] = "short" if union_sign_map.get(r_idx, +1) == -1 else "long"
+        sign = union_sign_map.get(r_idx, +1)
+        rec["direction"] = "short" if sign == -1 else "long"
+        if sign == -1 and rec.get("ret") is not None:
+            rec["ret"] = -rec["ret"]
         combined_trades.append(rec)
 
     # phi correlations restricted to the trade-eligible universe so the
