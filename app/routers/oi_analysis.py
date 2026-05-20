@@ -1760,6 +1760,16 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
             continue
         by_tkr[r.get("ticker", "_")].append((str(r.get("trade_date", "")), fv))
 
+    # Use the MIDPOINT of bin K's quantile range — quantile((K-0.5)/n_bins) —
+    # so the threshold is symmetric and meaningful at both ends:
+    #   B1  → 2.5th percentile (the centre of the bottom bin)
+    #   B20 → 97.5th percentile (the centre of the top bin)
+    # The naive K/n_bins formula gives the UPPER edge of bin K, which is
+    # degenerate at K=n_bins (= max value, which only grows over time and
+    # plateaus at the all-time peak).
+    def _q(K):
+        return (K - 0.5) / n_bins
+
     for tkr, items in by_tkr.items():
         sorted_vals: list = []
         last_month: str = ""
@@ -1773,7 +1783,7 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
                 n = len(sorted_vals)
                 if n >= warm:
                     for b in bins_to_track:
-                        thr = float(np.quantile(sorted_vals, b / n_bins))
+                        thr = float(np.quantile(sorted_vals, _q(b)))
                         tkr_samples.append({
                             "date":      last_date_in_prev_month,
                             "bin":       b,
@@ -1788,7 +1798,7 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
         n = len(sorted_vals)
         if n >= warm and last_date_in_prev_month:
             for b in bins_to_track:
-                thr = float(np.quantile(sorted_vals, b / n_bins))
+                thr = float(np.quantile(sorted_vals, _q(b)))
                 tkr_samples.append({
                     "date":      last_date_in_prev_month,
                     "bin":       b,
@@ -1796,13 +1806,13 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
                     "threshold": round(thr, 6),
                 })
 
-        # Full-history reference per ticker. Now attach to all of this
-        # ticker's samples so the endpoint can compute drift ratios
-        # without a separate lookup.
+        # Full-history reference per ticker. Same midpoint quantile so
+        # the drift-ratio (walk_forward / full_history) properly cancels
+        # at the end of history.
         ticker_full = {}
         if len(sorted_vals) >= n_bins:
             for b in bins_to_track:
-                full_v = float(np.quantile(sorted_vals, b / n_bins))
+                full_v = float(np.quantile(sorted_vals, _q(b)))
                 ticker_full[b] = full_v
                 full_thresholds[b].append(full_v)
         full_per_ticker[tkr] = ticker_full
@@ -2561,6 +2571,9 @@ async def global_metric_bins_invalidate():
 
 # ── Threshold Drift (walk-forward bin boundaries over time) ──────────────
 
+# Cache key is salted with this version so deploys that change the
+# computation formula automatically invalidate stale cached responses.
+_THRESHOLD_DRIFT_CACHE_VERSION = "v2-midpoint-quantile"
 _THRESHOLD_DRIFT_CACHE: dict = {}
 
 
@@ -2597,7 +2610,8 @@ async def threshold_drift(
     if not bins_to_track:
         bins_to_track = [n_bins]
 
-    cache_key = (f"{ticker}|{metric}|{outcome}|{n_bins}|"
+    cache_key = (f"{_THRESHOLD_DRIFT_CACHE_VERSION}|"
+                 f"{ticker}|{metric}|{outcome}|{n_bins}|"
                  f"{','.join(str(b) for b in bins_to_track)}|"
                  f"{date_from or ''}|{date_to or ''}")
     if cache_key in _THRESHOLD_DRIFT_CACHE:

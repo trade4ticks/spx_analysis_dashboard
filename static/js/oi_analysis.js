@@ -123,17 +123,27 @@ document.addEventListener('alpine:init', () => {
         this.outcomes = cols.outcomes || [];
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
-        // ALWAYS prefer ret_5d_fwd_oc for the standalone analysis panes
-        // — user has asked for 5d as their default multiple times. Pin
-        // explicitly here so Alpine's x-model doesn't fall back to
-        // outcomes[0] when options arrive after init. Fall back to the
-        // first outcome only if the preferred column isn't present.
-        const _preferred = 'ret_5d_fwd_oc';
-        const _pick = this.outcomes.includes(_preferred) ? _preferred : (this.outcomes[0] || '');
-        this.topBinsOutcome = _pick;
-        this.tdOutcome      = _pick;
         // Pre-fill Threshold Drift's metric picker with the first feature.
         if (this.features.length && !this.tdMetric) this.tdMetric = this.features[0];
+
+        // ALWAYS prefer ret_5d_fwd_oc for the standalone analysis panes
+        // (user has asked for 5d default repeatedly). Alpine's x-model
+        // on a <select> with dynamic x-for options has a race: when
+        // options arrive AFTER the state default, the browser
+        // auto-selects the first option and Alpine syncs the state
+        // backwards to it. Setting the model AFTER awaiting nextTick
+        // (so the options are rendered) sidesteps that.
+        const _preferred = 'ret_5d_fwd_oc';
+        const _pick = this.outcomes.includes(_preferred) ? _preferred : (this.outcomes[0] || '');
+        await this.$nextTick();   // ensure x-for options are in the DOM
+        this.topBinsOutcome = _pick;
+        this.tdOutcome      = _pick;
+        // Second tick: some browsers fire a stray 'change' event on the
+        // SELECT after first paint that wipes the value. Reassign once
+        // more after another tick to be sure.
+        await this.$nextTick();
+        this.topBinsOutcome = _pick;
+        this.tdOutcome      = _pick;
       }
       // Load score matrix (independent of analysis)
       this.smInit();
