@@ -2838,7 +2838,7 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
             val_lt  = v[:, None] > v[None, :]   # (nv, nv): val_lt[i,j] = v[i]>v[j]
             wf_rank = np.tril(val_lt, k=-1).sum(axis=1, dtype=np.int32)
 
-            n_after = idx + 1  # 1 … nv
+            n_after = np.arange(1, nv + 1)  # 1 … nv
             bin_idx = np.minimum(
                 (wf_rank.astype(np.float64) / n_after * n_bins).astype(np.int32),
                 n_bins - 1,
