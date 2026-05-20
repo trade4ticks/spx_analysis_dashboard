@@ -2568,6 +2568,12 @@ document.addEventListener('alpine:init', () => {
 
     async loadTopBins(forceRefresh = false) {
       this.topBinsLoading = true;
+      // Pin the dropdown to ret_5d_fwd_oc on first load — Alpine's x-model
+      // can fall out of sync when outcomes arrive after init.
+      if (this.outcomes?.length && !this.outcomes.includes(this.topBinsOutcome)) {
+        this.topBinsOutcome = this.outcomes.includes('ret_5d_fwd_oc')
+          ? 'ret_5d_fwd_oc' : this.outcomes[0];
+      }
       try {
         if (forceRefresh) {
           try {
@@ -2580,7 +2586,12 @@ document.addEventListener('alpine:init', () => {
           n_bins:  '20',
         });
         const r = await fetch('/api/oi-analysis/global-metric-bins?' + params);
-        if (!r.ok) { this.topBinsData = { metrics: [], total_rows: 0 }; return; }
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          this.topBinsData = { metrics: [], total_rows: 0,
+                               error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}` };
+          return;
+        }
         const d = await r.json();
         // Compute _zeroTopPct + _total per metric for the diverging-bar layout
         // (same pattern the corr explorer uses for its mini charts).
@@ -2593,7 +2604,7 @@ document.addEventListener('alpine:init', () => {
         this.topBinsData = d;
       } catch (e) {
         console.error('loadTopBins', e);
-        this.topBinsData = { metrics: [], total_rows: 0 };
+        this.topBinsData = { metrics: [], total_rows: 0, error: e.message };
       } finally {
         this.topBinsLoading = false;
       }

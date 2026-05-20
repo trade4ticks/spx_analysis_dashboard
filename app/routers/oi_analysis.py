@@ -2211,53 +2211,70 @@ async def global_metric_bins(
         where.append(f"trade_date <= ${p}")
         params.append(_date.fromisoformat(date_to)); p += 1
 
-    async with pool.acquire() as conn:
-        col_rows = await conn.fetch(
-            """SELECT column_name FROM information_schema.columns
-               WHERE table_name = 'daily_features' AND table_schema = 'public'
-               AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
-               AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
-               ORDER BY ordinal_position""")
-    all_num_cols = [r["column_name"] for r in col_rows]
-    outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
-    feature_cols = [c for c in all_num_cols
-                    if c not in outcome_cols_all and not c.startswith("spot")]
+    try:
+        async with pool.acquire() as conn:
+            col_rows = await conn.fetch(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'daily_features' AND table_schema = 'public'
+                   AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+                   AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+                   ORDER BY ordinal_position""")
+        all_num_cols = [r["column_name"] for r in col_rows]
+        outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
+        feature_cols = [c for c in all_num_cols
+                        if c not in outcome_cols_all and not c.startswith("spot")]
 
-    select_cols = ", ".join(["ticker", "trade_date", outcome] + feature_cols)
-    async with pool.acquire() as conn:
-        db_rows = await conn.fetch(
-            f"SELECT {select_cols} FROM daily_features "
-            f"WHERE {' AND '.join(where)} ORDER BY ticker, trade_date",
-            *params)
-    rows = [dict(r) for r in db_rows]
-    if not rows:
-        out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
-               "metrics": [], "total_rows": 0}
+        select_cols = ", ".join(["ticker", "trade_date", outcome] + feature_cols)
+        async with pool.acquire() as conn:
+            # Override the pool's 30 s command_timeout — pulling every feature
+            # column for every row across 80+ tickers can easily exceed it.
+            db_rows = await conn.fetch(
+                f"SELECT {select_cols} FROM daily_features "
+                f"WHERE {' AND '.join(where)} ORDER BY ticker, trade_date",
+                *params, timeout=240)
+        rows = [dict(r) for r in db_rows]
+        if not rows:
+            out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
+                   "metrics": [], "total_rows": 0,
+                   "metrics_attempted": 0}
+            _GLOBAL_BINS_CACHE[cache_key] = out
+            return out
+
+        is_all = (ticker == "ALL")
+        metrics_out = []
+        for feat in feature_cols:
+            data = _compute_bins_for_metric(rows, feat, outcome, n_bins, is_all)
+            if data:
+                metrics_out.append(data)
+
+        # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
+        def _lift(m):
+            bs = m.get("bins") or []
+            return (max(bs) - min(bs)) if bs else 0
+        metrics_out.sort(key=_lift, reverse=True)
+
+        out = {
+            "outcome":           outcome,
+            "ticker":            ticker,
+            "n_bins":            n_bins,
+            "total_rows":        len(rows),
+            "metrics_attempted": len(feature_cols),
+            "metrics":           metrics_out,
+        }
         _GLOBAL_BINS_CACHE[cache_key] = out
         return out
-
-    is_all = (ticker == "ALL")
-    metrics_out = []
-    for feat in feature_cols:
-        data = _compute_bins_for_metric(rows, feat, outcome, n_bins, is_all)
-        if data:
-            metrics_out.append(data)
-
-    # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
-    def _lift(m):
-        bs = m.get("bins") or []
-        return (max(bs) - min(bs)) if bs else 0
-    metrics_out.sort(key=_lift, reverse=True)
-
-    out = {
-        "outcome":    outcome,
-        "ticker":     ticker,
-        "n_bins":     n_bins,
-        "total_rows": len(rows),
-        "metrics":    metrics_out,
-    }
-    _GLOBAL_BINS_CACHE[cache_key] = out
-    return out
+    except Exception as exc:
+        # Surface failures to the frontend instead of returning a generic 500
+        # that the UI swallows into "no data". Most likely cause is a query
+        # timeout when daily_features has grown a lot.
+        return {
+            "error":      f"{type(exc).__name__}: {exc}",
+            "outcome":    outcome,
+            "ticker":     ticker,
+            "n_bins":     n_bins,
+            "metrics":    [],
+            "total_rows": 0,
+        }
 
 
 @router.post("/global-metric-bins/invalidate")

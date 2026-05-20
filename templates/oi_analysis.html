@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=61"></script>
+  <script src="/static/js/oi_analysis.js?v=62"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -171,7 +171,10 @@
                 x-text="topBinsExpanded ? '▾' : '▸'"></span>
           <span style="font-size:12px;font-weight:700;color:var(--text)">All-Ticker Metric Bins</span>
           <span style="font-size:10px;color:var(--dim)"
+                x-show="!topBinsData?.error"
                 x-text="topBinsData ? ('· ' + (topBinsData.metrics?.length || 0) + ' metrics · ' + (topBinsData.total_rows || 0).toLocaleString() + ' rows · ' + topBinsData.outcome) : '— click to load'"></span>
+          <span x-show="topBinsData?.error" style="font-size:10px;color:#e84393"
+                x-text="'Error: ' + topBinsData?.error"></span>
           <span x-show="topBinsLoading" style="font-size:10px;color:#3498db">Loading…</span>
         </div>
         <!-- Outcome selector + Refresh stay visible whether collapsed or
