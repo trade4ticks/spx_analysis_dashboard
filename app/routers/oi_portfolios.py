@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from app.db import get_pool, get_oi_pool
 from app.routers.oi_analysis import (
     _bin_membership,
+    _walk_forward_bins,
+    _DEFAULT_WALKFWD_WARMUP,
     _sec_equity_curve,
     _parse_horizon,
     _fetch_ticker_calendars,
@@ -429,8 +431,13 @@ def _signed_row(row: dict, sign: int, outcome_col: str) -> dict:
     return r
 
 
+class AggregateRequest(BaseModel):
+    walk_forward: bool = False
+
+
 @router.post("/portfolios/{pid}/aggregate")
 async def portfolio_aggregate(pid: int,
+                              req: AggregateRequest = Body(default_factory=AggregateRequest),
                               pool=Depends(get_pool),
                               oi_pool=Depends(get_oi_pool)):
     """Compute union stats + system/pair heatmaps for the portfolio."""
@@ -498,20 +505,47 @@ async def portfolio_aggregate(pid: int,
     per_system_pair_n = []
     primary_vectors = []     # per-system V_primary (for the trade-eligible universe)
 
+    # Walk-forward: pre-compute bin maps for every referenced metric once.
+    # _walk_forward_bins returns {row_idx: bin_1indexed_or_None}.
+    if req.walk_forward:
+        wf_cache: dict = {}
+        def _wf_map(metric, n_bins):
+            k = (metric, n_bins)
+            if k not in wf_cache:
+                wf_cache[k] = _walk_forward_bins(
+                    rows, metric, n_bins, is_all, _DEFAULT_WALKFWD_WARMUP)
+            return wf_cache[k]
+
+        def _wf_vector(metric, selected_bins, n_bins):
+            bmap = _wf_map(metric, n_bins)
+            v = np.zeros(len(rows))
+            for i, b in bmap.items():
+                if b is not None and b in selected_bins:
+                    v[i] = 1.0
+            return v
+
+        # Rows cleared by at least one system's primary metric (for dropped count).
+        cleared_any: set = set()
+
     for s in enabled_systems:
-        prim_bins = set(int(b) for b in (s.get("primary_bins") or []))
+        prim_bins  = set(int(b) for b in (s.get("primary_bins") or []))
         prim_count = int(s.get("primary_bin_count") or 20)
-        V_p = _bin_membership(rows, s["primary_metric"], prim_bins,
-                              prim_count, is_all)
+
+        if req.walk_forward:
+            V_p = _wf_vector(s["primary_metric"], prim_bins, prim_count)
+            # Track which rows cleared warmup for any system.
+            bmap_p = _wf_map(s["primary_metric"], prim_count)
+            cleared_any.update(i for i, b in bmap_p.items() if b is not None)
+        else:
+            V_p = _bin_membership(rows, s["primary_metric"], prim_bins,
+                                  prim_count, is_all)
+
         primary_vectors.append(V_p)
-        # Indices of rows that pass the primary bin filter.
         primary_indices = [i for i, v in enumerate(V_p) if v == 1.0]
         primary_rows = [rows[i] for i in primary_indices]
 
         secs = s.get("secondaries") or []
         if not secs or not prim_bins or not primary_rows:
-            # Degenerate system — no secondaries OR no primary bins OR
-            # primary filter empty. Keep slot so labels stay aligned.
             zero = np.zeros(len(rows))
             system_vectors.append(zero)
             system_labels.append(s["name"])
@@ -519,26 +553,28 @@ async def portfolio_aggregate(pid: int,
             system_boundaries.append(len(pair_vectors))
             continue
 
-        # Bin each secondary metric WITHIN the primary-filtered subset, then
-        # expand back to the full-row vector space (0 outside primary).
-        # This matches the Multi-Metric Correlation Explorer's semantics —
-        # it calls _bin_membership against the primary-filtered rows too.
         expanded_sec_vecs = []
         for sec in secs:
             sec_bins  = set(int(b) for b in (sec.get("bins") or []))
             sec_count = int(sec.get("bin_count") or 10)
-            V_si_sub = _bin_membership(primary_rows, sec["metric"],
-                                       sec_bins, sec_count, is_all)
-            V_si_full = np.zeros(len(rows))
-            for sub_idx, orig_idx in enumerate(primary_indices):
-                V_si_full[orig_idx] = V_si_sub[sub_idx]
+
+            if req.walk_forward:
+                # Secondary bins computed over all rows chronologically,
+                # then intersected with the walk-forward primary filter.
+                V_si_full = _wf_vector(sec["metric"], sec_bins, sec_count)
+                V_si_full = V_si_full * V_p   # AND with primary
+            else:
+                # In-sample: bin secondary within primary-filtered rows only.
+                V_si_sub = _bin_membership(primary_rows, sec["metric"],
+                                           sec_bins, sec_count, is_all)
+                V_si_full = np.zeros(len(rows))
+                for sub_idx, orig_idx in enumerate(primary_indices):
+                    V_si_full[orig_idx] = V_si_sub[sub_idx]
+
             expanded_sec_vecs.append(V_si_full)
-            # Pair vector = this secondary alone (already constrained to primary).
             pair_vectors.append(V_si_full)
             pair_labels.append(f"{s['name']}: {sec['metric']}")
 
-        # System vector = union of secondaries (each already AND'd with primary
-        # via the expansion). No need to AND with V_p again.
         V_S = np.max(np.stack(expanded_sec_vecs), axis=0)
         system_vectors.append(V_S)
         system_labels.append(s["name"])
@@ -754,6 +790,16 @@ async def portfolio_aggregate(pid: int,
     phi_sys,   overlap_sys   = _phi_restricted(system_vectors)
     phi_pairs, overlap_pairs = _phi_restricted(pair_vectors)
 
+    if req.walk_forward:
+        wf_dropped  = len(rows) - len(cleared_any)
+        wf_start    = (min(rows[i]["trade_date"] for i in cleared_any)
+                       if cleared_any else None)
+        resp_mode   = "walk_forward"
+    else:
+        wf_dropped  = 0
+        wf_start    = rows[0]["trade_date"] if rows else None
+        resp_mode   = "in_sample"
+
     # Fields named to mirror the corr explorer's /secondary-correlation
     # response — the frontend reuses corrStats() and the corr render
     # functions verbatim.
@@ -761,6 +807,10 @@ async def portfolio_aggregate(pid: int,
         "portfolio": portfolio,
         "systems":   sys_stats,
         "horizon":   horizon,
+        "mode":              resp_mode,
+        "warmup":            _DEFAULT_WALKFWD_WARMUP,
+        "dropped_warmup_n":  wf_dropped,
+        "start_date":        wf_start,
         "baseline_n": int(universe_mask.sum()),
         "combined_n": int(union_n),
         "equity_primary":  equity_primary,

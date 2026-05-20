@@ -2978,7 +2978,8 @@ document.addEventListener('alpine:init', () => {
     //   1. All-Ticker Metric Bins (top-of-page)
     //   2. Re-runs /analyze (primary chart suite)
     //   3. Re-runs corr explorer mini data + (if a result is shown) correlation
-    // System Portfolio, Secondary Scanner, Score Matrix follow as 3b/c/d land.
+    //   4. Re-runs System Portfolio aggregate (3b)
+    // Secondary Scanner, Score Matrix follow as 3c/d land.
     async setPageMode(m) {
       if (m === this.pageMode) return;
       this.pageMode = m;
@@ -2999,6 +3000,9 @@ document.addEventListener('alpine:init', () => {
         if (hadCorrResult && this.corrSelectedCount() >= 2) {
           await this.runCorrelation();
         }
+      }
+      if (this.portfolioId && this.portAggregate) {
+        this.loadPortfolioAggregate();  // fire-and-forget
       }
     },
 
@@ -3911,7 +3915,8 @@ document.addEventListener('alpine:init', () => {
       this.portLoading = true;
       try {
         const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/aggregate`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ walk_forward: this.pageMode === 'walk_forward' }),
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();
