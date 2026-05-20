@@ -27,7 +27,7 @@ document.addEventListener('alpine:init', () => {
     // primary / corr explorer / portfolio aggregate all use the same flavor.
     //   'in_sample'    — full-history bin thresholds (default; current behavior)
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
-    pageMode: 'in_sample',
+    pageMode: 'walk_forward',
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
@@ -1748,13 +1748,41 @@ document.addEventListener('alpine:init', () => {
     },
 
     closeFullscreen() {
+      const wasChartId = this.fsChartId;
       if (this._charts['_fs']) { this._charts['_fs'].destroy(); delete this._charts['_fs']; }
       this.fsChartId = null;
       this.$nextTick(() => {
-        this._renderAllCharts();
-        if (this.secDetail) this._renderSecDetail();
-        if (this.corrResult && !this.corrResult.error) this._renderCorrDetail();
-        if (this.portAggregate && this.portAggregate.combined_n > 0) this._renderPortCharts();
+        // Re-render only the chart that was in fullscreen — re-rendering all
+        // charts takes 3-5 s and is unnecessary.
+        const renderMap = {
+          'chart-decile':        () => this._renderDecileBar(),
+          'chart-equity':        () => this._renderEquity(),
+          'chart-yearly':        () => this._renderYearly(),
+          'chart-rolling':       () => this._renderRollingCorr(),
+          'chart-boxplot':       () => this._renderBoxplot(),
+          'chart-drawdown':      () => this._renderDrawdown(),
+          'chart-dist':          () => this._renderReturnDist(),
+          'chart-calendar':      () => this._renderTradeCalendar(),
+          'chart-dow':           () => this._renderDOW(),
+          'chart-winrate':       () => this._renderWinRate(),
+          'chart-activity':      () => this._renderActivity(),
+          'sec-bar-canvas':      () => this._renderSecBar(),
+          'sec-equity-canvas':   () => this._renderSecEquity(),
+          'sec-bins-canvas':     () => this._renderSecBinsChart(),
+          'sec-activity-canvas': () => this._renderSecActivity(),
+          'sec-bubble-canvas':   () => this._renderSecBubble(),
+          'sec-yearly-canvas':   () => this._renderSecYearly(),
+          'corr-equity-canvas':  () => this._renderCorrEquity(),
+          'corr-yearly-canvas':  () => this._renderCorrYearly(),
+          'corr-activity-canvas':() => this._renderCorrActivity(),
+          'corr-bubble-canvas':  () => this._renderCorrBubble(),
+          'chart-port-equity':   () => this._renderPortEquity(),
+          'chart-port-yearly':   () => this._renderPortYearly(),
+          'chart-port-activity': () => this._renderPortActivity(),
+          'chart-port-bubble':   () => this._renderPortBubble(),
+        };
+        const fn = renderMap[wasChartId];
+        if (fn) fn();
       });
     },
 
