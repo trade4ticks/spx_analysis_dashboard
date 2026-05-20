@@ -2218,22 +2218,32 @@ def _walk_forward_primary_filter(rows: list, primary_metric: str,
     chart), then keeps rows whose walk-forward bin is in
     `selected_primary_bins`. Rows in warmup (bin=None) are excluded.
 
-    Returns (filtered_chrono_rows, dropped_warmup_n).
+    Returns (filtered_chrono_rows, dropped_warmup_n, universe_n).
+      filtered_chrono_rows — rows matching selected_primary_bins
+      dropped_warmup_n     — rows excluded because their primary wf bin
+                             is None (warmup not yet satisfied, or
+                             missing primary metric value)
+      universe_n           — total rows with a defined wf primary bin
+                             (= len(rows) - dropped_warmup_n). Useful so
+                             the UI can show the post-warmup universe
+                             separate from the primary-filtered subset.
     """
     ordered = _sort_chrono(rows)
     wf = _walk_forward_bins(ordered, primary_metric, 20, is_all)
     kept: list = []
     dropped = 0
+    universe = 0
     sel = set(int(b) for b in (selected_primary_bins or []))
     for i, r in enumerate(ordered):
         b = wf.get(i)
         if b is None:
             dropped += 1
             continue
+        universe += 1
         if sel and b not in sel:
             continue
         kept.append(r)
-    return kept, dropped
+    return kept, dropped, universe
 
 
 def _compute_walk_forward_bin_stats(rows_chrono: list, feat: str, outcome_col: str,
@@ -2296,12 +2306,13 @@ async def secondary_corr_bins(req: CorrBinsReq):
         primary_metric = cached.get("primary_metric") or ""
         if not primary_metric:
             return {"error": "no_primary_metric"}
-        filtered, dropped = _walk_forward_primary_filter(
+        filtered, dropped, universe = _walk_forward_primary_filter(
             all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
         )
         if not filtered:
             return {"error": "no_data", "mode": "walk_forward",
-                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped}
+                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
+                    "universe_n": universe}
         results = []
         for feat in feat_cols:
             r = _compute_walk_forward_bin_stats(filtered, feat, outcome_col, n_bins, is_all)
@@ -2312,8 +2323,9 @@ async def secondary_corr_bins(req: CorrBinsReq):
             "mode": "walk_forward",
             "warmup": _DEFAULT_WALKFWD_WARMUP,
             "dropped_warmup_n": dropped,
-            "combined_n": len(filtered),
-            "start_date": filtered[0].get("trade_date", "") if filtered else "",
+            "universe_n":       universe,
+            "combined_n":       len(filtered),
+            "start_date":       filtered[0].get("trade_date", "") if filtered else "",
         }
 
     filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
@@ -2383,12 +2395,13 @@ async def secondary_correlation(req: CorrReq):
         primary_metric = cached.get("primary_metric") or ""
         if not primary_metric:
             return {"error": "no_primary_metric"}
-        filtered, dropped = _walk_forward_primary_filter(
+        filtered, dropped, universe = _walk_forward_primary_filter(
             all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
         )
         if not filtered:
             return {"error": "no_data", "mode": "walk_forward",
-                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped}
+                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
+                    "universe_n": universe}
         ordered = filtered  # already chronologically sorted by _walk_forward_primary_filter
         mode_out = "walk_forward"
     else:
@@ -2397,6 +2410,7 @@ async def secondary_correlation(req: CorrReq):
             return {"error": "no_data"}
         ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
         dropped = 0
+        universe = len(ordered)
         mode_out = "in_sample"
 
     vectors, metric_names, n_each = [], [], []
@@ -2512,6 +2526,7 @@ async def secondary_correlation(req: CorrReq):
         "mode":             mode_out,
         "warmup":           _DEFAULT_WALKFWD_WARMUP if req.walk_forward else None,
         "dropped_warmup_n": dropped,
+        "universe_n":       universe,
         "start_date":       ordered[0].get("trade_date", "") if ordered else "",
     }
 

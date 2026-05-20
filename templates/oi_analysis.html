@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=69"></script>
+  <script src="/static/js/oi_analysis.js?v=70"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -971,7 +971,7 @@
             <!-- Walk-forward subtitle -->
             <template x-if="!corrMiniLoading && corrMiniData?.mode === 'walk_forward'">
               <div style="font-size:10px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' rows since ' + (corrMiniData.start_date||'?') + ' · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (corrMiniData.warmup||252) + 'd)'"></div>
+                   x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' in primary-bin filter / ' + (corrMiniData.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrMiniData.warmup||252) + 'd) · since ' + (corrMiniData.start_date||'?')"></div>
             </template>
 
             <!-- 4-column metric grid -->
@@ -1025,7 +1025,7 @@
             <!-- Walk-forward subtitle (result pane) -->
             <template x-if="corrResult?.mode === 'walk_forward' && !corrResult.error">
               <div style="font-size:10px;color:#e6a23c;margin:6px 0 6px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows since ' + (corrResult.start_date||'?') + ' · ' + (corrResult.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (corrResult.warmup||252) + 'd)'"></div>
+                   x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows in primary-bin filter / ' + (corrResult.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrResult.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrResult.warmup||252) + 'd) · since ' + (corrResult.start_date||'?')"></div>
             </template>
 
             <!-- Stats pane -->
