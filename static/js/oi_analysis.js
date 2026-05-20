@@ -113,6 +113,15 @@ document.addEventListener('alpine:init', () => {
         this.outcomes = cols.outcomes || [];
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
+        // All-Ticker Metric Bins should ALWAYS default to ret_5d_fwd_oc
+        // when it exists in the column set. Pin explicitly here so the
+        // dropdown's x-model doesn't fall back to outcomes[0] (often
+        // ret_1d_fwd_*) when options render after init.
+        if (this.outcomes.includes('ret_5d_fwd_oc')) {
+          this.topBinsOutcome = 'ret_5d_fwd_oc';
+        } else if (this.outcomes.length) {
+          this.topBinsOutcome = this.outcomes[0];
+        }
       }
       // Load score matrix (independent of analysis)
       this.smInit();
