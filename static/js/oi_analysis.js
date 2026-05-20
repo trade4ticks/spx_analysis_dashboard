@@ -1066,10 +1066,12 @@ document.addEventListener('alpine:init', () => {
       }
       if (!allRets.length) return;
 
-      // Build histogram bins
+      // Build histogram bins — avoid spread on large arrays (V8 call-stack limit)
       const nBins = 40;
-      const mn = Math.max(Math.min(...allRets), -15);
-      const mx = Math.min(Math.max(...allRets), 15);
+      let minRet = Infinity, maxRet = -Infinity;
+      for (const v of allRets) { if (v < minRet) minRet = v; if (v > maxRet) maxRet = v; }
+      const mn = Math.max(minRet, -15);
+      const mx = Math.min(maxRet,  15);
       const step = (mx - mn) / nBins;
       const labels = [];
       const allCounts = new Array(nBins).fill(0);
@@ -1722,6 +1724,26 @@ document.addEventListener('alpine:init', () => {
         // Restore IDs
         fsEl.id = 'fs-canvas';
         if (origEl) origEl.id = chartId;
+      });
+    },
+
+    openTradeTableFullscreen() {
+      this.fsChartId = 'trade-table';
+      this.$nextTick(() => {
+        // Clone the rendered table DOM into the overlay mount point
+        const src  = document.getElementById('trade-table-body')?.closest('table');
+        const dest = document.getElementById('fs-trade-table-mount');
+        if (src && dest) {
+          dest.innerHTML = '';
+          dest.appendChild(src.cloneNode(true));
+          // Copy the colgroup + thead from the original table wrapper
+          const colgroup = document.getElementById('trade-table-cols');
+          const thead    = document.getElementById('trade-table-head');
+          const tbl      = dest.querySelector('table');
+          if (tbl && colgroup) tbl.prepend(colgroup.cloneNode(true));
+          if (tbl && thead)    tbl.querySelector('thead')?.replaceWith(thead.cloneNode(true));
+          tbl?.setAttribute('style', 'border-collapse:collapse;font-family:monospace;width:100%;table-layout:fixed');
+        }
       });
     },
 

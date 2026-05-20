@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=72"></script>
+  <script src="/static/js/oi_analysis.js?v=73"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -150,8 +150,17 @@
       <div class="fs-bar">
         <button @click="closeFullscreen()">✕ Close</button>
       </div>
-      <div class="fs-body">
-        <canvas id="fs-canvas"></canvas>
+      <div class="fs-body" :style="fsChartId === 'trade-table' ? 'overflow-y:auto;position:static;padding:16px' : ''">
+        <template x-if="fsChartId !== 'trade-table'">
+          <canvas id="fs-canvas"></canvas>
+        </template>
+        <template x-if="fsChartId === 'trade-table'">
+          <div style="font-size:11px">
+            <div style="margin-bottom:8px;color:var(--dim);font-size:10px"
+                 x-text="'Trade Data — ' + (data?.trade_data?.length || 0) + ' trades'"></div>
+            <div id="fs-trade-table-mount"></div>
+          </div>
+        </template>
       </div>
     </div>
   </template>
@@ -577,6 +586,7 @@
                        color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
                 Export CSV
               </button>
+              <button class="fs-btn" @click="openTradeTableFullscreen()" title="Fullscreen">⛶</button>
             </div>
             <div style="overflow-y:auto;max-height:280px;font-size:10px">
               <table class="trade-table" style="border-collapse:collapse;font-family:monospace">
