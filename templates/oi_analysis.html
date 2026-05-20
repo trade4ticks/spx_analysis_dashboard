@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=66"></script>
+  <script src="/static/js/oi_analysis.js?v=67"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -182,7 +182,9 @@
              window before triggering a load. -->
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
           <span style="font-size:10px;color:var(--dim)">Outcome:</span>
-          <select x-model="topBinsOutcome" @change="topBinsData && loadTopBins(true)"
+          <select autocomplete="off"
+                  :value="topBinsOutcome"
+                  @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:10px;padding:2px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tbo-'+o">
@@ -256,7 +258,9 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" @click.stop>
           <span style="font-size:10px;color:var(--dim)">Metric:</span>
-          <select x-model="tdMetric" @change="tdData && loadTd(true)"
+          <select autocomplete="off"
+                  :value="tdMetric"
+                  @change="tdMetric = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:10px;padding:2px 6px;border-radius:3px;max-width:240px">
             <template x-for="f in features" :key="'tdf-'+f">
@@ -264,7 +268,9 @@
             </template>
           </select>
           <span style="font-size:10px;color:var(--dim)">Outcome:</span>
-          <select x-model="tdOutcome" @change="tdData && loadTd(true)"
+          <select autocomplete="off"
+                  :value="tdOutcome"
+                  @change="tdOutcome = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:10px;padding:2px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tdo-'+o">
@@ -279,7 +285,9 @@
             <option value="native_single">Native units (one ticker)</option>
           </select>
           <template x-if="tdMode === 'native_single'">
-            <select x-model="tdSingleTicker" @change="_renderTdChart()"
+            <select autocomplete="off"
+                    :value="tdSingleTicker"
+                    @change="tdSingleTicker = $event.target.value; _renderTdChart()"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                            font-size:10px;padding:2px 6px;border-radius:3px;max-width:120px">
               <template x-for="t in (tdData?.tickers_eligible || [])" :key="'tdt-'+t">

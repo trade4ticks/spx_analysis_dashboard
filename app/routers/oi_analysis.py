@@ -1764,62 +1764,65 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
     # so the threshold is symmetric and meaningful at both ends:
     #   B1  → 2.5th percentile (the centre of the bottom bin)
     #   B20 → 97.5th percentile (the centre of the top bin)
-    # The naive K/n_bins formula gives the UPPER edge of bin K, which is
-    # degenerate at K=n_bins (= max value, which only grows over time and
-    # plateaus at the all-time peak).
     def _q(K):
         return (K - 0.5) / n_bins
 
+    # Canonical month-end calendar from the UNION of all tickers' dates.
+    # Snapshotting every ticker at the same set of dates is critical —
+    # otherwise sparse tickers cause spike-and-recover artefacts where
+    # a non-month-end date appears in the aggregated series with only
+    # ONE contributing ticker.
+    all_dates = set()
+    for items in by_tkr.values():
+        for date_s, _v in items:
+            all_dates.add(date_s)
+    if not all_dates:
+        return [], {}, full_thresholds
+    # For each month, keep the last (max) date seen across all tickers.
+    month_last: dict = {}
+    for d in sorted(all_dates):
+        month_last[d[:7]] = d
+    canonical_month_ends = sorted(month_last.values())
+
     for tkr, items in by_tkr.items():
-        sorted_vals: list = []
-        last_month: str = ""
-        last_date_in_prev_month: str = ""
-        # Collect this ticker's samples here so we can attach
-        # full-history thresholds at the end of the ticker's walk.
-        tkr_samples: list = []
-        for date_s, val in items:
-            month = date_s[:7]  # YYYY-MM
-            if last_month and month != last_month:
-                n = len(sorted_vals)
-                if n >= warm:
-                    for b in bins_to_track:
-                        thr = float(np.quantile(sorted_vals, _q(b)))
-                        tkr_samples.append({
-                            "date":      last_date_in_prev_month,
-                            "bin":       b,
-                            "ticker":    tkr,
-                            "threshold": round(thr, 6),
-                        })
-            bisect.insort(sorted_vals, val)
-            last_month = month
-            last_date_in_prev_month = date_s
+        cum_vals: list = []
+        # items is already chronologically sorted (rows were ORDER BY ticker, trade_date).
+        idx = 0
+        n_items = len(items)
+        for me_date in canonical_month_ends:
+            # Advance through this ticker's data up to and including me_date,
+            # inserting each value into the running sorted list.
+            while idx < n_items and items[idx][0] <= me_date:
+                bisect.insort(cum_vals, items[idx][1])
+                idx += 1
+            if len(cum_vals) >= warm:
+                for b in bins_to_track:
+                    thr = float(np.quantile(cum_vals, _q(b)))
+                    samples.append({
+                        "date":      me_date,
+                        "bin":       b,
+                        "ticker":    tkr,
+                        "threshold": round(thr, 6),
+                    })
+            # If the ticker has no more data beyond me_date, the snapshot
+            # is still a legitimate "as-of" value — keep going so the line
+            # extends to the end of the chart.
 
-        # Final month snapshot.
-        n = len(sorted_vals)
-        if n >= warm and last_date_in_prev_month:
-            for b in bins_to_track:
-                thr = float(np.quantile(sorted_vals, _q(b)))
-                tkr_samples.append({
-                    "date":      last_date_in_prev_month,
-                    "bin":       b,
-                    "ticker":    tkr,
-                    "threshold": round(thr, 6),
-                })
-
-        # Full-history reference per ticker. Same midpoint quantile so
-        # the drift-ratio (walk_forward / full_history) properly cancels
-        # at the end of history.
+        # Full-history reference per ticker (after walking all dates).
         ticker_full = {}
-        if len(sorted_vals) >= n_bins:
+        if len(cum_vals) >= n_bins:
             for b in bins_to_track:
-                full_v = float(np.quantile(sorted_vals, _q(b)))
+                full_v = float(np.quantile(cum_vals, _q(b)))
                 ticker_full[b] = full_v
                 full_thresholds[b].append(full_v)
         full_per_ticker[tkr] = ticker_full
-        for s in tkr_samples:
-            s["threshold_full_ticker"] = round(ticker_full.get(s["bin"], 0.0), 6) \
-                if s["bin"] in ticker_full else None
-        samples.extend(tkr_samples)
+
+    # Second pass: attach each ticker's full-history threshold to its samples
+    # so the endpoint can compute drift ratios in O(1).
+    for s in samples:
+        ft = full_per_ticker.get(s["ticker"], {})
+        s["threshold_full_ticker"] = round(ft.get(s["bin"], 0.0), 6) \
+            if s["bin"] in ft else None
 
     return samples, full_per_ticker, full_thresholds
 
@@ -2573,7 +2576,7 @@ async def global_metric_bins_invalidate():
 
 # Cache key is salted with this version so deploys that change the
 # computation formula automatically invalidate stale cached responses.
-_THRESHOLD_DRIFT_CACHE_VERSION = "v2-midpoint-quantile"
+_THRESHOLD_DRIFT_CACHE_VERSION = "v3-canonical-month-end"
 _THRESHOLD_DRIFT_CACHE: dict = {}
 
 
