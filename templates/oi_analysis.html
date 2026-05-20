@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=68"></script>
+  <script src="/static/js/oi_analysis.js?v=69"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -930,6 +930,12 @@
                 <span :class="{on: corrBinCount===10}" @click="corrSetBinCount(10)">10</span>
                 <span :class="{on: corrBinCount===20}" @click="corrSetBinCount(20)">20</span>
               </div>
+              <span style="font-size:10px;color:var(--dim);margin-left:6px"
+                    title="Walk-forward computes bins using only data prior to each row's date (per-ticker bisect_left against a running sorted list). The primary bin filter and every secondary bin assignment both honour this. ~252-day warmup drops earliest rows.">Mode:</span>
+              <div class="mode-seg">
+                <span :class="{on: corrMode==='in_sample'}"    @click="corrSetMode('in_sample')">In-sample</span>
+                <span :class="{on: corrMode==='walk_forward'}" @click="corrSetMode('walk_forward')">Walk-forward</span>
+              </div>
               <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
                       style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                              font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
@@ -961,6 +967,12 @@
             <div x-show="corrMiniLoading" style="font-size:11px;color:var(--dim);padding:8px 0 12px">
               Loading metric bins…
             </div>
+
+            <!-- Walk-forward subtitle -->
+            <template x-if="!corrMiniLoading && corrMiniData?.mode === 'walk_forward'">
+              <div style="font-size:10px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
+                   x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' rows since ' + (corrMiniData.start_date||'?') + ' · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (corrMiniData.warmup||252) + 'd)'"></div>
+            </template>
 
             <!-- 4-column metric grid -->
             <template x-if="corrMiniData && !corrMiniData.error && !corrMiniLoading">
@@ -1008,6 +1020,12 @@
                   </div>
                 </template>
               </div>
+            </template>
+
+            <!-- Walk-forward subtitle (result pane) -->
+            <template x-if="corrResult?.mode === 'walk_forward' && !corrResult.error">
+              <div style="font-size:10px;color:#e6a23c;margin:6px 0 6px;font-family:monospace;letter-spacing:.5px"
+                   x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows since ' + (corrResult.start_date||'?') + ' · ' + (corrResult.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (corrResult.warmup||252) + 'd)'"></div>
             </template>
 
             <!-- Stats pane -->

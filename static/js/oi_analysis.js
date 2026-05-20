@@ -68,6 +68,7 @@ document.addEventListener('alpine:init', () => {
     corrResult: null,
     corrLoading: false,
     corrBubbleMinN: 1,
+    corrMode: 'in_sample',     // 'in_sample' | 'walk_forward'
 
     // System Portfolio (third tier — persisted research portfolios)
     portfolios: [],          // [{id, name, ticker, outcome, date_from, date_to, system_count}, ...]
@@ -2913,6 +2914,22 @@ document.addEventListener('alpine:init', () => {
       if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
     },
 
+    async corrSetMode(m) {
+      if (m === this.corrMode) return;
+      this.corrMode = m;
+      // Selections are bin IDs; they're meaningful in either mode, so keep them.
+      // But the cached mini data and any existing result are no longer valid.
+      this.corrMiniData = null;
+      const hadResult = !!(this.corrResult && !this.corrResult.error);
+      this.corrResult = null;
+      if (this.corrPanelOpen && this.secCacheKey) {
+        await this.corrLoadMiniData();
+        if (hadResult && this.corrSelectedCount() >= 2) {
+          await this.runCorrelation();
+        }
+      }
+    },
+
     async corrLoadMiniData() {
       this.corrMiniLoading = true;
       try {
@@ -2924,6 +2941,8 @@ document.addEventListener('alpine:init', () => {
             filtered_dates: this._secFilteredDates(),
             ticker:         this.ticker,
             n_bins:         this.corrBinCount,
+            walk_forward:   this.corrMode === 'walk_forward',
+            selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
         const d = await r.json();
@@ -2987,6 +3006,8 @@ document.addEventListener('alpine:init', () => {
             ticker:         this.ticker,
             n_bins:         this.corrBinCount,
             selections,
+            walk_forward:   this.corrMode === 'walk_forward',
+            selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
         const d = await r.json();

@@ -2199,11 +2199,89 @@ class CorrBinsReq(BaseModel):
     filtered_dates: List[str]
     ticker: str = "SPX"
     n_bins: int = 10
+    walk_forward: bool = False
+    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward mode)
+
+
+def _sort_chrono(rows: list) -> list:
+    """Stable chronological sort by (trade_date, ticker)."""
+    return sorted(rows, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+
+
+def _walk_forward_primary_filter(rows: list, primary_metric: str,
+                                  selected_primary_bins: set,
+                                  is_all: bool) -> tuple:
+    """Walk-forward equivalent of `_filter_by_tkr_date` for the corr-explorer.
+
+    Sorts `rows` chronologically, computes walk-forward bins for
+    `primary_metric` (20-bin universe, matching the OI Analysis primary
+    chart), then keeps rows whose walk-forward bin is in
+    `selected_primary_bins`. Rows in warmup (bin=None) are excluded.
+
+    Returns (filtered_chrono_rows, dropped_warmup_n).
+    """
+    ordered = _sort_chrono(rows)
+    wf = _walk_forward_bins(ordered, primary_metric, 20, is_all)
+    kept: list = []
+    dropped = 0
+    sel = set(int(b) for b in (selected_primary_bins or []))
+    for i, r in enumerate(ordered):
+        b = wf.get(i)
+        if b is None:
+            dropped += 1
+            continue
+        if sel and b not in sel:
+            continue
+        kept.append(r)
+    return kept, dropped
+
+
+def _compute_walk_forward_bin_stats(rows_chrono: list, feat: str, outcome_col: str,
+                                    n_bins: int, is_all: bool) -> dict | None:
+    """Walk-forward equivalent of `_compute_bins_for_metric` for one feature.
+
+    Within the (already walk-forward-primary-filtered) chronological row
+    set, compute walk-forward bins for `feat` and aggregate per-bin avg
+    outcome. Uses a small warmup (= n_bins) inside the subset since the
+    primary filter has already enforced the macro warmup gate.
+    """
+    n_bins = max(2, min(20, int(n_bins)))
+    # Within an already-walk-forward subset we just need enough samples per
+    # group to make `min(rank/n*n_bins)+1` meaningful; n_bins is enough.
+    wf = _walk_forward_bins(rows_chrono, feat, n_bins, is_all, warmup=n_bins)
+    buckets: list = [[] for _ in range(n_bins)]
+    for i, r in enumerate(rows_chrono):
+        b = wf.get(i)
+        if b is None:
+            continue
+        o = r.get(outcome_col)
+        if o is None:
+            continue
+        try:
+            ov = float(o)
+            if math.isnan(ov):
+                continue
+        except (TypeError, ValueError):
+            continue
+        buckets[b - 1].append(ov)
+    if all(len(bk) == 0 for bk in buckets):
+        return None
+    return {
+        "name":   feat,
+        "bins":   [round(float(np.mean(bk)), 6) if bk else 0.0 for bk in buckets],
+        "bin_ns": [len(bk) for bk in buckets],
+    }
 
 
 @router.post("/secondary-corr-bins")
 async def secondary_corr_bins(req: CorrBinsReq):
-    """Per-bin avg return for every secondary metric — drives the correlation explorer mini charts."""
+    """Per-bin avg return for every secondary metric — drives the correlation explorer mini charts.
+
+    walk_forward mode: primary bins for `primary_metric` and secondary
+    bins for each `feat` are both computed walk-forward (bisect_left
+    against a per-ticker running sorted list). The warmup is 252 trading
+    days; warmup rows are excluded from stats.
+    """
     cached = _SEC_CACHE.get(req.cache_key)
     if not cached:
         return {"error": "cache_miss"}
@@ -2213,6 +2291,30 @@ async def secondary_corr_bins(req: CorrBinsReq):
     outcome_col = cached["outcome"]
     is_all  = (req.ticker == "ALL")
     n_bins  = max(2, min(20, req.n_bins))
+
+    if req.walk_forward:
+        primary_metric = cached.get("primary_metric") or ""
+        if not primary_metric:
+            return {"error": "no_primary_metric"}
+        filtered, dropped = _walk_forward_primary_filter(
+            all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
+        )
+        if not filtered:
+            return {"error": "no_data", "mode": "walk_forward",
+                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped}
+        results = []
+        for feat in feat_cols:
+            r = _compute_walk_forward_bin_stats(filtered, feat, outcome_col, n_bins, is_all)
+            if r:
+                results.append(r)
+        return {
+            "metrics": results, "n_bins": n_bins,
+            "mode": "walk_forward",
+            "warmup": _DEFAULT_WALKFWD_WARMUP,
+            "dropped_warmup_n": dropped,
+            "combined_n": len(filtered),
+            "start_date": filtered[0].get("trade_date", "") if filtered else "",
+        }
 
     filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
     if not filtered:
@@ -2224,7 +2326,7 @@ async def secondary_corr_bins(req: CorrBinsReq):
         if r:
             results.append(r)
 
-    return {"metrics": results, "n_bins": n_bins}
+    return {"metrics": results, "n_bins": n_bins, "mode": "in_sample"}
 
 
 class CorrReq(BaseModel):
@@ -2233,11 +2335,40 @@ class CorrReq(BaseModel):
     ticker: str = "SPX"
     n_bins: int = 10
     selections: List[dict]  # [{metric: str, bins: [int]}]
+    walk_forward: bool = False
+    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward mode)
+
+
+def _walk_forward_membership(rows_chrono: list, metric: str, selected_bins: set,
+                              n_bins: int, is_all: bool) -> np.ndarray:
+    """Walk-forward equivalent of `_bin_membership`.
+
+    Computes walk-forward bins for `metric` over the already-filtered
+    chronological row set, returning a 0/1 vector where 1 = the row's
+    walk-forward bin is in `selected_bins`. Warmup rows (bin=None) stay
+    0. Uses a small warmup (= n_bins) since the primary filter has
+    already enforced the macro warmup gate.
+    """
+    n_rows = len(rows_chrono)
+    out = np.zeros(n_rows, dtype=np.float64)
+    if not selected_bins:
+        return out
+    wf = _walk_forward_bins(rows_chrono, metric, n_bins, is_all, warmup=n_bins)
+    for i in range(n_rows):
+        b = wf.get(i)
+        if b is not None and b in selected_bins:
+            out[i] = 1.0
+    return out
 
 
 @router.post("/secondary-correlation")
 async def secondary_correlation(req: CorrReq):
-    """Phi correlation matrix between selected secondary metrics' binary bin-membership vectors."""
+    """Phi correlation matrix between selected secondary metrics' binary bin-membership vectors.
+
+    walk_forward mode: both the primary filter (which rows are in the
+    universe) and each selection's bin membership are computed
+    walk-forward via `_walk_forward_bins`. Warmup rows are dropped.
+    """
     cached = _SEC_CACHE.get(req.cache_key)
     if not cached:
         return {"error": "cache_miss"}
@@ -2248,11 +2379,25 @@ async def secondary_correlation(req: CorrReq):
     is_all   = (req.ticker == "ALL")
     n_bins   = max(2, min(20, req.n_bins))
 
-    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
-    if not filtered:
-        return {"error": "no_data"}
-
-    ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+    if req.walk_forward:
+        primary_metric = cached.get("primary_metric") or ""
+        if not primary_metric:
+            return {"error": "no_primary_metric"}
+        filtered, dropped = _walk_forward_primary_filter(
+            all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
+        )
+        if not filtered:
+            return {"error": "no_data", "mode": "walk_forward",
+                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped}
+        ordered = filtered  # already chronologically sorted by _walk_forward_primary_filter
+        mode_out = "walk_forward"
+    else:
+        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
+        if not filtered:
+            return {"error": "no_data"}
+        ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+        dropped = 0
+        mode_out = "in_sample"
 
     vectors, metric_names, n_each = [], [], []
     for sel in req.selections:
@@ -2260,7 +2405,10 @@ async def secondary_correlation(req: CorrReq):
         bins   = set(sel.get("bins", []))
         if not metric or not bins:
             continue
-        vec = _bin_membership(ordered, metric, bins, n_bins, is_all)
+        if req.walk_forward:
+            vec = _walk_forward_membership(ordered, metric, bins, n_bins, is_all)
+        else:
+            vec = _bin_membership(ordered, metric, bins, n_bins, is_all)
         vectors.append(vec)
         metric_names.append(metric)
         n_each.append(int(vec.sum()))
@@ -2361,6 +2509,10 @@ async def secondary_correlation(req: CorrReq):
         "combined_trades":       combined_trades,
         "winner_avg_ret": winner_avg,
         "loser_avg_ret":  loser_avg,
+        "mode":             mode_out,
+        "warmup":           _DEFAULT_WALKFWD_WARMUP if req.walk_forward else None,
+        "dropped_warmup_n": dropped,
+        "start_date":       ordered[0].get("trade_date", "") if ordered else "",
     }
 
 
