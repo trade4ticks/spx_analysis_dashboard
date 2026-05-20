@@ -76,6 +76,7 @@ document.addEventListener('alpine:init', () => {
     portAggregate: null,     // last /aggregate response
     portLoading: false,
     editingSystemId: null,   // when set, the "Add" button becomes "Save Changes"
+    portIsShort: false,      // direction toggle for the system being added/edited
     portBubbleMinN: 1,       // bubble chart min-n filter
     // System Library — anchor-agnostic system templates reusable across portfolios
     librarySystems: [],      // [{id, name, primary_metric, primary_bins, secondaries, ...}]
@@ -3418,6 +3419,7 @@ document.addEventListener('alpine:init', () => {
         primary_bins,
         primary_bin_count: 20,
         secondaries,
+        is_short: this.portIsShort,
       };
       const editingId = this.editingSystemId;
       const url = editingId
@@ -3435,6 +3437,7 @@ document.addEventListener('alpine:init', () => {
         }
         // Clear edit mode on success
         this.editingSystemId = null;
+        this.portIsShort = false;
         await this.selectPortfolio(this.portfolioId);
         await this.loadPortfolios();
       } catch (e) { alert((editingId ? 'Save changes' : 'Add system') + ' error: ' + e.message); }
@@ -3442,6 +3445,7 @@ document.addEventListener('alpine:init', () => {
 
     cancelEditSystem() {
       this.editingSystemId = null;
+      this.portIsShort = false;
     },
 
     async toggleSystem(sid, enabled) {
@@ -3484,6 +3488,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async editSystem(sys) {
+      this.portIsShort = sys.is_short || false;
       // Mark the system as the one being edited. The "+ Add Current Setup
       // as System" button will become "Save Changes to <name>" and will
       // PUT instead of POST.
@@ -3828,6 +3833,7 @@ document.addEventListener('alpine:init', () => {
         secondaries:       (sys.secondaries || []).map(s => ({
           metric: s.metric, bins: s.bins || [], bin_count: s.bin_count || 10,
         })),
+        is_short: sys.is_short || false,
       };
       try {
         const r = await fetch('/api/oi-analysis/library/systems', {

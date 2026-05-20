@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS oi_research_system_library (
     created_at        TIMESTAMPTZ DEFAULT NOW(),
     updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE oi_research_systems        ADD COLUMN IF NOT EXISTS is_short BOOLEAN DEFAULT FALSE;
+ALTER TABLE oi_research_system_library ADD COLUMN IF NOT EXISTS is_short BOOLEAN DEFAULT FALSE;
 """
 
 
@@ -112,6 +114,7 @@ class LibraryItemIn(BaseModel):
     primary_bins: List[int]
     primary_bin_count: int = 20
     secondaries: List[SecondarySpec] = []
+    is_short: bool = False
 
 
 class LibraryItemUpdate(BaseModel):
@@ -121,6 +124,7 @@ class LibraryItemUpdate(BaseModel):
     primary_bins: Optional[List[int]] = None
     primary_bin_count: Optional[int] = None
     secondaries: Optional[List[SecondarySpec]] = None
+    is_short: Optional[bool] = None
 
 
 class SystemIn(BaseModel):
@@ -129,6 +133,7 @@ class SystemIn(BaseModel):
     primary_bins: List[int]
     primary_bin_count: int = 20
     secondaries: List[SecondarySpec] = []
+    is_short: bool = False
 
 
 class SystemUpdate(BaseModel):
@@ -139,6 +144,7 @@ class SystemUpdate(BaseModel):
     primary_bins: Optional[List[int]] = None
     primary_bin_count: Optional[int] = None
     secondaries: Optional[List[SecondarySpec]] = None
+    is_short: Optional[bool] = None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -241,7 +247,7 @@ async def get_portfolio(pid: int, pool=Depends(get_pool)):
         srows = await conn.fetch(
             """SELECT id, portfolio_id, name, enabled, position,
                       primary_metric, primary_bins, primary_bin_count, secondaries,
-                      created_at, updated_at
+                      is_short, created_at, updated_at
                FROM oi_research_systems
                WHERE portfolio_id = $1
                ORDER BY position, id""", pid)
@@ -272,13 +278,13 @@ async def add_system(pid: int, body: SystemIn, pool=Depends(get_pool)):
         row = await conn.fetchrow(
             """INSERT INTO oi_research_systems
                  (portfolio_id, name, position, primary_metric, primary_bins,
-                  primary_bin_count, secondaries)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                  primary_bin_count, secondaries, is_short)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
                RETURNING id, portfolio_id, name, enabled, position,
                          primary_metric, primary_bins, primary_bin_count,
-                         secondaries, created_at, updated_at""",
+                         secondaries, is_short, created_at, updated_at""",
             pid, name, cnt, body.primary_metric, body.primary_bins,
-            body.primary_bin_count, secondaries_json)
+            body.primary_bin_count, secondaries_json, body.is_short)
         await conn.execute(
             "UPDATE oi_research_portfolios SET updated_at = NOW() WHERE id = $1",
             pid)
@@ -305,6 +311,8 @@ async def update_system(pid: int, sid: int, body: SystemUpdate,
     if body.secondaries is not None:
         sets.append(f"secondaries = ${p}::jsonb")
         params.append(_json.dumps([s.dict() for s in body.secondaries])); p += 1
+    if body.is_short is not None:
+        sets.append(f"is_short = ${p}"); params.append(body.is_short); p += 1
     if not sets:
         raise HTTPException(400, "no fields to update")
     sets.append("updated_at = NOW()")
@@ -313,7 +321,7 @@ async def update_system(pid: int, sid: int, body: SystemUpdate,
            f"WHERE portfolio_id = ${p} AND id = ${p + 1} "
            f"RETURNING id, portfolio_id, name, enabled, position, "
            f"primary_metric, primary_bins, primary_bin_count, secondaries, "
-           f"created_at, updated_at")
+           f"is_short, created_at, updated_at")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *params)
         if not row:
@@ -407,6 +415,20 @@ def _stats_from_trades(trades: list, outcome_col: str) -> dict:
     }
 
 
+def _signed_row(row: dict, sign: int, outcome_col: str) -> dict:
+    """Return row unchanged if sign==+1, else a copy with outcome negated."""
+    if sign == 1:
+        return row
+    r = dict(row)
+    v = r.get(outcome_col)
+    if v is not None:
+        try:
+            r[outcome_col] = -float(v)
+        except (TypeError, ValueError):
+            pass
+    return r
+
+
 @router.post("/portfolios/{pid}/aggregate")
 async def portfolio_aggregate(pid: int,
                               pool=Depends(get_pool),
@@ -424,7 +446,7 @@ async def portfolio_aggregate(pid: int,
             raise HTTPException(404, "portfolio not found")
         srows = await conn.fetch(
             """SELECT id, name, enabled, position,
-                      primary_metric, primary_bins, primary_bin_count, secondaries
+                      primary_metric, primary_bins, primary_bin_count, secondaries, is_short
                FROM oi_research_systems
                WHERE portfolio_id = $1
                ORDER BY position, id""", pid)
@@ -528,6 +550,22 @@ async def portfolio_aggregate(pid: int,
     V_port = (M_sys.sum(axis=0) > 0).astype(float)
     union_rows = [rows[i] for i, v in enumerate(V_port) if v == 1.0]
 
+    # Per-row direction: +1 if any long system fires, -1 if only short systems fire.
+    system_is_short = [bool(s.get("is_short", False)) for s in enabled_systems]
+    union_sign_map: dict = {}
+    for r_idx, vp in enumerate(V_port):
+        if vp != 1.0:
+            continue
+        has_long = any(
+            (not system_is_short[k]) and (system_vectors[k][r_idx] == 1.0)
+            for k in range(len(system_vectors))
+        )
+        union_sign_map[r_idx] = +1 if has_long else -1
+    union_rows_signed = [
+        _signed_row(rows[i], union_sign_map.get(i, +1), outcome)
+        for i, v in enumerate(V_port) if v == 1.0
+    ]
+
     # Trade-eligible universe: union of all enabled systems' primary filters.
     # phi correlations restrict to this universe so values match the corr
     # explorer (which only sees primary-filtered rows). The "primary" equity
@@ -543,18 +581,21 @@ async def portfolio_aggregate(pid: int,
     # Per-system summary
     sys_stats = []
     total_sum_ret_union = 0.0
-    for r in union_rows:
+    for r in union_rows_signed:
         v = r.get(outcome)
         if v is not None:
             try:
                 total_sum_ret_union += float(v)
             except (TypeError, ValueError):
                 pass
-    for s, vec in zip(enabled_systems, system_vectors):
+    for s, vec, is_short_sys in zip(enabled_systems, system_vectors, system_is_short):
         sys_rows = [rows[i] for i, v in enumerate(vec) if v == 1.0]
+        if is_short_sys:
+            sys_rows = [_signed_row(r, -1, outcome) for r in sys_rows]
         st = _stats_from_trades(sys_rows, outcome)
         sys_stats.append({
             "id": s["id"], "name": s["name"], "enabled": True,
+            "is_short": s.get("is_short", False),
             "n_trades": st["n"], "win_rate": st["win_rate"],
             "avg_ret": st["avg_ret"],
             "contrib_pct": round(st["sum_ret"] / total_sum_ret_union * 100, 2)
@@ -566,6 +607,7 @@ async def portfolio_aggregate(pid: int,
         if s["id"] not in enabled_ids:
             sys_stats.append({
                 "id": s["id"], "name": s["name"], "enabled": False,
+                "is_short": s.get("is_short", False),
                 "n_trades": 0, "win_rate": 0.0, "avg_ret": 0.0,
                 "contrib_pct": 0.0,
             })
@@ -576,7 +618,7 @@ async def portfolio_aggregate(pid: int,
     # Equity curves — primary universe (blue) and union (pink) — match the
     # corr explorer's two-line plot exactly.
     equity_primary  = _sec_equity_curve(universe_rows, outcome)
-    equity_combined = _sec_equity_curve(union_rows, outcome)
+    equity_combined = _sec_equity_curve(union_rows_signed, outcome)
 
     # Yearly breakdown with both primary baseline + combined union, same
     # field names the corr explorer's yearly chart expects.
@@ -591,7 +633,7 @@ async def portfolio_aggregate(pid: int,
             yp[yr].append(float(v))
         except (TypeError, ValueError):
             pass
-    for r in union_rows:
+    for r in union_rows_signed:
         yr = int(str(r.get("trade_date", "0000"))[:4])
         v = r.get(outcome)
         if v is None:
@@ -615,9 +657,9 @@ async def portfolio_aggregate(pid: int,
         })
     horizon = _parse_horizon(outcome)
 
-    # Ticker breakdown
+    # Ticker breakdown (use signed returns so short systems contribute positively)
     ticker_rets: dict = defaultdict(list)
-    for r in union_rows:
+    for r in union_rows_signed:
         v = r.get(outcome)
         if v is None:
             continue
@@ -639,8 +681,8 @@ async def portfolio_aggregate(pid: int,
             "contrib_pct": round(contrib, 2),
         })
 
-    # Winner / loser averages
-    union_outcomes = [float(r[outcome]) for r in union_rows
+    # Winner / loser averages (signed)
+    union_outcomes = [float(r[outcome]) for r in union_rows_signed
                       if r.get(outcome) is not None]
     winners = [v for v in union_outcomes if v > 0]
     losers  = [v for v in union_outcomes if v <= 0]
@@ -683,6 +725,7 @@ async def portfolio_aggregate(pid: int,
             outcome_col=outcome,
         )
         rec["fired_systems"] = fired
+        rec["direction"] = "short" if union_sign_map.get(r_idx, +1) == -1 else "long"
         combined_trades.append(rec)
 
     # phi correlations restricted to the trade-eligible universe so the
@@ -758,7 +801,7 @@ async def list_library_systems(pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT id, name, description, primary_metric, primary_bins,
-                      primary_bin_count, secondaries, created_at, updated_at
+                      primary_bin_count, secondaries, is_short, created_at, updated_at
                FROM oi_research_system_library
                ORDER BY updated_at DESC""")
     return [_library_row_to_dict(r) for r in rows]
@@ -772,13 +815,14 @@ async def add_library_system(body: LibraryItemIn, pool=Depends(get_pool)):
         row = await conn.fetchrow(
             """INSERT INTO oi_research_system_library
                  (name, description, primary_metric, primary_bins,
-                  primary_bin_count, secondaries)
-               VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                  primary_bin_count, secondaries, is_short)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                RETURNING id, name, description, primary_metric, primary_bins,
-                         primary_bin_count, secondaries, created_at, updated_at""",
+                         primary_bin_count, secondaries, is_short, created_at, updated_at""",
             body.name, body.description, body.primary_metric, body.primary_bins,
             body.primary_bin_count,
-            _json.dumps([s.dict() for s in body.secondaries]))
+            _json.dumps([s.dict() for s in body.secondaries]),
+            body.is_short)
     return _library_row_to_dict(row)
 
 
@@ -800,13 +844,15 @@ async def update_library_system(lid: int, body: LibraryItemUpdate,
     if body.secondaries is not None:
         sets.append(f"secondaries = ${p}::jsonb")
         params.append(_json.dumps([s.dict() for s in body.secondaries])); p += 1
+    if body.is_short is not None:
+        sets.append(f"is_short = ${p}"); params.append(body.is_short); p += 1
     if not sets:
         raise HTTPException(400, "no fields to update")
     sets.append("updated_at = NOW()")
     params.append(lid)
     sql = (f"UPDATE oi_research_system_library SET {', '.join(sets)} "
            f"WHERE id = ${p} RETURNING id, name, description, primary_metric, "
-           f"primary_bins, primary_bin_count, secondaries, created_at, updated_at")
+           f"primary_bins, primary_bin_count, secondaries, is_short, created_at, updated_at")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, *params)
     if not row:
@@ -833,7 +879,7 @@ async def add_system_from_library(pid: int, lid: int, pool=Depends(get_pool)):
         if not port:
             raise HTTPException(404, "portfolio not found")
         lib = await conn.fetchrow(
-            """SELECT name, primary_metric, primary_bins, primary_bin_count, secondaries
+            """SELECT name, primary_metric, primary_bins, primary_bin_count, secondaries, is_short
                FROM oi_research_system_library WHERE id = $1""", lid)
         if not lib:
             raise HTTPException(404, "library system not found")
@@ -857,13 +903,13 @@ async def add_system_from_library(pid: int, lid: int, pool=Depends(get_pool)):
         row = await conn.fetchrow(
             """INSERT INTO oi_research_systems
                  (portfolio_id, name, position, primary_metric, primary_bins,
-                  primary_bin_count, secondaries)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                  primary_bin_count, secondaries, is_short)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
                RETURNING id, portfolio_id, name, enabled, position,
                          primary_metric, primary_bins, primary_bin_count,
-                         secondaries, created_at, updated_at""",
+                         secondaries, is_short, created_at, updated_at""",
             pid, name, cnt, lib["primary_metric"], lib["primary_bins"],
-            lib["primary_bin_count"], _json.dumps(secs))
+            lib["primary_bin_count"], _json.dumps(secs), lib.get("is_short", False))
         await conn.execute(
             "UPDATE oi_research_portfolios SET updated_at = NOW() WHERE id = $1",
             pid)

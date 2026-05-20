@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=60"></script>
+  <script src="/static/js/oi_analysis.js?v=61"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1150,6 +1150,15 @@
                 </button>
               </div>
             </template>
+            <!-- Direction toggle: Long / Short -->
+            <span x-show="portfolio" style="display:inline-flex;border-radius:4px;overflow:hidden;border:1px solid var(--border)">
+              <button @click="portIsShort = false"
+                      :style="!portIsShort ? 'background:rgba(52,152,219,.2);color:#3498db;font-weight:700' : 'background:var(--raised);color:var(--dim)'"
+                      style="font-size:10px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">LONG</button>
+              <button @click="portIsShort = true"
+                      :style="portIsShort ? 'background:rgba(232,67,147,.2);color:#e84393;font-weight:700' : 'background:var(--raised);color:var(--dim)'"
+                      style="font-size:10px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">SHORT</button>
+            </span>
             <button @click="addCurrentSystem()"
                     :disabled="!canAddSystem"
                     :style="canAddSystem ? (editingSystemId ? 'background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);color:#e84393;cursor:pointer' : 'background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.4);color:#3498db;cursor:pointer') : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:not-allowed;opacity:.6'"
@@ -1186,6 +1195,10 @@
                   <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
                     <span style="font-size:11px;font-weight:700;color:var(--text);flex:1"
                           x-text="lib.name"></span>
+                    <span x-show="lib.is_short"
+                          style="font-size:9px;font-weight:700;letter-spacing:.4px;
+                                 background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);
+                                 color:#e84393;border-radius:3px;padding:1px 5px">SHORT</span>
                     <span class="if-pill" style="cursor:pointer"
                           :class="!portfolioId ? '' : ''"
                           :style="portfolioId ? '' : 'opacity:.4;cursor:not-allowed'"
@@ -1229,6 +1242,10 @@
                          style="cursor:pointer">
                   <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
                         x-text="sys.name"></span>
+                  <span x-show="sys.is_short"
+                        style="font-size:9px;font-weight:700;letter-spacing:.4px;
+                               background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);
+                               color:#e84393;border-radius:3px;padding:1px 5px">SHORT</span>
                   <span class="if-pill" style="cursor:pointer" @click="saveSystemToLibrary(sys)" title="Save to Library">💾</span>
                   <span class="if-pill" style="cursor:pointer" @click="renameSystem(sys.id, sys.name)" title="Rename">✎</span>
                   <span class="if-pill" style="cursor:pointer" @click="editSystem(sys)">Edit</span>
