@@ -2137,21 +2137,37 @@ async def secondary_scan(req: SecScanReq):
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
 
+    # Spec-dispatched primary filter. The `_sec_score_metrics` call still
+    # forks on walk_forward inside it (separate concern — that helper's
+    # signature is "filtered list OR full rows + filtered_dates"), but
+    # the filter selection itself is unified here.
+    from app.routers.row_compute import (
+        InSampleSpec, WalkForwardSpec, filter_by_assignments,
+    )
+    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    filtered, dropped, universe = filter_by_assignments(
+        rows, spec, primary_metric,
+        req.selected_primary_bins, is_all, req.filtered_dates,
+    )
     if req.walk_forward:
-        sel = set(int(b) for b in (req.selected_primary_bins or []))
-        filtered, dropped, universe = _walk_forward_primary_filter(
-            rows, primary_metric, sel, is_all)
         metrics_result = _sec_score_metrics(filtered, [], outcome_col, feature_cols, is_all)
         baseline_subset = filtered
         resp_mode = "walk_forward"
         start_date = filtered[0]["trade_date"] if filtered else None
     else:
+        # In-sample path keeps its legacy two-arg shape: `_sec_score_metrics`
+        # accepts the full row set + filtered_dates and does its own
+        # _filter_by_tkr_date pass internally. The `baseline_subset` we
+        # return uses the wrapper's filtered output (semantically the same
+        # subset; just collapses the duplicated _filter_by_tkr_date call).
         metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
-        baseline_subset = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
-                           if req.filtered_dates else rows)
-        dropped, universe = 0, len(baseline_subset)
+        baseline_subset = filtered if req.filtered_dates else rows
         resp_mode = "in_sample"
         start_date = rows[0]["trade_date"] if rows else None
+        # Legacy in-sample reported universe_n as len(baseline_subset).
+        # The wrapper returns len(rows) — override to preserve the
+        # legacy semantic for the regression diff.
+        universe = len(baseline_subset)
 
     baseline_rets = [float(r[outcome_col]) for r in baseline_subset if r.get(outcome_col) is not None]
     baseline = {
@@ -2183,89 +2199,32 @@ async def secondary_detail(req: SecDetailReq):
     primary_metric = cached.get("primary_metric")
     n_bins = max(2, min(20, req.sec_bin_count))
 
-    # ── Primary filter ──────────────────────────────────────────────────────
-    if req.walk_forward:
-        sel = set(int(b) for b in (req.selected_primary_bins or []))
-        filtered, dropped, _universe = _walk_forward_primary_filter(
-            all_rows, primary_metric, sel, is_all)
-        resp_mode = "walk_forward"
-    else:
-        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
-        dropped = 0
-        resp_mode = "in_sample"
+    # ── Primary filter + secondary bucketing ──────────────────────────────
+    # Both steps dispatch on the spec — single path for both in-sample and
+    # walk-forward, no inline branches in this endpoint anymore.
+    from app.routers.row_compute import (
+        InSampleSpec, WalkForwardSpec,
+        filter_by_assignments, assign_secondary_buckets,
+    )
+    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    filtered, dropped, _universe = filter_by_assignments(
+        all_rows, spec, primary_metric or "",
+        req.selected_primary_bins, is_all, req.filtered_dates,
+    )
+    resp_mode = "walk_forward" if req.walk_forward else "in_sample"
 
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
 
     # ── Secondary binning ───────────────────────────────────────────────────
-    if req.walk_forward:
-        # Walk-forward bins within the primary-filtered chronological subset.
-        # warmup=n_bins: tiny warmup so even small filtered sets work.
-        filtered_chrono = _sort_chrono(filtered)
-        wf_sec = _walk_forward_bins(filtered_chrono, req.metric_b, n_bins, is_all, warmup=n_bins)
-        buckets: list = [[] for _ in range(n_bins)]
-        for i, r in enumerate(filtered_chrono):
-            b = wf_sec.get(i)
-            if b is None:
-                continue
-            v = r.get(req.metric_b)
-            o = r.get(outcome_col)
-            if v is None or o is None:
-                continue
-            try:
-                fv, fo = float(v), float(o)
-                if not (math.isnan(fv) or math.isnan(fo)):
-                    buckets[b - 1].append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
-            except (TypeError, ValueError):
-                pass
-    else:
-        # In-sample: per-ticker rank-normalize for ALL, global rank for single.
-        if is_all:
-            by_tkr: dict = defaultdict(list)
-            for r in filtered:
-                v = r.get(req.metric_b)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv, fo = float(v), float(o)
-                    if not (math.isnan(fv) or math.isnan(fo)):
-                        by_tkr[r.get("ticker", "_")].append(
-                            (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
-                        )
-                except (TypeError, ValueError):
-                    pass
-            norm_rows = []
-            for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < n_bins:
-                    continue
-                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-                n_t = len(sorted_t)
-                for rank, (_, y, d, tkr) in enumerate(sorted_t):
-                    norm_rows.append((rank / n_t, y, d, tkr))
-        else:
-            norm_rows = []
-            for r in filtered:
-                v = r.get(req.metric_b)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv, fo = float(v), float(o)
-                    if not (math.isnan(fv) or math.isnan(fo)):
-                        norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
-                except (TypeError, ValueError):
-                    pass
-
-        if len(norm_rows) < n_bins * 2:
-            return {"error": "insufficient_data"}
-
-        sorted_norm = sorted(norm_rows, key=lambda x: x[0])
-        n = len(sorted_norm)
-        buckets: list = [[] for _ in range(n_bins)]
-        for i, row_t in enumerate(sorted_norm):
-            b = min(int(i / n * n_bins), n_bins - 1)
-            buckets[b].append(row_t)
+    # Spec-dispatched. The in-sample branch may return None when there
+    # are too few rows with valid (metric_b, outcome) pairs after the
+    # per-ticker n_bins gate — match the legacy "insufficient_data"
+    # error in that case. The walk-forward branch never returns None
+    # (matches legacy, which always built buckets without a second check).
+    buckets = assign_secondary_buckets(spec, filtered, req.metric_b, n_bins, outcome_col, is_all)
+    if buckets is None:
+        return {"error": "insufficient_data"}
 
     # Bin stats
     bins_out = []
@@ -2542,22 +2501,36 @@ async def secondary_corr_bins(req: CorrBinsReq):
     is_all  = (req.ticker == "ALL")
     n_bins  = max(2, min(20, req.n_bins))
 
-    if req.walk_forward:
-        primary_metric = cached.get("primary_metric") or ""
-        if not primary_metric:
-            return {"error": "no_primary_metric"}
-        filtered, dropped, universe = _walk_forward_primary_filter(
-            all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
-        )
-        if not filtered:
+    # Route primary filter + per-feature stats through the row_compute
+    # spec-dispatched helpers. The fork on `walk_forward` collapses to
+    # a single spec selection; the rest of the function body is one path.
+    from app.routers.row_compute import (
+        InSampleSpec, WalkForwardSpec,
+        filter_by_assignments, assign_secondary_bin_stats,
+    )
+    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    primary_metric = cached.get("primary_metric") or ""
+    if req.walk_forward and not primary_metric:
+        return {"error": "no_primary_metric"}
+
+    filtered, dropped, universe = filter_by_assignments(
+        all_rows, spec, primary_metric,
+        req.selected_primary_bins, is_all, req.filtered_dates,
+    )
+    if not filtered:
+        if req.walk_forward:
             return {"error": "no_data", "mode": "walk_forward",
                     "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
                     "universe_n": universe}
-        results = []
-        for feat in feat_cols:
-            r = _compute_walk_forward_bin_stats(filtered, feat, outcome_col, n_bins, is_all)
-            if r:
-                results.append(r)
+        return {"error": "no_data"}
+
+    results = []
+    for feat in feat_cols:
+        r = assign_secondary_bin_stats(spec, filtered, feat, n_bins, outcome_col, is_all)
+        if r:
+            results.append(r)
+
+    if req.walk_forward:
         return {
             "metrics": results, "n_bins": n_bins,
             "mode": "walk_forward",
@@ -2567,17 +2540,6 @@ async def secondary_corr_bins(req: CorrBinsReq):
             "combined_n":       len(filtered),
             "start_date":       filtered[0].get("trade_date", "") if filtered else "",
         }
-
-    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
-    if not filtered:
-        return {"error": "no_data"}
-
-    results = []
-    for feat in feat_cols:
-        r = _compute_bins_for_metric(filtered, feat, outcome_col, n_bins, is_all)
-        if r:
-            results.append(r)
-
     return {"metrics": results, "n_bins": n_bins, "mode": "in_sample"}
 
 
@@ -2631,25 +2593,36 @@ async def secondary_correlation(req: CorrReq):
     is_all   = (req.ticker == "ALL")
     n_bins   = max(2, min(20, req.n_bins))
 
-    if req.walk_forward:
-        primary_metric = cached.get("primary_metric") or ""
-        if not primary_metric:
-            return {"error": "no_primary_metric"}
-        filtered, dropped, universe = _walk_forward_primary_filter(
-            all_rows, primary_metric, set(req.selected_primary_bins or []), is_all
-        )
-        if not filtered:
+    # Spec-dispatched primary filter + membership. Single path; no fork
+    # on `walk_forward` for the bucketing logic.
+    from app.routers.row_compute import (
+        InSampleSpec, WalkForwardSpec,
+        filter_by_assignments, secondary_membership,
+    )
+    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    primary_metric = cached.get("primary_metric") or ""
+    if req.walk_forward and not primary_metric:
+        return {"error": "no_primary_metric"}
+
+    filtered, dropped, universe = filter_by_assignments(
+        all_rows, spec, primary_metric,
+        req.selected_primary_bins, is_all, req.filtered_dates,
+    )
+    if not filtered:
+        if req.walk_forward:
             return {"error": "no_data", "mode": "walk_forward",
                     "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
                     "universe_n": universe}
-        ordered = filtered  # already chronologically sorted by _walk_forward_primary_filter
+        return {"error": "no_data"}
+
+    if req.walk_forward:
+        ordered = filtered  # already chronologically sorted by the wf filter
         mode_out = "walk_forward"
     else:
-        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
-        if not filtered:
-            return {"error": "no_data"}
+        # In-sample: the wrapper preserves cached-row order (legacy
+        # `_filter_by_tkr_date` was unsorted). Re-sort here to match the
+        # legacy explicit sort that fed _bin_membership.
         ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
-        dropped = 0
         universe = len(ordered)
         mode_out = "in_sample"
 
@@ -2659,10 +2632,7 @@ async def secondary_correlation(req: CorrReq):
         bins   = set(sel.get("bins", []))
         if not metric or not bins:
             continue
-        if req.walk_forward:
-            vec = _walk_forward_membership(ordered, metric, bins, n_bins, is_all)
-        else:
-            vec = _bin_membership(ordered, metric, bins, n_bins, is_all)
+        vec = secondary_membership(spec, ordered, metric, bins, n_bins, is_all)
         vectors.append(vec)
         metric_names.append(metric)
         n_each.append(int(vec.sum()))

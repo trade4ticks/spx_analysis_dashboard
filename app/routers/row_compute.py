@@ -502,6 +502,237 @@ ASSIGNERS: dict[str, type] = {
 }
 
 
+# ── Secondary-endpoint dispatch (Step 4) ─────────────────────────────────
+# The secondary correlation explorer + scanner endpoints share a three-step
+# shape that depends on the active spec:
+#   (1) PRIMARY filter — narrow cached rows to "user-selected primary bins"
+#   (2) SECONDARY bin stats — per-bin avg-ret for one metric inside (1)
+#   (3) SECONDARY membership — binary 0/1 vector for one (metric, bin set)
+#
+# Pre-Step-4 each endpoint forked on `walk_forward` and called a
+# different helper for each step. The three functions below collapse
+# the fork into one spec-dispatched call. Each delegates to the
+# existing helpers in oi_analysis.py — no rewritten math.
+
+def filter_by_assignments(
+    rows: list,
+    spec,
+    primary_metric: str,
+    selected_primary_bins,
+    is_all: bool,
+    filtered_dates: Optional[list] = None,
+) -> tuple[list, int, int]:
+    """Primary filter for the secondary-endpoint family.
+
+    Returns (filtered_rows, dropped_warmup_n, universe_n).
+
+      in_sample: uses the frontend's `filtered_dates` (a list of
+        "ticker|date" strings already narrowed by /analyze's in-sample
+        primary bins). `dropped_warmup_n` is 0; `universe_n` is the full
+        cached row count. Output is in cached-row iteration order
+        (NOT chronologically resorted) to preserve legacy bit-equivalence
+        — downstream `_compute_bins_for_metric` is order-insensitive.
+
+      walk_forward: delegates to `_walk_forward_primary_filter`. Computes
+        walk-forward primary bins backend-side (20-bin universe, 252-day
+        warmup) and keeps rows whose bin ∈ `selected_primary_bins`.
+        Output is chronologically sorted.
+
+      train_test: (Step 6) frozen training-set bins.
+    """
+    from app.routers.oi_analysis import (
+        _walk_forward_primary_filter, _filter_by_tkr_date, _parse_tkr_date_set,
+    )
+    if spec.kind == "in_sample":
+        filtered = _filter_by_tkr_date(rows, _parse_tkr_date_set(filtered_dates or []))
+        return filtered, 0, len(rows)
+    if spec.kind == "walk_forward":
+        return _walk_forward_primary_filter(
+            rows, primary_metric, set(selected_primary_bins or []), is_all,
+        )
+    if spec.kind == "train_test":
+        raise NotImplementedError(
+            "TrainTestSpec.filter_by_assignments is filled in by Step 6."
+        )
+    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+
+
+def assign_secondary_bin_stats(
+    spec,
+    rows_chrono: list,
+    metric: str,
+    n_bins: int,
+    outcome_col: str,
+    is_all: bool,
+) -> Optional[dict]:
+    """Per-bin avg-return for ONE secondary metric inside an already-
+    primary-filtered chronological subset. Returns {name, bins, bin_ns}
+    or None if insufficient data.
+
+      in_sample: per-ticker rank over the full subset history
+        (`_compute_bins_for_metric`).
+      walk_forward: per-ticker bisect_left running history with
+        warmup=n_bins — the macro 252-day warmup gate is already
+        enforced by the primary filter, so the inner warmup is small
+        (`_compute_walk_forward_bin_stats`).
+      train_test: (Step 6).
+    """
+    from app.routers.oi_analysis import (
+        _compute_bins_for_metric, _compute_walk_forward_bin_stats,
+    )
+    if spec.kind == "in_sample":
+        return _compute_bins_for_metric(rows_chrono, metric, outcome_col, n_bins, is_all)
+    if spec.kind == "walk_forward":
+        return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
+    if spec.kind == "train_test":
+        raise NotImplementedError(
+            "TrainTestSpec.assign_secondary_bin_stats is filled in by Step 6."
+        )
+    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+
+
+def assign_secondary_buckets(
+    spec,
+    rows_chrono: list,
+    metric: str,
+    n_bins: int,
+    outcome_col: str,
+    is_all: bool,
+):
+    """Per-bin row tuples for ONE secondary metric, used by /secondary-detail.
+
+    Returns `buckets: list[list[(fv_or_rank, outcome, date, ticker)]]` of
+    length n_bins, or `None` if fewer than `n_bins * 2` valid rows.
+
+    The first tuple element is:
+      - in_sample ALL mode    : `rank/n_t` (legacy per-ticker normalization)
+      - in_sample single mode : the raw metric value
+      - walk_forward          : the raw metric value
+    Downstream /secondary-detail uses only positions [1], [2], [3]
+    (outcome, date, ticker) — the first element is preserved for
+    legacy bit-equivalence but not consumed.
+
+    Behavior by spec:
+      in_sample: per-ticker rank-normalize (ALL) or flat sort (single),
+        then distribute into n_bins by index position.
+      walk_forward: per-ticker `bisect_left` running history with
+        warmup=n_bins (macro warmup already enforced by the primary
+        filter); each row's walk-forward bin places its tuple in
+        `buckets[bin - 1]`.
+      train_test: (Step 6).
+    """
+    if spec.kind == "in_sample":
+        if is_all:
+            by_tkr: dict = {}
+            for r in rows_chrono:
+                v = r.get(metric)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv = float(v); fo = float(o)
+                    if math.isnan(fv) or math.isnan(fo):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                by_tkr.setdefault(r.get("ticker", "_"), []).append(
+                    (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
+                )
+            norm_rows = []
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < n_bins:
+                    continue
+                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+                n_t = len(sorted_t)
+                for rank, (_, y, d, tkr) in enumerate(sorted_t):
+                    norm_rows.append((rank / n_t, y, d, tkr))
+        else:
+            norm_rows = []
+            for r in rows_chrono:
+                v = r.get(metric)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv = float(v); fo = float(o)
+                    if math.isnan(fv) or math.isnan(fo):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
+        if len(norm_rows) < n_bins * 2:
+            return None
+        sorted_norm = sorted(norm_rows, key=lambda x: x[0])
+        n = len(sorted_norm)
+        buckets: list = [[] for _ in range(n_bins)]
+        for i, row_t in enumerate(sorted_norm):
+            b = min(int(i / n * n_bins), n_bins - 1)
+            buckets[b].append(row_t)
+        return buckets
+
+    if spec.kind == "walk_forward":
+        from app.routers.oi_analysis import _walk_forward_bins, _sort_chrono
+        # Macro warmup already enforced by the primary filter; use a tiny
+        # inner warmup so even small subsets can produce bin assignments.
+        # Legacy WF branch did not impose a second "len < n_bins*2" check
+        # (only the IS branch did, on norm_rows). Mirror that — return
+        # whatever buckets the walk-forward assignments produced, possibly
+        # partly empty. Downstream `bins_out` handles empty buckets.
+        filtered_chrono = _sort_chrono(rows_chrono)
+        wf_sec = _walk_forward_bins(filtered_chrono, metric, n_bins, is_all, warmup=n_bins)
+        buckets = [[] for _ in range(n_bins)]
+        for i, r in enumerate(filtered_chrono):
+            b = wf_sec.get(i)
+            if b is None:
+                continue
+            v = r.get(metric); o = r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv = float(v); fo = float(o)
+                if math.isnan(fv) or math.isnan(fo):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            buckets[b - 1].append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
+        return buckets
+
+    if spec.kind == "train_test":
+        raise NotImplementedError(
+            "TrainTestSpec.assign_secondary_buckets is filled in by Step 6."
+        )
+    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+
+
+def secondary_membership(
+    spec,
+    rows_chrono: list,
+    metric: str,
+    selected_bins,
+    n_bins: int,
+    is_all: bool,
+):
+    """Binary 0/1 membership vector for ONE secondary metric inside an
+    already-primary-filtered chronological subset. Returns a numpy float64
+    array of length len(rows_chrono).
+
+      in_sample: `_bin_membership` — per-ticker rank, 0 for excluded.
+      walk_forward: `_walk_forward_membership` — small inner warmup.
+      train_test: (Step 6).
+    """
+    from app.routers.oi_analysis import _bin_membership, _walk_forward_membership
+    sel = set(selected_bins or [])
+    if spec.kind == "in_sample":
+        return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
+    if spec.kind == "walk_forward":
+        return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
+    if spec.kind == "train_test":
+        raise NotImplementedError(
+            "TrainTestSpec.secondary_membership is filled in by Step 6."
+        )
+    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+
+
 # ── Runtime contract validator ───────────────────────────────────────────
 
 def _validate_assignments(assignments: list[RowAssignment], n_bins: int) -> None:
