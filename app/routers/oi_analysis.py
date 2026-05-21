@@ -251,37 +251,54 @@ async def analyze(
                 except (ValueError, TypeError):
                     pass
 
-        if walk_forward:
-            # Walk-forward bin assignment per ticker. Both 10-bin and 20-bin
-            # bucketing computed in one bisect pass per ticker. Warmup rows
-            # (per-ticker history < 252) are dropped.
-            buckets_by_n, wf_assignments, wf_dropped = _walk_forward_bucket_per_ticker(
-                by_ticker, [10, 20]
-            )
-            buckets        = buckets_by_n[10]
-            buckets_20_all = buckets_by_n[20]
-            pairs          = [a[0]        for a in wf_assignments]
-            pairs_decile   = [a[1][10]    for a in wf_assignments]
-            pairs_decile20 = [a[1][20]    for a in wf_assignments]
-        else:
-            buckets = _bucket_pairs_per_ticker(by_ticker, 10)
-            buckets_20_all = _bucket_pairs_per_ticker(by_ticker, 20)
-            wf_dropped = 0
+        # Route bucketing through the row_compute layer. Both in-sample
+        # and walk-forward branches now flow through one path; the
+        # method choice picks the Assigner. Downstream of this block
+        # (decile_stats_20, equity_by_decile, trade_calendar, etc.) is
+        # unchanged.
+        from app.routers.row_compute import (
+            ASSIGNERS, InSampleSpec, WalkForwardSpec, _validate_assignments,
+        )
+        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        assigner = ASSIGNERS[spec.kind](spec)
+        state10 = assigner.fit(row_dicts, metric, 10, True)
+        a10 = assigner.assign(row_dicts, metric, 10, True, state10, outcome)
+        _validate_assignments(a10, 10)
+        state20 = assigner.fit(row_dicts, metric, 20, True)
+        a20 = assigner.assign(row_dicts, metric, 20, True, state20, outcome)
+        _validate_assignments(a20, 20)
 
-            # pairs + parallel decile lists from pre-assigned buckets
-            pairs_with_d = sorted(
-                [(p, i + 1) for i, bucket in enumerate(buckets) for p in bucket],
-                key=lambda x: x[0][2]  # chronological
-            )
-            pairs = [pd[0] for pd in pairs_with_d]
-            pairs_decile = [pd[1] for pd in pairs_with_d]
+        # Cross-reference 10-bin and 20-bin assignments by (ticker, date)
+        # so each valid pair carries both bin numbers — same identity used
+        # in `buckets`, `buckets_20_all`, and the chronological `pairs`
+        # list.
+        key_b20: dict = {(a.ticker, a.trade_date): a.bin
+                         for a in a20 if a.bin is not None}
+        valid_a10 = [a for a in a10
+                     if a.bin is not None
+                     and (a.ticker, a.trade_date) in key_b20]
+        valid_a10.sort(key=lambda a: a.trade_date)  # chronological across tickers
 
-            # 20-bin per-ticker normalization (same pattern, 20 buckets)
-            pair_to_dec20: dict = {}
-            for bin_idx, bucket in enumerate(buckets_20_all):
-                for p in bucket:
-                    pair_to_dec20[id(p)] = bin_idx + 1
-            pairs_decile20 = [pair_to_dec20.get(id(pd[0]), 0) for pd in pairs_with_d]
+        pairs          = []
+        pairs_decile   = []
+        pairs_decile20 = []
+        buckets        = [[] for _ in range(10)]
+        buckets_20_all = [[] for _ in range(20)]
+        for a in valid_a10:
+            pair = (a.metric_value, a.forward_return, a.trade_date, a.ticker)
+            b10 = a.bin
+            b20 = key_b20[(a.ticker, a.trade_date)]
+            pairs.append(pair)
+            pairs_decile.append(b10)
+            pairs_decile20.append(b20)
+            buckets[b10 - 1].append(pair)
+            buckets_20_all[b20 - 1].append(pair)
+
+        # Legacy `wf_dropped` reported only warmup-drop count (in-sample
+        # path used 0). Preserve that exact semantics — count rows whose
+        # dropped_reason is "warmup", ignoring "missing_value" and
+        # "insufficient_history".
+        wf_dropped = sum(1 for a in a10 if a.dropped_reason == "warmup")
 
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
@@ -333,35 +350,55 @@ async def analyze(
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {single_ticker_cond}"
                 f"{date_conditions} ORDER BY trade_date", *params_single)
         row_dicts = [dict(r) for r in rows]
-        pairs = _clean_pairs(row_dicts, metric, outcome)
+        # Single-ticker rows don't carry a "ticker" column in the SQL
+        # SELECT; inject it so the row_compute Assigners can group
+        # consistently (they look up r["ticker"]).
+        for r in row_dicts:
+            r.setdefault("ticker", ticker)
 
-        if walk_forward:
-            # pairs is already chronological (SELECT ORDER BY trade_date).
-            wf_assignments, wf_dropped = _walk_forward_bucket_pairs(
-                pairs, [10, 20], _DEFAULT_WALKFWD_WARMUP
-            )
-            buckets    = [[] for _ in range(10)]
-            buckets_20 = [[] for _ in range(20)]
-            for pair, bins_for_pair in wf_assignments:
-                buckets[bins_for_pair[10] - 1].append(pair)
-                buckets_20[bins_for_pair[20] - 1].append(pair)
-            pairs          = [a[0]      for a in wf_assignments]
-            pairs_decile   = [a[1][10]  for a in wf_assignments]
-            pairs_decile20 = [a[1][20]  for a in wf_assignments]
-        else:
-            buckets = _bucket_pairs(pairs, 10)
-            buckets_20 = _bucket_pairs(pairs, 20)
-            wf_dropped = 0
+        # Route bucketing through the row_compute layer. Both in-sample
+        # and walk-forward branches flow through one path.
+        from app.routers.row_compute import (
+            ASSIGNERS, InSampleSpec, WalkForwardSpec, _validate_assignments,
+        )
+        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        assigner = ASSIGNERS[spec.kind](spec)
+        state10 = assigner.fit(row_dicts, metric, 10, False)
+        a10 = assigner.assign(row_dicts, metric, 10, False, state10, outcome)
+        _validate_assignments(a10, 10)
+        state20 = assigner.fit(row_dicts, metric, 20, False)
+        a20 = assigner.assign(row_dicts, metric, 20, False, state20, outcome)
+        _validate_assignments(a20, 20)
 
-            # Build decile assignments from flat rank order
-            sorted_by_x = sorted(range(len(pairs)), key=lambda i: pairs[i][0])
-            dm: dict = {}
-            dm20: dict = {}
-            for rank, idx in enumerate(sorted_by_x):
-                dm[idx]   = min(int(rank / len(pairs) * 10) + 1, 10)
-                dm20[idx] = min(int(rank / len(pairs) * 20) + 1, 20)
-            pairs_decile   = [dm[i]   for i in range(len(pairs))]
-            pairs_decile20 = [dm20[i] for i in range(len(pairs))]
+        key_b20: dict = {(a.ticker, a.trade_date): a.bin
+                         for a in a20 if a.bin is not None}
+        valid_a10 = [a for a in a10
+                     if a.bin is not None
+                     and (a.ticker, a.trade_date) in key_b20]
+        # Single-ticker mode: assignments already chronological per
+        # input row order (SQL ORDER BY trade_date); sort again to be
+        # explicit and tolerate any reordering the Assigner might do.
+        valid_a10.sort(key=lambda a: a.trade_date)
+
+        pairs          = []
+        pairs_decile   = []
+        pairs_decile20 = []
+        buckets        = [[] for _ in range(10)]
+        buckets_20     = [[] for _ in range(20)]
+        for a in valid_a10:
+            # Single-ticker `pairs` are 3-tuples (no ticker column —
+            # legacy shape; downstream `_clean_pairs` consumers also
+            # treat them as 3-tuples).
+            pair = (a.metric_value, a.forward_return, a.trade_date)
+            b10 = a.bin
+            b20 = key_b20[(a.ticker, a.trade_date)]
+            pairs.append(pair)
+            pairs_decile.append(b10)
+            pairs_decile20.append(b20)
+            buckets[b10 - 1].append(pair)
+            buckets_20[b20 - 1].append(pair)
+
+        wf_dropped = sum(1 for a in a10 if a.dropped_reason == "warmup")
 
         decile_stats_20 = _compute_bucket_stats(buckets_20)
         by_ticker = None  # not needed in single-ticker mode
