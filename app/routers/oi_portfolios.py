@@ -20,14 +20,15 @@ from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 from app.routers.oi_analysis import (
-    _bin_membership,
-    _walk_forward_bins,
     _DEFAULT_WALKFWD_WARMUP,
     _sec_equity_curve,
     _parse_horizon,
     _fetch_ticker_calendars,
     _build_enriched_trade,
 )
+# _bin_membership and _walk_forward_bins were used directly in the
+# per-system loop pre-Step-5; PortfolioVectorBuilder in row_compute.py
+# now owns both calls and imports them lazily.
 
 router = APIRouter(tags=["oi_portfolios"])
 
@@ -505,40 +506,27 @@ async def portfolio_aggregate(pid: int,
     per_system_pair_n = []
     primary_vectors = []     # per-system V_primary (for the trade-eligible universe)
 
-    # Walk-forward: pre-compute bin maps for every referenced metric once.
-    # _walk_forward_bins returns {row_idx: bin_1indexed_or_None}.
-    if req.walk_forward:
-        wf_cache: dict = {}
-        def _wf_map(metric, n_bins):
-            k = (metric, n_bins)
-            if k not in wf_cache:
-                wf_cache[k] = _walk_forward_bins(
-                    rows, metric, n_bins, is_all, _DEFAULT_WALKFWD_WARMUP)
-            return wf_cache[k]
-
-        def _wf_vector(metric, selected_bins, n_bins):
-            bmap = _wf_map(metric, n_bins)
-            v = np.zeros(len(rows))
-            for i, b in bmap.items():
-                if b is not None and b in selected_bins:
-                    v[i] = 1.0
-            return v
-
-        # Rows cleared by at least one system's primary metric (for dropped count).
-        cleared_any: set = set()
+    # Spec-dispatched per-system loop via PortfolioVectorBuilder. The
+    # builder encapsulates both the in-sample-vs-walk-forward asymmetry
+    # (secondary bins on subset vs full rows ANDed with primary) and the
+    # per-(metric, n_bins) caching that the legacy `wf_cache` provided.
+    # Single path; no `if req.walk_forward` inside this loop.
+    from app.routers.row_compute import (
+        InSampleSpec, WalkForwardSpec, PortfolioVectorBuilder,
+    )
+    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    builder = PortfolioVectorBuilder(spec, rows, is_all)
+    cleared_any: set = set()  # rows cleared by ANY system's primary metric
 
     for s in enabled_systems:
         prim_bins  = set(int(b) for b in (s.get("primary_bins") or []))
         prim_count = int(s.get("primary_bin_count") or 20)
 
-        if req.walk_forward:
-            V_p = _wf_vector(s["primary_metric"], prim_bins, prim_count)
-            # Track which rows cleared warmup for any system.
-            bmap_p = _wf_map(s["primary_metric"], prim_count)
-            cleared_any.update(i for i, b in bmap_p.items() if b is not None)
-        else:
-            V_p = _bin_membership(rows, s["primary_metric"], prim_bins,
-                                  prim_count, is_all)
+        V_p = builder.primary_vector(s["primary_metric"], prim_bins, prim_count)
+        # primary_cleared_indices returns empty set in in-sample mode,
+        # which is exactly legacy's behaviour (wf_dropped is hardcoded to
+        # 0 in the response metadata branch for in_sample).
+        cleared_any.update(builder.primary_cleared_indices(s["primary_metric"], prim_count))
 
         primary_vectors.append(V_p)
         primary_indices = [i for i, v in enumerate(V_p) if v == 1.0]
@@ -558,18 +546,9 @@ async def portfolio_aggregate(pid: int,
             sec_bins  = set(int(b) for b in (sec.get("bins") or []))
             sec_count = int(sec.get("bin_count") or 10)
 
-            if req.walk_forward:
-                # Secondary bins computed over all rows chronologically,
-                # then intersected with the walk-forward primary filter.
-                V_si_full = _wf_vector(sec["metric"], sec_bins, sec_count)
-                V_si_full = V_si_full * V_p   # AND with primary
-            else:
-                # In-sample: bin secondary within primary-filtered rows only.
-                V_si_sub = _bin_membership(primary_rows, sec["metric"],
-                                           sec_bins, sec_count, is_all)
-                V_si_full = np.zeros(len(rows))
-                for sub_idx, orig_idx in enumerate(primary_indices):
-                    V_si_full[orig_idx] = V_si_sub[sub_idx]
+            V_si_full = builder.secondary_vector(
+                sec["metric"], sec_bins, sec_count, primary_indices,
+            )
 
             expanded_sec_vecs.append(V_si_full)
             pair_vectors.append(V_si_full)

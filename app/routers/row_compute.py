@@ -733,6 +733,131 @@ def secondary_membership(
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
+# ── Portfolio-aggregator vector builder (Step 5) ─────────────────────────
+# /portfolios/{pid}/aggregate computes 0/1 bin-membership vectors over a
+# fixed row set for every (system, primary_metric) + (system, secondary)
+# pair. The legacy implementation forked on `walk_forward` three times
+# inside the per-system loop because the modes have asymmetric semantics:
+#
+#   walk_forward / train_test:
+#     - bin maps cached per (metric, n_bins) — multiple systems sharing a
+#       metric reuse the same _walk_forward_bins / frozen-train result.
+#     - secondary bins computed on the FULL row set, then ANDed with the
+#       primary mask.
+#
+#   in_sample:
+#     - secondary bins computed on the primary-FILTERED subset only,
+#       then expanded back to the full-length vector.
+#
+# `PortfolioVectorBuilder` encapsulates both the asymmetry and the cache.
+# Callers loop over systems and ask `primary_vector` / `secondary_vector`;
+# the builder picks the right path by spec.kind.
+
+class PortfolioVectorBuilder:
+    """Per-portfolio 0/1 membership vector builder.
+
+    Construct with the active spec and the portfolio's full row set. Each
+    `primary_vector` / `secondary_vector` call returns a numpy float64
+    vector of length `len(rows)`. Walk-forward and train-test mode cache
+    the per-(metric, n_bins) bin map across calls so multiple systems that
+    share a primary or secondary metric only pay the bisect_left cost once.
+    """
+
+    def __init__(self, spec, rows: list, is_all: bool):
+        self.spec = spec
+        self.rows = rows
+        self.is_all = is_all
+        self._cache: dict = {}  # (metric, n_bins) -> bin map (wf / tt only)
+
+    def primary_vector(self, metric: str, selected_bins, n_bins: int):
+        """0/1 vector over self.rows for one primary metric."""
+        return self._full_vector(metric, selected_bins, n_bins)
+
+    def secondary_vector(self, metric: str, selected_bins, n_bins: int,
+                         primary_indices: list):
+        """0/1 vector over self.rows for one secondary metric within
+        the primary scope. `primary_indices` is the list of indices into
+        self.rows where the primary's vector is 1.
+
+        in_sample: bins computed on rows[primary_indices], result
+          expanded back to a full-length vector at those indices.
+        walk_forward / train_test: bins computed on the full row set,
+          result ANDed with a primary mask.
+        """
+        sel = set(selected_bins or [])
+        if self.spec.kind == "in_sample":
+            from app.routers.oi_analysis import _bin_membership
+            subset = [self.rows[i] for i in primary_indices]
+            v_sub = _bin_membership(subset, metric, sel, n_bins, self.is_all)
+            import numpy as np
+            v_full = np.zeros(len(self.rows))
+            for sub_idx, orig_idx in enumerate(primary_indices):
+                v_full[orig_idx] = v_sub[sub_idx]
+            return v_full
+        v_full = self._full_vector(metric, selected_bins, n_bins)
+        import numpy as np
+        prim_mask = np.zeros(len(self.rows))
+        for i in primary_indices:
+            prim_mask[i] = 1.0
+        return v_full * prim_mask
+
+    def primary_cleared_indices(self, metric: str, n_bins: int) -> set:
+        """Indices where the primary metric has a defined bin under the
+        current spec. Used by /portfolios/aggregate to compute the
+        cross-system "dropped to warmup" count.
+
+        For walk_forward / train_test: indices with a non-None bin map
+          entry (cleared warmup AND have a valid metric value).
+        For in_sample: empty set — legacy /portfolios/aggregate's
+          in-sample path hardcodes wf_dropped=0 and wf_start=rows[0].date,
+          which depends on cleared_any STAYING empty. Match that exactly.
+        """
+        if self.spec.kind == "in_sample":
+            return set()
+        bmap = self._bin_map(metric, n_bins)
+        return {i for i, b in bmap.items() if b is not None}
+
+    def _full_vector(self, metric: str, selected_bins, n_bins: int):
+        """0/1 vector over self.rows by spec.kind."""
+        sel = set(selected_bins or [])
+        import numpy as np
+        if self.spec.kind == "walk_forward":
+            bmap = self._bin_map(metric, n_bins)
+            v = np.zeros(len(self.rows))
+            for i, b in bmap.items():
+                if b is not None and b in sel:
+                    v[i] = 1.0
+            return v
+        if self.spec.kind == "in_sample":
+            from app.routers.oi_analysis import _bin_membership
+            return _bin_membership(self.rows, metric, sel, n_bins, self.is_all)
+        if self.spec.kind == "train_test":
+            raise NotImplementedError(
+                "TrainTestSpec.PortfolioVectorBuilder is filled in by Step 6."
+            )
+        raise ValueError(f"unknown spec kind: {self.spec.kind!r}")
+
+    def _bin_map(self, metric: str, n_bins: int):
+        """Cached bin map for walk_forward / train_test."""
+        key = (metric, n_bins)
+        if key not in self._cache:
+            if self.spec.kind == "walk_forward":
+                from app.routers.oi_analysis import _walk_forward_bins
+                self._cache[key] = _walk_forward_bins(
+                    self.rows, metric, n_bins, self.is_all, self.spec.warmup,
+                )
+            elif self.spec.kind == "train_test":
+                raise NotImplementedError(
+                    "TrainTestSpec._bin_map is filled in by Step 6."
+                )
+            else:
+                raise ValueError(
+                    f"_bin_map only meaningful for walk_forward / train_test; "
+                    f"got spec.kind={self.spec.kind!r}"
+                )
+        return self._cache[key]
+
+
 # ── Runtime contract validator ───────────────────────────────────────────
 
 def _validate_assignments(assignments: list[RowAssignment], n_bins: int) -> None:
