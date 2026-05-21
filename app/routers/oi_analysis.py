@@ -278,7 +278,18 @@ async def analyze(
         key_b20: dict = {(a.ticker, a.trade_date): a.bin
                          for a in a20 if a.bin is not None}
         valid_a10 = [a for a in a10 if a.bin is not None]
-        valid_a10.sort(key=lambda a: a.trade_date)  # chronological across tickers
+        # Chronological across tickers, with legacy within-date tie-break:
+        #   in-sample: legacy iterates buckets sequentially then stable-sorts
+        #     by date, so same-date rows come out in (bin, ticker, x) order.
+        #   walk-forward: legacy has no bucket-iteration step; same-date rows
+        #     come out in alphabetical-ticker order (matches mine without
+        #     extra tie-break).
+        # `dow_data` is the canary — it iterates `pairs` in order and the
+        # harness can't key it by (ticker, date) because the field is absent.
+        if walk_forward:
+            valid_a10.sort(key=lambda a: a.trade_date)
+        else:
+            valid_a10.sort(key=lambda a: (a.trade_date, a.bin, a.ticker, a.metric_value))
 
         pairs          = []
         pairs_decile   = []

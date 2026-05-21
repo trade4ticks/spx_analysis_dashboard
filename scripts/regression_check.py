@@ -52,11 +52,43 @@ from pathlib import Path
 DEFAULT_BASE  = "http://localhost:8000/api/oi-analysis"
 SNAPSHOT_ROOT = Path("regression_snapshots")
 HTTP_TIMEOUT  = 600  # generous; some endpoints (Score Matrix, etc.) are slow
+RETRY_ATTEMPTS = 4   # retries for transient URLError / RemoteDisconnected
+RETRY_BACKOFF  = 8   # seconds between retries (linear; long enough for uvicorn restart)
 
 
 # ─────────────────────────────────────────────────────────────────────────
 # HTTP helpers
 # ─────────────────────────────────────────────────────────────────────────
+
+def _request(req: urllib.request.Request, label: str) -> dict | list:
+    """Execute `req` with retry-on-transient-connection-error.
+
+    HTTPError responses (4xx/5xx) are returned by the caller's except
+    clause — we don't retry those (the server intentionally responded).
+    URLError (DNS, refused, reset, RemoteDisconnected wrapped via the
+    http.client layer) is retried up to RETRY_ATTEMPTS times. This is
+    important on the VPS where heavy walk-forward responses (60MB+)
+    can OOM a uvicorn worker and force a respawn — the next request
+    may briefly get ConnectionRefused before the worker is back.
+    """
+    import time
+    last_err = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            raise  # surface to caller — server intentionally responded
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            last_err = e
+            if attempt < RETRY_ATTEMPTS:
+                print(f"[capture]   RETRY {label} (attempt {attempt}/{RETRY_ATTEMPTS} "
+                      f"failed: {type(e).__name__}); sleeping {RETRY_BACKOFF}s",
+                      file=sys.stderr)
+                time.sleep(RETRY_BACKOFF)
+                continue
+            raise last_err  # exhausted retries
+
 
 def _get(base: str, path: str, params: dict | None = None) -> dict | list:
     url = base + path
@@ -64,8 +96,7 @@ def _get(base: str, path: str, params: dict | None = None) -> dict | list:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, method="GET",
                                  headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _request(req, label=path)
 
 
 def _post(base: str, path: str, body: dict) -> dict:
@@ -75,8 +106,7 @@ def _post(base: str, path: str, body: dict) -> dict:
         url, method="POST", data=data,
         headers={"Content-Type": "application/json",
                  "Accept":       "application/json"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _request(req, label=path)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -281,8 +311,15 @@ def cmd_capture(args) -> int:
                 resp = {"_http_error": e.code, "_body": "<unreadable>"}
             err += 1
         except urllib.error.URLError as e:
-            print(f"[capture]   FAIL {name}: connection error {e!r}", file=sys.stderr)
-            return 3
+            # Retries exhausted — record the failure and continue with
+            # the rest of the matrix instead of aborting the whole run.
+            resp = {"_connection_error": repr(e)}
+            (out_dir / name).write_text(json.dumps(resp, indent=2, default=str),
+                                        encoding="utf-8")
+            print(f"[capture]   FAIL {name}: connection error after retries {e!r}",
+                  file=sys.stderr)
+            err += 1
+            continue
         except Exception as e:
             print(f"[capture]   FAIL {name}: {e!r}", file=sys.stderr)
             err += 1
