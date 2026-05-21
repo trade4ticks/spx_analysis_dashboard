@@ -434,6 +434,7 @@ def _signed_row(row: dict, sign: int, outcome_col: str) -> dict:
 
 class AggregateRequest(BaseModel):
     walk_forward: bool = False
+    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
 
 
 @router.post("/portfolios/{pid}/aggregate")
@@ -511,10 +512,8 @@ async def portfolio_aggregate(pid: int,
     # (secondary bins on subset vs full rows ANDed with primary) and the
     # per-(metric, n_bins) caching that the legacy `wf_cache` provided.
     # Single path; no `if req.walk_forward` inside this loop.
-    from app.routers.row_compute import (
-        InSampleSpec, WalkForwardSpec, PortfolioVectorBuilder,
-    )
-    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    from app.routers.row_compute import make_spec, PortfolioVectorBuilder
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     builder = PortfolioVectorBuilder(spec, rows, is_all)
     cleared_any: set = set()  # rows cleared by ANY system's primary metric
 
@@ -769,15 +768,17 @@ async def portfolio_aggregate(pid: int,
     phi_sys,   overlap_sys   = _phi_restricted(system_vectors)
     phi_pairs, overlap_pairs = _phi_restricted(pair_vectors)
 
-    if req.walk_forward:
-        wf_dropped  = len(rows) - len(cleared_any)
-        wf_start    = (min(rows[i]["trade_date"] for i in cleared_any)
-                       if cleared_any else None)
-        resp_mode   = "walk_forward"
+    # `cleared_any` is empty in in_sample mode (PortfolioVectorBuilder
+    # returns an empty set there to keep wf_dropped=0 / wf_start=first
+    # row) and populated in walk_forward / train_test mode.
+    if spec.kind == "in_sample":
+        wf_dropped = 0
+        wf_start   = rows[0]["trade_date"] if rows else None
     else:
-        wf_dropped  = 0
-        wf_start    = rows[0]["trade_date"] if rows else None
-        resp_mode   = "in_sample"
+        wf_dropped = len(rows) - len(cleared_any)
+        wf_start   = (min(rows[i]["trade_date"] for i in cleared_any)
+                      if cleared_any else None)
+    resp_mode = spec.kind
 
     # Fields named to mirror the corr explorer's /secondary-correlation
     # response — the frontend reuses corrStats() and the corr render
@@ -787,7 +788,8 @@ async def portfolio_aggregate(pid: int,
         "systems":   sys_stats,
         "horizon":   horizon,
         "mode":              resp_mode,
-        "warmup":            _DEFAULT_WALKFWD_WARMUP,
+        "warmup":            spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":       spec.cutoff.isoformat() if spec.kind == "train_test" else None,
         "dropped_warmup_n":  wf_dropped,
         "start_date":        wf_start,
         "baseline_n": int(universe_mask.sum()),

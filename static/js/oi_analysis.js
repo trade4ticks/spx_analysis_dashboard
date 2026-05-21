@@ -28,6 +28,9 @@ document.addEventListener('alpine:init', () => {
     //   'in_sample'    — full-history bin thresholds (default; current behavior)
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
     pageMode: 'walk_forward',
+    // Only used when pageMode === 'train_test'. Defaults to 2024-01-01 so
+    // users get a meaningful default test window without typing a date.
+    cutoffDate: '2024-01-01',
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
@@ -193,6 +196,7 @@ document.addEventListener('alpine:init', () => {
         if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
         if (this.dateTo) url += `&date_to=${this.dateTo}`;
         if (this.pageMode === 'walk_forward') url += '&walk_forward=true';
+        if (this.pageMode === 'train_test')   url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
@@ -858,12 +862,15 @@ document.addEventListener('alpine:init', () => {
       this.hmXData = null;
       this.hmYData = null;
       this._hmRange = null;
-      // walk_forward heatmap is only supported in ALL mode (single-ticker
-      // /heatmap uses absolute np.percentile edges by design). For
-      // single-ticker + walk-forward pageMode, leave walk_forward off so
-      // the heatmap silently runs in-sample rather than 422'ing.
-      const wf = (this.pageMode === 'walk_forward' && this.ticker === 'ALL')
-                 ? '&walk_forward=true' : '';
+      // walk_forward / train_test heatmap are only supported in ALL mode
+      // (single-ticker /heatmap uses absolute np.percentile edges by design).
+      // For single-ticker + non-in-sample pageMode, leave the mode flags off
+      // so the heatmap silently runs in-sample rather than 422'ing.
+      let wf = '';
+      if (this.ticker === 'ALL') {
+        if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
+        else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+      }
       try {
         const r = await fetch(
           `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
@@ -902,10 +909,13 @@ document.addEventListener('alpine:init', () => {
     async loadHmBins1d() {
       if (!this.data || !this.heatmapMetric) return;
       // /metric-bins (post-Step-5.5-continuation) supports walk_forward
-      // for both ALL and single-ticker modes via the Assigner. Send the
-      // page-wide mode so the side bin charts agree with the rest of the
-      // page (top All-Ticker Metric Bins, standalone primary chart).
-      const wf = (this.pageMode === 'walk_forward') ? '&walk_forward=true' : '';
+      // and (Step 6) train_test for both ALL and single-ticker modes via
+      // the Assigner. Send the page-wide mode so the side bin charts
+      // agree with the rest of the page (top All-Ticker Metric Bins,
+      // standalone primary chart).
+      let wf = '';
+      if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
+      else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
       const base = `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
         + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.hmBins1d}`
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
@@ -2387,6 +2397,7 @@ document.addEventListener('alpine:init', () => {
             filtered_dates:        this._secFilteredDates(),
             ticker:                this.ticker,
             walk_forward:          this.pageMode === 'walk_forward',
+            cutoff_date:           this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -2428,6 +2439,7 @@ document.addEventListener('alpine:init', () => {
             sec_bin_count:         this.secBinCount,
             ticker:                this.ticker,
             walk_forward:          this.pageMode === 'walk_forward',
+            cutoff_date:           this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -2926,6 +2938,7 @@ document.addEventListener('alpine:init', () => {
           n_bins:       '20',
           walk_forward: this.pageMode === 'walk_forward' ? '1' : '0',
         });
+        if (this.pageMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
         const r = await fetch('/api/oi-analysis/global-metric-bins?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
@@ -3001,14 +3014,15 @@ document.addEventListener('alpine:init', () => {
       if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
     },
 
-    // Page-wide mode toggle. Cascades:
-    //   1. All-Ticker Metric Bins (top-of-page)
-    //   2. Re-runs /analyze (primary chart suite)
-    //   3. Re-runs corr explorer mini data + (if a result is shown) correlation
-    //   4. Re-runs System Portfolio aggregate (3b)
-    // Secondary Scanner, Score Matrix follow as 3c/d land.
+    // Page-wide mode toggle. Cascades through every binning surface on
+    // the page: All-Ticker Metric Bins, /analyze, corr explorer (mini +
+    // result), System Portfolio aggregate, Score Matrix, and the heatmap
+    // (grid + side bars). Called by the segmented mode toggle AND by the
+    // cutoff-date input's @change — in train_test mode the cutoffDate may
+    // have shifted even though the mode label didn't, so the early
+    // return only applies when the new mode is in_sample/walk_forward.
     async setPageMode(m) {
-      if (m === this.pageMode) return;
+      if (m === this.pageMode && m !== 'train_test') return;
       this.pageMode = m;
       // Top bins: always clear so the next open (or current expanded view)
       // re-fetches in the new mode.
@@ -3055,6 +3069,7 @@ document.addEventListener('alpine:init', () => {
             ticker:         this.ticker,
             n_bins:         this.corrBinCount,
             walk_forward:   this.pageMode === 'walk_forward',
+            cutoff_date:    this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -3120,6 +3135,7 @@ document.addEventListener('alpine:init', () => {
             n_bins:         this.corrBinCount,
             selections,
             walk_forward:   this.pageMode === 'walk_forward',
+            cutoff_date:    this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -3953,7 +3969,10 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/aggregate`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ walk_forward: this.pageMode === 'walk_forward' }),
+          body: JSON.stringify({
+            walk_forward: this.pageMode === 'walk_forward',
+            cutoff_date:  this.pageMode === 'train_test' ? this.cutoffDate : null,
+          }),
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();

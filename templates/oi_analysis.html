@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=79"></script>
+  <script src="/static/js/oi_analysis.js?v=80"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -383,12 +383,21 @@
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
       </div>
       <div style="padding-top:14px"
-           title="Page-wide bin mode. Drives the primary chart, Multi-Metric Correlation Explorer, and (rolling out) Score Matrix / Signal Scanner / System Portfolio. Walk-forward computes per-ticker bins via bisect_left against a running sorted list — 252-day warmup excluded.">
+           title="Page-wide bin mode. Drives every binning analysis on the page. In-sample uses the entire history. Walk-forward computes per-ticker bins via bisect_left against a running sorted list with a 252-day warmup. Train-test freezes bin thresholds on data BEFORE the cutoff and ranks all rows against that frozen training history — out-of-sample test rows can pile into the extreme bins.">
         <label style="font-size:11px;color:var(--dim)">Mode</label><br>
         <div class="mode-seg" style="margin-top:2px">
           <span :class="{on: pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
           <span :class="{on: pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
+          <span :class="{on: pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
         </div>
+      </div>
+      <div x-show="pageMode === 'train_test'" style="padding-top:14px"
+           title="Bins are computed using rows with trade_date < this date (the 'training' window). Rows at or after the cutoff (the 'test' window) are ranked against those frozen training thresholds — they can land in B1 or B(n_bins) when they exceed the training range.">
+        <label style="font-size:11px;color:var(--dim)">Cutoff</label><br>
+        <input type="date" x-model="cutoffDate"
+               @change="setPageMode('train_test')"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:11px;padding:5px 6px;border-radius:4px;margin-top:2px">
       </div>
       <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
     </div>

@@ -200,6 +200,7 @@ async def analyze(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
+    cutoff_date: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """Full analysis payload for one ticker/metric/outcome combo."""
@@ -207,6 +208,11 @@ async def analyze(
         return {"error": "OI database not configured"}
 
     is_all = (ticker == "ALL")
+
+    # Construct the active spec once at the function entry so both
+    # is_all branches and the response envelope below share it.
+    from app.routers.row_compute import make_spec
+    spec = make_spec(walk_forward, cutoff_date)
 
     # Build date filter params (shared by both modes)
     date_conditions = ""
@@ -256,10 +262,8 @@ async def analyze(
         # method choice picks the Assigner. Downstream of this block
         # (decile_stats_20, equity_by_decile, trade_calendar, etc.) is
         # unchanged.
-        from app.routers.row_compute import (
-            ASSIGNERS, InSampleSpec, WalkForwardSpec, _validate_assignments,
-        )
-        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        from app.routers.row_compute import ASSIGNERS, _validate_assignments
+        # `spec` was constructed at the top of the function.
         assigner = ASSIGNERS[spec.kind](spec)
         state10 = assigner.fit(row_dicts, metric, 10, True)
         a10 = assigner.assign(row_dicts, metric, 10, True, state10, outcome)
@@ -314,17 +318,21 @@ async def analyze(
         #   walk-forward: pairs in per-ticker chronological order
         # My loop above filled buckets in cross-ticker chronological
         # order; sort each bucket here to restore legacy iteration order.
-        sort_key = (lambda p: (p[3], p[2])) if walk_forward else (lambda p: (p[3], p[0]))
+        # Walk-forward populates buckets in per-ticker-chrono order (legacy);
+        # in-sample and train-test (rank-based math against frozen training
+        # history) both populate in (ticker, sorted-by-x) order.
+        sort_key = (lambda p: (p[3], p[2])) if spec.kind == "walk_forward" else (lambda p: (p[3], p[0]))
         for b in range(10):
             buckets[b].sort(key=sort_key)
         for b in range(20):
             buckets_20_all[b].sort(key=sort_key)
 
-        # Legacy `wf_dropped` reported only warmup-drop count (in-sample
-        # path used 0). Preserve that exact semantics — count rows whose
-        # dropped_reason is "warmup", ignoring "missing_value" and
-        # "insufficient_history".
-        wf_dropped = sum(1 for a in a10 if a.dropped_reason == "warmup")
+        # Mode-aware "dropped" count for the response subtitle:
+        #   in_sample    -> 0 (no method-specific gate)
+        #   walk_forward -> rows that didn't clear the 252-day warmup
+        #   train_test   -> rows whose ticker had < n_bins training samples
+        from app.routers.row_compute import dropped_count_for_mode
+        wf_dropped = dropped_count_for_mode(spec, a10)
 
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
@@ -384,10 +392,8 @@ async def analyze(
 
         # Route bucketing through the row_compute layer. Both in-sample
         # and walk-forward branches flow through one path.
-        from app.routers.row_compute import (
-            ASSIGNERS, InSampleSpec, WalkForwardSpec, _validate_assignments,
-        )
-        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        from app.routers.row_compute import ASSIGNERS, _validate_assignments
+        # `spec` was constructed at the top of the function.
         assigner = ASSIGNERS[spec.kind](spec)
         state10 = assigner.fit(row_dicts, metric, 10, False)
         a10 = assigner.assign(row_dicts, metric, 10, False, state10, outcome)
@@ -430,13 +436,18 @@ async def analyze(
         # legacy bucket[i] is already in chronological order (only one
         # ticker, so per-ticker-chrono == cross-ticker-chrono), which
         # matches my output; no sort needed.
-        if not walk_forward:
+        # Single-ticker: legacy in-sample sorted each bucket by x. Train-test
+        # uses the same rank-based math as in-sample (just against a frozen
+        # training history) so its bucket ordering is also sort-by-x. Only
+        # walk-forward leaves buckets in chronological order.
+        if spec.kind != "walk_forward":
             for b in range(10):
                 buckets[b].sort(key=lambda p: p[0])
             for b in range(20):
                 buckets_20[b].sort(key=lambda p: p[0])
 
-        wf_dropped = sum(1 for a in a10 if a.dropped_reason == "warmup")
+        from app.routers.row_compute import dropped_count_for_mode
+        wf_dropped = dropped_count_for_mode(spec, a10)
 
         decile_stats_20 = _compute_bucket_stats(buckets_20)
         by_ticker = None  # not needed in single-ticker mode
@@ -818,11 +829,12 @@ async def analyze(
         "today_decile":     today_decile,
         "latest_date":      str(pairs[-1][2]) if pairs else None,
 
-        # Walk-forward metadata (in-sample mode → mode='in_sample',
-        # warmup=None, dropped_warmup_n=0; consumers use it to render the
-        # WALK-FORWARD subtitle on the primary chart).
-        "mode":             "walk_forward" if walk_forward else "in_sample",
-        "warmup":           _DEFAULT_WALKFWD_WARMUP if walk_forward else None,
+        # Mode-aware metadata. Frontend reads `mode` and the matching
+        # mode-specific field (warmup for walk_forward, cutoff_date for
+        # train_test) to render the subtitle on the primary chart.
+        "mode":             spec.kind,
+        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
         "dropped_warmup_n": wf_dropped,
         "start_date":       str(pairs[0][2]) if pairs else None,
     }
@@ -838,6 +850,7 @@ async def heatmap_2d(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
+    cutoff_date: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell.
@@ -862,9 +875,12 @@ async def heatmap_2d(
         return {"error": "OI database not configured"}
 
     is_all = (ticker == "ALL")
-    if walk_forward and not is_all:
-        return {"error": "walk_forward not supported for single-ticker /heatmap "
-                         "(uses absolute-percentile edges, not rank bins)"}
+    # Walk-forward and train-test heatmap modes both require ALL — single-
+    # ticker /heatmap uses absolute np.percentile edges, not rank bins.
+    if (walk_forward or cutoff_date) and not is_all:
+        return {"error": "walk_forward / train_test not supported for "
+                         "single-ticker /heatmap (uses absolute-percentile "
+                         "edges, not rank bins)"}
 
     date_conditions = ""
     params: list = []
@@ -892,11 +908,9 @@ async def heatmap_2d(
         # ALL mode: route x-axis and y-axis bucketing through the
         # row_compute Assigner. Two parallel calls — same per-ticker rank
         # math as the legacy inline loop, but the dispatch now picks
-        # in-sample / walk-forward / train-test (Step 6).
-        from app.routers.row_compute import (
-            ASSIGNERS, InSampleSpec, WalkForwardSpec,
-        )
-        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        # in-sample / walk-forward / train-test.
+        from app.routers.row_compute import ASSIGNERS, make_spec
+        spec = make_spec(walk_forward, cutoff_date)
         assigner = ASSIGNERS[spec.kind](spec)
 
         # Pre-filter to rows with all three fields valid + numeric. This
@@ -973,13 +987,15 @@ async def heatmap_2d(
             "grid":      grid,
             "per_ticker": True,
             "n_tickers": n_tickers_used,
-            "mode":      "walk_forward" if walk_forward else "in_sample",
+            "mode":      spec.kind,
         }
-        if walk_forward:
-            out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
-            out["dropped_warmup_n"] = sum(
-                1 for a in a_x if a.bin is None and a.dropped_reason == "warmup"
-            )
+        from app.routers.row_compute import dropped_count_for_mode
+        if spec.kind == "walk_forward":
+            out["warmup"]           = spec.warmup
+            out["dropped_warmup_n"] = dropped_count_for_mode(spec, a_x)
+        elif spec.kind == "train_test":
+            out["cutoff_date"]      = spec.cutoff.isoformat()
+            out["dropped_warmup_n"] = dropped_count_for_mode(spec, a_x)
         return out
 
     # Single-ticker mode — original absolute-percentile binning.
@@ -1043,6 +1059,7 @@ async def metric_bins_1d(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
+    cutoff_date: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze).
@@ -1085,10 +1102,8 @@ async def metric_bins_1d(
     # Spec-dispatched binning. Both ALL and single-ticker flow through
     # the Assigner with the same shape — the legacy fork on `is_all`
     # collapses to a single path inside the Assigner.
-    from app.routers.row_compute import (
-        ASSIGNERS, InSampleSpec, WalkForwardSpec,
-    )
-    spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+    from app.routers.row_compute import ASSIGNERS, make_spec
+    spec = make_spec(walk_forward, cutoff_date)
     assigner = ASSIGNERS[spec.kind](spec)
 
     rows_for_assigner = [dict(r) for r in rows]
@@ -1144,13 +1159,15 @@ async def metric_bins_1d(
         "n":          total_n,
         "buckets":    result,
         "per_ticker": is_all,
-        "mode":       "walk_forward" if walk_forward else "in_sample",
+        "mode":       spec.kind,
     }
-    if walk_forward:
-        out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
-        out["dropped_warmup_n"] = sum(
-            1 for a in assignments if a.bin is None and a.dropped_reason == "warmup"
-        )
+    from app.routers.row_compute import dropped_count_for_mode
+    if spec.kind == "walk_forward":
+        out["warmup"]           = spec.warmup
+        out["dropped_warmup_n"] = dropped_count_for_mode(spec, assignments)
+    elif spec.kind == "train_test":
+        out["cutoff_date"]      = spec.cutoff.isoformat()
+        out["dropped_warmup_n"] = dropped_count_for_mode(spec, assignments)
     return out
 
 
@@ -2092,6 +2109,7 @@ class SecScanReq(BaseModel):
     filtered_dates: List[str]
     ticker: str = "SPX"
     walk_forward: bool = False
+    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
     selected_primary_bins: Optional[List[int]] = None
 
 
@@ -2103,6 +2121,7 @@ class SecDetailReq(BaseModel):
     sec_bin_count: int = 10
     ticker: str = "SPX"
     walk_forward: bool = False
+    cutoff_date: Optional[str] = None
     selected_primary_bins: Optional[List[int]] = None
 
 
@@ -2209,25 +2228,24 @@ async def secondary_scan(req: SecScanReq):
     # forks on walk_forward inside it (separate concern — that helper's
     # signature is "filtered list OR full rows + filtered_dates"), but
     # the filter selection itself is unified here.
-    from app.routers.row_compute import (
-        InSampleSpec, WalkForwardSpec, filter_by_assignments,
-    )
-    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    from app.routers.row_compute import make_spec, filter_by_assignments
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, universe = filter_by_assignments(
         rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    if req.walk_forward:
+    # walk_forward AND train_test pass pre-filtered rows to the metric
+    # scorer (the primary filter has been applied by filter_by_assignments).
+    # in_sample keeps its legacy two-arg shape — _sec_score_metrics
+    # accepts the full row set + filtered_dates and re-filters internally.
+    # (_sec_score_metrics's dual signature is logged in the Step 7 cleanup
+    # checklist — single caller post-Step-4; unify there.)
+    if spec.kind != "in_sample":
         metrics_result = _sec_score_metrics(filtered, [], outcome_col, feature_cols, is_all)
         baseline_subset = filtered
-        resp_mode = "walk_forward"
+        resp_mode = spec.kind
         start_date = filtered[0]["trade_date"] if filtered else None
     else:
-        # In-sample path keeps its legacy two-arg shape: `_sec_score_metrics`
-        # accepts the full row set + filtered_dates and does its own
-        # _filter_by_tkr_date pass internally. The `baseline_subset` we
-        # return uses the wrapper's filtered output (semantically the same
-        # subset; just collapses the duplicated _filter_by_tkr_date call).
         metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
         baseline_subset = filtered if req.filtered_dates else rows
         resp_mode = "in_sample"
@@ -2244,7 +2262,7 @@ async def secondary_scan(req: SecScanReq):
         "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
     }
 
-    return {
+    out = {
         "baseline":         baseline,
         "metrics":          metrics_result,
         "mode":             resp_mode,
@@ -2252,6 +2270,9 @@ async def secondary_scan(req: SecScanReq):
         "universe_n":       universe,
         "start_date":       start_date,
     }
+    if spec.kind == "train_test":
+        out["cutoff_date"] = spec.cutoff.isoformat()
+    return out
 
 
 @router.post("/secondary-detail")
@@ -2271,15 +2292,14 @@ async def secondary_detail(req: SecDetailReq):
     # Both steps dispatch on the spec — single path for both in-sample and
     # walk-forward, no inline branches in this endpoint anymore.
     from app.routers.row_compute import (
-        InSampleSpec, WalkForwardSpec,
-        filter_by_assignments, assign_secondary_buckets,
+        make_spec, filter_by_assignments, assign_secondary_buckets,
     )
-    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    resp_mode = "walk_forward" if req.walk_forward else "in_sample"
+    resp_mode = spec.kind
 
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
@@ -2403,6 +2423,8 @@ async def secondary_detail(req: SecDetailReq):
         "combined_trades": combined_trades,
         "mode":            resp_mode,
         "dropped_warmup_n": dropped,
+        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
     }
 
 
@@ -2467,7 +2489,8 @@ class CorrBinsReq(BaseModel):
     ticker: str = "SPX"
     n_bins: int = 10
     walk_forward: bool = False
-    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward mode)
+    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
+    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward / train_test mode)
 
 
 def _sort_chrono(rows: list) -> list:
@@ -2573,10 +2596,9 @@ async def secondary_corr_bins(req: CorrBinsReq):
     # spec-dispatched helpers. The fork on `walk_forward` collapses to
     # a single spec selection; the rest of the function body is one path.
     from app.routers.row_compute import (
-        InSampleSpec, WalkForwardSpec,
-        filter_by_assignments, assign_secondary_bin_stats,
+        make_spec, filter_by_assignments, assign_secondary_bin_stats,
     )
-    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     primary_metric = cached.get("primary_metric") or ""
     if req.walk_forward and not primary_metric:
         return {"error": "no_primary_metric"}
@@ -2586,10 +2608,14 @@ async def secondary_corr_bins(req: CorrBinsReq):
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
     if not filtered:
-        if req.walk_forward:
-            return {"error": "no_data", "mode": "walk_forward",
-                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
-                    "universe_n": universe}
+        if spec.kind != "in_sample":
+            err = {"error": "no_data", "mode": spec.kind,
+                   "dropped_warmup_n": dropped, "universe_n": universe}
+            if spec.kind == "walk_forward":
+                err["warmup"] = spec.warmup
+            elif spec.kind == "train_test":
+                err["cutoff_date"] = spec.cutoff.isoformat()
+            return err
         return {"error": "no_data"}
 
     results = []
@@ -2598,16 +2624,20 @@ async def secondary_corr_bins(req: CorrBinsReq):
         if r:
             results.append(r)
 
-    if req.walk_forward:
-        return {
+    if spec.kind != "in_sample":
+        out = {
             "metrics": results, "n_bins": n_bins,
-            "mode": "walk_forward",
-            "warmup": _DEFAULT_WALKFWD_WARMUP,
+            "mode": spec.kind,
             "dropped_warmup_n": dropped,
             "universe_n":       universe,
             "combined_n":       len(filtered),
             "start_date":       filtered[0].get("trade_date", "") if filtered else "",
         }
+        if spec.kind == "walk_forward":
+            out["warmup"] = spec.warmup
+        else:  # train_test
+            out["cutoff_date"] = spec.cutoff.isoformat()
+        return out
     return {"metrics": results, "n_bins": n_bins, "mode": "in_sample"}
 
 
@@ -2618,7 +2648,8 @@ class CorrReq(BaseModel):
     n_bins: int = 10
     selections: List[dict]  # [{metric: str, bins: [int]}]
     walk_forward: bool = False
-    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward mode)
+    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
+    selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward / train_test mode)
 
 
 def _walk_forward_membership(rows_chrono: list, metric: str, selected_bins: set,
@@ -2664,10 +2695,9 @@ async def secondary_correlation(req: CorrReq):
     # Spec-dispatched primary filter + membership. Single path; no fork
     # on `walk_forward` for the bucketing logic.
     from app.routers.row_compute import (
-        InSampleSpec, WalkForwardSpec,
-        filter_by_assignments, secondary_membership,
+        make_spec, filter_by_assignments, secondary_membership,
     )
-    spec = WalkForwardSpec() if req.walk_forward else InSampleSpec()
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     primary_metric = cached.get("primary_metric") or ""
     if req.walk_forward and not primary_metric:
         return {"error": "no_primary_metric"}
@@ -2677,15 +2707,19 @@ async def secondary_correlation(req: CorrReq):
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
     if not filtered:
-        if req.walk_forward:
-            return {"error": "no_data", "mode": "walk_forward",
-                    "warmup": _DEFAULT_WALKFWD_WARMUP, "dropped_warmup_n": dropped,
-                    "universe_n": universe}
+        if spec.kind != "in_sample":
+            err = {"error": "no_data", "mode": spec.kind,
+                   "dropped_warmup_n": dropped, "universe_n": universe}
+            if spec.kind == "walk_forward":
+                err["warmup"] = spec.warmup
+            elif spec.kind == "train_test":
+                err["cutoff_date"] = spec.cutoff.isoformat()
+            return err
         return {"error": "no_data"}
 
-    if req.walk_forward:
-        ordered = filtered  # already chronologically sorted by the wf filter
-        mode_out = "walk_forward"
+    if spec.kind != "in_sample":
+        ordered = filtered  # already chronologically sorted by the wf / tt filter
+        mode_out = spec.kind
     else:
         # In-sample: the wrapper preserves cached-row order (legacy
         # `_filter_by_tkr_date` was unsorted). Re-sort here to match the
@@ -2802,7 +2836,8 @@ async def secondary_correlation(req: CorrReq):
         "winner_avg_ret": winner_avg,
         "loser_avg_ret":  loser_avg,
         "mode":             mode_out,
-        "warmup":           _DEFAULT_WALKFWD_WARMUP if req.walk_forward else None,
+        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
         "dropped_warmup_n": dropped,
         "universe_n":       universe,
         "start_date":       ordered[0].get("trade_date", "") if ordered else "",
@@ -3053,6 +3088,7 @@ async def global_metric_bins(
     date_from:    Optional[str] = Query(None),
     date_to:      Optional[str] = Query(None),
     walk_forward: bool = Query(False),
+    cutoff_date:  Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """Per-bin avg return for every feature column at the given outcome, with
@@ -3065,7 +3101,15 @@ async def global_metric_bins(
     if not pool:
         return {"error": "OI database not configured"}
     n_bins = max(2, min(20, n_bins))
-    mode_tag = "wf" if walk_forward else "is"
+    # Cache key includes the mode tag so in-sample / walk-forward / train-test
+    # results don't collide. Train-test also includes the cutoff date —
+    # different cutoffs produce different bin assignments.
+    if cutoff_date:
+        mode_tag = f"tt:{cutoff_date}"
+    elif walk_forward:
+        mode_tag = "wf"
+    else:
+        mode_tag = "is"
     cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
     if cache_key in _GLOBAL_BINS_CACHE:
         return _GLOBAL_BINS_CACHE[cache_key]
@@ -3135,10 +3179,8 @@ async def global_metric_bins(
         # the same numpy-vectorized helpers as before; the if/else here
         # is now a one-line spec selection instead of duplicated call
         # sites with diverging return shapes.
-        from app.routers.row_compute import (
-            ASSIGNERS, InSampleSpec, WalkForwardSpec,
-        )
-        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        from app.routers.row_compute import ASSIGNERS, make_spec
+        spec = make_spec(walk_forward, cutoff_date)
         assigner = ASSIGNERS[spec.kind](spec)
         metrics_out, dropped_n, wf_start = assigner.assign_batch(
             rows, feature_cols, outcome, n_bins, is_all,
@@ -3157,10 +3199,14 @@ async def global_metric_bins(
             "total_rows":        len(rows),
             "metrics_attempted": len(feature_cols),
             "metrics":           metrics_out,
-            "mode":              "walk_forward" if walk_forward else "in_sample",
+            "mode":              spec.kind,
         }
-        if walk_forward:
-            out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
+        if spec.kind == "walk_forward":
+            out["warmup"]           = spec.warmup
+            out["dropped_warmup_n"] = dropped_n
+            out["start_date"]       = wf_start
+        elif spec.kind == "train_test":
+            out["cutoff_date"]      = spec.cutoff.isoformat()
             out["dropped_warmup_n"] = dropped_n
             out["start_date"]       = wf_start
 
@@ -3174,7 +3220,7 @@ async def global_metric_bins(
                     "ON CONFLICT (cache_key) DO UPDATE "
                     "    SET payload=$6::jsonb, cached_at=NOW()",
                     cache_key, outcome, ticker, n_bins,
-                    "walk_forward" if walk_forward else "in_sample",
+                    spec.kind,
                     json.dumps(out),
                 )
                 row_ca = await conn.fetchrow(

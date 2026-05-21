@@ -401,16 +401,53 @@ class TrainTestAssigner:
         self.spec = spec
 
     def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
-        """Train/test batch — Step 6 will implement this when the
-        train/test mode is wired into the frontend. Until then,
-        train/test mode is only exercised by the single-metric `assign`
-        path; if a caller routes a batch endpoint with TrainTestSpec
-        before Step 6, fail loudly rather than silently fall back.
+        """Per-bin avg-return for each feature using train-test binning.
+
+        Per-feature: fit a frozen per-ticker training history from
+        rows with `trade_date < cutoff`, then assign each row's bin
+        via `_bin_for_value` against that frozen history. Aggregate
+        per-bin outcomes across all rows (training and test).
+
+        Cost: O(N log N) per feature for the per-row `bisect_left`
+        calls. Same complexity as walk-forward batch; uncached.
+        Acceptable for /global-metric-bins given its existing DB cache.
+
+        Returns (metrics, dropped_n, start_date):
+          dropped_n: rows with bin=None (insufficient training history
+            for the ticker, or missing metric/outcome value).
+          start_date: the cutoff in ISO format — semantically the
+            point at which test-set rows start. The frontend uses this
+            to render the TRAIN-TEST subtitle.
         """
-        raise NotImplementedError(
-            "TrainTestAssigner.assign_batch is filled in by Step 6. "
-            "/global-metric-bins should not see TrainTestSpec until then."
-        )
+        import numpy as np
+        results = []
+        max_dropped = 0
+        for feat in feature_cols:
+            state = self.fit(rows, feat, n_bins, is_all)
+            assignments = self.assign(rows, feat, n_bins, is_all, state, outcome_col)
+            buckets: list = [[] for _ in range(n_bins)]
+            for a in assignments:
+                if a.bin is None or a.forward_return is None:
+                    continue
+                buckets[a.bin - 1].append(a.forward_return)
+            if all(len(b) == 0 for b in buckets):
+                continue
+            dropped = sum(
+                1 for a in assignments
+                if a.bin is None and a.dropped_reason in (
+                    "insufficient_train_history", "missing_value",
+                )
+            )
+            max_dropped = max(max_dropped, dropped)
+            total = sum(len(b) for b in buckets)
+            if total < n_bins * 2:
+                continue
+            results.append({
+                "name":   feat,
+                "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+                "bin_ns": [len(b) for b in buckets],
+            })
+        return results, max_dropped, self.spec.cutoff.isoformat()
 
     def fit(self, rows, metric, n_bins, is_all):
         cutoff_s = self.spec.cutoff.isoformat()
@@ -502,6 +539,44 @@ ASSIGNERS: dict[str, type] = {
 }
 
 
+def dropped_count_for_mode(spec, assignments) -> int:
+    """Count of rows dropped by the spec's method-specific gate.
+
+    Endpoints use this to populate the `dropped_warmup_n` response
+    field — the legacy name is preserved across modes since the frontend
+    subtitle renders it as "rows dropped to warmup" for walk-forward and
+    "rows dropped (insufficient train history)" for train-test.
+
+    in_sample    -> 0 (missing-value / insufficient-history drops are
+                       structural, not method-specific)
+    walk_forward -> rows with dropped_reason == "warmup"
+    train_test   -> rows with dropped_reason == "insufficient_train_history"
+    """
+    if spec.kind == "in_sample":
+        return 0
+    target = "warmup" if spec.kind == "walk_forward" else "insufficient_train_history"
+    return sum(1 for a in assignments if a.dropped_reason == target)
+
+
+def make_spec(walk_forward: bool, cutoff_date: Optional[str] = None) -> BinningSpec:
+    """Construct the appropriate BinningSpec from FastAPI query params.
+
+    Precedence: `cutoff_date` (truthy string) wins over `walk_forward`.
+    A cutoff implies train-test mode; walk_forward is ignored in that case.
+    Endpoints accept both params and let this helper pick:
+
+      cutoff_date set     -> TrainTestSpec(cutoff=parsed)
+      walk_forward=True   -> WalkForwardSpec()
+      neither             -> InSampleSpec()
+    """
+    if cutoff_date:
+        from datetime import date as _date_cls
+        return TrainTestSpec(cutoff=_date_cls.fromisoformat(str(cutoff_date)))
+    if walk_forward:
+        return WalkForwardSpec()
+    return InSampleSpec()
+
+
 # ── Secondary-endpoint dispatch (Step 4) ─────────────────────────────────
 # The secondary correlation explorer + scanner endpoints share a three-step
 # shape that depends on the active spec:
@@ -542,6 +617,7 @@ def filter_by_assignments(
     """
     from app.routers.oi_analysis import (
         _walk_forward_primary_filter, _filter_by_tkr_date, _parse_tkr_date_set,
+        _sort_chrono,
     )
     if spec.kind == "in_sample":
         filtered = _filter_by_tkr_date(rows, _parse_tkr_date_set(filtered_dates or []))
@@ -551,9 +627,29 @@ def filter_by_assignments(
             rows, primary_metric, set(selected_primary_bins or []), is_all,
         )
     if spec.kind == "train_test":
-        raise NotImplementedError(
-            "TrainTestSpec.filter_by_assignments is filled in by Step 6."
-        )
+        # Mirror the walk_forward semantic but with train-test bins:
+        # sort chronologically, compute train-test primary bins, keep
+        # rows whose bin is in selected_primary_bins.
+        ordered = _sort_chrono(rows)
+        assigner = TrainTestAssigner(spec)
+        state = assigner.fit(ordered, primary_metric, 20, is_all)
+        # outcome_col here is just a passthrough field on RowAssignment;
+        # use a sentinel string since we don't have the real one.
+        assignments = assigner.assign(ordered, primary_metric, 20, is_all,
+                                       state, outcome_col="__filter__")
+        sel = set(int(b) for b in (selected_primary_bins or []))
+        kept: list = []
+        dropped = 0
+        universe = 0
+        for i, a in enumerate(assignments):
+            if a.bin is None:
+                dropped += 1
+                continue
+            universe += 1
+            if sel and a.bin not in sel:
+                continue
+            kept.append(ordered[i])
+        return kept, dropped, universe
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
@@ -585,9 +681,26 @@ def assign_secondary_bin_stats(
     if spec.kind == "walk_forward":
         return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "train_test":
-        raise NotImplementedError(
-            "TrainTestSpec.assign_secondary_bin_stats is filled in by Step 6."
-        )
+        # Re-fit train-test bins on the primary-filtered subset (the
+        # cutoff still partitions the subset into training / test rows).
+        # Per-bin aggregation across all assigned rows.
+        import numpy as np
+        assigner = TrainTestAssigner(spec)
+        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
+                                       state, outcome_col)
+        buckets: list = [[] for _ in range(n_bins)]
+        for a in assignments:
+            if a.bin is None or a.forward_return is None:
+                continue
+            buckets[a.bin - 1].append(a.forward_return)
+        if all(len(b) == 0 for b in buckets):
+            return None
+        return {
+            "name":   metric,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+            "bin_ns": [len(b) for b in buckets],
+        }
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
@@ -698,9 +811,24 @@ def assign_secondary_buckets(
         return buckets
 
     if spec.kind == "train_test":
-        raise NotImplementedError(
-            "TrainTestSpec.assign_secondary_buckets is filled in by Step 6."
-        )
+        # Train-test bins on the primary-filtered subset, then group each
+        # row's (metric_value, outcome, date, ticker) tuple into its bin.
+        assigner = TrainTestAssigner(spec)
+        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
+                                       state, outcome_col)
+        buckets = [[] for _ in range(n_bins)]
+        for i, a in enumerate(assignments):
+            if a.bin is None or a.forward_return is None:
+                continue
+            row = rows_chrono[i] if i < len(rows_chrono) else None
+            if row is None:
+                continue
+            buckets[a.bin - 1].append((
+                a.metric_value, a.forward_return,
+                row.get("trade_date", ""), row.get("ticker", ""),
+            ))
+        return buckets
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
@@ -721,15 +849,28 @@ def secondary_membership(
       train_test: (Step 6).
     """
     from app.routers.oi_analysis import _bin_membership, _walk_forward_membership
+    import numpy as np
     sel = set(selected_bins or [])
     if spec.kind == "in_sample":
         return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "walk_forward":
         return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "train_test":
-        raise NotImplementedError(
-            "TrainTestSpec.secondary_membership is filled in by Step 6."
-        )
+        # Re-fit train-test bins on the (already primary-filtered)
+        # chronological subset and emit a 0/1 membership vector. The
+        # cutoff partitions the subset into training and test rows; both
+        # contribute to the vector if their bin lands in sel.
+        out = np.zeros(len(rows_chrono), dtype=np.float64)
+        if not sel:
+            return out
+        assigner = TrainTestAssigner(spec)
+        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
+                                       state, outcome_col="__membership__")
+        for i, a in enumerate(assignments):
+            if a.bin is not None and a.bin in sel:
+                out[i] = 1.0
+        return out
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
@@ -821,7 +962,7 @@ class PortfolioVectorBuilder:
         """0/1 vector over self.rows by spec.kind."""
         sel = set(selected_bins or [])
         import numpy as np
-        if self.spec.kind == "walk_forward":
+        if self.spec.kind == "walk_forward" or self.spec.kind == "train_test":
             bmap = self._bin_map(metric, n_bins)
             v = np.zeros(len(self.rows))
             for i, b in bmap.items():
@@ -831,14 +972,18 @@ class PortfolioVectorBuilder:
         if self.spec.kind == "in_sample":
             from app.routers.oi_analysis import _bin_membership
             return _bin_membership(self.rows, metric, sel, n_bins, self.is_all)
-        if self.spec.kind == "train_test":
-            raise NotImplementedError(
-                "TrainTestSpec.PortfolioVectorBuilder is filled in by Step 6."
-            )
         raise ValueError(f"unknown spec kind: {self.spec.kind!r}")
 
     def _bin_map(self, metric: str, n_bins: int):
-        """Cached bin map for walk_forward / train_test."""
+        """Cached bin map for walk_forward / train_test.
+
+        walk_forward: per-ticker bisect_left against running history,
+          252-day warmup.
+        train_test: per-row `_bin_for_value` against the frozen per-ticker
+          training history (rows with trade_date < cutoff).
+
+        Both return `{row_idx_in_self.rows: bin_or_None}`.
+        """
         key = (metric, n_bins)
         if key not in self._cache:
             if self.spec.kind == "walk_forward":
@@ -847,9 +992,16 @@ class PortfolioVectorBuilder:
                     self.rows, metric, n_bins, self.is_all, self.spec.warmup,
                 )
             elif self.spec.kind == "train_test":
-                raise NotImplementedError(
-                    "TrainTestSpec._bin_map is filled in by Step 6."
-                )
+                # Run TrainTestAssigner.assign over self.rows; flatten the
+                # result list into a {row_idx: bin} dict matching the
+                # walk-forward shape so _full_vector treats both identically.
+                assigner = TrainTestAssigner(self.spec)
+                state = assigner.fit(self.rows, metric, n_bins, self.is_all)
+                assigns = assigner.assign(self.rows, metric, n_bins, self.is_all,
+                                          state, outcome_col="__bin_map__")
+                # assigns is parallel to self.rows by construction; idx i
+                # corresponds to self.rows[i].
+                self._cache[key] = {i: a.bin for i, a in enumerate(assigns)}
             else:
                 raise ValueError(
                     f"_bin_map only meaningful for walk_forward / train_test; "
