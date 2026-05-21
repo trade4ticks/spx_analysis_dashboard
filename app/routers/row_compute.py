@@ -477,13 +477,18 @@ class TrainTestAssigner:
         out: list[RowAssignment] = []
         for r in rows:
             tkr = str(r.get("ticker", ""))
-            date_s = str(r.get("trade_date", ""))
+            # Preserve the original trade_date object on the RowAssignment
+            # (matches _parse_rows' contract for the other two Assigners).
+            # Downstream legacy code in /analyze's `_equity_for_decile` does
+            # `dd - last_date` on `pair[2]` — that requires a date object,
+            # not a string. The pre-fix bug shipped a string here and crashed.
+            trade_date = r.get("trade_date", "")
             xv = r.get(metric)
             yv = r.get(outcome_col)
 
             if xv is None or yv is None:
                 out.append(RowAssignment(
-                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
                     outcome_col=outcome_col, forward_return=None,
                     dropped_reason="missing_value",
@@ -493,7 +498,7 @@ class TrainTestAssigner:
                 xf = float(xv); yf = float(yv)
             except (TypeError, ValueError):
                 out.append(RowAssignment(
-                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
                     outcome_col=outcome_col, forward_return=None,
                     dropped_reason="missing_value",
@@ -501,7 +506,7 @@ class TrainTestAssigner:
                 continue
             if math.isnan(xf) or math.isnan(yf):
                 out.append(RowAssignment(
-                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
                     outcome_col=outcome_col, forward_return=None,
                     dropped_reason="missing_value",
@@ -513,14 +518,14 @@ class TrainTestAssigner:
             b = _bin_for_value(xf, history, n_bins)
             if b is None:
                 out.append(RowAssignment(
-                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=xf, n_bins=n_bins, bin=None,
                     outcome_col=outcome_col, forward_return=yf,
                     dropped_reason="insufficient_train_history",
                 ))
             else:
                 out.append(RowAssignment(
-                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=xf, n_bins=n_bins, bin=b,
                     outcome_col=outcome_col, forward_return=yf,
                     dropped_reason=None,
