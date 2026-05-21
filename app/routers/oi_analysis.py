@@ -296,6 +296,19 @@ async def analyze(
             if b20 > 0:
                 buckets_20_all[b20 - 1].append(pair)
 
+        # Match legacy bucket ordering so `decile_stats[i].returns` is
+        # bit-equivalent. Legacy populated each bucket by iterating
+        # tickers in by_ticker order (alphabetical from SQL) and then:
+        #   in-sample:    pairs sorted by x within each ticker
+        #   walk-forward: pairs in per-ticker chronological order
+        # My loop above filled buckets in cross-ticker chronological
+        # order; sort each bucket here to restore legacy iteration order.
+        sort_key = (lambda p: (p[3], p[2])) if walk_forward else (lambda p: (p[3], p[0]))
+        for b in range(10):
+            buckets[b].sort(key=sort_key)
+        for b in range(20):
+            buckets_20_all[b].sort(key=sort_key)
+
         # Legacy `wf_dropped` reported only warmup-drop count (in-sample
         # path used 0). Preserve that exact semantics — count rows whose
         # dropped_reason is "warmup", ignoring "missing_value" and
@@ -399,6 +412,18 @@ async def analyze(
             pairs_decile20.append(b20)
             buckets[b10 - 1].append(pair)
             buckets_20[b20 - 1].append(pair)
+
+        # Match legacy bucket ordering. Single-ticker in-sample legacy
+        # used `_bucket_pairs(pairs, n)` which sorts by x then
+        # distributes — bucket[i] is in sorted-by-x order. Walk-forward
+        # legacy bucket[i] is already in chronological order (only one
+        # ticker, so per-ticker-chrono == cross-ticker-chrono), which
+        # matches my output; no sort needed.
+        if not walk_forward:
+            for b in range(10):
+                buckets[b].sort(key=lambda p: p[0])
+            for b in range(20):
+                buckets_20[b].sort(key=lambda p: p[0])
 
         wf_dropped = sum(1 for a in a10 if a.dropped_reason == "warmup")
 
