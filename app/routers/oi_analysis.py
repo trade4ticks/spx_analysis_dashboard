@@ -1086,6 +1086,7 @@ async def get_score_matrix(
     sort_by: str = "composite_score",
     order: str = "desc",
     limit: int = 500,
+    mode: str = Query("in_sample"),
 ):
     """Return score matrix rows with optional filters."""
     from research.batch_score import ensure_table
@@ -1100,22 +1101,16 @@ async def get_score_matrix(
         sort_by = "composite_score"
     direction = "DESC" if order == "desc" else "ASC"
 
-    where = ["composite_score >= $1", "metric NOT ILIKE 'spot%'"]
-    params = [min_score]
-    idx = 2
+    where = ["composite_score >= $1", "metric NOT ILIKE 'spot%'", "mode = $2"]
+    params: list = [min_score, mode]
+    idx = 3
 
     if ticker:
-        where.append(f"ticker = ${idx}")
-        params.append(ticker)
-        idx += 1
+        where.append(f"ticker = ${idx}"); params.append(ticker); idx += 1
     if metric:
-        where.append(f"metric = ${idx}")
-        params.append(metric)
-        idx += 1
+        where.append(f"metric = ${idx}"); params.append(metric); idx += 1
     if fwd_ret:
-        where.append(f"fwd_ret = ${idx}")
-        params.append(fwd_ret)
-        idx += 1
+        where.append(f"fwd_ret = ${idx}"); params.append(fwd_ret); idx += 1
 
     where_clause = " AND ".join(where)
     sql = f"""
@@ -1136,40 +1131,47 @@ async def get_score_matrix(
 
 
 @router.get("/score-matrix/meta")
-async def score_matrix_meta(pool=Depends(get_pool)):
+async def score_matrix_meta(pool=Depends(get_pool),
+                            mode: str = Query("in_sample")):
     """Return distinct metrics, tickers, fwd_rets + summary stats for filter dropdowns."""
     from research.batch_score import ensure_table
     await ensure_table(pool)
 
     async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM oi_score_matrix")
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM oi_score_matrix WHERE mode = $1", mode)
         if count == 0:
             return {"count": 0, "tickers": [], "metrics": [], "fwd_rets": [],
-                    "avg_score": 0, "gte50": 0, "gte70": 0, "last_run": None}
+                    "avg_score": 0, "gte50": 0, "gte70": 0, "last_run": None,
+                    "mode": mode}
 
         tickers = [r["ticker"] for r in await conn.fetch(
-            "SELECT DISTINCT ticker FROM oi_score_matrix ORDER BY ticker")]
+            "SELECT DISTINCT ticker FROM oi_score_matrix WHERE mode = $1 ORDER BY ticker",
+            mode)]
         metrics = [r["metric"] for r in await conn.fetch(
-            "SELECT DISTINCT metric FROM oi_score_matrix WHERE metric NOT ILIKE 'spot%' ORDER BY metric")]
+            "SELECT DISTINCT metric FROM oi_score_matrix "
+            "WHERE mode = $1 AND metric NOT ILIKE 'spot%' ORDER BY metric", mode)]
         fwd_rets = [r["fwd_ret"] for r in await conn.fetch(
-            "SELECT DISTINCT fwd_ret FROM oi_score_matrix ORDER BY fwd_ret")]
+            "SELECT DISTINCT fwd_ret FROM oi_score_matrix WHERE mode = $1 ORDER BY fwd_ret",
+            mode)]
         stats = await conn.fetchrow("""
             SELECT AVG(composite_score) as avg_score,
                    COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                    COUNT(*) FILTER (WHERE composite_score >= 70) as gte70,
                    MAX(scanned_at) as last_run
-            FROM oi_score_matrix
-        """)
+            FROM oi_score_matrix WHERE mode = $1
+        """, mode)
 
     return {
-        "count": count,
-        "tickers": tickers,
-        "metrics": metrics,
-        "fwd_rets": fwd_rets,
+        "count":     count,
+        "tickers":   tickers,
+        "metrics":   metrics,
+        "fwd_rets":  fwd_rets,
         "avg_score": round(float(stats["avg_score"] or 0), 1),
-        "gte50": int(stats["gte50"] or 0),
-        "gte70": int(stats["gte70"] or 0),
-        "last_run": str(stats["last_run"])[:19] if stats["last_run"] else None,
+        "gte50":     int(stats["gte50"] or 0),
+        "gte70":     int(stats["gte70"] or 0),
+        "last_run":  str(stats["last_run"])[:19] if stats["last_run"] else None,
+        "mode":      mode,
     }
 
 
@@ -1179,87 +1181,74 @@ async def score_matrix_summary(
     metric: Optional[str] = None,
     fwd_ret: Optional[str] = None,
     ticker: Optional[str] = None,
+    mode: str = Query("in_sample"),
 ):
     """Aggregated score stats with optional cross-filtering."""
     from research.batch_score import ensure_table
     await ensure_table(pool)
 
+    # All queries share a base mode filter.  Build WHERE clauses dynamically
+    # so the positional param numbers stay consistent.
     async with pool.acquire() as conn:
-        # By metric — filtered by fwd_ret if selected
+        # By metric
+        bm_w = ["mode = $1", "metric NOT ILIKE 'spot%'"]
+        bm_p: list = [mode]
         if fwd_ret:
-            by_metric = await conn.fetch("""
-                SELECT metric, AVG(composite_score) as avg_score,
-                       STDDEV(composite_score) as std_score, COUNT(*) as n,
-                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
-                       MAX(composite_score) as max_score
-                FROM oi_score_matrix WHERE fwd_ret = $1 AND metric NOT ILIKE 'spot%'
-                GROUP BY metric ORDER BY AVG(composite_score) DESC
-            """, fwd_ret)
-        else:
-            by_metric = await conn.fetch("""
-                SELECT metric, AVG(composite_score) as avg_score,
-                       STDDEV(composite_score) as std_score, COUNT(*) as n,
-                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
-                       MAX(composite_score) as max_score
-                FROM oi_score_matrix WHERE metric NOT ILIKE 'spot%'
-                GROUP BY metric ORDER BY AVG(composite_score) DESC
-            """)
+            bm_p.append(fwd_ret); bm_w.append(f"fwd_ret = ${len(bm_p)}")
+        by_metric = await conn.fetch(f"""
+            SELECT metric, AVG(composite_score) as avg_score,
+                   STDDEV(composite_score) as std_score, COUNT(*) as n,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   MAX(composite_score) as max_score
+            FROM oi_score_matrix WHERE {" AND ".join(bm_w)}
+            GROUP BY metric ORDER BY AVG(composite_score) DESC
+        """, *bm_p)
 
-        # By fwd_ret — filtered by metric if selected
+        # By fwd_ret
+        bf_w = ["mode = $1"]
+        bf_p: list = [mode]
         if metric:
-            by_fwd = await conn.fetch("""
-                SELECT fwd_ret, AVG(composite_score) as avg_score,
-                       STDDEV(composite_score) as std_score, COUNT(*) as n,
-                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
-                       MAX(composite_score) as max_score
-                FROM oi_score_matrix WHERE metric = $1
-                GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
-            """, metric)
-        else:
-            by_fwd = await conn.fetch("""
-                SELECT fwd_ret, AVG(composite_score) as avg_score,
-                       STDDEV(composite_score) as std_score, COUNT(*) as n,
-                       COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
-                       MAX(composite_score) as max_score
-                FROM oi_score_matrix
-                GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
-            """)
+            bf_p.append(metric); bf_w.append(f"metric = ${len(bf_p)}")
+        by_fwd = await conn.fetch(f"""
+            SELECT fwd_ret, AVG(composite_score) as avg_score,
+                   STDDEV(composite_score) as std_score, COUNT(*) as n,
+                   COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
+                   MAX(composite_score) as max_score
+            FROM oi_score_matrix WHERE {" AND ".join(bf_w)}
+            GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
+        """, *bf_p)
 
-        # By ticker — filtered by metric and fwd_ret if selected
-        ticker_wheres, ticker_params = [], []
+        # By ticker
+        bt_w = ["mode = $1"]
+        bt_p: list = [mode]
         if metric:
-            ticker_params.append(metric)
-            ticker_wheres.append(f"metric = ${len(ticker_params)}")
+            bt_p.append(metric); bt_w.append(f"metric = ${len(bt_p)}")
         if fwd_ret:
-            ticker_params.append(fwd_ret)
-            ticker_wheres.append(f"fwd_ret = ${len(ticker_params)}")
-        ticker_where_sql = ("WHERE " + " AND ".join(ticker_wheres)) if ticker_wheres else ""
+            bt_p.append(fwd_ret); bt_w.append(f"fwd_ret = ${len(bt_p)}")
         by_ticker = await conn.fetch(f"""
             SELECT ticker, AVG(composite_score) as avg_score,
                    STDDEV(composite_score) as std_score, COUNT(*) as n,
                    COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                    MAX(composite_score) as max_score
-            FROM oi_score_matrix {ticker_where_sql}
+            FROM oi_score_matrix WHERE {" AND ".join(bt_w)}
             GROUP BY ticker ORDER BY AVG(composite_score) DESC
-        """, *ticker_params)
+        """, *bt_p)
 
-        # By fwd_ret scoped to a ticker — filtered by ticker (and metric if selected)
-        tfwd_wheres, tfwd_params = [], []
+        # By fwd_ret scoped to a ticker
+        tf_w = ["mode = $1"]
+        tf_p: list = [mode]
         if ticker:
-            tfwd_params.append(ticker)
-            tfwd_wheres.append(f"ticker = ${len(tfwd_params)}")
+            tf_p.append(ticker); tf_w.append(f"ticker = ${len(tf_p)}")
         if metric:
-            tfwd_params.append(metric)
-            tfwd_wheres.append(f"metric = ${len(tfwd_params)}")
-        tfwd_where_sql = ("WHERE " + " AND ".join(tfwd_wheres)) if tfwd_wheres else ""
+            tf_p.append(metric); tf_w.append(f"metric = ${len(tf_p)}")
         by_fwd_ticker = await conn.fetch(f"""
             SELECT fwd_ret, AVG(composite_score) as avg_score,
                    STDDEV(composite_score) as std_score, COUNT(*) as n,
                    COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                    MAX(composite_score) as max_score
-            FROM oi_score_matrix {tfwd_where_sql}
+            FROM oi_score_matrix WHERE {" AND ".join(tf_w)}
             GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
-        """, *tfwd_params)
+        """, *tf_p)
 
     def _row(r, key):
         return {key: r[key],
@@ -1269,22 +1258,27 @@ async def score_matrix_summary(
                 "max_score": round(float(r["max_score"] or 0), 1)}
 
     return {
-        "by_metric":     [_row(r, "metric")  for r in by_metric],
-        "by_fwd":        [_row(r, "fwd_ret") for r in by_fwd],
-        "by_ticker":     [_row(r, "ticker")  for r in by_ticker],
-        "by_fwd_ticker": [_row(r, "fwd_ret") for r in by_fwd_ticker],
+        "by_metric":        [_row(r, "metric")  for r in by_metric],
+        "by_fwd":           [_row(r, "fwd_ret") for r in by_fwd],
+        "by_ticker":        [_row(r, "ticker")  for r in by_ticker],
+        "by_fwd_ticker":    [_row(r, "fwd_ret") for r in by_fwd_ticker],
         "selected_metric":  metric,
         "selected_fwd_ret": fwd_ret,
         "selected_ticker":  ticker,
     }
 
 
+class BatchScoreReq(BaseModel):
+    walk_forward: bool = False
+
+
 @router.post("/run-batch-score")
 async def trigger_batch_score(
+    req: BatchScoreReq = Body(default_factory=BatchScoreReq),
     pool=Depends(get_pool),
     oi_pool=Depends(get_oi_pool),
 ):
-    """Trigger a batch score run in the background."""
+    """Trigger a batch score run (in-sample or walk-forward) in the background."""
     from research.batch_score import get_progress, run_batch_score
     import asyncio
 
@@ -1292,9 +1286,11 @@ async def trigger_batch_score(
     if progress["running"]:
         return {"status": "already_running", "message": progress["message"]}
 
-    asyncio.get_event_loop().create_task(run_batch_score(oi_pool, pool))
+    asyncio.get_event_loop().create_task(
+        run_batch_score(oi_pool, pool, walk_forward=req.walk_forward))
 
-    return {"status": "started", "message": "Batch scoring started..."}
+    mode_label = "walk-forward" if req.walk_forward else "in-sample"
+    return {"status": "started", "message": f"Batch scoring ({mode_label}) started…"}
 
 
 @router.get("/batch-score-status")

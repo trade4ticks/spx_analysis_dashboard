@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=76"></script>
+  <script src="/static/js/oi_analysis.js?v=77"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1675,6 +1675,18 @@
               style="font-size:10px;color:var(--dim);margin-left:auto"
               x-text="'Last: ' + (smMeta.last_run || 'never')"></span>
       </div>
+
+      <!-- WF mode status -->
+      <template x-if="pageMode === 'walk_forward'">
+        <div style="margin-bottom:8px">
+          <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px">WALK-FORWARD MODE</span>
+          <template x-if="smMeta.count === 0 && !smStatus.running">
+            <span style="font-size:10px;color:var(--dim);margin-left:8px">
+              No walk-forward scores computed yet — click <strong>Run Scan</strong> to generate them.
+            </span>
+          </template>
+        </div>
+      </template>
 
       <!-- Filters -->
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">

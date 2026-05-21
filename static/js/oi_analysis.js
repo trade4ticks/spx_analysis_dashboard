@@ -1840,8 +1840,9 @@ document.addEventListener('alpine:init', () => {
 
     async smInit() {
       try {
+        const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
         const [metaRes, statusRes] = await Promise.all([
-          fetch('/api/oi-analysis/score-matrix/meta'),
+          fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode),
           fetch('/api/oi-analysis/batch-score-status'),
         ]);
         if (metaRes.ok) this.smMeta = await metaRes.json();
@@ -1862,10 +1863,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadScoreMatrix() {
+      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
       const params = new URLSearchParams({
         sort_by: this.smSortKey === 'd10_d1_spread' ? 'composite_score' : this.smSortKey,
         order: this.smSortDir,
         min_score: this.smMinScore,
+        mode: smMode,
       });
       if (this.smFilterTicker) params.set('ticker', this.smFilterTicker);
       if (this.smFilterMetric) params.set('metric', this.smFilterMetric);
@@ -1875,7 +1878,7 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/oi-analysis/score-matrix?' + params);
         if (r.ok) this.smRows = await r.json();
         // Refresh meta too
-        const m = await fetch('/api/oi-analysis/score-matrix/meta');
+        const m = await fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode);
         if (m.ok) this.smMeta = await m.json();
       } catch (_) {}
     },
@@ -1902,7 +1905,11 @@ document.addEventListener('alpine:init', () => {
 
     async runBatchScore() {
       try {
-        const r = await fetch('/api/oi-analysis/run-batch-score', { method: 'POST' });
+        const r = await fetch('/api/oi-analysis/run-batch-score', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ walk_forward: this.pageMode === 'walk_forward' }),
+        });
         if (r.ok) {
           const data = await r.json();
           this.smStatus = { running: true, message: data.message, last_run: this.smStatus.last_run };
@@ -1934,7 +1941,8 @@ document.addEventListener('alpine:init', () => {
       if (metric === undefined) metric = this.smSelectedMetric;
       if (fwdRet === undefined) fwdRet = this.smSelectedFwd;
       if (ticker === undefined) ticker = this.smSelectedTicker;
-      const params = new URLSearchParams();
+      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
+      const params = new URLSearchParams({ mode: smMode });
       if (metric) params.set('metric', metric);
       if (fwdRet) params.set('fwd_ret', fwdRet);
       if (ticker) params.set('ticker', ticker);
@@ -3009,6 +3017,9 @@ document.addEventListener('alpine:init', () => {
       }
       if (this.portfolioId && this.portAggregate) {
         this.loadPortfolioAggregate();  // fire-and-forget
+      }
+      if (this.smMeta.count > 0) {
+        this.smInit();  // reload score matrix in new mode
       }
     },
 

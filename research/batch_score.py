@@ -8,8 +8,9 @@ in the oi_score_matrix table. Run via API endpoint or CLI:
 """
 import asyncio
 import math
-import json
 from datetime import datetime
+
+import numpy as np
 
 from research import scanner
 
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS oi_score_matrix (
     ticker          TEXT NOT NULL,
     metric          TEXT NOT NULL,
     fwd_ret         TEXT NOT NULL,
+    mode            TEXT NOT NULL DEFAULT 'in_sample',
     composite_score REAL,
     pattern         TEXT,
     spearman_r      REAL,
@@ -38,21 +40,22 @@ CREATE TABLE IF NOT EXISTS oi_score_matrix (
     mi              REAL,
     pearson_r       REAL,
     loyo_fragile    BOOLEAN,
-    scanned_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (ticker, metric, fwd_ret)
+    scanned_at      TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_oi_score_ticker ON oi_score_matrix(ticker);
 CREATE INDEX IF NOT EXISTS idx_oi_score_metric ON oi_score_matrix(metric);
-CREATE INDEX IF NOT EXISTS idx_oi_score_score ON oi_score_matrix(composite_score DESC);
+CREATE INDEX IF NOT EXISTS idx_oi_score_score  ON oi_score_matrix(composite_score DESC);
+CREATE INDEX IF NOT EXISTS idx_oi_score_mode   ON oi_score_matrix(mode);
 """
 
+# mode is $4; total 20 positional params
 _UPSERT = """\
 INSERT INTO oi_score_matrix
-    (ticker, metric, fwd_ret, composite_score, pattern, spearman_r,
+    (ticker, metric, fwd_ret, mode, composite_score, pattern, spearman_r,
      monotonicity, yearly_pct, concentration, tail_spread, n_obs,
      d10_avg, d1_avg, d10_wr, d1_wr, best_sharpe, mi, pearson_r, loyo_fragile, scanned_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
-ON CONFLICT (ticker, metric, fwd_ret) DO UPDATE SET
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
+ON CONFLICT (ticker, metric, fwd_ret, mode) DO UPDATE SET
     composite_score=EXCLUDED.composite_score, pattern=EXCLUDED.pattern,
     spearman_r=EXCLUDED.spearman_r, monotonicity=EXCLUDED.monotonicity,
     yearly_pct=EXCLUDED.yearly_pct, concentration=EXCLUDED.concentration,
@@ -65,7 +68,7 @@ ON CONFLICT (ticker, metric, fwd_ret) DO UPDATE SET
 """
 
 # Shared progress state for API polling
-_progress = {"running": False, "message": "", "last_run": None}
+_progress = {"running": False, "message": "", "last_run": None, "walk_forward": False}
 
 
 def get_progress() -> dict:
@@ -75,18 +78,79 @@ def get_progress() -> dict:
 async def ensure_table(pool):
     async with pool.acquire() as conn:
         await conn.execute(_TABLE_DDL)
-        for col, typ in [('mi', 'REAL'), ('pearson_r', 'REAL'), ('loyo_fragile', 'BOOLEAN')]:
+        # Column migrations for rows created before the current DDL
+        for col, typ in [('mi', 'REAL'), ('pearson_r', 'REAL'), ('loyo_fragile', 'BOOLEAN'),
+                         ('mode', "TEXT NOT NULL DEFAULT 'in_sample'")]:
             await conn.execute(
                 f'ALTER TABLE oi_score_matrix ADD COLUMN IF NOT EXISTS {col} {typ}')
+        # Replace old (ticker, metric, fwd_ret) unique with mode-inclusive unique index.
+        # Unique index syntax supports IF NOT EXISTS; constraint syntax does not.
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS oi_score_matrix_uq_mode
+            ON oi_score_matrix (ticker, metric, fwd_ret, mode)
+        """)
+        # Drop the old 3-column constraint if it still exists (non-fatal if already gone).
+        try:
+            await conn.execute(
+                "ALTER TABLE oi_score_matrix "
+                "DROP CONSTRAINT IF EXISTS oi_score_matrix_ticker_metric_fwd_ret_key")
+        except Exception:
+            pass
 
 
-async def run_batch_score(oi_pool, main_pool, log=print):
+def _safe_float(v):
+    if v is None:
+        return float("nan")
+    try:
+        f = float(v)
+        return f if not math.isnan(f) else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _wf_bin_matrix(rows_chrono: list, feature_list: list, n_bins: int = 10, warmup: int = 252):
+    """Compute walk-forward bin assignments for all features simultaneously.
+
+    Returns (bin_mat, valid_cum, nan_mask):
+      bin_mat   — int32 (N, F), 1-indexed bin for each (row, feature); 0 = warmup/NaN
+      valid_cum — int32 (N, F), cumulative non-NaN count up to and including row i
+      nan_mask  — bool  (N, F)
+    """
+    N = len(rows_chrono)
+    F = len(feature_list)
+    X = np.array(
+        [[_safe_float(r.get(feat)) for feat in feature_list] for r in rows_chrono],
+        dtype=np.float64,
+    )
+    nan_mask = np.isnan(X)
+    # Set NaN to 0 for comparison (nan > x == False in numpy, but safer to be explicit)
+    X_cmp = np.where(nan_mask, np.finfo(np.float64).min, X)
+
+    wf_rank = np.zeros((N, F), dtype=np.int32)
+    for j in range(N - 1):
+        valid_j = ~nan_mask[j]                # features with a real value at row j
+        gt = (X_cmp[j + 1:] > X_cmp[j]) & (~nan_mask[j + 1:]) & valid_j
+        wf_rank[j + 1:] += gt.astype(np.int32)
+
+    valid_cum = np.cumsum(~nan_mask, axis=0, dtype=np.int32)
+    safe_n = np.where(valid_cum > 0, valid_cum, 1).astype(np.float64)
+    raw_bin = (wf_rank.astype(np.float64) / safe_n * n_bins).astype(np.int32)
+    bin_mat = np.minimum(raw_bin, n_bins - 1) + 1   # 1-indexed
+
+    # Zero out warmup rows and NaN cells so callers can skip them
+    past_warm = valid_cum >= warmup
+    bin_mat = np.where(past_warm & ~nan_mask, bin_mat, 0)
+    return bin_mat, valid_cum, nan_mask
+
+
+async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False, log=print):
     """Run the full batch scan. oi_pool=open_interest DB, main_pool=spx_interpolated DB."""
-    _progress["running"] = True
-    _progress["message"] = "Starting..."
+    _progress["running"]      = True
+    _progress["walk_forward"] = walk_forward
+    _progress["message"]      = "Starting…"
+    mode_label = "walk_forward" if walk_forward else "in_sample"
 
     try:
-        # Ensure table exists (in main DB where research tables live)
         await ensure_table(main_pool)
 
         # 1. Get tickers
@@ -94,7 +158,7 @@ async def run_batch_score(oi_pool, main_pool, log=print):
             ticker_rows = await conn.fetch(
                 "SELECT DISTINCT ticker FROM daily_features ORDER BY ticker")
         tickers = [r["ticker"] for r in ticker_rows]
-        log(f"Found {len(tickers)} tickers")
+        log(f"Found {len(tickers)} tickers  [mode={mode_label}]")
 
         # 2. Get columns
         async with oi_pool.acquire() as conn:
@@ -107,26 +171,34 @@ async def run_batch_score(oi_pool, main_pool, log=print):
         all_cols = [r["column_name"] for r in col_rows]
 
         features = [c for c in all_cols
-                     if not (c.startswith("ret_") and "fwd" in c)
-                     and c not in _EXCLUDE_FEATURES]
+                    if not (c.startswith("ret_") and "fwd" in c)
+                    and c not in _EXCLUDE_FEATURES
+                    and not c.endswith("_pc")]
         outcomes = [c for c in all_cols if c.startswith("ret_") and "fwd" in c]
 
         total_combos = len(tickers) * len(features) * len(outcomes)
-        log(f"Scanning: {len(tickers)} tickers × {len(features)} features × {len(outcomes)} outcomes = {total_combos} combos")
+        log(f"Scanning: {len(tickers)} tickers × {len(features)} features × "
+            f"{len(outcomes)} outcomes = {total_combos} combos")
 
         total_scored = 0
         total_skipped = 0
 
         for ti, ticker in enumerate(tickers):
             _progress["message"] = f"Ticker {ti+1}/{len(tickers)}: {ticker}"
-            log(f"[{ti+1}/{len(tickers)}] {ticker}...")
+            log(f"[{ti+1}/{len(tickers)}] {ticker}…")
 
-            # Fetch data for this ticker (from 2020-01-01 to match OI Analysis default)
             async with oi_pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT * FROM daily_features WHERE ticker = $1 AND trade_date >= '2020-01-01' ORDER BY trade_date",
+                    "SELECT * FROM daily_features "
+                    "WHERE ticker = $1 AND trade_date >= '2020-01-01' "
+                    "ORDER BY trade_date",
                     ticker)
             rows = [dict(r) for r in rows]
+            for r in rows:
+                if hasattr(r.get("trade_date"), "isoformat"):
+                    r["trade_date"] = r["trade_date"].isoformat()
+                else:
+                    r["trade_date"] = str(r["trade_date"])
 
             if len(rows) < 30:
                 log(f"  Skipping {ticker} — only {len(rows)} rows")
@@ -136,57 +208,78 @@ async def run_batch_score(oi_pool, main_pool, log=print):
             avail = set(rows[0].keys())
             batch_params = []
 
-            for feature in features:
-                if feature not in avail:
+            if walk_forward:
+                # ── Walk-forward mode ────────────────────────────────────────
+                # Compute WF bins for all available features simultaneously
+                # using the numpy j-loop, then use bin numbers as proxy feature
+                # values for the scanner.
+                avail_features = [f for f in features if f in avail]
+                if not avail_features:
+                    total_skipped += len(features) * len(outcomes)
                     continue
-                for outcome in outcomes:
-                    if outcome not in avail or feature == outcome:
+
+                bin_mat, valid_cum, nan_mask = _wf_bin_matrix(
+                    rows, avail_features, n_bins=10, warmup=252)
+
+                for fi, feature in enumerate(avail_features):
+                    for outcome in outcomes:
+                        if outcome not in avail or feature == outcome:
+                            continue
+                        # Build proxy rows: feature value = WF bin number (1-10)
+                        proxy = []
+                        for i, r in enumerate(rows):
+                            b = bin_mat[i, fi]
+                            if b == 0:
+                                continue      # warmup or NaN
+                            o = _safe_float(r.get(outcome))
+                            if math.isnan(o):
+                                continue
+                            proxy.append({
+                                feature:      float(b),
+                                outcome:      o,
+                                "trade_date": r.get("trade_date"),
+                            })
+                        if len(proxy) < 30:
+                            total_skipped += 1
+                            continue
+                        try:
+                            result = scanner.scan_relationship(proxy, feature, outcome, ticker)
+                        except Exception:
+                            total_skipped += 1
+                            continue
+                        if "error" in result or result.get("n", 0) < 30:
+                            total_skipped += 1
+                            continue
+                        _append_params(batch_params, ticker, feature, outcome,
+                                       mode_label, result)
+                        total_scored += 1
+
+            else:
+                # ── In-sample mode (original flow) ───────────────────────────
+                for feature in features:
+                    if feature not in avail:
                         continue
-                    try:
-                        result = scanner.scan_relationship(rows, feature, outcome, ticker)
-                    except Exception:
-                        total_skipped += 1
-                        continue
+                    for outcome in outcomes:
+                        if outcome not in avail or feature == outcome:
+                            continue
+                        try:
+                            result = scanner.scan_relationship(rows, feature, outcome, ticker)
+                        except Exception:
+                            total_skipped += 1
+                            continue
+                        if "error" in result or result.get("n", 0) < 30:
+                            total_skipped += 1
+                            continue
+                        _append_params(batch_params, ticker, feature, outcome,
+                                       mode_label, result)
+                        total_scored += 1
 
-                    if "error" in result or result.get("n", 0) < 30:
-                        total_skipped += 1
-                        continue
-
-                    rob = result.get("robustness") or {}
-                    bs = result.get("bucket_stats") or []
-                    valid_bs = [b for b in bs if b is not None]
-                    d10 = next((b for b in valid_bs if b.get("bucket") == 10), {})
-                    d1 = next((b for b in valid_bs if b.get("bucket") == 1), {})
-                    best = result.get("best_single_bucket") or {}
-
-                    batch_params.append((
-                        ticker, feature, outcome,
-                        result.get("composite_score"),
-                        result.get("pattern"),
-                        result.get("spearman_r"),
-                        result.get("monotonicity"),
-                        rob.get("yearly_consistency_pct"),
-                        rob.get("concentration_risk"),
-                        result.get("tail_spread"),
-                        result.get("n"),
-                        d10.get("avg_ret"),
-                        d1.get("avg_ret"),
-                        d10.get("win_rate"),
-                        d1.get("win_rate"),
-                        best.get("sharpe"),
-                        result.get("mi"),
-                        result.get("pearson_r"),
-                        rob.get("loyo_fragile"),
-                    ))
-                    total_scored += 1
-
-            # Batch upsert for this ticker
             if batch_params:
                 async with main_pool.acquire() as conn:
                     await conn.executemany(_UPSERT, batch_params)
                 log(f"  {len(batch_params)} scores saved")
 
-        _progress["message"] = f"Complete: {total_scored} scored, {total_skipped} skipped"
+        _progress["message"]  = f"Complete: {total_scored} scored, {total_skipped} skipped"
         _progress["last_run"] = datetime.utcnow().isoformat()
         log(f"Done. {total_scored} scored, {total_skipped} skipped.")
 
@@ -198,23 +291,59 @@ async def run_batch_score(oi_pool, main_pool, log=print):
         _progress["running"] = False
 
 
+def _append_params(batch_params: list, ticker: str, feature: str, outcome: str,
+                   mode: str, result: dict) -> None:
+    """Extract scanner result fields and append an _UPSERT param tuple."""
+    rob  = result.get("robustness") or {}
+    bs   = result.get("bucket_stats") or []
+    valid_bs = [b for b in bs if b is not None]
+    d10  = next((b for b in valid_bs if b.get("bucket") == 10), {})
+    d1   = next((b for b in valid_bs if b.get("bucket") == 1),  {})
+    best = result.get("best_single_bucket") or {}
+    batch_params.append((
+        ticker, feature, outcome, mode,
+        result.get("composite_score"),
+        result.get("pattern"),
+        result.get("spearman_r"),
+        result.get("monotonicity"),
+        rob.get("yearly_consistency_pct"),
+        rob.get("concentration_risk"),
+        result.get("tail_spread"),
+        result.get("n"),
+        d10.get("avg_ret"),
+        d1.get("avg_ret"),
+        d10.get("win_rate"),
+        d1.get("win_rate"),
+        best.get("sharpe"),
+        result.get("mi"),
+        result.get("pearson_r"),
+        rob.get("loyo_fragile"),
+    ))
+
+
 # CLI entry point
 if __name__ == "__main__":
     import asyncpg
     import os
+    import argparse
     from dotenv import load_dotenv
     load_dotenv()
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--walk-forward", action="store_true",
+                        help="Compute walk-forward scores instead of in-sample")
+    args = parser.parse_args()
+
     async def main():
-        oi_url = os.environ.get("OI_DATABASE_URL")
+        oi_url   = os.environ.get("OI_DATABASE_URL")
         main_url = os.environ.get("DATABASE_URL")
         if not oi_url or not main_url:
             print("Set OI_DATABASE_URL and DATABASE_URL env vars")
             return
-        oi_pool = await asyncpg.create_pool(oi_url, min_size=2, max_size=5)
+        oi_pool   = await asyncpg.create_pool(oi_url,   min_size=2, max_size=5)
         main_pool = await asyncpg.create_pool(main_url, min_size=2, max_size=5)
         try:
-            await run_batch_score(oi_pool, main_pool)
+            await run_batch_score(oi_pool, main_pool, walk_forward=args.walk_forward)
         finally:
             await oi_pool.close()
             await main_pool.close()
