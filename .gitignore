@@ -22,3 +22,6 @@ Thumbs.db
 mockups/
 research_config.yaml
 latest_research_summary.md
+
+# Regression-check snapshot output (transient, can be 100s of MB per run)
+regression_snapshots/
