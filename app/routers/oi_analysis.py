@@ -837,6 +837,7 @@ async def heatmap_2d(
     bins: int = Query(5, ge=3, le=10),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    walk_forward: bool = Query(False),
     pool=Depends(get_oi_pool),
 ):
     """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell.
@@ -845,12 +846,26 @@ async def heatmap_2d(
     then pools, matching the main quantile chart's methodology. Each
     ticker contributes evenly to every cell rather than the universe's
     absolute-range membership being dominated by tickers with naturally
-    extreme magnitudes.
+    extreme magnitudes. ALL-mode bucketing flows through the row_compute
+    Assigner layer, so `walk_forward=true` and (in Step 6) train-test
+    are first-class modes.
+
+    Single-ticker mode uses absolute `np.percentile` bin edges (a
+    deliberately different algorithm — the response carries the literal
+    edge values as labels, e.g. "0.05–0.10", which the frontend renders).
+    `walk_forward` is rejected for single-ticker because the absolute-edge
+    semantic doesn't translate to a running-history view; if/when
+    single-ticker /heatmap needs walk-forward, it gets its own design
+    (rank-based bucketing with B1..BN labels, separate UI path).
     """
     if not pool:
         return {"error": "OI database not configured"}
 
     is_all = (ticker == "ALL")
+    if walk_forward and not is_all:
+        return {"error": "walk_forward not supported for single-ticker /heatmap "
+                         "(uses absolute-percentile edges, not rank bins)"}
+
     date_conditions = ""
     params: list = []
     p = 1
@@ -863,18 +878,32 @@ async def heatmap_2d(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    # Always select ticker so ALL mode can group per-ticker.
+    # SELECT trade_date too so the row_compute Assigner can populate the
+    # RowAssignment.trade_date field (used downstream for the WALK-FORWARD
+    # subtitle's start_date — when wired in Step 6).
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, {metric_x}, {metric_y}, {outcome} FROM daily_features "
+            f"SELECT ticker, trade_date, {metric_x}, {metric_y}, {outcome} FROM daily_features "
             f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL"
             f"{date_conditions} ORDER BY trade_date",
             *params)
 
     if is_all:
-        # Group by ticker, independently bin each axis per ticker, then pool
-        # the joint membership into the global grid.
-        by_ticker: dict = defaultdict(list)
+        # ALL mode: route x-axis and y-axis bucketing through the
+        # row_compute Assigner. Two parallel calls — same per-ticker rank
+        # math as the legacy inline loop, but the dispatch now picks
+        # in-sample / walk-forward / train-test (Step 6).
+        from app.routers.row_compute import (
+            ASSIGNERS, InSampleSpec, WalkForwardSpec,
+        )
+        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        assigner = ASSIGNERS[spec.kind](spec)
+
+        # Pre-filter to rows with all three fields valid + numeric. This
+        # mirrors the legacy validity gate exactly so the per-ticker
+        # row counts the Assigner sees match the legacy by_ticker.values()
+        # iteration.
+        rows_clean: list = []
         for r in rows:
             try:
                 xv, yv, ov = float(r[metric_x]), float(r[metric_y]), float(r[outcome])
@@ -882,33 +911,38 @@ async def heatmap_2d(
                 continue
             if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
                 continue
-            by_ticker[r['ticker']].append((xv, yv, ov))
+            rows_clean.append({
+                "ticker":     r["ticker"],
+                "trade_date": r.get("trade_date"),
+                metric_x:     xv,
+                metric_y:     yv,
+                outcome:      ov,
+            })
+
+        # Two parallel Assigner calls — one per axis. Each row appears
+        # in both result lists in the same input order.
+        state_x = assigner.fit(rows_clean, metric_x, bins, True)
+        a_x = assigner.assign(rows_clean, metric_x, bins, True, state_x, outcome)
+        state_y = assigner.fit(rows_clean, metric_y, bins, True)
+        a_y = assigner.assign(rows_clean, metric_y, bins, True, state_y, outcome)
 
         # cell_rets[y_bin][x_bin] — outer index is y so the returned grid
         # matches the frontend's grid[iy][ix] convention (rows=y, cols=x).
         cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
-        n_tickers_used = 0
+        n_tickers_with_bins: set = set()
         total_n = 0
-        for items in by_ticker.values():
-            if len(items) < bins:
+        for ax, ay, row in zip(a_x, a_y, rows_clean):
+            # Rows from tickers with < bins observations have bin=None
+            # under both Assigners (`_bucket_pairs_per_ticker` excludes
+            # tickers below the threshold). Skip them — matches legacy
+            # `if len(items) < bins: continue`.
+            if ax.bin is None or ay.bin is None:
                 continue
-            n_tickers_used += 1
-            n_t = len(items)
-            # Assign x-bin via rank, independently for this ticker.
-            order_x = sorted(range(n_t), key=lambda k: items[k][0])
-            x_bin = [0] * n_t
-            for rank, k in enumerate(order_x):
-                x_bin[k] = min(int(rank / n_t * bins), bins - 1)
-            # Assign y-bin via rank, independently.
-            order_y = sorted(range(n_t), key=lambda k: items[k][1])
-            y_bin = [0] * n_t
-            for rank, k in enumerate(order_y):
-                y_bin[k] = min(int(rank / n_t * bins), bins - 1)
-            # Pool outcomes into joint cells. Index order: [y][x] so rows
-            # represent the y-axis bins as the template expects.
-            for k in range(n_t):
-                cell_rets[y_bin[k]][x_bin[k]].append(items[k][2])
-                total_n += 1
+            # 1-indexed → 0-indexed for Python list indexing.
+            cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
+            total_n += 1
+            n_tickers_with_bins.add(ax.ticker)
+        n_tickers_used = len(n_tickers_with_bins)
 
         if total_n < 50:
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
@@ -932,14 +966,21 @@ async def heatmap_2d(
         # each ticker has its own boundaries. Use B1..BN.
         x_labels = [f"B{i+1}" for i in range(bins)]
         y_labels = [f"B{j+1}" for j in range(bins)]
-        return {
+        out: dict = {
             "metric_x":  metric_x, "metric_y": metric_y, "outcome": outcome,
             "bins":      bins, "n": total_n,
             "x_labels":  x_labels, "y_labels": y_labels,
             "grid":      grid,
             "per_ticker": True,
             "n_tickers": n_tickers_used,
+            "mode":      "walk_forward" if walk_forward else "in_sample",
         }
+        if walk_forward:
+            out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
+            out["dropped_warmup_n"] = sum(
+                1 for a in a_x if a.bin is None and a.dropped_reason == "warmup"
+            )
+        return out
 
     # Single-ticker mode — original absolute-percentile binning.
     valid = []

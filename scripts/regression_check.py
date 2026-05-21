@@ -184,13 +184,30 @@ def _build_test_matrix(disc: dict) -> list[tuple[str, dict]]:
                        "walk_forward": str(wf).lower()},
         }))
 
-    # /heatmap — single variant (no walk-forward today; that's the point —
-    # baseline captured now becomes regression target after step 5.5).
+    # /heatmap — three variants now that Step 5.5 routes ALL-mode through
+    # the row_compute Assigner. Single-ticker stays on np.percentile edges
+    # (different algorithm by design — see the endpoint docstring).
     matrix.append((f"heatmap__{tk_one}__{metric}__{metric2}__{outcome}.json", {
         "method": "GET",
         "path":   "/heatmap",
         "params": {"ticker": tk_one, "metric_x": metric, "metric_y": metric2,
                    "outcome": outcome, "bins": "5"},
+    }))
+    # ALL-mode in-sample — exercises the new Assigner routing.
+    matrix.append((f"heatmap__ALL__{metric}__{metric2}__{outcome}__wf0.json", {
+        "method": "GET",
+        "path":   "/heatmap",
+        "params": {"ticker": "ALL", "metric_x": metric, "metric_y": metric2,
+                   "outcome": outcome, "bins": "5", "walk_forward": "false"},
+    }))
+    # ALL-mode walk-forward — new capability that comes for free with the
+    # Assigner routing. No legacy reference exists pre-Step-5.5, so the
+    # first capture here defines the baseline going forward.
+    matrix.append((f"heatmap__ALL__{metric}__{metric2}__{outcome}__wf1.json", {
+        "method": "GET",
+        "path":   "/heatmap",
+        "params": {"ticker": "ALL", "metric_x": metric, "metric_y": metric2,
+                   "outcome": outcome, "bins": "5", "walk_forward": "true"},
     }))
 
     # Secondary-scanner chain: /secondary-load → /secondary-scan → /secondary-detail
