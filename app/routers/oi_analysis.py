@@ -1042,13 +1042,19 @@ async def metric_bins_1d(
     bins: int = Query(10, ge=2, le=20),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    walk_forward: bool = Query(False),
     pool=Depends(get_oi_pool),
 ):
     """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze).
 
-    ALL mode uses per-ticker independent quantile binning then pools, matching
-    the main quantile chart's methodology. Single-ticker mode uses ordinary
-    percentile binning.
+    ALL mode uses per-ticker independent quantile binning then pools,
+    matching the main quantile chart's methodology. Single-ticker mode
+    uses flat rank-based binning. Both modes flow through the
+    row_compute Assigner — `walk_forward=true` and (Step 6) train-test
+    are first-class modes. This endpoint backs the heatmap's side bin
+    charts; pre-Step-5.5-continuation it was on inline math with no
+    walk-forward support, producing in-sample hindsight-monotone shapes
+    that didn't match the page's other binning panes.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -1066,36 +1072,50 @@ async def metric_bins_1d(
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
 
-    # Always select ticker so ALL mode can group; ignored in single-ticker.
+    # SELECT trade_date too so the Assigner can populate RowAssignment.trade_date
+    # (WalkForwardAssigner sorts per-ticker pairs by trade_date — empty
+    # strings would still work via stable sort + chronological SQL order,
+    # but explicit dates are more robust against schema changes).
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, {metric}, {outcome} FROM daily_features "
+            f"SELECT ticker, trade_date, {metric}, {outcome} FROM daily_features "
             f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
             f"ORDER BY trade_date", *params)
 
-    if is_all:
-        # Per-ticker independent quantile, then pool. Tickers with < `bins`
-        # observations are excluded (same rule as _bucket_pairs_per_ticker).
-        by_ticker: dict = defaultdict(list)
-        for r in rows:
-            try:
-                xf, yf = float(r[metric]), float(r[outcome])
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(xf) or math.isnan(yf):
-                continue
-            by_ticker[r['ticker']].append((xf, yf))
-        buckets_data = _bucket_pairs_per_ticker(by_ticker, bins)
-        total_n = sum(len(b) for b in buckets_data)
-        if total_n < 20:
+    # Spec-dispatched binning. Both ALL and single-ticker flow through
+    # the Assigner with the same shape — the legacy fork on `is_all`
+    # collapses to a single path inside the Assigner.
+    from app.routers.row_compute import (
+        ASSIGNERS, InSampleSpec, WalkForwardSpec,
+    )
+    spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+    assigner = ASSIGNERS[spec.kind](spec)
+
+    rows_for_assigner = [dict(r) for r in rows]
+    if not is_all:
+        # Single-ticker rows don't carry a "ticker" column from the SQL
+        # SELECT — inject it so the Assigner can group consistently.
+        for r in rows_for_assigner:
+            r.setdefault("ticker", ticker)
+
+    state = assigner.fit(rows_for_assigner, metric, bins, is_all)
+    assignments = assigner.assign(rows_for_assigner, metric, bins, is_all, state, outcome)
+
+    # Build buckets_data: list of (xf, yf) tuples per bin (1-indexed →
+    # 0-indexed list position). Drops bin=None rows (warmup,
+    # missing_value, or insufficient_history in ALL mode).
+    buckets_data: list = [[] for _ in range(bins)]
+    total_n = 0
+    for a in assignments:
+        if a.bin is None:
+            continue
+        buckets_data[a.bin - 1].append((a.metric_value, a.forward_return))
+        total_n += 1
+
+    if total_n < 20:
+        if is_all:
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
-    else:
-        row_dicts = [dict(r) for r in rows]
-        pairs = _clean_pairs(row_dicts, metric, outcome)
-        if len(pairs) < 20:
-            return {"error": f"Insufficient data: {len(pairs)} rows"}
-        buckets_data = _bucket_pairs(pairs, bins)
-        total_n = len(pairs)
+        return {"error": f"Insufficient data: {total_n} rows"}
 
     result = []
     for i, bucket in enumerate(buckets_data):
@@ -1117,14 +1137,21 @@ async def metric_bins_1d(
             "min_val":  round(float(min(xs)), 6),
             "max_val":  round(float(max(xs)), 6),
         })
-    return {
+    out: dict = {
         "metric":     metric,
         "outcome":    outcome,
         "bins":       bins,
         "n":          total_n,
         "buckets":    result,
         "per_ticker": is_all,
+        "mode":       "walk_forward" if walk_forward else "in_sample",
     }
+    if walk_forward:
+        out["warmup"]           = _DEFAULT_WALKFWD_WARMUP
+        out["dropped_warmup_n"] = sum(
+            1 for a in assignments if a.bin is None and a.dropped_reason == "warmup"
+        )
+    return out
 
 
 @router.get("/ai-summary")

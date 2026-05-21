@@ -858,6 +858,12 @@ document.addEventListener('alpine:init', () => {
       this.hmXData = null;
       this.hmYData = null;
       this._hmRange = null;
+      // walk_forward heatmap is only supported in ALL mode (single-ticker
+      // /heatmap uses absolute np.percentile edges by design). For
+      // single-ticker + walk-forward pageMode, leave walk_forward off so
+      // the heatmap silently runs in-sample rather than 422'ing.
+      const wf = (this.pageMode === 'walk_forward' && this.ticker === 'ALL')
+                 ? '&walk_forward=true' : '';
       try {
         const r = await fetch(
           `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
@@ -865,7 +871,8 @@ document.addEventListener('alpine:init', () => {
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`
           + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
-          + (this.dateTo   ? `&date_to=${this.dateTo}`     : ''));
+          + (this.dateTo   ? `&date_to=${this.dateTo}`     : '')
+          + wf);
         if (r.ok) {
           const d = await r.json();
           let max = 0;
@@ -894,10 +901,16 @@ document.addEventListener('alpine:init', () => {
 
     async loadHmBins1d() {
       if (!this.data || !this.heatmapMetric) return;
+      // /metric-bins (post-Step-5.5-continuation) supports walk_forward
+      // for both ALL and single-ticker modes via the Assigner. Send the
+      // page-wide mode so the side bin charts agree with the rest of the
+      // page (top All-Ticker Metric Bins, standalone primary chart).
+      const wf = (this.pageMode === 'walk_forward') ? '&walk_forward=true' : '';
       const base = `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
         + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.hmBins1d}`
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
-        + (this.dateTo ? `&date_to=${this.dateTo}` : '');
+        + (this.dateTo ? `&date_to=${this.dateTo}` : '')
+        + wf;
       try {
         const [rx, ry] = await Promise.all([
           fetch(base + `&metric=${encodeURIComponent(this.metric)}`),
@@ -3020,6 +3033,13 @@ document.addEventListener('alpine:init', () => {
       }
       if (this.smMeta.count > 0) {
         this.smInit();  // reload score matrix in new mode
+      }
+      // Heatmap (Step 5.5 continuation): re-fetch when mode flips. If a
+      // heatmap is currently rendered (heatmapData != null) it needs to
+      // re-bin under the new spec — both the 2D grid (via /heatmap) and
+      // the side bin charts (via /metric-bins).
+      if (this.heatmapData && this.heatmapMetric) {
+        this.loadHeatmap();  // fire-and-forget; chains into loadHmBins1d()
       }
     },
 
