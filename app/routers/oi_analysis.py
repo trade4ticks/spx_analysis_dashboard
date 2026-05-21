@@ -268,15 +268,16 @@ async def analyze(
         a20 = assigner.assign(row_dicts, metric, 20, True, state20, outcome)
         _validate_assignments(a20, 20)
 
-        # Cross-reference 10-bin and 20-bin assignments by (ticker, date)
-        # so each valid pair carries both bin numbers — same identity used
-        # in `buckets`, `buckets_20_all`, and the chronological `pairs`
-        # list.
+        # Cross-reference 10-bin and 20-bin assignments by (ticker, date).
+        # A ticker with 10..19 rows clears the 10-bin threshold but not
+        # the 20-bin one (`_bucket_pairs_per_ticker` excludes tickers
+        # with < n rows). Legacy emits those rows with `decile20 = 0`
+        # and does NOT add them to any 20-bin bucket; preserve that
+        # exact semantics here for bit-equivalence on the regression
+        # check.
         key_b20: dict = {(a.ticker, a.trade_date): a.bin
                          for a in a20 if a.bin is not None}
-        valid_a10 = [a for a in a10
-                     if a.bin is not None
-                     and (a.ticker, a.trade_date) in key_b20]
+        valid_a10 = [a for a in a10 if a.bin is not None]
         valid_a10.sort(key=lambda a: a.trade_date)  # chronological across tickers
 
         pairs          = []
@@ -287,12 +288,13 @@ async def analyze(
         for a in valid_a10:
             pair = (a.metric_value, a.forward_return, a.trade_date, a.ticker)
             b10 = a.bin
-            b20 = key_b20[(a.ticker, a.trade_date)]
+            b20 = key_b20.get((a.ticker, a.trade_date), 0)
             pairs.append(pair)
             pairs_decile.append(b10)
             pairs_decile20.append(b20)
             buckets[b10 - 1].append(pair)
-            buckets_20_all[b20 - 1].append(pair)
+            if b20 > 0:
+                buckets_20_all[b20 - 1].append(pair)
 
         # Legacy `wf_dropped` reported only warmup-drop count (in-sample
         # path used 0). Preserve that exact semantics — count rows whose
