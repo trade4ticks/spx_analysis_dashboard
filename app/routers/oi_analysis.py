@@ -2699,6 +2699,27 @@ async def secondary_correlation(req: CorrReq):
 # ── Global Metric Bins (standalone top-of-page browser) ───────────────────
 
 _GLOBAL_BINS_CACHE: dict = {}
+_GLOBAL_BINS_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS global_bins_cache (
+    cache_key TEXT PRIMARY KEY,
+    outcome   TEXT NOT NULL,
+    ticker    TEXT NOT NULL,
+    n_bins    INT  NOT NULL,
+    mode      TEXT NOT NULL,
+    payload   JSONB NOT NULL,
+    cached_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+_bins_table_ensured = False
+
+
+async def _ensure_bins_table(pool) -> None:
+    global _bins_table_ensured
+    if _bins_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_GLOBAL_BINS_TABLE_DDL)
+    _bins_table_ensured = True
 
 
 def _compute_all_bins_fast(rows: list, feature_cols: list, outcome_col: str,
@@ -2936,6 +2957,22 @@ async def global_metric_bins(
     if cache_key in _GLOBAL_BINS_CACHE:
         return _GLOBAL_BINS_CACHE[cache_key]
 
+    # Check persistent DB cache before running the expensive computation.
+    await _ensure_bins_table(pool)
+    try:
+        async with pool.acquire() as conn:
+            db_row = await conn.fetchrow(
+                "SELECT payload, cached_at FROM global_bins_cache WHERE cache_key = $1",
+                cache_key)
+        if db_row:
+            out = dict(db_row["payload"])
+            ca = db_row["cached_at"]
+            out["cached_at"] = ca.isoformat() if ca else None
+            _GLOBAL_BINS_CACHE[cache_key] = out
+            return out
+    except Exception:
+        pass  # Table might not exist yet on first startup; fall through to compute
+
     # Build date filter
     where = [f"{outcome} IS NOT NULL"]
     params: list = []
@@ -3013,6 +3050,26 @@ async def global_metric_bins(
             out["dropped_warmup_n"] = dropped_n
             out["start_date"]       = wf_start
 
+        # Persist to DB so next server restart loads instantly.
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO global_bins_cache "
+                    "    (cache_key, outcome, ticker, n_bins, mode, payload) "
+                    "VALUES ($1,$2,$3,$4,$5,$6::jsonb) "
+                    "ON CONFLICT (cache_key) DO UPDATE "
+                    "    SET payload=$6::jsonb, cached_at=NOW()",
+                    cache_key, outcome, ticker, n_bins,
+                    "walk_forward" if walk_forward else "in_sample",
+                    json.dumps(out),
+                )
+                row_ca = await conn.fetchrow(
+                    "SELECT cached_at FROM global_bins_cache WHERE cache_key = $1",
+                    cache_key)
+            out["cached_at"] = row_ca["cached_at"].isoformat() if row_ca else None
+        except Exception:
+            out["cached_at"] = None
+
         _GLOBAL_BINS_CACHE[cache_key] = out
         return out
     except Exception as exc:
@@ -3030,10 +3087,16 @@ async def global_metric_bins(
 
 
 @router.post("/global-metric-bins/invalidate")
-async def global_metric_bins_invalidate():
-    """Drop the in-memory cache so a fresh fetch is computed (e.g. after the
-    user adds new metric columns to daily_features)."""
+async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
+    """Drop the in-memory and DB cache so a fresh computation runs next request."""
     _GLOBAL_BINS_CACHE.clear()
+    if pool:
+        try:
+            await _ensure_bins_table(pool)
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM global_bins_cache")
+        except Exception:
+            pass
     return {"ok": True}
 
 

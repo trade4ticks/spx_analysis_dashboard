@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=77"></script>
+  <script src="/static/js/oi_analysis.js?v=78"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -185,6 +185,9 @@
           <span x-show="topBinsData?.mode === 'walk_forward'"
                 style="font-size:10px;color:#f39c12;font-weight:600"
                 x-text="topBinsData ? ('WALK-FWD · ' + (topBinsData.total_rows - (topBinsData.dropped_warmup_n||0)).toLocaleString() + ' rows used · ' + (topBinsData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (topBinsData.warmup||252) + 'd)') : ''"></span>
+          <span x-show="topBinsData?.cached_at && !topBinsData?.error"
+                style="font-size:10px;color:var(--dim)"
+                x-text="topBinsData?.cached_at ? ('· as of ' + new Date(topBinsData.cached_at).toLocaleString()) : ''"></span>
           <span x-show="topBinsData?.error" style="font-size:10px;color:#e84393"
                 x-text="'Error: ' + topBinsData?.error"></span>
           <span x-show="topBinsLoading" style="font-size:10px;color:#3498db">Loading…</span>
