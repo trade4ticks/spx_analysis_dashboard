@@ -63,6 +63,7 @@ document.addEventListener('alpine:init', () => {
     secBinCount: 10,
     secSelectedSecBins: [10],
     secBubbleMinN: 1,
+    secScanMeta: null,
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
@@ -2361,9 +2362,11 @@ document.addEventListener('alpine:init', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            cache_key:      this.secCacheKey,
-            filtered_dates: this._secFilteredDates(),
-            ticker:         this.ticker,
+            cache_key:             this.secCacheKey,
+            filtered_dates:        this._secFilteredDates(),
+            ticker:                this.ticker,
+            walk_forward:          this.pageMode === 'walk_forward',
+            selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2378,6 +2381,7 @@ document.addEventListener('alpine:init', () => {
         this.secBaseline = d.baseline;
         this.secMetrics  = d.metrics || [];
         this.secMaxAbsLift = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.lift)));
+        this.secScanMeta = { mode: d.mode, dropped_warmup_n: d.dropped_warmup_n, universe_n: d.universe_n, start_date: d.start_date };
         // Reset detail if the selected metric's position changed significantly
         if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
         this._renderSecBar();
@@ -2396,12 +2400,14 @@ document.addEventListener('alpine:init', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            cache_key:      this.secCacheKey,
-            metric_b:       metricName,
-            filtered_dates: this._secFilteredDates(),
-            sec_bins:       this.secSelectedSecBins,
-            sec_bin_count:  this.secBinCount,
-            ticker:         this.ticker,
+            cache_key:             this.secCacheKey,
+            metric_b:              metricName,
+            filtered_dates:        this._secFilteredDates(),
+            sec_bins:              this.secSelectedSecBins,
+            sec_bin_count:         this.secBinCount,
+            ticker:                this.ticker,
+            walk_forward:          this.pageMode === 'walk_forward',
+            selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

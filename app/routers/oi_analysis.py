@@ -1952,6 +1952,8 @@ class SecScanReq(BaseModel):
     cache_key: str
     filtered_dates: List[str]
     ticker: str = "SPX"
+    walk_forward: bool = False
+    selected_primary_bins: Optional[List[int]] = None
 
 
 class SecDetailReq(BaseModel):
@@ -1961,6 +1963,8 @@ class SecDetailReq(BaseModel):
     sec_bins: List[int] = [10]
     sec_bin_count: int = 10
     ticker: str = "SPX"
+    walk_forward: bool = False
+    selected_primary_bins: Optional[List[int]] = None
 
 
 @router.post("/secondary-load")
@@ -2060,13 +2064,24 @@ async def secondary_scan(req: SecScanReq):
     rows = cached["rows"]
     feature_cols = cached["features"]
     outcome_col = cached["outcome"]
+    primary_metric = cached["primary_metric"]
 
-    metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
-
-    if req.filtered_dates:
-        baseline_subset = _filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+    if req.walk_forward:
+        sel = set(int(b) for b in (req.selected_primary_bins or []))
+        filtered, dropped, universe = _walk_forward_primary_filter(
+            rows, primary_metric, sel, is_all)
+        metrics_result = _sec_score_metrics(filtered, [], outcome_col, feature_cols, is_all)
+        baseline_subset = filtered
+        resp_mode = "walk_forward"
+        start_date = filtered[0]["trade_date"] if filtered else None
     else:
-        baseline_subset = rows
+        metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
+        baseline_subset = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+                           if req.filtered_dates else rows)
+        dropped, universe = 0, len(baseline_subset)
+        resp_mode = "in_sample"
+        start_date = rows[0]["trade_date"] if rows else None
+
     baseline_rets = [float(r[outcome_col]) for r in baseline_subset if r.get(outcome_col) is not None]
     baseline = {
         "n": len(baseline_rets),
@@ -2074,7 +2089,14 @@ async def secondary_scan(req: SecScanReq):
         "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
     }
 
-    return {"baseline": baseline, "metrics": metrics_result}
+    return {
+        "baseline":         baseline,
+        "metrics":          metrics_result,
+        "mode":             resp_mode,
+        "dropped_warmup_n": dropped,
+        "universe_n":       universe,
+        "start_date":       start_date,
+    }
 
 
 @router.post("/secondary-detail")
@@ -2087,16 +2109,34 @@ async def secondary_detail(req: SecDetailReq):
     is_all = (req.ticker == "ALL")
     all_rows = cached["rows"]
     outcome_col = cached["outcome"]
+    primary_metric = cached.get("primary_metric")
     n_bins = max(2, min(20, req.sec_bin_count))
 
-    filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
+    # ── Primary filter ──────────────────────────────────────────────────────
+    if req.walk_forward:
+        sel = set(int(b) for b in (req.selected_primary_bins or []))
+        filtered, dropped, _universe = _walk_forward_primary_filter(
+            all_rows, primary_metric, sel, is_all)
+        resp_mode = "walk_forward"
+    else:
+        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(req.filtered_dates))
+        dropped = 0
+        resp_mode = "in_sample"
+
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
 
-    # Build (secondary_value, outcome, date, ticker) for filtered rows
-    if is_all:
-        by_tkr: dict = defaultdict(list)
-        for r in filtered:
+    # ── Secondary binning ───────────────────────────────────────────────────
+    if req.walk_forward:
+        # Walk-forward bins within the primary-filtered chronological subset.
+        # warmup=n_bins: tiny warmup so even small filtered sets work.
+        filtered_chrono = _sort_chrono(filtered)
+        wf_sec = _walk_forward_bins(filtered_chrono, req.metric_b, n_bins, is_all, warmup=n_bins)
+        buckets: list = [[] for _ in range(n_bins)]
+        for i, r in enumerate(filtered_chrono):
+            b = wf_sec.get(i)
+            if b is None:
+                continue
             v = r.get(req.metric_b)
             o = r.get(outcome_col)
             if v is None or o is None:
@@ -2104,43 +2144,57 @@ async def secondary_detail(req: SecDetailReq):
             try:
                 fv, fo = float(v), float(o)
                 if not (math.isnan(fv) or math.isnan(fo)):
-                    by_tkr[r.get("ticker", "_")].append(
-                        (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
-                    )
+                    buckets[b - 1].append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
             except (TypeError, ValueError):
                 pass
-        # Rank-normalize per ticker then pool
-        norm_rows = []
-        for tkr_vals in by_tkr.values():
-            if len(tkr_vals) < n_bins:
-                continue
-            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-            n_t = len(sorted_t)
-            for rank, (_, y, d, tkr) in enumerate(sorted_t):
-                norm_rows.append((rank / n_t, y, d, tkr))
     else:
-        norm_rows = []
-        for r in filtered:
-            v = r.get(req.metric_b)
-            o = r.get(outcome_col)
-            if v is None or o is None:
-                continue
-            try:
-                fv, fo = float(v), float(o)
-                if not (math.isnan(fv) or math.isnan(fo)):
-                    norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
-            except (TypeError, ValueError):
-                pass
+        # In-sample: per-ticker rank-normalize for ALL, global rank for single.
+        if is_all:
+            by_tkr: dict = defaultdict(list)
+            for r in filtered:
+                v = r.get(req.metric_b)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv, fo = float(v), float(o)
+                    if not (math.isnan(fv) or math.isnan(fo)):
+                        by_tkr[r.get("ticker", "_")].append(
+                            (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
+                        )
+                except (TypeError, ValueError):
+                    pass
+            norm_rows = []
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < n_bins:
+                    continue
+                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+                n_t = len(sorted_t)
+                for rank, (_, y, d, tkr) in enumerate(sorted_t):
+                    norm_rows.append((rank / n_t, y, d, tkr))
+        else:
+            norm_rows = []
+            for r in filtered:
+                v = r.get(req.metric_b)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv, fo = float(v), float(o)
+                    if not (math.isnan(fv) or math.isnan(fo)):
+                        norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
+                except (TypeError, ValueError):
+                    pass
 
-    if len(norm_rows) < n_bins * 2:
-        return {"error": "insufficient_data"}
+        if len(norm_rows) < n_bins * 2:
+            return {"error": "insufficient_data"}
 
-    sorted_norm = sorted(norm_rows, key=lambda x: x[0])
-    n = len(sorted_norm)
-    buckets: list = [[] for _ in range(n_bins)]
-    for i, row_t in enumerate(sorted_norm):
-        b = min(int(i / n * n_bins), n_bins - 1)
-        buckets[b].append(row_t)
+        sorted_norm = sorted(norm_rows, key=lambda x: x[0])
+        n = len(sorted_norm)
+        buckets: list = [[] for _ in range(n_bins)]
+        for i, row_t in enumerate(sorted_norm):
+            b = min(int(i / n * n_bins), n_bins - 1)
+            buckets[b].append(row_t)
 
     # Bin stats
     bins_out = []
@@ -2249,6 +2303,8 @@ async def secondary_detail(req: SecDetailReq):
         "combined_trade_dates": [r.get("trade_date", "") for r in combined_sorted],
         "tickers":     tickers_out,
         "combined_trades": combined_trades,
+        "mode":            resp_mode,
+        "dropped_warmup_n": dropped,
     }
 
 

@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=75"></script>
+  <script src="/static/js/oi_analysis.js?v=76"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -776,6 +776,10 @@
               · WR <b style="color:var(--muted)" x-text="(secBaseline.win_rate * 100).toFixed(1) + '%'"></b>
               · <span x-text="secMetrics.length + ' metrics ranked'"></span>
             </span>
+          </template>
+          <template x-if="secScanMeta && secScanMeta.mode === 'walk_forward'">
+            <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px"
+                  x-text="'WALK-FORWARD · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · ' + (secScanMeta.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (252d)'"></span>
           </template>
           <span x-show="secStatus.loading" style="font-size:10px;color:#3498db">Computing secondary scores…</span>
           <span x-show="secStatus.error" style="font-size:10px;color:#e84393" x-text="secStatus.error"></span>
