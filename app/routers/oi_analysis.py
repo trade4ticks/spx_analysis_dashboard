@@ -3093,17 +3093,18 @@ async def global_metric_bins(
 
         is_all = (ticker == "ALL")
 
-        if walk_forward:
-            metrics_out, dropped_n, wf_start = _compute_all_bins_walk_forward(
-                rows, feature_cols, outcome, n_bins, is_all,
-                warmup=_DEFAULT_WALKFWD_WARMUP,
-            )
-        else:
-            # Vectorised batch helper — ~10x faster than the per-metric Python
-            # loop for large daily_features fetches.
-            metrics_out = _compute_all_bins_fast(rows, feature_cols, outcome, n_bins, is_all)
-            dropped_n = None
-            wf_start = None
+        # Route through the row_compute layer. Both branches delegate to
+        # the same numpy-vectorized helpers as before; the if/else here
+        # is now a one-line spec selection instead of duplicated call
+        # sites with diverging return shapes.
+        from app.routers.row_compute import (
+            ASSIGNERS, InSampleSpec, WalkForwardSpec,
+        )
+        spec = WalkForwardSpec() if walk_forward else InSampleSpec()
+        assigner = ASSIGNERS[spec.kind](spec)
+        metrics_out, dropped_n, wf_start = assigner.assign_batch(
+            rows, feature_cols, outcome, n_bins, is_all,
+        )
 
         # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
         def _lift(m):

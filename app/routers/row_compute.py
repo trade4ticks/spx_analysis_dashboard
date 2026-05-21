@@ -149,6 +149,23 @@ class RowAssigner(Protocol):
                is_all: bool, state: Any, outcome_col: str
                ) -> list[RowAssignment]: ...
 
+    def assign_batch(self, rows: list[dict], feature_cols: list[str],
+                     outcome_col: str, n_bins: int, is_all: bool
+                     ) -> tuple[list[dict], Optional[int], Optional[str]]:
+        """Batch variant for many-feature endpoints (`/global-metric-bins`).
+
+        Computes per-bin avg-return for every column in `feature_cols`
+        in a single pass. Output preserves the legacy
+        `_compute_all_bins_fast` / `_compute_all_bins_walk_forward`
+        shape so the caller doesn't need to translate:
+
+        Returns (metrics, dropped_warmup_n, start_date):
+          metrics: list of {name, bins: [avg_ret per bin], bin_ns: [count per bin]}
+          dropped_warmup_n: None for in-sample (no warmup concept), int for walk-forward
+          start_date: None for in-sample, ISO string for walk-forward
+        """
+        ...
+
 
 # ── Shared first-pass: parse rows into (pair, row_idx) plus dropped records ──
 
@@ -229,6 +246,15 @@ class InSampleAssigner:
     def fit(self, rows, metric, n_bins, is_all):
         return None  # in-sample needs no precomputed state
 
+    def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
+        """Delegate to `_compute_all_bins_fast` — the numpy-vectorized
+        in-sample batch helper. Returns (metrics, None, None) since
+        in-sample has no warmup concept.
+        """
+        from app.routers.oi_analysis import _compute_all_bins_fast
+        metrics = _compute_all_bins_fast(rows, feature_cols, outcome_col, n_bins, is_all)
+        return metrics, None, None
+
     def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
         from app.routers.oi_analysis import (  # local import avoids circular
             _bucket_pairs, _bucket_pairs_per_ticker,
@@ -291,6 +317,17 @@ class WalkForwardAssigner:
 
     def fit(self, rows, metric, n_bins, is_all):
         return None  # walk-forward is computed inline in assign
+
+    def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
+        """Delegate to `_compute_all_bins_walk_forward` — the
+        numpy-vectorized walk-forward batch helper. Returns
+        (metrics, dropped_warmup_n, start_date).
+        """
+        from app.routers.oi_analysis import _compute_all_bins_walk_forward
+        metrics, dropped, start_date = _compute_all_bins_walk_forward(
+            rows, feature_cols, outcome_col, n_bins, is_all, warmup=self.spec.warmup,
+        )
+        return metrics, dropped, start_date
 
     def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
         from app.routers.oi_analysis import (
@@ -362,6 +399,18 @@ class TrainTestAssigner:
     """
     def __init__(self, spec: TrainTestSpec):
         self.spec = spec
+
+    def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
+        """Train/test batch — Step 6 will implement this when the
+        train/test mode is wired into the frontend. Until then,
+        train/test mode is only exercised by the single-metric `assign`
+        path; if a caller routes a batch endpoint with TrainTestSpec
+        before Step 6, fail loudly rather than silently fall back.
+        """
+        raise NotImplementedError(
+            "TrainTestAssigner.assign_batch is filled in by Step 6. "
+            "/global-metric-bins should not see TrainTestSpec until then."
+        )
 
     def fit(self, rows, metric, n_bins, is_all):
         cutoff_s = self.spec.cutoff.isoformat()
