@@ -1612,22 +1612,17 @@ def _filter_by_tkr_date(rows: list, tkr_date_set: set) -> list:
 
 
 def _sec_score_metrics(
-    all_rows: list,
-    filtered_dates: list,
+    rows: list,
     outcome_col: str,
     feature_cols: list,
     is_all: bool = False,
     n_bins: int = 5,
 ) -> list:
-    """Score each secondary feature by its lift over baseline in the filtered date subset."""
-    if not filtered_dates:
-        filtered = all_rows
-    else:
-        filtered = _filter_by_tkr_date(all_rows, _parse_tkr_date_set(filtered_dates))
-    if len(filtered) < n_bins * 2:
+    """Score each secondary feature by its lift over baseline. Caller pre-filters rows."""
+    if len(rows) < n_bins * 2:
         return []
 
-    all_rets = [float(r[outcome_col]) for r in filtered
+    all_rets = [float(r[outcome_col]) for r in rows
                 if r.get(outcome_col) is not None and not math.isnan(float(r[outcome_col]))]
     if not all_rets:
         return []
@@ -1639,7 +1634,7 @@ def _sec_score_metrics(
         if is_all:
             # Per-ticker rank-normalize within filtered subset
             by_tkr: dict = defaultdict(list)
-            for r in filtered:
+            for r in rows:
                 v = r.get(feat)
                 o = r.get(outcome_col)
                 if v is None or o is None:
@@ -1661,7 +1656,7 @@ def _sec_score_metrics(
                     norm_vals.append((rank / n_t, y))
         else:
             norm_vals = []
-            for r in filtered:
+            for r in rows:
                 v = r.get(feat)
                 o = r.get(outcome_col)
                 if v is None or o is None:
@@ -2205,13 +2200,11 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     rows = cached["rows"]
     feature_cols = cached["features"]
 
-    metrics_result = _sec_score_metrics(rows, req.filtered_dates, req.outcome, feature_cols, is_all)
+    scored_rows = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+                   if req.filtered_dates else rows)
+    metrics_result = _sec_score_metrics(scored_rows, req.outcome, feature_cols, is_all)
 
-    if req.filtered_dates:
-        baseline_subset = _filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
-    else:
-        baseline_subset = rows
-    baseline_rets = [float(r[req.outcome]) for r in baseline_subset if r.get(req.outcome) is not None]
+    baseline_rets = [float(r[req.outcome]) for r in scored_rows if r.get(req.outcome) is not None]
     baseline = {
         "n": len(baseline_rets),
         "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
@@ -2234,35 +2227,26 @@ async def secondary_scan(req: SecScanReq):
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
 
-    # Spec-dispatched primary filter. The `_sec_score_metrics` call still
-    # forks on walk_forward inside it (separate concern — that helper's
-    # signature is "filtered list OR full rows + filtered_dates"), but
-    # the filter selection itself is unified here.
     from app.routers.row_compute import make_spec, filter_by_assignments
     spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, universe = filter_by_assignments(
         rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    # walk_forward AND train_test pass pre-filtered rows to the metric
-    # scorer (the primary filter has been applied by filter_by_assignments).
-    # in_sample keeps its legacy two-arg shape — _sec_score_metrics
-    # accepts the full row set + filtered_dates and re-filters internally.
-    # (_sec_score_metrics's dual signature is logged in the Step 7 cleanup
-    # checklist — single caller post-Step-4; unify there.)
     if spec.kind != "in_sample":
-        metrics_result = _sec_score_metrics(filtered, [], outcome_col, feature_cols, is_all)
+        metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all)
         baseline_subset = filtered
         resp_mode = spec.kind
         start_date = filtered[0]["trade_date"] if filtered else None
     else:
-        metrics_result = _sec_score_metrics(rows, req.filtered_dates, outcome_col, feature_cols, is_all)
+        # In-sample secondary scoring uses date-filtered rows (not primary-filtered)
+        # to preserve the legacy semantic from before the row_compute migration.
+        scored_rows = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
+                       if req.filtered_dates else rows)
+        metrics_result = _sec_score_metrics(scored_rows, outcome_col, feature_cols, is_all)
         baseline_subset = filtered if req.filtered_dates else rows
         resp_mode = "in_sample"
         start_date = rows[0]["trade_date"] if rows else None
-        # Legacy in-sample reported universe_n as len(baseline_subset).
-        # The wrapper returns len(rows) — override to preserve the
-        # legacy semantic for the regression diff.
         universe = len(baseline_subset)
 
     baseline_rets = [float(r[outcome_col]) for r in baseline_subset if r.get(outcome_col) is not None]
