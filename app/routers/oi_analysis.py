@@ -2304,7 +2304,10 @@ async def secondary_detail(req: SecDetailReq):
     # per-ticker n_bins gate — match the legacy "insufficient_data"
     # error in that case. The walk-forward branch never returns None
     # (matches legacy, which always built buckets without a second check).
-    buckets = assign_secondary_buckets(spec, filtered, req.metric_b, n_bins, outcome_col, is_all)
+    buckets = assign_secondary_buckets(
+        spec, filtered, req.metric_b, n_bins, outcome_col, is_all,
+        all_rows=(all_rows if spec.kind == "train_test" else None),
+    )
     if buckets is None:
         return {"error": "insufficient_data"}
 
@@ -2614,7 +2617,10 @@ async def secondary_corr_bins(req: CorrBinsReq):
 
     results = []
     for feat in feat_cols:
-        r = assign_secondary_bin_stats(spec, filtered, feat, n_bins, outcome_col, is_all)
+        r = assign_secondary_bin_stats(
+            spec, filtered, feat, n_bins, outcome_col, is_all,
+            all_rows=(all_rows if spec.kind == "train_test" else None),
+        )
         if r:
             results.append(r)
 
@@ -2728,7 +2734,10 @@ async def secondary_correlation(req: CorrReq):
         bins   = set(sel.get("bins", []))
         if not metric or not bins:
             continue
-        vec = secondary_membership(spec, ordered, metric, bins, n_bins, is_all)
+        vec = secondary_membership(
+            spec, ordered, metric, bins, n_bins, is_all,
+            all_rows=(all_rows if spec.kind == "train_test" else None),
+        )
         vectors.append(vec)
         metric_names.append(metric)
         n_each.append(int(vec.sum()))

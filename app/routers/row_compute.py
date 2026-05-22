@@ -663,6 +663,8 @@ def assign_secondary_bin_stats(
     n_bins: int,
     outcome_col: str,
     is_all: bool,
+    *,
+    all_rows=None,
 ) -> Optional[dict]:
     """Per-bin avg-return for ONE secondary metric inside an already-
     primary-filtered chronological subset. Returns {name, bins, bin_ns}
@@ -674,7 +676,9 @@ def assign_secondary_bin_stats(
         warmup=n_bins — the macro 252-day warmup gate is already
         enforced by the primary filter, so the inner warmup is small
         (`_compute_walk_forward_bin_stats`).
-      train_test: (Step 6).
+      train_test: bins are fit on `all_rows` (full cache including
+        pre-cutoff training data); aggregation uses `rows_chrono`
+        (test-window-only rows from filter_by_assignments).
     """
     from app.routers.oi_analysis import (
         _compute_bins_for_metric, _compute_walk_forward_bin_stats,
@@ -684,13 +688,12 @@ def assign_secondary_bin_stats(
     if spec.kind == "walk_forward":
         return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "train_test":
-        # Re-fit train-test bins on the primary-filtered subset (the
-        # primary filter already ran test-only, but if rows_chrono
-        # somehow contains training rows we still exclude them via the
-        # dropped_reason check below). Per-bin aggregation is test-only.
+        # Fit on the full row cache so the assigner sees pre-cutoff training
+        # history; assign only the test-window rows (rows_chrono).
         import numpy as np
+        fit_rows = all_rows if all_rows is not None else rows_chrono
         assigner = TrainTestAssigner(spec)
-        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        state = assigner.fit(fit_rows, metric, n_bins, is_all)
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
                                        state, outcome_col)
         buckets: list = [[] for _ in range(n_bins)]
@@ -720,6 +723,8 @@ def assign_secondary_buckets(
     n_bins: int,
     outcome_col: str,
     is_all: bool,
+    *,
+    all_rows=None,
 ):
     """Per-bin row tuples for ONE secondary metric, used by /secondary-detail.
 
@@ -741,7 +746,8 @@ def assign_secondary_buckets(
         warmup=n_bins (macro warmup already enforced by the primary
         filter); each row's walk-forward bin places its tuple in
         `buckets[bin - 1]`.
-      train_test: (Step 6).
+      train_test: bins fit on `all_rows` (full cache, pre-cutoff history
+        available); buckets filled from `rows_chrono` (test-window rows).
     """
     if spec.kind == "in_sample":
         if is_all:
@@ -820,12 +826,11 @@ def assign_secondary_buckets(
         return buckets
 
     if spec.kind == "train_test":
-        # Train-test bins on the primary-filtered subset. Test-only:
-        # training-window rows are dropped from the buckets (their bin
-        # is still computed and available on the RowAssignment for a
-        # future side-by-side view).
+        # Fit on full row cache so training history is available; assign
+        # the test-window-only rows (rows_chrono from filter_by_assignments).
+        fit_rows = all_rows if all_rows is not None else rows_chrono
         assigner = TrainTestAssigner(spec)
-        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        state = assigner.fit(fit_rows, metric, n_bins, is_all)
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
                                        state, outcome_col)
         buckets = [[] for _ in range(n_bins)]
@@ -852,6 +857,8 @@ def secondary_membership(
     selected_bins,
     n_bins: int,
     is_all: bool,
+    *,
+    all_rows=None,
 ):
     """Binary 0/1 membership vector for ONE secondary metric inside an
     already-primary-filtered chronological subset. Returns a numpy float64
@@ -859,7 +866,8 @@ def secondary_membership(
 
       in_sample: `_bin_membership` — per-ticker rank, 0 for excluded.
       walk_forward: `_walk_forward_membership` — small inner warmup.
-      train_test: (Step 6).
+      train_test: bins fit on `all_rows`; membership vector over
+        `rows_chrono` (test-window rows only).
     """
     from app.routers.oi_analysis import _bin_membership, _walk_forward_membership
     import numpy as np
@@ -869,17 +877,14 @@ def secondary_membership(
     if spec.kind == "walk_forward":
         return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "train_test":
-        # Re-fit train-test bins on the (already primary-filtered)
-        # chronological subset and emit a 0/1 membership vector.
-        # Test-only: training-window rows (dropped_reason="pre_cutoff")
-        # stay 0 in the vector even though their bin is set. This
-        # matches the test-only aggregation semantic — training rows
-        # don't fire as system trades.
+        # Fit on full row cache; membership vector over test-window rows only.
+        # Training-window rows (dropped_reason="pre_cutoff") stay 0.
         out = np.zeros(len(rows_chrono), dtype=np.float64)
         if not sel:
             return out
+        fit_rows = all_rows if all_rows is not None else rows_chrono
         assigner = TrainTestAssigner(spec)
-        state = assigner.fit(rows_chrono, metric, n_bins, is_all)
+        state = assigner.fit(fit_rows, metric, n_bins, is_all)
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
                                        state, outcome_col="__membership__")
         for i, a in enumerate(assignments):
