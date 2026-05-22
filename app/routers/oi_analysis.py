@@ -1281,7 +1281,16 @@ async def get_score_matrix(
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
-    return [dict(r) for r in rows]
+    # Coerce NaN floats to None so the JSON encoder doesn't reject the
+    # response. The batch scorer now writes NaN as NULL, but any older
+    # rows containing NaN would still poison the response otherwise.
+    def _scrub(d):
+        out = dict(d)
+        for k, v in out.items():
+            if isinstance(v, float) and math.isnan(v):
+                out[k] = None
+        return out
+    return [_scrub(r) for r in rows]
 
 
 @router.get("/score-matrix/meta")
@@ -1316,12 +1325,21 @@ async def score_matrix_meta(pool=Depends(get_pool),
             FROM oi_score_matrix WHERE mode = $1
         """, mode)
 
+    # Defensive: an AVG over a column containing PostgreSQL NaN returns
+    # NaN, which the JSON encoder rejects ("Out of range float values
+    # are not JSON compliant"). The batch scorer now coerces NaN to NULL
+    # at write time, but old data may still contain NaN — guard here too.
+    raw_avg = stats["avg_score"]
+    if raw_avg is None or (isinstance(raw_avg, float) and math.isnan(raw_avg)):
+        avg_score = 0.0
+    else:
+        avg_score = round(float(raw_avg), 1)
     return {
         "count":     count,
         "tickers":   tickers,
         "metrics":   metrics,
         "fwd_rets":  fwd_rets,
-        "avg_score": round(float(stats["avg_score"] or 0), 1),
+        "avg_score": avg_score,
         "gte50":     int(stats["gte50"] or 0),
         "gte70":     int(stats["gte70"] or 0),
         "last_run":  str(stats["last_run"])[:19] if stats["last_run"] else None,
@@ -1404,12 +1422,19 @@ async def score_matrix_summary(
             GROUP BY fwd_ret ORDER BY AVG(composite_score) DESC
         """, *tf_p)
 
+    def _safe(v):
+        """Treat NULL or NaN as 0 — AVG/MAX of NaN-containing groups
+        returns NaN, which the JSON encoder rejects."""
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return 0.0
+        return round(float(v), 1)
+
     def _row(r, key):
         return {key: r[key],
-                "avg_score": round(float(r["avg_score"] or 0), 1),
-                "std_score": round(float(r["std_score"] or 0), 1),
+                "avg_score": _safe(r["avg_score"]),
+                "std_score": _safe(r["std_score"]),
                 "n": int(r["n"]), "gte50": int(r["gte50"]),
-                "max_score": round(float(r["max_score"] or 0), 1)}
+                "max_score": _safe(r["max_score"])}
 
     return {
         "by_metric":        [_row(r, "metric")  for r in by_metric],

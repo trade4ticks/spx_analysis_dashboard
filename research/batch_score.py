@@ -415,9 +415,22 @@ async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False,
         _progress["running"] = False
 
 
+def _nz(v):
+    """Convert NaN floats to None so they store as SQL NULL instead of
+    PostgreSQL's float NaN. NaN-poisoned rows break downstream AVG()
+    aggregates (AVG over a set containing NaN returns NaN, which the
+    JSON encoder rejects with `Out of range float values are not JSON
+    compliant`)."""
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    return v
+
+
 def _append_params(batch_params: list, ticker: str, feature: str, outcome: str,
                    mode: str, result: dict) -> None:
-    """Extract scanner result fields and append an _UPSERT param tuple."""
+    """Extract scanner result fields and append an _UPSERT param tuple.
+    Every float field is run through `_nz` so NaN becomes SQL NULL —
+    NaN values in REAL columns poison AVG/MAX aggregates downstream."""
     rob  = result.get("robustness") or {}
     bs   = result.get("bucket_stats") or []
     valid_bs = [b for b in bs if b is not None]
@@ -426,21 +439,21 @@ def _append_params(batch_params: list, ticker: str, feature: str, outcome: str,
     best = result.get("best_single_bucket") or {}
     batch_params.append((
         ticker, feature, outcome, mode,
-        result.get("composite_score"),
+        _nz(result.get("composite_score")),
         result.get("pattern"),
-        result.get("spearman_r"),
-        result.get("monotonicity"),
-        rob.get("yearly_consistency_pct"),
-        rob.get("concentration_risk"),
-        result.get("tail_spread"),
+        _nz(result.get("spearman_r")),
+        _nz(result.get("monotonicity")),
+        _nz(rob.get("yearly_consistency_pct")),
+        _nz(rob.get("concentration_risk")),
+        _nz(result.get("tail_spread")),
         result.get("n"),
-        d10.get("avg_ret"),
-        d1.get("avg_ret"),
-        d10.get("win_rate"),
-        d1.get("win_rate"),
-        best.get("sharpe"),
-        result.get("mi"),
-        result.get("pearson_r"),
+        _nz(d10.get("avg_ret")),
+        _nz(d1.get("avg_ret")),
+        _nz(d10.get("win_rate")),
+        _nz(d1.get("win_rate")),
+        _nz(best.get("sharpe")),
+        _nz(result.get("mi")),
+        _nz(result.get("pearson_r")),
         rob.get("loyo_fragile"),
     ))
 
