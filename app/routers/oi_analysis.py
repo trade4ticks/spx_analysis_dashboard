@@ -279,9 +279,17 @@ async def analyze(
         # and does NOT add them to any 20-bin bucket; preserve that
         # exact semantics here for bit-equivalence on the regression
         # check.
+        # `dropped_reason is None` excludes train-test pre_cutoff rows
+        # (where bin IS set but the row is training-window — included on
+        # the assignment for a future side-by-side view, excluded from
+        # the standard test-period aggregation). For in_sample and
+        # walk_forward this is a no-op since dropped_reason is always
+        # None when bin is not None.
         key_b20: dict = {(a.ticker, a.trade_date): a.bin
-                         for a in a20 if a.bin is not None}
-        valid_a10 = [a for a in a10 if a.bin is not None]
+                         for a in a20
+                         if a.bin is not None and a.dropped_reason is None}
+        valid_a10 = [a for a in a10
+                     if a.bin is not None and a.dropped_reason is None]
         # Chronological across tickers, with legacy within-date tie-break:
         #   in-sample: legacy iterates buckets sequentially then stable-sorts
         #     by date, so same-date rows come out in (bin, ticker, x) order.
@@ -1117,12 +1125,14 @@ async def metric_bins_1d(
     assignments = assigner.assign(rows_for_assigner, metric, bins, is_all, state, outcome)
 
     # Build buckets_data: list of (xf, yf) tuples per bin (1-indexed →
-    # 0-indexed list position). Drops bin=None rows (warmup,
-    # missing_value, or insufficient_history in ALL mode).
+    # 0-indexed list position). Drops bin=None rows (warmup, missing_value,
+    # insufficient_history) AND train-test pre_cutoff rows (training-window
+    # rows that have bin set but are excluded from test-period aggregation).
+    # For in_sample/walk_forward the dropped_reason check is a no-op.
     buckets_data: list = [[] for _ in range(bins)]
     total_n = 0
     for a in assignments:
-        if a.bin is None:
+        if a.bin is None or a.dropped_reason is not None:
             continue
         buckets_data[a.bin - 1].append((a.metric_value, a.forward_return))
         total_n += 1
@@ -3174,7 +3184,14 @@ def _compute_all_bins_train_test_fast(
                 (ranks * n_bins // n_train).astype(np.int64),
                 n_bins - 1,
             )
-            use_mask = valid_col & outcome_valid
+            # Test-period-only aggregation: bins are DEFINED by the
+            # training window, but per-bin outcomes are aggregated over
+            # TEST rows only (~training_mask). This matches the standard
+            # train-test split semantic — "do training-defined thresholds
+            # produce a useful signal out of sample?" — and is what
+            # /analyze, /metric-bins, and every other train_test aggregator
+            # in row_compute also does.
+            use_mask = valid_col & outcome_valid & ~training_mask
             if not use_mask.any():
                 continue
             o_sel = outcomes[use_mask]

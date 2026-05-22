@@ -626,7 +626,75 @@ def cmd_train_test_check(args) -> int:
     else:
         print(f"[B] FAIL {diffs_b} divergence(s) on rows strictly before cutoff")
 
-    return 0 if (failures == 0 and diffs_b == 0) else 1
+    # ── Test C: pre_cutoff dropped_reason on training rows (Option A semantic)
+    # Bins are SET on training rows (computed against frozen training history),
+    # but the row is marked dropped_reason="pre_cutoff" so aggregators skip
+    # them. This preserves the bin information for a future side-by-side
+    # training/test view while making the test-period-only aggregation
+    # contract explicit.
+    failures_c = 0
+    by_date_a = {a.trade_date: a for a in assignments}  # from Test A's run
+    cutoff_iso = "2024-01-01"
+    for d in ("2019-01-01", "2020-01-01", "2021-01-01", "2022-01-01", "2023-01-01"):
+        a = by_date_a.get(d)
+        if a is None:
+            print(f"[C] FAIL date={d}: no assignment"); failures_c += 1; continue
+        if a.bin is None:
+            print(f"[C] FAIL date={d}: training row has bin=None (should be set)")
+            failures_c += 1
+        elif a.dropped_reason != "pre_cutoff":
+            print(f"[C] FAIL date={d}: dropped_reason={a.dropped_reason!r}, expected 'pre_cutoff'")
+            failures_c += 1
+    for d in ("2024-01-01", "2025-01-01", "2026-01-01", "2027-01-01", "2028-01-01"):
+        a = by_date_a.get(d)
+        if a is None:
+            print(f"[C] FAIL date={d}: no assignment"); failures_c += 1; continue
+        if a.bin is None:
+            print(f"[C] FAIL date={d}: test row has bin=None")
+            failures_c += 1
+        elif a.dropped_reason is not None:
+            print(f"[C] FAIL date={d}: dropped_reason={a.dropped_reason!r}, expected None")
+            failures_c += 1
+    if failures_c == 0:
+        print("[C] PASS training rows tagged pre_cutoff; test rows have dropped_reason=None")
+
+    # ── Test D: cutoff > max(date) ⇒ empty test set, no crash
+    # Verifies the degenerate edge case. With cutoff one day past the
+    # last row, every row is training; aggregators should return empty
+    # results (no rows to aggregate), not crash.
+    failures_d = 0
+    far_cutoff = _date(2030, 1, 1)
+    spec_d = TrainTestSpec(cutoff=far_cutoff)
+    asgn_d = TrainTestAssigner(spec_d)
+    try:
+        state_d = asgn_d.fit(rows, metric="iv", n_bins=5, is_all=True)
+        assigns_d = asgn_d.assign(rows, metric="iv", n_bins=5, is_all=True,
+                                  state=state_d, outcome_col="ret_5d_fwd_oc")
+        _validate_assignments(assigns_d, n_bins=5)
+        n_pre_cutoff = sum(1 for a in assigns_d if a.dropped_reason == "pre_cutoff")
+        n_test = sum(1 for a in assigns_d if a.bin is not None and a.dropped_reason is None)
+        if n_pre_cutoff != 10:
+            print(f"[D] FAIL expected 10 pre_cutoff rows, got {n_pre_cutoff}")
+            failures_d += 1
+        if n_test != 0:
+            print(f"[D] FAIL expected 0 test rows, got {n_test}")
+            failures_d += 1
+        # assign_batch should return empty results without crashing.
+        results, dropped, start = asgn_d.assign_batch(
+            rows, ["iv"], "ret_5d_fwd_oc", n_bins=5, is_all=True,
+        )
+        if results != []:
+            print(f"[D] FAIL assign_batch expected [] results, got {len(results)} features")
+            failures_d += 1
+        if failures_d == 0:
+            print(f"[D] PASS empty-test-set degenerates: {n_pre_cutoff} training, "
+                  f"{n_test} test, assign_batch returned [] cleanly")
+    except Exception as e:
+        print(f"[D] FAIL crash on empty-test-set: {e!r}")
+        failures_d += 1
+
+    return 0 if (failures == 0 and diffs_b == 0
+                 and failures_c == 0 and failures_d == 0) else 1
 
 
 # ─────────────────────────────────────────────────────────────────────────

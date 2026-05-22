@@ -80,11 +80,15 @@ class RowAssignment:
     `str(...)` or `.isoformat()`.
 
     `dropped_reason` is None for emitted rows and otherwise one of:
-      - "missing_value"           — metric or outcome was None/NaN
-      - "warmup"                  — walk-forward per-ticker history < warmup
-      - "insufficient_history"    — in-sample: ticker had < n_bins rows
-      - "insufficient_train_history" — train-test: ticker had < n_bins training rows
-      - "pre_cutoff"              — (reserved; unused in Step 1)
+      - "missing_value"           — metric or outcome was None/NaN (bin=None)
+      - "warmup"                  — walk-forward per-ticker history < warmup (bin=None)
+      - "insufficient_history"    — in-sample: ticker had < n_bins rows (bin=None)
+      - "insufficient_train_history" — train-test: ticker had < n_bins training rows (bin=None)
+      - "pre_cutoff"              — train-test only: training-window row (trade_date < cutoff).
+        Bin IS set (computed against the frozen training history), but the
+        row is tagged so test-period aggregators skip it. This keeps the
+        training-period bin information available for a future side-by-side
+        training/test view without re-computing.
     """
     ticker: str
     trade_date: Any
@@ -440,17 +444,33 @@ class TrainTestAssigner:
         return train_history
 
     def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
+        """Assign train-test bins. Both training-window and test-window
+        rows get a bin assignment computed against the frozen training
+        history. Training rows are tagged `dropped_reason="pre_cutoff"`
+        so downstream aggregators can exclude them from test-period
+        stats while keeping the bin information available for a future
+        side-by-side training/test view.
+
+        Semantics:
+          - training-window row (trade_date < cutoff): bin set, dropped_reason="pre_cutoff"
+          - test-window row, valid bin:                bin set, dropped_reason=None
+          - any row with missing metric or outcome:    bin=None, dropped_reason="missing_value"
+          - any row whose ticker had <n_bins training samples: bin=None, dropped_reason="insufficient_train_history"
+        """
         from app.routers.oi_analysis import _bin_for_value
         train_history = state or {}
+        cutoff_s = self.spec.cutoff.isoformat()
         out: list[RowAssignment] = []
         for r in rows:
             tkr = str(r.get("ticker", ""))
-            # Preserve the original trade_date object on the RowAssignment
-            # (matches _parse_rows' contract for the other two Assigners).
-            # Downstream legacy code in /analyze's `_equity_for_decile` does
-            # `dd - last_date` on `pair[2]` — that requires a date object,
-            # not a string. The pre-fix bug shipped a string here and crashed.
+            # Preserve original trade_date type on the RowAssignment
+            # (downstream legacy code does `dd - last_date` on pair[2]
+            # which requires a date object, not a string).
             trade_date = r.get("trade_date", "")
+            # For the cutoff comparison we need a string form.
+            date_s = (trade_date.isoformat() if hasattr(trade_date, "isoformat")
+                       else str(trade_date))
+            is_pre_cutoff = date_s < cutoff_s
             xv = r.get(metric)
             yv = r.get(outcome_col)
 
@@ -492,11 +512,14 @@ class TrainTestAssigner:
                     dropped_reason="insufficient_train_history",
                 ))
             else:
+                # Training-window row: bin set, marked pre_cutoff so
+                # aggregators skip it (test-period-only stats). Test-window
+                # row: bin set, dropped_reason None — included in aggregation.
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=xf, n_bins=n_bins, bin=b,
                     outcome_col=outcome_col, forward_return=yf,
-                    dropped_reason=None,
+                    dropped_reason=("pre_cutoff" if is_pre_cutoff else None),
                 ))
         return out
 
@@ -600,14 +623,16 @@ def filter_by_assignments(
             rows, primary_metric, set(selected_primary_bins or []), is_all,
         )
     if spec.kind == "train_test":
-        # Mirror the walk_forward semantic but with train-test bins:
-        # sort chronologically, compute train-test primary bins, keep
-        # rows whose bin is in selected_primary_bins.
+        # Train-test primary filter — test-period-only universe.
+        # Bins are computed against the frozen training history (rows
+        # with trade_date < cutoff), but the kept set EXCLUDES training
+        # rows: only test-window rows with bin in selected_primary_bins
+        # land in the filtered subset. This matches the test-only
+        # aggregation semantic used across /analyze, /metric-bins, and
+        # _compute_all_bins_train_test_fast.
         ordered = _sort_chrono(rows)
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(ordered, primary_metric, 20, is_all)
-        # outcome_col here is just a passthrough field on RowAssignment;
-        # use a sentinel string since we don't have the real one.
         assignments = assigner.assign(ordered, primary_metric, 20, is_all,
                                        state, outcome_col="__filter__")
         sel = set(int(b) for b in (selected_primary_bins or []))
@@ -617,6 +642,11 @@ def filter_by_assignments(
         for i, a in enumerate(assignments):
             if a.bin is None:
                 dropped += 1
+                continue
+            # Training-window row — bin set but skipped from the test-only
+            # universe. Not counted as "dropped" (it could be binned;
+            # it's just out of scope for the analysis).
+            if a.dropped_reason == "pre_cutoff":
                 continue
             universe += 1
             if sel and a.bin not in sel:
@@ -655,8 +685,9 @@ def assign_secondary_bin_stats(
         return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "train_test":
         # Re-fit train-test bins on the primary-filtered subset (the
-        # cutoff still partitions the subset into training / test rows).
-        # Per-bin aggregation across all assigned rows.
+        # primary filter already ran test-only, but if rows_chrono
+        # somehow contains training rows we still exclude them via the
+        # dropped_reason check below). Per-bin aggregation is test-only.
         import numpy as np
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(rows_chrono, metric, n_bins, is_all)
@@ -664,7 +695,12 @@ def assign_secondary_bin_stats(
                                        state, outcome_col)
         buckets: list = [[] for _ in range(n_bins)]
         for a in assignments:
-            if a.bin is None or a.forward_return is None:
+            # `dropped_reason is None` catches both warmup/missing/insufficient
+            # (bin is None) AND pre_cutoff training rows (bin set but excluded
+            # from test-period aggregation).
+            if a.bin is None or a.dropped_reason is not None:
+                continue
+            if a.forward_return is None:
                 continue
             buckets[a.bin - 1].append(a.forward_return)
         if all(len(b) == 0 for b in buckets):
@@ -784,15 +820,19 @@ def assign_secondary_buckets(
         return buckets
 
     if spec.kind == "train_test":
-        # Train-test bins on the primary-filtered subset, then group each
-        # row's (metric_value, outcome, date, ticker) tuple into its bin.
+        # Train-test bins on the primary-filtered subset. Test-only:
+        # training-window rows are dropped from the buckets (their bin
+        # is still computed and available on the RowAssignment for a
+        # future side-by-side view).
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(rows_chrono, metric, n_bins, is_all)
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
                                        state, outcome_col)
         buckets = [[] for _ in range(n_bins)]
         for i, a in enumerate(assignments):
-            if a.bin is None or a.forward_return is None:
+            if a.bin is None or a.dropped_reason is not None:
+                continue
+            if a.forward_return is None:
                 continue
             row = rows_chrono[i] if i < len(rows_chrono) else None
             if row is None:
@@ -830,9 +870,11 @@ def secondary_membership(
         return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "train_test":
         # Re-fit train-test bins on the (already primary-filtered)
-        # chronological subset and emit a 0/1 membership vector. The
-        # cutoff partitions the subset into training and test rows; both
-        # contribute to the vector if their bin lands in sel.
+        # chronological subset and emit a 0/1 membership vector.
+        # Test-only: training-window rows (dropped_reason="pre_cutoff")
+        # stay 0 in the vector even though their bin is set. This
+        # matches the test-only aggregation semantic — training rows
+        # don't fire as system trades.
         out = np.zeros(len(rows_chrono), dtype=np.float64)
         if not sel:
             return out
@@ -841,7 +883,7 @@ def secondary_membership(
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
                                        state, outcome_col="__membership__")
         for i, a in enumerate(assignments):
-            if a.bin is not None and a.bin in sel:
+            if a.bin is not None and a.dropped_reason is None and a.bin in sel:
                 out[i] = 1.0
         return out
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
@@ -965,16 +1007,20 @@ class PortfolioVectorBuilder:
                     self.rows, metric, n_bins, self.is_all, self.spec.warmup,
                 )
             elif self.spec.kind == "train_test":
-                # Run TrainTestAssigner.assign over self.rows; flatten the
-                # result list into a {row_idx: bin} dict matching the
-                # walk-forward shape so _full_vector treats both identically.
+                # Train-test bin map for portfolio aggregation. Test-only:
+                # training-window rows (dropped_reason="pre_cutoff") are
+                # mapped to bin=None in the cache so _full_vector
+                # treats them like warmup rows in walk_forward (excluded
+                # from system membership). The original bin is still on
+                # the RowAssignment if a future side-by-side view wants it.
                 assigner = TrainTestAssigner(self.spec)
                 state = assigner.fit(self.rows, metric, n_bins, self.is_all)
                 assigns = assigner.assign(self.rows, metric, n_bins, self.is_all,
                                           state, outcome_col="__bin_map__")
-                # assigns is parallel to self.rows by construction; idx i
-                # corresponds to self.rows[i].
-                self._cache[key] = {i: a.bin for i, a in enumerate(assigns)}
+                self._cache[key] = {
+                    i: (a.bin if a.dropped_reason is None else None)
+                    for i, a in enumerate(assigns)
+                }
             else:
                 raise ValueError(
                     f"_bin_map only meaningful for walk_forward / train_test; "

@@ -124,7 +124,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=80"></script>
+  <script src="/static/js/oi_analysis.js?v=81"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -414,6 +414,14 @@
                x-text="'WALK-FORWARD · ' + (data.n||0).toLocaleString() + ' trades since ' + (data.start_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (data.warmup||252) + 'd)'"></div>
         </template>
 
+        <!-- Train-test subtitle: bins defined by training data (rows with
+             trade_date < cutoff); per-bin stats below are computed over
+             TEST-window rows only. -->
+        <template x-if="data.mode === 'train_test'">
+          <div style="font-size:10px;color:#9b59b6;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
+               x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · bins frozen at cutoff ' + (data.cutoff_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows excluded (insufficient training history)'"></div>
+        </template>
+
         <!-- Stats card -->
         <div class="stats-card">
           <div class="stat-item">
@@ -504,6 +512,15 @@
                 </template>
               </template>
             </div>
+            <!-- Explicit equity-curve scope label in train-test mode.
+                 The curve only includes test-window trades (rows with
+                 trade_date >= cutoff), under bins frozen at the cutoff.
+                 This label prevents misreading the curve as full-history
+                 when toggling between modes. -->
+            <template x-if="data.mode === 'train_test'">
+              <div style="font-size:10px;color:#9b59b6;margin:2px 0 4px;font-family:monospace;letter-spacing:.5px;font-weight:600"
+                   x-text="'TEST PERIOD · since ' + (data.cutoff_date || '?')"></div>
+            </template>
             <div class="chart-canvas"><canvas id="chart-equity"></canvas></div>
           </div>
 
