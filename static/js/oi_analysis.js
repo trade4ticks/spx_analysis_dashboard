@@ -113,13 +113,15 @@ document.addEventListener('alpine:init', () => {
     tdSingleTicker: '',
 
     // IC.5 — Signal Stability (universe-wide IC leaderboard + scatter)
-    // Loaded on page-init and after every Analyze / setPageMode so the
-    // survey stays in sync with the active ticker + outcome + mode.
+    // Lazy-loaded on first expand (user-initiated, same as All-Ticker Metric
+    // Bins). Also reloads when the section is open and mode changes. Fresh
+    // compute takes ~2-3 min on the VPS; cached reads are sub-second.
     icBatchData:     null,
     icBatchLoading:  false,
     icBatchError:    null,
     icBatchExpanded: false,
     icBatchView:     'leaderboard',  // 'leaderboard' | 'scatter'
+    icBatchKey:      null,           // last-loaded "ticker:outcome:mode:cutoff" key
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -172,9 +174,6 @@ document.addEventListener('alpine:init', () => {
       this.loadPortfolios();
       // System library (anchor-agnostic reusable system templates)
       this.loadLibrarySystems();
-      // IC.5: pre-load signal stability (sub-second on cache hit; first
-      // fetch for a new ticker/outcome takes ~2-3 min on the VPS thread).
-      this.loadIcBatch();
     },
 
     async loadAnalysis() {
@@ -218,7 +217,13 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
-        this.loadIcBatch();   // IC.5: keep survey in sync with active ticker/outcome
+        // IC.5: if the Signal Stability section is expanded and the
+        // ticker/outcome changed, reload to stay in sync. Don't auto-load
+        // when collapsed — fresh compute can take ~2-3 min and 524s.
+        if (this.icBatchExpanded) {
+          const k = this._icBatchKey();
+          if (k !== this.icBatchKey) this.loadIcBatch();
+        }
         if (this.heatmapMetric) await this.loadHeatmap();
       } catch (e) {
         this.error = e.message;
@@ -3190,9 +3195,10 @@ document.addEventListener('alpine:init', () => {
       if (this.heatmapData && this.heatmapMetric) {
         this.loadHeatmap();  // fire-and-forget; chains into loadHmBins1d()
       }
-      // IC.5: mode change shifts the reference IC (train_test cutoff vs full
-      // history), so reload the batch survey under the new mode.
-      this.loadIcBatch();  // fire-and-forget
+      // IC.5: mode change shifts reference IC (train_test cutoff vs full
+      // history). Reload only if the section is open — don't auto-fire a
+      // potentially uncached 2-3 min request when the panel is collapsed.
+      if (this.icBatchExpanded && this.icBatchData) this.loadIcBatch();
     },
 
     async corrLoadMiniData() {
@@ -4443,6 +4449,13 @@ document.addEventListener('alpine:init', () => {
     // the scatter (IC strength × stability). Click on any bar/dot sets the
     // Metric selector and fires /analyze below.
 
+    // Canonical cache-key for the current fetch context. Stored after a
+    // successful load so expand/mode-change can detect stale data.
+    _icBatchKey() {
+      const cut = this.pageMode === 'train_test' ? this.cutoffDate : '';
+      return `${this.ticker}:${this.outcome}:${this.pageMode}:${cut}`;
+    },
+
     async loadIcBatch(refresh = false) {
       if (!this.ticker || !this.outcome) return;
       this.icBatchLoading = true;
@@ -4457,6 +4470,7 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (d.error) throw new Error(d.error);
         this.icBatchData = d;
+        this.icBatchKey  = this._icBatchKey();
         if (this.icBatchExpanded) {
           await this.$nextTick();
           this._renderIcBatch();
@@ -4470,14 +4484,18 @@ document.addEventListener('alpine:init', () => {
 
     toggleIcBatch() {
       this.icBatchExpanded = !this.icBatchExpanded;
-      if (this.icBatchExpanded && this.icBatchData) {
+      if (!this.icBatchExpanded) return;
+      // On expand: load if no data yet, or if stale (ticker/outcome/mode changed).
+      if (!this.icBatchData || this._icBatchKey() !== this.icBatchKey) {
+        this.loadIcBatch();
+      } else {
         this.$nextTick(() => this._renderIcBatch());
       }
     },
 
     icBatchSubtitle() {
       if (this.icBatchLoading) return '';
-      if (!this.icBatchData?.metrics?.length) return '— click ▸ to expand after loading';
+      if (!this.icBatchData?.metrics?.length) return '— click ▸ to load (cached: instant · fresh: ~2-3 min)';
       const n = this.icBatchData.metrics.length;
       const nSup = this.icBatchData.metrics.filter(m => m.suppressed).length;
       const mode = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';

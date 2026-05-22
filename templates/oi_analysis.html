@@ -477,10 +477,14 @@
             <canvas id="chart-ic-scatter"></canvas>
           </div>
 
-          <!-- Waiting-for-data state -->
+          <!-- Waiting-for-data / in-progress state -->
+          <div x-show="!icBatchData && icBatchLoading"
+               style="font-size:11px;color:var(--dim);padding:8px 0">
+            Computing signal stability across all metrics — first load takes ~2-3 min on the VPS. Subsequent loads for the same ticker are sub-second (cached).
+          </div>
           <div x-show="!icBatchData && !icBatchLoading && !icBatchError"
                style="font-size:11px;color:var(--dim);padding:8px 0">
-            Waiting for signal stability data… (fetched automatically on page load)
+            Loading…
           </div>
         </div>
       </template>
