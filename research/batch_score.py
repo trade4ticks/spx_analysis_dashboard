@@ -78,11 +78,16 @@ def get_progress() -> dict:
 async def ensure_table(pool):
     async with pool.acquire() as conn:
         await conn.execute(_TABLE_DDL)
-        # Column migrations for rows created before the current DDL
+        # Column migrations for rows created before the current DDL.
+        # Use try/except instead of IF NOT EXISTS — some PG versions/wrappers silently
+        # ignore IF NOT EXISTS on ADD COLUMN and don't actually add the column.
         for col, typ in [('mi', 'REAL'), ('pearson_r', 'REAL'), ('loyo_fragile', 'BOOLEAN'),
                          ('mode', "TEXT NOT NULL DEFAULT 'in_sample'")]:
-            await conn.execute(
-                f'ALTER TABLE oi_score_matrix ADD COLUMN IF NOT EXISTS {col} {typ}')
+            try:
+                await conn.execute(
+                    f'ALTER TABLE oi_score_matrix ADD COLUMN {col} {typ}')
+            except Exception:
+                pass  # column already exists
         # Replace old (ticker, metric, fwd_ret) unique with mode-inclusive unique index.
         # Unique index syntax supports IF NOT EXISTS; constraint syntax does not.
         await conn.execute("""
