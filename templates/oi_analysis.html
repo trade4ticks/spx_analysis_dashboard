@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=86"></script>
+  <script src="/static/js/oi_analysis.js?v=87"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -409,6 +409,81 @@
                       font-size:11px;padding:5px 6px;border-radius:4px">
       </div>
       <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
+    </div>
+
+    <!-- ── Signal Stability (IC.5) ───────────────────────────────────────
+         Universe-wide IC leaderboard + scatter, driven by /ic-batch.
+         Loaded on page-init and after every Analyze / setPageMode so the
+         survey stays in sync with the current ticker + outcome + mode.
+         Click a bar or dot to set the Metric selector and drill in below. -->
+    <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
+                background:rgba(255,255,255,.02)">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
+        <div @click="toggleIcBatch()"
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
+          <span style="font-size:12px;color:var(--muted)"
+                x-text="icBatchExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Stability</span>
+          <span style="font-size:10px;color:var(--dim)"
+                x-show="!icBatchLoading && !icBatchError"
+                x-text="icBatchSubtitle()"></span>
+          <span x-show="icBatchLoading" style="font-size:10px;color:#3498db">Loading…</span>
+          <span x-show="icBatchError && !icBatchLoading"
+                style="font-size:10px;color:#e84393"
+                x-text="'Error: ' + icBatchError"></span>
+        </div>
+        <!-- View toggle + Refresh — always visible so user can switch
+             Leaderboard↔Scatter without expanding first -->
+        <div style="display:flex;gap:8px;align-items:center" @click.stop>
+          <div class="mode-seg">
+            <span :class="{on: icBatchView==='leaderboard'}"
+                  @click="icBatchView='leaderboard'; icBatchExpanded && icBatchData && _renderIcBatch()">
+              Leaderboard</span>
+            <span :class="{on: icBatchView==='scatter'}"
+                  @click="icBatchView='scatter'; icBatchExpanded && icBatchData && _renderIcBatch()">
+              Scatter</span>
+          </div>
+          <button x-show="icBatchData" @click="loadIcBatch(true)"
+                  :disabled="icBatchLoading"
+                  :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                         font-size:10px;padding:2px 10px;border-radius:3px"
+                  title="Re-compute (bypasses cache — takes ~2-3 min for uncached ticker)">⟳ Refresh</button>
+        </div>
+      </div>
+
+      <template x-if="icBatchExpanded">
+        <div style="padding:0 12px 12px">
+          <!-- Instruction line (only when data is loaded) -->
+          <div x-show="icBatchData && !icBatchError"
+               style="font-size:9px;color:var(--dim);margin-bottom:6px">
+            <span x-show="icBatchView==='leaderboard'">Sorted by sign stability ↓ · bar opacity = IC strength · click a bar to set Metric and analyze</span>
+            <span x-show="icBatchView==='scatter'">X = IC strength (abs) · Y = sign stability · click a dot to set Metric and analyze</span>
+          </div>
+
+          <!-- Leaderboard: scrollable container so 120+ metrics don't
+               overflow the page; canvas height is set by _renderIcLeaderboard. -->
+          <div x-show="icBatchView === 'leaderboard' && icBatchData && !icBatchError">
+            <div style="overflow-y:auto;max-height:520px">
+              <div id="ic-leaderboard-inner" style="position:relative">
+                <canvas id="chart-ic-leaderboard"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Scatter: fixed-height container -->
+          <div x-show="icBatchView === 'scatter' && icBatchData && !icBatchError"
+               style="height:420px;position:relative">
+            <canvas id="chart-ic-scatter"></canvas>
+          </div>
+
+          <!-- Waiting-for-data state -->
+          <div x-show="!icBatchData && !icBatchLoading && !icBatchError"
+               style="font-size:11px;color:var(--dim);padding:8px 0">
+            Waiting for signal stability data… (fetched automatically on page load)
+          </div>
+        </div>
+      </template>
     </div>
 
     <div x-show="error" style="color:var(--danger);padding:12px;font-size:12px" x-text="error"></div>

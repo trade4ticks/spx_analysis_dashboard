@@ -112,6 +112,15 @@ document.addEventListener('alpine:init', () => {
     tdMode:         'ratio',   // 'ratio' (all tickers, dimensionless) | 'native_single'
     tdSingleTicker: '',
 
+    // IC.5 — Signal Stability (universe-wide IC leaderboard + scatter)
+    // Loaded on page-init and after every Analyze / setPageMode so the
+    // survey stays in sync with the active ticker + outcome + mode.
+    icBatchData:     null,
+    icBatchLoading:  false,
+    icBatchError:    null,
+    icBatchExpanded: false,
+    icBatchView:     'leaderboard',  // 'leaderboard' | 'scatter'
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -163,6 +172,9 @@ document.addEventListener('alpine:init', () => {
       this.loadPortfolios();
       // System library (anchor-agnostic reusable system templates)
       this.loadLibrarySystems();
+      // IC.5: pre-load signal stability (sub-second on cache hit; first
+      // fetch for a new ticker/outcome takes ~2-3 min on the VPS thread).
+      this.loadIcBatch();
     },
 
     async loadAnalysis() {
@@ -206,6 +218,7 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
+        this.loadIcBatch();   // IC.5: keep survey in sync with active ticker/outcome
         if (this.heatmapMetric) await this.loadHeatmap();
       } catch (e) {
         this.error = e.message;
@@ -286,7 +299,8 @@ document.addEventListener('alpine:init', () => {
       // top-of-page Threshold Drift line (td) live independently and
       // shouldn't blank out every time Analyze runs.
       for (const k of Object.keys(this._charts)) {
-        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td') continue;
+        // Preserve charts not tied to the primary analysis result.
+        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-')) continue;
         this._charts[k].destroy();
         delete this._charts[k];
       }
@@ -3176,6 +3190,9 @@ document.addEventListener('alpine:init', () => {
       if (this.heatmapData && this.heatmapMetric) {
         this.loadHeatmap();  // fire-and-forget; chains into loadHmBins1d()
       }
+      // IC.5: mode change shifts the reference IC (train_test cutoff vs full
+      // history), so reload the batch survey under the new mode.
+      this.loadIcBatch();  // fire-and-forget
     },
 
     async corrLoadMiniData() {
@@ -4418,6 +4435,269 @@ document.addEventListener('alpine:init', () => {
         await fetch(`/api/oi-analysis/library/systems/${lid}`, { method: 'DELETE' });
         await this.loadLibrarySystems();
       } catch (_) {}
+    },
+
+    // ── IC.5 — Signal Stability (universe-wide leaderboard + scatter) ────
+    // Fetches /ic-batch for the current ticker + outcome + mode, then
+    // renders either the leaderboard (horizontal bar, sign_stability ↓) or
+    // the scatter (IC strength × stability). Click on any bar/dot sets the
+    // Metric selector and fires /analyze below.
+
+    async loadIcBatch(refresh = false) {
+      if (!this.ticker || !this.outcome) return;
+      this.icBatchLoading = true;
+      this.icBatchError = null;
+      try {
+        let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
+        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        if (refresh) url += '&refresh=true';
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.icBatchData = d;
+        if (this.icBatchExpanded) {
+          await this.$nextTick();
+          this._renderIcBatch();
+        }
+      } catch (e) {
+        this.icBatchError = e.message;
+      } finally {
+        this.icBatchLoading = false;
+      }
+    },
+
+    toggleIcBatch() {
+      this.icBatchExpanded = !this.icBatchExpanded;
+      if (this.icBatchExpanded && this.icBatchData) {
+        this.$nextTick(() => this._renderIcBatch());
+      }
+    },
+
+    icBatchSubtitle() {
+      if (this.icBatchLoading) return '';
+      if (!this.icBatchData?.metrics?.length) return '— click ▸ to expand after loading';
+      const n = this.icBatchData.metrics.length;
+      const nSup = this.icBatchData.metrics.filter(m => m.suppressed).length;
+      const mode = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';
+      let s = `· ${n} metrics · ${nSup} suppressed · ${mode}`;
+      if (this.icBatchData.cutoff_date) s += ` · cutoff ${this.icBatchData.cutoff_date}`;
+      return s;
+    },
+
+    _renderIcBatch() {
+      if (this.icBatchView === 'leaderboard') this._renderIcLeaderboard();
+      else this._renderIcScatter();
+    },
+
+    _renderIcLeaderboard() {
+      const el = document.getElementById('chart-ic-leaderboard');
+      const innerEl = document.getElementById('ic-leaderboard-inner');
+      if (!el || !this.icBatchData?.metrics?.length) return;
+      if (this._charts['ic-leader']) { this._charts['ic-leader'].destroy(); this._charts['ic-leader'] = null; }
+
+      const metrics = this.icBatchData.metrics;
+      // Sort: non-suppressed by sign_stability desc, suppressed alphabetically at bottom.
+      const nonSup = metrics.filter(m => !m.suppressed)
+                            .sort((a, b) => (b.sign_stability ?? 0) - (a.sign_stability ?? 0));
+      const sup    = metrics.filter(m => m.suppressed)
+                            .sort((a, b) => a.name.localeCompare(b.name));
+      const sorted = [...nonSup, ...sup];
+
+      const maxAbsIc = Math.max(...nonSup.map(m => m.long_run_ic_abs || 0), 0.001);
+      const barH = 16;
+      const chartH = Math.max(320, sorted.length * barH + 50);
+
+      // Size the container + canvas before Chart.js reads dimensions.
+      if (innerEl) innerEl.style.height = chartH + 'px';
+
+      const labels = sorted.map(m => m.name.length > 36 ? m.name.slice(0, 35) + '…' : m.name);
+      const values = sorted.map(m => m.suppressed ? 0 : (m.sign_stability ?? 0));
+      const bgColors = sorted.map(m => {
+        if (m.suppressed) return 'rgba(100,100,100,0.25)';
+        const t = Math.min((m.long_run_ic_abs || 0) / maxAbsIc, 1);
+        const op = (0.25 + t * 0.65).toFixed(2);
+        return (m.long_run_ic || 0) >= 0
+          ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
+      });
+
+      const self = this;
+      this._charts['ic-leader'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{ data: values, backgroundColor: bgColors, borderWidth: 0, barThickness: barH - 4 }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const m = sorted[elements[0].index];
+            if (m && !m.suppressed) self._icBatchClickMetric(m.name);
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                title: ctx => sorted[ctx[0]?.dataIndex]?.name || '',
+                label: ctx => {
+                  const m = sorted[ctx.dataIndex];
+                  if (!m) return '';
+                  if (m.suppressed) return [`Suppressed: ${m.suppression_reason || 'no decisive windows'}`];
+                  return [
+                    `Stability: ${m.sign_stability != null ? (m.sign_stability * 100).toFixed(1) + '%' : '—'}`,
+                    `IC: ${(m.long_run_ic || 0).toFixed(4)}  abs: ${(m.long_run_ic_abs || 0).toFixed(4)}`,
+                    `ε: ${(m.epsilon || 0).toFixed(4)}  windows: ${m.n_windows}`,
+                    `same:${m.n_same}  opp:${m.n_opposite}  neut:${m.n_neutral}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ...this._darkScales().x,
+              min: 0, max: 1,
+              title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().x.ticks, callback: v => (v * 100).toFixed(0) + '%' },
+            },
+            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks, font: { size: 8 } } },
+          },
+        },
+      });
+    },
+
+    _renderIcScatter() {
+      const el = document.getElementById('chart-ic-scatter');
+      if (!el || !this.icBatchData?.metrics?.length) return;
+      if (this._charts['ic-scatter']) { this._charts['ic-scatter'].destroy(); this._charts['ic-scatter'] = null; }
+
+      const metrics = this.icBatchData.metrics;
+      const nonSup  = metrics.filter(m => !m.suppressed);
+      const sup     = metrics.filter(m => m.suppressed);
+      const maxAbsIc = Math.max(...nonSup.map(m => m.long_run_ic_abs || 0), 0.001);
+      const xMax    = Math.max(maxAbsIc * 1.1, 0.05);
+
+      const _mkPt = m => ({
+        x:          m.long_run_ic_abs || 0,
+        y:          m.sign_stability ?? 0,
+        name:       m.name,
+        ic:         m.long_run_ic || 0,
+        stability:  m.sign_stability,
+        n_same:     m.n_same,
+        n_opposite: m.n_opposite,
+        suppressed: m.suppressed,
+      });
+      const _color = m => {
+        if (m.suppressed) return 'rgba(100,100,100,0.28)';
+        const t = Math.min((m.long_run_ic_abs || 0) / maxAbsIc, 1);
+        const op = (0.4 + t * 0.5).toFixed(2);
+        return (m.long_run_ic || 0) >= 0
+          ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
+      };
+
+      // Quadrant guide-lines + labels drawn after datasets.
+      const quadrantPlugin = {
+        id: 'icScatterQuadrant',
+        afterDatasetsDraw(chart) {
+          const { ctx, chartArea: { left, right, top, bottom }, scales: { x: sx, y: sy } } = chart;
+          const xMid = sx.getPixelForValue(xMax * 0.5);
+          const yMid = sy.getPixelForValue(0.5);
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+          ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(xMid, top); ctx.lineTo(xMid, bottom); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(left, yMid); ctx.lineTo(right, yMid); ctx.stroke();
+          ctx.restore();
+          ctx.save();
+          ctx.font = '9px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
+          ctx.fillText('stable / weak',        left + 4,   yMid - 8);
+          ctx.fillText('stable / strong ★',    xMid + 6,   top   + 14);
+          ctx.fillText('unstable / weak',       left + 4,   bottom - 6);
+          ctx.fillText('unstable / strong',     xMid + 6,   bottom - 6);
+          ctx.restore();
+        },
+      };
+
+      const self = this;
+      this._charts['ic-scatter'] = new Chart(el, {
+        type: 'scatter',
+        data: {
+          datasets: [
+            {
+              label: 'Metrics',
+              data: nonSup.map(_mkPt),
+              backgroundColor: nonSup.map(_color),
+              pointRadius: 5, pointHoverRadius: 7,
+            },
+            {
+              label: 'Suppressed',
+              data: sup.map(_mkPt),
+              backgroundColor: 'rgba(100,100,100,0.25)',
+              pointRadius: 3, pointHoverRadius: 5,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const ds  = elements[0].datasetIndex === 0 ? nonSup : sup;
+            const m   = ds[elements[0].index];
+            if (m && !m.suppressed) self._icBatchClickMetric(m.name);
+          },
+          plugins: {
+            legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                title: ctx => {
+                  const ds = ctx[0]?.datasetIndex === 0 ? nonSup : sup;
+                  return ds[ctx[0]?.dataIndex]?.name || '';
+                },
+                label: ctx => {
+                  const pt = ctx.raw;
+                  if (pt.suppressed) return 'Suppressed (no decisive windows)';
+                  return [
+                    `IC abs: ${pt.x.toFixed(4)}  (${pt.ic >= 0 ? '+' : ''}${pt.ic.toFixed(4)})`,
+                    `Stability: ${pt.stability != null ? (pt.stability * 100).toFixed(1) + '%' : '—'}`,
+                    `same: ${pt.n_same}  opp: ${pt.n_opposite}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ...this._darkScales().x,
+              min: 0, max: xMax,
+              title: { display: true, text: 'IC Strength (abs)', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().x.ticks, callback: v => v.toFixed(3) },
+            },
+            y: {
+              ...this._darkScales().y,
+              min: 0, max: 1,
+              title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, callback: v => (v * 100).toFixed(0) + '%' },
+            },
+          },
+        },
+        plugins: [quadrantPlugin],
+      });
+    },
+
+    // Set the Metric selector to `name` and trigger /analyze.
+    // Belt-and-suspenders: update both Alpine state and the DOM select value
+    // (same pattern as init()'s _forceSelect) so browser form-cache can't
+    // resist the programmatic change.
+    _icBatchClickMetric(name) {
+      this.metric = name;
+      const el = document.querySelector('select[x-model="metric"]');
+      if (el) el.value = name;
+      this.loadAnalysis();
     },
   }));
 });
