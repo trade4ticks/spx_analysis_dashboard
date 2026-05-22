@@ -1,4 +1,5 @@
 """OI Analysis workbench — interactive decile analytics for a single ticker/metric/outcome."""
+import asyncio
 import hashlib
 import json
 import math
@@ -2794,6 +2795,261 @@ async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
         except Exception:
             pass
     return {"ok": True}
+
+
+# ── IC stability batch (IC.4) ────────────────────────────────────────────
+# Per-metric long-run IC + sign-stability across all ~123 daily_features
+# columns. Powers the IC.5 leaderboard and strength-vs-stability scatter.
+# DB-cached on a (ticker, outcome, window, mode/cutoff) key — mirrors the
+# /global-metric-bins read-through cache pattern. CPU-heavy compute runs
+# via asyncio.to_thread so the FastAPI event loop stays responsive while
+# the per-metric rolling-IC loop executes.
+
+_IC_BATCH_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS ic_batch_cache (
+    cache_key TEXT PRIMARY KEY,
+    ticker    TEXT NOT NULL,
+    outcome   TEXT NOT NULL,
+    window    INT  NOT NULL,
+    cutoff_date DATE,
+    payload   JSONB NOT NULL,
+    cached_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+_ic_batch_table_ensured = False
+
+
+async def _ensure_ic_batch_table(pool) -> None:
+    global _ic_batch_table_ensured
+    if _ic_batch_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_IC_BATCH_TABLE_DDL)
+    _ic_batch_table_ensured = True
+
+
+async def _fetch_ic_feature_columns(pool) -> list[str]:
+    """Mirror /columns: numeric daily_features columns excluding outcomes."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'daily_features' AND table_schema = 'public'
+               AND data_type IN ('double precision','numeric','real',
+                                 'integer','bigint','smallint')
+               AND column_name NOT IN ('id','ticker','trade_date',
+                                       'created_at','updated_at')
+               ORDER BY ordinal_position""")
+    all_cols = [r["column_name"] for r in rows]
+    outcomes = {c for c in all_cols if "ret_" in c and "fwd" in c}
+    return [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+
+
+def _compute_ic_batch_sync(
+    rows: list[dict],
+    feature_cols: list[str],
+    outcome: str,
+    window: int,
+    cutoff_date: Optional[str],
+    is_all: bool,
+    horizon: int,
+) -> list[dict]:
+    """Per-metric IC computation. Pure-sync, no DB. Off-loaded via to_thread.
+
+    For each feature column: rolling Spearman IC against the outcome over
+    a `window`-day trailing window (single-ticker time-series IC, or daily
+    cross-sectional IC rolled if `is_all=True`), then mode-aware reference
+    IC, ε, and sign-stability.
+
+    The outcome column is skipped if present in feature_cols. Returns one
+    dict per emitted metric, in the input feature_cols order.
+    """
+    from app.routers.ic_compute import (
+        rolling_ic_single_ticker, rolling_ic_cross_sectional,
+        sign_stability_from_rolling, noise_floor_epsilon,
+    )
+
+    results: list[dict] = []
+    for metric in feature_cols:
+        if metric == outcome:
+            continue
+
+        if is_all:
+            series = rolling_ic_cross_sectional(
+                rows, metric, outcome, window=window,
+            )
+            median_k = int(np.median([p.n for p in series])) if series else 0
+            epsilon = noise_floor_epsilon(
+                "cross_sectional", window=window, horizon=horizon,
+                k_tickers=median_k,
+            )
+        else:
+            series = rolling_ic_single_ticker(
+                rows, metric, outcome, window=window,
+            )
+            epsilon = noise_floor_epsilon(
+                "single_ticker", window=window, horizon=horizon,
+            )
+
+        if cutoff_date:
+            pre_cutoff = [p.ic for p in series if str(p.date) < cutoff_date]
+            reference_ic = float(np.mean(pre_cutoff)) if pre_cutoff else 0.0
+        elif series:
+            reference_ic = float(np.mean([p.ic for p in series]))
+        else:
+            reference_ic = 0.0
+
+        stability = sign_stability_from_rolling(series, reference_ic, epsilon)
+        n_total = stability.n_total
+
+        results.append({
+            "name":            metric,
+            "long_run_ic":     round(reference_ic, 6),
+            "long_run_ic_abs": round(abs(reference_ic), 6),
+            "epsilon":         round(epsilon, 6),
+            "n_windows":       n_total,
+            "sign_stability":  (round(stability.stability, 4)
+                                if stability.stability is not None else None),
+            "n_same":          stability.n_same,
+            "n_opposite":      stability.n_opposite,
+            "n_neutral":       stability.n_neutral,
+            "neutral_pct":     (round(100.0 * stability.n_neutral / n_total, 2)
+                                if n_total else 0.0),
+            "suppressed":      stability.suppressed,
+            "suppression_reason": stability.suppression_reason,
+        })
+
+    return results
+
+
+@router.get("/ic-batch")
+async def ic_batch(
+    ticker:      str  = Query("ALL"),
+    outcome:     str  = Query("ret_5d_fwd_oc"),
+    window:      int  = Query(252, ge=20, le=1000),
+    cutoff_date: Optional[str] = Query(None),
+    refresh:     bool = Query(False),
+    pool=Depends(get_oi_pool),
+):
+    """Per-metric long-run IC + sign-stability for all ~123 daily_features
+    columns at the active mode. Drives the universe-wide IC stability
+    leaderboard and the strength-vs-stability scatter (IC.5).
+
+    Mode is encoded by `cutoff_date`:
+      - cutoff_date set     → train_test: reference IC computed from
+                              pre-cutoff windows only
+      - cutoff_date not set → in_sample / walk_forward: reference uses
+                              the full-history mean (same result for both
+                              since rolling IC is mode-independent except
+                              for the reference, and in_sample / walk_forward
+                              share that)
+
+    Returns:
+      metrics: list of dicts, one per metric. Fields:
+        name, long_run_ic, long_run_ic_abs, epsilon, n_windows,
+        sign_stability (or null when suppressed), n_same, n_opposite,
+        n_neutral, neutral_pct, suppressed, suppression_reason.
+
+    DB-cached on (ticker, outcome, window, mode_tag). Use `refresh=true`
+    to force re-computation and rewrite the cache row.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    await _ensure_ic_batch_table(pool)
+
+    is_all = (ticker.upper() == "ALL")
+    mode_tag = f"tt:{cutoff_date}" if cutoff_date else "default"
+    cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}"
+
+    if not refresh:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT payload, cached_at FROM ic_batch_cache "
+                "WHERE cache_key = $1", cache_key,
+            )
+        if row is not None:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return {
+                "metrics":     payload.get("metrics", []),
+                "ticker":      ticker,
+                "outcome":     outcome,
+                "window":      window,
+                "cutoff_date": cutoff_date,
+                "cached_at":   str(row["cached_at"]),
+                "from_cache":  True,
+            }
+
+    # Cache miss: fetch and compute.
+    feature_cols = await _fetch_ic_feature_columns(pool)
+    horizon = _parse_horizon(outcome)
+
+    # SELECT only the columns we need — outcome + all features. Quoting
+    # column names with double-quotes (one-time controlled list from
+    # information_schema, not user input).
+    cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
+    if is_all:
+        sql = (
+            f'SELECT ticker, trade_date, {cols_sql} FROM daily_features '
+            f'WHERE "{outcome}" IS NOT NULL '
+            f'ORDER BY ticker, trade_date'
+        )
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(sql, timeout=180)
+    else:
+        sql = (
+            f'SELECT trade_date, {cols_sql} FROM daily_features '
+            f'WHERE ticker = $1 AND "{outcome}" IS NOT NULL '
+            f'ORDER BY trade_date'
+        )
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(sql, ticker, timeout=60)
+
+    rows = [dict(r) for r in db_rows]
+    if not is_all:
+        # Single-ticker SQL doesn't carry the ticker column; inject it so
+        # the cross-sectional helper would group consistently (defensive —
+        # ic_compute uses ticker only for cross-sectional grouping anyway).
+        for r in rows:
+            r.setdefault("ticker", ticker)
+
+    # CPU-heavy per-metric loop runs on a worker thread so the FastAPI
+    # event loop stays responsive (same pattern as research/batch_score.py
+    # Step 7d). NumPy releases the GIL inside the per-window Spearman
+    # calls, so other dashboard requests genuinely overlap with this work.
+    results = await asyncio.to_thread(
+        _compute_ic_batch_sync,
+        rows, feature_cols, outcome, window, cutoff_date, is_all, horizon,
+    )
+
+    # Persist to cache.
+    payload_json = json.dumps({"metrics": results})
+    from datetime import date as _date
+    cutoff_obj = _date.fromisoformat(cutoff_date) if cutoff_date else None
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO ic_batch_cache
+                   (cache_key, ticker, outcome, window, cutoff_date, payload, cached_at)
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET payload = EXCLUDED.payload,
+                       cached_at = NOW()""",
+                cache_key, ticker, outcome, window, cutoff_obj, payload_json,
+            )
+    except Exception as e:
+        import logging
+        logging.warning("ic_batch_cache write failed: %r", e)
+
+    return {
+        "metrics":     results,
+        "ticker":      ticker,
+        "outcome":     outcome,
+        "window":      window,
+        "cutoff_date": cutoff_date,
+        "from_cache":  False,
+    }
 
 
 # ── Threshold Drift (walk-forward bin boundaries over time) ──────────────
