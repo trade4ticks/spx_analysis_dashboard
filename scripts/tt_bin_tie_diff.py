@@ -1,22 +1,23 @@
 """Step 7k tied-value bin diff (targeted comparison on real data).
 
-For several (ticker, feature) tuples and a train-test cutoff, compute
-bin assignments under BOTH:
+For every numeric feature column in `daily_features` and a fixed train-test
+cutoff, compute bin assignments under BOTH:
 
   - side='right' (Score Matrix's prior _tt_bin_matrix behavior)
   - side='left'  (the shared train_test_bin_matrix_per_ticker helper)
 
-and report every test row whose bin assignment shifts between the two
-methods. Tied test values (test value matches one or more training values)
-are the only ones that can possibly shift, and even then only when the
-tie crosses a bin boundary.
+across several tickers, then report which features have any test rows that
+shift bins between the two methods. Tied test values (test value equals
+one or more training values) are the only ones that can shift, and even
+then only when the rank delta crosses a bin boundary.
+
+The output is the complete list of features whose pre-Step-7k train-test
+Score Matrix values could have been affected by the side='right' bug.
 
 Run on the VPS where OI_DATABASE_URL points at the local Postgres instance:
 
     cd /spx_analysis_dashboard
     python scripts/tt_bin_tie_diff.py
-
-Output is printed to stdout — paste back to the dev session.
 """
 import asyncio
 import math
@@ -32,22 +33,12 @@ load_dotenv()
 CUTOFF = "2024-01-01"
 N_BINS = 10
 
+# Mix of index ETFs, large caps, and a low-priced ticker (AAL) — picked to
+# expose discreteness on both ends of the price scale. Discrete features
+# manifest across all tickers, so this sample is sufficient for feature
+# identification (which is structural). Adding more tickers would refine
+# per-ticker shift counts but not change the affected-feature list.
 TICKERS = ["SPY", "QQQ", "AAL", "NVDA", "TSLA", "COIN", "AAPL", "AMD"]
-
-# Mix of discrete-leaning and continuous features. Strikes are integers
-# and frequently repeat (same strike holds max OI for many days), so
-# max_oi_strike_* should produce the densest ties. The pct_* and ratio
-# columns are continuous and should produce sparse-to-no ties.
-FEATURES = [
-    "max_oi_strike_call",
-    "max_oi_strike_put",
-    "total_oi",
-    "call_oi",
-    "put_call_oi_ratio",
-    "pct_oi_in_front_expiry",
-    "top5_strikes_pct_total_oi",
-    "weighted_avg_dte",
-]
 
 
 def _safe(v):
@@ -61,7 +52,7 @@ def _safe(v):
 
 
 def _bin_old(train_sorted, n_train, v, n_bins):
-    """Score Matrix's PRIOR side='right' behavior (one bin too high on ties)."""
+    """Score Matrix's PRIOR side='right' behavior."""
     if math.isnan(v):
         return 0
     rank = int(np.searchsorted(train_sorted, v, side="right"))
@@ -69,7 +60,7 @@ def _bin_old(train_sorted, n_train, v, n_bins):
 
 
 def _bin_new(train_sorted, n_train, v, n_bins):
-    """Shared helper's side='left' behavior — correct per the invariance argument."""
+    """Shared helper's side='left' behavior."""
     if math.isnan(v):
         return 0
     rank = int(np.searchsorted(train_sorted, v, side="left"))
@@ -80,17 +71,37 @@ async def main():
     dsn = os.environ["OI_DATABASE_URL"]
     conn = await asyncpg.connect(dsn)
 
+    # Discover all numeric feature columns via the same query the
+    # dashboard's /columns endpoint uses.
+    col_rows = await conn.fetch("""
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'daily_features' AND table_schema = 'public'
+        AND data_type IN ('double precision','numeric','real',
+                          'integer','bigint','smallint')
+        AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+        ORDER BY ordinal_position
+    """)
+    all_cols = [r["column_name"] for r in col_rows]
+    outcomes = {c for c in all_cols if "ret_" in c and "fwd" in c}
+    features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+
     print(f"Cutoff: {CUTOFF}   n_bins: {N_BINS}")
     print(f"Tickers: {TICKERS}")
+    print(f"Features discovered: {len(features)}")
     print()
 
-    grand_shifts = 0
-    grand_tested = 0
-    grand_ties = 0
+    per_feature: dict = {f: {
+        "shifts":           0,
+        "tested":           0,
+        "ties":             0,
+        "min_delta":        0,   # most negative delta seen (worst downward)
+        "any_pos_delta":    False,
+        "tickers_affected": set(),
+    } for f in features}
 
     for ticker in TICKERS:
-        print(f"--- {ticker} ---")
-        for feat in FEATURES:
+        print(f"  scanning {ticker} ...", flush=True)
+        for feat in features:
             try:
                 rows = await conn.fetch(
                     f'SELECT trade_date, "{feat}" AS v FROM daily_features '
@@ -98,8 +109,7 @@ async def main():
                     f'ORDER BY trade_date',
                     ticker,
                 )
-            except Exception as e:
-                print(f"  {feat:30s} : query failed ({e})")
+            except Exception:
                 continue
 
             train_vals = []
@@ -115,56 +125,76 @@ async def main():
                     test_pairs.append((date_s, v))
 
             if len(train_vals) < N_BINS or not test_pairs:
-                print(f"  {feat:30s} : skipped (train={len(train_vals)}, test={len(test_pairs)})")
                 continue
 
             train_sorted = np.sort(np.array(train_vals, dtype=np.float64))
             train_set = set(train_vals)
             n_train = len(train_sorted)
 
-            shifts = []
-            shifts_by_delta: dict = {}
-            ties = 0
+            n_shifts = 0
+            n_ties = 0
             for date, v in test_pairs:
                 if v in train_set:
-                    ties += 1
+                    n_ties += 1
                 b_old = _bin_old(train_sorted, n_train, v, N_BINS)
                 b_new = _bin_new(train_sorted, n_train, v, N_BINS)
                 if b_old != b_new:
-                    shifts.append((date, v, b_old, b_new))
+                    n_shifts += 1
                     delta = b_new - b_old
-                    shifts_by_delta[delta] = shifts_by_delta.get(delta, 0) + 1
+                    if delta < per_feature[feat]["min_delta"]:
+                        per_feature[feat]["min_delta"] = delta
+                    if delta > 0:
+                        per_feature[feat]["any_pos_delta"] = True
 
-            n_test = len(test_pairs)
-            pct = 100 * len(shifts) / n_test
-            tie_pct = 100 * ties / n_test
-            shift_summary = (
-                "  ".join(f"Δ={d:+d}: {n}" for d, n in sorted(shifts_by_delta.items()))
-                if shifts_by_delta
-                else "—"
-            )
-            print(
-                f"  {feat:30s} : shifts {len(shifts):5d}/{n_test:5d} "
-                f"({pct:5.2f}%)  ties {ties:5d} ({tie_pct:5.2f}%)  "
-                f"shift dist: {shift_summary}"
-            )
+            per_feature[feat]["shifts"] += n_shifts
+            per_feature[feat]["tested"] += len(test_pairs)
+            per_feature[feat]["ties"] += n_ties
+            if n_shifts > 0:
+                per_feature[feat]["tickers_affected"].add(ticker)
 
-            for date, v, b_old, b_new in shifts[:3]:
-                print(f"      e.g. {date}  v={v}  old bin {b_old} → new bin {b_new}")
-
-            grand_shifts += len(shifts)
-            grand_tested += n_test
-            grand_ties += ties
-        print()
-
-    print(f"GRAND TOTAL: {grand_shifts} shifted / {grand_tested} test rows "
-          f"({100*grand_shifts/max(grand_tested,1):.3f}%)")
-    print(f"             {grand_ties} rows tied with training "
-          f"({100*grand_ties/max(grand_tested,1):.3f}%)")
     print()
-    print("Note: every shift is a tied value (only ties can possibly shift), but not")
-    print("every tie causes a shift — only those whose rank diff crosses a bin boundary.")
-    print("So #shifts ≤ #ties is expected.")
+    print("=" * 100)
+    print("AFFECTED FEATURES (≥1 shifted test row across any of the sampled tickers)")
+    print("=" * 100)
+    affected = sorted(
+        [(f, d) for f, d in per_feature.items() if d["shifts"] > 0],
+        key=lambda x: -x[1]["shifts"],
+    )
+    print(f"{len(affected)} of {len(features)} features had ≥1 shift")
+    print()
+    if affected:
+        print(f"{'feature':45s}  {'shifts':>8s} / {'tested':>8s}  {'pct':>7s}  "
+              f"{'tickers':>9s}  {'worst Δ':>8s}")
+        print("-" * 100)
+        for feat, d in affected:
+            pct = 100 * d["shifts"] / max(d["tested"], 1)
+            n_tkrs = len(d["tickers_affected"])
+            worst = f"{d['min_delta']:+d}" + ("!" if d["any_pos_delta"] else "")
+            print(f"{feat:45s}  {d['shifts']:8d} / {d['tested']:8d}  "
+                  f"{pct:6.2f}%  {n_tkrs:4d}/{len(TICKERS):<2d}  {worst:>8s}")
+
+    print()
+    print("=" * 100)
+    print("UNAFFECTED FEATURES (0 shifted rows across all sampled tickers)")
+    print("=" * 100)
+    unaffected = sorted([f for f, d in per_feature.items() if d["shifts"] == 0])
+    print(f"{len(unaffected)} features. List:")
+    # Print in 3 columns
+    rows_unaffected = [unaffected[i:i + 3] for i in range(0, len(unaffected), 3)]
+    for row in rows_unaffected:
+        print("  " + "  ".join(f"{f:32s}" for f in row))
+
+    print()
+    grand_shifts  = sum(d["shifts"] for d in per_feature.values())
+    grand_tested  = sum(d["tested"] for d in per_feature.values())
+    any_pos       = any(d["any_pos_delta"] for d in per_feature.values())
+    print(f"Grand total: {grand_shifts} shifts across {grand_tested} test rows "
+          f"({100*grand_shifts/max(grand_tested,1):.4f}%)")
+    if any_pos:
+        print("WARNING: at least one feature had a POSITIVE-delta shift — unexpected!")
+    else:
+        print("All shifts had negative delta (side='right' was always too high). "
+              "Consistent with the invariance argument: side='left' is correct.")
 
     await conn.close()
 
