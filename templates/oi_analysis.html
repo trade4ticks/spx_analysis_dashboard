@@ -1707,7 +1707,8 @@
                        font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer">
           Refresh
         </button>
-        <span x-show="smStatus.running" style="font-size:10px;color:var(--dim)"
+        <span x-show="smStatus.message"
+              :style="`font-size:10px;color:${smStatus.message && smStatus.message.startsWith('Error') ? '#e74c3c' : 'var(--dim)'}`"
               x-text="smStatus.message"></span>
         <span x-show="smMeta.last_run && !smStatus.running"
               style="font-size:10px;color:var(--dim);margin-left:auto"
@@ -1721,6 +1722,18 @@
           <template x-if="smMeta.count === 0 && !smStatus.running">
             <span style="font-size:10px;color:var(--dim);margin-left:8px">
               No walk-forward scores computed yet — click <strong>Run Scan</strong> to generate them.
+            </span>
+          </template>
+        </div>
+      </template>
+
+      <!-- TT mode status -->
+      <template x-if="pageMode === 'train_test'">
+        <div style="margin-bottom:8px">
+          <span style="font-size:10px;color:#9b59b6;font-family:monospace;letter-spacing:.5px">TRAIN-TEST MODE</span>
+          <template x-if="smMeta.count === 0 && !smStatus.running">
+            <span style="font-size:10px;color:var(--dim);margin-left:8px">
+              No train-test scores computed yet — click <strong>Run Scan</strong> to generate them.
             </span>
           </template>
         </div>
