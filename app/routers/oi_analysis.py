@@ -629,39 +629,56 @@ async def analyze(
     c_sample  = min(n / 1000, 0.5)
     composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
 
-    # ── Rolling IC + sign-stability (Step IC.2) ───────────────────────────
+    # ── Rolling IC + sign-stability (Steps IC.2 + IC.3) ───────────────────
     # Routes through `ic_compute` primitives. The rolling-IC series is always
-    # FULL HISTORY (mode-independent), built from the raw `row_dicts` for the
-    # ticker — not from `pairs`, which is mode-filtered (walk_forward drops
-    # warmup rows, train_test drops pre_cutoff rows). Only the *reference IC*
-    # used for sign-classification depends on mode:
+    # FULL HISTORY (mode-independent), built from the raw `row_dicts`. Only
+    # the *reference IC* used for sign-classification depends on the spec:
     #   in_sample / walk_forward → reference = mean of all windows
     #   train_test               → reference = mean of pre-cutoff windows
-    # ALL mode emits an empty payload; cross-sectional rolling IC arrives in
-    # Step IC.3.
+    #
+    # Two different computations under the same payload shape:
+    #   single-ticker (is_all=False) — rolling Spearman of one ticker's
+    #     (metric, fwd_ret) over a 252-day trailing window (IC.2).
+    #   ALL (is_all=True)            — per-day cross-sectional Spearman
+    #     across all tickers, then a 252-day trailing mean of that daily
+    #     series (IC.3). The series-shape contract is identical, so the
+    #     frontend renders both with the same code; only ε differs (much
+    #     tighter in cross-sectional because K-1 effective degrees of
+    #     freedom multiply with W/horizon).
     from app.routers.ic_compute import (
-        rolling_ic_single_ticker, classified_rolling_ic,
-        sign_stability_from_rolling, noise_floor_epsilon,
-        _horizon_from_outcome,
+        rolling_ic_single_ticker, rolling_ic_cross_sectional,
+        classified_rolling_ic, sign_stability_from_rolling,
+        noise_floor_epsilon, _horizon_from_outcome,
     )
 
     _IC_WINDOW = 252
     rolling_ic_payload: Optional[dict] = None
-    if not is_all and row_dicts:
-        # row_dicts is chronologically ordered by SQL ORDER BY trade_date;
-        # SQL also filters non-null metric/outcome — so every row is a valid
-        # (date, metric, outcome) triple. No mode filtering applied here.
-        ic_series = rolling_ic_single_ticker(
-            row_dicts, metric, outcome, window=_IC_WINDOW,
-        )
-
+    if row_dicts:
         horizon = _horizon_from_outcome(outcome)
-        epsilon = noise_floor_epsilon("single_ticker",
-                                      window=_IC_WINDOW, horizon=horizon)
 
-        # Mode-aware reference. In train_test mode, scope to windows whose
-        # end-date precedes the cutoff (the "did the training-era edge hold
-        # out-of-sample" question). Otherwise use the full-history mean.
+        if is_all:
+            ic_series = rolling_ic_cross_sectional(
+                row_dicts, metric, outcome, window=_IC_WINDOW,
+            )
+            # ε for cross-sectional needs a K (cross-section size). Use the
+            # median n across rolled points (each IcPoint.n is the median
+            # per-day cross-section size in its window) — stable across
+            # the chart and faithfully reports the typical K.
+            median_k = int(np.median([p.n for p in ic_series])) if ic_series else 0
+            epsilon = noise_floor_epsilon(
+                "cross_sectional", window=_IC_WINDOW, horizon=horizon,
+                k_tickers=median_k,
+            )
+            ic_mode = "cross_sectional"
+        else:
+            ic_series = rolling_ic_single_ticker(
+                row_dicts, metric, outcome, window=_IC_WINDOW,
+            )
+            epsilon = noise_floor_epsilon(
+                "single_ticker", window=_IC_WINDOW, horizon=horizon,
+            )
+            ic_mode = "single_ticker"
+
         if spec.kind == "train_test":
             cutoff_s = spec.cutoff.isoformat()
             pre_cutoff_ics = [p.ic for p in ic_series if str(p.date) < cutoff_s]
@@ -685,6 +702,7 @@ async def analyze(
             "window":        _IC_WINDOW,
             "horizon":       horizon,
             "mode":          spec.kind,
+            "ic_mode":       ic_mode,
             "cutoff_date":   (spec.cutoff.isoformat()
                               if spec.kind == "train_test" else None),
             "sign_stability": {
