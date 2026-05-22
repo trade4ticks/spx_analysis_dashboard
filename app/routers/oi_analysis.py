@@ -2807,13 +2807,13 @@ async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
 
 _IC_BATCH_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS ic_batch_cache (
-    cache_key TEXT PRIMARY KEY,
-    ticker    TEXT NOT NULL,
-    outcome   TEXT NOT NULL,
-    window    INT  NOT NULL,
+    cache_key   TEXT PRIMARY KEY,
+    ticker      TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    window_size INT  NOT NULL,
     cutoff_date DATE,
-    payload   JSONB NOT NULL,
-    cached_at TIMESTAMPTZ DEFAULT NOW()
+    payload     JSONB NOT NULL,
+    cached_at   TIMESTAMPTZ DEFAULT NOW()
 );
 """
 _ic_batch_table_ensured = False
@@ -3031,7 +3031,7 @@ async def ic_batch(
         async with pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO ic_batch_cache
-                   (cache_key, ticker, outcome, window, cutoff_date, payload, cached_at)
+                   (cache_key, ticker, outcome, window_size, cutoff_date, payload, cached_at)
                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
                    ON CONFLICT (cache_key) DO UPDATE
                    SET payload = EXCLUDED.payload,
