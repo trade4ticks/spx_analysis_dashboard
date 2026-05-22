@@ -1676,6 +1676,83 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
     return results, dropped_total, start_date
 
 
+def train_test_bin_matrix_per_ticker(
+    rows_chrono: list, feature_cols: list, cutoff_date_str: str, n_bins: int,
+) -> tuple:
+    """Per-ticker train-test bin assignment over test-window rows.
+
+    For one ticker's rows (chronologically sorted), compute per-feature
+    bin assignments for all rows with trade_date >= cutoff. Bins are
+    frozen from rows with trade_date < cutoff. Uses `searchsorted side='left'`
+    against the sorted per-feature training distribution — the same
+    primitive as `_compute_all_bins_train_test_fast`, `_bin_for_value`, and
+    the TrainTestAssigner. Tied test values land in the bin of the first
+    equal training value (the lower bin among possible ties), matching
+    standard percentile-rank semantics (fraction strictly less than v).
+
+    Returns (test_rows, bin_mat):
+      test_rows: list of input rows with trade_date >= cutoff, in input order.
+      bin_mat:   (len(test_rows), len(feature_cols)) int32, 1-indexed
+                 [1..n_bins]. Sentinel value 0 = either the feature had
+                 fewer than n_bins valid training samples for this ticker,
+                 or the test row's value for that feature is NaN.
+    """
+    n_bins = max(2, min(20, int(n_bins)))
+    F = len(feature_cols)
+
+    training_mask = np.array(
+        [str(r.get("trade_date", "")) < cutoff_date_str for r in rows_chrono],
+        dtype=bool,
+    )
+    test_mask = ~training_mask
+    test_rows = [r for r, t in zip(rows_chrono, test_mask) if t]
+    N_test = len(test_rows)
+    bin_mat = np.zeros((N_test, F), dtype=np.int32)
+
+    if N_test == 0 or F == 0:
+        return test_rows, bin_mat
+
+    n_train_total = int(training_mask.sum())
+    if n_train_total < n_bins:
+        return test_rows, bin_mat
+
+    N = len(rows_chrono)
+    X = np.empty((N, F), dtype=np.float64)
+    for f_idx, feat in enumerate(feature_cols):
+        for i, r in enumerate(rows_chrono):
+            v = r.get(feat)
+            if v is None:
+                X[i, f_idx] = np.nan
+                continue
+            try:
+                fv = float(v)
+                X[i, f_idx] = fv if not math.isnan(fv) else np.nan
+            except (TypeError, ValueError):
+                X[i, f_idx] = np.nan
+
+    test_indices = np.where(test_mask)[0]
+
+    for f_idx in range(F):
+        col = X[:, f_idx]
+        valid_col = ~np.isnan(col)
+        train_idx = np.where(training_mask & valid_col)[0]
+        n_train = int(len(train_idx))
+        if n_train < n_bins:
+            continue
+        sorted_train = np.sort(col[train_idx])
+        ranks = np.searchsorted(sorted_train, col, side='left')
+        bins_0idx = np.minimum(
+            (ranks * n_bins // n_train).astype(np.int64),
+            n_bins - 1,
+        )
+        test_col = col[test_indices]
+        valid_test = ~np.isnan(test_col)
+        test_bins_1idx = (bins_0idx[test_indices] + 1).astype(np.int32)
+        bin_mat[:, f_idx] = np.where(valid_test, test_bins_1idx, 0)
+
+    return test_rows, bin_mat
+
+
 def _compute_all_bins_train_test_fast(
     rows: list, feature_cols: list, outcome_col: str,
     n_bins: int, is_all: bool, cutoff_date: str,

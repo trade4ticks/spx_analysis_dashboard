@@ -167,41 +167,18 @@ def _wf_bin_matrix(rows_chrono: list, feature_list: list, n_bins: int = 10, warm
 
 
 def _tt_bin_matrix(rows_chrono: list, feature_list: list, cutoff_date_str: str, n_bins: int = 10):
-    """Compute train-test bin assignments for all features simultaneously.
+    """Score Matrix's per-ticker train-test bin matrix.
 
-    Training rows (trade_date < cutoff) build per-feature sorted thresholds
-    via np.searchsorted. Test rows (trade_date >= cutoff) are assigned bins
-    against the frozen training distribution.
-
-    Returns (test_rows, bin_mat) where bin_mat is int32 (N_test, F), 1-indexed;
-    0 = insufficient training history for that feature or NaN value.
+    Delegates to `train_test_bin_matrix_per_ticker` in `row_compute` so the
+    bin-assignment primitive is shared with the rest of the dashboard
+    (`_compute_all_bins_train_test_fast`, `_bin_for_value`, TrainTestAssigner).
+    Previously this had its own implementation using `searchsorted side='right'`,
+    which placed test values tied with training thresholds one bin higher
+    than the standard percentile-rank convention used everywhere else —
+    Step 7k fixed that by routing through the shared helper.
     """
-    train_rows = [r for r in rows_chrono if r.get("trade_date", "") < cutoff_date_str]
-    test_rows  = [r for r in rows_chrono if r.get("trade_date", "") >= cutoff_date_str]
-
-    F      = len(feature_list)
-    N_test = len(test_rows)
-    bin_mat = np.zeros((N_test, F), dtype=np.int32)
-
-    for fi, feat in enumerate(feature_list):
-        train_vals = []
-        for r in train_rows:
-            v = _safe_float(r.get(feat))
-            if not math.isnan(v):
-                train_vals.append(v)
-        if len(train_vals) < n_bins:
-            continue  # leave column as 0 (insufficient training)
-        train_sorted = np.sort(np.array(train_vals, dtype=np.float64))
-        n_train = len(train_sorted)
-        for ti, r in enumerate(test_rows):
-            v = _safe_float(r.get(feat))
-            if math.isnan(v):
-                continue
-            rank = int(np.searchsorted(train_sorted, v, side="right"))
-            b = min(int(rank / n_train * n_bins), n_bins - 1) + 1  # 1-indexed
-            bin_mat[ti, fi] = b
-
-    return test_rows, bin_mat
+    from app.routers.row_compute import train_test_bin_matrix_per_ticker
+    return train_test_bin_matrix_per_ticker(rows_chrono, feature_list, cutoff_date_str, n_bins)
 
 
 def _score_one_ticker(
