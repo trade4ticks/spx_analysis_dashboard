@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS oi_score_matrix (
     metric          TEXT NOT NULL,
     fwd_ret         TEXT NOT NULL,
     mode            TEXT NOT NULL DEFAULT 'in_sample',
+    cutoff_date     DATE,
     composite_score REAL,
     pattern         TEXT,
     spearman_r      REAL,
@@ -48,14 +49,19 @@ CREATE INDEX IF NOT EXISTS idx_oi_score_score  ON oi_score_matrix(composite_scor
 CREATE INDEX IF NOT EXISTS idx_oi_score_mode   ON oi_score_matrix(mode);
 """
 
-# mode is $4; total 20 positional params
+# mode is $4, cutoff_date is $5; total 21 positional params (was 20).
+# Conflict target is (ticker, metric, fwd_ret, mode, cutoff_date) — uses
+# NULLS NOT DISTINCT so in_sample / walk_forward rows (cutoff_date IS NULL)
+# behave the same as before. Train-test runs with different cutoffs get
+# separate rows; the most-recent run of a given cutoff updates in place.
 _UPSERT = """\
 INSERT INTO oi_score_matrix
-    (ticker, metric, fwd_ret, mode, composite_score, pattern, spearman_r,
+    (ticker, metric, fwd_ret, mode, cutoff_date,
+     composite_score, pattern, spearman_r,
      monotonicity, yearly_pct, concentration, tail_spread, n_obs,
      d10_avg, d1_avg, d10_wr, d1_wr, best_sharpe, mi, pearson_r, loyo_fragile, scanned_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NOW())
-ON CONFLICT (ticker, metric, fwd_ret, mode) DO UPDATE SET
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NOW())
+ON CONFLICT (ticker, metric, fwd_ret, mode, cutoff_date) DO UPDATE SET
     composite_score=EXCLUDED.composite_score, pattern=EXCLUDED.pattern,
     spearman_r=EXCLUDED.spearman_r, monotonicity=EXCLUDED.monotonicity,
     yearly_pct=EXCLUDED.yearly_pct, concentration=EXCLUDED.concentration,
@@ -82,17 +88,29 @@ async def ensure_table(pool):
         # Use try/except instead of IF NOT EXISTS — some PG versions/wrappers silently
         # ignore IF NOT EXISTS on ADD COLUMN and don't actually add the column.
         for col, typ in [('mi', 'REAL'), ('pearson_r', 'REAL'), ('loyo_fragile', 'BOOLEAN'),
-                         ('mode', "TEXT NOT NULL DEFAULT 'in_sample'")]:
+                         ('mode', "TEXT NOT NULL DEFAULT 'in_sample'"),
+                         ('cutoff_date', 'DATE')]:
             try:
                 await conn.execute(
                     f'ALTER TABLE oi_score_matrix ADD COLUMN {col} {typ}')
             except Exception:
                 pass  # column already exists
-        # Replace old (ticker, metric, fwd_ret) unique with mode-inclusive unique index.
-        # Unique index syntax supports IF NOT EXISTS; constraint syntax does not.
+        # Unique index now includes cutoff_date so train-test runs with
+        # different cutoffs persist independently. NULLS NOT DISTINCT
+        # (PG 15+) treats NULL == NULL — so in_sample / walk_forward rows
+        # (cutoff_date IS NULL) keep their single-row-per-(ticker, metric,
+        # fwd_ret, mode) behaviour unchanged.
+        #
+        # The previous mode-only index is dropped — it would over-constrain
+        # train-test rows (only one cutoff could ever be stored per combo).
+        try:
+            await conn.execute("DROP INDEX IF EXISTS oi_score_matrix_uq_mode")
+        except Exception:
+            pass
         await conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS oi_score_matrix_uq_mode
-            ON oi_score_matrix (ticker, metric, fwd_ret, mode)
+            CREATE UNIQUE INDEX IF NOT EXISTS oi_score_matrix_uq_mode_cutoff
+            ON oi_score_matrix (ticker, metric, fwd_ret, mode, cutoff_date)
+            NULLS NOT DISTINCT
         """)
         # Drop the old 3-column constraint if it still exists (non-fatal if already gone).
         try:
@@ -202,6 +220,12 @@ def _score_one_ticker(
     No asyncpg access here — the caller fetches `rows` on the event
     loop, passes them in, and writes `batch_params` after this returns.
     """
+    # Parse cutoff_date string into a date object once. None for
+    # in_sample / walk_forward; a `datetime.date` for train_test.
+    # asyncpg expects a date object for the DATE column in _UPSERT.
+    from datetime import date as _date_cls
+    cutoff_date_obj = _date_cls.fromisoformat(cutoff_date) if cutoff_date else None
+
     avail = set(rows[0].keys())
     batch_params: list = []
     scored = 0
@@ -249,7 +273,7 @@ def _score_one_ticker(
                     skipped += 1
                     continue
                 _append_params(batch_params, ticker, feature, outcome,
-                               mode_label, result)
+                               mode_label, cutoff_date_obj, result)
                 scored += 1
 
     elif walk_forward:
@@ -290,7 +314,7 @@ def _score_one_ticker(
                     skipped += 1
                     continue
                 _append_params(batch_params, ticker, feature, outcome,
-                               mode_label, result)
+                               mode_label, cutoff_date_obj, result)
                 scored += 1
 
     else:
@@ -310,7 +334,7 @@ def _score_one_ticker(
                     skipped += 1
                     continue
                 _append_params(batch_params, ticker, feature, outcome,
-                               mode_label, result)
+                               mode_label, cutoff_date_obj, result)
                 scored += 1
 
     return batch_params, scored, skipped
@@ -427,10 +451,16 @@ def _nz(v):
 
 
 def _append_params(batch_params: list, ticker: str, feature: str, outcome: str,
-                   mode: str, result: dict) -> None:
+                   mode: str, cutoff_date_obj, result: dict) -> None:
     """Extract scanner result fields and append an _UPSERT param tuple.
+
+    `cutoff_date_obj` is a `datetime.date` for train_test mode, None for
+    in_sample / walk_forward. Stored as the 5th positional param (after
+    mode) — matches the `_UPSERT` column order.
+
     Every float field is run through `_nz` so NaN becomes SQL NULL —
-    NaN values in REAL columns poison AVG/MAX aggregates downstream."""
+    NaN values in REAL columns poison AVG/MAX aggregates downstream.
+    """
     rob  = result.get("robustness") or {}
     bs   = result.get("bucket_stats") or []
     valid_bs = [b for b in bs if b is not None]
@@ -438,7 +468,7 @@ def _append_params(batch_params: list, ticker: str, feature: str, outcome: str,
     d1   = next((b for b in valid_bs if b.get("bucket") == 1),  {})
     best = result.get("best_single_bucket") or {}
     batch_params.append((
-        ticker, feature, outcome, mode,
+        ticker, feature, outcome, mode, cutoff_date_obj,
         _nz(result.get("composite_score")),
         result.get("pattern"),
         _nz(result.get("spearman_r")),

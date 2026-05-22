@@ -1241,8 +1241,15 @@ async def get_score_matrix(
     order: str = "desc",
     limit: int = 500,
     mode: str = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
 ):
-    """Return score matrix rows with optional filters."""
+    """Return score matrix rows with optional filters.
+
+    For mode='train_test' the cutoff_date filter selects results for that
+    specific cutoff. If omitted in train_test mode, returns rows where
+    cutoff_date IS NULL — typically empty. For other modes cutoff_date
+    is ignored (those rows always have NULL cutoff_date).
+    """
     from research.batch_score import ensure_table
     await ensure_table(pool)
 
@@ -1259,6 +1266,14 @@ async def get_score_matrix(
     params: list = [min_score, mode]
     idx = 3
 
+    # Train-test rows are partitioned by cutoff_date. Other modes always
+    # have NULL cutoff_date, so this filter does nothing for them.
+    if mode == "train_test":
+        if cutoff_date:
+            params.append(_date.fromisoformat(cutoff_date))
+            where.append(f"cutoff_date = ${idx}"); idx += 1
+        else:
+            where.append("cutoff_date IS NULL")
     if ticker:
         where.append(f"ticker = ${idx}"); params.append(ticker); idx += 1
     if metric:
@@ -1295,35 +1310,53 @@ async def get_score_matrix(
 
 @router.get("/score-matrix/meta")
 async def score_matrix_meta(pool=Depends(get_pool),
-                            mode: str = Query("in_sample")):
-    """Return distinct metrics, tickers, fwd_rets + summary stats for filter dropdowns."""
+                            mode: str = Query("in_sample"),
+                            cutoff_date: Optional[str] = Query(None)):
+    """Return distinct metrics, tickers, fwd_rets + summary stats for filter dropdowns.
+
+    For mode='train_test', the cutoff_date filter scopes everything to a
+    specific train-test cutoff. Other modes ignore cutoff_date (rows for
+    those modes always have NULL cutoff_date).
+    """
     from research.batch_score import ensure_table
     await ensure_table(pool)
 
+    # Build the shared mode + cutoff_date filter once. Used by every query
+    # below — keeps the train_test partitioning consistent across count,
+    # distinct lists, and aggregate stats.
+    where = "mode = $1"
+    p_args: list = [mode]
+    if mode == "train_test":
+        if cutoff_date:
+            p_args.append(_date.fromisoformat(cutoff_date))
+            where += " AND cutoff_date = $2"
+        else:
+            where += " AND cutoff_date IS NULL"
+
     async with pool.acquire() as conn:
         count = await conn.fetchval(
-            "SELECT COUNT(*) FROM oi_score_matrix WHERE mode = $1", mode)
+            f"SELECT COUNT(*) FROM oi_score_matrix WHERE {where}", *p_args)
         if count == 0:
             return {"count": 0, "tickers": [], "metrics": [], "fwd_rets": [],
                     "avg_score": 0, "gte50": 0, "gte70": 0, "last_run": None,
-                    "mode": mode}
+                    "mode": mode, "cutoff_date": cutoff_date}
 
         tickers = [r["ticker"] for r in await conn.fetch(
-            "SELECT DISTINCT ticker FROM oi_score_matrix WHERE mode = $1 ORDER BY ticker",
-            mode)]
+            f"SELECT DISTINCT ticker FROM oi_score_matrix WHERE {where} ORDER BY ticker",
+            *p_args)]
         metrics = [r["metric"] for r in await conn.fetch(
-            "SELECT DISTINCT metric FROM oi_score_matrix "
-            "WHERE mode = $1 AND metric NOT ILIKE 'spot%' ORDER BY metric", mode)]
+            f"SELECT DISTINCT metric FROM oi_score_matrix "
+            f"WHERE {where} AND metric NOT ILIKE 'spot%' ORDER BY metric", *p_args)]
         fwd_rets = [r["fwd_ret"] for r in await conn.fetch(
-            "SELECT DISTINCT fwd_ret FROM oi_score_matrix WHERE mode = $1 ORDER BY fwd_ret",
-            mode)]
-        stats = await conn.fetchrow("""
+            f"SELECT DISTINCT fwd_ret FROM oi_score_matrix WHERE {where} ORDER BY fwd_ret",
+            *p_args)]
+        stats = await conn.fetchrow(f"""
             SELECT AVG(composite_score) as avg_score,
                    COUNT(*) FILTER (WHERE composite_score >= 50) as gte50,
                    COUNT(*) FILTER (WHERE composite_score >= 70) as gte70,
                    MAX(scanned_at) as last_run
-            FROM oi_score_matrix WHERE mode = $1
-        """, mode)
+            FROM oi_score_matrix WHERE {where}
+        """, *p_args)
 
     # Defensive: an AVG over a column containing PostgreSQL NaN returns
     # NaN, which the JSON encoder rejects ("Out of range float values
@@ -1344,6 +1377,7 @@ async def score_matrix_meta(pool=Depends(get_pool),
         "gte70":     int(stats["gte70"] or 0),
         "last_run":  str(stats["last_run"])[:19] if stats["last_run"] else None,
         "mode":      mode,
+        "cutoff_date": cutoff_date,
     }
 
 
@@ -1354,17 +1388,31 @@ async def score_matrix_summary(
     fwd_ret: Optional[str] = None,
     ticker: Optional[str] = None,
     mode: str = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
 ):
-    """Aggregated score stats with optional cross-filtering."""
+    """Aggregated score stats with optional cross-filtering. For mode='train_test'
+    the cutoff_date filter scopes everything to that specific cutoff."""
     from research.batch_score import ensure_table
     await ensure_table(pool)
+
+    # Shared mode + (optional) cutoff_date filter. Used by every grouped
+    # aggregation below; we pre-build the SQL fragment and the param list
+    # so each query just appends its own extra filters.
+    base_w: list = ["mode = $1"]
+    base_p: list = [mode]
+    if mode == "train_test":
+        if cutoff_date:
+            base_p.append(_date.fromisoformat(cutoff_date))
+            base_w.append(f"cutoff_date = ${len(base_p)}")
+        else:
+            base_w.append("cutoff_date IS NULL")
 
     # All queries share a base mode filter.  Build WHERE clauses dynamically
     # so the positional param numbers stay consistent.
     async with pool.acquire() as conn:
         # By metric
-        bm_w = ["mode = $1", "metric NOT ILIKE 'spot%'"]
-        bm_p: list = [mode]
+        bm_w = list(base_w) + ["metric NOT ILIKE 'spot%'"]
+        bm_p: list = list(base_p)
         if fwd_ret:
             bm_p.append(fwd_ret); bm_w.append(f"fwd_ret = ${len(bm_p)}")
         by_metric = await conn.fetch(f"""
@@ -1377,8 +1425,8 @@ async def score_matrix_summary(
         """, *bm_p)
 
         # By fwd_ret
-        bf_w = ["mode = $1"]
-        bf_p: list = [mode]
+        bf_w = list(base_w)
+        bf_p: list = list(base_p)
         if metric:
             bf_p.append(metric); bf_w.append(f"metric = ${len(bf_p)}")
         by_fwd = await conn.fetch(f"""
@@ -1391,8 +1439,8 @@ async def score_matrix_summary(
         """, *bf_p)
 
         # By ticker
-        bt_w = ["mode = $1"]
-        bt_p: list = [mode]
+        bt_w = list(base_w)
+        bt_p: list = list(base_p)
         if metric:
             bt_p.append(metric); bt_w.append(f"metric = ${len(bt_p)}")
         if fwd_ret:
@@ -1407,8 +1455,8 @@ async def score_matrix_summary(
         """, *bt_p)
 
         # By fwd_ret scoped to a ticker
-        tf_w = ["mode = $1"]
-        tf_p: list = [mode]
+        tf_w = list(base_w)
+        tf_p: list = list(base_p)
         if ticker:
             tf_p.append(ticker); tf_w.append(f"ticker = ${len(tf_p)}")
         if metric:

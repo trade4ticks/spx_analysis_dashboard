@@ -1864,8 +1864,12 @@ document.addEventListener('alpine:init', () => {
     async smInit() {
       try {
         const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : this.pageMode === 'train_test' ? 'train_test' : 'in_sample';
+        // For train_test, the score matrix is partitioned by cutoff_date.
+        // Send the active cutoff so the right slice loads.
+        const cutoffQ = smMode === 'train_test'
+          ? `&cutoff_date=${encodeURIComponent(this.cutoffDate)}` : '';
         const [metaRes, statusRes] = await Promise.all([
-          fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode),
+          fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode + cutoffQ),
           fetch('/api/oi-analysis/batch-score-status'),
         ]);
         if (metaRes.ok) this.smMeta = await metaRes.json();
@@ -1893,6 +1897,8 @@ document.addEventListener('alpine:init', () => {
         min_score: this.smMinScore,
         mode: smMode,
       });
+      // For train_test, scope to the active cutoff_date.
+      if (smMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
       if (this.smFilterTicker) params.set('ticker', this.smFilterTicker);
       if (this.smFilterMetric) params.set('metric', this.smFilterMetric);
       if (this.smFilterFwd) params.set('fwd_ret', this.smFilterFwd);
@@ -1900,8 +1906,10 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await fetch('/api/oi-analysis/score-matrix?' + params);
         if (r.ok) this.smRows = await r.json();
-        // Refresh meta too
-        const m = await fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode);
+        // Refresh meta too (mirror the cutoff_date filter).
+        const metaParams = new URLSearchParams({ mode: smMode });
+        if (smMode === 'train_test') metaParams.set('cutoff_date', this.cutoffDate);
+        const m = await fetch('/api/oi-analysis/score-matrix/meta?' + metaParams);
         if (m.ok) this.smMeta = await m.json();
       } catch (_) {}
     },
@@ -1967,8 +1975,12 @@ document.addEventListener('alpine:init', () => {
       if (metric === undefined) metric = this.smSelectedMetric;
       if (fwdRet === undefined) fwdRet = this.smSelectedFwd;
       if (ticker === undefined) ticker = this.smSelectedTicker;
-      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
+      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward'
+                   : this.pageMode === 'train_test'   ? 'train_test'
+                   : 'in_sample';
       const params = new URLSearchParams({ mode: smMode });
+      // For train_test, scope to the active cutoff_date.
+      if (smMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
       if (metric) params.set('metric', metric);
       if (fwdRet) params.set('fwd_ret', fwdRet);
       if (ticker) params.set('ticker', ticker);
