@@ -18,22 +18,6 @@ _SEC_CACHE: dict = {}  # cache_key -> {rows, features, outcome}
 router = APIRouter(tags=["oi_analysis"])
 
 
-def _clean_pairs(rows, x_col, y_col):
-    """Extract (x, y, date) tuples, filtering None and NaN."""
-    out = []
-    for r in rows:
-        xv, yv = r.get(x_col), r.get(y_col)
-        if xv is None or yv is None:
-            continue
-        try:
-            xf, yf = float(xv), float(yv)
-        except (ValueError, TypeError):
-            continue
-        if math.isnan(xf) or math.isnan(yf):
-            continue
-        out.append((xf, yf, r.get("trade_date")))
-    return out
-
 
 def _bucket_pairs(pairs, n=10):
     """Sort by x, split into n equal-count buckets. Returns list of lists of (x, y, date)."""
@@ -2624,21 +2608,17 @@ async def secondary_corr_bins(req: CorrBinsReq):
         if r:
             results.append(r)
 
-    if spec.kind != "in_sample":
-        out = {
-            "metrics": results, "n_bins": n_bins,
-            "mode": spec.kind,
-            "dropped_warmup_n": dropped,
-            "universe_n":       universe,
-            "combined_n":       len(filtered),
-            "start_date":       filtered[0].get("trade_date", "") if filtered else "",
-        }
-        if spec.kind == "walk_forward":
-            out["warmup"] = spec.warmup
-        else:  # train_test
-            out["cutoff_date"] = spec.cutoff.isoformat()
-        return out
-    return {"metrics": results, "n_bins": n_bins, "mode": "in_sample"}
+    return {
+        "metrics":          results,
+        "n_bins":           n_bins,
+        "mode":             spec.kind,
+        "dropped_warmup_n": dropped,
+        "universe_n":       universe,
+        "combined_n":       len(filtered),
+        "start_date":       filtered[0].get("trade_date", "") if filtered else "",
+        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+    }
 
 
 class CorrReq(BaseModel):
