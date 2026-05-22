@@ -4457,6 +4457,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadIcBatch(refresh = false) {
+      // Hard guard: never run when section is collapsed unless explicitly
+      // refreshing via the ⟳ button. Prevents any accidental auto-load.
+      if (!this.icBatchExpanded && !refresh) return;
       if (!this.ticker || !this.outcome) return;
       this.icBatchLoading = true;
       this.icBatchError = null;
