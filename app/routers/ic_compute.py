@@ -154,6 +154,7 @@ def rolling_ic_single_ticker(
     metric: str,
     outcome: str,
     window: int = 252,
+    stride: int = 1,
 ) -> list[IcPoint]:
     """Rolling Spearman IC of (metric, outcome) over trailing `window` rows.
 
@@ -164,9 +165,17 @@ def rolling_ic_single_ticker(
 
     Degenerate windows (zero-variance metric or zero-variance outcome) are
     skipped — they would produce undefined Spearman.
+
+    `stride` controls how often a window is evaluated. stride=1 (default)
+    evaluates every position; stride=3 evaluates every 3rd, reducing
+    compute proportionally while leaving sign-stability counts accurate.
+    The /analyze rolling-IC chart uses stride=1 (full resolution);
+    /ic-batch uses stride=3 to stay under Cloudflare's 100s timeout.
     """
     if window < 2:
         raise ValueError(f"window must be ≥ 2, got {window}")
+    if stride < 1:
+        raise ValueError(f"stride must be ≥ 1, got {stride}")
 
     triples: list[tuple[Any, float, float]] = []
     for r in rows_chrono:
@@ -181,7 +190,7 @@ def rolling_ic_single_ticker(
         return []
 
     out: list[IcPoint] = []
-    for end in range(window, n + 1):
+    for end in range(window, n + 1, stride):
         win = triples[end - window:end]
         xs = np.fromiter((t[1] for t in win), dtype=np.float64, count=window)
         ys = np.fromiter((t[2] for t in win), dtype=np.float64, count=window)
@@ -200,6 +209,7 @@ def rolling_ic_cross_sectional(
     outcome: str,
     window: int = 252,
     min_tickers_per_day: int = 5,
+    stride: int = 1,
 ) -> list[IcPoint]:
     """Cross-sectional daily IC then trailing-mean over `window` days.
 
@@ -251,7 +261,7 @@ def rolling_ic_cross_sectional(
         return []
 
     out: list[IcPoint] = []
-    for end in range(window, n_days + 1):
+    for end in range(window, n_days + 1, stride):
         win = daily[end - window:end]
         ic_mean = float(np.mean([p[1] for p in win]))
         med_k = int(np.median([p[2] for p in win]))

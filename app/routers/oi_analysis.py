@@ -2852,6 +2852,7 @@ def _compute_ic_batch_sync(
     cutoff_date: Optional[str],
     is_all: bool,
     horizon: int,
+    stride: int = 1,
 ) -> list[dict]:
     """Per-metric IC computation. Pure-sync, no DB. Off-loaded via to_thread.
 
@@ -2875,7 +2876,7 @@ def _compute_ic_batch_sync(
 
         if is_all:
             series = rolling_ic_cross_sectional(
-                rows, metric, outcome, window=window,
+                rows, metric, outcome, window=window, stride=stride,
             )
             median_k = int(np.median([p.n for p in series])) if series else 0
             epsilon = noise_floor_epsilon(
@@ -2884,7 +2885,7 @@ def _compute_ic_batch_sync(
             )
         else:
             series = rolling_ic_single_ticker(
-                rows, metric, outcome, window=window,
+                rows, metric, outcome, window=window, stride=stride,
             )
             epsilon = noise_floor_epsilon(
                 "single_ticker", window=window, horizon=horizon,
@@ -2928,6 +2929,7 @@ async def ic_batch(
     window:      int  = Query(252, ge=20, le=1000),
     cutoff_date: Optional[str] = Query(None),
     refresh:     bool = Query(False),
+    stride:      int  = Query(3, ge=1, le=10),
     pool=Depends(get_oi_pool),
 ):
     """Per-metric long-run IC + sign-stability for all ~123 daily_features
@@ -2959,7 +2961,7 @@ async def ic_batch(
 
     is_all = (ticker.upper() == "ALL")
     mode_tag = f"tt:{cutoff_date}" if cutoff_date else "default"
-    cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}"
+    cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}:s{stride}"
 
     if not refresh:
         async with pool.acquire() as conn:
@@ -3020,7 +3022,7 @@ async def ic_batch(
     # calls, so other dashboard requests genuinely overlap with this work.
     results = await asyncio.to_thread(
         _compute_ic_batch_sync,
-        rows, feature_cols, outcome, window, cutoff_date, is_all, horizon,
+        rows, feature_cols, outcome, window, cutoff_date, is_all, horizon, stride,
     )
 
     # Persist to cache.
