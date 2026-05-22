@@ -1863,7 +1863,7 @@ document.addEventListener('alpine:init', () => {
 
     async smInit() {
       try {
-        const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
+        const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : this.pageMode === 'train_test' ? 'train_test' : 'in_sample';
         const [metaRes, statusRes] = await Promise.all([
           fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode),
           fetch('/api/oi-analysis/batch-score-status'),
@@ -1886,7 +1886,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadScoreMatrix() {
-      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : 'in_sample';
+      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : this.pageMode === 'train_test' ? 'train_test' : 'in_sample';
       const params = new URLSearchParams({
         sort_by: this.smSortKey === 'd10_d1_spread' ? 'composite_score' : this.smSortKey,
         order: this.smSortDir,
@@ -1931,7 +1931,10 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/oi-analysis/run-batch-score', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ walk_forward: this.pageMode === 'walk_forward' }),
+          body: JSON.stringify({
+            walk_forward: this.pageMode === 'walk_forward',
+            cutoff_date:  this.pageMode === 'train_test' ? this.cutoffDate : null,
+          }),
         });
         if (r.ok) {
           const data = await r.json();

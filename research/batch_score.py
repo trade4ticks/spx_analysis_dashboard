@@ -68,7 +68,7 @@ ON CONFLICT (ticker, metric, fwd_ret, mode) DO UPDATE SET
 """
 
 # Shared progress state for API polling
-_progress = {"running": False, "message": "", "last_run": None, "walk_forward": False}
+_progress = {"running": False, "message": "", "last_run": None, "walk_forward": False, "cutoff_date": None}
 
 
 def get_progress() -> dict:
@@ -143,12 +143,57 @@ def _wf_bin_matrix(rows_chrono: list, feature_list: list, n_bins: int = 10, warm
     return bin_mat, valid_cum, nan_mask
 
 
-async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False, log=print):
+def _tt_bin_matrix(rows_chrono: list, feature_list: list, cutoff_date_str: str, n_bins: int = 10):
+    """Compute train-test bin assignments for all features simultaneously.
+
+    Training rows (trade_date < cutoff) build per-feature sorted thresholds
+    via np.searchsorted. Test rows (trade_date >= cutoff) are assigned bins
+    against the frozen training distribution.
+
+    Returns (test_rows, bin_mat) where bin_mat is int32 (N_test, F), 1-indexed;
+    0 = insufficient training history for that feature or NaN value.
+    """
+    train_rows = [r for r in rows_chrono if r.get("trade_date", "") < cutoff_date_str]
+    test_rows  = [r for r in rows_chrono if r.get("trade_date", "") >= cutoff_date_str]
+
+    F      = len(feature_list)
+    N_test = len(test_rows)
+    bin_mat = np.zeros((N_test, F), dtype=np.int32)
+
+    for fi, feat in enumerate(feature_list):
+        train_vals = []
+        for r in train_rows:
+            v = _safe_float(r.get(feat))
+            if not math.isnan(v):
+                train_vals.append(v)
+        if len(train_vals) < n_bins:
+            continue  # leave column as 0 (insufficient training)
+        train_sorted = np.sort(np.array(train_vals, dtype=np.float64))
+        n_train = len(train_sorted)
+        for ti, r in enumerate(test_rows):
+            v = _safe_float(r.get(feat))
+            if math.isnan(v):
+                continue
+            rank = int(np.searchsorted(train_sorted, v, side="right"))
+            b = min(int(rank / n_train * n_bins), n_bins - 1) + 1  # 1-indexed
+            bin_mat[ti, fi] = b
+
+    return test_rows, bin_mat
+
+
+async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False,
+                          cutoff_date: str = "", log=print):
     """Run the full batch scan. oi_pool=open_interest DB, main_pool=spx_interpolated DB."""
     _progress["running"]      = True
     _progress["walk_forward"] = walk_forward
+    _progress["cutoff_date"]  = cutoff_date or None
     _progress["message"]      = "Starting…"
-    mode_label = "walk_forward" if walk_forward else "in_sample"
+    if cutoff_date:
+        mode_label = "train_test"
+    elif walk_forward:
+        mode_label = "walk_forward"
+    else:
+        mode_label = "in_sample"
 
     try:
         await ensure_table(main_pool)
@@ -208,7 +253,55 @@ async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False, log=pr
             avail = set(rows[0].keys())
             batch_params = []
 
-            if walk_forward:
+            if cutoff_date:
+                # ── Train-test mode ──────────────────────────────────────────
+                # Bins frozen from training rows (trade_date < cutoff); proxy
+                # rows built from test rows only.
+                avail_features = [f for f in features if f in avail]
+                if not avail_features:
+                    total_skipped += len(features) * len(outcomes)
+                    continue
+
+                test_rows, bin_mat = _tt_bin_matrix(rows, avail_features, cutoff_date, n_bins=10)
+
+                if len(test_rows) < 30:
+                    log(f"  Skipping {ticker} — only {len(test_rows)} test rows after cutoff")
+                    total_skipped += len(avail_features) * len(outcomes)
+                    continue
+
+                for fi, feature in enumerate(avail_features):
+                    for outcome in outcomes:
+                        if outcome not in avail or feature == outcome:
+                            continue
+                        proxy = []
+                        for ti, r in enumerate(test_rows):
+                            b = bin_mat[ti, fi]
+                            if b == 0:
+                                continue  # insufficient training history or NaN
+                            o = _safe_float(r.get(outcome))
+                            if math.isnan(o):
+                                continue
+                            proxy.append({
+                                feature:      float(b),
+                                outcome:      o,
+                                "trade_date": r.get("trade_date"),
+                            })
+                        if len(proxy) < 30:
+                            total_skipped += 1
+                            continue
+                        try:
+                            result = scanner.scan_relationship(proxy, feature, outcome, ticker)
+                        except Exception:
+                            total_skipped += 1
+                            continue
+                        if "error" in result or result.get("n", 0) < 30:
+                            total_skipped += 1
+                            continue
+                        _append_params(batch_params, ticker, feature, outcome,
+                                       mode_label, result)
+                        total_scored += 1
+
+            elif walk_forward:
                 # ── Walk-forward mode ────────────────────────────────────────
                 # Compute WF bins for all available features simultaneously
                 # using the numpy j-loop, then use bin numbers as proxy feature

@@ -1424,6 +1424,7 @@ async def score_matrix_summary(
 
 class BatchScoreReq(BaseModel):
     walk_forward: bool = False
+    cutoff_date: Optional[str] = None
 
 
 @router.post("/run-batch-score")
@@ -1432,7 +1433,7 @@ async def trigger_batch_score(
     pool=Depends(get_pool),
     oi_pool=Depends(get_oi_pool),
 ):
-    """Trigger a batch score run (in-sample or walk-forward) in the background."""
+    """Trigger a batch score run (in-sample, walk-forward, or train-test) in the background."""
     from research.batch_score import get_progress, run_batch_score
     import asyncio
 
@@ -1441,9 +1442,15 @@ async def trigger_batch_score(
         return {"status": "already_running", "message": progress["message"]}
 
     asyncio.get_event_loop().create_task(
-        run_batch_score(oi_pool, pool, walk_forward=req.walk_forward))
+        run_batch_score(oi_pool, pool, walk_forward=req.walk_forward,
+                        cutoff_date=req.cutoff_date or ""))
 
-    mode_label = "walk-forward" if req.walk_forward else "in-sample"
+    if req.cutoff_date:
+        mode_label = f"train-test (cutoff {req.cutoff_date})"
+    elif req.walk_forward:
+        mode_label = "walk-forward"
+    else:
+        mode_label = "in-sample"
     return {"status": "started", "message": f"Batch scoring ({mode_label}) started…"}
 
 
