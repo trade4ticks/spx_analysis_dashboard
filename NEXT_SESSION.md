@@ -100,6 +100,8 @@ Three modes:
 
 **Reference baseline** for in-sample/walk-forward bit-equivalence: `regression_snapshots/step3-baseline/` (captured against the VPS at commit `e866848`, post-Step-2 with all the bit-equivalence follow-ups). Every subsequent migration step (3, 4, 5, 5.5) was diffed against this and came back clean except for environmental drift (`cached_at` timestamps on `/global-metric-bins`, FP drift on `/secondary-load` lift values — both 2a-accepted).
 
+Step 7j (`cdaa6f6`) was also diffed against `step3-baseline` (snapshot tag `step7j`). 246 diffs, all explainable as: row-count drift from ~3 weeks of additional ingested `daily_features` rows (~190 diffs), pre-existing Step 7f `cutoff_date` envelope additions (~6), pre-existing Step 7h `mode_envelope` unification (~6), exit prices materializing on trades whose `exit_date` fell between baseline and Step 7j capture (~10), `cached_at` timestamps (2), heatmap edge labels shifting with newer data (~10), two new heatmap matrix variants from Step 5.5. No diff indicates Step 7j broke Assigner behavior — all numeric shifts are row-count-proportional, consistent with structural relocation.
+
 ## Operational
 
 **VPS**: at Tailscale `100.76.94.99:8000`, from `/spx_analysis_dashboard` via `python run.py`. SSH `root@100.76.94.99` works with key auth from the original machine. The dashboard uses asyncpg+FastAPI+uvicorn (`--reload` mode). uvicorn workers can OOM on the heavy `/analyze` ALL-mode responses (60MB+) and respawn — the regression harness handles this with retry-with-backoff.
