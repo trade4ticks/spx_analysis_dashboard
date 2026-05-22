@@ -1038,29 +1038,111 @@ document.addEventListener('alpine:init', () => {
       this.aiLoading = false;
     },
 
-    // ── Rolling correlation ────────────────────────────────────────────
+    // ── Rolling IC + sign-stability (IC.2) ─────────────────────────────
+    // Reads `data.rolling_ic.series`, colors each segment by sign_class
+    // (same=green, opposite=red, neutral=grey), draws the reference IC as
+    // a dashed horizontal line, and in train_test mode draws a vertical
+    // dashed marker at the cutoff date.
     _renderRollingCorr() {
       const el = document.getElementById('chart-rolling');
-      if (!el || !this.data?.rolling_corr?.length) return;
+      const payload = this.data?.rolling_ic;
+      if (!el || !payload?.series?.length) {
+        if (this._charts['rolling']) { this._charts['rolling'].destroy(); this._charts['rolling'] = null; }
+        return;
+      }
       if (this._charts['rolling']) this._charts['rolling'].destroy();
 
-      const rc = this.data.rolling_corr;
+      const series = payload.series;
+      const refIc  = Number(payload.reference_ic ?? 0);
+      const cutoff = payload.cutoff_date;  // ISO date string or null
+
+      const SIGN_COLORS = {
+        same:     'rgba(76, 175, 80, 0.95)',   // green
+        opposite: 'rgba(229, 57, 53, 0.95)',   // red
+        neutral:  'rgba(140, 140, 140, 0.55)', // dim grey
+      };
+
+      // Find cutoff index for vertical-line drawing in train_test mode.
+      let cutoffIdx = -1;
+      if (cutoff) {
+        for (let i = 0; i < series.length; i++) {
+          if (series[i].date >= cutoff) { cutoffIdx = i; break; }
+        }
+      }
+
+      // Custom plugin for the cutoff vertical line. Drawn on top of the
+      // datasets so it sits above the IC line.
+      const cutoffPlugin = {
+        id: 'icCutoffLine',
+        afterDatasetsDraw(chart) {
+          if (cutoffIdx < 0) return;
+          const xScale = chart.scales.x, yScale = chart.scales.y;
+          const xPx = xScale.getPixelForValue(cutoffIdx);
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255, 193, 7, 0.75)';
+          ctx.setLineDash([5, 4]);
+          ctx.lineWidth = 1.25;
+          ctx.beginPath();
+          ctx.moveTo(xPx, yScale.top);
+          ctx.lineTo(xPx, yScale.bottom);
+          ctx.stroke();
+          // Label
+          ctx.fillStyle = 'rgba(255, 193, 7, 0.95)';
+          ctx.font = '10px sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText(`cutoff ${cutoff}`, xPx + 4, yScale.top + 10);
+          ctx.restore();
+        },
+      };
+
       this._charts['rolling'] = new Chart(el, {
         type: 'line',
         data: {
-          labels: rc.map(r => r.date?.slice(0, 7)),
-          datasets: [{
-            label: 'Spearman ρ (252d)',
-            data: rc.map(r => r.spearman),
-            borderColor: '#3498db', backgroundColor: 'transparent',
-            borderWidth: 1.5, pointRadius: 0, tension: 0.2,
-          }],
+          labels: series.map(p => p.date?.slice(0, 7)),
+          datasets: [
+            // IC line with per-segment coloring.
+            {
+              label: `IC (252d)`,
+              data: series.map(p => p.ic),
+              borderColor: SIGN_COLORS.neutral, // default for any segment we can't classify
+              backgroundColor: 'transparent',
+              borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+              segment: {
+                // Chart.js segment hook: `ctx.p1DataIndex` is the right
+                // endpoint of the segment. Color by the destination
+                // point's sign_class.
+                borderColor: (ctx) => {
+                  const cls = series[ctx.p1DataIndex]?.sign_class;
+                  return SIGN_COLORS[cls] || SIGN_COLORS.neutral;
+                },
+              },
+            },
+            // Reference IC dashed horizontal line.
+            {
+              label: `Reference IC (${refIc.toFixed(3)})`,
+              data: series.map(() => refIc),
+              borderColor: 'rgba(255, 193, 7, 0.55)',
+              backgroundColor: 'transparent',
+              borderWidth: 1, borderDash: [6, 4],
+              pointRadius: 0, tension: 0,
+            },
+          ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { labels:{color:'#aaa',font:{size:10}} },
-            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
+            legend: { labels: { color:'#aaa', font:{ size:10 } } },
+            tooltip: {
+              backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1,
+              callbacks: {
+                afterLabel: (item) => {
+                  const p = series[item.dataIndex];
+                  if (!p) return '';
+                  return `class: ${p.sign_class}`;
+                },
+              },
+            },
           },
           scales: {
             ...this._darkScales(),
@@ -1069,7 +1151,27 @@ document.addEventListener('alpine:init', () => {
                   callback: v => v.toFixed(3) } },
           },
         },
+        plugins: [cutoffPlugin],
       });
+    },
+
+    // Human-readable summary string for the rolling-IC pane subtitle.
+    // Returns empty string when no data (subtitle hidden by the template).
+    rollingIcSubtitle() {
+      const p = this.data?.rolling_ic;
+      if (!p?.series?.length) return '';
+      const ss = p.sign_stability || {};
+      const refTxt = `ref ${(p.reference_ic ?? 0).toFixed(3)}`;
+      const epsTxt = `ε ${(p.epsilon ?? 0).toFixed(3)}`;
+      if (ss.suppressed) {
+        const reason = ss.suppression_reason === 'reference_below_noise'
+          ? 'reference below noise floor'
+          : (ss.suppression_reason || 'no decisive windows');
+        return `Stability: — (${reason}) · ${refTxt} · ${epsTxt}`;
+      }
+      const stab    = (ss.stability == null) ? '—' : `${(ss.stability * 100).toFixed(1)}%`;
+      const neutPct = ss.n_total ? (100 * ss.n_neutral / ss.n_total).toFixed(1) : '0.0';
+      return `Stability: ${stab} · ${neutPct}% neutral · ${refTxt} · ${epsTxt}`;
     },
 
     // ── Return distribution (histogram with background) ─────────────────

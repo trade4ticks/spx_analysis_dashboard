@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=84"></script>
+  <script src="/static/js/oi_analysis.js?v=85"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -581,11 +581,14 @@
             <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
           </div>
 
-          <!-- Rolling correlation (moved here) -->
+          <!-- Rolling Signal Strength = rolling IC + sign-stability (IC.2) -->
           <div class="chart-box">
-            <div class="chart-title">Rolling Signal Strength (252d Spearman)
+            <div class="chart-title">Rolling Signal Strength (252d Spearman IC)
               <button class="fs-btn" @click="openFullscreen('chart-rolling')" title="Fullscreen">⛶</button>
             </div>
+            <div x-text="rollingIcSubtitle()"
+                 x-show="data?.rolling_ic?.series?.length"
+                 style="font-size:10px;color:var(--dim);padding:0 6px 4px"></div>
             <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
           </div>
 

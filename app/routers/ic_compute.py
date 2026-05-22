@@ -51,10 +51,15 @@ class IcPoint:
     `n` is the window length (single-ticker mode) or the median cross-section
     size in the rolling window (cross-sectional mode). Surfaced to the UI so
     the noise floor can be displayed alongside the value.
+
+    `sign_class` is populated by `classified_rolling_ic` after the reference
+    IC and ε are known. One of "same", "opposite", "neutral", or None when
+    not yet classified. The rolling primitives leave it as None.
     """
     date: Any
     ic: float
     n: int
+    sign_class: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +256,47 @@ def rolling_ic_cross_sectional(
         ic_mean = float(np.mean([p[1] for p in win]))
         med_k = int(np.median([p[2] for p in win]))
         out.append(IcPoint(date=win[-1][0], ic=round(ic_mean, 6), n=med_k))
+    return out
+
+
+# ── Per-window classification ────────────────────────────────────────────
+
+def classified_rolling_ic(
+    rolling: list[IcPoint],
+    reference_ic: float,
+    epsilon: float,
+) -> list[IcPoint]:
+    """Return a new list of IcPoint with `sign_class` populated per window.
+
+    Classification rule — kept consistent with `sign_stability_from_rolling`:
+      - If |reference_ic| < epsilon (reference itself is noise), all windows
+        get `sign_class="neutral"`. This matches the suppression semantics:
+        when there is no meaningful reference sign, no window can be "stable"
+        against it. The frontend renders a uniformly-grey line in this case.
+      - Otherwise, classify per window:
+          |ic| < epsilon                   → "neutral"
+          sign(ic) == sign(reference_ic)   → "same"
+          else                              → "opposite"
+
+    This function is the single source of truth for sign_class. Endpoints
+    that need per-window labels MUST go through this — duplicating the
+    logic inline risks drift from `sign_stability_from_rolling`.
+    """
+    if abs(reference_ic) < epsilon:
+        return [
+            IcPoint(date=p.date, ic=p.ic, n=p.n, sign_class="neutral")
+            for p in rolling
+        ]
+    ref_positive = reference_ic > 0
+    out: list[IcPoint] = []
+    for p in rolling:
+        if abs(p.ic) < epsilon:
+            cls = "neutral"
+        elif (p.ic > 0) == ref_positive:
+            cls = "same"
+        else:
+            cls = "opposite"
+        out.append(IcPoint(date=p.date, ic=p.ic, n=p.n, sign_class=cls))
     return out
 
 

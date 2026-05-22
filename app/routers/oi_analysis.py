@@ -629,19 +629,75 @@ async def analyze(
     c_sample  = min(n / 1000, 0.5)
     composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
 
-    # ── Rolling correlation (252-day window; skipped in ALL mode) ─────────
-    rolling_corr = []
-    if not is_all:
-        sorted_by_date = sorted(pairs, key=lambda p: p[2])
-        rolling_window = 252
-        if len(sorted_by_date) > rolling_window:
-            for end in range(rolling_window, len(sorted_by_date)):
-                window = sorted_by_date[end - rolling_window:end]
-                wx = np.array([p[0] for p in window])
-                wy = np.array([p[1] for p in window])
-                if wx.std() > 0 and wy.std() > 0:
-                    rc, _ = sp_stats.spearmanr(wx, wy)
-                    rolling_corr.append({"date": str(window[-1][2]), "spearman": round(float(rc), 4)})
+    # ── Rolling IC + sign-stability (Step IC.2) ───────────────────────────
+    # Routes through `ic_compute` primitives. The rolling-IC series is always
+    # FULL HISTORY (mode-independent), built from the raw `row_dicts` for the
+    # ticker — not from `pairs`, which is mode-filtered (walk_forward drops
+    # warmup rows, train_test drops pre_cutoff rows). Only the *reference IC*
+    # used for sign-classification depends on mode:
+    #   in_sample / walk_forward → reference = mean of all windows
+    #   train_test               → reference = mean of pre-cutoff windows
+    # ALL mode emits an empty payload; cross-sectional rolling IC arrives in
+    # Step IC.3.
+    from app.routers.ic_compute import (
+        rolling_ic_single_ticker, classified_rolling_ic,
+        sign_stability_from_rolling, noise_floor_epsilon,
+        _horizon_from_outcome,
+    )
+
+    _IC_WINDOW = 252
+    rolling_ic_payload: Optional[dict] = None
+    if not is_all and row_dicts:
+        # row_dicts is chronologically ordered by SQL ORDER BY trade_date;
+        # SQL also filters non-null metric/outcome — so every row is a valid
+        # (date, metric, outcome) triple. No mode filtering applied here.
+        ic_series = rolling_ic_single_ticker(
+            row_dicts, metric, outcome, window=_IC_WINDOW,
+        )
+
+        horizon = _horizon_from_outcome(outcome)
+        epsilon = noise_floor_epsilon("single_ticker",
+                                      window=_IC_WINDOW, horizon=horizon)
+
+        # Mode-aware reference. In train_test mode, scope to windows whose
+        # end-date precedes the cutoff (the "did the training-era edge hold
+        # out-of-sample" question). Otherwise use the full-history mean.
+        if spec.kind == "train_test":
+            cutoff_s = spec.cutoff.isoformat()
+            pre_cutoff_ics = [p.ic for p in ic_series if str(p.date) < cutoff_s]
+            reference_ic = float(np.mean(pre_cutoff_ics)) if pre_cutoff_ics else 0.0
+        elif ic_series:
+            reference_ic = float(np.mean([p.ic for p in ic_series]))
+        else:
+            reference_ic = 0.0
+
+        classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
+        stability = sign_stability_from_rolling(ic_series, reference_ic, epsilon)
+
+        rolling_ic_payload = {
+            "series": [
+                {"date": str(p.date), "ic": p.ic, "n": p.n,
+                 "sign_class": p.sign_class}
+                for p in classified
+            ],
+            "reference_ic":  round(reference_ic, 6),
+            "epsilon":       round(epsilon, 6),
+            "window":        _IC_WINDOW,
+            "horizon":       horizon,
+            "mode":          spec.kind,
+            "cutoff_date":   (spec.cutoff.isoformat()
+                              if spec.kind == "train_test" else None),
+            "sign_stability": {
+                "stability": (round(stability.stability, 4)
+                              if stability.stability is not None else None),
+                "n_same":     stability.n_same,
+                "n_opposite": stability.n_opposite,
+                "n_neutral":  stability.n_neutral,
+                "n_total":    stability.n_total,
+                "suppressed": stability.suppressed,
+                "suppression_reason": stability.suppression_reason,
+            },
+        }
 
     # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
     spot_by_date = {s["date"]: s["value"] for s in spot_series} if spot_series else {}
@@ -739,7 +795,7 @@ async def analyze(
         # Time series
         "yearly":             yearly,
         "yearly_consistency": yearly_consistency,
-        "rolling_corr":       rolling_corr,
+        "rolling_ic":         rolling_ic_payload,
         "trade_calendar":     trade_calendar,
         "dow_data":           dow_data,
         "spot_series":        spot_series,
