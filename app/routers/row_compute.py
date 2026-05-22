@@ -47,10 +47,14 @@ paths.
 
 from __future__ import annotations
 
+import bisect
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date as _date
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
+
+import numpy as np
 
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -255,7 +259,6 @@ class InSampleAssigner:
         in-sample batch helper. Returns (metrics, None, None) since
         in-sample has no warmup concept.
         """
-        from app.routers.oi_analysis import _compute_all_bins_fast
         metrics = _compute_all_bins_fast(rows, feature_cols, outcome_col, n_bins, is_all)
         return metrics, None, None
 
@@ -327,16 +330,12 @@ class WalkForwardAssigner:
         numpy-vectorized walk-forward batch helper. Returns
         (metrics, dropped_warmup_n, start_date).
         """
-        from app.routers.oi_analysis import _compute_all_bins_walk_forward
         metrics, dropped, start_date = _compute_all_bins_walk_forward(
             rows, feature_cols, outcome_col, n_bins, is_all, warmup=self.spec.warmup,
         )
         return metrics, dropped, start_date
 
     def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
-        from app.routers.oi_analysis import (
-            _walk_forward_bucket_pairs, _walk_forward_bucket_per_ticker,
-        )
         valid_pairs, dropped = _parse_rows(rows, metric, outcome_col, n_bins)
         warm = self.spec.warmup
 
@@ -415,7 +414,6 @@ class TrainTestAssigner:
         100-second upstream timeout. The vectorized version uses
         `np.searchsorted` per (ticker, feature) and is roughly 80x faster.
         """
-        from app.routers.oi_analysis import _compute_all_bins_train_test_fast
         return _compute_all_bins_train_test_fast(
             rows, feature_cols, outcome_col, n_bins, is_all,
             self.spec.cutoff.isoformat(),
@@ -464,7 +462,6 @@ class TrainTestAssigner:
                                                        bin=None, dropped_reason="missing_value"
           - row whose ticker had <n_bins training samples: bin=None, dropped_reason="insufficient_train_history"
         """
-        from app.routers.oi_analysis import _bin_for_value
         train_history = state or {}
         cutoff_s = self.spec.cutoff.isoformat()
         need_outcome = outcome_col is not None
@@ -659,10 +656,7 @@ def filter_by_assignments(
 
       train_test: (Step 6) frozen training-set bins.
     """
-    from app.routers.oi_analysis import (
-        _walk_forward_primary_filter, _filter_by_tkr_date, _parse_tkr_date_set,
-        _sort_chrono,
-    )
+    from app.routers.oi_analysis import _filter_by_tkr_date, _parse_tkr_date_set
     if spec.kind == "in_sample":
         filtered = _filter_by_tkr_date(rows, _parse_tkr_date_set(filtered_dates or []))
         return filtered, 0, len(rows)
@@ -728,9 +722,6 @@ def assign_secondary_bin_stats(
         pre-cutoff training data); aggregation uses `rows_chrono`
         (test-window-only rows from filter_by_assignments).
     """
-    from app.routers.oi_analysis import (
-        _compute_bins_for_metric, _compute_walk_forward_bin_stats,
-    )
     if spec.kind == "in_sample":
         return _compute_bins_for_metric(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "walk_forward":
@@ -847,7 +838,6 @@ def assign_secondary_buckets(
         return buckets
 
     if spec.kind == "walk_forward":
-        from app.routers.oi_analysis import _walk_forward_bins, _sort_chrono
         # Macro warmup already enforced by the primary filter; use a tiny
         # inner warmup so even small subsets can produce bin assignments.
         # Legacy WF branch did not impose a second "len < n_bins*2" check
@@ -917,8 +907,6 @@ def secondary_membership(
       train_test: bins fit on `all_rows`; membership vector over
         `rows_chrono` (test-window rows only).
     """
-    from app.routers.oi_analysis import _bin_membership, _walk_forward_membership
-    import numpy as np
     sel = set(selected_bins or [])
     if spec.kind == "in_sample":
         return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
@@ -995,16 +983,13 @@ class PortfolioVectorBuilder:
         """
         sel = set(selected_bins or [])
         if self.spec.kind == "in_sample":
-            from app.routers.oi_analysis import _bin_membership
             subset = [self.rows[i] for i in primary_indices]
             v_sub = _bin_membership(subset, metric, sel, n_bins, self.is_all)
-            import numpy as np
             v_full = np.zeros(len(self.rows))
             for sub_idx, orig_idx in enumerate(primary_indices):
                 v_full[orig_idx] = v_sub[sub_idx]
             return v_full
         v_full = self._full_vector(metric, selected_bins, n_bins)
-        import numpy as np
         prim_mask = np.zeros(len(self.rows))
         for i in primary_indices:
             prim_mask[i] = 1.0
@@ -1029,7 +1014,6 @@ class PortfolioVectorBuilder:
     def _full_vector(self, metric: str, selected_bins, n_bins: int):
         """0/1 vector over self.rows by spec.kind."""
         sel = set(selected_bins or [])
-        import numpy as np
         if self.spec.kind == "walk_forward" or self.spec.kind == "train_test":
             bmap = self._bin_map(metric, n_bins)
             v = np.zeros(len(self.rows))
@@ -1038,7 +1022,6 @@ class PortfolioVectorBuilder:
                     v[i] = 1.0
             return v
         if self.spec.kind == "in_sample":
-            from app.routers.oi_analysis import _bin_membership
             return _bin_membership(self.rows, metric, sel, n_bins, self.is_all)
         raise ValueError(f"unknown spec kind: {self.spec.kind!r}")
 
@@ -1055,7 +1038,6 @@ class PortfolioVectorBuilder:
         key = (metric, n_bins)
         if key not in self._cache:
             if self.spec.kind == "walk_forward":
-                from app.routers.oi_analysis import _walk_forward_bins
                 self._cache[key] = _walk_forward_bins(
                     self.rows, metric, n_bins, self.is_all, self.spec.warmup,
                 )
@@ -1117,3 +1099,694 @@ def _validate_assignments(assignments: list[RowAssignment], n_bins: int) -> None
                 f"Index-convention drift — every Assigner must emit "
                 f"1-indexed bins at the contract boundary."
             )
+
+
+# ── Relocated helpers (Step 7j) ──────────────────────────────────────────
+# These were previously defined in oi_analysis.py and called only by the
+# Assigner classes / dispatch helpers above. Moving them here keeps all
+# binning math in one module. (`_bucket_pairs`, `_bucket_pairs_per_ticker`,
+# and `_walk_forward_thresholds` remain in oi_analysis.py because they're
+# called from view-specific code in /analyze and /threshold-drift.)
+
+
+def _walk_forward_bucket_pairs(pairs, n_bins_list, warmup):
+    """Walk-forward equivalent of `_bucket_pairs` (single-ticker) for one or
+    more bin counts simultaneously.
+
+    Each pair is (x, y, date[, ticker]). Pairs MUST be in chronological order
+    at the call site (we don't re-sort here — for ALL mode the caller iterates
+    per-ticker chronologically).
+
+    For each pair, the running per-history rank is computed via bisect_left
+    against a sorted list of prior x values. After the per-history count
+    reaches `max(warmup, max(n_bins_list))`, the bin is emitted as
+    `min(int(rank / n_after * n_bins) + 1, n_bins)`. Pairs in warmup are
+    skipped.
+
+    Returns:
+      assignments: list of (pair, {n_bins: bin_int}) for pairs that cleared
+                   warmup, in the chronological order they were provided.
+      dropped_warmup_n: count of pairs that didn't clear warmup.
+    """
+    max_bins = max(n_bins_list)
+    warm = max(int(warmup), int(max_bins))
+    assignments: list = []
+    dropped = 0
+    sorted_vals: list = []
+    for pair in pairs:
+        val = pair[0]
+        rank = bisect.bisect_left(sorted_vals, val)
+        bisect.insort(sorted_vals, val)
+        n_after = len(sorted_vals)
+        if n_after < warm:
+            dropped += 1
+            continue
+        bins_for_pair = {nb: min(int(rank / n_after * nb) + 1, nb) for nb in n_bins_list}
+        assignments.append((pair, bins_for_pair))
+    return assignments, dropped
+
+
+def _walk_forward_bucket_per_ticker(by_ticker, n_bins_list,
+                                    warmup=None) -> tuple:
+    """Walk-forward equivalent of `_bucket_pairs_per_ticker`.
+
+    For each ticker, walks the pairs chronologically (sorted by trade_date)
+    and emits walk-forward bin assignments at every requested granularity in
+    a single bisect_left pass. Pairs whose per-ticker history hasn't reached
+    `max(warmup, max(n_bins_list))` are dropped.
+
+    Returns:
+      buckets_per_granularity: dict {n_bins: list of n_bins buckets, each a
+                                     list of pair tuples assigned to that bin}
+      assignments_chrono: list of (pair, {n_bins: bin_int}) sorted
+                          chronologically across all tickers — convenient for
+                          building `pairs_with_d`-style structures downstream.
+      dropped_warmup_n: total count of pairs dropped to warmup (across all
+                        tickers).
+    """
+    if warmup is None:
+        warmup = DEFAULT_WALKFWD_WARMUP
+    buckets_by_n: dict = {nb: [[] for _ in range(nb)] for nb in n_bins_list}
+    all_assignments: list = []
+    dropped = 0
+    for tkr_pairs in by_ticker.values():
+        chrono = sorted(tkr_pairs, key=lambda p: p[2])
+        a_t, d_t = _walk_forward_bucket_pairs(chrono, n_bins_list, warmup)
+        dropped += d_t
+        all_assignments.extend(a_t)
+        for pair, bins_for_pair in a_t:
+            for nb, b in bins_for_pair.items():
+                buckets_by_n[nb][b - 1].append(pair)
+    all_assignments.sort(key=lambda ab: ab[0][2])
+    return buckets_by_n, all_assignments, dropped
+
+
+def _bin_membership(ordered: list, metric: str, selected_bins: set,
+                    n_bins: int, is_all: bool) -> np.ndarray:
+    """Binary 0/1 vector across `ordered` rows: 1 where metric's bin is in selected_bins.
+
+    ALL mode applies per-ticker rank normalization (each ticker ranked
+    independently then pooled), matching the OI Analysis primary chart and
+    the secondary correlation explorer. Single-ticker mode uses a flat rank.
+    Tickers (ALL mode) with fewer than n_bins observations are excluded —
+    their rows stay 0.
+    """
+    n_rows = len(ordered)
+    assignments: list = [None] * n_rows
+    n_bins = max(2, min(20, n_bins))
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for idx, r in enumerate(ordered):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    by_tkr[r.get("ticker", "_")].append((fv, idx))
+            except (TypeError, ValueError):
+                pass
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, orig_idx) in enumerate(sorted_t):
+                assignments[orig_idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    else:
+        pairs = []
+        for idx, r in enumerate(ordered):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if not math.isnan(fv):
+                    pairs.append((fv, idx))
+            except (TypeError, ValueError):
+                pass
+        sorted_p = sorted(pairs, key=lambda x: x[0])
+        n_t = len(sorted_p)
+        for rank, (_, idx) in enumerate(sorted_p):
+            assignments[idx] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    return np.array([1.0 if assignments[i] in selected_bins else 0.0
+                     for i in range(n_rows)])
+
+
+def _bin_for_value(value, history_values: list, n_bins: int):
+    """Return the 1..n_bins bin that `value` would occupy in `history_values`.
+
+    Mirrors _bin_membership's ranking math: bin = min(int(rank / n * n_bins) + 1, n_bins)
+    where rank is the position in the sorted ascending list (number of
+    values strictly less than `value`).
+
+    Returns None if value is None/NaN or history is too short (< n_bins).
+    """
+    if value is None:
+        return None
+    try:
+        v = float(value)
+        if math.isnan(v):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not history_values or len(history_values) < n_bins:
+        return None
+    rank = bisect.bisect_left(history_values, v)
+    n = len(history_values)
+    return min(int(rank / n * n_bins) + 1, n_bins)
+
+
+def _walk_forward_bins(rows_chrono: list, metric: str, n_bins: int,
+                       is_all: bool, warmup: int = DEFAULT_WALKFWD_WARMUP) -> dict:
+    """Walk-forward bin assignment per row.
+
+    Returns {row_index_in_input: bin_or_None}. For each row, the bin is
+    computed using only data from prior dates AT THAT ROW'S TICKER
+    (ALL mode) or all prior rows (single ticker). Rows whose group has
+    < max(warmup, n_bins) prior observations get None and should be
+    excluded from any downstream stats.
+
+    Implementation: per group, iterate chronologically and maintain a
+    sorted insertion list of prior metric values. For each new value,
+    bisect_left gives the count strictly less than it (= its rank in
+    [0, n_so_far)). After inserting, compute
+    `min(int(rank / n_after_insert * n_bins) + 1, n_bins)` so the bin
+    formula matches the in-sample _bin_membership exactly.
+
+    Time complexity: O(N log N) per group (bisect_left is log; list
+    insertion is O(N), but Python's list.insert is implemented in C so
+    constants are small enough for our data sizes).
+    """
+    out: dict = {}
+    n_bins = max(2, min(20, int(n_bins)))
+    warm = max(int(warmup), n_bins)
+
+    if is_all:
+        groups: dict = {}
+        for i, r in enumerate(rows_chrono):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if math.isnan(fv):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            tkr = r.get("ticker", "_")
+            groups.setdefault(tkr, []).append((i, fv))
+    else:
+        flat = []
+        for i, r in enumerate(rows_chrono):
+            v = r.get(metric)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if math.isnan(fv):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            flat.append((i, fv))
+        groups = {"_": flat}
+
+    for _tkr, items in groups.items():
+        sorted_vals: list = []
+        for orig_idx, value in items:
+            rank = bisect.bisect_left(sorted_vals, value)
+            bisect.insort(sorted_vals, value)
+            n_after = len(sorted_vals)
+            if n_after < warm:
+                out[orig_idx] = None
+            else:
+                out[orig_idx] = min(int(rank / n_after * n_bins) + 1, n_bins)
+    return out
+
+
+def _compute_bins_for_metric(filtered: list, feat: str, outcome_col: str,
+                              n_bins: int, is_all: bool) -> dict | None:
+    """Return per-bin avg_ret (and n) for one feature over a filtered row set."""
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for r in filtered:
+            v, o = r.get(feat), r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    by_tkr[r.get("ticker", "_")].append((fv, fo))
+            except (TypeError, ValueError):
+                pass
+        norm_vals = []
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, y) in enumerate(sorted_t):
+                norm_vals.append((rank / n_t, y))
+    else:
+        norm_vals = []
+        for r in filtered:
+            v, o = r.get(feat), r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv, fo = float(v), float(o)
+                if not (math.isnan(fv) or math.isnan(fo)):
+                    norm_vals.append((fv, fo))
+            except (TypeError, ValueError):
+                pass
+
+    if len(norm_vals) < n_bins * 2:
+        return None
+
+    sorted_vals = sorted(norm_vals, key=lambda x: x[0])
+    n = len(sorted_vals)
+    buckets: list = [[] for _ in range(n_bins)]
+    for i, (_, y) in enumerate(sorted_vals):
+        b = min(int(i / n * n_bins), n_bins - 1)
+        buckets[b].append(y)
+
+    return {
+        "name":    feat,
+        "bins":    [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+        "bin_ns":  [len(b) for b in buckets],
+    }
+
+
+def _sort_chrono(rows: list) -> list:
+    """Stable chronological sort by (trade_date, ticker)."""
+    return sorted(rows, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
+
+
+def _walk_forward_primary_filter(rows: list, primary_metric: str,
+                                  selected_primary_bins: set,
+                                  is_all: bool) -> tuple:
+    """Walk-forward equivalent of `_filter_by_tkr_date` for the corr-explorer.
+
+    Sorts `rows` chronologically, computes walk-forward bins for
+    `primary_metric` (20-bin universe, matching the OI Analysis primary
+    chart), then keeps rows whose walk-forward bin is in
+    `selected_primary_bins`. Rows in warmup (bin=None) are excluded.
+
+    Returns (filtered_chrono_rows, dropped_warmup_n, universe_n).
+      filtered_chrono_rows — rows matching selected_primary_bins
+      dropped_warmup_n     — rows excluded because their primary wf bin
+                             is None (warmup not yet satisfied, or
+                             missing primary metric value)
+      universe_n           — total rows with a defined wf primary bin
+                             (= len(rows) - dropped_warmup_n). Useful so
+                             the UI can show the post-warmup universe
+                             separate from the primary-filtered subset.
+    """
+    ordered = _sort_chrono(rows)
+    wf = _walk_forward_bins(ordered, primary_metric, 20, is_all)
+    kept: list = []
+    dropped = 0
+    universe = 0
+    sel = set(int(b) for b in (selected_primary_bins or []))
+    for i, r in enumerate(ordered):
+        b = wf.get(i)
+        if b is None:
+            dropped += 1
+            continue
+        universe += 1
+        if sel and b not in sel:
+            continue
+        kept.append(r)
+    return kept, dropped, universe
+
+
+def _compute_walk_forward_bin_stats(rows_chrono: list, feat: str, outcome_col: str,
+                                    n_bins: int, is_all: bool) -> dict | None:
+    """Walk-forward equivalent of `_compute_bins_for_metric` for one feature.
+
+    Within the (already walk-forward-primary-filtered) chronological row
+    set, compute walk-forward bins for `feat` and aggregate per-bin avg
+    outcome. Uses a small warmup (= n_bins) inside the subset since the
+    primary filter has already enforced the macro warmup gate.
+    """
+    n_bins = max(2, min(20, int(n_bins)))
+    wf = _walk_forward_bins(rows_chrono, feat, n_bins, is_all, warmup=n_bins)
+    buckets: list = [[] for _ in range(n_bins)]
+    for i, r in enumerate(rows_chrono):
+        b = wf.get(i)
+        if b is None:
+            continue
+        o = r.get(outcome_col)
+        if o is None:
+            continue
+        try:
+            ov = float(o)
+            if math.isnan(ov):
+                continue
+        except (TypeError, ValueError):
+            continue
+        buckets[b - 1].append(ov)
+    if all(len(bk) == 0 for bk in buckets):
+        return None
+    return {
+        "name":   feat,
+        "bins":   [round(float(np.mean(bk)), 6) if bk else 0.0 for bk in buckets],
+        "bin_ns": [len(bk) for bk in buckets],
+    }
+
+
+def _walk_forward_membership(rows_chrono: list, metric: str, selected_bins: set,
+                              n_bins: int, is_all: bool) -> np.ndarray:
+    """Walk-forward equivalent of `_bin_membership`.
+
+    Computes walk-forward bins for `metric` over the already-filtered
+    chronological row set, returning a 0/1 vector where 1 = the row's
+    walk-forward bin is in `selected_bins`. Warmup rows (bin=None) stay
+    0. Uses a small warmup (= n_bins) since the primary filter has
+    already enforced the macro warmup gate.
+    """
+    n_rows = len(rows_chrono)
+    out = np.zeros(n_rows, dtype=np.float64)
+    if not selected_bins:
+        return out
+    wf = _walk_forward_bins(rows_chrono, metric, n_bins, is_all, warmup=n_bins)
+    for i in range(n_rows):
+        b = wf.get(i)
+        if b is not None and b in selected_bins:
+            out[i] = 1.0
+    return out
+
+
+def _compute_all_bins_fast(rows: list, feature_cols: list, outcome_col: str,
+                           n_bins: int, is_all: bool) -> list:
+    """Numpy-vectorized batch bin computation for many features at once.
+
+    Replaces the per-metric Python loop in `_compute_bins_for_metric` with
+    a single-pass NaN-aware numpy pipeline. ~10x faster on >100k-row
+    daily_features fetches with 80+ feature columns — keeps the All-Ticker
+    Metric Bins endpoint under Cloudflare's ~100s upstream timeout.
+    """
+    n = len(rows)
+    if n < n_bins * 2 or not feature_cols:
+        return []
+
+    tickers_str = np.array([r.get("ticker", "_") for r in rows], dtype=object)
+    unique_tkrs, ticker_id = np.unique(tickers_str, return_inverse=True)
+    n_tkrs = len(unique_tkrs)
+    ticker_indices = [np.where(ticker_id == t)[0] for t in range(n_tkrs)]
+
+    def _to_float_arr(seq):
+        arr = np.empty(len(seq), dtype=np.float64)
+        for i, v in enumerate(seq):
+            if v is None:
+                arr[i] = np.nan
+                continue
+            try:
+                fv = float(v)
+                arr[i] = fv if not math.isnan(fv) else np.nan
+            except (TypeError, ValueError):
+                arr[i] = np.nan
+        return arr
+
+    outcomes = _to_float_arr([r.get(outcome_col) for r in rows])
+
+    results = []
+    for feat in feature_cols:
+        col = _to_float_arr([r.get(feat) for r in rows])
+
+        all_ranks: list = []
+        all_outs:  list = []
+        if is_all:
+            for idxs in ticker_indices:
+                vals = col[idxs]
+                outs = outcomes[idxs]
+                m = ~np.isnan(vals) & ~np.isnan(outs)
+                if m.sum() < n_bins:
+                    continue
+                v_clean = vals[m]
+                o_clean = outs[m]
+                order = np.argsort(v_clean)
+                n_t = len(v_clean)
+                all_ranks.append(np.arange(n_t) / n_t)
+                all_outs.append(o_clean[order])
+        else:
+            m = ~np.isnan(col) & ~np.isnan(outcomes)
+            if m.sum() < n_bins:
+                continue
+            v_clean = col[m]
+            o_clean = outcomes[m]
+            order = np.argsort(v_clean)
+            n_t = len(v_clean)
+            all_ranks.append(np.arange(n_t) / n_t)
+            all_outs.append(o_clean[order])
+
+        if not all_ranks:
+            continue
+        ranks_flat = np.concatenate(all_ranks)
+        outs_flat  = np.concatenate(all_outs)
+        if len(ranks_flat) < n_bins * 2:
+            continue
+
+        order2 = np.argsort(ranks_flat)
+        outs_flat = outs_flat[order2]
+        n2 = len(ranks_flat)
+        bin_idx = np.minimum((np.arange(n2) / n2 * n_bins).astype(int), n_bins - 1)
+
+        bins_avg = np.zeros(n_bins)
+        bins_n   = np.zeros(n_bins, dtype=int)
+        for b in range(n_bins):
+            mm = bin_idx == b
+            bins_n[b] = int(mm.sum())
+            if bins_n[b] > 0:
+                bins_avg[b] = float(outs_flat[mm].mean())
+
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(v), 6) for v in bins_avg],
+            "bin_ns": [int(v) for v in bins_n],
+        })
+
+    return results
+
+
+def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
+                                   outcome_col: str, n_bins: int, is_all: bool,
+                                   warmup: int = DEFAULT_WALKFWD_WARMUP) -> tuple:
+    """Walk-forward batch bin computation for global-metric-bins.
+
+    Per-ticker j-loop: for each row j, adds 1 to wf_rank[i, f] for all i > j
+    where X[i, f] > X[j, f]. This is equivalent to bisect_left rank counting
+    but operates on a (N-j, F) slice per step instead of one (N, N) matrix.
+    Peak memory: 2 × (N, F) arrays per ticker (~1.6 MB for N=1 300, F=80).
+
+    Returns:
+        (results, dropped_warmup_n, start_date)
+        results: list of {"name", "bins", "bin_ns"} — same format as
+                 _compute_all_bins_fast.
+        dropped_warmup_n: rows excluded to warmup (outcome-column level).
+        start_date: earliest trade_date string that cleared warmup (or None).
+    """
+    n_bins = max(2, min(20, n_bins))
+    warm   = max(int(warmup), n_bins)
+    F      = len(feature_cols)
+
+    def _to_f64(seq):
+        a = np.empty(len(seq), dtype=np.float64)
+        for i, v in enumerate(seq):
+            if v is None:
+                a[i] = np.nan; continue
+            try:
+                fv = float(v)
+                a[i] = fv if not math.isnan(fv) else np.nan
+            except (TypeError, ValueError):
+                a[i] = np.nan
+        return a
+
+    by_ticker: dict = {}
+    for r in rows:
+        tkr = r.get("ticker", "_") if is_all else "_"
+        by_ticker.setdefault(tkr, []).append(r)
+    for tkr in by_ticker:
+        by_ticker[tkr].sort(key=lambda r: r.get("trade_date", ""))
+
+    feat_bins: list = [[[] for _ in range(n_bins)] for _ in range(F)]
+    dropped_total = 0
+    start_date    = None
+
+    for tkr, tkr_rows in by_ticker.items():
+        N = len(tkr_rows)
+
+        outcomes = _to_f64([r.get(outcome_col) for r in tkr_rows])
+        X = np.empty((N, F), dtype=np.float64)
+        for f_idx, feat in enumerate(feature_cols):
+            X[:, f_idx] = _to_f64([r.get(feat) for r in tkr_rows])
+
+        outcome_valid = ~np.isnan(outcomes)
+
+        n_valid_outcome = int(outcome_valid.sum())
+        dropped_total += min(warm, n_valid_outcome)
+        if n_valid_outcome > warm:
+            first_past = int(np.where(outcome_valid)[0][warm])
+            d = tkr_rows[first_past].get("trade_date")
+            if d is not None:
+                ds = str(d)
+                if start_date is None or ds < start_date:
+                    start_date = ds
+
+        # wf_rank[i, f] = #{j < i : X[j, f] < X[i, f]}
+        # NaN comparisons return False so NaN rows auto-contribute 0.
+        wf_rank = np.zeros((N, F), dtype=np.int32)
+        for j in range(N - 1):
+            wf_rank[j + 1:] += X[j + 1:] > X[j]
+
+        nan_mask    = np.isnan(X)
+        valid_cum   = np.cumsum(~nan_mask, axis=0, dtype=np.int32)
+        safe_n      = np.where(valid_cum > 0, valid_cum, 1).astype(np.float64)
+        bin_mat     = np.minimum(
+            (wf_rank.astype(np.float64) / safe_n * n_bins).astype(np.int32),
+            n_bins - 1,
+        )
+
+        past_warm_mat = (~nan_mask) & (valid_cum >= warm)
+        use_mask      = past_warm_mat & outcome_valid[:, np.newaxis]
+
+        for f_idx in range(F):
+            col_mask = use_mask[:, f_idx]
+            if not col_mask.any():
+                continue
+            o_sel = outcomes[col_mask]
+            b_sel = bin_mat[col_mask, f_idx]
+            for b in range(n_bins):
+                hits = o_sel[b_sel == b]
+                if hits.size:
+                    feat_bins[f_idx][b].extend(hits.tolist())
+
+    results = []
+    for f_idx, feat in enumerate(feature_cols):
+        total = sum(len(b) for b in feat_bins[f_idx])
+        if total < n_bins * 2:
+            continue
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                       for b in feat_bins[f_idx]],
+            "bin_ns": [len(b) for b in feat_bins[f_idx]],
+        })
+
+    return results, dropped_total, start_date
+
+
+def _compute_all_bins_train_test_fast(
+    rows: list, feature_cols: list, outcome_col: str,
+    n_bins: int, is_all: bool, cutoff_date: str,
+) -> tuple:
+    """Numpy-vectorized batch bin computation for train-test mode.
+
+    Mirrors `_compute_all_bins_walk_forward` in shape but partitions
+    rows by `trade_date < cutoff_date` into training and full sets.
+    Per ticker:
+      1. Build the (N, F) feature matrix + outcome vector.
+      2. For each feature: sort the training subset's non-NaN values
+         to get a frozen per-ticker history. `np.searchsorted` vectorizes
+         `bisect_left` across all N rows of this ticker (training + test).
+      3. Bin = `min((rank * n_bins) // n_train, n_bins - 1)` — 0-indexed
+         internally; the caller never sees this (matches the WF batch
+         contract which also emits 0-indexed bin_mat).
+      4. Aggregate per-bin outcomes for valid (feature, outcome) pairs.
+
+    Tickers whose training subset has fewer than `n_bins` rows are dropped
+    entirely (all of their rows count toward dropped_n).
+
+    Returns (metrics, dropped_n, start_date) where start_date is the
+    cutoff (semantically "test window begins here").
+
+    The vectorized path is ~80x faster than the per-row TrainTestAssigner
+    loop. Without it, /global-metric-bins on the full ~200K-row dataset
+    exceeds Cloudflare's 100-second upstream timeout (HTTP 524).
+    """
+    n = len(rows)
+    F = len(feature_cols)
+    if n < n_bins * 2 or not feature_cols:
+        return [], 0, cutoff_date
+
+    def _to_f64(seq):
+        a = np.empty(len(seq), dtype=np.float64)
+        for i, v in enumerate(seq):
+            if v is None:
+                a[i] = np.nan
+                continue
+            try:
+                fv = float(v)
+                a[i] = fv if not math.isnan(fv) else np.nan
+            except (TypeError, ValueError):
+                a[i] = np.nan
+        return a
+
+    by_ticker: dict = {}
+    for r in rows:
+        tkr = r.get("ticker", "_") if is_all else "_"
+        by_ticker.setdefault(tkr, []).append(r)
+
+    feat_bins: list = [[[] for _ in range(n_bins)] for _ in range(F)]
+    dropped_total = 0
+
+    for tkr, tkr_rows in by_ticker.items():
+        N = len(tkr_rows)
+        outcomes = _to_f64([r.get(outcome_col) for r in tkr_rows])
+        X = np.empty((N, F), dtype=np.float64)
+        for f_idx, feat in enumerate(feature_cols):
+            X[:, f_idx] = _to_f64([r.get(feat) for r in tkr_rows])
+
+        # asyncpg returns datetime.date; str() gives ISO "YYYY-MM-DD" which
+        # sorts/compares lexicographically the same as a string cutoff.
+        training_mask = np.array(
+            [str(r.get("trade_date", "")) < cutoff_date for r in tkr_rows],
+            dtype=bool,
+        )
+        n_train_total = int(training_mask.sum())
+        if n_train_total < n_bins:
+            dropped_total += N
+            continue
+
+        outcome_valid = ~np.isnan(outcomes)
+        for f_idx in range(F):
+            col = X[:, f_idx]
+            valid_col = ~np.isnan(col)
+            train_idx = np.where(training_mask & valid_col)[0]
+            n_train = int(len(train_idx))
+            if n_train < n_bins:
+                # Per-(ticker, feature) gap: most rows have NaN for this feature.
+                # Skip without inflating dropped_total — the per-ticker check
+                # above already covers the macro-insufficient case.
+                continue
+            sorted_train = np.sort(col[train_idx])
+            ranks = np.searchsorted(sorted_train, col, side='left')
+            bins_for_feature = np.minimum(
+                (ranks * n_bins // n_train).astype(np.int64),
+                n_bins - 1,
+            )
+            # Test-period-only aggregation: bins are defined by the training
+            # window, per-bin outcomes are aggregated over test rows only.
+            use_mask = valid_col & outcome_valid & ~training_mask
+            if not use_mask.any():
+                continue
+            o_sel = outcomes[use_mask]
+            b_sel = bins_for_feature[use_mask]
+            for b in range(n_bins):
+                hits = o_sel[b_sel == b]
+                if hits.size:
+                    feat_bins[f_idx][b].extend(hits.tolist())
+
+    results = []
+    for f_idx, feat in enumerate(feature_cols):
+        total = sum(len(b) for b in feat_bins[f_idx])
+        if total < n_bins * 2:
+            continue
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                       for b in feat_bins[f_idx]],
+            "bin_ns": [len(b) for b in feat_bins[f_idx]],
+        })
+
+    return results, dropped_total, cutoff_date

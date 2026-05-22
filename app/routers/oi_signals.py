@@ -441,7 +441,7 @@ async def firing_portfolios(
 
     # Late imports to avoid circular and keep this endpoint self-contained.
     from app.routers.oi_portfolios import _ensure_tables as _ensure_port_tables, _fetch_anchor_rows
-    from app.routers.oi_analysis import _bin_for_value
+    from app.routers.row_compute import _bin_for_value
     await _ensure_port_tables(pool)
 
     # 1) Load monitored portfolios + their enabled systems.
