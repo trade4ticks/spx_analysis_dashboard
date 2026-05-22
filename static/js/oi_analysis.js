@@ -27,7 +27,7 @@ document.addEventListener('alpine:init', () => {
     // primary / corr explorer / portfolio aggregate all use the same flavor.
     //   'in_sample'    — full-history bin thresholds (default; current behavior)
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
-    pageMode: 'walk_forward',
+    pageMode: 'in_sample',
     // Only used when pageMode === 'train_test'. Defaults to 2024-01-01 so
     // users get a meaningful default test window without typing a date.
     cutoffDate: '2024-01-01',
