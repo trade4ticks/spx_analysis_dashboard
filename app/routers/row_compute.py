@@ -582,6 +582,45 @@ def make_spec(walk_forward: bool, cutoff_date: Optional[str] = None) -> BinningS
     return InSampleSpec()
 
 
+def mode_envelope(spec, *, dropped: int = 0, universe: int = 0,
+                  start_date: Any = None) -> dict:
+    """Standard mode-aware metadata fields for spec-dispatched endpoints.
+
+    Centralizes the 3-way conditional that every spec-dispatched endpoint
+    used to inline at its return site. Callers spread the result into
+    their response dict:
+
+        return {
+            "metrics": results,
+            ...,
+            **mode_envelope(spec, dropped=dropped, universe=universe,
+                            start_date=filtered[0].get("trade_date", "")),
+        }
+
+    Six fields, uniform across modes:
+      mode             — "in_sample" / "walk_forward" / "train_test"
+      warmup           — int for walk_forward, None otherwise
+      cutoff_date      — ISO string for train_test, None otherwise
+      dropped_warmup_n — caller-supplied; rows excluded by the spec's gate
+                         (warmup for walk_forward, insufficient_train_history
+                         for train_test, 0 for in_sample)
+      universe_n       — caller-supplied; rows with a defined bin
+      start_date       — caller-supplied; first date in the universe
+
+    Pre-existing JS only reads `mode` (and `warmup`/`cutoff_date` for the
+    primary chart's WALK-FORWARD / TEST PERIOD subtitle). Returning all
+    six fields uniformly is inert for consumers that don't read them.
+    """
+    return {
+        "mode":             spec.kind,
+        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+        "dropped_warmup_n": dropped,
+        "universe_n":       universe,
+        "start_date":       start_date,
+    }
+
+
 # ── Secondary-endpoint dispatch (Step 4) ─────────────────────────────────
 # The secondary correlation explorer + scanner endpoints share a three-step
 # shape that depends on the active spec:

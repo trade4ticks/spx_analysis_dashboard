@@ -2291,7 +2291,7 @@ async def secondary_scan(req: SecScanReq):
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
 
-    from app.routers.row_compute import make_spec, filter_by_assignments
+    from app.routers.row_compute import make_spec, filter_by_assignments, mode_envelope
     spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, universe = filter_by_assignments(
         rows, spec, primary_metric,
@@ -2300,7 +2300,6 @@ async def secondary_scan(req: SecScanReq):
     if spec.kind != "in_sample":
         metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all)
         baseline_subset = filtered
-        resp_mode = spec.kind
         start_date = filtered[0]["trade_date"] if filtered else None
     else:
         # In-sample secondary scoring uses date-filtered rows (not primary-filtered)
@@ -2309,7 +2308,6 @@ async def secondary_scan(req: SecScanReq):
                        if req.filtered_dates else rows)
         metrics_result = _sec_score_metrics(scored_rows, outcome_col, feature_cols, is_all)
         baseline_subset = filtered if req.filtered_dates else rows
-        resp_mode = "in_sample"
         start_date = rows[0]["trade_date"] if rows else None
         universe = len(baseline_subset)
 
@@ -2320,17 +2318,12 @@ async def secondary_scan(req: SecScanReq):
         "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
     }
 
-    out = {
+    return {
         "baseline":         baseline,
         "metrics":          metrics_result,
-        "mode":             resp_mode,
-        "dropped_warmup_n": dropped,
-        "universe_n":       universe,
-        "start_date":       start_date,
+        **mode_envelope(spec, dropped=dropped, universe=universe,
+                        start_date=start_date),
     }
-    if spec.kind == "train_test":
-        out["cutoff_date"] = spec.cutoff.isoformat()
-    return out
 
 
 @router.post("/secondary-detail")
@@ -2351,13 +2344,13 @@ async def secondary_detail(req: SecDetailReq):
     # walk-forward, no inline branches in this endpoint anymore.
     from app.routers.row_compute import (
         make_spec, filter_by_assignments, assign_secondary_buckets,
+        mode_envelope,
     )
     spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    resp_mode = spec.kind
 
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
@@ -2482,10 +2475,11 @@ async def secondary_detail(req: SecDetailReq):
         "combined_trade_dates": [r.get("trade_date", "") for r in combined_sorted],
         "tickers":     tickers_out,
         "combined_trades": combined_trades,
-        "mode":            resp_mode,
-        "dropped_warmup_n": dropped,
-        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
-        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+        # `dropped`, `_universe`, and `start_date` aren't tracked in this
+        # endpoint, so universe and start_date pass through as defaults
+        # (0 and None). Matches the pre-helper response shape, which also
+        # omitted these.
+        **mode_envelope(spec, dropped=dropped),
     }
 
 
@@ -2658,6 +2652,7 @@ async def secondary_corr_bins(req: CorrBinsReq):
     # a single spec selection; the rest of the function body is one path.
     from app.routers.row_compute import (
         make_spec, filter_by_assignments, assign_secondary_bin_stats,
+        mode_envelope,
     )
     spec = make_spec(req.walk_forward, req.cutoff_date)
     primary_metric = cached.get("primary_metric") or ""
@@ -2669,15 +2664,8 @@ async def secondary_corr_bins(req: CorrBinsReq):
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
     if not filtered:
-        if spec.kind != "in_sample":
-            err = {"error": "no_data", "mode": spec.kind,
-                   "dropped_warmup_n": dropped, "universe_n": universe}
-            if spec.kind == "walk_forward":
-                err["warmup"] = spec.warmup
-            elif spec.kind == "train_test":
-                err["cutoff_date"] = spec.cutoff.isoformat()
-            return err
-        return {"error": "no_data"}
+        return {"error": "no_data",
+                **mode_envelope(spec, dropped=dropped, universe=universe)}
 
     results = []
     for feat in feat_cols:
@@ -2691,13 +2679,9 @@ async def secondary_corr_bins(req: CorrBinsReq):
     return {
         "metrics":          results,
         "n_bins":           n_bins,
-        "mode":             spec.kind,
-        "dropped_warmup_n": dropped,
-        "universe_n":       universe,
         "combined_n":       len(filtered),
-        "start_date":       filtered[0].get("trade_date", "") if filtered else "",
-        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
-        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+        **mode_envelope(spec, dropped=dropped, universe=universe,
+                        start_date=filtered[0].get("trade_date", "") if filtered else ""),
     }
 
 
@@ -2756,6 +2740,7 @@ async def secondary_correlation(req: CorrReq):
     # on `walk_forward` for the bucketing logic.
     from app.routers.row_compute import (
         make_spec, filter_by_assignments, secondary_membership,
+        mode_envelope,
     )
     spec = make_spec(req.walk_forward, req.cutoff_date)
     primary_metric = cached.get("primary_metric") or ""
@@ -2767,26 +2752,17 @@ async def secondary_correlation(req: CorrReq):
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
     if not filtered:
-        if spec.kind != "in_sample":
-            err = {"error": "no_data", "mode": spec.kind,
-                   "dropped_warmup_n": dropped, "universe_n": universe}
-            if spec.kind == "walk_forward":
-                err["warmup"] = spec.warmup
-            elif spec.kind == "train_test":
-                err["cutoff_date"] = spec.cutoff.isoformat()
-            return err
-        return {"error": "no_data"}
+        return {"error": "no_data",
+                **mode_envelope(spec, dropped=dropped, universe=universe)}
 
     if spec.kind != "in_sample":
         ordered = filtered  # already chronologically sorted by the wf / tt filter
-        mode_out = spec.kind
     else:
         # In-sample: the wrapper preserves cached-row order (legacy
         # `_filter_by_tkr_date` was unsorted). Re-sort here to match the
         # legacy explicit sort that fed _bin_membership.
         ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
         universe = len(ordered)
-        mode_out = "in_sample"
 
     vectors, metric_names, n_each = [], [], []
     for sel in req.selections:
@@ -2898,12 +2874,8 @@ async def secondary_correlation(req: CorrReq):
         "combined_trades":       combined_trades,
         "winner_avg_ret": winner_avg,
         "loser_avg_ret":  loser_avg,
-        "mode":             mode_out,
-        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
-        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
-        "dropped_warmup_n": dropped,
-        "universe_n":       universe,
-        "start_date":       ordered[0].get("trade_date", "") if ordered else "",
+        **mode_envelope(spec, dropped=dropped, universe=universe,
+                        start_date=ordered[0].get("trade_date", "") if ordered else ""),
     }
 
 
