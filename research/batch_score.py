@@ -186,6 +186,136 @@ def _tt_bin_matrix(rows_chrono: list, feature_list: list, cutoff_date_str: str, 
     return test_rows, bin_mat
 
 
+def _score_one_ticker(
+    ticker: str, rows: list, features: list, outcomes: list,
+    mode_label: str, walk_forward: bool, cutoff_date: str,
+) -> tuple[list, int, int]:
+    """Pure-sync per-ticker scoring. Runs on a worker thread via
+    `asyncio.to_thread` so the FastAPI event loop stays responsive
+    while this numpy-heavy work executes.
+
+    Returns (batch_params, scored, skipped):
+      batch_params — list of _UPSERT param tuples ready for executemany
+      scored       — number of (feature, outcome) pairs scored
+      skipped      — number skipped (insufficient data, scanner error, etc.)
+
+    No asyncpg access here — the caller fetches `rows` on the event
+    loop, passes them in, and writes `batch_params` after this returns.
+    """
+    avail = set(rows[0].keys())
+    batch_params: list = []
+    scored = 0
+    skipped = 0
+
+    if cutoff_date:
+        # ── Train-test mode ──────────────────────────────────────────
+        # Bins frozen from training rows (trade_date < cutoff); proxy
+        # rows built from test rows only.
+        avail_features = [f for f in features if f in avail]
+        if not avail_features:
+            return batch_params, 0, len(features) * len(outcomes)
+
+        test_rows, bin_mat = _tt_bin_matrix(rows, avail_features, cutoff_date, n_bins=10)
+
+        if len(test_rows) < 30:
+            return batch_params, 0, len(avail_features) * len(outcomes)
+
+        for fi, feature in enumerate(avail_features):
+            for outcome in outcomes:
+                if outcome not in avail or feature == outcome:
+                    continue
+                proxy = []
+                for ri, r in enumerate(test_rows):
+                    b = bin_mat[ri, fi]
+                    if b == 0:
+                        continue  # insufficient training history or NaN
+                    o = _safe_float(r.get(outcome))
+                    if math.isnan(o):
+                        continue
+                    proxy.append({
+                        feature:      float(b),
+                        outcome:      o,
+                        "trade_date": r.get("trade_date"),
+                    })
+                if len(proxy) < 30:
+                    skipped += 1
+                    continue
+                try:
+                    result = scanner.scan_relationship(proxy, feature, outcome, ticker)
+                except Exception:
+                    skipped += 1
+                    continue
+                if "error" in result or result.get("n", 0) < 30:
+                    skipped += 1
+                    continue
+                _append_params(batch_params, ticker, feature, outcome,
+                               mode_label, result)
+                scored += 1
+
+    elif walk_forward:
+        # ── Walk-forward mode ────────────────────────────────────────
+        avail_features = [f for f in features if f in avail]
+        if not avail_features:
+            return batch_params, 0, len(features) * len(outcomes)
+
+        bin_mat, valid_cum, nan_mask = _wf_bin_matrix(
+            rows, avail_features, n_bins=10, warmup=252)
+
+        for fi, feature in enumerate(avail_features):
+            for outcome in outcomes:
+                if outcome not in avail or feature == outcome:
+                    continue
+                proxy = []
+                for i, r in enumerate(rows):
+                    b = bin_mat[i, fi]
+                    if b == 0:
+                        continue
+                    o = _safe_float(r.get(outcome))
+                    if math.isnan(o):
+                        continue
+                    proxy.append({
+                        feature:      float(b),
+                        outcome:      o,
+                        "trade_date": r.get("trade_date"),
+                    })
+                if len(proxy) < 30:
+                    skipped += 1
+                    continue
+                try:
+                    result = scanner.scan_relationship(proxy, feature, outcome, ticker)
+                except Exception:
+                    skipped += 1
+                    continue
+                if "error" in result or result.get("n", 0) < 30:
+                    skipped += 1
+                    continue
+                _append_params(batch_params, ticker, feature, outcome,
+                               mode_label, result)
+                scored += 1
+
+    else:
+        # ── In-sample mode ───────────────────────────────────────────
+        for feature in features:
+            if feature not in avail:
+                continue
+            for outcome in outcomes:
+                if outcome not in avail or feature == outcome:
+                    continue
+                try:
+                    result = scanner.scan_relationship(rows, feature, outcome, ticker)
+                except Exception:
+                    skipped += 1
+                    continue
+                if "error" in result or result.get("n", 0) < 30:
+                    skipped += 1
+                    continue
+                _append_params(batch_params, ticker, feature, outcome,
+                               mode_label, result)
+                scored += 1
+
+    return batch_params, scored, skipped
+
+
 async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False,
                           cutoff_date: str = "", log=print):
     """Run the full batch scan. oi_pool=open_interest DB, main_pool=spx_interpolated DB."""
@@ -255,122 +385,18 @@ async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False,
                 total_skipped += len(features) * len(outcomes)
                 continue
 
-            avail = set(rows[0].keys())
-            batch_params = []
-
-            if cutoff_date:
-                # ── Train-test mode ──────────────────────────────────────────
-                # Bins frozen from training rows (trade_date < cutoff); proxy
-                # rows built from test rows only.
-                avail_features = [f for f in features if f in avail]
-                if not avail_features:
-                    total_skipped += len(features) * len(outcomes)
-                    continue
-
-                test_rows, bin_mat = _tt_bin_matrix(rows, avail_features, cutoff_date, n_bins=10)
-
-                if len(test_rows) < 30:
-                    log(f"  Skipping {ticker} — only {len(test_rows)} test rows after cutoff")
-                    total_skipped += len(avail_features) * len(outcomes)
-                    continue
-
-                for fi, feature in enumerate(avail_features):
-                    for outcome in outcomes:
-                        if outcome not in avail or feature == outcome:
-                            continue
-                        proxy = []
-                        for ti, r in enumerate(test_rows):
-                            b = bin_mat[ti, fi]
-                            if b == 0:
-                                continue  # insufficient training history or NaN
-                            o = _safe_float(r.get(outcome))
-                            if math.isnan(o):
-                                continue
-                            proxy.append({
-                                feature:      float(b),
-                                outcome:      o,
-                                "trade_date": r.get("trade_date"),
-                            })
-                        if len(proxy) < 30:
-                            total_skipped += 1
-                            continue
-                        try:
-                            result = scanner.scan_relationship(proxy, feature, outcome, ticker)
-                        except Exception:
-                            total_skipped += 1
-                            continue
-                        if "error" in result or result.get("n", 0) < 30:
-                            total_skipped += 1
-                            continue
-                        _append_params(batch_params, ticker, feature, outcome,
-                                       mode_label, result)
-                        total_scored += 1
-
-            elif walk_forward:
-                # ── Walk-forward mode ────────────────────────────────────────
-                # Compute WF bins for all available features simultaneously
-                # using the numpy j-loop, then use bin numbers as proxy feature
-                # values for the scanner.
-                avail_features = [f for f in features if f in avail]
-                if not avail_features:
-                    total_skipped += len(features) * len(outcomes)
-                    continue
-
-                bin_mat, valid_cum, nan_mask = _wf_bin_matrix(
-                    rows, avail_features, n_bins=10, warmup=252)
-
-                for fi, feature in enumerate(avail_features):
-                    for outcome in outcomes:
-                        if outcome not in avail or feature == outcome:
-                            continue
-                        # Build proxy rows: feature value = WF bin number (1-10)
-                        proxy = []
-                        for i, r in enumerate(rows):
-                            b = bin_mat[i, fi]
-                            if b == 0:
-                                continue      # warmup or NaN
-                            o = _safe_float(r.get(outcome))
-                            if math.isnan(o):
-                                continue
-                            proxy.append({
-                                feature:      float(b),
-                                outcome:      o,
-                                "trade_date": r.get("trade_date"),
-                            })
-                        if len(proxy) < 30:
-                            total_skipped += 1
-                            continue
-                        try:
-                            result = scanner.scan_relationship(proxy, feature, outcome, ticker)
-                        except Exception:
-                            total_skipped += 1
-                            continue
-                        if "error" in result or result.get("n", 0) < 30:
-                            total_skipped += 1
-                            continue
-                        _append_params(batch_params, ticker, feature, outcome,
-                                       mode_label, result)
-                        total_scored += 1
-
-            else:
-                # ── In-sample mode (original flow) ───────────────────────────
-                for feature in features:
-                    if feature not in avail:
-                        continue
-                    for outcome in outcomes:
-                        if outcome not in avail or feature == outcome:
-                            continue
-                        try:
-                            result = scanner.scan_relationship(rows, feature, outcome, ticker)
-                        except Exception:
-                            total_skipped += 1
-                            continue
-                        if "error" in result or result.get("n", 0) < 30:
-                            total_skipped += 1
-                            continue
-                        _append_params(batch_params, ticker, feature, outcome,
-                                       mode_label, result)
-                        total_scored += 1
+            # Score this ticker on a worker thread so the FastAPI event
+            # loop stays free to serve other dashboards. The scoring is
+            # numpy-heavy (np.searchsorted, scanner.scan_relationship),
+            # and numpy releases the GIL during big array ops — so the
+            # thread genuinely parallelizes with the main loop.
+            batch_params, scored, skipped = await asyncio.to_thread(
+                _score_one_ticker,
+                ticker, rows, features, outcomes, mode_label,
+                walk_forward, cutoff_date,
+            )
+            total_scored  += scored
+            total_skipped += skipped
 
             if batch_params:
                 async with main_pool.acquire() as conn:
