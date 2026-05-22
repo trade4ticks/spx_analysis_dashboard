@@ -250,6 +250,39 @@ def _build_test_matrix(disc: dict) -> list[tuple[str, dict]]:
             "chain_consume": "portfolios_list",
         }))
 
+    # Score Matrix — all three modes for each of the three read endpoints.
+    # Added in Step 7k to close a regression-blind-spot: previously the
+    # batch-score-driven `oi_score_matrix` table was invisible to the
+    # capture matrix entirely. The /run-batch-score POST is NOT captured
+    # because it triggers a multi-minute background job — these GETs
+    # read whatever state the table currently has.
+    #
+    # The cutoff_date for train_test mode is fixed at 2024-01-01 (the
+    # typical train/test split). If the user hasn't run a train_test
+    # batch scan for that cutoff, the response will be empty — that
+    # still validates response shape and catches structural changes.
+    sm_modes = [
+        ("in_sample",    {"mode": "in_sample"}),
+        ("walk_forward", {"mode": "walk_forward"}),
+        ("train_test",   {"mode": "train_test", "cutoff_date": "2024-01-01"}),
+    ]
+    for mode_label, extra_params in sm_modes:
+        matrix.append((f"score-matrix__{mode_label}.json", {
+            "method": "GET",
+            "path":   "/score-matrix",
+            "params": {**extra_params, "limit": "500"},
+        }))
+        matrix.append((f"score-matrix-meta__{mode_label}.json", {
+            "method": "GET",
+            "path":   "/score-matrix/meta",
+            "params": extra_params,
+        }))
+        matrix.append((f"score-matrix-summary__{mode_label}.json", {
+            "method": "GET",
+            "path":   "/score-matrix/summary",
+            "params": extra_params,
+        }))
+
     return matrix
 
 
