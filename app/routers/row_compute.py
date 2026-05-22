@@ -403,51 +403,19 @@ class TrainTestAssigner:
     def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
         """Per-bin avg-return for each feature using train-test binning.
 
-        Per-feature: fit a frozen per-ticker training history from
-        rows with `trade_date < cutoff`, then assign each row's bin
-        via `_bin_for_value` against that frozen history. Aggregate
-        per-bin outcomes across all rows (training and test).
-
-        Cost: O(N log N) per feature for the per-row `bisect_left`
-        calls. Same complexity as walk-forward batch; uncached.
-        Acceptable for /global-metric-bins given its existing DB cache.
-
-        Returns (metrics, dropped_n, start_date):
-          dropped_n: rows with bin=None (insufficient training history
-            for the ticker, or missing metric/outcome value).
-          start_date: the cutoff in ISO format — semantically the
-            point at which test-set rows start. The frontend uses this
-            to render the TRAIN-TEST subtitle.
+        Delegates to the numpy-vectorized batch helper
+        `_compute_all_bins_train_test_fast` (sibling of
+        `_compute_all_bins_walk_forward`). The per-row `bisect_left`
+        loop the assign() path uses is too slow for /global-metric-bins
+        scale (~80 features × ~200K rows) — it exceeds Cloudflare's
+        100-second upstream timeout. The vectorized version uses
+        `np.searchsorted` per (ticker, feature) and is roughly 80x faster.
         """
-        import numpy as np
-        results = []
-        max_dropped = 0
-        for feat in feature_cols:
-            state = self.fit(rows, feat, n_bins, is_all)
-            assignments = self.assign(rows, feat, n_bins, is_all, state, outcome_col)
-            buckets: list = [[] for _ in range(n_bins)]
-            for a in assignments:
-                if a.bin is None or a.forward_return is None:
-                    continue
-                buckets[a.bin - 1].append(a.forward_return)
-            if all(len(b) == 0 for b in buckets):
-                continue
-            dropped = sum(
-                1 for a in assignments
-                if a.bin is None and a.dropped_reason in (
-                    "insufficient_train_history", "missing_value",
-                )
-            )
-            max_dropped = max(max_dropped, dropped)
-            total = sum(len(b) for b in buckets)
-            if total < n_bins * 2:
-                continue
-            results.append({
-                "name":   feat,
-                "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
-                "bin_ns": [len(b) for b in buckets],
-            })
-        return results, max_dropped, self.spec.cutoff.isoformat()
+        from app.routers.oi_analysis import _compute_all_bins_train_test_fast
+        return _compute_all_bins_train_test_fast(
+            rows, feature_cols, outcome_col, n_bins, is_all,
+            self.spec.cutoff.isoformat(),
+        )
 
     def fit(self, rows, metric, n_bins, is_all):
         cutoff_s = self.spec.cutoff.isoformat()

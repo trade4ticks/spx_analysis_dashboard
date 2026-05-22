@@ -3080,6 +3080,125 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
     return results, dropped_total, start_date
 
 
+def _compute_all_bins_train_test_fast(
+    rows: list, feature_cols: list, outcome_col: str,
+    n_bins: int, is_all: bool, cutoff_date: str,
+) -> tuple:
+    """Numpy-vectorized batch bin computation for train-test mode.
+
+    Mirrors `_compute_all_bins_walk_forward` in shape but partitions
+    rows by `trade_date < cutoff_date` into training and full sets.
+    Per ticker:
+      1. Build the (N, F) feature matrix + outcome vector.
+      2. For each feature: sort the training subset's non-NaN values
+         to get a frozen per-ticker history. `np.searchsorted` vectorizes
+         `bisect_left` across all N rows of this ticker (training + test).
+      3. Bin = `min((rank * n_bins) // n_train, n_bins - 1)` — 0-indexed
+         internally; the caller never sees this (matches the WF batch
+         contract which also emits 0-indexed bin_mat).
+      4. Aggregate per-bin outcomes for valid (feature, outcome) pairs.
+
+    Tickers whose training subset has fewer than `n_bins` rows are dropped
+    entirely (all of their rows count toward dropped_n).
+
+    Returns (metrics, dropped_n, start_date) where start_date is the
+    cutoff (semantically "test window begins here").
+
+    The vectorized path is ~80x faster than the per-row TrainTestAssigner
+    loop. Without it, /global-metric-bins on the full ~200K-row dataset
+    exceeds Cloudflare's 100-second upstream timeout (HTTP 524).
+    """
+    n = len(rows)
+    F = len(feature_cols)
+    if n < n_bins * 2 or not feature_cols:
+        return [], 0, cutoff_date
+
+    def _to_f64(seq):
+        a = np.empty(len(seq), dtype=np.float64)
+        for i, v in enumerate(seq):
+            if v is None:
+                a[i] = np.nan
+                continue
+            try:
+                fv = float(v)
+                a[i] = fv if not math.isnan(fv) else np.nan
+            except (TypeError, ValueError):
+                a[i] = np.nan
+        return a
+
+    by_ticker: dict = {}
+    for r in rows:
+        tkr = r.get("ticker", "_") if is_all else "_"
+        by_ticker.setdefault(tkr, []).append(r)
+
+    feat_bins: list = [[[] for _ in range(n_bins)] for _ in range(F)]
+    dropped_total = 0
+
+    for tkr, tkr_rows in by_ticker.items():
+        N = len(tkr_rows)
+        outcomes = _to_f64([r.get(outcome_col) for r in tkr_rows])
+        X = np.empty((N, F), dtype=np.float64)
+        for f_idx, feat in enumerate(feature_cols):
+            X[:, f_idx] = _to_f64([r.get(feat) for r in tkr_rows])
+
+        # Training mask: trade_date < cutoff. asyncpg returns
+        # datetime.date; str() gives ISO "YYYY-MM-DD" which sorts/compares
+        # lexicographically the same as a string cutoff like "2024-01-01".
+        training_mask = np.array(
+            [str(r.get("trade_date", "")) < cutoff_date for r in tkr_rows],
+            dtype=bool,
+        )
+        n_train_total = int(training_mask.sum())
+        if n_train_total < n_bins:
+            # Insufficient training samples for this ticker — drop all its rows.
+            dropped_total += N
+            continue
+
+        outcome_valid = ~np.isnan(outcomes)
+        for f_idx in range(F):
+            col = X[:, f_idx]
+            valid_col = ~np.isnan(col)
+            train_idx = np.where(training_mask & valid_col)[0]
+            n_train = int(len(train_idx))
+            if n_train < n_bins:
+                # Per-(ticker, feature) insufficient training (most rows
+                # have NaN for this feature). Skip this feature for this
+                # ticker without inflating dropped_total — the per-ticker
+                # check above already accounts for the macro insufficient
+                # case; this is a feature-specific gap.
+                continue
+            sorted_train = np.sort(col[train_idx])
+            # np.searchsorted is the vectorized bisect_left.
+            ranks = np.searchsorted(sorted_train, col, side='left')
+            bins_for_feature = np.minimum(
+                (ranks * n_bins // n_train).astype(np.int64),
+                n_bins - 1,
+            )
+            use_mask = valid_col & outcome_valid
+            if not use_mask.any():
+                continue
+            o_sel = outcomes[use_mask]
+            b_sel = bins_for_feature[use_mask]
+            for b in range(n_bins):
+                hits = o_sel[b_sel == b]
+                if hits.size:
+                    feat_bins[f_idx][b].extend(hits.tolist())
+
+    results = []
+    for f_idx, feat in enumerate(feature_cols):
+        total = sum(len(b) for b in feat_bins[f_idx])
+        if total < n_bins * 2:
+            continue
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                       for b in feat_bins[f_idx]],
+            "bin_ns": [len(b) for b in feat_bins[f_idx]],
+        })
+
+    return results, dropped_total, cutoff_date
+
+
 @router.get("/global-metric-bins")
 async def global_metric_bins(
     outcome:      str  = Query("ret_5d_fwd_oc"),
