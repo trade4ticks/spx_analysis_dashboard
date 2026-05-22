@@ -443,7 +443,7 @@ class TrainTestAssigner:
             train_history[k].sort()
         return train_history
 
-    def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
+    def assign(self, rows, metric, n_bins, is_all, state, outcome_col=None):
         """Assign train-test bins. Both training-window and test-window
         rows get a bin assignment computed against the frozen training
         history. Training rows are tagged `dropped_reason="pre_cutoff"`
@@ -451,15 +451,23 @@ class TrainTestAssigner:
         stats while keeping the bin information available for a future
         side-by-side training/test view.
 
+        `outcome_col` is optional. Pass None (or omit) when only the bin
+        number is needed (e.g. filter_by_assignments, secondary_membership)
+        — rows with a valid metric value will still receive a bin even if
+        no outcome is available. When provided, rows missing the outcome
+        value are dropped (bin=None, dropped_reason="missing_value").
+
         Semantics:
           - training-window row (trade_date < cutoff): bin set, dropped_reason="pre_cutoff"
           - test-window row, valid bin:                bin set, dropped_reason=None
-          - any row with missing metric or outcome:    bin=None, dropped_reason="missing_value"
-          - any row whose ticker had <n_bins training samples: bin=None, dropped_reason="insufficient_train_history"
+          - row with missing metric (or outcome when required):
+                                                       bin=None, dropped_reason="missing_value"
+          - row whose ticker had <n_bins training samples: bin=None, dropped_reason="insufficient_train_history"
         """
         from app.routers.oi_analysis import _bin_for_value
         train_history = state or {}
         cutoff_s = self.spec.cutoff.isoformat()
+        need_outcome = outcome_col is not None
         out: list[RowAssignment] = []
         for r in rows:
             tkr = str(r.get("ticker", ""))
@@ -472,31 +480,32 @@ class TrainTestAssigner:
                        else str(trade_date))
             is_pre_cutoff = date_s < cutoff_s
             xv = r.get(metric)
-            yv = r.get(outcome_col)
+            yv = r.get(outcome_col) if need_outcome else None
 
-            if xv is None or yv is None:
+            if xv is None or (need_outcome and yv is None):
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
-                    outcome_col=outcome_col, forward_return=None,
+                    outcome_col=outcome_col or "", forward_return=None,
                     dropped_reason="missing_value",
                 ))
                 continue
             try:
-                xf = float(xv); yf = float(yv)
+                xf = float(xv)
+                yf = float(yv) if need_outcome else None
             except (TypeError, ValueError):
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
-                    outcome_col=outcome_col, forward_return=None,
+                    outcome_col=outcome_col or "", forward_return=None,
                     dropped_reason="missing_value",
                 ))
                 continue
-            if math.isnan(xf) or math.isnan(yf):
+            if math.isnan(xf) or (need_outcome and yf is not None and math.isnan(yf)):
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=float("nan"), n_bins=n_bins, bin=None,
-                    outcome_col=outcome_col, forward_return=None,
+                    outcome_col=outcome_col or "", forward_return=None,
                     dropped_reason="missing_value",
                 ))
                 continue
@@ -508,7 +517,7 @@ class TrainTestAssigner:
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=xf, n_bins=n_bins, bin=None,
-                    outcome_col=outcome_col, forward_return=yf,
+                    outcome_col=outcome_col or "", forward_return=yf,
                     dropped_reason="insufficient_train_history",
                 ))
             else:
@@ -518,7 +527,7 @@ class TrainTestAssigner:
                 out.append(RowAssignment(
                     ticker=tkr, trade_date=trade_date, metric_name=metric,
                     metric_value=xf, n_bins=n_bins, bin=b,
-                    outcome_col=outcome_col, forward_return=yf,
+                    outcome_col=outcome_col or "", forward_return=yf,
                     dropped_reason=("pre_cutoff" if is_pre_cutoff else None),
                 ))
         return out
@@ -634,7 +643,7 @@ def filter_by_assignments(
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(ordered, primary_metric, 20, is_all)
         assignments = assigner.assign(ordered, primary_metric, 20, is_all,
-                                       state, outcome_col="__filter__")
+                                       state, outcome_col=None)
         sel = set(int(b) for b in (selected_primary_bins or []))
         kept: list = []
         dropped = 0
@@ -886,7 +895,7 @@ def secondary_membership(
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(fit_rows, metric, n_bins, is_all)
         assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
-                                       state, outcome_col="__membership__")
+                                       state, outcome_col=None)
         for i, a in enumerate(assignments):
             if a.bin is not None and a.dropped_reason is None and a.bin in sel:
                 out[i] = 1.0
@@ -1021,7 +1030,7 @@ class PortfolioVectorBuilder:
                 assigner = TrainTestAssigner(self.spec)
                 state = assigner.fit(self.rows, metric, n_bins, self.is_all)
                 assigns = assigner.assign(self.rows, metric, n_bins, self.is_all,
-                                          state, outcome_col="__bin_map__")
+                                          state, outcome_col=None)
                 self._cache[key] = {
                     i: (a.bin if a.dropped_reason is None else None)
                     for i, a in enumerate(assigns)
