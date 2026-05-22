@@ -3304,6 +3304,12 @@ async def global_metric_bins(
         return _GLOBAL_BINS_CACHE[cache_key]
 
     # Check persistent DB cache before running the expensive computation.
+    # asyncpg returns JSONB as a string by default (no codec is registered
+    # in app/db.py), so `payload` needs an explicit json.loads — the old
+    # code did `dict(db_row["payload"])` which silently failed on the
+    # string and fell through to recompute every time the in-memory cache
+    # was cold. Pre-fix, the DB cache only ever served data that had
+    # already been computed in the current process lifetime.
     await _ensure_bins_table(pool)
     try:
         async with pool.acquire() as conn:
@@ -3311,13 +3317,20 @@ async def global_metric_bins(
                 "SELECT payload, cached_at FROM global_bins_cache WHERE cache_key = $1",
                 cache_key)
         if db_row:
-            out = dict(db_row["payload"])
+            payload = db_row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            out = dict(payload)
             ca = db_row["cached_at"]
             out["cached_at"] = ca.isoformat() if ca else None
             _GLOBAL_BINS_CACHE[cache_key] = out
             return out
-    except Exception:
-        pass  # Table might not exist yet on first startup; fall through to compute
+    except Exception as e:
+        # Log instead of silently swallowing — masked the JSONB parse
+        # failure for months. Still tolerate the failure so first-startup
+        # (table doesn't exist) falls through to compute cleanly.
+        import logging
+        logging.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
 
     # Build date filter
     where = [f"{outcome} IS NOT NULL"]
