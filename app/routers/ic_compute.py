@@ -472,6 +472,13 @@ def ic_decompose_cross_sectional(
     n_bot_map:       dict[str, int]   = {}  # days ticker in bottom half
     sum_ret_bot_map: dict[str, float] = {}  # Σ outcomes when in bottom half
     n_pos_ret_bot:   dict[str, int]   = {}  # positive-outcome count, bottom half
+    # Basket-adjusted return accumulators: Σ(outcome − daily_basket_mean) per flagged day.
+    # daily_basket_mean = mean outcome across all K tickers in the cross-section that day.
+    # Because every ticker has a different set of flagged days, the correction differs per
+    # ticker — this is NOT a uniform axis shift.  It isolates each ticker's flagged-day
+    # return relative to what the overall basket returned on those same days.
+    sum_excess_top_map: dict[str, float] = {}  # top-half basket-adjusted Σ
+    sum_excess_bot_map: dict[str, float] = {}  # bot-half basket-adjusted Σ
 
     for d in sorted(by_date.keys()):
         tkr_vals = by_date[d]
@@ -506,6 +513,10 @@ def ic_decompose_cross_sectional(
         if cutoff_date is None or d_str < cutoff_date:
             pre_cutoff_ics.append(rho)
 
+        # Cross-sectional mean outcome for this day — used to compute
+        # basket-adjusted (excess) return per ticker in the inner loop.
+        daily_mean_out = float(np.mean(ov_arr))
+
         for i, tkr in enumerate(tickers):
             c = z_m[i] * z_o[i] / norm
             contrib_sum[tkr] = contrib_sum.get(tkr, 0.0) + c
@@ -516,15 +527,18 @@ def ic_decompose_cross_sectional(
                 n_pos_rp_map[tkr] = n_pos_rp_map.get(tkr, 0) + 1
 
             # Conditional returns split by metric-rank half
-            out_val = float(ov_arr[i])
+            out_val    = float(ov_arr[i])
+            excess_val = out_val - daily_mean_out   # vs basket on this day
             if r_m[i] > mean_r:        # top half by metric rank
-                n_top_map[tkr]       = n_top_map.get(tkr, 0) + 1
-                sum_ret_top_map[tkr] = sum_ret_top_map.get(tkr, 0.0) + out_val
+                n_top_map[tkr]          = n_top_map.get(tkr, 0) + 1
+                sum_ret_top_map[tkr]    = sum_ret_top_map.get(tkr, 0.0) + out_val
+                sum_excess_top_map[tkr] = sum_excess_top_map.get(tkr, 0.0) + excess_val
                 if out_val > 0:
                     n_pos_ret_top[tkr] = n_pos_ret_top.get(tkr, 0) + 1
             else:                      # bottom half (includes exact median — rare)
-                n_bot_map[tkr]       = n_bot_map.get(tkr, 0) + 1
-                sum_ret_bot_map[tkr] = sum_ret_bot_map.get(tkr, 0.0) + out_val
+                n_bot_map[tkr]          = n_bot_map.get(tkr, 0) + 1
+                sum_ret_bot_map[tkr]    = sum_ret_bot_map.get(tkr, 0.0) + out_val
+                sum_excess_bot_map[tkr] = sum_excess_bot_map.get(tkr, 0.0) + excess_val
                 if out_val > 0:
                     n_pos_ret_bot[tkr] = n_pos_ret_bot.get(tkr, 0) + 1
 
@@ -562,23 +576,27 @@ def ic_decompose_cross_sectional(
         if flag_top:
             nf   = n_top_map.get(tkr, 0)
             sr   = sum_ret_top_map.get(tkr, 0.0)
+            se   = sum_excess_top_map.get(tkr, 0.0)
             npos = n_pos_ret_top.get(tkr, 0)
         else:
             nf   = n_bot_map.get(tkr, 0)
             sr   = sum_ret_bot_map.get(tkr, 0.0)
+            se   = sum_excess_bot_map.get(tkr, 0.0)
             npos = n_pos_ret_bot.get(tkr, 0)
 
-        avg_ret_flagged  = round(sr / nf, 6) if nf > 0 else None
-        hit_rate_flagged = round(npos / nf, 4) if nf > 0 else None
+        avg_ret_flagged           = round(sr / nf, 6) if nf > 0 else None
+        avg_ret_flagged_vs_basket = round(se / nf, 6) if nf > 0 else None
+        hit_rate_flagged          = round(npos / nf, 4) if nf > 0 else None
 
         results.append({
-            "ticker":              tkr,
-            "score":               score,
-            "n_days":              nd,
-            "sign_agreement_rate": sign_agr,
-            "avg_ret_flagged":     avg_ret_flagged,
-            "hit_rate_flagged":    hit_rate_flagged,
-            "n_flagged":           nf,
+            "ticker":                    tkr,
+            "score":                     score,
+            "n_days":                    nd,
+            "sign_agreement_rate":       sign_agr,
+            "avg_ret_flagged":           avg_ret_flagged,
+            "avg_ret_flagged_vs_basket": avg_ret_flagged_vs_basket,
+            "hit_rate_flagged":          hit_rate_flagged,
+            "n_flagged":                 nf,
         })
     results.sort(key=lambda x: x["score"], reverse=True)
 

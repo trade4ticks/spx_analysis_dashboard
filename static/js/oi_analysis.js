@@ -133,6 +133,7 @@ document.addEventListener('alpine:init', () => {
     icDecompError:    null,
     icDecompExpanded: false,
     icDecompKey:      null,   // last-loaded "metric:outcome:mode:cutoff"
+    icDecompYMode:    'raw',  // 'raw' | 'basket' — Y-axis mode for bubble scatter
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -4980,9 +4981,21 @@ document.addEventListener('alpine:init', () => {
         return sameSign ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
       });
 
-      const bubbleData = tickers.map((t, i) => ({
+      // Y-axis mode: 'raw' = avg_ret_flagged; 'basket' = avg_ret_flagged_vs_basket.
+      // Both are direction-normalised (predicted-winner side). 'basket' subtracts the
+      // cross-sectional mean return over each ticker's own flagged days — per-ticker
+      // correction, NOT a uniform axis shift. Clearly labelled as vs 128-ticker basket.
+      const useBasket = this.icDecompYMode === 'basket';
+      const yVal  = t => (useBasket
+        ? (t.avg_ret_flagged_vs_basket ?? t.avg_ret_flagged)
+        : t.avg_ret_flagged) * 100;
+      const yTitle = useBasket
+        ? 'Avg return when flagged vs 128-ticker basket  (%)'
+        : 'Avg return when flagged  (%)';
+
+      const bubbleData = tickers.map(t => ({
         x:  t.sign_agreement_rate,
-        y:  t.avg_ret_flagged * 100,   // decimal → %
+        y:  yVal(t),
         r:  bubbleR(t),
         _t: t,
       }));
@@ -5024,13 +5037,14 @@ document.addEventListener('alpine:init', () => {
             tooltip: {
               callbacks: {
                 label: ctx => {
-                  const t = ctx.raw._t;
-                  const agr = (t.sign_agreement_rate * 100).toFixed(1);
-                  const ret = (t.avg_ret_flagged * 100).toFixed(3);
-                  const hr  = t.hit_rate_flagged != null
+                  const t    = ctx.raw._t;
+                  const agr  = (t.sign_agreement_rate * 100).toFixed(1);
+                  const ret  = yVal(t).toFixed(3);
+                  const hr   = t.hit_rate_flagged != null
                     ? ` · hit ${(t.hit_rate_flagged * 100).toFixed(1)}%` : '';
+                  const yLbl = useBasket ? 'vs basket' : 'avg ret';
                   return [`${t.ticker}`,
-                          `sign agr: ${agr}%  ·  avg ret: ${ret}%${hr}`,
+                          `sign agr: ${agr}%  ·  ${yLbl}: ${ret}%${hr}`,
                           `n flagged: ${t.n_flagged}  ·  score: ${t.score.toFixed(6)}`];
                 },
               },
@@ -5039,16 +5053,15 @@ document.addEventListener('alpine:init', () => {
           scales: {
             x: {
               ...this._darkScales().x,
-              min: 0, max: 1,
+              min: 0.35, max: 0.65,
               title: { display: true, text: 'Sign agreement rate  (0.5 = random)',
                        color: 'var(--dim)', font: { size: 9 } },
               ticks: { ...this._darkScales().x.ticks,
-                       callback: v => (v * 100).toFixed(0) + '%', maxTicksLimit: 6 },
+                       callback: v => (v * 100).toFixed(0) + '%', maxTicksLimit: 7 },
             },
             y: {
               ...this._darkScales().y,
-              title: { display: true, text: 'Avg return when flagged  (%)',
-                       color: 'var(--dim)', font: { size: 9 } },
+              title: { display: true, text: yTitle, color: 'var(--dim)', font: { size: 9 } },
               ticks: { ...this._darkScales().y.ticks,
                        callback: v => v.toFixed(2) + '%', maxTicksLimit: 7 },
             },

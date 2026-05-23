@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=96"></script>
+  <script src="/static/js/oi_analysis.js?v=97"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -577,22 +577,35 @@
     <div x-show="ticker === 'ALL'"
          style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
                 background:rgba(255,255,255,.02)">
-      <div @click="toggleIcDecomp()"
-           style="cursor:pointer;display:flex;align-items:center;gap:10px;
-                  padding:10px 12px;user-select:none">
-        <span style="font-size:12px;color:var(--muted)"
-              x-text="icDecompExpanded ? '▾' : '▸'"></span>
-        <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Decomposition</span>
-        <span x-show="icDecompData && !icDecompLoading && !icDecompError"
-              style="font-size:10px;color:var(--dim)"
-              x-text="icDecompData
-                ? `· ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} / ${icDecompData.n_tickers} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`
-                : ''">
-        </span>
-        <span x-show="icDecompLoading" style="font-size:10px;color:#3498db">Loading…</span>
-        <span x-show="icDecompError && !icDecompLoading"
-              style="font-size:10px;color:#e74c3c"
-              x-text="'Error: ' + icDecompError"></span>
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
+        <!-- Expand toggle -->
+        <div @click="toggleIcDecomp()"
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
+          <span style="font-size:12px;color:var(--muted)"
+                x-text="icDecompExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Decomposition</span>
+          <span x-show="icDecompData && !icDecompLoading && !icDecompError"
+                style="font-size:10px;color:var(--dim)"
+                x-text="icDecompData
+                  ? `· ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} / ${icDecompData.n_tickers} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`
+                  : ''">
+          </span>
+          <span x-show="icDecompLoading" style="font-size:10px;color:#3498db">Loading…</span>
+          <span x-show="icDecompError && !icDecompLoading"
+                style="font-size:10px;color:#e74c3c"
+                x-text="'Error: ' + icDecompError"></span>
+        </div>
+        <!-- Y-axis mode toggle — right side, @click.stop prevents collapse -->
+        <div x-show="icDecompExpanded && icDecompData && !icDecompError"
+             style="display:flex;gap:8px;align-items:center" @click.stop>
+          <div class="mode-seg">
+            <span :class="{on: icDecompYMode==='raw'}"
+                  @click="icDecompYMode='raw'; $nextTick(() => _renderIcDecomp())">Raw</span>
+            <span :class="{on: icDecompYMode==='basket'}"
+                  @click="icDecompYMode='basket'; $nextTick(() => _renderIcDecomp())"
+                  title="Y = avg return vs 128-ticker basket mean on flagged days. Per-ticker correction — not a uniform shift.">vs Basket</span>
+          </div>
+        </div>
       </div>
 
       <template x-if="icDecompExpanded">
@@ -600,10 +613,11 @@
           <div x-show="icDecompData && !icDecompError"
                style="font-size:9px;color:var(--dim);margin-bottom:6px">
             X = sign agreement rate (0.5 = random) ·
-            Y = avg return when flagged on predicted-winner side ·
-            size = n days flagged · blue = same sign as IC · pink = opposite ·
-            upper-right cluster = broad, trustworthy edge ·
-            click a dot to drill into that ticker
+            <span x-text="icDecompYMode === 'basket'
+              ? 'Y = avg return vs 128-ticker basket (per-ticker correction, not market-relative)'
+              : 'Y = avg return when flagged (raw, tradable)'"></span> ·
+            size = n flagged days · blue = same sign as IC · pink = opposite ·
+            upper-right = broad reliable edge · click a dot to drill into that ticker
           </div>
 
           <!-- Fixed-height bubble scatter — no scrolling needed -->
