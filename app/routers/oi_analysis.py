@@ -689,6 +689,18 @@ async def analyze(
         else:
             reference_ic = 0.0
 
+        # Short-window (5d) rolling IC for the regime-context overlay.
+        # Not sign-classified, no epsilon computed — context only.
+        _IC_SHORT_WINDOW = 5
+        if is_all:
+            short_ic_series = rolling_ic_cross_sectional(
+                row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
+            )
+        else:
+            short_ic_series = rolling_ic_single_ticker(
+                row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
+            )
+
         classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
         stability = sign_stability_from_rolling(ic_series, reference_ic, epsilon)
 
@@ -698,6 +710,9 @@ async def analyze(
                  "sign_class": p.sign_class}
                 for p in classified
             ],
+            "short_series":  [{"date": str(p.date), "ic": p.ic}
+                               for p in short_ic_series],
+            "short_window":  _IC_SHORT_WINDOW,
             "reference_ic":  round(reference_ic, 6),
             "epsilon":       round(epsilon, 6),
             "window":        _IC_WINDOW,

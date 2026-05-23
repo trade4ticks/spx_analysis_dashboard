@@ -1084,6 +1084,12 @@ document.addEventListener('alpine:init', () => {
       const epsilon = Number(payload.epsilon ?? 0);  // noise-floor half-width
       const cutoff  = payload.cutoff_date;  // ISO date string or null
 
+      // 5-day context series: align to main series x-axis by date so both
+      // share the same label array regardless of warmup-length differences.
+      // (5d warmup << 252d warmup, so every main-series date is covered.)
+      const shortByDate = new Map((payload.short_series || []).map(p => [p.date, p.ic]));
+      const shortData   = series.map(p => shortByDate.get(p.date) ?? null);
+
       // ── Y-axis range: always include 0 and the full ±ε band ─────────────
       const icValues = series.map(p => p.ic).filter(v => v != null);
       const dataMin  = icValues.length ? Math.min(...icValues) : 0;
@@ -1157,6 +1163,19 @@ document.addEventListener('alpine:init', () => {
         data: {
           labels: series.map(p => p.date?.slice(0, 7)),
           datasets: [
+            // 5-day IC context overlay — regime texture, NOT a signal line.
+            // Drawn first so it sits behind the main 252d line and reference
+            // line. Flat neutral color, no segment hook, thinner stroke.
+            // Y-axis range is not expanded for 5d extremes — spikes clip.
+            {
+              label: 'IC (5d context)',
+              data:  shortData,
+              borderColor:     'rgba(180, 180, 180, 0.28)',
+              backgroundColor: 'transparent',
+              borderWidth: 0.75, pointRadius: 0, tension: 0.15,
+              // No segment: coloring must stay flat to distinguish it from
+              // the sign-classified 252d line — color encodes nothing here.
+            },
             // IC line with per-segment coloring.
             {
               label: `IC (252d)`,
