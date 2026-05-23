@@ -2875,6 +2875,7 @@ def _compute_ic_batch_sync(
     from app.routers.ic_compute import (
         IcPoint, rolling_ic_single_ticker,
         sign_stability_from_rolling, noise_floor_epsilon,
+        finite_or_none,
     )
 
     # ── ALL-mode: pre-build date→row-list map once ───────────────────────────
@@ -2965,11 +2966,11 @@ def _compute_ic_batch_sync(
 
         results.append({
             "name":            metric,
-            "long_run_ic":     round(reference_ic, 6),
-            "long_run_ic_abs": round(abs(reference_ic), 6),
-            "epsilon":         round(epsilon, 6),
+            "long_run_ic":     finite_or_none(reference_ic),
+            "long_run_ic_abs": finite_or_none(abs(reference_ic)),
+            "epsilon":         finite_or_none(epsilon),
             "n_windows":       n_total,
-            "sign_stability":  (round(stability.stability, 4)
+            "sign_stability":  (finite_or_none(stability.stability, 4)
                                 if stability.stability is not None else None),
             "n_same":          stability.n_same,
             "n_opposite":      stability.n_opposite,

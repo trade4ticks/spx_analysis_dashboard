@@ -42,6 +42,29 @@ import numpy as np
 from scipy import stats as sp_stats
 
 
+# ── JSON-safe float helper ───────────────────────────────────────────────
+
+def finite_or_none(v: float, ndigits: int = 6) -> Optional[float]:
+    """Return round(v, ndigits) if v is finite, else None.
+
+    Prevents json.dumps() from raising ValueError on inf/nan values that
+    arise from degenerate IC windows. The canonical case: noise_floor_epsilon
+    returns +inf when k_tickers < 2 (cross-sectional series with too few
+    tickers in every rolling window). JSON null is the correct representation
+    — the frontend already handles None epsilon as "n/a".
+
+    Used by both _compute_ic_batch_sync (oi_analysis.py) and the offline
+    precompute_ic_all.py script so the sanitization is shared.
+    """
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, ndigits) if math.isfinite(f) else None
+
+
 # ── Output contracts ─────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

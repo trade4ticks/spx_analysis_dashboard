@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import sys
@@ -52,6 +53,7 @@ load_dotenv(_ROOT / ".env")
 import asyncpg  # noqa: E402
 
 from app.routers.ic_compute import (  # noqa: E402
+    finite_or_none,
     noise_floor_epsilon,
     rolling_ic_cross_sectional,
     sign_stability_from_rolling,
@@ -142,6 +144,7 @@ async def run(
         print(f"  cache key: {cache_key}")
         print()
 
+        nonfinite_metrics = []  # track metrics that produced inf/nan epsilon
         results = []
         for i, metric in enumerate(metrics, 1):
             print(f"  [{i:>3}/{len(metrics)}] {metric:<40}", end="", flush=True)
@@ -182,14 +185,18 @@ async def run(
             stability = sign_stability_from_rolling(series, reference_ic, epsilon)
             n_total   = stability.n_total
 
+            epsilon_nonfinite = not math.isfinite(epsilon)
+            if epsilon_nonfinite:
+                nonfinite_metrics.append(metric)
+
             results.append({
                 "name":            metric,
-                "long_run_ic":     round(reference_ic, 6),
-                "long_run_ic_abs": round(abs(reference_ic), 6),
-                "epsilon":         round(epsilon, 6),
+                "long_run_ic":     finite_or_none(reference_ic),
+                "long_run_ic_abs": finite_or_none(abs(reference_ic)),
+                "epsilon":         finite_or_none(epsilon),
                 "n_windows":       n_total,
                 "sign_stability":  (
-                    round(stability.stability, 4)
+                    finite_or_none(stability.stability, 4)
                     if stability.stability is not None else None
                 ),
                 "n_same":          stability.n_same,
@@ -208,7 +215,18 @@ async def run(
                 tag += f"  stab={stability.stability:.0%}"
             else:
                 tag += f"  stab=— ({stability.suppression_reason})"
+            if epsilon_nonfinite:
+                tag += "  [ε=∞→null]"
             print(tag)
+
+        # Report any metrics that produced non-finite epsilon.
+        if nonfinite_metrics:
+            print(f"\n  WARNING: {len(nonfinite_metrics)} metric(s) produced ε=∞ "
+                  f"(k_tickers < 2 in every rolling window) — stored as null:")
+            for m in nonfinite_metrics:
+                print(f"    {m}")
+        else:
+            print(f"\n  All epsilons finite.")
 
         # Write to cache.
         print(f"\nWriting {len(results)} metrics to ic_batch_cache...")
