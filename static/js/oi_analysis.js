@@ -1889,6 +1889,7 @@ document.addEventListener('alpine:init', () => {
         // Signal Survey (IC.5 + IC.7)
         'chart-ic-leaderboard': 'ic-leader',
         'chart-ic-scatter':     'ic-scatter',
+        'chart-ic-beeswarm':    'ic-beeswarm',
         'chart-ic-decomp':      'ic-decomp',
       };
       const key = keyOverride[chartId] || chartId.replace('chart-', '');
@@ -1939,6 +1940,7 @@ document.addEventListener('alpine:init', () => {
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
+          'chart-ic-beeswarm':    () => this._renderIcBeeswarm(),
           'chart-ic-decomp':      () => this._renderIcDecomp(),
         };
         const fn = renderMap[chartId];
@@ -2010,6 +2012,7 @@ document.addEventListener('alpine:init', () => {
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
+          'chart-ic-beeswarm':    () => this._renderIcBeeswarm(),
           'chart-ic-decomp':      () => this._renderIcDecomp(),
         };
         const fn = renderMap[wasChartId];
@@ -4692,7 +4695,7 @@ document.addEventListener('alpine:init', () => {
     _renderIcBatch() {
       this._renderIcLeaderboard();
       this._renderIcScatter();
-      // _renderIcBeeswarm() — added in next commit
+      this._renderIcBeeswarm();
     },
 
     _renderIcLeaderboard() {
@@ -4900,6 +4903,177 @@ document.addEventListener('alpine:init', () => {
           },
         },
         plugins: [quadrantPlugin],
+      });
+    },
+
+    // ── IC.7 Breadth Beeswarm ─────────────────────────────────────────
+
+    _renderIcBeeswarm() {
+      const el = document.getElementById('chart-ic-beeswarm');
+      if (!el || !this.icBatchData?.metrics?.length) return;
+      if (this._charts['ic-beeswarm']) {
+        this._charts['ic-beeswarm'].destroy();
+        this._charts['ic-beeswarm'] = null;
+      }
+
+      const metrics = this.icBatchData.metrics;
+
+      // Separate plottable metrics (have gini) from excluded ones (null = no
+      // cross-sectional data for that metric — iv_25d_call_30d etc).
+      // undefined gini = stale cache, not expected to reach here.
+      const hasGini = metrics.filter(m => m.concentration_gini != null);
+      const noGini  = metrics.filter(m => m.concentration_gini == null);
+      const nonSup  = hasGini.filter(m => !m.suppressed);
+      const sup     = hasGini.filter(m =>  m.suppressed);
+
+      if (hasGini.length === 0) return; // nothing to plot
+
+      const maxAbsIc = Math.max(...nonSup.map(m => m.long_run_ic_abs || 0), 0.001);
+
+      // Dot radius in pixels — uniform across all dots (it's a beeswarm, not a bubble).
+      const DOT_R = 6;
+      // Approximate canvas dimensions for beeswarm collision geometry.
+      // The pane is 1/3 of the survey grid; chart height is the 380px pane
+      // body minus the subtitle padding.
+      const CW = Math.max(el.parentElement?.clientWidth || 400, 180);
+      const CH = 330;      // usable canvas height (px)
+      const X_SPAN = 1.04; // gini axis spans -0.02 .. 1.02
+      const Y_SPAN = 1.30; // Y axis spans -0.65 .. 0.65
+      // Dot radius in data-unit coordinates
+      const xr = DOT_R / CW * X_SPAN;
+      const yr = DOT_R / CH * Y_SPAN;
+
+      // Simple 1-D beeswarm: process metrics sorted by gini (left → right),
+      // find the nearest Y level (±k full-diameters from centre) where the
+      // incoming dot does not overlap any already-placed dot.
+      const _beeswarm = (arr) => {
+        const sorted = [...arr].sort((a, b) => a.concentration_gini - b.concentration_gini);
+        const placed = [];
+        for (const m of sorted) {
+          const gx = m.concentration_gini;
+          let gy = 0;
+          outer:
+          for (let k = 0; k <= 40; k++) {
+            const ys = k === 0 ? [0] : [k * yr * 2.1, -k * yr * 2.1];
+            for (const cy of ys) {
+              if (Math.abs(cy) > 0.60) continue;   // clip at axis edge
+              let ok = true;
+              for (const p of placed) {
+                const dxn = (gx - p.gx) / xr;
+                const dyn = (cy - p.gy) / yr;
+                if (dxn * dxn + dyn * dyn < 4.2) { ok = false; break; }
+              }
+              if (ok) { gy = cy; break outer; }
+            }
+          }
+          placed.push({ gx, gy, _m: m });
+        }
+        return placed;
+      };
+
+      const pNonSup = _beeswarm(nonSup);
+      const pSup    = _beeswarm(sup);
+
+      // Color: same palette and opacity curve as Signal Scatter for consistency.
+      // Blue = positive IC, pink = negative IC; opacity encodes IC magnitude.
+      const _color = (m) => {
+        const t  = Math.min((m.long_run_ic_abs || 0) / maxAbsIc, 1);
+        const op = (0.28 + t * 0.62).toFixed(2);
+        return (m.long_run_ic || 0) >= 0
+          ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
+      };
+
+      const nonSupData = pNonSup.map(p => ({ x: p.gx, y: p.gy, r: DOT_R, _m: p._m }));
+      const supData    = pSup.map(p =>    ({ x: p.gx, y: p.gy, r: DOT_R, _m: p._m }));
+
+      const self = this;
+
+      this._charts['ic-beeswarm'] = new Chart(el, {
+        type: 'bubble',
+        data: {
+          datasets: [
+            {
+              label:           'Active',
+              data:            nonSupData,
+              backgroundColor: pNonSup.map(p => _color(p._m)),
+              borderWidth:     0,
+            },
+            {
+              label:           'Suppressed',
+              data:            supData,
+              backgroundColor: 'rgba(100,100,100,0.35)',
+              borderWidth:     0,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick(e, elements) {
+            if (!elements.length) return;
+            if (elements[0].datasetIndex !== 0) return; // suppressed → inert
+            const m = nonSupData[elements[0].index]?._m;
+            if (m) self._icBatchClickMetric(m.name);
+          },
+          plugins: {
+            legend: { display: false },
+            // Show excluded-metric count as subtitle when any are absent.
+            subtitle: noGini.length > 0 ? {
+              display: true,
+              text:    `${noGini.length} metrics excluded — no cross-sectional coverage`,
+              color:   '#666',
+              font:    { size: 9 },
+              padding: { top: 0, bottom: 3 },
+              align:   'start',
+            } : { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const m    = ctx.raw._m;
+                  const gini = m.concentration_gini.toFixed(3);
+                  const effn = m.effective_n != null ? m.effective_n.toFixed(1) : '—';
+                  if (m.suppressed) {
+                    return [
+                      `${m.name}  [suppressed]`,
+                      `Gini ${gini}  ·  eff N ${effn}`,
+                      `Reason: ${m.suppression_reason || 'no decisive windows'}`,
+                    ];
+                  }
+                  const ic   = (m.long_run_ic   || 0).toFixed(4);
+                  const stab = m.sign_stability != null
+                    ? (m.sign_stability * 100).toFixed(1) + '%' : '—';
+                  return [
+                    m.name,
+                    `IC ${ic}  ·  stability ${stab}`,
+                    `Gini ${gini}  ·  eff N ${effn}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ...this._darkScales().x,
+              min: -0.02, max: 1.02,
+              title: {
+                display: true,
+                text:    'Concentration (Gini)   0 = equal   1 = one ticker dominates',
+                color:   '#888',
+                font:    { size: 9 },
+              },
+              ticks: {
+                ...this._darkScales().x.ticks,
+                callback: v => v.toFixed(1),
+                maxTicksLimit: 7,
+              },
+            },
+            y: {
+              display: false,    // Y axis hidden — only used for spread
+              min: -0.65,
+              max:  0.65,
+            },
+          },
+        },
       });
     },
 

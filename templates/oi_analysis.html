@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=98"></script>
+  <script src="/static/js/oi_analysis.js?v=99"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -543,17 +543,16 @@
           <div x-show="!(icBatchData && !icBatchError)" class="survey-pane-ph">—</div>
         </div>
 
-        <!-- Pane 3: Breadth Beeswarm (stub — rendered in next commit) -->
+        <!-- Pane 3: Breadth Beeswarm -->
         <div class="survey-pane">
           <div class="survey-pane-hdr">
             <span class="survey-pane-title">Breadth Beeswarm</span>
             <span class="survey-pane-hint">Gini concentration · color = IC strength · click → drill into metric</span>
+            <button class="fs-btn" @click="openFullscreen('chart-ic-beeswarm')"
+                    x-show="!!(icBatchData && !icBatchError)" title="Fullscreen">⛶</button>
           </div>
-          <div x-show="!!(icBatchData && !icBatchError)"
-               style="height:380px;position:relative;display:flex;align-items:center;
-                      justify-content:center;flex-direction:column;gap:6px">
-            <canvas id="chart-ic-beeswarm" style="display:none"></canvas>
-            <span style="font-size:11px;color:var(--dim)">Beeswarm — rendering in next step</span>
+          <div x-show="!!(icBatchData && !icBatchError)" style="height:380px;position:relative">
+            <canvas id="chart-ic-beeswarm"></canvas>
           </div>
           <div x-show="!(icBatchData && !icBatchError)" class="survey-pane-ph">—</div>
         </div>
