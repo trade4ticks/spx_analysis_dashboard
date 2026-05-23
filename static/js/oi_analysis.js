@@ -122,9 +122,10 @@ document.addEventListener('alpine:init', () => {
     icBatchExpanded:  false,
     icBatchView:      'leaderboard',  // 'leaderboard' | 'scatter'
     icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
-    icBatchStatus:    null,           // 'not_ready' | 'computing' | 'failed' | 'timeout' | null
+    icBatchStatus:    null,           // 'not_ready' | 'computing' | 'queued' | 'failed' | 'timeout' | null
     icBatchPollTimer: null,           // setInterval handle for polling
     icBatchPollStart: null,           // Date.now() when polling started
+    icBatchRefreshAt: null,           // Date.now() when ⟳ Refresh was last triggered
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -220,12 +221,16 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
-        // IC.5: if the Signal Stability section is expanded and the
-        // ticker/outcome changed, reload to stay in sync. Don't auto-load
-        // when collapsed — fresh compute can take ~2-3 min and 524s.
+        // IC.5: reload Signal Stability whenever Analyze runs with the section
+        // open — either key changed (new ticker/outcome/mode) or data is null
+        // (was cleared by a Refresh). Clear stale data first so the user sees
+        // status panels rather than old bars while the new load is in flight.
         if (this.icBatchExpanded) {
           const k = this._icBatchKey();
-          if (k !== this.icBatchKey) this.loadIcBatch();
+          if (k !== this.icBatchKey || !this.icBatchData) {
+            if (k !== this.icBatchKey) this.icBatchData = null; // clear stale bars immediately
+            this.loadIcBatch();
+          }
         }
         if (this.heatmapMetric) await this.loadHeatmap();
       } catch (e) {
@@ -3199,9 +3204,9 @@ document.addEventListener('alpine:init', () => {
         this.loadHeatmap();  // fire-and-forget; chains into loadHmBins1d()
       }
       // IC.5: mode change shifts reference IC (train_test cutoff vs full
-      // history). Reload only if the section is open — don't auto-fire a
-      // potentially uncached 2-3 min request when the panel is collapsed.
-      if (this.icBatchExpanded && this.icBatchData) this.loadIcBatch();
+      // history). Reload if the section is open. Clear stale data so the
+      // user sees status panels rather than wrong-mode bars.
+      if (this.icBatchExpanded) { this.icBatchData = null; this.loadIcBatch(); }
     },
 
     async corrLoadMiniData() {
@@ -4502,6 +4507,18 @@ document.addEventListener('alpine:init', () => {
         } else {
           // Normal response: cached data.
           if (d.error) throw new Error(d.error);
+          // Stale-cache guard: if a ⟳ Refresh was triggered, ignore any
+          // cache entry older than the refresh click — keep polling until
+          // the background job writes a fresh result.
+          if (this.icBatchRefreshAt && d.cached_at) {
+            const cacheMs = new Date(d.cached_at.replace(' ', 'T')).getTime();
+            if (cacheMs < this.icBatchRefreshAt) {
+              this.icBatchStatus = 'computing';
+              this._startIcBatchPolling();
+              return; // don't render stale data
+            }
+          }
+          this.icBatchRefreshAt = null; // fresh data received, clear flag
           this.icBatchStatus = null;
           this.icBatchData   = d;
           this.icBatchKey    = this._icBatchKey();
@@ -4523,9 +4540,10 @@ document.addEventListener('alpine:init', () => {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
       if (!this.ticker || !this.outcome) return;
-      this.icBatchLoading = true;
-      this.icBatchError   = null;
-      this.icBatchData    = null;
+      this.icBatchLoading  = true;
+      this.icBatchError    = null;
+      this.icBatchData     = null;
+      this.icBatchRefreshAt = Date.now(); // used by loadIcBatch to reject stale cache hits
       try {
         let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
@@ -4588,6 +4606,7 @@ document.addEventListener('alpine:init', () => {
       }
       // On expand: load if no data yet, or if stale (ticker/outcome/mode changed).
       if (!this.icBatchData || this._icBatchKey() !== this.icBatchKey) {
+        if (this._icBatchKey() !== this.icBatchKey) this.icBatchData = null; // clear stale immediately
         this.loadIcBatch();
       } else {
         this.$nextTick(() => this._renderIcBatch());
