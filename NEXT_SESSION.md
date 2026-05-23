@@ -2,6 +2,121 @@
 
 Read top-to-bottom on the new machine. Self-contained briefing for picking up where the previous session left off.
 
+## TL;DR — current state (2026-05-23)
+
+Two long-running initiatives done, IC.5 in progress:
+
+1. **row_compute refactor (Steps 1–7)** — *DONE*. Details unchanged — see sections below.
+
+2. **IC tooling (IC.1–IC.4)** — *DONE*. Details unchanged — see IC section below.
+
+3. **IC.5 — Signal Stability section** — *Partially done, two sub-tasks remain.*
+   - Visual layout (leaderboard vertical columns, scatter y-axis 0–105%) — **done and verified**.
+   - ALL-mode OOM: diagnosed, precompute script written, working. **Cache needs a `--force` re-run (see below).**
+   - Double-stride bug in live ALL-mode path: **identified, not yet fixed**.
+   - Live ALL-mode inline computation: **must be disabled** (returns "not ready — refresh" on cache miss). **Not yet done.**
+   - Background refresh button: **not yet done**.
+   - IC.5 is NOT complete until those three items land in one commit.
+
+---
+
+## IC.5 — what's done and what remains
+
+### Done
+- Leaderboard: vertical bar chart, `overflow-x: auto` scroll, rotated labels, correct height. Visual-only, committed earlier.
+- Scatter: y-axis `max: 1.05` so 100% dots aren't clipped.
+- `finite_or_none` helper in `ic_compute.py`: sanitizes `+inf`/`nan` epsilon to `null` before JSON write. Used in both `_compute_ic_batch_sync` and the precompute script.
+- `scripts/precompute_ic_all.py`: offline CLI that computes ALL-mode IC one metric at a time (4 cols × 141K rows per fetch, peak ~4 MB, no OOM). Writes to `ic_batch_cache` with the same key the `/ic-batch` endpoint reads. Accepts `--outcome`, `--window`, `--stride`, `--cutoff-date`, `--force`.
+
+### Pending (one commit, step 2 of IC.5)
+
+**Three things in one commit:**
+
+1. **Fix double-stride bug** in `_compute_ic_batch_sync` ALL-mode.
+   - Bug: line 2893 `strided_dates = sorted(all_by_date.keys())[::stride]` applies stride to the DATE loop.
+   - Then line 2935 applies stride again to the rolling-mean loop.
+   - With stride=3 and window=252, effective lookback is 252 × 3 = 756 trading days, not 252.
+   - Fix: remove `[::stride]` from the date loop. Date loop iterates ALL dates; stride applies only to the rolling-mean loop (matching `rolling_ic_cross_sectional` behavior).
+   - After fix, `_compute_ic_batch_sync` ALL-mode produces the same result as the precompute script.
+
+2. **Disable live ALL-mode inline computation.**
+   - On cache miss, return HTTP 200 with `{"status": "not_ready", "metrics": [], "ticker": "ALL", ...}`.
+   - Never call `_compute_ic_batch_sync` inline for ALL mode from the web handler.
+   - Single-ticker path unchanged (fast, no OOM risk).
+
+3. **Background refresh button.**
+   - In the Signal Stability pane, a "⟳ Refresh" button (ALL mode only).
+   - Calls a new `POST /ic-batch/refresh` endpoint (or existing `?refresh=true` GET — TBD during planning).
+   - Endpoint starts `asyncio.to_thread(_compute_ic_batch_sync, ...)` non-blocking, returns immediately with `{"status": "computing"}`.
+   - Frontend shows a spinner / "Computing… this takes 2–3 min" message.
+   - After a polling delay (or a second button press), re-loads the leaderboard.
+   - On VPS restart the cache survives in the DB — only the precompute script or the refresh button can write to it for ALL mode.
+
+**Plan before coding:** enter plan mode, design the three-item commit, get approval.
+
+---
+
+## OOM diagnosis — confirmed
+
+`dmesg` on VPS shows 6 OOM kills: `python` at 3.6–5 GB. Root cause: `_compute_ic_batch_sync` ALL-mode fetched all 125 cols × 141K rows into Python dicts at once (~800 MB), plus multiprocessing worker overhead from `run.py`. The precompute script avoids this by fetching 4 cols per metric.
+
+Two other dashboards on the same VPS (`/root/Portfolio_Dashboard/app.py` ~515 MB, `/root/VPS_Dashboard/app.py` ~62 MB) consume ~580 MB permanently, reducing headroom. Not the OOM cause, but worth noting if RAM pressure becomes a recurring issue.
+
+No persistent log file — `run.py` doesn't redirect stdout. VPS is controlled via `python run.py` (spawns multiprocessing children). Stop: `kill <run.py PID>`; children follow. Restart: however originally launched (tmux session etc.).
+
+---
+
+## VPS cache state — action needed before next session
+
+The ALL-mode default cache entry was overwritten by a live computation (the double-stride path, producing IC~0.3142 instead of correct ~0.1412 for donchian). **Before using the ALL-mode Signal Stability leaderboard, re-run:**
+
+```bash
+cd /spx_analysis_dashboard
+python scripts/precompute_ic_all.py --force
+```
+
+For any train-test cutoff dates you intend to use (each needs its own run):
+```bash
+python scripts/precompute_ic_all.py --cutoff-date YYYY-MM-DD --force
+```
+
+After the step-2 commit (disable live path + background refresh button), the refresh button handles this going forward.
+
+---
+
+## Double-stride audit — confirmed clean elsewhere
+
+The double-stride bug is **isolated to `_compute_ic_batch_sync` ALL-mode**. Every other IC path is correct:
+
+| Path | Verdict |
+|---|---|
+| `rolling_ic_single_ticker` (ic_compute.py) | Correct — stride only on rolling window loop |
+| `rolling_ic_cross_sectional` (ic_compute.py) | Correct — all dates computed; stride only on rolling-mean loop |
+| `/analyze` ALL-mode IC chart (line 661) | Correct — calls `rolling_ic_cross_sectional`, stride=1 (default) |
+| `/analyze` single-ticker IC chart (line 675) | Correct — calls `rolling_ic_single_ticker`, stride=1 (default) |
+| `_compute_ic_batch_sync` single-ticker (line 2949) | Correct — delegates to `rolling_ic_single_ticker` |
+| `_compute_ic_batch_sync` ALL-mode (lines 2893 + 2935) | **BUG — double stride** |
+| `precompute_ic_all.py` | Correct — calls `rolling_ic_cross_sectional` |
+
+The `/analyze` rolling IC chart, green/grey/red classification, and noise floors are **not affected** by this bug. The only contaminated output was the ALL-mode `/ic-batch` cache entry.
+
+---
+
+## Commits since last NEXT_SESSION update
+
+```
+d919b20  IC.5 fix: sanitize inf/nan epsilon to null before JSON write (finite_or_none in ic_compute.py)
+a499501  IC.5: add scripts/precompute_ic_all.py — offline ALL-mode IC pre-computation
+88df3b3  IC.5 diag: wrap ALL-mode DB fetch in try/except, surface error as 200 JSON
+003c715  (prior session) _compute_ic_batch_sync: Python pre-build optimization + diagnostics
+```
+
+The diagnostic try/except (88df3b3) around the ALL-mode DB fetch is still in the endpoint. It serves as a safety net and can stay — it converts any DB fetch exception into a visible 200 response with error text in the leaderboard. Clean it up or formalize it after step 2 lands.
+
+---
+
+## Everything below this line is unchanged from the prior handoff
+
 ## TL;DR — current state (2026-05-22)
 
 Two long-running initiatives now mostly done, one in flight:
@@ -104,20 +219,13 @@ Signal-stability tooling on top of rolling Spearman IC. Same step-cadence discip
 - **IC.2 — done (`3e26016`)**. `/analyze` single-ticker `rolling_corr` field replaced by `rolling_ic` payload with per-window sign-class, mode-aware reference IC, ε, and sign-stability scalar. Pane upgraded to multi-segment colored line + reference dashed line + train_test cutoff marker. Regression diff against step7k confirmed bit-identity of every other `/analyze` field.
 - **IC.3 — done (`c6a249b`)**. ALL-mode rolling IC populated via cross-sectional helper. Same payload shape as single-ticker, different ε (cross-sectional ε ~10× tighter). Frontend disambiguates with `[single-ticker]` vs `[cross-sectional]` subtitle tag. Regression diff confirmed only the predicted 4 diffs (ic_mode added in single-ticker, rolling_ic populated in ALL); all other endpoints PASS identical.
 - **IC.4 — done (`05cd501` + hotfix `4aa8ff2`)**. New `/ic-batch` endpoint at `GET /api/oi-analysis/ic-batch?ticker=&outcome=&window=&cutoff_date=&refresh=`. DB-cached in table `ic_batch_cache` (mirror of `global_bins_cache` pattern). Compute runs off-event-loop via `asyncio.to_thread`. Returns `{metrics: [{name, long_run_ic, long_run_ic_abs, epsilon, n_windows, sign_stability, n_same, n_opposite, n_neutral, neutral_pct, suppressed, suppression_reason}, ...]}`. Mode encoded by `cutoff_date` param: set → train_test (reference IC from pre-cutoff windows only); unset → in_sample / walk_forward (full-history reference; same result for both since rolling IC is mode-independent except for the reference).
-
-  **Fresh-fetch timing**: ~2–3 minutes for single-ticker on AAL × ~123 metrics × 1500 windows × per-window scipy.spearmanr. Cached subsequent reads are sub-second. ALL-mode fresh fetch is similar (DB fetch is the bottleneck; per-day Spearman on 80 tickers is faster than per-window Spearman on 252 pairs).
-
-  **Visual verification done**: queried `ticker=AAL`, confirmed the result is consistent with the rolling-IC pane chart for AAL + `oi_weighted_call` (mostly-green chart matches `n_same=1260, n_opposite=0, n_neutral=339, sign_stability=1.0` in the batch result). The price-level metrics for AAL (`spot_co`, `oi_weighted_*`, `oi_above_spot_co`, etc.) consistently show n_opposite=0 across 1599 rolling windows — plausible given AAL's persistent multi-year downtrend; price-level-vs-forward-return is a structurally stable relationship for trending tickers within rolling windows.
-
-- **IC.5 — next**. Frontend "Signal Stability" section on the Analyze page (between top selectors and "All Ticker Metric Bins"). Two universe-wide views, both driven by `/ic-batch`:
-  - **IC stability leaderboard**: horizontal bar chart, one bar per metric, sorted by `sign_stability` desc. Bars color-coded by `long_run_ic_abs` (darker = stronger signal). Greyed-out bars for suppressed metrics. Header shows the active mode unambiguously (`Signal Stability — AAL (time-series)` vs `Signal Stability — ALL (cross-sectional)`) — bound to the ticker selector and updates in lockstep.
-  - **Strength-vs-stability scatter**: every metric a dot. X = `long_run_ic_abs`. Y = `sign_stability`. Quadrants carry meaning: top-right = strong + persistent (priority); top-left = weak + persistent; bottom-right = strong + unstable ("one regime" trap); bottom-left = noise.
-  - **Click-to-load**: clicking a bar or dot flips the `metric` selector and triggers `/analyze`, dropping the user from survey mode into deep-dive on that metric.
-  - Implementation notes: new section in `templates/oi_analysis.html` before the existing "All Ticker Metric Bins" pane. New render functions in `static/js/oi_analysis.js`. Both views read `data.ic_batch.metrics`; the Alpine fetch hook calls `/ic-batch` on page load and on `setPageMode()` (mode change recomputes via the cache).
-
-- **IC.6 — pending after IC.5**. Add `/ic-batch` (3 modes — default cached, train_test with a fixed cutoff, refresh=true to force fresh) and the updated `/analyze` rolling_ic payload variants to the regression capture matrix. Capture a new baseline tag. Verify nothing else regresses.
-
-- **IC.7 — placeholder (don't design or build yet, just tracked)**. Per-ticker decomposition of cross-sectional IC for a selected metric: a bubble scatter diagnosing whether a metric's edge is broad across the universe or concentrated in a few names. Measured against the *cross-sectional* noise floor, NOT single-ticker IC. Diagnosis tool, not a ticker-selection tool. To be specified in detail after IC.5 ships, since it drills into the leaderboard.
+- **IC.5 — in progress**. Visual layout done (leaderboard vertical bars, scatter y-axis fix). OOM root cause diagnosed (confirmed via dmesg: 6 kills, python at 3.6–5 GB). Precompute script written (`scripts/precompute_ic_all.py`). Double-stride bug identified. **Remaining work in one commit (plan before coding):**
+  1. Fix double-stride in `_compute_ic_batch_sync` ALL-mode (remove `[::stride]` from date loop)
+  2. Disable live ALL-mode inline computation on cache miss → return `{"status": "not_ready", ...}`
+  3. Background refresh button in the Signal Stability pane (calls `/ic-batch` non-blocking, polls or re-loads)
+  IC.5 is complete only when ALL-mode Signal Stability works without OOM risk AND has a user-operable refresh path.
+- **IC.6 — pending after IC.5**. Add `/ic-batch` (3 modes) and updated `/analyze` rolling_ic to the regression capture matrix. Capture a new baseline tag. Verify nothing else regresses.
+- **IC.7 — placeholder**. Per-ticker decomposition of cross-sectional IC for a selected metric. Bubble scatter. Measured against cross-sectional ε, not single-ticker IC. To be specified after IC.5 ships.
 
 ## Verification harness (`scripts/regression_check.py`)
 
@@ -129,15 +237,15 @@ Three modes:
 
 **Reference baseline** for in-sample/walk-forward bit-equivalence: `regression_snapshots/step3-baseline/` (captured against the VPS at commit `e866848`, post-Step-2 with all the bit-equivalence follow-ups). Every subsequent migration step (3, 4, 5, 5.5) was diffed against this and came back clean except for environmental drift (`cached_at` timestamps on `/global-metric-bins`, FP drift on `/secondary-load` lift values — both 2a-accepted).
 
-Step 7j (`cdaa6f6`) was also diffed against `step3-baseline` (snapshot tag `step7j`). 246 diffs, all explainable as: row-count drift from ~3 weeks of additional ingested `daily_features` rows (~190 diffs), pre-existing Step 7f `cutoff_date` envelope additions (~6), pre-existing Step 7h `mode_envelope` unification (~6), exit prices materializing on trades whose `exit_date` fell between baseline and Step 7j capture (~10), `cached_at` timestamps (2), heatmap edge labels shifting with newer data (~10), two new heatmap matrix variants from Step 5.5. No diff indicates Step 7j broke Assigner behavior — all numeric shifts are row-count-proportional, consistent with structural relocation.
-
-Step 7k (`3bed28f` + `507baa7` + `a16df70`) snapshot tag `step7k` was diffed against `step7j`. 14 of 17 files PASS identical (every Assigner-routed endpoint); 9 score-matrix files baseline themselves (new matrix coverage); 3 files with non-algorithmic diffs (`secondary-corr-bins__wf0` got `cache_miss` due to a uvicorn worker restart between captures; the two `secondary-load` files have fourth-decimal `lift` drifts from ~24 hours of additional `daily_features` data). No collateral damage from the Score Matrix consolidation. `step7k` is the new clean baseline going forward.
+Step 7k snapshot tag `step7k` is the last clean baseline going forward.
 
 ## Operational
 
 **VPS**: at Tailscale `100.76.94.99:8000`, from `/spx_analysis_dashboard` via `python run.py`. SSH `root@100.76.94.99` works with key auth from the original machine. The dashboard uses asyncpg+FastAPI+uvicorn (`--reload` mode). uvicorn workers can OOM on the heavy `/analyze` ALL-mode responses (60MB+) and respawn — the regression harness handles this with retry-with-backoff.
 
-**Deploy protocol per step**: commit + push on dev machine → user SSHes to VPS, `git pull`, restart dashboard → user warms cache (loads the OI Analysis page once) → user reports ready → I run capture + diff → user does manual click-through where the plan calls for it (e.g. Step 2's 12-view hard stop).
+**Server architecture**: `run.py` spawns multiprocessing child workers (two visible via `ps aux`). The parent survives OOM kills; children get killed. No systemd service. No persistent log file. Stop: `kill <run.py PID>`; children follow. Restart: however originally launched (tmux session, etc.). For a log file: `nohup .venv/bin/python run.py > /tmp/spx.log 2>&1 &`.
+
+**Deploy protocol per step**: commit + push on dev machine → user SSHes to VPS, `git pull`, restart dashboard → user warms cache → user reports ready → I run capture + diff → user does manual click-through where the plan calls for it.
 
 **Working cadence (in memory)**: one migration step per session, manual review between each, no chaining. See `C:\Users\kroko\.claude\projects\C--Personal-Data-spx-analysis-dashboard\memory\feedback_step_cadence.md` for the user's explicit phrasing.
 
@@ -146,64 +254,47 @@ Step 7k (`3bed28f` + `507baa7` + `a16df70`) snapshot tag `step7k` was diffed aga
 | File | Role |
 |------|------|
 | `app/routers/row_compute.py` | Refactor destination — Protocol, registry, 3 Assigner classes, 4 dispatch functions, `PortfolioVectorBuilder`, `make_spec`, `dropped_count_for_mode`, `_validate_assignments`. Also hosts the relocated binning helpers from Step 7j and `train_test_bin_matrix_per_ticker` (the Step-7k shared primitive Score Matrix now uses). |
-| `app/routers/ic_compute.py` | **NEW** sibling module added in IC.1. Three primitives: `rolling_ic_single_ticker`, `rolling_ic_cross_sectional`, `sign_stability_from_rolling`. Plus `noise_floor_epsilon` (mode-aware ε), `classified_rolling_ic` (single source of truth for per-window sign labels), and `IcPoint` / `SignStability` dataclasses. Date-indexed-series output — doesn't unify cleanly with row_compute's per-row contract; intentional parallel module. |
-| `app/routers/oi_analysis.py` | Hosts the migrated endpoints. New in IC.2/IC.3: `/analyze` emits `rolling_ic` payload (was `rolling_corr`). New in IC.4: `/ic-batch` endpoint + `ic_batch_cache` table + `_compute_ic_batch_sync`. `_walk_forward_thresholds`, `_bucket_pairs`, `_bucket_pairs_per_ticker` still live here (used by yearly_consistency, half-sample, threshold-drift — view-specific code, not Assigner pipeline). |
+| `app/routers/ic_compute.py` | IC sibling module. Three primitives + `noise_floor_epsilon` + `classified_rolling_ic` + `IcPoint`/`SignStability` dataclasses + `finite_or_none` (JSON-safe float, added in d919b20). |
+| `app/routers/oi_analysis.py` | Hosts the migrated endpoints. `/ic-batch` endpoint + `ic_batch_cache` table + `_compute_ic_batch_sync`. Diagnostic try/except around ALL-mode DB fetch (88df3b3) still present. |
+| `scripts/precompute_ic_all.py` | **NEW** (a499501). Offline ALL-mode IC pre-computation. One metric at a time, 4 cols per fetch, no OOM. Run with `--force` after any double-stride fix to restore correct cache. |
 | `app/routers/oi_portfolios.py` | `/portfolios/{pid}/aggregate` — uses `PortfolioVectorBuilder`. |
 | `app/routers/oi_signals.py` | Imports `_bin_for_value` from `app.routers.row_compute` (moved in Step 7j). |
-| `research/batch_score.py` | Score Matrix scanner. `_tt_bin_matrix` is now a thin delegator to `row_compute.train_test_bin_matrix_per_ticker` (Step 7k). |
-| `static/js/oi_analysis.js` | Frontend. `pageMode` state, `setPageMode(m)` cascade. IC.2/IC.3 added `_renderRollingCorr` rewrite (multi-segment colored line + reference dashed line + cutoff marker) and `rollingIcSubtitle()`. Cache version currently **v=86** (controlled in `templates/oi_analysis.html`'s `<script src="...?v=NN">`). |
-| `templates/oi_analysis.html` | 3-way Mode toggle + Cutoff date input. Rolling-IC pane subtitle div. Cache version v=86. |
-| `scripts/regression_check.py` | Verification harness. Runs against the live VPS. Matrix now includes 9 score-matrix captures (added in Step 7k) — total 26 files per capture. |
-| `scripts/ic_compute_check.py` | **NEW** hand-computed verification for `ic_compute` primitives. 8 tests (ε derivation + A/B/C/D/E + 2 properties). Runs without DB. |
-| `scripts/tt_bin_tie_diff.py` | **NEW** one-off targeted comparison: pulls real `daily_features` and computes train-test bins under both `side='right'` (pre-Step-7k) and `side='left'` (post). Runs on the VPS where OI_DATABASE_URL is local. Used to identify the 5 contaminated features. |
-| `C:\Users\kroko\.claude\plans\stateful-tumbling-dragon.md` | The original refactor plan (Step 7 cleanup checklist). |
-| `regression_snapshots/` | **Gitignored**. Snapshot tags `step7k`, `step_ic2`, `step_ic3` (and others) only exist on the machine that captured them. Re-capture as needed on the new machine. |
+| `research/batch_score.py` | Score Matrix scanner. `_tt_bin_matrix` delegates to `row_compute.train_test_bin_matrix_per_ticker` (Step 7k). |
+| `static/js/oi_analysis.js` | Frontend. `pageMode` state, `setPageMode(m)` cascade. IC.2/IC.3 rolling IC pane. IC.5 leaderboard + scatter render functions. |
+| `templates/oi_analysis.html` | 3-way Mode toggle + Cutoff date input. Rolling-IC pane. Signal Stability pane. |
+| `scripts/regression_check.py` | Verification harness. 26 files per capture. |
+| `scripts/ic_compute_check.py` | Hand-computed verification for `ic_compute` primitives. 8 tests. Runs without DB. |
 
 ## Picking up — concrete first steps on the new machine
 
 1. `cd C:\Personal\Data\spx_analysis_dashboard`
-2. `git pull` — latest should be `4aa8ff2` (IC.4 hotfix — renamed `ic_batch_cache.window` → `window_size` to dodge the PostgreSQL reserved-word collision).
-3. If `.venv` is fresh: `python -m venv .venv && .venv\Scripts\pip install -r requirements.txt` (numpy, scipy, asyncpg, fastapi, etc. — `requirements.txt` is in the repo).
-4. Smoke-test both verification suites:
-   - `python scripts\regression_check.py train_test_check` → expect A/B/C/D PASS (TrainTestAssigner property tests; verifies the row_compute refactor still works).
-   - `python scripts\ic_compute_check.py` → expect ε derivation + Tests A/B/C/D/E + properties all PASS (verifies the IC tooling primitives).
-5. **regression_snapshots/ is gitignored**. The `step7k`, `step_ic2`, `step_ic3` baseline tags from prior sessions do NOT carry over via git. To run any future diff against a baseline, capture a new tag on the new machine first (typically against the running VPS): `python scripts\regression_check.py capture --tag <name> --base http://100.76.94.99:8000/api/oi-analysis`. The full matrix takes ~3 minutes and produces 25–26 files. There IS no out-of-band sync for snapshot dirs.
-6. **VPS state**: at last check the VPS is on `4aa8ff2` (the user deployed before the session ended). The `ic_batch_cache` table will be created on first /ic-batch hit if it doesn't exist already. The `oi_score_matrix` table on the VPS still contains pre-7k train-test scores for the 5 contaminated features — those should be re-scanned via a new train-test Score Matrix run before relying on train-test Score Matrix values for those features.
-7. **Next work item: IC.5** (frontend leaderboard + scatter). Detailed plan in the IC section below.
+2. `git pull` — latest should be `d919b20` (IC.5 fix: finite_or_none for inf/nan epsilon).
+3. Smoke-test: `python scripts\ic_compute_check.py` → all tests PASS.
+4. **VPS cache**: ALL-mode default cache entry has wrong data (live double-stride computation overwrote it). Run on VPS: `python scripts/precompute_ic_all.py --force`. Also run for any train-test cutoff dates in use.
+5. **Next work item: IC.5 step 2** — one commit: fix double-stride + disable live ALL-mode + background refresh button. Enter plan mode before coding.
 
-## Recent commits (for context)
+## Recent commits
 
 ```
+d919b20  IC.5 fix: sanitize inf/nan epsilon to null before JSON write
+a499501  IC.5: add scripts/precompute_ic_all.py — offline ALL-mode IC pre-computation
+88df3b3  IC.5 diag: wrap ALL-mode DB fetch in try/except, surface error as 200 JSON
+003c715  _compute_ic_batch_sync: Python pre-build optimization + diagnostics
 4aa8ff2  IC.4 hotfix: rename ic_batch_cache.window column (PG reserved word)
 05cd501  IC.4: /ic-batch endpoint + log IC tooling plan (incl. IC.7 placeholder)
 c6a249b  IC.3: enable rolling IC + sign-stability in ALL mode (cross-sectional)
 3e26016  IC.2: rolling IC + sign-stability in /analyze single-ticker pane
 b5c6407  IC.1: ic_compute.py sibling module + hand-computed verification
-a325482  Close out Step 7: all five cleanup items resolved (7e–7k)
-3bed28f  Step 7k: consolidate Score Matrix train-test bins onto shared primitive
-cdaa6f6  Step 7i + 7j: migrate today_decile, relocate 13 single-caller helpers
-66550f3  Step 7h: unify mode envelope across 4 secondary endpoints
-fb11fbb  Step 7g: fix global_bins_cache DB read (jsonb returned as str)
-66fedc7  Step 7f: persist train-test score matrix per cutoff
-6653a3c  Step 7e: NaN-safe score matrix endpoints
-fb7d62a  Step 7d: thread the batch score's CPU-heavy per-ticker work
-3b03d03  Step 6 Option A: test-window-only aggregation for train_test
-e782401  Step 6: register train_test as the third method end-to-end
-ce6fc4a  Step 5.5: route /heatmap ALL-mode through Assigner
-080cd99  Step 5: route /portfolios/{pid}/aggregate through row_compute
-7731f61  Step 4: route 4 secondary endpoints through row_compute
-ee92d72  Step 3: route /global-metric-bins through row_compute
-4c70892  Step 2: route /analyze through row_compute layer
-9ffc284  Step 1: row_compute module + regression harness (purely additive)
 ```
 
 ## User-context worth knowing
 
 - **124 tickers** in the dataset (a few without 2019 data — affects warmup math for walk-forward).
-- Default outcome dropdown is `ret_5d_fwd_oc`. The init() force-selects this via DOM manipulation because Alpine reactivity wasn't reliable for default-selection across browser form-state cache.
+- Default outcome dropdown is `ret_5d_fwd_oc`.
 - User prefers terse responses, explains the **why** rather than the **what**, reads the diff themselves.
 - For exploratory questions, give a recommendation with the main tradeoff and let them redirect.
-- User pushes back on descoping ("don't leave follow-up items I'll forget") — when in doubt, finish the item now or add it to the plan's Step 7 cleanup checklist.
+- User pushes back on descoping — when in doubt, finish the item now or add it to the plan's cleanup checklist.
+- **Process rule**: one step per session, hard stop after each, plan before coding, no commits without approval. See memory file `feedback_step_cadence.md`. This is non-negotiable.
 
 ## Auto-memory note
 
@@ -215,4 +306,4 @@ Memory is per-user/per-machine. Copy the directory across or rely on this doc.
 
 ---
 
-**TL;DR for the next session**: row_compute refactor done (Steps 1–7). IC tooling at IC.4 done and visually verified. **Next work item: IC.5 — Signal Stability section on the Analyze page (leaderboard + scatter, both driven by `/ic-batch`, both wired to the ticker selector, click-to-load on bars/dots).** Specifics in the IC plan section above. Snapshot baselines don't carry over via git — re-capture as needed.
+**TL;DR for the next session**: IC.5 partially done. Visual layout works. OOM solved via precompute script. Cache needs a `--force` re-run. One commit remaining: fix double-stride bug + disable live ALL-mode inline computation + background refresh button. Plan before coding.
