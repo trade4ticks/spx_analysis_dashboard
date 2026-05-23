@@ -242,12 +242,11 @@ def rolling_ic_cross_sectional(
         by_date.setdefault(d, []).append(pair)
 
     daily: list[tuple[Any, float, int]] = []  # (date, ic, n_tickers)
-    # Stride the date loop so the expensive per-day spearmanr is called
-    # on every stride-th day rather than every day.  For stride=3 this
-    # reduces the ALL-mode daily-IC loop by ~3×, matching the saving we
-    # already apply to the rolling-mean loop below.
-    all_dates = sorted(by_date.keys())
-    for d in all_dates[::stride]:
+    # Note: for /ic-batch ALL mode, the caller pre-strides at the DB level
+    # (fetches only every stride-th date), so by_date already contains only
+    # those dates. We iterate all dates here; the stride parameter is then
+    # used only for the rolling-mean loop below.
+    for d in sorted(by_date.keys()):
         pairs = by_date[d]
         k = len(pairs)
         if k < min_tickers_per_day:
