@@ -25,9 +25,9 @@ document.addEventListener('alpine:init', () => {
     dateFrom: '', dateTo: new Date().toISOString().slice(0, 10),
     // Page-wide bin mode. Drives every binning analysis on the page so
     // primary / corr explorer / portfolio aggregate all use the same flavor.
-    //   'in_sample'    — full-history bin thresholds (default; current behavior)
+    //   'in_sample'    — full-history bin thresholds
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
-    pageMode: 'in_sample',
+    pageMode: 'walk_forward',
     // Only used when pageMode === 'train_test'. Defaults to 2024-01-01 so
     // users get a meaningful default test window without typing a date.
     cutoffDate: '2024-01-01',
@@ -139,7 +139,7 @@ document.addEventListener('alpine:init', () => {
       ]);
       if (tkRes.ok) {
         this.tickers = ['ALL', ...(await tkRes.json())];
-        this.ticker = this.tickers[1] || 'ALL';
+        this.ticker = 'ALL';
       }
       if (colRes.ok) {
         const cols = await colRes.json();
@@ -150,14 +150,14 @@ document.addEventListener('alpine:init', () => {
         // Pre-fill Threshold Drift's metric picker with the first feature.
         if (this.features.length && !this.tdMetric) this.tdMetric = this.features[0];
 
-        // ALWAYS prefer ret_5d_fwd_oc for the standalone analysis panes
-        // (user has asked for 5d default repeatedly).
+        // ALWAYS prefer ret_5d_fwd_oc for all outcome pickers.
         const _preferred = 'ret_5d_fwd_oc';
         const _pick = this.outcomes.includes(_preferred) ? _preferred : (this.outcomes[0] || '');
         // Set state AND force the DOM SELECT directly. Belt-and-suspenders
         // because some browsers restore the previously-chosen option from
         // form-state cache even with autocomplete="off", and Alpine's
         // reactivity won't re-fire if state hasn't changed.
+        this.outcome        = _pick;  // main analysis outcome
         await this.$nextTick();
         this.topBinsOutcome = _pick;
         this.tdOutcome      = _pick;
