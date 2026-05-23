@@ -4527,13 +4527,17 @@ document.addEventListener('alpine:init', () => {
       const sorted = [...nonSup, ...sup];
 
       const maxAbsIc = Math.max(...nonSup.map(m => m.long_run_ic_abs || 0), 0.001);
-      const barH = 16;
-      const chartH = Math.max(320, sorted.length * barH + 50);
+      // Vertical column chart: fixed height, width grows with metric count so
+      // x-axis labels have room (container is overflow-x:auto).
+      const chartH  = 380;
+      const chartW  = Math.max(sorted.length * 11, 900);
 
-      // Size the container + canvas before Chart.js reads dimensions.
-      if (innerEl) innerEl.style.height = chartH + 'px';
+      if (innerEl) {
+        innerEl.style.height = chartH + 'px';
+        innerEl.style.minWidth = chartW + 'px';
+      }
 
-      const labels = sorted.map(m => m.name.length > 36 ? m.name.slice(0, 35) + '…' : m.name);
+      const labels = sorted.map(m => m.name);
       const values = sorted.map(m => m.suppressed ? 0 : (m.sign_stability ?? 0));
       const bgColors = sorted.map(m => {
         if (m.suppressed) return 'rgba(100,100,100,0.25)';
@@ -4548,10 +4552,9 @@ document.addEventListener('alpine:init', () => {
         type: 'bar',
         data: {
           labels,
-          datasets: [{ data: values, backgroundColor: bgColors, borderWidth: 0, barThickness: barH - 4 }],
+          datasets: [{ data: values, backgroundColor: bgColors, borderWidth: 0, maxBarThickness: 12 }],
         },
         options: {
-          indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
           onClick: (e, elements) => {
             if (!elements.length) return;
@@ -4581,11 +4584,18 @@ document.addEventListener('alpine:init', () => {
           scales: {
             x: {
               ...this._darkScales().x,
+              ticks: {
+                ...this._darkScales().x.ticks,
+                maxRotation: 90, minRotation: 45,
+                font: { size: 7 },
+              },
+            },
+            y: {
+              ...this._darkScales().y,
               min: 0, max: 1,
               title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
-              ticks: { ...this._darkScales().x.ticks, callback: v => (v * 100).toFixed(0) + '%' },
+              ticks: { ...this._darkScales().y.ticks, callback: v => (v * 100).toFixed(0) + '%' },
             },
-            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks, font: { size: 8 } } },
           },
         },
       });
@@ -4700,7 +4710,7 @@ document.addEventListener('alpine:init', () => {
             },
             y: {
               ...this._darkScales().y,
-              min: 0, max: 1,
+              min: 0, max: 1.05,
               title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
               ticks: { ...this._darkScales().y.ticks, callback: v => (v * 100).toFixed(0) + '%' },
             },

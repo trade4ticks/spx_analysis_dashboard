@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=88"></script>
+  <script src="/static/js/oi_analysis.js?v=89"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -461,10 +461,10 @@
             <span x-show="icBatchView==='scatter'">X = IC strength (abs) · Y = sign stability · click a dot to set Metric and analyze</span>
           </div>
 
-          <!-- Leaderboard: scrollable container so 120+ metrics don't
-               overflow the page; canvas height is set by _renderIcLeaderboard. -->
+          <!-- Leaderboard: horizontal scroll so 120+ vertical columns fit;
+               height and min-width are set dynamically by _renderIcLeaderboard. -->
           <div x-show="icBatchView === 'leaderboard' && icBatchData && !icBatchError">
-            <div style="overflow-y:auto;max-height:520px">
+            <div style="overflow-x:auto">
               <div id="ic-leaderboard-inner" style="position:relative">
                 <canvas id="chart-ic-leaderboard"></canvas>
               </div>
