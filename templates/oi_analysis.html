@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=95"></script>
+  <script src="/static/js/oi_analysis.js?v=96"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -599,17 +599,17 @@
         <div style="padding:0 12px 12px">
           <div x-show="icDecompData && !icDecompError"
                style="font-size:9px;color:var(--dim);margin-bottom:6px">
-            Mean daily rank-product contribution per ticker ·
-            blue = same sign as reference IC · pink = opposite · grey ≈ zero ·
-            click a bar to drill into that ticker
+            X = sign agreement rate (0.5 = random) ·
+            Y = avg return when flagged on predicted-winner side ·
+            size = n days flagged · blue = same sign as IC · pink = opposite ·
+            upper-right cluster = broad, trustworthy edge ·
+            click a dot to drill into that ticker
           </div>
 
-          <!-- Scrollable chart container: height grows with ticker count (set by JS) -->
+          <!-- Fixed-height bubble scatter — no scrolling needed -->
           <div x-show="icDecompData && !icDecompError"
-               style="overflow-y:auto;max-height:520px">
-            <div id="ic-decomp-inner" style="position:relative">
-              <canvas id="chart-ic-decomp"></canvas>
-            </div>
+               style="height:420px;position:relative">
+            <canvas id="chart-ic-decomp"></canvas>
           </div>
 
           <div x-show="icDecompLoading"

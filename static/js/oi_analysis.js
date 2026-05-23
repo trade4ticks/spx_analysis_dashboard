@@ -4953,8 +4953,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderIcDecomp() {
-      const el      = document.getElementById('chart-ic-decomp');
-      const innerEl = document.getElementById('ic-decomp-inner');
+      const el = document.getElementById('chart-ic-decomp');
       if (!el || !this.icDecompData?.tickers?.length) return;
       if (this._charts['ic-decomp']) {
         this._charts['ic-decomp'].destroy();
@@ -4962,39 +4961,59 @@ document.addEventListener('alpine:init', () => {
       }
 
       const d       = this.icDecompData;
-      const tickers = d.tickers;          // sorted by score descending from server
+      // Only plot tickers that fired on the flagged side at least once
+      const tickers = d.tickers.filter(t => t.avg_ret_flagged != null && t.n_flagged > 0);
       const refIc   = d.reference_ic || 0;
 
-      // Canvas height: ~16px per row + labels/padding
-      const chartH = Math.max(280, tickers.length * 16 + 60);
-      if (innerEl) innerEl.style.height = chartH + 'px';
+      // Bubble size: radius scaled by sqrt(n_flagged) so area ∝ n_flagged.
+      // Clamp 3–18px so small-sample dots are still clickable.
+      const maxNF = Math.max(...tickers.map(t => t.n_flagged), 1);
+      const bubbleR = t => Math.max(3, Math.min(18, Math.sqrt(t.n_flagged / maxNF) * 14));
 
-      const labels = tickers.map(t => t.ticker);
-      const values = tickers.map(t => t.score);
-      const maxAbs = Math.max(...values.map(v => Math.abs(v)), 1e-9);
-      const thresh = maxAbs * 0.05;   // < 5% of max → neutral grey
-
-      const bgColors = values.map(v => {
-        if (Math.abs(v) < thresh) return 'rgba(150,150,150,0.35)';
-        const t  = Math.min(Math.abs(v) / maxAbs, 1);
-        const op = (0.3 + t * 0.55).toFixed(2);
-        const sameSign = refIc >= 0 ? v >= 0 : v < 0;
+      // Color: same direction as reference_ic → blue, opposite → pink.
+      // Opacity encodes magnitude so noise tickers fade to background.
+      const maxAbsScore = Math.max(...tickers.map(t => Math.abs(t.score)), 1e-9);
+      const bgColors = tickers.map(t => {
+        const mag = Math.min(Math.abs(t.score) / maxAbsScore, 1);
+        const op  = (0.35 + mag * 0.50).toFixed(2);
+        const sameSign = refIc >= 0 ? t.score >= 0 : t.score < 0;
         return sameSign ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
       });
 
+      const bubbleData = tickers.map((t, i) => ({
+        x:  t.sign_agreement_rate,
+        y:  t.avg_ret_flagged * 100,   // decimal → %
+        r:  bubbleR(t),
+        _t: t,
+      }));
+
+      // Reference-line plugin: vertical at x=0.5 (random baseline),
+      // horizontal at y=0 (break-even). Drawn before datasets.
+      const refLinePlugin = {
+        id: 'icDecompRefLines',
+        beforeDatasetsDraw(chart) {
+          const { ctx, scales: { x: xs, y: ys } } = chart;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(180,180,180,0.35)';
+          ctx.lineWidth   = 1;
+          ctx.setLineDash([4, 3]);
+          const x05 = xs.getPixelForValue(0.5);
+          ctx.beginPath(); ctx.moveTo(x05, ys.top);  ctx.lineTo(x05, ys.bottom); ctx.stroke();
+          const y0  = ys.getPixelForValue(0);
+          ctx.beginPath(); ctx.moveTo(xs.left, y0);  ctx.lineTo(xs.right, y0);   ctx.stroke();
+          ctx.restore();
+        },
+      };
+
       const self = this;
       this._charts['ic-decomp'] = new Chart(el, {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [{ data: values, backgroundColor: bgColors, borderWidth: 0, maxBarThickness: 14 }],
-        },
+        type: 'bubble',
+        data: { datasets: [{ data: bubbleData, backgroundColor: bgColors, borderWidth: 0 }] },
         options: {
-          indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
           onClick(e, elements) {
             if (!elements.length) return;
-            const tkr = tickers[elements[0].index].ticker;
+            const tkr = bubbleData[elements[0].index]._t.ticker;
             self.ticker = tkr;
             const sel = document.querySelector('select[x-model="ticker"]');
             if (sel) sel.value = tkr;
@@ -5005,8 +5024,14 @@ document.addEventListener('alpine:init', () => {
             tooltip: {
               callbacks: {
                 label: ctx => {
-                  const t = tickers[ctx.dataIndex];
-                  return `score ${t.score.toFixed(6)}  ·  ${t.n_days} days`;
+                  const t = ctx.raw._t;
+                  const agr = (t.sign_agreement_rate * 100).toFixed(1);
+                  const ret = (t.avg_ret_flagged * 100).toFixed(3);
+                  const hr  = t.hit_rate_flagged != null
+                    ? ` · hit ${(t.hit_rate_flagged * 100).toFixed(1)}%` : '';
+                  return [`${t.ticker}`,
+                          `sign agr: ${agr}%  ·  avg ret: ${ret}%${hr}`,
+                          `n flagged: ${t.n_flagged}  ·  score: ${t.score.toFixed(6)}`];
                 },
               },
             },
@@ -5014,18 +5039,22 @@ document.addEventListener('alpine:init', () => {
           scales: {
             x: {
               ...this._darkScales().x,
-              ticks: { ...this._darkScales().x.ticks, callback: v => v.toFixed(4), maxTicksLimit: 8 },
-              title: {
-                display: true, text: 'Mean daily rank-product contribution',
-                color: 'var(--dim)', font: { size: 9 },
-              },
+              min: 0, max: 1,
+              title: { display: true, text: 'Sign agreement rate  (0.5 = random)',
+                       color: 'var(--dim)', font: { size: 9 } },
+              ticks: { ...this._darkScales().x.ticks,
+                       callback: v => (v * 100).toFixed(0) + '%', maxTicksLimit: 6 },
             },
             y: {
               ...this._darkScales().y,
-              ticks: { ...this._darkScales().y.ticks, font: { size: 9 } },
+              title: { display: true, text: 'Avg return when flagged  (%)',
+                       color: 'var(--dim)', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks,
+                       callback: v => v.toFixed(2) + '%', maxTicksLimit: 7 },
             },
           },
         },
+        plugins: [refLinePlugin],
       });
     },
 

@@ -461,6 +461,18 @@ def ic_decompose_cross_sectional(
     daily_ics:       list[float] = []
     pre_cutoff_ics:  list[float] = []
 
+    # Per-ticker bubble-chart accumulators (populated in inner loop, used below)
+    # Separated into top-half and bottom-half by metric rank so we can
+    # direction-normalise after reference_ic is known (sign(reference_ic)
+    # determines which half is the "predicted winner").
+    n_pos_rp_map:    dict[str, int]   = {}  # days rank product > 0 (signal agreement)
+    n_top_map:       dict[str, int]   = {}  # days ticker in top half by metric rank
+    sum_ret_top_map: dict[str, float] = {}  # Σ outcomes when in top half
+    n_pos_ret_top:   dict[str, int]   = {}  # positive-outcome count, top half
+    n_bot_map:       dict[str, int]   = {}  # days ticker in bottom half
+    sum_ret_bot_map: dict[str, float] = {}  # Σ outcomes when in bottom half
+    n_pos_ret_bot:   dict[str, int]   = {}  # positive-outcome count, bottom half
+
     for d in sorted(by_date.keys()):
         tkr_vals = by_date[d]
         tickers  = list(tkr_vals.keys())
@@ -499,6 +511,23 @@ def ic_decompose_cross_sectional(
             contrib_sum[tkr] = contrib_sum.get(tkr, 0.0) + c
             n_days_map[tkr]  = n_days_map.get(tkr, 0) + 1
 
+            # Sign agreement: positive rank product = metric & outcome ranks aligned
+            if z_m[i] * z_o[i] > 0:
+                n_pos_rp_map[tkr] = n_pos_rp_map.get(tkr, 0) + 1
+
+            # Conditional returns split by metric-rank half
+            out_val = float(ov_arr[i])
+            if r_m[i] > mean_r:        # top half by metric rank
+                n_top_map[tkr]       = n_top_map.get(tkr, 0) + 1
+                sum_ret_top_map[tkr] = sum_ret_top_map.get(tkr, 0.0) + out_val
+                if out_val > 0:
+                    n_pos_ret_top[tkr] = n_pos_ret_top.get(tkr, 0) + 1
+            else:                      # bottom half (includes exact median — rare)
+                n_bot_map[tkr]       = n_bot_map.get(tkr, 0) + 1
+                sum_ret_bot_map[tkr] = sum_ret_bot_map.get(tkr, 0.0) + out_val
+                if out_val > 0:
+                    n_pos_ret_bot[tkr] = n_pos_ret_bot.get(tkr, 0) + 1
+
     n_days = len(daily_ics)
     if n_days == 0:
         return {
@@ -513,12 +542,44 @@ def ic_decompose_cross_sectional(
         else float(np.mean(daily_ics))
     )
 
-    # Per-ticker mean daily contribution — this is the IC.7 score
+    # Per-ticker mean daily contribution — this is the IC.7 score.
+    # flag_top: True when reference_ic ≥ 0 (top half = predicted winner).
+    # False when reference_ic < 0 (bottom half = predicted winner).
+    # Y-axis and Size must use the same normalisation so the bubble chart
+    # reads consistently regardless of the metric's sign.
+    flag_top = reference_ic >= 0
+
     results = []
     for tkr, csum in contrib_sum.items():
         nd    = n_days_map[tkr]
         score = round(csum / nd, 8)
-        results.append({"ticker": tkr, "score": score, "n_days": nd})
+
+        # Sign agreement rate: fraction of days metric & outcome rank aligned
+        n_pos_rp = n_pos_rp_map.get(tkr, 0)
+        sign_agr = round(n_pos_rp / nd, 4) if nd > 0 else 0.5
+
+        # Direction-normalised payoff: use predicted-winner half
+        if flag_top:
+            nf   = n_top_map.get(tkr, 0)
+            sr   = sum_ret_top_map.get(tkr, 0.0)
+            npos = n_pos_ret_top.get(tkr, 0)
+        else:
+            nf   = n_bot_map.get(tkr, 0)
+            sr   = sum_ret_bot_map.get(tkr, 0.0)
+            npos = n_pos_ret_bot.get(tkr, 0)
+
+        avg_ret_flagged  = round(sr / nf, 6) if nf > 0 else None
+        hit_rate_flagged = round(npos / nf, 4) if nf > 0 else None
+
+        results.append({
+            "ticker":              tkr,
+            "score":               score,
+            "n_days":              nd,
+            "sign_agreement_rate": sign_agr,
+            "avg_ret_flagged":     avg_ret_flagged,
+            "hit_rate_flagged":    hit_rate_flagged,
+            "n_flagged":           nf,
+        })
     results.sort(key=lambda x: x["score"], reverse=True)
 
     # ── Concentration metrics ────────────────────────────────────────────
