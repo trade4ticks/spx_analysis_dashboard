@@ -3052,17 +3052,20 @@ async def _compute_ic_batch_all_bg(
     Always discards cache_key from _ic_batch_running in the finally block.
     """
     import logging as _log
+    import time as _time
     from datetime import date as _date
     from app.routers.ic_compute import (
         rolling_ic_cross_sectional,
         sign_stability_from_rolling,
         noise_floor_epsilon,
         finite_or_none,
+        ic_decompose_cross_sectional,   # IC.7: breadth / gini per metric
     )
 
     horizon = _parse_horizon(outcome)
 
     try:
+        _t0 = _time.perf_counter()
         feature_cols = await _fetch_ic_feature_columns(pool)
         metrics = [c for c in feature_cols if c != outcome]
         results = []
@@ -3091,6 +3094,14 @@ async def _compute_ic_batch_all_bg(
                 rows, metric, outcome,
                 window=window,
                 stride=stride,
+            )
+
+            # IC.7: per-ticker decomp on same rows → gini + effective_n.
+            # Runs before del rows so no extra DB fetch is needed.
+            decomp = await asyncio.to_thread(
+                ic_decompose_cross_sectional,
+                rows, metric, outcome,
+                cutoff_date=cutoff_date,
             )
             del rows  # release before next iteration
 
@@ -3127,6 +3138,11 @@ async def _compute_ic_batch_all_bg(
                                     if n_total else 0.0),
                 "suppressed":      stability.suppressed,
                 "suppression_reason": stability.suppression_reason,
+                # IC.7 breadth fields — None if decomp returned no tickers
+                "concentration_gini": finite_or_none(decomp["concentration_gini"])
+                                      if decomp.get("concentration_gini") is not None else None,
+                "effective_n":        finite_or_none(decomp["effective_n"])
+                                      if decomp.get("effective_n") is not None else None,
             })
 
         # Write completed result to cache.
@@ -3142,8 +3158,10 @@ async def _compute_ic_batch_all_bg(
                        cached_at  = NOW()""",
                 cache_key, ticker, outcome, window, cutoff_obj, payload_json,
             )
+        _elapsed = _time.perf_counter() - _t0
         _log.info(
-            "ic_batch_all_bg: wrote %d metrics to cache key=%s", len(results), cache_key,
+            "ic_batch_all_bg: wrote %d metrics to cache key=%s elapsed=%.1fs",
+            len(results), cache_key, _elapsed,
         )
 
     except Exception as exc:
