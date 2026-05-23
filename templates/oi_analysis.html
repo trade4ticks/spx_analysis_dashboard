@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=99"></script>
+  <script src="/static/js/oi_analysis.js?v=100"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -632,26 +632,38 @@
           </div>
         </div>
 
-        <!-- Pane 5: Lorenz Curve (stub — rendered in next commit) -->
+        <!-- Pane 5: Lorenz Curve -->
         <div class="survey-pane">
           <div class="survey-pane-hdr">
             <span class="survey-pane-title">Lorenz Curve</span>
-            <span class="survey-pane-hint">cumulative IC signal concentration across tickers</span>
+            <span class="survey-pane-hint">cumulative |IC contribution| vs tickers · area below diagonal = Gini concentration</span>
+            <button class="fs-btn" @click="openFullscreen('chart-ic-lorenz')"
+                    x-show="!!(icDecompData && !icDecompError && ticker === 'ALL')" title="Fullscreen">⛶</button>
           </div>
           <!-- Single-ticker -->
           <div x-show="ticker !== 'ALL'" class="survey-pane-ph">
             Lorenz curve requires cross-sectional data — switch ticker to ALL.
           </div>
+          <!-- ALL mode: loading -->
+          <div x-show="ticker === 'ALL' && icDecompLoading"
+               style="height:420px;display:flex;align-items:center;justify-content:center">
+            <span style="font-size:12px;color:var(--dim)">Loading…</span>
+          </div>
           <!-- ALL mode: no metric selected -->
-          <div x-show="ticker === 'ALL' && !icDecompData" class="survey-pane-ph">
+          <div x-show="ticker === 'ALL' && !icDecompData && !icDecompLoading && !icDecompError"
+               class="survey-pane-ph">
             ← Click a metric to see its Lorenz curve
           </div>
-          <!-- ALL mode: stub placeholder when data present -->
-          <div x-show="ticker === 'ALL' && icDecompData"
-               style="height:420px;position:relative;display:flex;align-items:center;
-                      justify-content:center;flex-direction:column;gap:6px">
-            <canvas id="chart-ic-lorenz" style="display:none"></canvas>
-            <span style="font-size:11px;color:var(--dim)">Lorenz curve — rendering in next step</span>
+          <!-- ALL mode: chart -->
+          <div x-show="ticker === 'ALL' && icDecompData && !icDecompError && !icDecompLoading"
+               style="height:420px;position:relative">
+            <canvas id="chart-ic-lorenz"></canvas>
+          </div>
+          <!-- ALL mode: error -->
+          <div x-show="ticker === 'ALL' && icDecompError && !icDecompLoading"
+               style="padding:14px;margin:8px;border:1px solid #e74c3c55;border-radius:4px;background:#e74c3c0d">
+            <div style="font-size:13px;font-weight:600;color:#e74c3c">❌ Error</div>
+            <div style="font-size:12px;color:var(--dim)" x-text="icDecompError"></div>
           </div>
         </div>
 

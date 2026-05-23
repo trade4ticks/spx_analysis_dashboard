@@ -1891,6 +1891,7 @@ document.addEventListener('alpine:init', () => {
         'chart-ic-scatter':     'ic-scatter',
         'chart-ic-beeswarm':    'ic-beeswarm',
         'chart-ic-decomp':      'ic-decomp',
+        'chart-ic-lorenz':      'ic-lorenz',
       };
       const key = keyOverride[chartId] || chartId.replace('chart-', '');
       this.fsChartId = chartId;
@@ -1942,6 +1943,7 @@ document.addEventListener('alpine:init', () => {
           'chart-ic-scatter':     () => this._renderIcScatter(),
           'chart-ic-beeswarm':    () => this._renderIcBeeswarm(),
           'chart-ic-decomp':      () => this._renderIcDecomp(),
+          'chart-ic-lorenz':      () => this._renderIcLorenz(),
         };
         const fn = renderMap[chartId];
         if (fn) {
@@ -2014,6 +2016,7 @@ document.addEventListener('alpine:init', () => {
           'chart-ic-scatter':     () => this._renderIcScatter(),
           'chart-ic-beeswarm':    () => this._renderIcBeeswarm(),
           'chart-ic-decomp':      () => this._renderIcDecomp(),
+          'chart-ic-lorenz':      () => this._renderIcLorenz(),
         };
         const fn = renderMap[wasChartId];
         if (fn) fn();
@@ -5099,7 +5102,7 @@ document.addEventListener('alpine:init', () => {
         if (d.error) throw new Error(d.error);
         this.icDecompData = d;
         this.icDecompKey  = this._icDecompKey();
-        this.$nextTick(() => this._renderIcDecomp());
+        this.$nextTick(() => { this._renderIcDecomp(); this._renderIcLorenz(); });
       } catch (e) {
         this.icDecompError = e.message;
       } finally {
@@ -5222,6 +5225,163 @@ document.addEventListener('alpine:init', () => {
           },
         },
         plugins: [refLinePlugin],
+      });
+    },
+
+    // ── IC.7 Lorenz Curve ─────────────────────────────────────────────
+
+    _renderIcLorenz() {
+      const el = document.getElementById('chart-ic-lorenz');
+      if (!el || !this.icDecompData?.tickers?.length) return;
+      if (this._charts['ic-lorenz']) {
+        this._charts['ic-lorenz'].destroy();
+        this._charts['ic-lorenz'] = null;
+      }
+
+      const tickers = this.icDecompData.tickers;
+      const gini    = this.icDecompData.concentration_gini;
+      const effN    = this.icDecompData.effective_n;
+      const n       = tickers.length;
+
+      // Sort absolute scores ascending — smallest contributors first.
+      const absSorted = tickers
+        .map(t => Math.abs(t.score))
+        .sort((a, b) => a - b);
+
+      const total = absSorted.reduce((s, v) => s + v, 0);
+      if (total === 0) return; // degenerate: all scores zero
+
+      // Build Lorenz points: (0,0) → cumulative (fraction of tickers, fraction of |score|).
+      const lorenzPts = [{ x: 0, y: 0 }];
+      let cumSum = 0;
+      absSorted.forEach((v, i) => {
+        cumSum += v;
+        lorenzPts.push({ x: (i + 1) / n, y: cumSum / total });
+      });
+
+      // Diagonal = perfect equality line.
+      const diagPts = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+
+      // Custom plugin: shade the area between the diagonal and the Lorenz
+      // curve (below the diagonal = concentration). Runs before datasets so
+      // both lines render on top of the fill.
+      const shadePlugin = {
+        id: 'lorenzShade',
+        beforeDatasetsDraw(chart) {
+          const { ctx, scales: { x: xs, y: ys } } = chart;
+          ctx.save();
+          ctx.beginPath();
+          // Trace diagonal forward (0,0) → (1,1)
+          ctx.moveTo(xs.getPixelForValue(0), ys.getPixelForValue(0));
+          ctx.lineTo(xs.getPixelForValue(1), ys.getPixelForValue(1));
+          // Trace Lorenz curve backward from (1,1) to (0,0)
+          for (let i = lorenzPts.length - 1; i >= 0; i--) {
+            ctx.lineTo(
+              xs.getPixelForValue(lorenzPts[i].x),
+              ys.getPixelForValue(lorenzPts[i].y),
+            );
+          }
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(52,152,219,0.10)';
+          ctx.fill();
+          ctx.restore();
+        },
+      };
+
+      // Title: Gini + eff N aligned to the right so it floats over the chart
+      // without blocking the curve (concentrated metrics bow far below the
+      // diagonal, so the top-right corner is always empty).
+      const giniStr = gini  != null ? `Gini = ${gini.toFixed(3)}` : '';
+      const effStr  = effN  != null ? `  ·  eff N = ${effN.toFixed(1)} / ${n}` : '';
+
+      this._charts['ic-lorenz'] = new Chart(el, {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              // Diagonal reference line (equal distribution)
+              data:        diagPts,
+              borderColor: 'rgba(180,180,180,0.50)',
+              borderWidth: 1,
+              borderDash:  [4, 3],
+              pointRadius: 0,
+              tension:     0,
+              order:       2,
+            },
+            {
+              // Lorenz curve
+              data:        lorenzPts,
+              borderColor: 'rgba(52,152,219,0.85)',
+              borderWidth: 1.5,
+              pointRadius: 0,
+              tension:     0,
+              fill:        false,
+              order:       1,
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            title: (giniStr.length > 0) ? {
+              display:  true,
+              text:     giniStr + effStr,
+              color:    '#888',
+              font:     { size: 10 },
+              align:    'end',
+              padding:  { top: 6, bottom: 0 },
+            } : { display: false },
+            tooltip: {
+              callbacks: {
+                title: ctx => {
+                  const pct = (ctx[0].raw.x * 100).toFixed(0);
+                  return `Bottom ${pct}% of tickers by |IC contribution|`;
+                },
+                label: ctx => {
+                  if (ctx.datasetIndex === 1) {
+                    return `account for ${(ctx.raw.y * 100).toFixed(1)}% of total |IC contribution|`;
+                  }
+                  return 'equal distribution';
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ...this._darkScales().x,
+              type: 'linear',
+              min: 0, max: 1,
+              title: {
+                display: true,
+                text:    'Cumulative share of tickers (sorted by |contribution| ↑)',
+                color:   '#888',
+                font:    { size: 9 },
+              },
+              ticks: {
+                ...this._darkScales().x.ticks,
+                callback:     v => (v * 100).toFixed(0) + '%',
+                maxTicksLimit: 6,
+              },
+            },
+            y: {
+              ...this._darkScales().y,
+              min: 0, max: 1,
+              title: {
+                display: true,
+                text:    'Cumulative share of |IC contribution|',
+                color:   '#888',
+                font:    { size: 9 },
+              },
+              ticks: {
+                ...this._darkScales().y.ticks,
+                callback:     v => (v * 100).toFixed(0) + '%',
+                maxTicksLimit: 6,
+              },
+            },
+          },
+        },
+        plugins: [shadePlugin],
       });
     },
 
