@@ -3184,14 +3184,16 @@ async def ic_batch(
         payload = row["payload"]
         if isinstance(payload, str):
             payload = json.loads(payload)
+        cached_at_dt = row["cached_at"]
         return {
-            "metrics":     payload.get("metrics", []),
-            "ticker":      ticker,
-            "outcome":     outcome,
-            "window":      window,
-            "cutoff_date": cutoff_date,
-            "cached_at":   str(row["cached_at"]),
-            "from_cache":  True,
+            "metrics":      payload.get("metrics", []),
+            "ticker":       ticker,
+            "outcome":      outcome,
+            "window":       window,
+            "cutoff_date":  cutoff_date,
+            "cached_at":    str(cached_at_dt),
+            "cached_at_ms": int(cached_at_dt.timestamp() * 1000),  # epoch ms — used by JS stale-cache guard (no string parsing)
+            "from_cache":   True,
         }
 
     # Cache miss — return status so the frontend can prompt or poll.

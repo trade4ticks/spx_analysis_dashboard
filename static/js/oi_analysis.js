@@ -4510,15 +4510,17 @@ document.addEventListener('alpine:init', () => {
           // Stale-cache guard: if a ⟳ Refresh was triggered, ignore any
           // cache entry older than the refresh click — keep polling until
           // the background job writes a fresh result.
-          if (this.icBatchRefreshAt && d.cached_at) {
-            const cacheMs = new Date(d.cached_at.replace(' ', 'T')).getTime();
-            if (cacheMs < this.icBatchRefreshAt) {
+          // Stale-cache guard: if ⟳ Refresh was clicked, reject any cache entry
+          // older than the click. Uses epoch-ms from server (cached_at_ms) so
+          // there is no timezone string parsing — NaN is impossible.
+          if (this.icBatchRefreshAt && d.cached_at_ms) {
+            if (d.cached_at_ms < this.icBatchRefreshAt) {
               this.icBatchStatus = 'computing';
               this._startIcBatchPolling();
-              return; // don't render stale data
+              return; // don't render stale data; next poll will re-check
             }
           }
-          this.icBatchRefreshAt = null; // fresh data received, clear flag
+          this.icBatchRefreshAt = null; // fresh data confirmed, clear flag
           this.icBatchStatus = null;
           this.icBatchData   = d;
           this.icBatchKey    = this._icBatchKey();
