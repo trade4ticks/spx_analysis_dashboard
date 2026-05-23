@@ -391,3 +391,165 @@ def sign_stability_from_rolling(
         n_same=n_same, n_opposite=n_opp, n_neutral=n_neutral, n_total=n_total,
         suppressed=False, suppression_reason=None,
     )
+
+
+# ── Per-ticker IC decomposition (IC.7) ──────────────────────────────────
+
+def ic_decompose_cross_sectional(
+    rows: list[dict],
+    metric: str,
+    outcome: str,
+    min_tickers_per_day: int = 5,
+    cutoff_date: Optional[str] = None,
+) -> dict:
+    """Per-ticker rank-product contribution to daily cross-sectional IC.
+
+    For each trading day with at least `min_tickers_per_day` valid
+    (metric, outcome) pairs:
+      1. Rank all K tickers by `metric` and by `outcome` (midrank for ties)
+      2. Center ranks: z_m = r_m − (K+1)/2, z_o = r_o − (K+1)/2
+      3. Normalised contribution of ticker i to that day's Spearman IC:
+             contrib[i,d] = z_m[i] · z_o[i] / (K·(K²−1)/12)
+         Guarantees Σ_i contrib[i,d] = Spearman(metric, outcome) on that day.
+
+    Per-ticker score = mean daily contribution over all days the ticker
+    was present in the cross-section. Summing all scores weighted by
+    (n_days[i] / n_total_days) recovers the reference IC — useful
+    as a self-check for the caller.
+
+    Reference IC convention matches /ic-batch and /analyze:
+      • cutoff_date given → reference = mean of pre-cutoff daily ICs
+      • cutoff_date None  → reference = mean of all daily ICs
+
+    Returns dict with keys:
+      tickers           [{ticker, score, n_days}] sorted by score descending
+      reference_ic      float
+      n_days            int   — total days with valid cross-sections
+      n_tickers         int
+      concentration_gini float | None  — Gini of |score|; 0 = equal,
+                                         1 = perfectly concentrated
+      effective_n        float | None  — (Σ|score|)² / Σ(score²); the
+                                         effective number of contributing
+                                         tickers (high = broad, low = concentrated)
+      n_same_sign        int  — tickers whose score agrees with reference_ic sign
+      n_opposite_sign    int
+    """
+    from scipy.stats import rankdata as _rankdata
+
+    # Build date → {ticker: (metric_val, outcome_val)}
+    by_date: dict = {}
+    for r in rows:
+        d = r.get("trade_date")
+        tkr = r.get("ticker")
+        if d is None or tkr is None:
+            continue
+        mv = r.get(metric)
+        ov = r.get(outcome)
+        if mv is None or ov is None:
+            continue
+        try:
+            mf, of_ = float(mv), float(ov)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(mf) or math.isnan(of_):
+            continue
+        by_date.setdefault(d, {})[tkr] = (mf, of_)
+
+    # Accumulate per-ticker rank-product contributions across days
+    contrib_sum: dict[str, float] = {}
+    n_days_map:  dict[str, int]   = {}
+    daily_ics:       list[float] = []
+    pre_cutoff_ics:  list[float] = []
+
+    for d in sorted(by_date.keys()):
+        tkr_vals = by_date[d]
+        tickers  = list(tkr_vals.keys())
+        K = len(tickers)
+        if K < min_tickers_per_day:
+            continue
+
+        mv_arr = np.array([tkr_vals[t][0] for t in tickers], dtype=np.float64)
+        ov_arr = np.array([tkr_vals[t][1] for t in tickers], dtype=np.float64)
+
+        if mv_arr.std() == 0 or ov_arr.std() == 0:
+            continue
+
+        # Midrank for ties — matches scipy.stats.spearmanr internals
+        r_m = _rankdata(mv_arr, method="average")
+        r_o = _rankdata(ov_arr, method="average")
+
+        mean_r = (K + 1) / 2.0
+        z_m = r_m - mean_r
+        z_o = r_o - mean_r
+
+        # Normaliser: Σ_i z_m[i]·z_o[i] / norm = Spearman rho exactly
+        norm = K * (K * K - 1) / 12.0
+        if norm == 0:
+            continue
+
+        rho = float(np.dot(z_m, z_o) / norm)
+        daily_ics.append(rho)
+
+        d_str = str(d)
+        if cutoff_date is None or d_str < cutoff_date:
+            pre_cutoff_ics.append(rho)
+
+        for i, tkr in enumerate(tickers):
+            c = z_m[i] * z_o[i] / norm
+            contrib_sum[tkr] = contrib_sum.get(tkr, 0.0) + c
+            n_days_map[tkr]  = n_days_map.get(tkr, 0) + 1
+
+    n_days = len(daily_ics)
+    if n_days == 0:
+        return {
+            "tickers": [], "reference_ic": 0.0,
+            "n_days": 0, "n_tickers": 0,
+            "concentration_gini": None, "effective_n": None,
+            "n_same_sign": 0, "n_opposite_sign": 0,
+        }
+
+    reference_ic = (
+        float(np.mean(pre_cutoff_ics)) if (cutoff_date and pre_cutoff_ics)
+        else float(np.mean(daily_ics))
+    )
+
+    # Per-ticker mean daily contribution — this is the IC.7 score
+    results = []
+    for tkr, csum in contrib_sum.items():
+        nd    = n_days_map[tkr]
+        score = round(csum / nd, 8)
+        results.append({"ticker": tkr, "score": score, "n_days": nd})
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    # ── Concentration metrics ────────────────────────────────────────────
+    scores_arr = np.array([r["score"] for r in results], dtype=np.float64)
+    abs_arr    = np.abs(scores_arr)
+    n_t        = len(abs_arr)
+
+    if n_t > 1 and abs_arr.sum() > 0:
+        # Gini of |score|: G = (2 Σ i·x_i)/(n·Σ x_i) − (n+1)/n  [x sorted asc, i=1..n]
+        s   = np.sort(abs_arr)
+        idx = np.arange(1, n_t + 1)
+        gini = float((2.0 * np.dot(idx, s)) / (n_t * s.sum()) - (n_t + 1) / n_t)
+        gini = round(max(0.0, min(1.0, gini)), 4)
+    else:
+        gini = None
+
+    sum_abs     = float(abs_arr.sum())
+    sum_sq      = float(np.dot(scores_arr, scores_arr))
+    effective_n = round(sum_abs ** 2 / sum_sq, 2) if sum_sq > 0 else None
+
+    ref_pos = reference_ic > 0
+    n_same = sum(1 for r in results if r["score"] != 0 and (r["score"] > 0) == ref_pos)
+    n_opp  = sum(1 for r in results if r["score"] != 0 and (r["score"] > 0) != ref_pos)
+
+    return {
+        "tickers":            results,
+        "reference_ic":       round(reference_ic, 6),
+        "n_days":             n_days,
+        "n_tickers":          n_t,
+        "concentration_gini": gini,
+        "effective_n":        effective_n,
+        "n_same_sign":        n_same,
+        "n_opposite_sign":    n_opp,
+    }

@@ -2840,6 +2840,7 @@ _ic_batch_table_ensured = False
 # The frontend's 15-min poll timeout covers sessions mid-poll at restart time.
 _ic_batch_running: set = set()   # cache_key values currently being computed
 _ic_batch_status: dict = {}      # cache_key → {"status": "failed", "error": "..."}
+_IC_DECOMP_CACHE:  dict = {}     # IC.7: cache_key → decomp result (in-memory, cleared on restart)
 
 
 async def _ensure_ic_batch_table(pool) -> None:
@@ -3306,6 +3307,98 @@ async def ic_batch_refresh(
         )
 
     return {"status": "computing", "cache_key": cache_key}
+
+
+# ── IC decomposition (IC.7) ──────────────────────────────────────────────
+
+@router.get("/ic-decomp")
+async def ic_decomp(
+    metric:      str           = Query(...),
+    outcome:     str           = Query("ret_5d_fwd_oc"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Per-ticker rank-product contribution to cross-sectional IC (IC.7).
+
+    Decomposes the ALL-mode cross-sectional IC into a per-ticker score.
+    Each ticker's score is its mean daily rank-product contribution to the
+    Spearman IC; the weighted sum of all scores (by n_days / n_total_days)
+    recovers the full-history reference IC.
+
+    Higher score = ticker consistently ranked in the right position for the
+    metric-to-outcome relationship. Near-zero score = noise ticker.
+    Negative score = consistently counter-directional.
+
+    Mode follows the same convention as /ic-batch:
+      • cutoff_date set   → train_test: reference IC from pre-cutoff only
+      • cutoff_date unset → in_sample / walk_forward: full-history mean
+
+    On-demand, in-memory cache — cleared on server restart.
+    Elapsed compute time is logged and returned as `elapsed_s` so the
+    first call can be benchmarked without needing a profiler.
+
+    Returns:
+      tickers            [{ticker, score, n_days}] sorted descending
+      reference_ic       float
+      n_days             int   total days with valid cross-sections
+      n_tickers          int
+      concentration_gini float | null  Gini of |score| (0=even, 1=concentrated)
+      effective_n        float | null  (Σ|score|)²/Σ(score²)
+      n_same_sign        int   tickers whose score agrees with reference_ic sign
+      n_opposite_sign    int
+      elapsed_s          float server-side compute time in seconds
+      from_cache         bool
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    import logging as _log
+    import time as _time
+
+    mode_tag  = f"tt:{cutoff_date}" if cutoff_date else "default"
+    cache_key = f"ic_decomp:{metric}:{outcome}:{mode_tag}"
+
+    if cache_key in _IC_DECOMP_CACHE:
+        cached = dict(_IC_DECOMP_CACHE[cache_key])
+        cached["from_cache"] = True
+        return cached
+
+    try:
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(
+                f'SELECT ticker, trade_date, "{metric}", "{outcome}" '
+                f'FROM daily_features '
+                f'WHERE "{metric}" IS NOT NULL AND "{outcome}" IS NOT NULL '
+                f'ORDER BY trade_date, ticker',
+                timeout=90,
+            )
+    except Exception as exc:
+        _log.exception("ic_decomp: DB fetch failed metric=%s outcome=%s", metric, outcome)
+        return {"error": f"DB fetch failed: {type(exc).__name__}: {exc}"}
+
+    rows = [dict(r) for r in db_rows]
+
+    from app.routers.ic_compute import ic_decompose_cross_sectional
+
+    t0     = _time.perf_counter()
+    result = await asyncio.to_thread(
+        ic_decompose_cross_sectional,
+        rows, metric, outcome,
+        cutoff_date=cutoff_date,
+    )
+    elapsed = round(_time.perf_counter() - t0, 3)
+    del rows
+
+    _log.info(
+        "ic_decomp: metric=%s outcome=%s mode=%s n_tickers=%d n_days=%d elapsed=%.3fs",
+        metric, outcome, mode_tag,
+        result.get("n_tickers", 0), result.get("n_days", 0), elapsed,
+    )
+
+    result["elapsed_s"]  = elapsed
+    result["from_cache"] = False
+    _IC_DECOMP_CACHE[cache_key] = result
+    return result
 
 
 # ── Threshold Drift (walk-forward bin boundaries over time) ──────────────
