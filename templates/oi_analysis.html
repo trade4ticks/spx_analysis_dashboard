@@ -477,46 +477,94 @@
             <canvas id="chart-ic-scatter"></canvas>
           </div>
 
-          <!-- Status panels — mutually exclusive by icBatchStatus + icBatchLoading -->
+          <!-- Status panels — one is always visible when the section is open and no chart data.
+               computing/queued intentionally omit the !icBatchLoading guard so the panel
+               stays visible without flickering during the 30-s poll round-trip. -->
 
-          <!-- Fetching / generic loading (brief — only visible during HTTP round-trip) -->
-          <div x-show="icBatchLoading"
-               style="font-size:11px;color:var(--dim);padding:8px 0">
+          <!-- Loading: only when status is genuinely unknown (initial open or forced reload) -->
+          <div x-show="icBatchLoading && !icBatchStatus"
+               style="font-size:12px;color:var(--dim);padding:10px 0">
             Checking cache…
           </div>
 
-          <!-- not_ready: cache miss, user needs to trigger ⟳ Refresh -->
-          <div x-show="!icBatchLoading && icBatchStatus === 'not_ready'"
-               style="font-size:11px;color:var(--dim);padding:8px 0">
-            No cached data for this configuration. Click <strong>⟳ Refresh</strong> to start a background computation (ALL-mode: ~2-3 min, page polls automatically).
+          <!-- not_ready: single-ticker auto-triggers immediately; ALL needs Refresh click.
+               Visible even while loading so "Starting…" shows during the POST round-trip. -->
+          <div x-show="icBatchStatus === 'not_ready'"
+               style="padding:14px;border:1px solid var(--border);border-radius:4px;
+                      background:var(--raised);line-height:1.6;margin-top:4px">
+            <span x-show="ticker !== 'ALL'" style="font-size:12px;color:var(--dim)">
+              Starting computation…
+            </span>
+            <span x-show="ticker === 'ALL'" style="font-size:12px;color:var(--dim)">
+              No cached data for this configuration.
+              Click <strong>⟳ Refresh</strong> to start (ALL-mode: ~2–3 min, polls automatically).
+            </span>
           </div>
 
-          <!-- computing: background job running, polling every 30 s -->
-          <div x-show="!icBatchLoading && icBatchStatus === 'computing'"
-               style="font-size:11px;color:#3498db;padding:8px 0">
-            ⏳ Computing IC stability in the background — typically 2-3 min on the VPS. Checking every 30 s automatically.
+          <!-- computing: prominent blue box; stays visible during every 30-s poll check -->
+          <div x-show="icBatchStatus === 'computing'"
+               style="padding:16px;border:1px solid #3498db55;border-radius:4px;
+                      background:#3498db0d;line-height:1.7;margin-top:4px">
+            <div style="font-size:14px;font-weight:600;color:#3498db;margin-bottom:6px">
+              ⏳ Computing IC Stability
+            </div>
+            <div style="font-size:12px;color:var(--dim)"
+                 x-text="ticker === 'ALL'
+                   ? 'ALL-mode (cross-sectional, all tickers): typically 2–3 min on the VPS.'
+                   : 'Single-ticker (time-series): typically 1–2 min on the VPS.'">
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              Checking every 30 s automatically — bars will appear when the job finishes.<br>
+              You can navigate the page; the computation continues on the server.
+            </div>
           </div>
 
-          <!-- queued: slot occupied by a different ticker's job -->
-          <div x-show="!icBatchLoading && icBatchStatus === 'queued'"
-               style="font-size:11px;color:#f39c12;padding:8px 0">
-            ⏳ Another IC computation is running — this ticker is queued and will start automatically when it finishes. Checking every 30 s.
+          <!-- queued: another ticker occupies the slot; stays visible during poll -->
+          <div x-show="icBatchStatus === 'queued'"
+               style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
+                      background:#e6a23c0d;line-height:1.7;margin-top:4px">
+            <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">
+              ⏳ Queued
+            </div>
+            <div style="font-size:12px;color:var(--dim)">
+              Another IC computation is currently running. This ticker will start automatically
+              when the slot frees — checking every 30 s.
+            </div>
           </div>
 
           <!-- timeout: 15-min poll limit exceeded -->
           <div x-show="icBatchStatus === 'timeout'"
-               style="font-size:11px;color:#f39c12;padding:8px 0"
-               x-text="icBatchError || 'Background computation timed out — click ⟳ Refresh to retry.'"></div>
+               style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
+                      background:#e6a23c0d;line-height:1.7;margin-top:4px">
+            <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">
+              ⌛ Computation timed out (15 min)
+            </div>
+            <div style="font-size:12px;color:var(--dim)">
+              The poll timer stopped. The job may still be running on the server — expand this
+              section again in a few minutes, or click <strong>⟳ Refresh</strong> to restart.
+            </div>
+          </div>
 
-          <!-- failed: background job crashed -->
-          <div x-show="!icBatchLoading && icBatchStatus === 'failed'"
-               style="font-size:11px;color:var(--danger);padding:8px 0"
-               x-text="'Computation failed: ' + (icBatchError || 'unknown error') + ' — click ⟳ Refresh to retry'"></div>
+          <!-- failed: background job crashed or network error -->
+          <div x-show="icBatchStatus === 'failed'"
+               style="padding:16px;border:1px solid #e74c3c55;border-radius:4px;
+                      background:#e74c3c0d;line-height:1.7;margin-top:4px">
+            <div style="font-size:14px;font-weight:600;color:#e74c3c;margin-bottom:4px">
+              ❌ Computation failed
+            </div>
+            <div style="font-size:12px;color:var(--dim)" x-text="icBatchError || 'Unknown error'"></div>
+            <div style="font-size:11px;color:var(--dim);margin-top:8px">
+              Click <strong>⟳ Refresh</strong> to retry.
+            </div>
+          </div>
 
-          <!-- fallback: no data, no status, not loading (e.g. brief init or race) -->
+          <!-- fallback: safety net — blank panel should be impossible once all states are covered -->
           <div x-show="!icBatchLoading && !icBatchData && !icBatchStatus && !icBatchError"
-               style="font-size:11px;color:var(--dim);padding:8px 0">
-            Click ⟳ Refresh to compute IC stability for this ticker.
+               style="padding:14px;border:1px solid var(--border);border-radius:4px;
+                      background:var(--raised);margin-top:4px">
+            <div style="font-size:12px;color:var(--dim)">
+              Click <strong>⟳ Refresh</strong> to compute IC stability for this ticker.
+            </div>
           </div>
         </div>
       </template>

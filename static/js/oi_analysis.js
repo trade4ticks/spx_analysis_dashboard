@@ -4484,15 +4484,12 @@ document.addEventListener('alpine:init', () => {
           // ALL-mode requires an explicit ⟳ Refresh click (2-3 min job).
           this.icBatchStatus = 'not_ready';
           this.icBatchData   = null;
-          console.log('[IC-debug] not_ready: ticker=%s isNotAll=%s', this.ticker, this.ticker !== 'ALL');
           if (this.ticker !== 'ALL') {
             // refreshIcBatch() owns the polling-state transition from here —
             // don't call _stopIcBatchPolling() first so a queued cycle keeps
             // its timer running across successive not_ready → busy → not_ready
             // → computing ticks.
-            console.log('[IC-debug] calling refreshIcBatch()');
             await this.refreshIcBatch();
-            console.log('[IC-debug] refreshIcBatch() returned, icBatchStatus=%s', this.icBatchStatus);
           } else {
             this._stopIcBatchPolling();
           }
@@ -4534,7 +4531,8 @@ document.addEventListener('alpine:init', () => {
           }
         }
       } catch (e) {
-        this.icBatchError = e.message;
+        this.icBatchStatus = 'failed';
+        this.icBatchError  = e.message;
         this._stopIcBatchPolling();
       } finally {
         this.icBatchLoading = false;
@@ -4544,11 +4542,7 @@ document.addEventListener('alpine:init', () => {
     async refreshIcBatch() {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
-      console.log('[IC-debug] refreshIcBatch: ticker=%s outcome=%s', this.ticker, this.outcome);
-      if (!this.ticker || !this.outcome) {
-        console.log('[IC-debug] refreshIcBatch: EARLY RETURN — no ticker or outcome');
-        return;
-      }
+      if (!this.ticker || !this.outcome) return;
       this.icBatchLoading  = true;
       this.icBatchError    = null;
       this.icBatchData     = null;
@@ -4557,9 +4551,7 @@ document.addEventListener('alpine:init', () => {
         let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-        console.log('[IC-debug] refreshIcBatch: POSTing to', url);
         const r = await fetch(url, { method: 'POST' });
-        console.log('[IC-debug] refreshIcBatch: POST response status=%d ok=%s', r.status, r.ok);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         if (d.error) throw new Error(d.error);
@@ -4576,8 +4568,8 @@ document.addEventListener('alpine:init', () => {
           this._startIcBatchPolling();
         }
       } catch (e) {
-        console.log('[IC-debug] refreshIcBatch: CAUGHT ERROR', e.message, e);
-        this.icBatchError = e.message;
+        this.icBatchStatus = 'failed';
+        this.icBatchError  = e.message;
         this._stopIcBatchPolling();
       } finally {
         this.icBatchLoading = false;
