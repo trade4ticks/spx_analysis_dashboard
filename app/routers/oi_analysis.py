@@ -2992,35 +2992,29 @@ async def ic_batch(
     # information_schema, not user input).
     cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
     if is_all:
-        # Two-phase fetch to cut data transfer by the stride factor.
+        # DB-level date striding via CTE.  ROW_NUMBER() over distinct dates,
+        # keep only every stride-th row (rn % stride = 0), then join back to
+        # daily_features to fetch full row data only for those dates.
         #
-        # Phase 1 — cheap: get the sorted list of distinct trade_dates that
-        # have a valid outcome.  We stride this list in Python to produce the
-        # ~(N/stride) dates we actually need.
-        #
-        # Phase 2 — targeted: fetch full row data only for those dates using
-        # ANY($1).  With stride=3 this reduces rows from ~121 K to ~40 K and
-        # slashes both wire transfer and the per-metric by_date-building loop
-        # inside rolling_ic_cross_sectional by ~3×.
+        # This cuts rows from ~121 K to ~40 K (with stride=3) without passing
+        # a date-list parameter — asyncpg can't infer the array element type
+        # for ANY($1) with a Python list, causing a 500.  stride is a
+        # validated int (ge=1, le=10) so safe to embed directly in SQL.
+        cte_sql = (
+            f'WITH sd AS ('
+            f'  SELECT trade_date FROM ('
+            f'    SELECT DISTINCT trade_date,'
+            f'           (ROW_NUMBER() OVER (ORDER BY trade_date) - 1) AS rn'
+            f'    FROM daily_features WHERE "{outcome}" IS NOT NULL'
+            f'  ) t WHERE t.rn % {stride} = 0'
+            f')'
+            f' SELECT f.ticker, f.trade_date, {cols_sql}'
+            f' FROM daily_features f'
+            f' JOIN sd ON f.trade_date = sd.trade_date'
+            f' WHERE f."{outcome}" IS NOT NULL'
+        )
         async with pool.acquire() as conn:
-            date_rows = await conn.fetch(
-                f'SELECT DISTINCT trade_date FROM daily_features '
-                f'WHERE "{outcome}" IS NOT NULL ORDER BY trade_date',
-                timeout=30,
-            )
-        all_dates_q = [r["trade_date"] for r in date_rows]
-        strided_dates_q = all_dates_q[::stride]
-        if not strided_dates_q:
-            return {
-                "metrics": [], "ticker": ticker, "outcome": outcome,
-                "window": window, "cutoff_date": cutoff_date, "from_cache": False,
-            }
-        async with pool.acquire() as conn:
-            db_rows = await conn.fetch(
-                f'SELECT ticker, trade_date, {cols_sql} FROM daily_features '
-                f'WHERE trade_date = ANY($1) AND "{outcome}" IS NOT NULL',
-                strided_dates_q, timeout=120,
-            )
+            db_rows = await conn.fetch(cte_sql, timeout=180)
     else:
         sql = (
             f'SELECT trade_date, {cols_sql} FROM daily_features '
