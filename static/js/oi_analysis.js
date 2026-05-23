@@ -1094,10 +1094,6 @@ document.addEventListener('alpine:init', () => {
       const pad      = Math.max((rawMax - rawMin) * 0.12, 0.005);
       const yMin     = rawMin - pad;
       const yMax     = rawMax + pad;
-      // Q1-Q4 diagnostic: epsilon value and y-axis range
-      console.log('[IC-band] payload.epsilon=', payload.epsilon,
-                  '| epsilon=', epsilon, '| absEps=', absEps,
-                  '| yMin=', yMin.toFixed(4), '| yMax=', yMax.toFixed(4));
 
       const SIGN_COLORS = {
         same:     'rgba(76, 175, 80, 0.95)',   // green
@@ -1145,16 +1141,10 @@ document.addEventListener('alpine:init', () => {
       const noiseFloorPlugin = {
         id: 'icNoiseFloor',
         beforeDatasetsDraw(chart) {
-          // Q1: is this code reached?
-          console.log('[IC-band] beforeDatasetsDraw fired, absEps=', absEps);
-          if (absEps <= 0) { console.log('[IC-band] absEps<=0, skipping band'); return; }
+          if (absEps <= 0) return;
           const { scales: { x: xsc, y: ysc }, ctx: c } = chart;
           const yTop    = ysc.getPixelForValue(absEps);
           const yBottom = ysc.getPixelForValue(-absEps);
-          // Q3: coordinates — are they on-screen and non-zero height?
-          console.log('[IC-band] yTop(px)=', yTop, '| yBottom(px)=', yBottom,
-                      '| height(px)=', yBottom - yTop,
-                      '| chartArea=', chart.chartArea?.top, chart.chartArea?.bottom);
           c.save();
           c.fillStyle = 'rgba(160, 160, 160, 0.13)';
           c.fillRect(xsc.left, yTop, xsc.right - xsc.left, yBottom - yTop);
