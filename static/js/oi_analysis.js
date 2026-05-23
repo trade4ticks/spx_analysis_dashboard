@@ -1079,9 +1079,23 @@ document.addEventListener('alpine:init', () => {
       }
       if (this._charts['rolling']) this._charts['rolling'].destroy();
 
-      const series = payload.series;
-      const refIc  = Number(payload.reference_ic ?? 0);
-      const cutoff = payload.cutoff_date;  // ISO date string or null
+      const series  = payload.series;
+      const refIc   = Number(payload.reference_ic ?? 0);
+      const epsilon = Number(payload.epsilon ?? 0);  // noise-floor half-width
+      const cutoff  = payload.cutoff_date;  // ISO date string or null
+
+      // ── Y-axis range: always include 0 and the full ±ε band ─────────────
+      // Without this, a metric whose IC never approaches zero can produce a
+      // chart where the noise band is off-screen, defeating its purpose.
+      const icValues = series.map(p => p.ic).filter(v => v != null);
+      const dataMin  = icValues.length ? Math.min(...icValues) : 0;
+      const dataMax  = icValues.length ? Math.max(...icValues) : 0;
+      const absEps   = Math.abs(epsilon);
+      const rawMin   = Math.min(dataMin, -absEps, 0);
+      const rawMax   = Math.max(dataMax,  absEps, 0);
+      const pad      = Math.max((rawMax - rawMin) * 0.12, 0.005);
+      const yMin     = rawMin - pad;
+      const yMax     = rawMax + pad;
 
       const SIGN_COLORS = {
         same:     'rgba(76, 175, 80, 0.95)',   // green
@@ -1120,6 +1134,23 @@ document.addEventListener('alpine:init', () => {
           ctx.textAlign = 'left';
           ctx.fillText(`cutoff ${cutoff}`, xPx + 4, yScale.top + 10);
           ctx.restore();
+        },
+      };
+
+      // ── Noise-floor band: faint grey rect spanning −ε to +ε ─────────────
+      // Drawn before datasets so the IC line stays on top. If epsilon is 0
+      // or null (e.g. suppressed metrics) the plugin exits immediately.
+      const noiseFloorPlugin = {
+        id: 'icNoiseFloor',
+        beforeDatasetsDraw(chart) {
+          if (absEps <= 0) return;
+          const { scales: { x: xsc, y: ysc }, ctx: c } = chart;
+          const yTop    = ysc.getPixelForValue(absEps);
+          const yBottom = ysc.getPixelForValue(-absEps);
+          c.save();
+          c.fillStyle = 'rgba(160, 160, 160, 0.13)';
+          c.fillRect(xsc.left, yTop, xsc.right - xsc.left, yBottom - yTop);
+          c.restore();
         },
       };
 
@@ -1174,11 +1205,12 @@ document.addEventListener('alpine:init', () => {
           scales: {
             ...this._darkScales(),
             x: { ...this._darkScales().x, ticks:{...this._darkScales().x.ticks, maxTicksLimit:10} },
-            y: { ...this._darkScales().y, ticks:{...this._darkScales().y.ticks,
-                  callback: v => v.toFixed(3) } },
+            y: { ...this._darkScales().y,
+                 min: yMin, max: yMax,  // always include 0 and ±ε band
+                 ticks:{...this._darkScales().y.ticks, callback: v => v.toFixed(3) } },
           },
         },
-        plugins: [cutoffPlugin],
+        plugins: [noiseFloorPlugin, cutoffPlugin],
       });
     },
 
