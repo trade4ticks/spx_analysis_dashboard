@@ -2863,11 +2863,30 @@ def _compute_ic_batch_sync(
 
     The outcome column is skipped if present in feature_cols. Returns one
     dict per emitted metric, in the input feature_cols order.
+
+    ALL-mode fast path:
+        rolling_ic_cross_sectional rebuilds `by_date` from the full row
+        list for every metric — O(n_rows × n_metrics) = ~15 M Python ops.
+        Here we pre-build `all_by_date` once (O(n_rows) = ~0.1 s), then
+        each metric iterates only strided_dates × tickers (~5 M ops total),
+        cutting the date-sampling work from ~18 s to ~3 s and the total
+        spearmanr calls from 1764 × 123 to 588 × 123.
     """
     from app.routers.ic_compute import (
-        rolling_ic_single_ticker, rolling_ic_cross_sectional,
+        IcPoint, rolling_ic_single_ticker,
         sign_stability_from_rolling, noise_floor_epsilon,
     )
+
+    # ── ALL-mode: pre-build date→row-list map once ───────────────────────────
+    if is_all:
+        all_by_date: dict = {}
+        for r in rows:
+            d = r.get("trade_date")
+            if d is None or r.get("ticker") is None:
+                continue
+            all_by_date.setdefault(d, []).append(r)
+        strided_dates = sorted(all_by_date.keys())[::stride]
+        _min_tickers = 5
 
     results: list[dict] = []
     for metric in feature_cols:
@@ -2875,9 +2894,43 @@ def _compute_ic_batch_sync(
             continue
 
         if is_all:
-            series = rolling_ic_cross_sectional(
-                rows, metric, outcome, window=window, stride=stride,
-            )
+            # Cross-sectional daily IC using the pre-built map, then rolling mean.
+            daily: list[tuple] = []
+            for d in strided_dates:
+                pairs: list[tuple[float, float]] = []
+                for r in all_by_date[d]:
+                    mx, oy = r.get(metric), r.get(outcome)
+                    if mx is None or oy is None:
+                        continue
+                    try:
+                        xf, yf = float(mx), float(oy)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isnan(xf) or math.isnan(yf):
+                        continue
+                    pairs.append((xf, yf))
+                k = len(pairs)
+                if k < _min_tickers:
+                    continue
+                xs = np.fromiter((p[0] for p in pairs), dtype=np.float64, count=k)
+                ys = np.fromiter((p[1] for p in pairs), dtype=np.float64, count=k)
+                if xs.std() == 0 or ys.std() == 0:
+                    continue
+                rho, _ = sp_stats.spearmanr(xs, ys)
+                if not math.isnan(rho):
+                    daily.append((d, float(rho), k))
+
+            n_days = len(daily)
+            series: list[IcPoint] = []
+            if n_days >= window:
+                for end in range(window, n_days + 1, stride):
+                    win = daily[end - window:end]
+                    ic_mean = float(np.mean([p[1] for p in win]))
+                    med_k = int(np.median([p[2] for p in win]))
+                    series.append(IcPoint(
+                        date=win[-1][0], ic=round(ic_mean, 6), n=med_k,
+                    ))
+
             median_k = int(np.median([p.n for p in series])) if series else 0
             epsilon = noise_floor_epsilon(
                 "cross_sectional", window=window, horizon=horizon,
@@ -2992,29 +3045,13 @@ async def ic_batch(
     # information_schema, not user input).
     cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
     if is_all:
-        # DB-level date striding via CTE.  ROW_NUMBER() over distinct dates,
-        # keep only every stride-th row (rn % stride = 0), then join back to
-        # daily_features to fetch full row data only for those dates.
-        #
-        # This cuts rows from ~121 K to ~40 K (with stride=3) without passing
-        # a date-list parameter — asyncpg can't infer the array element type
-        # for ANY($1) with a Python list, causing a 500.  stride is a
-        # validated int (ge=1, le=10) so safe to embed directly in SQL.
-        cte_sql = (
-            f'WITH sd AS ('
-            f'  SELECT trade_date FROM ('
-            f'    SELECT DISTINCT trade_date,'
-            f'           (ROW_NUMBER() OVER (ORDER BY trade_date) - 1) AS rn'
-            f'    FROM daily_features WHERE "{outcome}" IS NOT NULL'
-            f'  ) t WHERE t.rn % {stride} = 0'
-            f')'
-            f' SELECT f.ticker, f.trade_date, {cols_sql}'
-            f' FROM daily_features f'
-            f' JOIN sd ON f.trade_date = sd.trade_date'
-            f' WHERE f."{outcome}" IS NOT NULL'
+        sql = (
+            f'SELECT ticker, trade_date, {cols_sql} FROM daily_features '
+            f'WHERE "{outcome}" IS NOT NULL '
+            f'ORDER BY ticker, trade_date'
         )
         async with pool.acquire() as conn:
-            db_rows = await conn.fetch(cte_sql, timeout=180)
+            db_rows = await conn.fetch(sql, timeout=180)
     else:
         sql = (
             f'SELECT trade_date, {cols_sql} FROM daily_features '

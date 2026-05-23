@@ -242,10 +242,6 @@ def rolling_ic_cross_sectional(
         by_date.setdefault(d, []).append(pair)
 
     daily: list[tuple[Any, float, int]] = []  # (date, ic, n_tickers)
-    # Note: for /ic-batch ALL mode, the caller pre-strides at the DB level
-    # (fetches only every stride-th date), so by_date already contains only
-    # those dates. We iterate all dates here; the stride parameter is then
-    # used only for the rolling-mean loop below.
     for d in sorted(by_date.keys()):
         pairs = by_date[d]
         k = len(pairs)
