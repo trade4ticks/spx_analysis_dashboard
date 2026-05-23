@@ -4474,23 +4474,33 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
 
         if (d.status === 'not_ready') {
-          // No cache entry — prompt user to click ⟳ Refresh.
+          // No cache entry. Single-ticker auto-triggers a background job so
+          // the UX matches the old "expand and wait" behavior without the 524.
+          // ALL-mode requires an explicit ⟳ Refresh click (2-3 min job).
           this.icBatchStatus = 'not_ready';
           this.icBatchData   = null;
-          this._stopIcBatchPolling();
+          if (this.ticker !== 'ALL') {
+            // refreshIcBatch() owns the polling-state transition from here —
+            // don't call _stopIcBatchPolling() first so a queued cycle keeps
+            // its timer running across successive not_ready → busy → not_ready
+            // → computing ticks.
+            await this.refreshIcBatch();
+          } else {
+            this._stopIcBatchPolling();
+          }
         } else if (d.status === 'computing') {
           // Background job running — begin / continue polling.
           this.icBatchStatus = 'computing';
           this.icBatchData   = null;
           this._startIcBatchPolling();
         } else if (d.status === 'failed') {
-          // Background job crashed.
+          // Background job crashed — surface the error, stop polling.
           this.icBatchStatus = 'failed';
           this.icBatchError  = d.error || 'Background computation failed';
           this.icBatchData   = null;
           this._stopIcBatchPolling();
         } else {
-          // Normal response: cached data or single-ticker inline result.
+          // Normal response: cached data.
           if (d.error) throw new Error(d.error);
           this.icBatchStatus = null;
           this.icBatchData   = d;
@@ -4510,38 +4520,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     async refreshIcBatch() {
+      // POST /ic-batch/refresh for any ticker (single or ALL).
+      // Returns immediately; background job writes cache; poll picks it up.
       if (!this.ticker || !this.outcome) return;
-
-      if (this.ticker !== 'ALL') {
-        // Single-ticker: inline compute via GET with refresh=true.
-        this.icBatchLoading = true;
-        this.icBatchError   = null;
-        try {
-          let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
-            + `&outcome=${encodeURIComponent(this.outcome)}`
-            + `&refresh=true`;
-          if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-          const r = await fetch(url);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const d = await r.json();
-          if (d.error) throw new Error(d.error);
-          this.icBatchStatus = null;
-          this.icBatchData   = d;
-          this.icBatchKey    = this._icBatchKey();
-          if (this.icBatchExpanded) { await this.$nextTick(); this._renderIcBatch(); }
-        } catch (e) {
-          this.icBatchError = e.message;
-        } finally {
-          this.icBatchLoading = false;
-        }
-        return;
-      }
-
-      // ALL-mode: POST to /ic-batch/refresh to start background job.
       this.icBatchLoading = true;
       this.icBatchError   = null;
       this.icBatchData    = null;
-      this._stopIcBatchPolling();
       try {
         let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
@@ -4550,10 +4534,21 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         if (d.error) throw new Error(d.error);
-        this.icBatchStatus = 'computing';
-        this._startIcBatchPolling();
+
+        if (d.status === 'busy') {
+          // Another ticker's job is occupying the slot. Treat as a queue:
+          // keep (or start) polling so the next not_ready → auto-trigger
+          // cycle fires automatically once the slot frees.
+          this.icBatchStatus = 'queued';
+          this._startIcBatchPolling();
+        } else {
+          // 'computing' or 'already_computing' — job is running for this key.
+          this.icBatchStatus = 'computing';
+          this._startIcBatchPolling();
+        }
       } catch (e) {
         this.icBatchError = e.message;
+        this._stopIcBatchPolling();
       } finally {
         this.icBatchLoading = false;
       }
@@ -4601,8 +4596,9 @@ document.addEventListener('alpine:init', () => {
 
     icBatchSubtitle() {
       if (this.icBatchLoading) return '';
-      if (this.icBatchStatus === 'not_ready') return '— no cached data · click ⟳ Refresh to compute (~2-3 min)';
+      if (this.icBatchStatus === 'not_ready') return '— no cached data · click ⟳ Refresh to compute';
       if (this.icBatchStatus === 'computing')  return '— computing in background · polling every 30 s…';
+      if (this.icBatchStatus === 'queued')     return '— queued · waiting for current IC job to finish…';
       if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') return '';
       if (!this.icBatchData?.metrics?.length) return '— click ▸ to load';
       const n    = this.icBatchData.metrics.length;

@@ -2922,6 +2922,99 @@ def _compute_ic_batch_sync(
     return results
 
 
+async def _compute_ic_batch_single_bg(
+    cache_key: str,
+    ticker: str,
+    outcome: str,
+    window: int,
+    cutoff_date: Optional[str],
+    stride: int,
+    pool,
+) -> None:
+    """Background coroutine: compute single-ticker IC batch off the event loop.
+
+    Fetches all feature columns for this ticker in one bulk SQL query (~125
+    cols × ~1250 rows ≈ lightweight), then off-loads the per-metric
+    rolling-Spearman loop via asyncio.to_thread(_compute_ic_batch_sync).
+
+    Infinity/NaN safety: _compute_ic_batch_sync calls finite_or_none() on
+    every float field before returning, so json.dumps() on the result never
+    encounters inf/nan. Single-ticker noise_floor_epsilon never returns +inf
+    (it requires k_tickers < 2 which is a cross-sectional-only condition),
+    but the finite_or_none cover is there defensively.
+
+    Server-restart safety: asyncio.create_task() tasks live inside the
+    process event loop. A server restart kills the process, which kills the
+    task — there is no zombie-task risk. _ic_batch_running and
+    _ic_batch_status are destroyed and reset with the process, so after a
+    restart GET returns not_ready and the single-ticker auto-trigger starts a
+    fresh job. The only loss is the in-flight result, which was never written
+    to the DB. The 15-min frontend poll timeout covers the edge case of a
+    restart mid-poll-session.
+    """
+    import logging as _log
+    from datetime import date as _date
+
+    horizon = _parse_horizon(outcome)
+
+    try:
+        feature_cols = await _fetch_ic_feature_columns(pool)
+
+        cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
+        sql = (
+            f'SELECT trade_date, {cols_sql} FROM daily_features '
+            f'WHERE ticker = $1 AND "{outcome}" IS NOT NULL '
+            f'ORDER BY trade_date'
+        )
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(sql, ticker, timeout=90)
+        rows = [dict(r) for r in db_rows]
+        for r in rows:
+            r.setdefault("ticker", ticker)
+
+        # CPU-heavy per-metric Spearman loop runs on a thread — keeps the
+        # event loop free. finite_or_none() is called inside
+        # _compute_ic_batch_sync on every float field, so the payload is
+        # json.dumps()-safe even if any value is inf/nan.
+        results = await asyncio.to_thread(
+            _compute_ic_batch_sync,
+            rows, feature_cols, outcome, window, cutoff_date, horizon, stride,
+        )
+        del rows
+
+        # Write completed result to cache.
+        payload_json = json.dumps({"metrics": results})
+        cutoff_obj = _date.fromisoformat(cutoff_date) if cutoff_date else None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO ic_batch_cache
+                   (cache_key, ticker, outcome, window_size, cutoff_date, payload, cached_at)
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET payload    = EXCLUDED.payload,
+                       cached_at  = NOW()""",
+                cache_key, ticker, outcome, window, cutoff_obj, payload_json,
+            )
+        _log.info(
+            "ic_batch_single_bg: wrote %d metrics to cache key=%s",
+            len(results), cache_key,
+        )
+
+    except Exception as exc:
+        import logging as _log2
+        _log2.exception("ic_batch_single_bg: fatal error key=%s", cache_key)
+        _ic_batch_status[cache_key] = {
+            "status": "failed",
+            "error":  f"{type(exc).__name__}: {exc}",
+        }
+
+    finally:
+        # Always release the slot — even on crash or cancellation.
+        # If the process is killed (server restart), the finally block does
+        # not run, but _ic_batch_running is destroyed with the process anyway.
+        _ic_batch_running.discard(cache_key)
+
+
 async def _compute_ic_batch_all_bg(
     cache_key: str,
     ticker: str,
@@ -3052,7 +3145,6 @@ async def ic_batch(
     outcome:     str  = Query("ret_5d_fwd_oc"),
     window:      int  = Query(252, ge=20, le=1000),
     cutoff_date: Optional[str] = Query(None),
-    refresh:     bool = Query(False),
     stride:      int  = Query(3, ge=1, le=10),
     pool=Depends(get_oi_pool),
 ):
@@ -3064,146 +3156,70 @@ async def ic_batch(
       - cutoff_date set     → train_test: reference IC computed from
                               pre-cutoff windows only
       - cutoff_date not set → in_sample / walk_forward: reference uses
-                              the full-history mean (same result for both
-                              since rolling IC is mode-independent except
-                              for the reference, and in_sample / walk_forward
-                              share that)
+                              the full-history mean
 
-    Returns:
-      metrics: list of dicts, one per metric. Fields:
-        name, long_run_ic, long_run_ic_abs, epsilon, n_windows,
-        sign_stability (or null when suppressed), n_same, n_opposite,
-        n_neutral, neutral_pct, suppressed, suppression_reason.
-
-    DB-cached on (ticker, outcome, window, mode_tag). Use `refresh=true`
-    to force re-computation and rewrite the cache row.
+    This endpoint is cache-read-only. Computation is always triggered via
+    POST /ic-batch/refresh (both single-ticker and ALL). On a cache miss,
+    returns one of three status responses so the frontend can react without
+    blocking the HTTP connection:
+      {"status": "not_ready"}   — no cache entry, POST /refresh to start
+      {"status": "computing"}   — background job is running, poll again
+      {"status": "failed"}      — background job crashed, POST /refresh to retry
     """
     if not pool:
         return {"error": "OI database not configured"}
 
     await _ensure_ic_batch_table(pool)
 
-    is_all = (ticker.upper() == "ALL")
-    mode_tag = f"tt:{cutoff_date}" if cutoff_date else "default"
+    mode_tag  = f"tt:{cutoff_date}" if cutoff_date else "default"
     cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}:s{stride}"
 
-    if not refresh:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT payload, cached_at FROM ic_batch_cache "
-                "WHERE cache_key = $1", cache_key,
-            )
-        if row is not None:
-            payload = row["payload"]
-            if isinstance(payload, str):
-                payload = json.loads(payload)
-            return {
-                "metrics":     payload.get("metrics", []),
-                "ticker":      ticker,
-                "outcome":     outcome,
-                "window":      window,
-                "cutoff_date": cutoff_date,
-                "cached_at":   str(row["cached_at"]),
-                "from_cache":  True,
-            }
-
-    # Cache miss.
-    if is_all:
-        # ALL-mode is never computed inline — a 125-col × 141K row bulk fetch
-        # OOM-kills the VPS worker (confirmed: 6 kills, python at 3.6–5 GB).
-        # Instead, return a status response so the frontend can show a prompt
-        # or poll after a POST /ic-batch/refresh triggers the background job.
-        failed = _ic_batch_status.get(cache_key)
-        if failed:
-            return {
-                "status":      "failed",
-                "error":       failed["error"],
-                "ticker":      ticker,
-                "outcome":     outcome,
-                "metrics":     [],
-                "from_cache":  False,
-            }
-        if cache_key in _ic_batch_running:
-            return {
-                "status":     "computing",
-                "ticker":     ticker,
-                "outcome":    outcome,
-                "metrics":    [],
-                "from_cache": False,
-            }
+    # Always check cache first — this endpoint never computes inline.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload, cached_at FROM ic_batch_cache "
+            "WHERE cache_key = $1", cache_key,
+        )
+    if row is not None:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
         return {
-            "status":     "not_ready",
+            "metrics":     payload.get("metrics", []),
+            "ticker":      ticker,
+            "outcome":     outcome,
+            "window":      window,
+            "cutoff_date": cutoff_date,
+            "cached_at":   str(row["cached_at"]),
+            "from_cache":  True,
+        }
+
+    # Cache miss — return status so the frontend can prompt or poll.
+    # POST /ic-batch/refresh starts the background job for any ticker.
+    failed = _ic_batch_status.get(cache_key)
+    if failed:
+        return {
+            "status":     "failed",
+            "error":      failed["error"],
             "ticker":     ticker,
             "outcome":    outcome,
             "metrics":    [],
             "from_cache": False,
-            "message":    (
-                "No cached data for this configuration. "
-                "Use the ⟳ Refresh button to start background computation."
-            ),
         }
-
-    # Single-ticker cache miss: fetch + compute inline.
-    feature_cols = await _fetch_ic_feature_columns(pool)
-    horizon = _parse_horizon(outcome)
-
-    cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
-    sql = (
-        f'SELECT trade_date, {cols_sql} FROM daily_features '
-        f'WHERE ticker = $1 AND "{outcome}" IS NOT NULL '
-        f'ORDER BY trade_date'
-    )
-    async with pool.acquire() as conn:
-        db_rows = await conn.fetch(sql, ticker, timeout=60)
-
-    rows = [dict(r) for r in db_rows]
-    for r in rows:
-        r.setdefault("ticker", ticker)
-
-    # CPU-heavy per-metric loop runs on a worker thread so the FastAPI
-    # event loop stays responsive.
-    try:
-        results = await asyncio.to_thread(
-            _compute_ic_batch_sync,
-            rows, feature_cols, outcome, window, cutoff_date, horizon, stride,
-        )
-    except Exception as _exc:
-        import traceback as _tb
-        import logging as _log
-        _log.exception("_compute_ic_batch_sync failed ticker=%s", ticker)
+    if cache_key in _ic_batch_running:
         return {
-            "metrics": [],
-            "error": f"{type(_exc).__name__}: {_exc}",
-            "traceback": _tb.format_exc(),
-            "ticker": ticker, "outcome": outcome, "from_cache": False,
+            "status":     "computing",
+            "ticker":     ticker,
+            "outcome":    outcome,
+            "metrics":    [],
+            "from_cache": False,
         }
-
-    # Persist to cache.
-    payload_json = json.dumps({"metrics": results})
-    from datetime import date as _date
-    cutoff_obj = _date.fromisoformat(cutoff_date) if cutoff_date else None
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO ic_batch_cache
-                   (cache_key, ticker, outcome, window_size, cutoff_date, payload, cached_at)
-                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
-                   ON CONFLICT (cache_key) DO UPDATE
-                   SET payload = EXCLUDED.payload,
-                       cached_at = NOW()""",
-                cache_key, ticker, outcome, window, cutoff_obj, payload_json,
-            )
-    except Exception as e:
-        import logging
-        logging.warning("ic_batch_cache write failed: %r", e)
-
     return {
-        "metrics":     results,
-        "ticker":      ticker,
-        "outcome":     outcome,
-        "window":      window,
-        "cutoff_date": cutoff_date,
-        "from_cache":  False,
+        "status":     "not_ready",
+        "ticker":     ticker,
+        "outcome":    outcome,
+        "metrics":    [],
+        "from_cache": False,
     }
 
 
@@ -3216,39 +3232,58 @@ async def ic_batch_refresh(
     stride:      int  = Query(3, ge=1, le=10),
     pool=Depends(get_oi_pool),
 ):
-    """Start a background ALL-mode IC batch computation and return immediately.
+    """Start a background IC batch computation for any ticker and return immediately.
 
-    Only operates on ticker=ALL — single-ticker computes inline via GET.
-    The background job writes to ic_batch_cache on completion. Poll
-    GET /ic-batch to check status ({"status": "computing"} while running,
-    normal metrics response once cached).
+    Works for both ticker=ALL and single tickers. The background job writes
+    to ic_batch_cache on completion. Poll GET /ic-batch to check status.
 
-    If a job for this exact cache key is already running, returns
-    {"status": "already_computing"} without starting a second one.
+    Concurrency: at most one IC background job runs at a time (global limit).
+    If a different job is already running, returns {"status": "busy"} without
+    starting a new one. The frontend treats busy as a queue entry: it keeps
+    polling GET /ic-batch; when the running job finishes and the slot clears,
+    the next not_ready → auto-trigger cycle starts this ticker's job.
+
+    If this exact cache key is already running (double-click / double-trigger),
+    returns {"status": "already_computing"}.
     """
     if not pool:
         return {"error": "OI database not configured"}
-
-    if ticker.upper() != "ALL":
-        return {"error": "POST /ic-batch/refresh is only for ticker=ALL"}
 
     await _ensure_ic_batch_table(pool)
 
     mode_tag  = f"tt:{cutoff_date}" if cutoff_date else "default"
     cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}:s{stride}"
 
+    # Per-key dedup: same ticker already running.
     if cache_key in _ic_batch_running:
         return {"status": "already_computing", "cache_key": cache_key}
+
+    # Global one-job-at-a-time limit: different ticker running.
+    # Prevents concurrent IC jobs from racing the VPS OOM killer.
+    if len(_ic_batch_running) >= 1:
+        return {
+            "status":  "busy",
+            "message": "Another IC computation is already running. "
+                       "This ticker is queued and will start automatically when it finishes.",
+        }
 
     # Clear any prior failure record before starting fresh.
     _ic_batch_status.pop(cache_key, None)
     _ic_batch_running.add(cache_key)
 
-    asyncio.create_task(
-        _compute_ic_batch_all_bg(
-            cache_key, ticker, outcome, window, cutoff_date, stride, pool,
+    is_all = (ticker.upper() == "ALL")
+    if is_all:
+        asyncio.create_task(
+            _compute_ic_batch_all_bg(
+                cache_key, ticker, outcome, window, cutoff_date, stride, pool,
+            )
         )
-    )
+    else:
+        asyncio.create_task(
+            _compute_ic_batch_single_bg(
+                cache_key, ticker, outcome, window, cutoff_date, stride, pool,
+            )
+        )
 
     return {"status": "computing", "cache_key": cache_key}
 
