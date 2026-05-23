@@ -2878,50 +2878,58 @@ def _compute_ic_batch_sync(
     )
 
     # ── ALL-mode: pre-build date→row-list map once ───────────────────────────
+    # No generic-alias type annotations on locals (list[tuple] etc.) so the
+    # code stays valid on Python 3.8.
     if is_all:
-        all_by_date: dict = {}
+        all_by_date = {}
         for r in rows:
             d = r.get("trade_date")
             if d is None or r.get("ticker") is None:
                 continue
-            all_by_date.setdefault(d, []).append(r)
+            if d not in all_by_date:
+                all_by_date[d] = []
+            all_by_date[d].append(r)
         strided_dates = sorted(all_by_date.keys())[::stride]
-        _min_tickers = 5
 
-    results: list[dict] = []
+    results = []
     for metric in feature_cols:
         if metric == outcome:
             continue
 
         if is_all:
             # Cross-sectional daily IC using the pre-built map, then rolling mean.
-            daily: list[tuple] = []
+            daily = []
             for d in strided_dates:
-                pairs: list[tuple[float, float]] = []
+                xs_list = []
+                ys_list = []
                 for r in all_by_date[d]:
-                    mx, oy = r.get(metric), r.get(outcome)
+                    mx = r.get(metric)
+                    oy = r.get(outcome)
                     if mx is None or oy is None:
                         continue
                     try:
-                        xf, yf = float(mx), float(oy)
+                        xf = float(mx)
+                        yf = float(oy)
                     except (TypeError, ValueError):
                         continue
                     if math.isnan(xf) or math.isnan(yf):
                         continue
-                    pairs.append((xf, yf))
-                k = len(pairs)
-                if k < _min_tickers:
+                    xs_list.append(xf)
+                    ys_list.append(yf)
+                k = len(xs_list)
+                if k < 5:
                     continue
-                xs = np.fromiter((p[0] for p in pairs), dtype=np.float64, count=k)
-                ys = np.fromiter((p[1] for p in pairs), dtype=np.float64, count=k)
-                if xs.std() == 0 or ys.std() == 0:
+                xs = np.array(xs_list, dtype=np.float64)
+                ys = np.array(ys_list, dtype=np.float64)
+                if xs.std() == 0.0 or ys.std() == 0.0:
                     continue
-                rho, _ = sp_stats.spearmanr(xs, ys)
+                rho_result = sp_stats.spearmanr(xs, ys)
+                rho = float(rho_result[0])
                 if not math.isnan(rho):
-                    daily.append((d, float(rho), k))
+                    daily.append((d, rho, k))
 
             n_days = len(daily)
-            series: list[IcPoint] = []
+            series = []
             if n_days >= window:
                 for end in range(window, n_days + 1, stride):
                     win = daily[end - window:end]
@@ -3073,10 +3081,21 @@ async def ic_batch(
     # event loop stays responsive (same pattern as research/batch_score.py
     # Step 7d). NumPy releases the GIL inside the per-window Spearman
     # calls, so other dashboard requests genuinely overlap with this work.
-    results = await asyncio.to_thread(
-        _compute_ic_batch_sync,
-        rows, feature_cols, outcome, window, cutoff_date, is_all, horizon, stride,
-    )
+    try:
+        results = await asyncio.to_thread(
+            _compute_ic_batch_sync,
+            rows, feature_cols, outcome, window, cutoff_date, is_all, horizon, stride,
+        )
+    except Exception as _exc:
+        import traceback as _tb
+        import logging as _log
+        _log.exception("_compute_ic_batch_sync failed ticker=%s is_all=%s", ticker, is_all)
+        return {
+            "metrics": [],
+            "error": f"{type(_exc).__name__}: {_exc}",
+            "traceback": _tb.format_exc(),
+            "ticker": ticker, "outcome": outcome, "from_cache": False,
+        }
 
     # Persist to cache.
     payload_json = json.dumps({"metrics": results})
