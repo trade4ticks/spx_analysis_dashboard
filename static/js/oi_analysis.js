@@ -127,6 +127,13 @@ document.addEventListener('alpine:init', () => {
     icBatchPollStart: null,           // Date.now() when polling started
     icBatchRefreshAt: null,           // Date.now() when ⟳ Refresh was last triggered
 
+    // IC.7 — Signal Decomposition (per-ticker breakdown, ALL mode only)
+    icDecompData:     null,
+    icDecompLoading:  false,
+    icDecompError:    null,
+    icDecompExpanded: false,
+    icDecompKey:      null,   // last-loaded "metric:outcome:mode:cutoff"
+
     async init() {
       // Trade-table column sort: header onclick calls a window function
       // directly since the headers are built via innerHTML (no Alpine bindings).
@@ -230,6 +237,14 @@ document.addEventListener('alpine:init', () => {
           if (k !== this.icBatchKey || !this.icBatchData) {
             if (k !== this.icBatchKey) this.icBatchData = null; // clear stale bars immediately
             this.loadIcBatch();
+          }
+        }
+        // IC.7: reload decomp if section is open and ticker is ALL
+        if (this.icDecompExpanded && this.ticker === 'ALL') {
+          const k = this._icDecompKey();
+          if (k !== this.icDecompKey || !this.icDecompData) {
+            if (k !== this.icDecompKey) this.icDecompData = null;
+            this.loadIcDecomp();
           }
         }
         if (this.heatmapMetric) await this.loadHeatmap();
@@ -3256,6 +3271,8 @@ document.addEventListener('alpine:init', () => {
       // history). Reload if the section is open. Clear stale data so the
       // user sees status panels rather than wrong-mode bars.
       if (this.icBatchExpanded) { this.icBatchData = null; this.loadIcBatch(); }
+      // IC.7: mode change shifts reference IC — reload if open and in ALL mode.
+      if (this.icDecompExpanded && this.ticker === 'ALL') { this.icDecompData = null; this.loadIcDecomp(); }
     },
 
     async corrLoadMiniData() {
@@ -4891,6 +4908,124 @@ document.addEventListener('alpine:init', () => {
           },
         },
         plugins: [quadrantPlugin],
+      });
+    },
+
+    // ── IC.7 Signal Decomposition ──────────────────────────────────────
+
+    _icDecompKey() {
+      const cut = this.pageMode === 'train_test' ? this.cutoffDate : '';
+      return `${this.metric}:${this.outcome}:${this.pageMode}:${cut}`;
+    },
+
+    toggleIcDecomp() {
+      this.icDecompExpanded = !this.icDecompExpanded;
+      if (!this.icDecompExpanded) return;
+      if (!this.icDecompData || this._icDecompKey() !== this.icDecompKey) {
+        if (this._icDecompKey() !== this.icDecompKey) this.icDecompData = null;
+        this.loadIcDecomp();
+      } else {
+        this.$nextTick(() => this._renderIcDecomp());
+      }
+    },
+
+    async loadIcDecomp() {
+      if (!this.icDecompExpanded) return;
+      if (this.ticker !== 'ALL' || !this.metric || !this.outcome) return;
+      this.icDecompLoading = true;
+      this.icDecompError   = null;
+      try {
+        let url = `/api/oi-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
+        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.icDecompData = d;
+        this.icDecompKey  = this._icDecompKey();
+        this.$nextTick(() => this._renderIcDecomp());
+      } catch (e) {
+        this.icDecompError = e.message;
+      } finally {
+        this.icDecompLoading = false;
+      }
+    },
+
+    _renderIcDecomp() {
+      const el      = document.getElementById('chart-ic-decomp');
+      const innerEl = document.getElementById('ic-decomp-inner');
+      if (!el || !this.icDecompData?.tickers?.length) return;
+      if (this._charts['ic-decomp']) {
+        this._charts['ic-decomp'].destroy();
+        this._charts['ic-decomp'] = null;
+      }
+
+      const d       = this.icDecompData;
+      const tickers = d.tickers;          // sorted by score descending from server
+      const refIc   = d.reference_ic || 0;
+
+      // Canvas height: ~16px per row + labels/padding
+      const chartH = Math.max(280, tickers.length * 16 + 60);
+      if (innerEl) innerEl.style.height = chartH + 'px';
+
+      const labels = tickers.map(t => t.ticker);
+      const values = tickers.map(t => t.score);
+      const maxAbs = Math.max(...values.map(v => Math.abs(v)), 1e-9);
+      const thresh = maxAbs * 0.05;   // < 5% of max → neutral grey
+
+      const bgColors = values.map(v => {
+        if (Math.abs(v) < thresh) return 'rgba(150,150,150,0.35)';
+        const t  = Math.min(Math.abs(v) / maxAbs, 1);
+        const op = (0.3 + t * 0.55).toFixed(2);
+        const sameSign = refIc >= 0 ? v >= 0 : v < 0;
+        return sameSign ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
+      });
+
+      const self = this;
+      this._charts['ic-decomp'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{ data: values, backgroundColor: bgColors, borderWidth: 0, maxBarThickness: 14 }],
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          onClick(e, elements) {
+            if (!elements.length) return;
+            const tkr = tickers[elements[0].index].ticker;
+            self.ticker = tkr;
+            const sel = document.querySelector('select[x-model="ticker"]');
+            if (sel) sel.value = tkr;
+            self.loadAnalysis();
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const t = tickers[ctx.dataIndex];
+                  return `score ${t.score.toFixed(6)}  ·  ${t.n_days} days`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ...this._darkScales().x,
+              ticks: { ...this._darkScales().x.ticks, callback: v => v.toFixed(4), maxTicksLimit: 8 },
+              title: {
+                display: true, text: 'Mean daily rank-product contribution',
+                color: 'var(--dim)', font: { size: 9 },
+              },
+            },
+            y: {
+              ...this._darkScales().y,
+              ticks: { ...this._darkScales().y.ticks, font: { size: 9 } },
+            },
+          },
+        },
       });
     },
 

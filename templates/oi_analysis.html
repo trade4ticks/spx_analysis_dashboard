@@ -134,7 +134,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=94"></script>
+  <script src="/static/js/oi_analysis.js?v=95"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -565,6 +565,66 @@
             <div style="font-size:12px;color:var(--dim)">
               Click <strong>⟳ Refresh</strong> to compute IC stability for this ticker.
             </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── Signal Decomposition (IC.7) ─────────────────────────────────────
+         Per-ticker rank-product contribution to cross-sectional IC for the
+         currently selected metric + outcome. ALL mode only — hidden for
+         single-ticker because the decomposition requires a cross-section. -->
+    <div x-show="ticker === 'ALL'"
+         style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
+                background:rgba(255,255,255,.02)">
+      <div @click="toggleIcDecomp()"
+           style="cursor:pointer;display:flex;align-items:center;gap:10px;
+                  padding:10px 12px;user-select:none">
+        <span style="font-size:12px;color:var(--muted)"
+              x-text="icDecompExpanded ? '▾' : '▸'"></span>
+        <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Decomposition</span>
+        <span x-show="icDecompData && !icDecompLoading && !icDecompError"
+              style="font-size:10px;color:var(--dim)"
+              x-text="icDecompData
+                ? `· ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} / ${icDecompData.n_tickers} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`
+                : ''">
+        </span>
+        <span x-show="icDecompLoading" style="font-size:10px;color:#3498db">Loading…</span>
+        <span x-show="icDecompError && !icDecompLoading"
+              style="font-size:10px;color:#e74c3c"
+              x-text="'Error: ' + icDecompError"></span>
+      </div>
+
+      <template x-if="icDecompExpanded">
+        <div style="padding:0 12px 12px">
+          <div x-show="icDecompData && !icDecompError"
+               style="font-size:9px;color:var(--dim);margin-bottom:6px">
+            Mean daily rank-product contribution per ticker ·
+            blue = same sign as reference IC · pink = opposite · grey ≈ zero ·
+            click a bar to drill into that ticker
+          </div>
+
+          <!-- Scrollable chart container: height grows with ticker count (set by JS) -->
+          <div x-show="icDecompData && !icDecompError"
+               style="overflow-y:auto;max-height:520px">
+            <div id="ic-decomp-inner" style="position:relative">
+              <canvas id="chart-ic-decomp"></canvas>
+            </div>
+          </div>
+
+          <div x-show="icDecompLoading"
+               style="font-size:12px;color:var(--dim);padding:10px 0">
+            Loading decomposition…
+          </div>
+          <div x-show="!icDecompLoading && !icDecompData && !icDecompError"
+               style="font-size:12px;color:var(--dim);padding:10px 0">
+            Click ▸ above to load.
+          </div>
+          <div x-show="icDecompError && !icDecompLoading"
+               style="padding:14px;border:1px solid #e74c3c55;border-radius:4px;
+                      background:#e74c3c0d;margin-top:4px">
+            <div style="font-size:13px;font-weight:600;color:#e74c3c">❌ Error</div>
+            <div style="font-size:12px;color:var(--dim)" x-text="icDecompError"></div>
           </div>
         </div>
       </template>
