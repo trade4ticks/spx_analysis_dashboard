@@ -131,10 +131,18 @@
       position:absolute; inset:12px;
       width:calc(100% - 24px)!important; height:calc(100% - 24px)!important;
     }
+
+    /* Signal Survey pane system (IC.5 + IC.7 layout) */
+    .survey-pane { background:var(--surface); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+    .survey-pane-hdr { display:flex; align-items:center; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border); min-height:30px; }
+    .survey-pane-title { font-size:11px; font-weight:700; color:var(--muted); white-space:nowrap; }
+    .survey-pane-hint { font-size:9px; color:var(--dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+    /* Placeholder shown when a pane has no data yet */
+    .survey-pane-ph { display:flex; align-items:center; justify-content:center; min-height:340px; color:var(--dim); font-size:11px; text-align:center; padding:0 24px; line-height:1.6; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=97"></script>
+  <script src="/static/js/oi_analysis.js?v=98"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -411,238 +419,245 @@
       <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
     </div>
 
-    <!-- ── Signal Stability (IC.5) ───────────────────────────────────────
-         Universe-wide IC leaderboard + scatter, driven by /ic-batch.
-         Loaded on page-init and after every Analyze / setPageMode so the
-         survey stays in sync with the current ticker + outcome + mode.
-         Click a bar or dot to set the Metric selector and drill in below. -->
+    <!-- ── Signal Survey (IC.5 + IC.7) ────────────────────────────────────
+         Three always-visible Level-1 panes (Leaderboard · Signal Scatter ·
+         Breadth Beeswarm) and two always-visible Level-2 panes (Ticker
+         Contributions · Lorenz Curve). No expand/collapse — fixed page shape.
+         OOM guard preserved: ALL-mode compute only via explicit ⟳ Refresh. -->
     <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
                 background:rgba(255,255,255,.02)">
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
-        <div @click="toggleIcBatch()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
-          <span style="font-size:12px;color:var(--muted)"
-                x-text="icBatchExpanded ? '▾' : '▸'"></span>
-          <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Stability</span>
-          <span style="font-size:10px;color:var(--dim)"
-                x-show="!icBatchLoading && !icBatchError"
-                x-text="icBatchSubtitle()"></span>
-          <span x-show="icBatchLoading" style="font-size:10px;color:#3498db">Loading…</span>
-          <span x-show="icBatchError && !icBatchLoading"
-                style="font-size:10px;color:#e84393"
-                x-text="'Error: ' + icBatchError"></span>
+
+      <!-- Survey header -->
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
+        <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Survey</span>
+        <span style="font-size:10px;color:var(--dim)"
+              x-show="!icBatchLoading && !icBatchError"
+              x-text="icBatchSubtitle()"></span>
+        <span x-show="icBatchLoading" style="font-size:10px;color:#3498db">Loading…</span>
+        <span x-show="icBatchError && !icBatchLoading"
+              style="font-size:10px;color:#e84393"
+              x-text="'Error: ' + icBatchError"></span>
+        <div style="flex:1"></div>
+        <button @click="refreshIcBatch()"
+                :disabled="icBatchLoading"
+                :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                       font-size:10px;padding:2px 10px;border-radius:3px"
+                title="Recompute all Signal Survey data — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
+      </div>
+
+      <!-- Stale-cache coherence banner: old DB cache entries lack the
+           concentration_gini key entirely (undefined ≠ null). null means
+           "legitimately no cross-sectional data"; undefined means stale. -->
+      <div x-show="icBatchData && icBatchData.metrics?.[0] && !('concentration_gini' in (icBatchData.metrics[0] ?? {}))"
+           style="margin:0 12px 8px;padding:8px 12px;border:1px solid #e6a23c55;border-radius:4px;
+                  background:#e6a23c0d;font-size:11px;color:#e6a23c;line-height:1.5">
+        ⚠ Cache predates breadth data — click Refresh for full Signal Survey (strength · stability · breadth).
+      </div>
+
+      <!-- Status panels (between header and pane grid; hidden once data is loaded) -->
+      <div style="padding:0 12px">
+        <div x-show="icBatchLoading && !icBatchStatus"
+             style="font-size:12px;color:var(--dim);padding:10px 0">Checking cache…</div>
+
+        <div x-show="icBatchStatus === 'not_ready'"
+             style="padding:14px;border:1px solid var(--border);border-radius:4px;
+                    background:var(--raised);line-height:1.6;margin-bottom:8px">
+          <span x-show="ticker !== 'ALL'" style="font-size:12px;color:var(--dim)">Starting computation…</span>
+          <span x-show="ticker === 'ALL'" style="font-size:12px;color:var(--dim)">
+            No cached data for this configuration.
+            Click <strong>⟳ Refresh</strong> to start (ALL-mode: ~10–15 min, polls every 30 s automatically).
+          </span>
         </div>
-        <!-- View toggle + Refresh — always visible so user can switch
-             Leaderboard↔Scatter without expanding first -->
-        <div style="display:flex;gap:8px;align-items:center" @click.stop>
-          <div class="mode-seg">
-            <span :class="{on: icBatchView==='leaderboard'}"
-                  @click="icBatchView='leaderboard'; icBatchExpanded && icBatchData && _renderIcBatch()">
-              Leaderboard</span>
-            <span :class="{on: icBatchView==='scatter'}"
-                  @click="icBatchView='scatter'; icBatchExpanded && icBatchData && _renderIcBatch()">
-              Scatter</span>
+
+        <div x-show="icBatchStatus === 'computing'"
+             style="padding:16px;border:1px solid #3498db55;border-radius:4px;
+                    background:#3498db0d;line-height:1.7;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:600;color:#3498db;margin-bottom:6px">⏳ Computing Signal Survey</div>
+          <div style="font-size:12px;color:var(--dim)"
+               x-text="ticker === 'ALL'
+                 ? 'ALL-mode (cross-sectional, all tickers): ~10–15 min on the VPS.'
+                 : 'Single-ticker (time-series): ~1–2 min on the VPS.'"></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            Checking every 30 s — charts appear when the job finishes. You can navigate the page freely.
           </div>
-          <button @click="refreshIcBatch()"
-                  :disabled="icBatchLoading"
-                  :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
-                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:10px;padding:2px 10px;border-radius:3px"
-                  title="Re-compute IC stability — ALL: background job ~2-3 min · single ticker: ~1 min · polls automatically">⟳ Refresh</button>
+        </div>
+
+        <div x-show="icBatchStatus === 'queued'"
+             style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
+                    background:#e6a23c0d;line-height:1.7;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">⏳ Queued</div>
+          <div style="font-size:12px;color:var(--dim)">
+            Another IC job is running — this key starts automatically when the slot frees (checking every 30 s).
+          </div>
+        </div>
+
+        <div x-show="icBatchStatus === 'timeout'"
+             style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
+                    background:#e6a23c0d;line-height:1.7;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">⌛ Poll timed out (15 min)</div>
+          <div style="font-size:12px;color:var(--dim)">
+            The poll timer stopped. The job may still be running — click <strong>⟳ Refresh</strong> to restart polling.
+          </div>
+        </div>
+
+        <div x-show="icBatchStatus === 'failed'"
+             style="padding:16px;border:1px solid #e74c3c55;border-radius:4px;
+                    background:#e74c3c0d;line-height:1.7;margin-bottom:8px">
+          <div style="font-size:14px;font-weight:600;color:#e74c3c;margin-bottom:4px">❌ Computation failed</div>
+          <div style="font-size:12px;color:var(--dim)" x-text="icBatchError || 'Unknown error'"></div>
+          <div style="font-size:11px;color:var(--dim);margin-top:8px">Click <strong>⟳ Refresh</strong> to retry.</div>
         </div>
       </div>
 
-      <template x-if="icBatchExpanded">
-        <div style="padding:0 12px 12px">
-          <!-- Instruction line (only when data is loaded) -->
-          <div x-show="icBatchData && !icBatchError"
-               style="font-size:9px;color:var(--dim);margin-bottom:6px">
-            <span x-show="icBatchView==='leaderboard'">Sorted by sign stability ↓ · bar opacity = IC strength · click a bar to set Metric and analyze</span>
-            <span x-show="icBatchView==='scatter'">X = IC strength (abs) · Y = sign stability · click a dot to set Metric and analyze</span>
-          </div>
+      <!-- Level-1: three equal-width panes always visible ─────────────── -->
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(280px,1fr));gap:12px;padding:0 12px 12px">
 
-          <!-- Leaderboard: horizontal scroll so 120+ vertical columns fit;
-               height and min-width are set dynamically by _renderIcLeaderboard. -->
-          <div x-show="icBatchView === 'leaderboard' && icBatchData && !icBatchError">
-            <div style="overflow-x:auto">
-              <div id="ic-leaderboard-inner" style="position:relative">
-                <canvas id="chart-ic-leaderboard"></canvas>
-              </div>
+        <!-- Pane 1: Leaderboard -->
+        <div class="survey-pane">
+          <div class="survey-pane-hdr">
+            <span class="survey-pane-title">Leaderboard</span>
+            <span class="survey-pane-hint">sign stability · opacity = IC strength · click bar → set Metric</span>
+            <button class="fs-btn" @click="openFullscreen('chart-ic-leaderboard')"
+                    x-show="!!(icBatchData && !icBatchError)" title="Fullscreen">⛶</button>
+          </div>
+          <div x-show="!!(icBatchData && !icBatchError)" style="overflow-x:auto">
+            <div id="ic-leaderboard-inner" style="position:relative">
+              <canvas id="chart-ic-leaderboard"></canvas>
             </div>
           </div>
+          <div x-show="!(icBatchData && !icBatchError)" class="survey-pane-ph">—</div>
+        </div>
 
-          <!-- Scatter: fixed-height container -->
-          <div x-show="icBatchView === 'scatter' && icBatchData && !icBatchError"
-               style="height:420px;position:relative">
+        <!-- Pane 2: Signal Scatter -->
+        <div class="survey-pane">
+          <div class="survey-pane-hdr">
+            <span class="survey-pane-title">Signal Scatter</span>
+            <span class="survey-pane-hint">X = IC strength (abs) · Y = sign stability · click dot → set Metric</span>
+            <button class="fs-btn" @click="openFullscreen('chart-ic-scatter')"
+                    x-show="!!(icBatchData && !icBatchError)" title="Fullscreen">⛶</button>
+          </div>
+          <div x-show="!!(icBatchData && !icBatchError)" style="height:380px;position:relative">
             <canvas id="chart-ic-scatter"></canvas>
           </div>
-
-          <!-- Status panels — one is always visible when the section is open and no chart data.
-               computing/queued intentionally omit the !icBatchLoading guard so the panel
-               stays visible without flickering during the 30-s poll round-trip. -->
-
-          <!-- Loading: only when status is genuinely unknown (initial open or forced reload) -->
-          <div x-show="icBatchLoading && !icBatchStatus"
-               style="font-size:12px;color:var(--dim);padding:10px 0">
-            Checking cache…
-          </div>
-
-          <!-- not_ready: single-ticker auto-triggers immediately; ALL needs Refresh click.
-               Visible even while loading so "Starting…" shows during the POST round-trip. -->
-          <div x-show="icBatchStatus === 'not_ready'"
-               style="padding:14px;border:1px solid var(--border);border-radius:4px;
-                      background:var(--raised);line-height:1.6;margin-top:4px">
-            <span x-show="ticker !== 'ALL'" style="font-size:12px;color:var(--dim)">
-              Starting computation…
-            </span>
-            <span x-show="ticker === 'ALL'" style="font-size:12px;color:var(--dim)">
-              No cached data for this configuration.
-              Click <strong>⟳ Refresh</strong> to start (ALL-mode: ~2–3 min, polls automatically).
-            </span>
-          </div>
-
-          <!-- computing: prominent blue box; stays visible during every 30-s poll check -->
-          <div x-show="icBatchStatus === 'computing'"
-               style="padding:16px;border:1px solid #3498db55;border-radius:4px;
-                      background:#3498db0d;line-height:1.7;margin-top:4px">
-            <div style="font-size:14px;font-weight:600;color:#3498db;margin-bottom:6px">
-              ⏳ Computing IC Stability
-            </div>
-            <div style="font-size:12px;color:var(--dim)"
-                 x-text="ticker === 'ALL'
-                   ? 'ALL-mode (cross-sectional, all tickers): typically 2–3 min on the VPS.'
-                   : 'Single-ticker (time-series): typically 1–2 min on the VPS.'">
-            </div>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              Checking every 30 s automatically — bars will appear when the job finishes.<br>
-              You can navigate the page; the computation continues on the server.
-            </div>
-          </div>
-
-          <!-- queued: another ticker occupies the slot; stays visible during poll -->
-          <div x-show="icBatchStatus === 'queued'"
-               style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
-                      background:#e6a23c0d;line-height:1.7;margin-top:4px">
-            <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">
-              ⏳ Queued
-            </div>
-            <div style="font-size:12px;color:var(--dim)">
-              Another IC computation is currently running. This ticker will start automatically
-              when the slot frees — checking every 30 s.
-            </div>
-          </div>
-
-          <!-- timeout: 15-min poll limit exceeded -->
-          <div x-show="icBatchStatus === 'timeout'"
-               style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
-                      background:#e6a23c0d;line-height:1.7;margin-top:4px">
-            <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">
-              ⌛ Computation timed out (15 min)
-            </div>
-            <div style="font-size:12px;color:var(--dim)">
-              The poll timer stopped. The job may still be running on the server — expand this
-              section again in a few minutes, or click <strong>⟳ Refresh</strong> to restart.
-            </div>
-          </div>
-
-          <!-- failed: background job crashed or network error -->
-          <div x-show="icBatchStatus === 'failed'"
-               style="padding:16px;border:1px solid #e74c3c55;border-radius:4px;
-                      background:#e74c3c0d;line-height:1.7;margin-top:4px">
-            <div style="font-size:14px;font-weight:600;color:#e74c3c;margin-bottom:4px">
-              ❌ Computation failed
-            </div>
-            <div style="font-size:12px;color:var(--dim)" x-text="icBatchError || 'Unknown error'"></div>
-            <div style="font-size:11px;color:var(--dim);margin-top:8px">
-              Click <strong>⟳ Refresh</strong> to retry.
-            </div>
-          </div>
-
-          <!-- fallback: safety net — blank panel should be impossible once all states are covered -->
-          <div x-show="!icBatchLoading && !icBatchData && !icBatchStatus && !icBatchError"
-               style="padding:14px;border:1px solid var(--border);border-radius:4px;
-                      background:var(--raised);margin-top:4px">
-            <div style="font-size:12px;color:var(--dim)">
-              Click <strong>⟳ Refresh</strong> to compute IC stability for this ticker.
-            </div>
-          </div>
+          <div x-show="!(icBatchData && !icBatchError)" class="survey-pane-ph">—</div>
         </div>
-      </template>
-    </div>
 
-    <!-- ── Signal Decomposition (IC.7) ─────────────────────────────────────
-         Per-ticker rank-product contribution to cross-sectional IC for the
-         currently selected metric + outcome. ALL mode only — hidden for
-         single-ticker because the decomposition requires a cross-section. -->
-    <div x-show="ticker === 'ALL'"
-         style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
-                background:rgba(255,255,255,.02)">
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
-        <!-- Expand toggle -->
-        <div @click="toggleIcDecomp()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
-          <span style="font-size:12px;color:var(--muted)"
-                x-text="icDecompExpanded ? '▾' : '▸'"></span>
-          <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Decomposition</span>
-          <span x-show="icDecompData && !icDecompLoading && !icDecompError"
+        <!-- Pane 3: Breadth Beeswarm (stub — rendered in next commit) -->
+        <div class="survey-pane">
+          <div class="survey-pane-hdr">
+            <span class="survey-pane-title">Breadth Beeswarm</span>
+            <span class="survey-pane-hint">Gini concentration · color = IC strength · click → drill into metric</span>
+          </div>
+          <div x-show="!!(icBatchData && !icBatchError)"
+               style="height:380px;position:relative;display:flex;align-items:center;
+                      justify-content:center;flex-direction:column;gap:6px">
+            <canvas id="chart-ic-beeswarm" style="display:none"></canvas>
+            <span style="font-size:11px;color:var(--dim)">Beeswarm — rendering in next step</span>
+          </div>
+          <div x-show="!(icBatchData && !icBatchError)" class="survey-pane-ph">—</div>
+        </div>
+
+      </div><!-- /level-1 -->
+
+      <!-- Level-2: Signal Decomposition ──────────────────────────────── -->
+      <div style="border-top:1px solid var(--border);padding:10px 12px 0">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <span style="font-size:11px;font-weight:700;color:var(--text)">Signal Decomposition</span>
+          <span x-show="icDecompData && !icDecompLoading && !icDecompError && ticker === 'ALL'"
                 style="font-size:10px;color:var(--dim)"
                 x-text="icDecompData
                   ? `· ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} / ${icDecompData.n_tickers} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`
                   : ''">
           </span>
-          <span x-show="icDecompLoading" style="font-size:10px;color:#3498db">Loading…</span>
+          <span x-show="icDecompLoading && ticker === 'ALL'"
+                style="font-size:10px;color:#3498db">Loading…</span>
           <span x-show="icDecompError && !icDecompLoading"
                 style="font-size:10px;color:#e74c3c"
                 x-text="'Error: ' + icDecompError"></span>
-        </div>
-        <!-- Y-axis mode toggle — right side, @click.stop prevents collapse -->
-        <div x-show="icDecompExpanded && icDecompData && !icDecompError"
-             style="display:flex;gap:8px;align-items:center" @click.stop>
-          <div class="mode-seg">
-            <span :class="{on: icDecompYMode==='raw'}"
-                  @click="icDecompYMode='raw'; $nextTick(() => _renderIcDecomp())">Raw</span>
-            <span :class="{on: icDecompYMode==='basket'}"
-                  @click="icDecompYMode='basket'; $nextTick(() => _renderIcDecomp())"
-                  title="Y = avg return vs 128-ticker basket mean on flagged days. Per-ticker correction — not a uniform shift.">vs Basket</span>
+          <div style="flex:1"></div>
+          <div x-show="icDecompData && !icDecompError && ticker === 'ALL'">
+            <div class="mode-seg">
+              <span :class="{on: icDecompYMode==='raw'}"
+                    @click="icDecompYMode='raw'; $nextTick(() => _renderIcDecomp())">Raw</span>
+              <span :class="{on: icDecompYMode==='basket'}"
+                    @click="icDecompYMode='basket'; $nextTick(() => _renderIcDecomp())"
+                    title="Y = avg return vs 128-ticker basket mean on flagged days. Per-ticker correction — not a uniform shift.">vs Basket</span>
+            </div>
           </div>
         </div>
       </div>
 
-      <template x-if="icDecompExpanded">
-        <div style="padding:0 12px 12px">
-          <div x-show="icDecompData && !icDecompError"
-               style="font-size:9px;color:var(--dim);margin-bottom:6px">
-            X = sign agreement rate (0.5 = random) ·
-            <span x-text="icDecompYMode === 'basket'
-              ? 'Y = avg return vs 128-ticker basket (per-ticker correction, not market-relative)'
-              : 'Y = avg return when flagged (raw, tradable)'"></span> ·
-            size = n flagged days · blue = same sign as IC · pink = opposite ·
-            upper-right = broad reliable edge · click a dot to drill into that ticker
-          </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 12px 12px">
 
-          <!-- Fixed-height bubble scatter — no scrolling needed -->
-          <div x-show="icDecompData && !icDecompError"
-               style="height:420px;position:relative">
-            <canvas id="chart-ic-decomp"></canvas>
+        <!-- Pane 4: Ticker Contributions (bubble scatter) -->
+        <div class="survey-pane">
+          <div class="survey-pane-hdr">
+            <span class="survey-pane-title">Ticker Contributions</span>
+            <span class="survey-pane-hint">X = sign agreement · Y = avg return when flagged · size = n days · click dot → drill into ticker</span>
+            <button class="fs-btn" @click="openFullscreen('chart-ic-decomp')"
+                    x-show="!!(icDecompData && !icDecompError && ticker === 'ALL')" title="Fullscreen">⛶</button>
           </div>
-
-          <div x-show="icDecompLoading"
-               style="font-size:12px;color:var(--dim);padding:10px 0">
-            Loading decomposition…
+          <!-- Single-ticker: cross-sectional decomp not meaningful -->
+          <div x-show="ticker !== 'ALL'" class="survey-pane-ph">
+            Signal decomposition is cross-sectional — switch ticker to ALL.
           </div>
-          <div x-show="!icDecompLoading && !icDecompData && !icDecompError"
-               style="font-size:12px;color:var(--dim);padding:10px 0">
-            Click ▸ above to load.
+          <!-- ALL mode: no metric selected yet -->
+          <div x-show="ticker === 'ALL' && !icDecompData && !icDecompLoading && !icDecompError"
+               class="survey-pane-ph">
+            ← Click a metric in the Leaderboard or Beeswarm to see its per-ticker decomposition
           </div>
-          <div x-show="icDecompError && !icDecompLoading"
-               style="padding:14px;border:1px solid #e74c3c55;border-radius:4px;
-                      background:#e74c3c0d;margin-top:4px">
+          <!-- ALL mode: loading -->
+          <div x-show="ticker === 'ALL' && icDecompLoading"
+               style="height:420px;display:flex;align-items:center;justify-content:center">
+            <span style="font-size:12px;color:var(--dim)">Loading decomposition…</span>
+          </div>
+          <!-- ALL mode: chart -->
+          <div x-show="ticker === 'ALL' && icDecompData && !icDecompError">
+            <div style="padding:4px 8px 2px;font-size:9px;color:var(--dim)">
+              X = sign agreement rate (0.5 = random) ·
+              <span x-text="icDecompYMode === 'basket'
+                ? 'Y = avg return vs 128-ticker basket (per-ticker)'
+                : 'Y = avg return when flagged (raw)'"></span> ·
+              size = n flagged · blue = same sign as IC · pink = opposite · click a dot to drill into that ticker
+            </div>
+            <div style="height:390px;position:relative">
+              <canvas id="chart-ic-decomp"></canvas>
+            </div>
+          </div>
+          <!-- ALL mode: error -->
+          <div x-show="ticker === 'ALL' && icDecompError && !icDecompLoading"
+               style="padding:14px;margin:8px;border:1px solid #e74c3c55;border-radius:4px;background:#e74c3c0d">
             <div style="font-size:13px;font-weight:600;color:#e74c3c">❌ Error</div>
             <div style="font-size:12px;color:var(--dim)" x-text="icDecompError"></div>
           </div>
         </div>
-      </template>
-    </div>
+
+        <!-- Pane 5: Lorenz Curve (stub — rendered in next commit) -->
+        <div class="survey-pane">
+          <div class="survey-pane-hdr">
+            <span class="survey-pane-title">Lorenz Curve</span>
+            <span class="survey-pane-hint">cumulative IC signal concentration across tickers</span>
+          </div>
+          <!-- Single-ticker -->
+          <div x-show="ticker !== 'ALL'" class="survey-pane-ph">
+            Lorenz curve requires cross-sectional data — switch ticker to ALL.
+          </div>
+          <!-- ALL mode: no metric selected -->
+          <div x-show="ticker === 'ALL' && !icDecompData" class="survey-pane-ph">
+            ← Click a metric to see its Lorenz curve
+          </div>
+          <!-- ALL mode: stub placeholder when data present -->
+          <div x-show="ticker === 'ALL' && icDecompData"
+               style="height:420px;position:relative;display:flex;align-items:center;
+                      justify-content:center;flex-direction:column;gap:6px">
+            <canvas id="chart-ic-lorenz" style="display:none"></canvas>
+            <span style="font-size:11px;color:var(--dim)">Lorenz curve — rendering in next step</span>
+          </div>
+        </div>
+
+      </div><!-- /level-2 panes -->
+    </div><!-- /signal survey -->
 
     <div x-show="error" style="color:var(--danger);padding:12px;font-size:12px" x-text="error"></div>
 

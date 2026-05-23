@@ -119,8 +119,6 @@ document.addEventListener('alpine:init', () => {
     icBatchData:      null,
     icBatchLoading:   false,
     icBatchError:     null,
-    icBatchExpanded:  false,
-    icBatchView:      'leaderboard',  // 'leaderboard' | 'scatter'
     icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
     icBatchStatus:    null,           // 'not_ready' | 'computing' | 'queued' | 'failed' | 'timeout' | null
     icBatchPollTimer: null,           // setInterval handle for polling
@@ -131,7 +129,6 @@ document.addEventListener('alpine:init', () => {
     icDecompData:     null,
     icDecompLoading:  false,
     icDecompError:    null,
-    icDecompExpanded: false,
     icDecompKey:      null,   // last-loaded "metric:outcome:mode:cutoff"
     icDecompYMode:    'raw',  // 'raw' | 'basket' — Y-axis mode for bubble scatter
 
@@ -186,6 +183,10 @@ document.addEventListener('alpine:init', () => {
       this.loadPortfolios();
       // System library (anchor-agnostic reusable system templates)
       this.loadLibrarySystems();
+      // Signal Survey — always-visible; load on init so charts appear without
+      // requiring an Analyze click. Single-ticker auto-triggers; ALL stays idle
+      // until explicit ⟳ Refresh (OOM guard).
+      this.loadIcBatch();
     },
 
     async loadAnalysis() {
@@ -229,22 +230,18 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderCharts(), 80);
-        // IC.5: reload Signal Stability whenever Analyze runs with the section
-        // open — either key changed (new ticker/outcome/mode) or data is null
-        // (was cleared by a Refresh). Clear stale data first so the user sees
-        // status panels rather than old bars while the new load is in flight.
-        if (this.icBatchExpanded) {
-          const k = this._icBatchKey();
-          if (k !== this.icBatchKey || !this.icBatchData) {
-            if (k !== this.icBatchKey) this.icBatchData = null; // clear stale bars immediately
-            this.loadIcBatch();
-          }
+        // IC.5: always reload when key changes or data is absent (section always visible).
+        // Clear stale data first so panes show status rather than wrong-mode charts.
+        const _icKey = this._icBatchKey();
+        if (_icKey !== this.icBatchKey || !this.icBatchData) {
+          if (_icKey !== this.icBatchKey) this.icBatchData = null;
+          this.loadIcBatch();
         }
-        // IC.7: reload decomp if section is open and ticker is ALL
-        if (this.icDecompExpanded && this.ticker === 'ALL') {
-          const k = this._icDecompKey();
-          if (k !== this.icDecompKey || !this.icDecompData) {
-            if (k !== this.icDecompKey) this.icDecompData = null;
+        // IC.7: reload decomp when metric/mode changes (ALL mode only; single-ticker has no decomp).
+        if (this.ticker === 'ALL') {
+          const _dcKey = this._icDecompKey();
+          if (_dcKey !== this.icDecompKey || !this.icDecompData) {
+            if (_dcKey !== this.icDecompKey) this.icDecompData = null;
             this.loadIcDecomp();
           }
         }
@@ -1889,6 +1886,10 @@ document.addEventListener('alpine:init', () => {
         'chart-port-yearly':    'port-yearly',
         'chart-port-activity':  'port-activity',
         'chart-port-bubble':    'port-bubble',
+        // Signal Survey (IC.5 + IC.7)
+        'chart-ic-leaderboard': 'ic-leader',
+        'chart-ic-scatter':     'ic-scatter',
+        'chart-ic-decomp':      'ic-decomp',
       };
       const key = keyOverride[chartId] || chartId.replace('chart-', '');
       this.fsChartId = chartId;
@@ -1935,6 +1936,10 @@ document.addEventListener('alpine:init', () => {
           'chart-port-yearly':    () => this._renderPortYearly(),
           'chart-port-activity':  () => this._renderPortActivity(),
           'chart-port-bubble':    () => this._renderPortBubble(),
+          // Signal Survey
+          'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
+          'chart-ic-scatter':     () => this._renderIcScatter(),
+          'chart-ic-decomp':      () => this._renderIcDecomp(),
         };
         const fn = renderMap[chartId];
         if (fn) {
@@ -2002,6 +2007,10 @@ document.addEventListener('alpine:init', () => {
           'chart-port-yearly':   () => this._renderPortYearly(),
           'chart-port-activity': () => this._renderPortActivity(),
           'chart-port-bubble':   () => this._renderPortBubble(),
+          // Signal Survey
+          'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
+          'chart-ic-scatter':     () => this._renderIcScatter(),
+          'chart-ic-decomp':      () => this._renderIcDecomp(),
         };
         const fn = renderMap[wasChartId];
         if (fn) fn();
@@ -3271,9 +3280,9 @@ document.addEventListener('alpine:init', () => {
       // IC.5: mode change shifts reference IC (train_test cutoff vs full
       // history). Reload if the section is open. Clear stale data so the
       // user sees status panels rather than wrong-mode bars.
-      if (this.icBatchExpanded) { this.icBatchData = null; this.loadIcBatch(); }
-      // IC.7: mode change shifts reference IC — reload if open and in ALL mode.
-      if (this.icDecompExpanded && this.ticker === 'ALL') { this.icDecompData = null; this.loadIcDecomp(); }
+      this.icBatchData = null; this.loadIcBatch();
+      // IC.7: mode change shifts reference IC — always reload in ALL mode.
+      if (this.ticker === 'ALL') { this.icDecompData = null; this.loadIcDecomp(); }
     },
 
     async corrLoadMiniData() {
@@ -4532,8 +4541,6 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadIcBatch() {
-      // Hard guard: never run when section is collapsed.
-      if (!this.icBatchExpanded) return;
       if (!this.ticker || !this.outcome) return;
       this.icBatchLoading = true;
       this.icBatchError = null;
@@ -4592,10 +4599,8 @@ document.addEventListener('alpine:init', () => {
           this.icBatchData   = d;
           this.icBatchKey    = this._icBatchKey();
           this._stopIcBatchPolling();
-          if (this.icBatchExpanded) {
-            await this.$nextTick();
-            this._renderIcBatch();
-          }
+          await this.$nextTick();
+          this._renderIcBatch();
         }
       } catch (e) {
         this.icBatchStatus = 'failed';
@@ -4668,21 +4673,6 @@ document.addEventListener('alpine:init', () => {
       this.icBatchPollStart = null;
     },
 
-    toggleIcBatch() {
-      this.icBatchExpanded = !this.icBatchExpanded;
-      if (!this.icBatchExpanded) {
-        // Stop polling when section is collapsed — restart on re-expand.
-        this._stopIcBatchPolling();
-        return;
-      }
-      // On expand: load if no data yet, or if stale (ticker/outcome/mode changed).
-      if (!this.icBatchData || this._icBatchKey() !== this.icBatchKey) {
-        if (this._icBatchKey() !== this.icBatchKey) this.icBatchData = null; // clear stale immediately
-        this.loadIcBatch();
-      } else {
-        this.$nextTick(() => this._renderIcBatch());
-      }
-    },
 
     icBatchSubtitle() {
       if (this.icBatchLoading) return '';
@@ -4690,7 +4680,7 @@ document.addEventListener('alpine:init', () => {
       if (this.icBatchStatus === 'computing')  return '— computing in background · polling every 30 s…';
       if (this.icBatchStatus === 'queued')     return '— queued · waiting for current IC job to finish…';
       if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') return '';
-      if (!this.icBatchData?.metrics?.length) return '— click ▸ to load';
+      if (!this.icBatchData?.metrics?.length) return '';
       const n    = this.icBatchData.metrics.length;
       const nSup = this.icBatchData.metrics.filter(m => m.suppressed).length;
       const mode = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';
@@ -4700,8 +4690,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderIcBatch() {
-      if (this.icBatchView === 'leaderboard') this._renderIcLeaderboard();
-      else this._renderIcScatter();
+      this._renderIcLeaderboard();
+      this._renderIcScatter();
+      // _renderIcBeeswarm() — added in next commit
     },
 
     _renderIcLeaderboard() {
@@ -4919,19 +4910,8 @@ document.addEventListener('alpine:init', () => {
       return `${this.metric}:${this.outcome}:${this.pageMode}:${cut}`;
     },
 
-    toggleIcDecomp() {
-      this.icDecompExpanded = !this.icDecompExpanded;
-      if (!this.icDecompExpanded) return;
-      if (!this.icDecompData || this._icDecompKey() !== this.icDecompKey) {
-        if (this._icDecompKey() !== this.icDecompKey) this.icDecompData = null;
-        this.loadIcDecomp();
-      } else {
-        this.$nextTick(() => this._renderIcDecomp());
-      }
-    },
 
     async loadIcDecomp() {
-      if (!this.icDecompExpanded) return;
       if (this.ticker !== 'ALL' || !this.metric || !this.outcome) return;
       this.icDecompLoading = true;
       this.icDecompError   = null;
