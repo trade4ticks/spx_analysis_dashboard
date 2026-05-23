@@ -689,9 +689,12 @@ async def analyze(
         else:
             reference_ic = 0.0
 
-        # Short-window (5d) rolling IC for the regime-context overlay.
+        # Short-window (21d ≈ 1 month) rolling IC for the regime-context overlay.
         # Not sign-classified, no epsilon computed — context only.
-        _IC_SHORT_WINDOW = 5
+        # 5d was too small: single-ticker Spearman over 5 obs has huge variance
+        # and produces artifact spikes; 21d gives enough sample to show genuine
+        # regime shifts without the statistical noise.
+        _IC_SHORT_WINDOW = 21
         if is_all:
             short_ic_series = rolling_ic_cross_sectional(
                 row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,

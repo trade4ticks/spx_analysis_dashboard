@@ -1168,7 +1168,7 @@ document.addEventListener('alpine:init', () => {
             // line. Flat neutral color, no segment hook, thinner stroke.
             // Y-axis range is not expanded for 5d extremes — spikes clip.
             {
-              label: 'IC (5d context)',
+              label: 'IC (21d context)',
               data:  shortData,
               borderColor:     'rgba(180, 180, 180, 0.28)',
               backgroundColor: 'transparent',
