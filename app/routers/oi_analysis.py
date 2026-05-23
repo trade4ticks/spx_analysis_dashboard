@@ -2818,6 +2818,11 @@ CREATE TABLE IF NOT EXISTS ic_batch_cache (
 """
 _ic_batch_table_ensured = False
 
+# Background-job tracking — in-memory only; cleared on server restart.
+# The frontend's 15-min poll timeout covers sessions mid-poll at restart time.
+_ic_batch_running: set = set()   # cache_key values currently being computed
+_ic_batch_status: dict = {}      # cache_key → {"status": "failed", "error": "..."}
+
 
 async def _ensure_ic_batch_table(pool) -> None:
     global _ic_batch_table_ensured
@@ -2850,108 +2855,41 @@ def _compute_ic_batch_sync(
     outcome: str,
     window: int,
     cutoff_date: Optional[str],
-    is_all: bool,
     horizon: int,
     stride: int = 1,
 ) -> list[dict]:
-    """Per-metric IC computation. Pure-sync, no DB. Off-loaded via to_thread.
+    """Per-metric IC computation for a SINGLE TICKER. Pure-sync, no DB.
+    Off-loaded via asyncio.to_thread.
+
+    ALL-mode is handled by _compute_ic_batch_all_bg, which fetches one metric
+    at a time (4 cols × 141K rows ≈ 4 MB peak) to avoid VPS OOM. The bulk
+    ALL-mode block that lived here was removed in IC.5 step-2 — it caused
+    6 OOM kills (python at 3.6–5 GB each) by loading 125 cols × 141K rows.
 
     For each feature column: rolling Spearman IC against the outcome over
-    a `window`-day trailing window (single-ticker time-series IC, or daily
-    cross-sectional IC rolled if `is_all=True`), then mode-aware reference
-    IC, ε, and sign-stability.
+    a `window`-day trailing window (single-ticker time-series IC), then
+    mode-aware reference IC, ε, and sign-stability.
 
     The outcome column is skipped if present in feature_cols. Returns one
     dict per emitted metric, in the input feature_cols order.
-
-    ALL-mode fast path:
-        rolling_ic_cross_sectional rebuilds `by_date` from the full row
-        list for every metric — O(n_rows × n_metrics) = ~15 M Python ops.
-        Here we pre-build `all_by_date` once (O(n_rows) = ~0.1 s), then
-        each metric iterates only strided_dates × tickers (~5 M ops total),
-        cutting the date-sampling work from ~18 s to ~3 s and the total
-        spearmanr calls from 1764 × 123 to 588 × 123.
     """
     from app.routers.ic_compute import (
-        IcPoint, rolling_ic_single_ticker,
+        rolling_ic_single_ticker,
         sign_stability_from_rolling, noise_floor_epsilon,
         finite_or_none,
     )
-
-    # ── ALL-mode: pre-build date→row-list map once ───────────────────────────
-    # No generic-alias type annotations on locals (list[tuple] etc.) so the
-    # code stays valid on Python 3.8.
-    if is_all:
-        all_by_date = {}
-        for r in rows:
-            d = r.get("trade_date")
-            if d is None or r.get("ticker") is None:
-                continue
-            if d not in all_by_date:
-                all_by_date[d] = []
-            all_by_date[d].append(r)
-        strided_dates = sorted(all_by_date.keys())[::stride]
 
     results = []
     for metric in feature_cols:
         if metric == outcome:
             continue
 
-        if is_all:
-            # Cross-sectional daily IC using the pre-built map, then rolling mean.
-            daily = []
-            for d in strided_dates:
-                xs_list = []
-                ys_list = []
-                for r in all_by_date[d]:
-                    mx = r.get(metric)
-                    oy = r.get(outcome)
-                    if mx is None or oy is None:
-                        continue
-                    try:
-                        xf = float(mx)
-                        yf = float(oy)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isnan(xf) or math.isnan(yf):
-                        continue
-                    xs_list.append(xf)
-                    ys_list.append(yf)
-                k = len(xs_list)
-                if k < 5:
-                    continue
-                xs = np.array(xs_list, dtype=np.float64)
-                ys = np.array(ys_list, dtype=np.float64)
-                if xs.std() == 0.0 or ys.std() == 0.0:
-                    continue
-                rho_result = sp_stats.spearmanr(xs, ys)
-                rho = float(rho_result[0])
-                if not math.isnan(rho):
-                    daily.append((d, rho, k))
-
-            n_days = len(daily)
-            series = []
-            if n_days >= window:
-                for end in range(window, n_days + 1, stride):
-                    win = daily[end - window:end]
-                    ic_mean = float(np.mean([p[1] for p in win]))
-                    med_k = int(np.median([p[2] for p in win]))
-                    series.append(IcPoint(
-                        date=win[-1][0], ic=round(ic_mean, 6), n=med_k,
-                    ))
-
-            median_k = int(np.median([p.n for p in series])) if series else 0
-            epsilon = noise_floor_epsilon(
-                "cross_sectional", window=window, horizon=horizon,
-                k_tickers=median_k,
-            )
-        else:
-            series = rolling_ic_single_ticker(
-                rows, metric, outcome, window=window, stride=stride,
-            )
-            epsilon = noise_floor_epsilon(
-                "single_ticker", window=window, horizon=horizon,
-            )
+        series = rolling_ic_single_ticker(
+            rows, metric, outcome, window=window, stride=stride,
+        )
+        epsilon = noise_floor_epsilon(
+            "single_ticker", window=window, horizon=horizon,
+        )
 
         if cutoff_date:
             pre_cutoff = [p.ic for p in series if str(p.date) < cutoff_date]
@@ -2982,6 +2920,130 @@ def _compute_ic_batch_sync(
         })
 
     return results
+
+
+async def _compute_ic_batch_all_bg(
+    cache_key: str,
+    ticker: str,
+    outcome: str,
+    window: int,
+    cutoff_date: Optional[str],
+    stride: int,
+    pool,
+) -> None:
+    """Background coroutine: compute ALL-mode IC batch one metric at a time.
+
+    Fetches only 4 columns per metric (ticker, trade_date, metric, outcome) so
+    peak RAM stays at ~4 MB per metric rather than ~800 MB for a 125-col bulk
+    fetch. Writes the completed payload to ic_batch_cache on success; records
+    {"status": "failed"} in _ic_batch_status on any unhandled exception.
+    Always discards cache_key from _ic_batch_running in the finally block.
+    """
+    import logging as _log
+    from datetime import date as _date
+    from app.routers.ic_compute import (
+        rolling_ic_cross_sectional,
+        sign_stability_from_rolling,
+        noise_floor_epsilon,
+        finite_or_none,
+    )
+
+    horizon = _parse_horizon(outcome)
+
+    try:
+        feature_cols = await _fetch_ic_feature_columns(pool)
+        metrics = [c for c in feature_cols if c != outcome]
+        results = []
+
+        for metric in metrics:
+            try:
+                async with pool.acquire() as conn:
+                    db_rows = await conn.fetch(
+                        f'SELECT ticker, trade_date, "{metric}", "{outcome}" '
+                        f'FROM daily_features '
+                        f'WHERE "{outcome}" IS NOT NULL '
+                        f'ORDER BY trade_date, ticker',
+                        timeout=60,
+                    )
+                rows = [dict(r) for r in db_rows]
+            except Exception as _fetch_exc:
+                _log.warning(
+                    "ic_batch_all_bg: DB fetch failed metric=%s key=%s: %r",
+                    metric, cache_key, _fetch_exc,
+                )
+                continue
+
+            # CPU-heavy Spearman in a thread to keep the event loop free.
+            series = await asyncio.to_thread(
+                rolling_ic_cross_sectional,
+                rows, metric, outcome,
+                window=window,
+                stride=stride,
+            )
+            del rows  # release before next iteration
+
+            if series:
+                if cutoff_date:
+                    pre = [p.ic for p in series if str(p.date) < cutoff_date]
+                    reference_ic = float(np.mean(pre)) if pre else 0.0
+                else:
+                    reference_ic = float(np.mean([p.ic for p in series]))
+                median_k = int(np.median([p.n for p in series]))
+            else:
+                reference_ic = 0.0
+                median_k = 0
+
+            epsilon = noise_floor_epsilon(
+                "cross_sectional", window=window,
+                horizon=horizon, k_tickers=median_k,
+            )
+            stability = sign_stability_from_rolling(series, reference_ic, epsilon)
+            n_total = stability.n_total
+
+            results.append({
+                "name":            metric,
+                "long_run_ic":     finite_or_none(reference_ic),
+                "long_run_ic_abs": finite_or_none(abs(reference_ic)),
+                "epsilon":         finite_or_none(epsilon),
+                "n_windows":       n_total,
+                "sign_stability":  (finite_or_none(stability.stability, 4)
+                                    if stability.stability is not None else None),
+                "n_same":          stability.n_same,
+                "n_opposite":      stability.n_opposite,
+                "n_neutral":       stability.n_neutral,
+                "neutral_pct":     (round(100.0 * stability.n_neutral / n_total, 2)
+                                    if n_total else 0.0),
+                "suppressed":      stability.suppressed,
+                "suppression_reason": stability.suppression_reason,
+            })
+
+        # Write completed result to cache.
+        payload_json = json.dumps({"metrics": results})
+        cutoff_obj = _date.fromisoformat(cutoff_date) if cutoff_date else None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO ic_batch_cache
+                   (cache_key, ticker, outcome, window_size, cutoff_date, payload, cached_at)
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET payload    = EXCLUDED.payload,
+                       cached_at  = NOW()""",
+                cache_key, ticker, outcome, window, cutoff_obj, payload_json,
+            )
+        _log.info(
+            "ic_batch_all_bg: wrote %d metrics to cache key=%s", len(results), cache_key,
+        )
+
+    except Exception as exc:
+        import logging as _log2
+        _log2.exception("ic_batch_all_bg: fatal error key=%s", cache_key)
+        _ic_batch_status[cache_key] = {
+            "status": "failed",
+            "error":  f"{type(exc).__name__}: {exc}",
+        }
+
+    finally:
+        _ic_batch_running.discard(cache_key)
 
 
 @router.get("/ic-batch")
@@ -3045,80 +3107,70 @@ async def ic_batch(
                 "from_cache":  True,
             }
 
-    # Cache miss: fetch and compute.
+    # Cache miss.
+    if is_all:
+        # ALL-mode is never computed inline — a 125-col × 141K row bulk fetch
+        # OOM-kills the VPS worker (confirmed: 6 kills, python at 3.6–5 GB).
+        # Instead, return a status response so the frontend can show a prompt
+        # or poll after a POST /ic-batch/refresh triggers the background job.
+        failed = _ic_batch_status.get(cache_key)
+        if failed:
+            return {
+                "status":      "failed",
+                "error":       failed["error"],
+                "ticker":      ticker,
+                "outcome":     outcome,
+                "metrics":     [],
+                "from_cache":  False,
+            }
+        if cache_key in _ic_batch_running:
+            return {
+                "status":     "computing",
+                "ticker":     ticker,
+                "outcome":    outcome,
+                "metrics":    [],
+                "from_cache": False,
+            }
+        return {
+            "status":     "not_ready",
+            "ticker":     ticker,
+            "outcome":    outcome,
+            "metrics":    [],
+            "from_cache": False,
+            "message":    (
+                "No cached data for this configuration. "
+                "Use the ⟳ Refresh button to start background computation."
+            ),
+        }
+
+    # Single-ticker cache miss: fetch + compute inline.
     feature_cols = await _fetch_ic_feature_columns(pool)
     horizon = _parse_horizon(outcome)
 
-    # SELECT only the columns we need — outcome + all features. Quoting
-    # column names with double-quotes (one-time controlled list from
-    # information_schema, not user input).
     cols_sql = ", ".join(f'"{c}"' for c in feature_cols) + f', "{outcome}"'
-    if is_all:
-        sql = (
-            f'SELECT ticker, trade_date, {cols_sql} FROM daily_features '
-            f'WHERE "{outcome}" IS NOT NULL '
-            f'ORDER BY ticker, trade_date'
-        )
-        try:
-            async with pool.acquire() as conn:
-                db_rows = await conn.fetch(sql, timeout=180)
-        except Exception as _db_exc:
-            import traceback as _tb
-            import logging as _log
-            _log.exception("ic_batch ALL-mode DB fetch failed")
-            _ename = type(_db_exc).__name__
-            _emsg  = str(_db_exc)[:300]
-            _etb   = _tb.format_exc()[-500:]
-            _diag  = f"{_ename}: {_emsg}"
-            return {
-                "metrics": [{
-                    "name": f"[DB-ERR] {_diag}",
-                    "suppressed": True,
-                    "suppression_reason": _etb,
-                    "long_run_ic":     0.0,
-                    "long_run_ic_abs": 0.0,
-                    "epsilon":         0.0,
-                    "n_windows":       0,
-                    "sign_stability":  None,
-                    "n_same":    0,
-                    "n_opposite":0,
-                    "n_neutral": 0,
-                    "neutral_pct": 0.0,
-                }],
-                "ticker": ticker, "outcome": outcome, "from_cache": False,
-                "error": _diag,
-                "traceback": _etb,
-            }
-    else:
-        sql = (
-            f'SELECT trade_date, {cols_sql} FROM daily_features '
-            f'WHERE ticker = $1 AND "{outcome}" IS NOT NULL '
-            f'ORDER BY trade_date'
-        )
-        async with pool.acquire() as conn:
-            db_rows = await conn.fetch(sql, ticker, timeout=60)
+    sql = (
+        f'SELECT trade_date, {cols_sql} FROM daily_features '
+        f'WHERE ticker = $1 AND "{outcome}" IS NOT NULL '
+        f'ORDER BY trade_date'
+    )
+    async with pool.acquire() as conn:
+        db_rows = await conn.fetch(sql, ticker, timeout=60)
 
     rows = [dict(r) for r in db_rows]
-    if not is_all:
-        # Single-ticker SQL doesn't carry the ticker column; inject it so
-        # the cross-sectional helper would group consistently (defensive —
-        # ic_compute uses ticker only for cross-sectional grouping anyway).
-        for r in rows:
-            r.setdefault("ticker", ticker)
+    for r in rows:
+        r.setdefault("ticker", ticker)
 
     # CPU-heavy per-metric loop runs on a worker thread so the FastAPI
-    # event loop stays responsive (same pattern as research/batch_score.py
-    # Step 7d). NumPy releases the GIL inside the per-window Spearman
-    # calls, so other dashboard requests genuinely overlap with this work.
+    # event loop stays responsive.
     try:
         results = await asyncio.to_thread(
             _compute_ic_batch_sync,
-            rows, feature_cols, outcome, window, cutoff_date, is_all, horizon, stride,
+            rows, feature_cols, outcome, window, cutoff_date, horizon, stride,
         )
     except Exception as _exc:
         import traceback as _tb
         import logging as _log
-        _log.exception("_compute_ic_batch_sync failed ticker=%s is_all=%s", ticker, is_all)
+        _log.exception("_compute_ic_batch_sync failed ticker=%s", ticker)
         return {
             "metrics": [],
             "error": f"{type(_exc).__name__}: {_exc}",
@@ -3153,6 +3205,52 @@ async def ic_batch(
         "cutoff_date": cutoff_date,
         "from_cache":  False,
     }
+
+
+@router.post("/ic-batch/refresh")
+async def ic_batch_refresh(
+    ticker:      str  = Query("ALL"),
+    outcome:     str  = Query("ret_5d_fwd_oc"),
+    window:      int  = Query(252, ge=20, le=1000),
+    cutoff_date: Optional[str] = Query(None),
+    stride:      int  = Query(3, ge=1, le=10),
+    pool=Depends(get_oi_pool),
+):
+    """Start a background ALL-mode IC batch computation and return immediately.
+
+    Only operates on ticker=ALL — single-ticker computes inline via GET.
+    The background job writes to ic_batch_cache on completion. Poll
+    GET /ic-batch to check status ({"status": "computing"} while running,
+    normal metrics response once cached).
+
+    If a job for this exact cache key is already running, returns
+    {"status": "already_computing"} without starting a second one.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    if ticker.upper() != "ALL":
+        return {"error": "POST /ic-batch/refresh is only for ticker=ALL"}
+
+    await _ensure_ic_batch_table(pool)
+
+    mode_tag  = f"tt:{cutoff_date}" if cutoff_date else "default"
+    cache_key = f"ic_batch:{ticker}:{outcome}:{window}:{mode_tag}:s{stride}"
+
+    if cache_key in _ic_batch_running:
+        return {"status": "already_computing", "cache_key": cache_key}
+
+    # Clear any prior failure record before starting fresh.
+    _ic_batch_status.pop(cache_key, None)
+    _ic_batch_running.add(cache_key)
+
+    asyncio.create_task(
+        _compute_ic_batch_all_bg(
+            cache_key, ticker, outcome, window, cutoff_date, stride, pool,
+        )
+    )
+
+    return {"status": "computing", "cache_key": cache_key}
 
 
 # ── Threshold Drift (walk-forward bin boundaries over time) ──────────────

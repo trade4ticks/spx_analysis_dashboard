@@ -443,12 +443,12 @@
                   @click="icBatchView='scatter'; icBatchExpanded && icBatchData && _renderIcBatch()">
               Scatter</span>
           </div>
-          <button x-show="icBatchData" @click="loadIcBatch(true)"
-                  :disabled="icBatchLoading"
-                  :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
+          <button @click="refreshIcBatch()"
+                  :disabled="icBatchLoading || icBatchStatus === 'computing'"
+                  :style="(icBatchLoading || icBatchStatus === 'computing') ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                          font-size:10px;padding:2px 10px;border-radius:3px"
-                  title="Re-compute (bypasses cache — takes ~2-3 min for uncached ticker)">⟳ Refresh</button>
+                  title="ALL: start background job (~2-3 min, auto-polls) · single ticker: re-compute inline (~10 s)">⟳ Refresh</button>
         </div>
       </div>
 
@@ -477,15 +477,35 @@
             <canvas id="chart-ic-scatter"></canvas>
           </div>
 
-          <!-- Waiting-for-data / in-progress state -->
-          <div x-show="!icBatchData && icBatchLoading"
+          <!-- Status panels — mutually exclusive by icBatchStatus + icBatchLoading -->
+
+          <!-- Fetching / generic loading (brief — only visible during HTTP round-trip) -->
+          <div x-show="icBatchLoading"
                style="font-size:11px;color:var(--dim);padding:8px 0">
-            Computing signal stability across all metrics — first load takes ~2-3 min on the VPS. Subsequent loads for the same ticker are sub-second (cached).
+            Checking cache…
           </div>
-          <div x-show="!icBatchData && !icBatchLoading && !icBatchError"
+
+          <!-- not_ready: cache miss, user needs to trigger ⟳ Refresh -->
+          <div x-show="!icBatchLoading && icBatchStatus === 'not_ready'"
                style="font-size:11px;color:var(--dim);padding:8px 0">
-            Loading…
+            No cached data for this configuration. Click <strong>⟳ Refresh</strong> to start a background computation (ALL-mode: ~2-3 min, page polls automatically).
           </div>
+
+          <!-- computing: background job running, polling every 30 s -->
+          <div x-show="!icBatchLoading && icBatchStatus === 'computing'"
+               style="font-size:11px;color:#3498db;padding:8px 0">
+            ⏳ Computing IC stability across all metrics in the background — typically 2-3 min on the VPS. Checking every 30 s automatically.
+          </div>
+
+          <!-- timeout: 15-min poll limit exceeded -->
+          <div x-show="icBatchStatus === 'timeout'"
+               style="font-size:11px;color:#f39c12;padding:8px 0"
+               x-text="icBatchError || 'Background computation timed out.'"></div>
+
+          <!-- failed: background job crashed -->
+          <div x-show="!icBatchLoading && icBatchStatus === 'failed'"
+               style="font-size:11px;color:var(--danger);padding:8px 0"
+               x-text="'Computation failed: ' + (icBatchError || 'unknown error')"></div>
         </div>
       </template>
     </div>

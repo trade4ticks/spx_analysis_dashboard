@@ -116,12 +116,15 @@ document.addEventListener('alpine:init', () => {
     // Lazy-loaded on first expand (user-initiated, same as All-Ticker Metric
     // Bins). Also reloads when the section is open and mode changes. Fresh
     // compute takes ~2-3 min on the VPS; cached reads are sub-second.
-    icBatchData:     null,
-    icBatchLoading:  false,
-    icBatchError:    null,
-    icBatchExpanded: false,
-    icBatchView:     'leaderboard',  // 'leaderboard' | 'scatter'
-    icBatchKey:      null,           // last-loaded "ticker:outcome:mode:cutoff" key
+    icBatchData:      null,
+    icBatchLoading:   false,
+    icBatchError:     null,
+    icBatchExpanded:  false,
+    icBatchView:      'leaderboard',  // 'leaderboard' | 'scatter'
+    icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
+    icBatchStatus:    null,           // 'not_ready' | 'computing' | 'failed' | 'timeout' | null
+    icBatchPollTimer: null,           // setInterval handle for polling
+    icBatchPollStart: null,           // Date.now() when polling started
 
     async init() {
       // Trade-table column sort: header onclick calls a window function
@@ -4456,10 +4459,9 @@ document.addEventListener('alpine:init', () => {
       return `${this.ticker}:${this.outcome}:${this.pageMode}:${cut}`;
     },
 
-    async loadIcBatch(refresh = false) {
-      // Hard guard: never run when section is collapsed unless explicitly
-      // refreshing via the ⟳ button. Prevents any accidental auto-load.
-      if (!this.icBatchExpanded && !refresh) return;
+    async loadIcBatch() {
+      // Hard guard: never run when section is collapsed.
+      if (!this.icBatchExpanded) return;
       if (!this.ticker || !this.outcome) return;
       this.icBatchLoading = true;
       this.icBatchError = null;
@@ -4467,17 +4469,89 @@ document.addEventListener('alpine:init', () => {
         let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-        if (refresh) url += '&refresh=true';
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (d.error) throw new Error(d.error);
-        this.icBatchData = d;
-        this.icBatchKey  = this._icBatchKey();
-        if (this.icBatchExpanded) {
-          await this.$nextTick();
-          this._renderIcBatch();
+
+        if (d.status === 'not_ready') {
+          // No cache entry — prompt user to click ⟳ Refresh.
+          this.icBatchStatus = 'not_ready';
+          this.icBatchData   = null;
+          this._stopIcBatchPolling();
+        } else if (d.status === 'computing') {
+          // Background job running — begin / continue polling.
+          this.icBatchStatus = 'computing';
+          this.icBatchData   = null;
+          this._startIcBatchPolling();
+        } else if (d.status === 'failed') {
+          // Background job crashed.
+          this.icBatchStatus = 'failed';
+          this.icBatchError  = d.error || 'Background computation failed';
+          this.icBatchData   = null;
+          this._stopIcBatchPolling();
+        } else {
+          // Normal response: cached data or single-ticker inline result.
+          if (d.error) throw new Error(d.error);
+          this.icBatchStatus = null;
+          this.icBatchData   = d;
+          this.icBatchKey    = this._icBatchKey();
+          this._stopIcBatchPolling();
+          if (this.icBatchExpanded) {
+            await this.$nextTick();
+            this._renderIcBatch();
+          }
         }
+      } catch (e) {
+        this.icBatchError = e.message;
+        this._stopIcBatchPolling();
+      } finally {
+        this.icBatchLoading = false;
+      }
+    },
+
+    async refreshIcBatch() {
+      if (!this.ticker || !this.outcome) return;
+
+      if (this.ticker !== 'ALL') {
+        // Single-ticker: inline compute via GET with refresh=true.
+        this.icBatchLoading = true;
+        this.icBatchError   = null;
+        try {
+          let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
+            + `&outcome=${encodeURIComponent(this.outcome)}`
+            + `&refresh=true`;
+          if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+          this.icBatchStatus = null;
+          this.icBatchData   = d;
+          this.icBatchKey    = this._icBatchKey();
+          if (this.icBatchExpanded) { await this.$nextTick(); this._renderIcBatch(); }
+        } catch (e) {
+          this.icBatchError = e.message;
+        } finally {
+          this.icBatchLoading = false;
+        }
+        return;
+      }
+
+      // ALL-mode: POST to /ic-batch/refresh to start background job.
+      this.icBatchLoading = true;
+      this.icBatchError   = null;
+      this.icBatchData    = null;
+      this._stopIcBatchPolling();
+      try {
+        let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
+        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        const r = await fetch(url, { method: 'POST' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        this.icBatchStatus = 'computing';
+        this._startIcBatchPolling();
       } catch (e) {
         this.icBatchError = e.message;
       } finally {
@@ -4485,9 +4559,38 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    _startIcBatchPolling() {
+      if (this.icBatchPollTimer) return; // already polling
+      const POLL_MS    = 30_000;          // 30 s between checks
+      const TIMEOUT_MS = 15 * 60 * 1000; // 15-min hard stop
+      this.icBatchPollStart = Date.now();
+      this.icBatchPollTimer = setInterval(async () => {
+        if (Date.now() - this.icBatchPollStart > TIMEOUT_MS) {
+          this._stopIcBatchPolling();
+          this.icBatchStatus = 'timeout';
+          this.icBatchError  = 'Computation is taking longer than 15 min. '
+            + 'Try expanding the section again in a few minutes, or check the server log.';
+          return;
+        }
+        try { await this.loadIcBatch(); } catch (_) { /* loadIcBatch handles its own errors */ }
+      }, POLL_MS);
+    },
+
+    _stopIcBatchPolling() {
+      if (this.icBatchPollTimer) {
+        clearInterval(this.icBatchPollTimer);
+        this.icBatchPollTimer = null;
+      }
+      this.icBatchPollStart = null;
+    },
+
     toggleIcBatch() {
       this.icBatchExpanded = !this.icBatchExpanded;
-      if (!this.icBatchExpanded) return;
+      if (!this.icBatchExpanded) {
+        // Stop polling when section is collapsed — restart on re-expand.
+        this._stopIcBatchPolling();
+        return;
+      }
       // On expand: load if no data yet, or if stale (ticker/outcome/mode changed).
       if (!this.icBatchData || this._icBatchKey() !== this.icBatchKey) {
         this.loadIcBatch();
@@ -4498,8 +4601,11 @@ document.addEventListener('alpine:init', () => {
 
     icBatchSubtitle() {
       if (this.icBatchLoading) return '';
-      if (!this.icBatchData?.metrics?.length) return '— click ▸ to load (cached: instant · fresh: ~2-3 min)';
-      const n = this.icBatchData.metrics.length;
+      if (this.icBatchStatus === 'not_ready') return '— no cached data · click ⟳ Refresh to compute (~2-3 min)';
+      if (this.icBatchStatus === 'computing')  return '— computing in background · polling every 30 s…';
+      if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') return '';
+      if (!this.icBatchData?.metrics?.length) return '— click ▸ to load';
+      const n    = this.icBatchData.metrics.length;
       const nSup = this.icBatchData.metrics.filter(m => m.suppressed).length;
       const mode = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';
       let s = `· ${n} metrics · ${nSup} suppressed · ${mode}`;
