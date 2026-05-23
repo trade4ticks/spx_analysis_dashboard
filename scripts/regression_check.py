@@ -283,6 +283,19 @@ def _build_test_matrix(disc: dict) -> list[tuple[str, dict]]:
             "params": extra_params,
         }))
 
+    # IC batch (IC.5) — read-only GET snapshots.
+    # Captures whatever is in ic_batch_cache: full metric arrays when cached,
+    # or {"status": "not_ready"} when not. Either is a valid structural
+    # snapshot — future diffs will catch computation regressions or cache-
+    # key changes. POST /ic-batch/refresh is intentionally excluded; it
+    # starts a multi-minute background job and must not fire in a capture run.
+    for tk in (tk_all, tk_one):
+        matrix.append((f"ic-batch__{tk}__{outcome}.json", {
+            "method": "GET",
+            "path":   "/ic-batch",
+            "params": {"ticker": tk, "outcome": outcome},
+        }))
+
     return matrix
 
 
