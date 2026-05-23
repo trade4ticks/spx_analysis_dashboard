@@ -67,7 +67,7 @@
       background:var(--raised); border-right:1px solid var(--border);
     }
     .mode-seg span:last-child { border-right:none; }
-    .mode-seg span.on { background:var(--accent); color:#fff; font-weight:600; }
+    .mode-seg span.on { background:rgba(255,255,255,0.14); color:var(--text); font-weight:600; }
 
     /* Page-header Mode toggle: size each segment to match the Analyze
        button (.go-btn) so the control row reads as one consistent strip
@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=100"></script>
+  <script src="/static/js/oi_analysis.js?v=101"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
