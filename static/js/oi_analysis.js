@@ -4708,9 +4708,9 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['ic-leader']) { this._charts['ic-leader'].destroy(); this._charts['ic-leader'] = null; }
 
       const metrics = this.icBatchData.metrics;
-      // Sort: non-suppressed by sign_stability desc, suppressed alphabetically at bottom.
+      // Sort: non-suppressed by IC strength desc, suppressed alphabetically at bottom.
       const nonSup = metrics.filter(m => !m.suppressed)
-                            .sort((a, b) => (b.sign_stability ?? 0) - (a.sign_stability ?? 0));
+                            .sort((a, b) => (b.long_run_ic_abs || 0) - (a.long_run_ic_abs || 0));
       const sup    = metrics.filter(m => m.suppressed)
                             .sort((a, b) => a.name.localeCompare(b.name));
       const sorted = [...nonSup, ...sup];
@@ -4727,7 +4727,7 @@ document.addEventListener('alpine:init', () => {
       }
 
       const labels = sorted.map(m => m.name);
-      const values = sorted.map(m => m.suppressed ? 0 : (m.sign_stability ?? 0));
+      const values = sorted.map(m => m.suppressed ? 0 : (m.long_run_ic_abs || 0));
       const bgColors = sorted.map(m => {
         if (m.suppressed) return 'rgba(100,100,100,0.25)';
         const t = Math.min((m.long_run_ic_abs || 0) / maxAbsIc, 1);
@@ -4781,9 +4781,9 @@ document.addEventListener('alpine:init', () => {
             },
             y: {
               ...this._darkScales().y,
-              min: 0, max: 1,
-              title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
-              ticks: { ...this._darkScales().y.ticks, callback: v => (v * 100).toFixed(0) + '%' },
+              min: 0, max: Math.max(maxAbsIc * 1.15, 0.01),
+              title: { display: true, text: 'IC Strength (|IC|)', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, callback: v => v.toFixed(4) },
             },
           },
         },
@@ -4795,21 +4795,28 @@ document.addEventListener('alpine:init', () => {
       if (!el || !this.icBatchData?.metrics?.length) return;
       if (this._charts['ic-scatter']) { this._charts['ic-scatter'].destroy(); this._charts['ic-scatter'] = null; }
 
-      const metrics = this.icBatchData.metrics;
-      const nonSup  = metrics.filter(m => !m.suppressed);
-      const sup     = metrics.filter(m => m.suppressed);
-      const maxAbsIc = Math.max(...nonSup.map(m => m.long_run_ic_abs || 0), 0.001);
-      const xMax    = Math.max(maxAbsIc * 1.1, 0.05);
+      const metrics  = this.icBatchData.metrics;
+      const nonSup   = metrics.filter(m => !m.suppressed);
+      const sup      = metrics.filter(m =>  m.suppressed);
+      // Y-axis is Gini: exclude metrics with null gini; they'll appear automatically
+      // once cross-sectional data exists (no name-based exclusion).
+      const hasGini  = nonSup.filter(m => m.concentration_gini != null);
+      const noGini   = nonSup.filter(m => m.concentration_gini == null);
+      const supGini  = sup.filter(m =>    m.concentration_gini != null);
+      const maxAbsIc = Math.max(...hasGini.map(m => m.long_run_ic_abs || 0), 0.001);
+      const xMax     = Math.max(maxAbsIc * 1.1, 0.05);
 
       const _mkPt = m => ({
-        x:          m.long_run_ic_abs || 0,
-        y:          m.sign_stability ?? 0,
-        name:       m.name,
-        ic:         m.long_run_ic || 0,
-        stability:  m.sign_stability,
-        n_same:     m.n_same,
-        n_opposite: m.n_opposite,
-        suppressed: m.suppressed,
+        x:           m.long_run_ic_abs || 0,
+        y:           m.concentration_gini,
+        name:        m.name,
+        ic:          m.long_run_ic || 0,
+        gini:        m.concentration_gini,
+        effective_n: m.effective_n,
+        stability:   m.sign_stability,
+        n_same:      m.n_same,
+        n_opposite:  m.n_opposite,
+        suppressed:  m.suppressed,
       });
       const _color = m => {
         if (m.suppressed) return 'rgba(100,100,100,0.28)';
@@ -4819,7 +4826,7 @@ document.addEventListener('alpine:init', () => {
           ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
       };
 
-      // Quadrant guide-lines + labels drawn after datasets.
+      // Quadrant guide-lines + labels: strength (x) × breadth (y, inverted: low Gini = broad).
       const quadrantPlugin = {
         id: 'icScatterQuadrant',
         afterDatasetsDraw(chart) {
@@ -4829,15 +4836,15 @@ document.addEventListener('alpine:init', () => {
           ctx.save();
           ctx.strokeStyle = 'rgba(255,255,255,0.06)';
           ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(xMid, top); ctx.lineTo(xMid, bottom); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(left, yMid); ctx.lineTo(right, yMid); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(xMid, top);  ctx.lineTo(xMid, bottom); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(left, yMid);  ctx.lineTo(right, yMid);  ctx.stroke();
           ctx.restore();
           ctx.save();
           ctx.font = '9px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
-          ctx.fillText('stable / weak',        left + 4,   yMid - 8);
-          ctx.fillText('stable / strong ★',    xMid + 6,   top   + 14);
-          ctx.fillText('unstable / weak',       left + 4,   bottom - 6);
-          ctx.fillText('unstable / strong',     xMid + 6,   bottom - 6);
+          ctx.fillText('weak / broad',          left + 4,  yMid - 8);
+          ctx.fillText('strong / broad ★',      xMid + 6,  yMid - 8);
+          ctx.fillText('weak / concentrated',   left + 4,  bottom - 6);
+          ctx.fillText('strong / concentrated', xMid + 6,  bottom - 6);
           ctx.restore();
         },
       };
@@ -4849,13 +4856,13 @@ document.addEventListener('alpine:init', () => {
           datasets: [
             {
               label: 'Metrics',
-              data: nonSup.map(_mkPt),
-              backgroundColor: nonSup.map(_color),
+              data: hasGini.map(_mkPt),
+              backgroundColor: hasGini.map(_color),
               pointRadius: 5, pointHoverRadius: 7,
             },
             {
               label: 'Suppressed',
-              data: sup.map(_mkPt),
+              data: supGini.map(_mkPt),
               backgroundColor: 'rgba(100,100,100,0.25)',
               pointRadius: 3, pointHoverRadius: 5,
             },
@@ -4865,24 +4872,31 @@ document.addEventListener('alpine:init', () => {
           responsive: true, maintainAspectRatio: false, animation: false,
           onClick: (e, elements) => {
             if (!elements.length) return;
-            const ds  = elements[0].datasetIndex === 0 ? nonSup : sup;
-            const m   = ds[elements[0].index];
+            const ds = elements[0].datasetIndex === 0 ? hasGini : supGini;
+            const m  = ds[elements[0].index];
             if (m && !m.suppressed) self._icBatchClickMetric(m.name);
           },
           plugins: {
-            legend: { labels: { color: '#aaa', font: { size: 10 } } },
+            legend: { display: false },
+            subtitle: noGini.length > 0 ? {
+              display: true,
+              text: `${noGini.length} metrics excluded — no cross-sectional coverage`,
+              color: '#666', font: { size: 9 }, padding: { top: 0, bottom: 3 }, align: 'start',
+            } : { display: false },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               callbacks: {
                 title: ctx => {
-                  const ds = ctx[0]?.datasetIndex === 0 ? nonSup : sup;
+                  const ds = ctx[0]?.datasetIndex === 0 ? hasGini : supGini;
                   return ds[ctx[0]?.dataIndex]?.name || '';
                 },
                 label: ctx => {
                   const pt = ctx.raw;
                   if (pt.suppressed) return 'Suppressed (no decisive windows)';
+                  const nStr = pt.effective_n != null ? pt.effective_n.toFixed(1) : '—';
                   return [
                     `IC abs: ${pt.x.toFixed(4)}  (${pt.ic >= 0 ? '+' : ''}${pt.ic.toFixed(4)})`,
+                    `Gini: ${pt.gini != null ? pt.gini.toFixed(3) : '—'}  eff N: ${nStr}`,
                     `Stability: ${pt.stability != null ? (pt.stability * 100).toFixed(1) + '%' : '—'}`,
                     `same: ${pt.n_same}  opp: ${pt.n_opposite}`,
                   ];
@@ -4894,14 +4908,14 @@ document.addEventListener('alpine:init', () => {
             x: {
               ...this._darkScales().x,
               min: 0, max: xMax,
-              title: { display: true, text: 'IC Strength (abs)', color: '#888', font: { size: 9 } },
+              title: { display: true, text: 'IC Strength (|IC|)', color: '#888', font: { size: 9 } },
               ticks: { ...this._darkScales().x.ticks, callback: v => v.toFixed(3) },
             },
             y: {
               ...this._darkScales().y,
-              min: 0, max: 1.05,
-              title: { display: true, text: 'Sign Stability', color: '#888', font: { size: 9 } },
-              ticks: { ...this._darkScales().y.ticks, callback: v => (v * 100).toFixed(0) + '%' },
+              min: 0, max: 1.02,
+              title: { display: true, text: 'Concentration (Gini)   0 = broad   1 = concentrated', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, callback: v => v.toFixed(1) },
             },
           },
         },
@@ -5004,7 +5018,7 @@ document.addEventListener('alpine:init', () => {
             {
               label:           'Suppressed',
               data:            supData,
-              backgroundColor: 'rgba(100,100,100,0.35)',
+              backgroundColor: 'rgba(100,100,100,0.10)',
               borderWidth:     0,
             },
           ],
