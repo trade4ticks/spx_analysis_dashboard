@@ -3058,8 +3058,36 @@ async def ic_batch(
             f'WHERE "{outcome}" IS NOT NULL '
             f'ORDER BY ticker, trade_date'
         )
-        async with pool.acquire() as conn:
-            db_rows = await conn.fetch(sql, timeout=180)
+        try:
+            async with pool.acquire() as conn:
+                db_rows = await conn.fetch(sql, timeout=180)
+        except Exception as _db_exc:
+            import traceback as _tb
+            import logging as _log
+            _log.exception("ic_batch ALL-mode DB fetch failed")
+            _ename = type(_db_exc).__name__
+            _emsg  = str(_db_exc)[:300]
+            _etb   = _tb.format_exc()[-500:]
+            _diag  = f"{_ename}: {_emsg}"
+            return {
+                "metrics": [{
+                    "name": f"[DB-ERR] {_diag}",
+                    "suppressed": True,
+                    "suppression_reason": _etb,
+                    "long_run_ic":     0.0,
+                    "long_run_ic_abs": 0.0,
+                    "epsilon":         0.0,
+                    "n_windows":       0,
+                    "sign_stability":  None,
+                    "n_same":    0,
+                    "n_opposite":0,
+                    "n_neutral": 0,
+                    "neutral_pct": 0.0,
+                }],
+                "ticker": ticker, "outcome": outcome, "from_cache": False,
+                "error": _diag,
+                "traceback": _etb,
+            }
     else:
         sql = (
             f'SELECT trade_date, {cols_sql} FROM daily_features '
