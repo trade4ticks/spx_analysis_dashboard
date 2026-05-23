@@ -4841,10 +4841,10 @@ document.addEventListener('alpine:init', () => {
           ctx.restore();
           ctx.save();
           ctx.font = '9px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.15)';
-          ctx.fillText('weak / broad',          left + 4,  yMid - 8);
-          ctx.fillText('strong / broad ★',      xMid + 6,  yMid - 8);
-          ctx.fillText('weak / concentrated',   left + 4,  bottom - 6);
-          ctx.fillText('strong / concentrated', xMid + 6,  bottom - 6);
+          ctx.fillText('weak / concentrated',   left + 4,  top    + 14);
+          ctx.fillText('strong / concentrated', xMid + 6,  top    + 14);
+          ctx.fillText('weak / broad',          left + 4,  bottom -  6);
+          ctx.fillText('strong / broad ★',      xMid + 6,  bottom -  6);
           ctx.restore();
         },
       };
