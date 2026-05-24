@@ -67,6 +67,8 @@ document.addEventListener('alpine:init', () => {
     secSelectedSecBins: [10],
     secBubbleMinN: 1,
     secScanMeta: null,
+    secScanKey: null,
+    secPolling: false,
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
@@ -202,6 +204,8 @@ document.addEventListener('alpine:init', () => {
       // Clear secondary scanner cache when primary analysis changes
       this.secStatus = { loaded: false, loading: false, error: null };
       this.secCacheKey = null;
+      this.secScanKey  = null;
+      this.secPolling  = false;
       this.secBaseline = null;
       this.secMetrics = [];
       this.secSelectedMetric = null;
@@ -2575,8 +2579,64 @@ document.addEventListener('alpine:init', () => {
       return entries.map(c => `${c.ticker}|${c.date}`);
     },
 
+    _applySecResults(d) {
+      this.secBaseline = d.baseline;
+      this.secMetrics  = d.metrics || [];
+      this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
+      this.secScanMeta = {
+        mode:             d.mode || 'walk_forward',
+        dropped_warmup_n: d.dropped_warmup_n,
+        universe_n:       d.universe_n,
+        start_date:       d.start_date,
+      };
+      this.secStatus = { loaded: true, loading: false, error: null };
+      this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
+    },
+
+    async _pollSecScore() {
+      if (this.secPolling) return;
+      this.secPolling = true;
+      const MAX_POLLS = 300;  // 15 min at 3s — matches IC batch timeout
+      let polls = 0;
+      try {
+        while (this.secPolling && polls < MAX_POLLS) {
+          await new Promise(res => setTimeout(res, 3000));
+          polls++;
+          if (!this.secScanKey) break;
+          const r = await fetch('/api/oi-analysis/secondary-score-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan_key: this.secScanKey }),
+          });
+          if (!r.ok) break;
+          const d = await r.json();
+          if (d.status === 'done') {
+            this.secPolling = false;
+            this._applySecResults(d);
+            if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+            this._renderSecBar();
+            break;
+          } else if (d.status === 'error' || d.status === 'not_found') {
+            this.secPolling = false;
+            this.secStatus = { loaded: false, loading: false, error: d.error || d.status };
+            break;
+          }
+          // status === 'computing' — keep polling
+        }
+        if (polls >= MAX_POLLS) {
+          this.secStatus = { loaded: false, loading: false,
+                             error: 'Score computation timed out — try Reload.' };
+        }
+      } finally {
+        this.secPolling = false;
+        if (!this.secStatus.loaded) {
+          this.secStatus = { ...this.secStatus, loading: false };
+        }
+      }
+    },
+
     async secLoad() {
-      if (!this.data || this.secStatus.loading) return;
+      if (!this.data || this.secStatus.loading || this.secPolling) return;
       this.secStatus = { loaded: false, loading: true, error: null };
       this.secSelectedMetric = null;
       this.secDetail = null;
@@ -2600,23 +2660,27 @@ document.addEventListener('alpine:init', () => {
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (d.error) throw new Error(d.error);
+        if (d.error && !d.scan_key) throw new Error(d.error);
         this.secCacheKey = d.cache_key;
-        this.secBaseline = d.baseline;
-        this.secMetrics  = d.metrics || [];
-        this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
-        this.secStatus = { loaded: true, loading: false, error: null };
-        await this.$nextTick();
-        await this.$nextTick();
-        setTimeout(() => this._renderSecBar(), 60);
+        this.secScanKey  = d.scan_key;
+        if (d.status === 'done') {
+          this._applySecResults(d);
+        } else if (d.status === 'computing') {
+          this._pollSecScore();  // fire-and-forget; loading stays true
+        } else if (d.status === 'busy') {
+          throw new Error(d.error || 'Another heavy job is running — try again shortly.');
+        } else {
+          throw new Error(`Unexpected status: ${d.status}`);
+        }
       } catch (e) {
         this.secStatus = { loaded: false, loading: false, error: e.message };
       }
     },
 
     async secScan() {
-      if (!this.secCacheKey || this.secStatus.loading) return;
+      if (!this.secCacheKey || this.secStatus.loading || this.secPolling) return;
       this.secStatus.loading = true;
+      let keepLoading = false;
       try {
         const r = await fetch('/api/oi-analysis/secondary-scan', {
           method: 'POST',
@@ -2631,22 +2695,24 @@ document.addEventListener('alpine:init', () => {
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (d.error) {
-          if (d.error === 'cache_miss') {
-            this.secStatus = { loaded: false, loading: false, error: null };
-            return;
-          }
-          throw new Error(d.error);
+        if (d.error === 'cache_miss') {
+          this.secStatus = { loaded: false, loading: false, error: null };
+          return;
         }
-        this.secBaseline = d.baseline;
-        this.secMetrics  = d.metrics || [];
-        this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
-        this.secScanMeta = { mode: d.mode, dropped_warmup_n: d.dropped_warmup_n, universe_n: d.universe_n, start_date: d.start_date };
-        // Reset detail if the selected metric's position changed significantly
-        if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
-        this._renderSecBar();
+        this.secScanKey = d.scan_key;
+        if (d.status === 'done') {
+          this._applySecResults(d);
+          if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+          this._renderSecBar();
+        } else if (d.status === 'computing') {
+          keepLoading = true;
+          this._pollSecScore();
+        } else if (d.status === 'busy') {
+          this.secStatus = { loaded: this.secStatus.loaded, loading: false,
+                             error: d.error || 'Another heavy job is running — try again shortly.' };
+        }
       } catch (_) {}
-      finally { this.secStatus.loading = false; }
+      finally { if (!keepLoading) this.secStatus.loading = false; }
     },
 
     async secDrillMetric(metricName, resetBins = true) {
@@ -4177,17 +4243,11 @@ document.addEventListener('alpine:init', () => {
         this.selectedBins20 = new Set(sys.primary_bins || []);
         await this.loadAnalysis();
         if (this.error) return;
-        await this.secLoad();
-        if (!this.secStatus.loaded) return;
       } else {
         // Fast path — page already on the right anchor + metric. Just
         // swap the primary bin selection and re-prime the corr cache.
         this.selectedBins20 = new Set(sys.primary_bins || []);
-        // Re-running secLoad refreshes the cache against the new
-        // primary bin filter (its `_secFilteredDates()` reads
-        // selectedBins20).
-        await this.secLoad();
-        if (!this.secStatus.loaded) return;
+        // Scanner re-scores on next explicit Load click.
       }
 
       // Restore the corr explorer state.

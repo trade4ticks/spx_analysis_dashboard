@@ -2,24 +2,9 @@
 import asyncio
 import hashlib
 import json
-import logging
 import math
-import time
 from collections import defaultdict
 from typing import List, Optional
-
-_sec_log = logging.getLogger("sec_timing")
-
-_SEC_TIMING_FILE = "/tmp/sec_timing.log"
-
-def _tlog(msg: str) -> None:
-    """Write a timestamped line to /tmp/sec_timing.log and flush immediately."""
-    line = f"{time.strftime('%H:%M:%S')} {msg}\n"
-    try:
-        with open(_SEC_TIMING_FILE, "a") as _f:
-            _f.write(line)
-    except Exception:
-        pass  # never break the request over a diagnostic write
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -29,7 +14,77 @@ from pydantic import BaseModel
 from app.db import get_pool, get_oi_pool
 
 # ── Secondary Signal Scanner cache ────────────────────────────────────────────
-_SEC_CACHE: dict = {}  # cache_key -> {rows, features, outcome}
+_SEC_CACHE: dict = {}          # cache_key -> {rows, features, outcome}
+_SEC_SCORE_CACHE: dict = {}    # scan_key  → {status, result, error_msg}
+_SEC_SCORE_CACHE_MAX = 50      # evict oldest entry when exceeded
+_sec_scan_running: bool = False  # one background job at a time
+
+
+def _sec_score_key(cache_key: str, selected_primary_bins, n_bins: int, filtered_dates) -> str:
+    """Stable hash for deduplicating secondary score jobs."""
+    parts = {
+        "ck": cache_key,
+        "bins": sorted(selected_primary_bins) if selected_primary_bins else [],
+        "n": n_bins,
+        "fd": sorted(filtered_dates) if filtered_dates else [],
+    }
+    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()[:20]
+
+
+def _run_sec_score(
+    scan_key: str,
+    rows: list,
+    outcome_col: str,
+    feature_cols: list,
+    is_all: bool,
+    n_bins: int,
+    primary_metric: str,
+    selected_primary_bins,
+    filtered_dates: list,
+) -> None:
+    """Synchronous secondary score computation — runs in thread-pool executor.
+    Sets _sec_scan_running True at entry, False in finally."""
+    global _sec_scan_running
+    _sec_scan_running = True
+    try:
+        from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
+        spec = WalkForwardSpec()
+        filtered, dropped, universe = filter_by_assignments(
+            rows, spec, primary_metric, selected_primary_bins, is_all, filtered_dates,
+        )
+        metrics = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
+        baseline_rets = [float(r[outcome_col]) for r in filtered
+                         if r.get(outcome_col) is not None]
+        baseline = {
+            "n": len(baseline_rets),
+            "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
+            "win_rate": round(
+                float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4
+            ) if baseline_rets else 0,
+        }
+        start_date = filtered[0]["trade_date"] if filtered else None
+        _SEC_SCORE_CACHE[scan_key] = {
+            "status": "done",
+            "result": {
+                "baseline":         baseline,
+                "metrics":          metrics,
+                "mode":             "walk_forward",
+                "warmup":           spec.warmup,
+                "cutoff_date":      None,
+                "dropped_warmup_n": dropped,
+                "universe_n":       universe,
+                "start_date":       start_date,
+            },
+        }
+    except Exception as exc:
+        _SEC_SCORE_CACHE[scan_key] = {
+            "status": "error",
+            "error_msg": f"{type(exc).__name__}: {exc}",
+            "result": None,
+        }
+    finally:
+        _sec_scan_running = False
+
 
 router = APIRouter(tags=["oi_analysis"])
 
@@ -1735,40 +1790,21 @@ def _sec_score_metrics(
 ) -> list:
     """Score each secondary feature by weighted_spread × breadth.
 
-    Replaces the old best-bin lift, which was a noise-maximiser (max over
-    ~10 noisy bin estimates is biased upward by construction).
+    Binning: uses walk-forward assign_secondary_buckets, identical to the
+    drilled secondary_detail chart — leaderboard scores reconcile with
+    the per-bin tooltip spreads.
 
     weighted_spread = (avg_ret[top_bin] − avg_ret[bottom_bin]) × w
       w = min(harmonic_mean(n_top, n_bottom) / _SEC_N_REF, 1.0)
-      Harmonic mean is used because the spread's variance is dominated by
-      the thinner endpoint; the cap at 1.0 prevents large bins from drowning
-      smaller ones. Direction of spread drives bar colour in the frontend.
-
-    Binning: uses an equal-count split on per-ticker rank-normalized values
-    (ALL) or raw values (single). This is O(n log n) per feature and
-    fast enough for 100+ feature scoring loops on VPS hardware. The
-    drilled secondary_detail chart uses WF bins (assign_secondary_buckets);
-    the scorer intentionally uses equal-count for performance — rankings
-    are approximately preserved and the endpoint doesn't time out.
 
     breadth (ALL mode) = fraction of qualifying tickers (≥10 rows each,
-      ≥3 total) whose own top-third-minus-bottom-third spread agrees in sign
-      with the global weighted_spread. Top-third / bottom-third (not median
-      split) matches the extremes that ingredient 1 measures.
+      ≥3 total) whose own top-third vs bottom-third spread agrees in sign
+      with the global weighted_spread.
       Single-ticker mode: breadth = 1.0 by convention.
 
-    score = weighted_spread × breadth — multiplicative so a near-zero on
-      either ingredient drags the whole score toward zero.
-
-    Requires ≥3 populated bins (degenerate-metric guard only — not a
-    sample-quality mechanism). Requires ≥3 qualifying tickers in ALL mode.
-    Sorted descending; negative scores (bottom bin beats top) appear at the
-    bottom and are interpretable as directional inversions.
-
-    win_lift = win_rate(top_bin) − win_rate(bottom_bin); informational only,
-    not used in ranking.
-
-    spec: reserved for future WF-batched scoring; ignored in current impl.
+    score = weighted_spread × breadth.
+    Requires ≥3 populated bins. Requires ≥3 qualifying tickers in ALL mode.
+    Sorted descending.
     """
     if len(rows) < n_bins * 2:
         return []
@@ -1779,15 +1815,12 @@ def _sec_score_metrics(
     if not all_rets:
         return []
 
-    _t_loop_start = time.perf_counter()
-    _tlog(f"SEC_SCORE start: n_rows={len(rows)}  n_features={len(feature_cols)}  n_bins={n_bins}  is_all={is_all}")
+    from app.routers.row_compute import assign_secondary_buckets
 
     results = []
-    for _feat_idx, feat in enumerate(feature_cols):
-        _t_feat = time.perf_counter()
+    for feat in feature_cols:
         if is_all:
-            # Per-ticker rank-normalise within the filtered subset, then pool.
-            # Used for both spread (norm_vals) and breadth (by_tkr).
+            # Build by_tkr for breadth computation (feature val + outcome per ticker).
             by_tkr: dict = defaultdict(list)
             for r in rows:
                 v = r.get(feat)
@@ -1800,42 +1833,16 @@ def _sec_score_metrics(
                         by_tkr[r.get("ticker", "_")].append((fv, fo))
                 except (TypeError, ValueError):
                     pass
-            norm_vals = []
-            for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < n_bins:
-                    continue
-                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-                n_t = len(sorted_t)
-                for rank, (_, y) in enumerate(sorted_t):
-                    norm_vals.append((rank / n_t, y))
         else:
             by_tkr = {}
-            norm_vals = []
-            for r in rows:
-                v = r.get(feat)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv, fo = float(v), float(o)
-                    if not (math.isnan(fv) or math.isnan(fo)):
-                        norm_vals.append((fv, fo))
-                except (TypeError, ValueError):
-                    pass
 
-        _t_after_group = time.perf_counter()
-        if _feat_idx == 0:
-            _tlog(f"SEC_SCORE feat[0]={feat}  group_build={_t_after_group - _t_feat:.3f}s  norm_vals={len(norm_vals)}")
-
-        if len(norm_vals) < n_bins * 2:
+        # WF-consistent bucket assignment — same path as drilled chart.
+        buckets_raw = assign_secondary_buckets(spec, rows, feat, n_bins, outcome_col, is_all)
+        if buckets_raw is None:
             continue
-
-        sorted_vals = sorted(norm_vals, key=lambda x: x[0])
-        n = len(sorted_vals)
-        buckets: list = [[] for _ in range(n_bins)]
-        for i, (_, y) in enumerate(sorted_vals):
-            b = min(int(i / n * n_bins), n_bins - 1)
-            buckets[b].append(y)
+        # Each entry in buckets_raw[i] is (metric_val, outcome, date, ticker).
+        buckets = [[entry[1] for entry in b] for b in buckets_raw]
+        n = sum(len(b) for b in buckets)
 
         # Degenerate-metric guard: require ≥3 populated bins.
         populated = [(i, b) for i, b in enumerate(buckets) if b]
@@ -1877,8 +1884,7 @@ def _sec_score_metrics(
                 continue
             breadth = n_agreeing / n_qualifying
         else:
-            # Single-ticker: breadth is 1.0 by convention (one ticker agrees
-            # with itself; spread × 1 reduces to just the weighted spread).
+            # Single-ticker: breadth is 1.0 by convention.
             n_qualifying = 1
             n_agreeing   = 1
             breadth      = 1.0
@@ -1889,9 +1895,6 @@ def _sec_score_metrics(
         top_wr    = float(np.mean([1.0 if y > 0 else 0.0 for y in top_b]))
         bottom_wr = float(np.mean([1.0 if y > 0 else 0.0 for y in bottom_b]))
         win_lift  = top_wr - bottom_wr
-
-        if _feat_idx == 0:
-            _tlog(f"SEC_SCORE feat[0] total={time.perf_counter() - _t_after_group:.3f}s  (sort+bucket+breadth after group)")
 
         results.append({
             "name":                  feat,
@@ -1910,7 +1913,6 @@ def _sec_score_metrics(
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    _tlog(f"SEC_SCORE done: scored={len(results)}/{len(feature_cols)}  total_loop={time.perf_counter() - _t_loop_start:.3f}s")
     return results
 
 
@@ -2193,15 +2195,14 @@ class SecDetailReq(BaseModel):
 
 @router.post("/secondary-load")
 async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
-    """Fetch all feature columns for the analysis date range and cache; compute initial secondary scores."""
+    """Fetch feature columns for the analysis date range (cached), then dispatch
+    background scoring job.  Returns immediately with status='computing' on
+    cache miss, or status='done'/'error' if the job already finished."""
     if not pool:
         return {"error": "OI database not configured"}
 
     is_all = (req.ticker == "ALL")
     cache_key = _sec_cache_key(req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
-
-    _t0 = time.perf_counter()
-    _tlog(f"SEC_LOAD start  ticker={req.ticker}  cached={cache_key in _SEC_CACHE}")
 
     if cache_key not in _SEC_CACHE:
         # Build date filter
@@ -2246,9 +2247,7 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         for r in rows:
             r["trade_date"] = str(r["trade_date"])
 
-        # Build per-ticker calendar (open/close lookup + date sequence) so
-        # combined_trades can compute exit_date + spot_exit (close of
-        # entry_date + horizon-1 trading days).
+        # Build per-ticker calendar (open/close lookup + date sequence).
         tickers_used = list({r.get("ticker") for r in rows if r.get("ticker")})
         cal_by_tkr = await _fetch_ticker_calendars(pool, tickers_used) if tickers_used else {}
 
@@ -2263,36 +2262,40 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     cached = _SEC_CACHE[cache_key]
     rows = cached["rows"]
     feature_cols = cached["features"]
-    _tlog(f"SEC_LOAD after_cache: n_rows={len(rows)}  n_features={len(feature_cols)}  elapsed={time.perf_counter() - _t0:.3f}s")
-
-    from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
-    spec = WalkForwardSpec()
     n_bins = max(2, min(20, req.sec_bin_count))
-    # WF primary filter: drops warmup rows; no bin restriction (selected=None)
-    # so the initial leaderboard covers the full post-warmup universe.
-    _t_filter = time.perf_counter()
-    wf_rows, _, _ = filter_by_assignments(
-        rows, spec, cached["primary_metric"], None, is_all, req.filtered_dates,
-    )
-    _tlog(f"SEC_LOAD after_filter: wf_rows={len(wf_rows)}  filter_elapsed={time.perf_counter() - _t_filter:.3f}s")
+    scan_key = _sec_score_key(cache_key, None, n_bins, req.filtered_dates)
 
-    _t_score = time.perf_counter()
-    metrics_result = _sec_score_metrics(wf_rows, req.outcome, feature_cols, is_all, n_bins, spec)
-    _tlog(f"SEC_LOAD after_score: n_metrics={len(metrics_result)}  score_elapsed={time.perf_counter() - _t_score:.3f}s  total={time.perf_counter() - _t0:.3f}s")
+    entry = _SEC_SCORE_CACHE.get(scan_key)
+    if entry is None:
+        # Cache miss — dispatch background job (IC batch discipline: never auto-compute).
+        if _sec_scan_running:
+            return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
+                    "error": "A secondary scan is already running — wait for it to finish."}
+        if len(_ic_batch_running) >= 1:
+            return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
+                    "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
+        while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
+            _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
+        _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            None, _run_sec_score,
+            scan_key, rows, cached["outcome"], feature_cols,
+            is_all, n_bins, cached["primary_metric"], None, req.filtered_dates,
+        )
 
-    baseline_rets = [float(r[req.outcome]) for r in wf_rows if r.get(req.outcome) is not None]
-    baseline = {
-        "n": len(baseline_rets),
-        "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
-        "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
-    }
-
-    return {"cache_key": cache_key, "baseline": baseline, "metrics": metrics_result}
+    entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
+    response: dict = {"cache_key": cache_key, "scan_key": scan_key, "status": entry["status"]}
+    if entry["status"] == "error":
+        response["error"] = entry.get("error_msg", "unknown error")
+    elif entry["status"] == "done" and entry.get("result"):
+        response.update(entry["result"])
+    return response
 
 
 @router.post("/secondary-scan")
 async def secondary_scan(req: SecScanReq):
-    """Re-score secondary metrics for a new bin selection (in-memory from cache)."""
+    """Re-score secondary metrics for a new primary bin selection (background job)."""
     cached = _SEC_CACHE.get(req.cache_key)
     if not cached:
         return {"error": "cache_miss"}
@@ -2303,37 +2306,51 @@ async def secondary_scan(req: SecScanReq):
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
     n_bins = max(2, min(20, req.sec_bin_count))
+    scan_key = _sec_score_key(req.cache_key, req.selected_primary_bins, n_bins, req.filtered_dates)
 
-    _t0 = time.perf_counter()
-    _tlog(f"SEC_SCAN start  ticker={req.ticker}  n_rows={len(rows)}  n_features={len(feature_cols)}  selected_bins={req.selected_primary_bins}")
+    entry = _SEC_SCORE_CACHE.get(scan_key)
+    if entry is None:
+        if _sec_scan_running:
+            return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
+                    "error": "A secondary scan is already running — wait for it to finish."}
+        if len(_ic_batch_running) >= 1:
+            return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
+                    "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
+        while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
+            _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
+        _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            None, _run_sec_score,
+            scan_key, rows, outcome_col, feature_cols,
+            is_all, n_bins, primary_metric, req.selected_primary_bins, req.filtered_dates,
+        )
 
-    from app.routers.row_compute import WalkForwardSpec, filter_by_assignments, mode_envelope
-    spec = WalkForwardSpec()
-    _t_filter = time.perf_counter()
-    filtered, dropped, universe = filter_by_assignments(
-        rows, spec, primary_metric,
-        req.selected_primary_bins, is_all, req.filtered_dates,
-    )
-    _tlog(f"SEC_SCAN after_filter: filtered={len(filtered)}  dropped={dropped}  filter_elapsed={time.perf_counter() - _t_filter:.3f}s")
+    entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
+    response: dict = {"cache_key": req.cache_key, "scan_key": scan_key, "status": entry["status"]}
+    if entry["status"] == "error":
+        response["error"] = entry.get("error_msg", "unknown error")
+    elif entry["status"] == "done" and entry.get("result"):
+        response.update(entry["result"])
+    return response
 
-    _t_score = time.perf_counter()
-    metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
-    _tlog(f"SEC_SCAN after_score: n_metrics={len(metrics_result)}  score_elapsed={time.perf_counter() - _t_score:.3f}s  total={time.perf_counter() - _t0:.3f}s")
-    start_date = filtered[0]["trade_date"] if filtered else None
 
-    baseline_rets = [float(r[outcome_col]) for r in filtered if r.get(outcome_col) is not None]
-    baseline = {
-        "n": len(baseline_rets),
-        "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
-        "win_rate": round(float(np.mean([1.0 if v > 0 else 0.0 for v in baseline_rets])), 4) if baseline_rets else 0,
-    }
+class SecStatusReq(BaseModel):
+    scan_key: str
 
-    return {
-        "baseline":         baseline,
-        "metrics":          metrics_result,
-        **mode_envelope(spec, dropped=dropped, universe=universe,
-                        start_date=start_date),
-    }
+
+@router.post("/secondary-score-status")
+async def secondary_score_status(req: SecStatusReq):
+    """Poll the status of a background secondary score job."""
+    entry = _SEC_SCORE_CACHE.get(req.scan_key)
+    if not entry:
+        return {"status": "not_found"}
+    response: dict = {"status": entry["status"]}
+    if entry["status"] == "error":
+        response["error"] = entry.get("error_msg", "unknown error")
+    elif entry["status"] == "done" and entry.get("result"):
+        response.update(entry["result"])
+    return response
 
 
 @router.post("/secondary-detail")
