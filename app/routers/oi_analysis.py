@@ -195,6 +195,20 @@ async def analyze(
     from app.routers.row_compute import make_spec
     spec = make_spec(walk_forward, cutoff_date)
 
+    # ── Per-phase timing (diagnostic) — writes to /tmp/analyze_timing.log ──
+    import time as _time
+    _t0 = _time.perf_counter()
+    def _tlog(label: str) -> None:
+        elapsed = _time.perf_counter() - _t0
+        line = f"[analyze][{ticker}|ALL={ticker == 'ALL'}|{spec.kind}] +{elapsed:.3f}s  {label}\n"
+        try:
+            with open('/tmp/analyze_timing.log', 'a') as _f:
+                _f.write(line)
+        except OSError:
+            pass  # non-fatal on Windows dev box
+
+    _tlog('start')
+
     # Build date filter params (shared by both modes)
     date_conditions = ""
     params: list = []
@@ -218,6 +232,7 @@ async def analyze(
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
                 f"ORDER BY ticker, trade_date", *params)
         row_dicts = [dict(r) for r in rows]
+        _tlog(f'ALL db_fetch1 ({len(row_dicts)} rows)')
 
         by_ticker: dict = defaultdict(list)
         all_open_by_tkr_date: dict = {}
@@ -252,6 +267,7 @@ async def analyze(
         state20 = assigner.fit(row_dicts, metric, 20, True)
         a20 = assigner.assign(row_dicts, metric, 20, True, state20, outcome)
         _validate_assignments(a20, 20)
+        _tlog('ALL bin_assign (10-bin + 20-bin)')
 
         # Cross-reference 10-bin and 20-bin assignments by (ticker, date).
         # A ticker with 10..19 rows clears the 10-bin threshold but not
@@ -324,6 +340,7 @@ async def analyze(
         wf_dropped = dropped_count_for_mode(spec, a10)
 
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
+        _tlog('ALL bucket_setup + decile_stats_20')
         n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
         spot_series = []
         all_spot_dates = []
@@ -358,6 +375,7 @@ async def analyze(
                 if npc is not None:
                     closes[dates[i]] = npc
             all_close_by_tkr[tkr] = closes
+        _tlog('ALL db_fetch2 + close_calendar')
 
     else:
         # Single-ticker mode
@@ -373,6 +391,7 @@ async def analyze(
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {single_ticker_cond}"
                 f"{date_conditions} ORDER BY trade_date", *params_single)
         row_dicts = [dict(r) for r in rows]
+        _tlog(f'single db_fetch1 ({len(row_dicts)} rows)')
         # Single-ticker rows don't carry a "ticker" column in the SQL
         # SELECT; inject it so the row_compute Assigners can group
         # consistently (they look up r["ticker"]).
@@ -390,6 +409,7 @@ async def analyze(
         state20 = assigner.fit(row_dicts, metric, 20, False)
         a20 = assigner.assign(row_dicts, metric, 20, False, state20, outcome)
         _validate_assignments(a20, 20)
+        _tlog('single bin_assign (10-bin + 20-bin)')
 
         key_b20: dict = {(a.ticker, a.trade_date): a.bin
                          for a in a20 if a.bin is not None}
@@ -439,6 +459,7 @@ async def analyze(
         wf_dropped = dropped_count_for_mode(spec, a10)
 
         decile_stats_20 = _compute_bucket_stats(buckets_20)
+        _tlog('single bucket_setup + decile_stats_20')
         by_ticker = None  # not needed in single-ticker mode
         n_tickers_used = 1
         all_open_by_tkr_date = {}
@@ -478,6 +499,7 @@ async def analyze(
                     close_by_date[all_spot_dates[i]] = round(float(next_pc), 2)
                 except (ValueError, TypeError):
                     pass
+        _tlog('single db_fetch2 + close_calendar')
 
     n = len(pairs)
     if n < 30:
@@ -612,6 +634,7 @@ async def analyze(
             "concurrent":      _equity_for_decile(i, "concurrent"),
             "non_overlapping": _equity_for_decile(i, "non_overlapping"),
         }
+    _tlog(f'common decile_stats + equity_by_decile ({n} pairs)')
 
     # ── Yearly consistency ────────────────────────────────────────────────
     yearly_consistency = []
@@ -661,6 +684,7 @@ async def analyze(
 
     n_years = len(yearly_consistency)
     consistency_pct = round(years_top_wins / n_years * 100, 1) if n_years else None
+    _tlog('common yearly_consistency')
 
     # ── Half-sample stability ─────────────────────────────────────────────
     if is_all and by_ticker:
@@ -699,6 +723,7 @@ async def analyze(
     c_sharpe  = min(best_sharpe / 0.5, 1.0)
     c_sample  = min(n / 1000, 0.5)
     composite = round((c_rank + c_mono + c_consist + c_half + c_conc + c_sharpe + c_sample) / 6.5 * 100, 1)
+    _tlog('common half_sample + composite')
 
     # ── Rolling IC + sign-stability (Steps IC.2 + IC.3) ───────────────────
     # Routes through `ic_compute` primitives. The rolling-IC series is always
@@ -805,6 +830,7 @@ async def analyze(
                 "suppression_reason": stability.suppression_reason,
             },
         }
+    _tlog('common rolling_ic (252d + 21d)')
 
     # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
     spot_by_date = {s["date"]: s["value"] for s in spot_series} if spot_series else {}
@@ -861,7 +887,7 @@ async def analyze(
         if dec20 is not None:
             dow_entry["decile20"] = dec20
         dow_data.append(dow_entry)
-
+    _tlog(f'common trade_cal + dow ({len(trade_calendar)} entries)')
 
     # ── Today's value (single-ticker only) ───────────────────────────────
     # today_decile is the bin the Assigner already computed for the latest
@@ -874,6 +900,7 @@ async def analyze(
         today_pct = round(sum(1 for v in all_x if v <= today_val) / len(all_x) * 100, 1)
         today_decile = pairs_decile[-1] if pairs_decile else None
 
+    _tlog('DONE')
     return {
         "ticker":   ticker,
         "metric":   metric,
