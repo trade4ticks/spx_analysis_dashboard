@@ -1815,29 +1815,59 @@ def _sec_score_metrics(
     if not all_rets:
         return []
 
-    from app.routers.row_compute import assign_secondary_buckets
+    from app.routers.row_compute import assign_secondary_buckets, _sort_chrono
+
+    # ── Pre-sort rows chronologically once (reused by every feature). ─────────
+    # assign_secondary_buckets (WF mode) calls _sort_chrono internally; passing
+    # rows_presorted=True skips that redundant O(N log N) sort per feature.
+    rows_sorted = _sort_chrono(rows)
+
+    # ── Precompute per-row outcome float and ticker (ALL mode only). ──────────
+    # Eliminates 4 per-row operations that are feature-independent:
+    #   r.get(outcome_col), float(o), isnan check, r.get("ticker").
+    # Stored as parallel lists indexed by position in rows_sorted.
+    if is_all:
+        _ticker_for_row: list = []
+        _outcome_for_row: list = []
+        for r in rows_sorted:
+            _ticker_for_row.append(r.get("ticker", "_"))
+            o = r.get(outcome_col)
+            if o is None:
+                _outcome_for_row.append(None)
+            else:
+                try:
+                    fo = float(o)
+                    _outcome_for_row.append(None if math.isnan(fo) else fo)
+                except (TypeError, ValueError):
+                    _outcome_for_row.append(None)
 
     results = []
     for feat in feature_cols:
         if is_all:
-            # Build by_tkr for breadth computation (feature val + outcome per ticker).
+            # Build by_tkr for breadth computation reusing precomputed arrays.
             by_tkr: dict = defaultdict(list)
-            for r in rows:
+            for i, r in enumerate(rows_sorted):
+                fo = _outcome_for_row[i]
+                if fo is None:
+                    continue
                 v = r.get(feat)
-                o = r.get(outcome_col)
-                if v is None or o is None:
+                if v is None:
                     continue
                 try:
-                    fv, fo = float(v), float(o)
-                    if not (math.isnan(fv) or math.isnan(fo)):
-                        by_tkr[r.get("ticker", "_")].append((fv, fo))
+                    fv = float(v)
+                    if not math.isnan(fv):
+                        by_tkr[_ticker_for_row[i]].append((fv, fo))
                 except (TypeError, ValueError):
                     pass
         else:
             by_tkr = {}
 
         # WF-consistent bucket assignment — same path as drilled chart.
-        buckets_raw = assign_secondary_buckets(spec, rows, feat, n_bins, outcome_col, is_all)
+        # rows_presorted=True skips the internal _sort_chrono call.
+        buckets_raw = assign_secondary_buckets(
+            spec, rows_sorted, feat, n_bins, outcome_col, is_all,
+            rows_presorted=True,
+        )
         if buckets_raw is None:
             continue
         # Each entry in buckets_raw[i] is (metric_val, outcome, date, ticker).

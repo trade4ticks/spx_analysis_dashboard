@@ -764,6 +764,7 @@ def assign_secondary_buckets(
     is_all: bool,
     *,
     all_rows=None,
+    rows_presorted: bool = False,
 ):
     """Per-bin row tuples for ONE secondary metric, used by /secondary-detail.
 
@@ -844,7 +845,8 @@ def assign_secondary_buckets(
         # (only the IS branch did, on norm_rows). Mirror that — return
         # whatever buckets the walk-forward assignments produced, possibly
         # partly empty. Downstream `bins_out` handles empty buckets.
-        filtered_chrono = _sort_chrono(rows_chrono)
+        # rows_presorted=True: caller already sorted; skip redundant O(N log N).
+        filtered_chrono = rows_chrono if rows_presorted else _sort_chrono(rows_chrono)
         wf_sec = _walk_forward_bins(filtered_chrono, metric, n_bins, is_all, warmup=n_bins)
         buckets = [[] for _ in range(n_bins)]
         for i, r in enumerate(filtered_chrono):
