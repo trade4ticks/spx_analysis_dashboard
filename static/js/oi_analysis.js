@@ -59,7 +59,7 @@ document.addEventListener('alpine:init', () => {
     secCacheKey: null,
     secBaseline: null,
     secMetrics: [],
-    secMaxAbsLift: 0,
+    secMaxAbsScore: 0,
     secSelectedMetric: null,
     secDetail: null,
     secDetailLoading: false,
@@ -2603,7 +2603,7 @@ document.addEventListener('alpine:init', () => {
         this.secCacheKey = d.cache_key;
         this.secBaseline = d.baseline;
         this.secMetrics  = d.metrics || [];
-        this.secMaxAbsLift = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.lift)));
+        this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
         this.secStatus = { loaded: true, loading: false, error: null };
         await this.$nextTick();
         await this.$nextTick();
@@ -2640,7 +2640,7 @@ document.addEventListener('alpine:init', () => {
         }
         this.secBaseline = d.baseline;
         this.secMetrics  = d.metrics || [];
-        this.secMaxAbsLift = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.lift)));
+        this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
         this.secScanMeta = { mode: d.mode, dropped_warmup_n: d.dropped_warmup_n, universe_n: d.universe_n, start_date: d.start_date };
         // Reset detail if the selected metric's position changed significantly
         if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
@@ -2707,26 +2707,37 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['sec-bar']) { this._charts['sec-bar'].destroy(); delete this._charts['sec-bar']; }
 
       const metrics = this.secMetrics;
-      const lifts   = metrics.map(m => +(m.lift * 100).toFixed(4));
-      const colors   = lifts.map(l => l >= 0 ? 'rgba(52,152,219,0.75)' : 'rgba(232,67,147,0.75)');
-      const borders  = lifts.map(l => l >= 0 ? '#3498db' : '#e84393');
+      // score is in raw return units (same as spread); * 100 converts to %.
+      const scores  = metrics.map(m => +(m.score * 100).toFixed(5));
+
+      // Color encodes spread direction (same IC leaderboard convention).
+      // Opacity encodes sample sufficiency via w: 0.25 (thin) → 0.90 (full).
+      // w is absolute-reference-normalised so a pale bar means thin bins
+      // regardless of how many primary bins were selected.
+      const bgColors  = metrics.map(m => {
+        const op = (0.25 + (m.w ?? 1) * 0.65).toFixed(2);
+        return (m.spread ?? 0) >= 0 ? `rgba(52,152,219,${op})` : `rgba(232,67,147,${op})`;
+      });
+      const borders   = metrics.map(m =>
+        (m.spread ?? 0) >= 0 ? 'rgba(52,152,219,0.6)' : 'rgba(232,67,147,0.6)');
 
       // Dynamic width: at least container width, at most barW*n
-      const barW = Math.max(10, Math.min(22, 1400 / metrics.length));
+      const barW   = Math.max(10, Math.min(22, 1400 / metrics.length));
       const chartW = Math.max(inner.parentElement.clientWidth || 600, metrics.length * (barW + 3) + 60);
       inner.style.width = chartW + 'px';
 
+      const secBinCount = this.secBinCount;
       const ctx = canvas.getContext('2d');
       this._charts['sec-bar'] = new Chart(ctx, {
         type: 'bar',
         data: {
           labels: metrics.map(m => m.name),
           datasets: [{
-            data: lifts,
-            backgroundColor: colors,
-            borderColor: borders,
-            borderWidth: 1,
-            barThickness: barW,
+            data:            scores,
+            backgroundColor: bgColors,
+            borderColor:     borders,
+            borderWidth:     1,
+            barThickness:    barW,
           }],
         },
         options: {
@@ -2744,11 +2755,13 @@ document.addEventListener('alpine:init', () => {
               callbacks: {
                 label: ctx => {
                   const m = metrics[ctx.dataIndex];
+                  const wPct = m.w != null ? (m.w * 100).toFixed(0) + '%' : '—';
                   return [
-                    `Lift: ${(m.lift * 100).toFixed(3)}%`,
-                    `WR lift: ${(m.win_lift * 100).toFixed(1)}%`,
-                    `Best bin: B${m.top_bin} of ${this.secBinCount}`,
-                    `n top bin: ${m.n_top}  total: ${m.n}`,
+                    `Score: ${(m.score * 100).toFixed(4)}%`,
+                    `Spread: ${(m.spread * 100).toFixed(3)}%  (n_top=${m.n_top}, n_bot=${m.n_bottom})`,
+                    `Breadth: ${(m.breadth * 100).toFixed(1)}%  (${m.n_qualifying_tickers} tickers)`,
+                    `Sample weight: ${wPct}  (qualifying bins: ${m.n_qualifying_bins} of ${secBinCount})`,
+                    `WR spread: ${(m.win_lift * 100).toFixed(1)}%`,
                   ];
                 },
               },
@@ -2765,9 +2778,9 @@ document.addEventListener('alpine:init', () => {
               grid: { color: '#1e1e1e' },
             },
             y: {
-              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+              ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(3) + '%' },
               grid: { color: '#2a2a2a' },
-              title: { display: true, text: 'Lift (%)', color: '#555', font: { size: 9 } },
+              title: { display: true, text: 'Score = weighted spread × breadth (%)', color: '#555', font: { size: 9 } },
             },
           },
         },

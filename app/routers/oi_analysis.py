@@ -1702,6 +1702,14 @@ def _filter_by_tkr_date(rows: list, tkr_date_set: set) -> list:
     return [r for r in rows if r.get("trade_date") in date_set]
 
 
+# Rows at which a bin mean is considered well-sampled for spread estimation.
+# SE of spread ≈ 0.3–0.5% at n=200 for typical option return vol; calibrated
+# against absolute row count (not relative to bin count) so tail-shaped metrics
+# — whose extreme bins are naturally thin — are not systematically penalised.
+# Revisit this constant if real tail secondaries appear dimmer than expected.
+_SEC_N_REF = 200
+
+
 def _sec_score_metrics(
     rows: list,
     outcome_col: str,
@@ -1709,21 +1717,48 @@ def _sec_score_metrics(
     is_all: bool = False,
     n_bins: int = 5,
 ) -> list:
-    """Score each secondary feature by its lift over baseline. Caller pre-filters rows."""
+    """Score each secondary feature by weighted_spread × breadth.
+
+    Replaces the old best-bin lift, which was a noise-maximiser (max over
+    ~10 noisy bin estimates is biased upward by construction).
+
+    weighted_spread = (avg_ret[top_bin] − avg_ret[bottom_bin]) × w
+      w = min(harmonic_mean(n_top, n_bottom) / _SEC_N_REF, 1.0)
+      Harmonic mean is used because the spread's variance is dominated by
+      the thinner endpoint; the cap at 1.0 prevents large bins from drowning
+      smaller ones. Direction of spread drives bar colour in the frontend.
+
+    breadth (ALL mode) = fraction of qualifying tickers (≥10 rows each,
+      ≥3 total) whose own top-third-minus-bottom-third spread agrees in sign
+      with the global weighted_spread. Top-third / bottom-third (not median
+      split) matches the extremes that ingredient 1 measures.
+      Single-ticker mode: breadth = 1.0 by convention.
+
+    score = weighted_spread × breadth — multiplicative so a near-zero on
+      either ingredient drags the whole score toward zero.
+
+    Requires ≥3 populated bins (degenerate-metric guard only — not a
+    sample-quality mechanism). Requires ≥3 qualifying tickers in ALL mode.
+    Sorted descending; negative scores (bottom bin beats top) appear at the
+    bottom and are interpretable as directional inversions.
+
+    win_lift = win_rate(top_bin) − win_rate(bottom_bin); informational only,
+    not used in ranking.
+    """
     if len(rows) < n_bins * 2:
         return []
 
     all_rets = [float(r[outcome_col]) for r in rows
-                if r.get(outcome_col) is not None and not math.isnan(float(r[outcome_col]))]
+                if r.get(outcome_col) is not None
+                and not math.isnan(float(r[outcome_col]))]
     if not all_rets:
         return []
-    baseline_avg = float(np.mean(all_rets))
-    baseline_wr  = float(np.mean([1.0 if r > 0 else 0.0 for r in all_rets]))
+    baseline_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in all_rets]))
 
     results = []
     for feat in feature_cols:
         if is_all:
-            # Per-ticker rank-normalize within filtered subset
+            # Per-ticker rank-normalise within the filtered subset, then pool.
             by_tkr: dict = defaultdict(list)
             for r in rows:
                 v = r.get(feat)
@@ -1736,7 +1771,6 @@ def _sec_score_metrics(
                         by_tkr[r.get("ticker", "_")].append((fv, fo))
                 except (TypeError, ValueError):
                     pass
-            # Rank-normalize each ticker, pool into global list
             norm_vals = []
             for tkr_vals in by_tkr.values():
                 if len(tkr_vals) < n_bins:
@@ -1746,6 +1780,7 @@ def _sec_score_metrics(
                 for rank, (_, y) in enumerate(sorted_t):
                     norm_vals.append((rank / n_t, y))
         else:
+            by_tkr = {}
             norm_vals = []
             for r in rows:
                 v = r.get(feat)
@@ -1769,25 +1804,74 @@ def _sec_score_metrics(
             b = min(int(i / n * n_bins), n_bins - 1)
             buckets[b].append(y)
 
-        bucket_avgs = [float(np.mean(b)) if b else None for b in buckets]
-        valid = [(i, a) for i, a in enumerate(bucket_avgs) if a is not None]
-        if not valid:
+        # Degenerate-metric guard: require ≥3 populated bins.
+        populated = [(i, b) for i, b in enumerate(buckets) if b]
+        if len(populated) < 3:
             continue
-        best_i, best_avg = max(valid, key=lambda x: x[1])
-        lift = best_avg - baseline_avg
-        best_wr = float(np.mean([1.0 if y > 0 else 0.0 for y in buckets[best_i]])) if buckets[best_i] else 0.0
-        win_lift = best_wr - baseline_wr
+
+        # Top and bottom bins by avg return (among all populated bins).
+        bin_stats = [(i, float(np.mean(b)), b) for i, b in populated]
+        top_i,    top_avg,    top_b    = max(bin_stats, key=lambda x: x[1])
+        bottom_i, bottom_avg, bottom_b = min(bin_stats, key=lambda x: x[1])
+
+        n_top    = len(top_b)
+        n_bottom = len(bottom_b)
+        raw_spread = top_avg - bottom_avg
+
+        # n-weighting: harmonic mean of endpoint counts vs absolute reference.
+        hmean_n = 2 * n_top * n_bottom / (n_top + n_bottom)
+        w = min(hmean_n / _SEC_N_REF, 1.0)
+        weighted_spread = raw_spread * w
+
+        # Breadth: per-ticker top-third vs bottom-third direction agreement.
+        if is_all and by_tkr:
+            sign_global  = 1 if weighted_spread >= 0 else -1
+            n_qualifying = 0
+            n_agreeing   = 0
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < 10:
+                    continue
+                n_qualifying += 1
+                sorted_tkr = sorted(tkr_vals, key=lambda x: x[0])
+                t     = len(sorted_tkr)
+                third = max(1, t // 3)
+                bot_rets = [y for _, y in sorted_tkr[:third]]
+                top_rets = [y for _, y in sorted_tkr[t - third:]]
+                tkr_spread = float(np.mean(top_rets)) - float(np.mean(bot_rets))
+                if (1 if tkr_spread >= 0 else -1) == sign_global:
+                    n_agreeing += 1
+            if n_qualifying < 3:
+                continue
+            breadth = n_agreeing / n_qualifying
+        else:
+            # Single-ticker: breadth is 1.0 by convention (one ticker agrees
+            # with itself; spread × 1 reduces to just the weighted spread).
+            n_qualifying = 1
+            n_agreeing   = 1
+            breadth      = 1.0
+
+        score = weighted_spread * breadth
+
+        # win_lift: win rate spread between top and bottom bins (info only).
+        top_wr    = float(np.mean([1.0 if y > 0 else 0.0 for y in top_b]))
+        bottom_wr = float(np.mean([1.0 if y > 0 else 0.0 for y in bottom_b]))
+        win_lift  = top_wr - bottom_wr
 
         results.append({
-            "name":     feat,
-            "lift":     round(lift, 6),
-            "win_lift": round(win_lift, 4),
-            "top_bin":  best_i + 1,
-            "n_top":    len(buckets[best_i]),
-            "n":        n,
+            "name":                  feat,
+            "score":                 round(score,        6),
+            "spread":                round(raw_spread,   6),
+            "breadth":               round(breadth,      4),
+            "w":                     round(w,            4),
+            "win_lift":              round(win_lift,      4),
+            "n_top":                 n_top,
+            "n_bottom":              n_bottom,
+            "n_qualifying_bins":     len(populated),
+            "n_qualifying_tickers":  n_qualifying,
+            "n":                     n,
         })
 
-    results.sort(key=lambda x: x["lift"], reverse=True)
+    results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
 
