@@ -10,6 +10,17 @@ from typing import List, Optional
 
 _sec_log = logging.getLogger("sec_timing")
 
+_SEC_TIMING_FILE = "/tmp/sec_timing.log"
+
+def _tlog(msg: str) -> None:
+    """Write a timestamped line to /tmp/sec_timing.log and flush immediately."""
+    line = f"{time.strftime('%H:%M:%S')} {msg}\n"
+    try:
+        with open(_SEC_TIMING_FILE, "a") as _f:
+            _f.write(line)
+    except Exception:
+        pass  # never break the request over a diagnostic write
+
 import numpy as np
 from scipy import stats as sp_stats
 from fastapi import APIRouter, Body, Depends, Query
@@ -1769,10 +1780,7 @@ def _sec_score_metrics(
         return []
 
     _t_loop_start = time.perf_counter()
-    _sec_log.warning(
-        "SEC_SCORE start: n_rows=%d  n_features=%d  n_bins=%d  is_all=%s",
-        len(rows), len(feature_cols), n_bins, is_all,
-    )
+    _tlog(f"SEC_SCORE start: n_rows={len(rows)}  n_features={len(feature_cols)}  n_bins={n_bins}  is_all={is_all}")
 
     results = []
     for _feat_idx, feat in enumerate(feature_cols):
@@ -1817,10 +1825,7 @@ def _sec_score_metrics(
 
         _t_after_group = time.perf_counter()
         if _feat_idx == 0:
-            _sec_log.warning(
-                "SEC_SCORE feat[0]=%s  group_build=%.3fs  norm_vals=%d",
-                feat, _t_after_group - _t_feat, len(norm_vals),
-            )
+            _tlog(f"SEC_SCORE feat[0]={feat}  group_build={_t_after_group - _t_feat:.3f}s  norm_vals={len(norm_vals)}")
 
         if len(norm_vals) < n_bins * 2:
             continue
@@ -1886,10 +1891,7 @@ def _sec_score_metrics(
         win_lift  = top_wr - bottom_wr
 
         if _feat_idx == 0:
-            _sec_log.warning(
-                "SEC_SCORE feat[0] total=%.3fs  (sort+bucket+breadth after group)",
-                time.perf_counter() - _t_after_group,
-            )
+            _tlog(f"SEC_SCORE feat[0] total={time.perf_counter() - _t_after_group:.3f}s  (sort+bucket+breadth after group)")
 
         results.append({
             "name":                  feat,
@@ -1908,10 +1910,7 @@ def _sec_score_metrics(
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    _sec_log.warning(
-        "SEC_SCORE done: scored=%d/%d  total_loop=%.3fs",
-        len(results), len(feature_cols), time.perf_counter() - _t_loop_start,
-    )
+    _tlog(f"SEC_SCORE done: scored={len(results)}/{len(feature_cols)}  total_loop={time.perf_counter() - _t_loop_start:.3f}s")
     return results
 
 
@@ -2202,7 +2201,7 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     cache_key = _sec_cache_key(req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
 
     _t0 = time.perf_counter()
-    _sec_log.warning("SEC_LOAD start  ticker=%s  cached=%s", req.ticker, cache_key in _SEC_CACHE)
+    _tlog(f"SEC_LOAD start  ticker={req.ticker}  cached={cache_key in _SEC_CACHE}")
 
     if cache_key not in _SEC_CACHE:
         # Build date filter
@@ -2264,10 +2263,7 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     cached = _SEC_CACHE[cache_key]
     rows = cached["rows"]
     feature_cols = cached["features"]
-    _sec_log.warning(
-        "SEC_LOAD after_cache: n_rows=%d  n_features=%d  elapsed=%.3fs",
-        len(rows), len(feature_cols), time.perf_counter() - _t0,
-    )
+    _tlog(f"SEC_LOAD after_cache: n_rows={len(rows)}  n_features={len(feature_cols)}  elapsed={time.perf_counter() - _t0:.3f}s")
 
     from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
     spec = WalkForwardSpec()
@@ -2278,17 +2274,11 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     wf_rows, _, _ = filter_by_assignments(
         rows, spec, cached["primary_metric"], None, is_all, req.filtered_dates,
     )
-    _sec_log.warning(
-        "SEC_LOAD after_filter: wf_rows=%d  filter_elapsed=%.3fs",
-        len(wf_rows), time.perf_counter() - _t_filter,
-    )
+    _tlog(f"SEC_LOAD after_filter: wf_rows={len(wf_rows)}  filter_elapsed={time.perf_counter() - _t_filter:.3f}s")
 
     _t_score = time.perf_counter()
     metrics_result = _sec_score_metrics(wf_rows, req.outcome, feature_cols, is_all, n_bins, spec)
-    _sec_log.warning(
-        "SEC_LOAD after_score: n_metrics=%d  score_elapsed=%.3fs  total=%.3fs",
-        len(metrics_result), time.perf_counter() - _t_score, time.perf_counter() - _t0,
-    )
+    _tlog(f"SEC_LOAD after_score: n_metrics={len(metrics_result)}  score_elapsed={time.perf_counter() - _t_score:.3f}s  total={time.perf_counter() - _t0:.3f}s")
 
     baseline_rets = [float(r[req.outcome]) for r in wf_rows if r.get(req.outcome) is not None]
     baseline = {
@@ -2315,10 +2305,7 @@ async def secondary_scan(req: SecScanReq):
     n_bins = max(2, min(20, req.sec_bin_count))
 
     _t0 = time.perf_counter()
-    _sec_log.warning(
-        "SEC_SCAN start  ticker=%s  n_rows=%d  n_features=%d  selected_bins=%s",
-        req.ticker, len(rows), len(feature_cols), req.selected_primary_bins,
-    )
+    _tlog(f"SEC_SCAN start  ticker={req.ticker}  n_rows={len(rows)}  n_features={len(feature_cols)}  selected_bins={req.selected_primary_bins}")
 
     from app.routers.row_compute import WalkForwardSpec, filter_by_assignments, mode_envelope
     spec = WalkForwardSpec()
@@ -2327,17 +2314,11 @@ async def secondary_scan(req: SecScanReq):
         rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    _sec_log.warning(
-        "SEC_SCAN after_filter: filtered=%d  dropped=%d  filter_elapsed=%.3fs",
-        len(filtered), dropped, time.perf_counter() - _t_filter,
-    )
+    _tlog(f"SEC_SCAN after_filter: filtered={len(filtered)}  dropped={dropped}  filter_elapsed={time.perf_counter() - _t_filter:.3f}s")
 
     _t_score = time.perf_counter()
     metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
-    _sec_log.warning(
-        "SEC_SCAN after_score: n_metrics=%d  score_elapsed=%.3fs  total=%.3fs",
-        len(metrics_result), time.perf_counter() - _t_score, time.perf_counter() - _t0,
-    )
+    _tlog(f"SEC_SCAN after_score: n_metrics={len(metrics_result)}  score_elapsed={time.perf_counter() - _t_score:.3f}s  total={time.perf_counter() - _t0:.3f}s")
     start_date = filtered[0]["trade_date"] if filtered else None
 
     baseline_rets = [float(r[outcome_col]) for r in filtered if r.get(outcome_col) is not None]
