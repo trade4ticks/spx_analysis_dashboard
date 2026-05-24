@@ -2,9 +2,13 @@
 import asyncio
 import hashlib
 import json
+import logging
 import math
+import time
 from collections import defaultdict
 from typing import List, Optional
+
+_sec_log = logging.getLogger("sec_timing")
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -1764,8 +1768,15 @@ def _sec_score_metrics(
     if not all_rets:
         return []
 
+    _t_loop_start = time.perf_counter()
+    _sec_log.warning(
+        "SEC_SCORE start: n_rows=%d  n_features=%d  n_bins=%d  is_all=%s",
+        len(rows), len(feature_cols), n_bins, is_all,
+    )
+
     results = []
-    for feat in feature_cols:
+    for _feat_idx, feat in enumerate(feature_cols):
+        _t_feat = time.perf_counter()
         if is_all:
             # Per-ticker rank-normalise within the filtered subset, then pool.
             # Used for both spread (norm_vals) and breadth (by_tkr).
@@ -1803,6 +1814,13 @@ def _sec_score_metrics(
                         norm_vals.append((fv, fo))
                 except (TypeError, ValueError):
                     pass
+
+        _t_after_group = time.perf_counter()
+        if _feat_idx == 0:
+            _sec_log.warning(
+                "SEC_SCORE feat[0]=%s  group_build=%.3fs  norm_vals=%d",
+                feat, _t_after_group - _t_feat, len(norm_vals),
+            )
 
         if len(norm_vals) < n_bins * 2:
             continue
@@ -1867,6 +1885,12 @@ def _sec_score_metrics(
         bottom_wr = float(np.mean([1.0 if y > 0 else 0.0 for y in bottom_b]))
         win_lift  = top_wr - bottom_wr
 
+        if _feat_idx == 0:
+            _sec_log.warning(
+                "SEC_SCORE feat[0] total=%.3fs  (sort+bucket+breadth after group)",
+                time.perf_counter() - _t_after_group,
+            )
+
         results.append({
             "name":                  feat,
             "score":                 round(score,        6),
@@ -1884,6 +1908,10 @@ def _sec_score_metrics(
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
+    _sec_log.warning(
+        "SEC_SCORE done: scored=%d/%d  total_loop=%.3fs",
+        len(results), len(feature_cols), time.perf_counter() - _t_loop_start,
+    )
     return results
 
 
@@ -2173,6 +2201,9 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     is_all = (req.ticker == "ALL")
     cache_key = _sec_cache_key(req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
 
+    _t0 = time.perf_counter()
+    _sec_log.warning("SEC_LOAD start  ticker=%s  cached=%s", req.ticker, cache_key in _SEC_CACHE)
+
     if cache_key not in _SEC_CACHE:
         # Build date filter
         date_conditions = ""
@@ -2233,16 +2264,31 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     cached = _SEC_CACHE[cache_key]
     rows = cached["rows"]
     feature_cols = cached["features"]
+    _sec_log.warning(
+        "SEC_LOAD after_cache: n_rows=%d  n_features=%d  elapsed=%.3fs",
+        len(rows), len(feature_cols), time.perf_counter() - _t0,
+    )
 
     from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
     spec = WalkForwardSpec()
     n_bins = max(2, min(20, req.sec_bin_count))
     # WF primary filter: drops warmup rows; no bin restriction (selected=None)
     # so the initial leaderboard covers the full post-warmup universe.
+    _t_filter = time.perf_counter()
     wf_rows, _, _ = filter_by_assignments(
         rows, spec, cached["primary_metric"], None, is_all, req.filtered_dates,
     )
+    _sec_log.warning(
+        "SEC_LOAD after_filter: wf_rows=%d  filter_elapsed=%.3fs",
+        len(wf_rows), time.perf_counter() - _t_filter,
+    )
+
+    _t_score = time.perf_counter()
     metrics_result = _sec_score_metrics(wf_rows, req.outcome, feature_cols, is_all, n_bins, spec)
+    _sec_log.warning(
+        "SEC_LOAD after_score: n_metrics=%d  score_elapsed=%.3fs  total=%.3fs",
+        len(metrics_result), time.perf_counter() - _t_score, time.perf_counter() - _t0,
+    )
 
     baseline_rets = [float(r[req.outcome]) for r in wf_rows if r.get(req.outcome) is not None]
     baseline = {
@@ -2268,13 +2314,30 @@ async def secondary_scan(req: SecScanReq):
     primary_metric = cached["primary_metric"]
     n_bins = max(2, min(20, req.sec_bin_count))
 
+    _t0 = time.perf_counter()
+    _sec_log.warning(
+        "SEC_SCAN start  ticker=%s  n_rows=%d  n_features=%d  selected_bins=%s",
+        req.ticker, len(rows), len(feature_cols), req.selected_primary_bins,
+    )
+
     from app.routers.row_compute import WalkForwardSpec, filter_by_assignments, mode_envelope
     spec = WalkForwardSpec()
+    _t_filter = time.perf_counter()
     filtered, dropped, universe = filter_by_assignments(
         rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
+    _sec_log.warning(
+        "SEC_SCAN after_filter: filtered=%d  dropped=%d  filter_elapsed=%.3fs",
+        len(filtered), dropped, time.perf_counter() - _t_filter,
+    )
+
+    _t_score = time.perf_counter()
     metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
+    _sec_log.warning(
+        "SEC_SCAN after_score: n_metrics=%d  score_elapsed=%.3fs  total=%.3fs",
+        len(metrics_result), time.perf_counter() - _t_score, time.perf_counter() - _t0,
+    )
     start_date = filtered[0]["trade_date"] if filtered else None
 
     baseline_rets = [float(r[outcome_col]) for r in filtered if r.get(outcome_col) is not None]
