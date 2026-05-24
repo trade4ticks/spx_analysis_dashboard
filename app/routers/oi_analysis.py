@@ -964,7 +964,12 @@ async def heatmap_2d(
             # under both Assigners (`_bucket_pairs_per_ticker` excludes
             # tickers below the threshold). Skip them — matches legacy
             # `if len(items) < bins: continue`.
+            # In train-test mode, pre-cutoff rows carry a real bin (frozen
+            # training thresholds applied to training rows) but must be
+            # excluded from the test-period aggregation — same as /analyze.
             if ax.bin is None or ay.bin is None:
+                continue
+            if ax.dropped_reason == "pre_cutoff" or ay.dropped_reason == "pre_cutoff":
                 continue
             # 1-indexed → 0-indexed for Python list indexing.
             cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
