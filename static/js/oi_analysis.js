@@ -2649,13 +2649,14 @@ document.addEventListener('alpine:init', () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            ticker:         this.ticker,
-            metric:         this.metric,
-            outcome:        this.outcome,
-            date_from:      this.dateFrom || '',
-            date_to:        this.dateTo || '',
-            filtered_dates: this._secFilteredDates(),
-            sec_bin_count:  this.secBinCount,
+            ticker:                this.ticker,
+            metric:                this.metric,
+            outcome:               this.outcome,
+            date_from:             this.dateFrom || '',
+            date_to:               this.dateTo || '',
+            filtered_dates:        this._secFilteredDates(),
+            sec_bin_count:         this.secBinCount,
+            selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

@@ -2173,6 +2173,7 @@ class SecLoadReq(BaseModel):
     date_to: str = ""
     filtered_dates: List[str] = []
     sec_bin_count: int = 10
+    selected_primary_bins: Optional[List[int]] = None
 
 
 class SecScanReq(BaseModel):
@@ -2263,7 +2264,7 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     rows = cached["rows"]
     feature_cols = cached["features"]
     n_bins = max(2, min(20, req.sec_bin_count))
-    scan_key = _sec_score_key(cache_key, None, n_bins, req.filtered_dates)
+    scan_key = _sec_score_key(cache_key, req.selected_primary_bins, n_bins, req.filtered_dates)
 
     entry = _SEC_SCORE_CACHE.get(scan_key)
     if entry is None:
@@ -2281,7 +2282,7 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         loop.run_in_executor(
             None, _run_sec_score,
             scan_key, rows, cached["outcome"], feature_cols,
-            is_all, n_bins, cached["primary_metric"], None, req.filtered_dates,
+            is_all, n_bins, cached["primary_metric"], req.selected_primary_bins, req.filtered_dates,
         )
 
     entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
