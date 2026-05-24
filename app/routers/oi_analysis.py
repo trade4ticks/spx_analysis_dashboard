@@ -1729,11 +1729,12 @@ def _sec_score_metrics(
       the thinner endpoint; the cap at 1.0 prevents large bins from drowning
       smaller ones. Direction of spread drives bar colour in the frontend.
 
-    Bins are assigned via assign_secondary_buckets (WalkForwardSpec by
-    default) so the scorer and the detail chart use identical bucket
-    boundaries — a bar at rank N corresponds to the same WF decile cut
-    that the drilled-in chart shows.  Breadth is computed from raw per-ticker
-    row values (not WF buckets) so it remains an independent gradient check.
+    Binning: uses an equal-count split on per-ticker rank-normalized values
+    (ALL) or raw values (single). This is O(n log n) per feature and
+    fast enough for 100+ feature scoring loops on VPS hardware. The
+    drilled secondary_detail chart uses WF bins (assign_secondary_buckets);
+    the scorer intentionally uses equal-count for performance — rankings
+    are approximately preserved and the endpoint doesn't time out.
 
     breadth (ALL mode) = fraction of qualifying tickers (≥10 rows each,
       ≥3 total) whose own top-third-minus-bottom-third spread agrees in sign
@@ -1751,11 +1752,9 @@ def _sec_score_metrics(
 
     win_lift = win_rate(top_bin) − win_rate(bottom_bin); informational only,
     not used in ranking.
-    """
-    from app.routers.row_compute import assign_secondary_buckets, WalkForwardSpec
-    if spec is None:
-        spec = WalkForwardSpec()
 
+    spec: reserved for future WF-batched scoring; ignored in current impl.
+    """
     if len(rows) < n_bins * 2:
         return []
 
@@ -1767,10 +1766,9 @@ def _sec_score_metrics(
 
     results = []
     for feat in feature_cols:
-        # -- Per-ticker raw values for breadth computation (independent of
-        #    WF bucketing; correct because WF bins are a monotone transform
-        #    of raw values, so raw top-third / bottom-third agrees in sign).
         if is_all:
+            # Per-ticker rank-normalise within the filtered subset, then pool.
+            # Used for both spread (norm_vals) and breadth (by_tkr).
             by_tkr: dict = defaultdict(list)
             for r in rows:
                 v = r.get(feat)
@@ -1783,19 +1781,38 @@ def _sec_score_metrics(
                         by_tkr[r.get("ticker", "_")].append((fv, fo))
                 except (TypeError, ValueError):
                     pass
+            norm_vals = []
+            for tkr_vals in by_tkr.values():
+                if len(tkr_vals) < n_bins:
+                    continue
+                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+                n_t = len(sorted_t)
+                for rank, (_, y) in enumerate(sorted_t):
+                    norm_vals.append((rank / n_t, y))
         else:
             by_tkr = {}
+            norm_vals = []
+            for r in rows:
+                v = r.get(feat)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv, fo = float(v), float(o)
+                    if not (math.isnan(fv) or math.isnan(fo)):
+                        norm_vals.append((fv, fo))
+                except (TypeError, ValueError):
+                    pass
 
-        # -- WF-consistent bucket assignment for spread computation --------
-        # Reconciles scorer with the detail chart: both use the same
-        # assign_secondary_buckets path and therefore identical cuts.
-        buckets_raw = assign_secondary_buckets(spec, rows, feat, n_bins, outcome_col, is_all)
-        if buckets_raw is None:
-            continue  # in-sample only; WF always returns a list
+        if len(norm_vals) < n_bins * 2:
+            continue
 
-        # Extract outcome (index 1) from each (raw_val, outcome, date, tkr) tuple.
-        buckets = [[entry[1] for entry in b] for b in buckets_raw]
-        n = sum(len(b) for b in buckets)
+        sorted_vals = sorted(norm_vals, key=lambda x: x[0])
+        n = len(sorted_vals)
+        buckets: list = [[] for _ in range(n_bins)]
+        for i, (_, y) in enumerate(sorted_vals):
+            b = min(int(i / n * n_bins), n_bins - 1)
+            buckets[b].append(y)
 
         # Degenerate-metric guard: require ≥3 populated bins.
         populated = [(i, b) for i, b in enumerate(buckets) if b]
