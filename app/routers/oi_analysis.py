@@ -1715,7 +1715,8 @@ def _sec_score_metrics(
     outcome_col: str,
     feature_cols: list,
     is_all: bool = False,
-    n_bins: int = 5,
+    n_bins: int = 10,
+    spec=None,
 ) -> list:
     """Score each secondary feature by weighted_spread × breadth.
 
@@ -1727,6 +1728,12 @@ def _sec_score_metrics(
       Harmonic mean is used because the spread's variance is dominated by
       the thinner endpoint; the cap at 1.0 prevents large bins from drowning
       smaller ones. Direction of spread drives bar colour in the frontend.
+
+    Bins are assigned via assign_secondary_buckets (WalkForwardSpec by
+    default) so the scorer and the detail chart use identical bucket
+    boundaries — a bar at rank N corresponds to the same WF decile cut
+    that the drilled-in chart shows.  Breadth is computed from raw per-ticker
+    row values (not WF buckets) so it remains an independent gradient check.
 
     breadth (ALL mode) = fraction of qualifying tickers (≥10 rows each,
       ≥3 total) whose own top-third-minus-bottom-third spread agrees in sign
@@ -1745,6 +1752,10 @@ def _sec_score_metrics(
     win_lift = win_rate(top_bin) − win_rate(bottom_bin); informational only,
     not used in ranking.
     """
+    from app.routers.row_compute import assign_secondary_buckets, WalkForwardSpec
+    if spec is None:
+        spec = WalkForwardSpec()
+
     if len(rows) < n_bins * 2:
         return []
 
@@ -1753,12 +1764,13 @@ def _sec_score_metrics(
                 and not math.isnan(float(r[outcome_col]))]
     if not all_rets:
         return []
-    baseline_wr = float(np.mean([1.0 if r > 0 else 0.0 for r in all_rets]))
 
     results = []
     for feat in feature_cols:
+        # -- Per-ticker raw values for breadth computation (independent of
+        #    WF bucketing; correct because WF bins are a monotone transform
+        #    of raw values, so raw top-third / bottom-third agrees in sign).
         if is_all:
-            # Per-ticker rank-normalise within the filtered subset, then pool.
             by_tkr: dict = defaultdict(list)
             for r in rows:
                 v = r.get(feat)
@@ -1771,38 +1783,19 @@ def _sec_score_metrics(
                         by_tkr[r.get("ticker", "_")].append((fv, fo))
                 except (TypeError, ValueError):
                     pass
-            norm_vals = []
-            for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < n_bins:
-                    continue
-                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-                n_t = len(sorted_t)
-                for rank, (_, y) in enumerate(sorted_t):
-                    norm_vals.append((rank / n_t, y))
         else:
             by_tkr = {}
-            norm_vals = []
-            for r in rows:
-                v = r.get(feat)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv, fo = float(v), float(o)
-                    if not (math.isnan(fv) or math.isnan(fo)):
-                        norm_vals.append((fv, fo))
-                except (TypeError, ValueError):
-                    pass
 
-        if len(norm_vals) < n_bins * 2:
-            continue
+        # -- WF-consistent bucket assignment for spread computation --------
+        # Reconciles scorer with the detail chart: both use the same
+        # assign_secondary_buckets path and therefore identical cuts.
+        buckets_raw = assign_secondary_buckets(spec, rows, feat, n_bins, outcome_col, is_all)
+        if buckets_raw is None:
+            continue  # in-sample only; WF always returns a list
 
-        sorted_vals = sorted(norm_vals, key=lambda x: x[0])
-        n = len(sorted_vals)
-        buckets: list = [[] for _ in range(n_bins)]
-        for i, (_, y) in enumerate(sorted_vals):
-            b = min(int(i / n * n_bins), n_bins - 1)
-            buckets[b].append(y)
+        # Extract outcome (index 1) from each (raw_val, outcome, date, tkr) tuple.
+        buckets = [[entry[1] for entry in b] for b in buckets_raw]
+        n = sum(len(b) for b in buckets)
 
         # Degenerate-metric guard: require ≥3 populated bins.
         populated = [(i, b) for i, b in enumerate(buckets) if b]
@@ -1866,6 +1859,8 @@ def _sec_score_metrics(
             "win_lift":              round(win_lift,      4),
             "n_top":                 n_top,
             "n_bottom":              n_bottom,
+            "top_bin":               top_i + 1,
+            "bottom_bin":            bottom_i + 1,
             "n_qualifying_bins":     len(populated),
             "n_qualifying_tickers":  n_qualifying,
             "n":                     n,
@@ -2131,14 +2126,14 @@ class SecLoadReq(BaseModel):
     date_from: str = ""
     date_to: str = ""
     filtered_dates: List[str] = []
+    sec_bin_count: int = 10
 
 
 class SecScanReq(BaseModel):
     cache_key: str
     filtered_dates: List[str]
     ticker: str = "SPX"
-    walk_forward: bool = False
-    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
+    sec_bin_count: int = 10
     selected_primary_bins: Optional[List[int]] = None
 
 
@@ -2149,8 +2144,6 @@ class SecDetailReq(BaseModel):
     sec_bins: List[int] = [10]
     sec_bin_count: int = 10
     ticker: str = "SPX"
-    walk_forward: bool = False
-    cutoff_date: Optional[str] = None
     selected_primary_bins: Optional[List[int]] = None
 
 
@@ -2224,11 +2217,17 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     rows = cached["rows"]
     feature_cols = cached["features"]
 
-    scored_rows = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
-                   if req.filtered_dates else rows)
-    metrics_result = _sec_score_metrics(scored_rows, req.outcome, feature_cols, is_all)
+    from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
+    spec = WalkForwardSpec()
+    n_bins = max(2, min(20, req.sec_bin_count))
+    # WF primary filter: drops warmup rows; no bin restriction (selected=None)
+    # so the initial leaderboard covers the full post-warmup universe.
+    wf_rows, _, _ = filter_by_assignments(
+        rows, spec, cached["primary_metric"], None, is_all, req.filtered_dates,
+    )
+    metrics_result = _sec_score_metrics(wf_rows, req.outcome, feature_cols, is_all, n_bins, spec)
 
-    baseline_rets = [float(r[req.outcome]) for r in scored_rows if r.get(req.outcome) is not None]
+    baseline_rets = [float(r[req.outcome]) for r in wf_rows if r.get(req.outcome) is not None]
     baseline = {
         "n": len(baseline_rets),
         "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
@@ -2250,28 +2249,18 @@ async def secondary_scan(req: SecScanReq):
     feature_cols = cached["features"]
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
+    n_bins = max(2, min(20, req.sec_bin_count))
 
-    from app.routers.row_compute import make_spec, filter_by_assignments, mode_envelope
-    spec = make_spec(req.walk_forward, req.cutoff_date)
+    from app.routers.row_compute import WalkForwardSpec, filter_by_assignments, mode_envelope
+    spec = WalkForwardSpec()
     filtered, dropped, universe = filter_by_assignments(
         rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
-    if spec.kind != "in_sample":
-        metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all)
-        baseline_subset = filtered
-        start_date = filtered[0]["trade_date"] if filtered else None
-    else:
-        # In-sample secondary scoring uses date-filtered rows (not primary-filtered)
-        # to preserve the legacy semantic from before the row_compute migration.
-        scored_rows = (_filter_by_tkr_date(rows, _parse_tkr_date_set(req.filtered_dates))
-                       if req.filtered_dates else rows)
-        metrics_result = _sec_score_metrics(scored_rows, outcome_col, feature_cols, is_all)
-        baseline_subset = filtered if req.filtered_dates else rows
-        start_date = rows[0]["trade_date"] if rows else None
-        universe = len(baseline_subset)
+    metrics_result = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
+    start_date = filtered[0]["trade_date"] if filtered else None
 
-    baseline_rets = [float(r[outcome_col]) for r in baseline_subset if r.get(outcome_col) is not None]
+    baseline_rets = [float(r[outcome_col]) for r in filtered if r.get(outcome_col) is not None]
     baseline = {
         "n": len(baseline_rets),
         "avg_ret": round(float(np.mean(baseline_rets)), 6) if baseline_rets else 0,
@@ -2303,10 +2292,10 @@ async def secondary_detail(req: SecDetailReq):
     # Both steps dispatch on the spec — single path for both in-sample and
     # walk-forward, no inline branches in this endpoint anymore.
     from app.routers.row_compute import (
-        make_spec, filter_by_assignments, assign_secondary_buckets,
+        WalkForwardSpec, filter_by_assignments, assign_secondary_buckets,
         mode_envelope,
     )
-    spec = make_spec(req.walk_forward, req.cutoff_date)
+    spec = WalkForwardSpec()
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,

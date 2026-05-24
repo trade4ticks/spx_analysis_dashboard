@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=104"></script>
+  <script src="/static/js/oi_analysis.js?v=105"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1061,6 +1061,7 @@
         <!-- Header row -->
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
           <div style="font-size:12px;font-weight:700;color:var(--text)">Secondary Signal Scanner</div>
+          <span style="font-size:9px;color:#e6a23c;font-family:monospace;letter-spacing:.5px;background:rgba(230,162,60,.1);border:1px solid rgba(230,162,60,.3);padding:1px 6px;border-radius:3px">walk-forward · nomination only</span>
           <button @click="secLoad()"
                   :disabled="secStatus.loading"
                   :style="{ opacity: secStatus.loading ? 0.5 : 1 }"

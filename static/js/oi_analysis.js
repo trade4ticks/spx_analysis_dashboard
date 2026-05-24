@@ -2595,6 +2595,7 @@ document.addEventListener('alpine:init', () => {
             date_from:      this.dateFrom || '',
             date_to:        this.dateTo || '',
             filtered_dates: this._secFilteredDates(),
+            sec_bin_count:  this.secBinCount,
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2624,8 +2625,7 @@ document.addEventListener('alpine:init', () => {
             cache_key:             this.secCacheKey,
             filtered_dates:        this._secFilteredDates(),
             ticker:                this.ticker,
-            walk_forward:          this.pageMode === 'walk_forward',
-            cutoff_date:           this.pageMode === 'train_test' ? this.cutoffDate : null,
+            sec_bin_count:         this.secBinCount,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -2666,8 +2666,6 @@ document.addEventListener('alpine:init', () => {
             sec_bins:              this.secSelectedSecBins,
             sec_bin_count:         this.secBinCount,
             ticker:                this.ticker,
-            walk_forward:          this.pageMode === 'walk_forward',
-            cutoff_date:           this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
           }),
         });
@@ -2697,6 +2695,7 @@ document.addEventListener('alpine:init', () => {
     async secSetBinCount(n) {
       this.secBinCount = n;
       this.secSelectedSecBins = [n];  // reset to top bin
+      await this.secScan();           // re-rank leaderboard with new bin count
       if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
     },
 
