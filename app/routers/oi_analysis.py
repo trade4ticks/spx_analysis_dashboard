@@ -232,28 +232,10 @@ async def analyze(
     _tlog(f'W2 key="{_ac_key}" cache_size={len(_ANALYZE_CACHE)} in_cache={_ac_key in _ANALYZE_CACHE}')
 
     if _ac_key in _ANALYZE_CACHE:
-        _cached = _ANALYZE_CACHE[_ac_key]
-        _stale = True  # default: recompute if the staleness check itself fails
-        try:
-            async with pool.acquire() as _sc:
-                if is_all:
-                    _fresh_max = await _sc.fetchval(
-                        "SELECT MAX(trade_date) FROM daily_features")
-                else:
-                    _fresh_max = await _sc.fetchval(
-                        "SELECT MAX(trade_date) FROM daily_features WHERE ticker = $1",
-                        ticker)
-            _stale = str(_fresh_max) != _cached.get("data_as_of", "")
-            _tlog(f'W2 staleness: stored="{_cached.get("data_as_of","")}" fresh_raw={repr(_fresh_max)} fresh_str="{str(_fresh_max)}" stale={_stale}')
-        except Exception as _sc_exc:
-            _tlog(f'W2 staleness check FAILED: {type(_sc_exc).__name__}: {_sc_exc}')
-            pass  # DB error → treat as stale, fall through to recompute
-        if not _stale:
-            _tlog('W2 cache hit')
-            _hit = dict(_cached)          # shallow copy — don't mutate the stored entry
-            _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
-            return _hit
-        # Stale or check failed — fall through to full recompute
+        _tlog('W2 cache hit')
+        _hit = dict(_ANALYZE_CACHE[_ac_key])  # shallow copy — don't mutate the stored entry
+        _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
+        return _hit
 
     # Build date filter params (shared by both modes)
     date_conditions = ""
