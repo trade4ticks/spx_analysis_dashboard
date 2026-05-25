@@ -2631,6 +2631,7 @@ document.addEventListener('alpine:init', () => {
         dropped_warmup_n: d.dropped_warmup_n,
         universe_n:       d.universe_n,
         start_date:       d.start_date,
+        data_as_of:       d.data_as_of || null,
       };
       this.secStatus = { loaded: true, loading: false, error: null };
       this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
@@ -2700,6 +2701,8 @@ document.addEventListener('alpine:init', () => {
             filtered_dates:        this._secFilteredDates(),
             sec_bin_count:         this.secBinCount,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
+            mode:                  this.pageMode || 'walk_forward',
+            cutoff_date:           this.cutoffDate || '',
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -2735,6 +2738,8 @@ document.addEventListener('alpine:init', () => {
             ticker:                this.ticker,
             sec_bin_count:         this.secBinCount,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
+            mode:                  this.pageMode || 'walk_forward',
+            cutoff_date:           this.cutoffDate || '',
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

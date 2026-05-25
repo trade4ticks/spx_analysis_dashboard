@@ -14,10 +14,92 @@ from pydantic import BaseModel
 from app.db import get_pool, get_oi_pool
 
 # ── Secondary Signal Scanner cache ────────────────────────────────────────────
-_SEC_CACHE: dict = {}          # cache_key -> {rows, features, outcome}
+_SEC_CACHE: dict = {}          # cache_key -> {rows, features, outcome, data_as_of, ...}
 _SEC_SCORE_CACHE: dict = {}    # scan_key  → {status, result, error_msg}
-_SEC_SCORE_CACHE_MAX = 50      # evict oldest entry when exceeded
+_SEC_SCORE_CACHE_MAX = 50      # evict oldest entry when exceeded (in-memory only)
 _sec_scan_running: bool = False  # one background job at a time
+
+# ── Secondary Scanner DB persistence ──────────────────────────────────────────
+_SEC_SCAN_CACHE_MAX_ROWS = 50   # FIFO eviction when table reaches this count
+_sec_scan_table_ensured: bool = False
+
+_SEC_SCAN_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS sec_scan_cache (
+    structural_key  TEXT         PRIMARY KEY,
+    ticker          TEXT         NOT NULL,
+    primary_metric  TEXT         NOT NULL,
+    selected_bins   JSONB        NOT NULL,
+    outcome         TEXT         NOT NULL,
+    mode            TEXT         NOT NULL,
+    cutoff_date     DATE,
+    n_bins          INT          NOT NULL,
+    data_as_of      DATE         NOT NULL,
+    n_input_rows    INT,
+    payload         JSONB        NOT NULL,
+    cached_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS sec_scan_cache_cached_at ON sec_scan_cache (cached_at);
+"""
+
+
+async def _ensure_sec_scan_table(pool) -> None:
+    global _sec_scan_table_ensured
+    if _sec_scan_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_SEC_SCAN_TABLE_DDL)
+    _sec_scan_table_ensured = True
+
+
+def _sec_structural_key(
+    ticker: str, metric: str, outcome: str, mode: str,
+    cutoff: str, n_bins: int, selected_bins,
+) -> str:
+    """Stable DB lookup key — no date, no filtered_dates.  The key encodes every
+    parameter that can change the result; data_as_of lives separately in the row."""
+    bins_sorted = sorted(selected_bins) if selected_bins else []
+    bins_hash = hashlib.sha256(
+        json.dumps(bins_sorted, separators=(",", ":")).encode()
+    ).hexdigest()[:12]
+    cutoff_str = cutoff or "null"
+    return f"sec:{ticker}:{metric}:{outcome}:{mode}:{cutoff_str}:{n_bins}:{bins_hash}"
+
+
+async def _write_sec_scan_cache(
+    pool, structural_key: str, ticker: str, metric: str, outcome: str,
+    mode: str, cutoff_date_str: str, n_bins: int, selected_bins,
+    data_as_of_str: str, n_input_rows: int, result_dict: dict,
+) -> None:
+    """Upsert one secondary scan result into sec_scan_cache.  FIFO-evicts the
+    oldest row when the table is at capacity.  Non-fatal on any DB error."""
+    from datetime import date as _date
+    try:
+        payload_json = json.dumps(result_dict)
+        bins_json    = json.dumps(sorted(selected_bins) if selected_bins else [])
+        data_as_of_obj = _date.fromisoformat(data_as_of_str) if data_as_of_str else None
+        cutoff_obj     = _date.fromisoformat(cutoff_date_str) if cutoff_date_str else None
+        async with pool.acquire() as conn:
+            count = await conn.fetchval("SELECT COUNT(*) FROM sec_scan_cache")
+            if count >= _SEC_SCAN_CACHE_MAX_ROWS:
+                await conn.execute(
+                    "DELETE FROM sec_scan_cache WHERE cached_at = "
+                    "(SELECT MIN(cached_at) FROM sec_scan_cache)"
+                )
+            await conn.execute(
+                """INSERT INTO sec_scan_cache
+                   (structural_key, ticker, primary_metric, selected_bins, outcome,
+                    mode, cutoff_date, n_bins, data_as_of, n_input_rows, payload)
+                   VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                   ON CONFLICT (structural_key) DO UPDATE SET
+                       data_as_of   = EXCLUDED.data_as_of,
+                       n_input_rows = EXCLUDED.n_input_rows,
+                       payload      = EXCLUDED.payload,
+                       cached_at    = NOW()""",
+                structural_key, ticker, metric, bins_json, outcome,
+                mode, cutoff_obj, n_bins, data_as_of_obj, n_input_rows, payload_json,
+            )
+    except Exception:
+        pass  # non-fatal — in-memory _SEC_SCORE_CACHE still works
 
 # ── Trade-detail cache (W1) ────────────────────────────────────────────────────
 # Populated by /analyze; read by GET /trades and GET /trades/csv.
@@ -57,9 +139,11 @@ def _run_sec_score(
     primary_metric: str,
     selected_primary_bins,
     filtered_dates: list,
+    db_write_params=None,   # dict with loop/pool/structural_key/etc.; None = no DB write
 ) -> None:
     """Synchronous secondary score computation — runs in thread-pool executor.
-    Sets _sec_scan_running True at entry, False in finally."""
+    Sets _sec_scan_running True at entry, False in finally.
+    When db_write_params is provided, persists result to sec_scan_cache on success."""
     global _sec_scan_running
     _sec_scan_running = True
     try:
@@ -79,19 +163,41 @@ def _run_sec_score(
             ) if baseline_rets else 0,
         }
         start_date = filtered[0]["trade_date"] if filtered else None
-        _SEC_SCORE_CACHE[scan_key] = {
-            "status": "done",
-            "result": {
-                "baseline":         baseline,
-                "metrics":          metrics,
-                "mode":             "walk_forward",
-                "warmup":           spec.warmup,
-                "cutoff_date":      None,
-                "dropped_warmup_n": dropped,
-                "universe_n":       universe,
-                "start_date":       start_date,
-            },
+        result_dict = {
+            "baseline":         baseline,
+            "metrics":          metrics,
+            "mode":             "walk_forward",
+            "warmup":           spec.warmup,
+            "cutoff_date":      None,
+            "dropped_warmup_n": dropped,
+            "universe_n":       universe,
+            "start_date":       start_date,
+            "data_as_of":       db_write_params["data_as_of"] if db_write_params else None,
         }
+        _SEC_SCORE_CACHE[scan_key] = {"status": "done", "result": result_dict}
+        # Persist to DB so the next server session finds this result instantly.
+        if db_write_params:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    _write_sec_scan_cache(
+                        db_write_params["pool"],
+                        db_write_params["structural_key"],
+                        db_write_params["ticker"],
+                        db_write_params["metric"],
+                        db_write_params["outcome"],
+                        db_write_params["mode"],
+                        db_write_params.get("cutoff_date", ""),
+                        n_bins,
+                        selected_primary_bins,
+                        db_write_params["data_as_of"],
+                        db_write_params["n_input_rows"],
+                        result_dict,
+                    ),
+                    db_write_params["loop"],
+                )
+                future.result(timeout=15)  # block thread ≤15s; failure is non-fatal
+            except Exception:
+                pass
     except Exception as exc:
         _SEC_SCORE_CACHE[scan_key] = {
             "status": "error",
@@ -2471,6 +2577,8 @@ class SecLoadReq(BaseModel):
     filtered_dates: List[str] = []
     sec_bin_count: int = 10
     selected_primary_bins: Optional[List[int]] = None
+    mode: str = "walk_forward"
+    cutoff_date: str = ""
 
 
 class SecScanReq(BaseModel):
@@ -2495,9 +2603,12 @@ class SecDetailReq(BaseModel):
 async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
     """Fetch feature columns for the analysis date range (cached), then dispatch
     background scoring job.  Returns immediately with status='computing' on
-    cache miss, or status='done'/'error' if the job already finished."""
+    cache miss, or status='done'/'error' if the job already finished.
+    Checks sec_scan_cache before dispatching — a DB hit is served instantly."""
     if not pool:
         return {"error": "OI database not configured"}
+
+    await _ensure_sec_scan_table(pool)
 
     is_all = (req.ticker == "ALL")
     cache_key = _sec_cache_key(req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
@@ -2545,6 +2656,8 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
         for r in rows:
             r["trade_date"] = str(r["trade_date"])
 
+        data_as_of = max((r["trade_date"] for r in rows), default=None) if rows else None
+
         # Build per-ticker calendar (open/close lookup + date sequence).
         tickers_used = list({r.get("ticker") for r in rows if r.get("ticker")})
         cal_by_tkr = await _fetch_ticker_calendars(pool, tickers_used) if tickers_used else {}
@@ -2555,32 +2668,67 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
             "outcome":        req.outcome,
             "primary_metric": req.metric,
             "calendars":      cal_by_tkr,
+            "data_as_of":     data_as_of,
+            "mode":           req.mode,
+            "cutoff_date":    req.cutoff_date,
         }
 
     cached = _SEC_CACHE[cache_key]
     rows = cached["rows"]
     feature_cols = cached["features"]
+    data_as_of = cached.get("data_as_of")
     n_bins = max(2, min(20, req.sec_bin_count))
     scan_key = _sec_score_key(cache_key, req.selected_primary_bins, n_bins, req.filtered_dates)
+    structural_key = _sec_structural_key(
+        req.ticker, req.metric, req.outcome, req.mode,
+        req.cutoff_date, n_bins, req.selected_primary_bins or [],
+    )
 
     entry = _SEC_SCORE_CACHE.get(scan_key)
     if entry is None:
-        # Cache miss — dispatch background job (IC batch discipline: never auto-compute).
-        if _sec_scan_running:
-            return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
-                    "error": "A secondary scan is already running — wait for it to finish."}
-        if len(_ic_batch_running) >= 1:
-            return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
-                    "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
-        while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
-            _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
-        _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None, _run_sec_score,
-            scan_key, rows, cached["outcome"], feature_cols,
-            is_all, n_bins, cached["primary_metric"], req.selected_primary_bins, req.filtered_dates,
-        )
+        # Check DB cache before running a job — stored results are served instantly.
+        try:
+            async with pool.acquire() as conn:
+                db_row = await conn.fetchrow(
+                    "SELECT payload, data_as_of FROM sec_scan_cache WHERE structural_key = $1",
+                    structural_key,
+                )
+        except Exception:
+            db_row = None
+        if db_row:
+            result_dict = json.loads(db_row["payload"])
+            result_dict["data_as_of"] = str(db_row["data_as_of"]) if db_row["data_as_of"] else data_as_of
+            _SEC_SCORE_CACHE[scan_key] = {"status": "done", "result": result_dict}
+        else:
+            # DB miss — dispatch background job (IC batch discipline: never auto-compute).
+            if _sec_scan_running:
+                return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
+                        "error": "A secondary scan is already running — wait for it to finish."}
+            if len(_ic_batch_running) >= 1:
+                return {"cache_key": cache_key, "scan_key": scan_key, "status": "busy",
+                        "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
+            while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
+                _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
+            _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
+            loop = asyncio.get_running_loop()
+            db_write_params = {
+                "loop":           loop,
+                "pool":           pool,
+                "structural_key": structural_key,
+                "ticker":         req.ticker,
+                "metric":         req.metric,
+                "outcome":        req.outcome,
+                "mode":           req.mode,
+                "cutoff_date":    req.cutoff_date,
+                "data_as_of":     data_as_of,
+                "n_input_rows":   len(rows),
+            }
+            loop.run_in_executor(
+                None, _run_sec_score,
+                scan_key, rows, cached["outcome"], feature_cols,
+                is_all, n_bins, cached["primary_metric"], req.selected_primary_bins, req.filtered_dates,
+                db_write_params,
+            )
 
     entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
     response: dict = {"cache_key": cache_key, "scan_key": scan_key, "status": entry["status"]}
@@ -2592,8 +2740,9 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
 
 
 @router.post("/secondary-scan")
-async def secondary_scan(req: SecScanReq):
-    """Re-score secondary metrics for a new primary bin selection (background job)."""
+async def secondary_scan(req: SecScanReq, pool=Depends(get_oi_pool)):
+    """Re-score secondary metrics for a new primary bin selection (background job).
+    Checks sec_scan_cache before dispatching — a DB hit is served instantly."""
     cached = _SEC_CACHE.get(req.cache_key)
     if not cached:
         return {"error": "cache_miss"}
@@ -2603,26 +2752,62 @@ async def secondary_scan(req: SecScanReq):
     feature_cols = cached["features"]
     outcome_col = cached["outcome"]
     primary_metric = cached["primary_metric"]
+    data_as_of = cached.get("data_as_of")
+    mode = cached.get("mode", "walk_forward")
+    cutoff_date = cached.get("cutoff_date", "")
     n_bins = max(2, min(20, req.sec_bin_count))
     scan_key = _sec_score_key(req.cache_key, req.selected_primary_bins, n_bins, req.filtered_dates)
+    structural_key = _sec_structural_key(
+        req.ticker, primary_metric, outcome_col, mode,
+        cutoff_date, n_bins, req.selected_primary_bins or [],
+    )
 
     entry = _SEC_SCORE_CACHE.get(scan_key)
     if entry is None:
-        if _sec_scan_running:
-            return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
-                    "error": "A secondary scan is already running — wait for it to finish."}
-        if len(_ic_batch_running) >= 1:
-            return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
-                    "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
-        while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
-            _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
-        _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None, _run_sec_score,
-            scan_key, rows, outcome_col, feature_cols,
-            is_all, n_bins, primary_metric, req.selected_primary_bins, req.filtered_dates,
-        )
+        # Check DB cache before running a job — stored results are served instantly.
+        db_row = None
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    db_row = await conn.fetchrow(
+                        "SELECT payload, data_as_of FROM sec_scan_cache WHERE structural_key = $1",
+                        structural_key,
+                    )
+            except Exception:
+                db_row = None
+        if db_row:
+            result_dict = json.loads(db_row["payload"])
+            result_dict["data_as_of"] = str(db_row["data_as_of"]) if db_row["data_as_of"] else data_as_of
+            _SEC_SCORE_CACHE[scan_key] = {"status": "done", "result": result_dict}
+        else:
+            if _sec_scan_running:
+                return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
+                        "error": "A secondary scan is already running — wait for it to finish."}
+            if len(_ic_batch_running) >= 1:
+                return {"cache_key": req.cache_key, "scan_key": scan_key, "status": "busy",
+                        "error": "An IC batch job is running — wait for it to finish before loading the scanner."}
+            while len(_SEC_SCORE_CACHE) >= _SEC_SCORE_CACHE_MAX:
+                _SEC_SCORE_CACHE.pop(next(iter(_SEC_SCORE_CACHE)))
+            _SEC_SCORE_CACHE[scan_key] = {"status": "computing", "result": None, "error_msg": None}
+            loop = asyncio.get_running_loop()
+            db_write_params = {
+                "loop":           loop,
+                "pool":           pool,
+                "structural_key": structural_key,
+                "ticker":         req.ticker,
+                "metric":         primary_metric,
+                "outcome":        outcome_col,
+                "mode":           mode,
+                "cutoff_date":    cutoff_date,
+                "data_as_of":     data_as_of,
+                "n_input_rows":   len(rows),
+            } if pool else None
+            loop.run_in_executor(
+                None, _run_sec_score,
+                scan_key, rows, outcome_col, feature_cols,
+                is_all, n_bins, primary_metric, req.selected_primary_bins, req.filtered_dates,
+                db_write_params,
+            )
 
     entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
     response: dict = {"cache_key": req.cache_key, "scan_key": scan_key, "status": entry["status"]}
