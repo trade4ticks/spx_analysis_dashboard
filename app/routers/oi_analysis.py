@@ -26,6 +26,15 @@ _sec_scan_running: bool = False  # one background job at a time
 _TRADE_CACHE: dict = {}
 _TRADE_CACHE_MAX = 5  # keep last 5 unique (ticker,metric,outcome,mode) analyses
 
+# ── Full-response cache (W2) ──────────────────────────────────────────────────
+# Caches the complete /analyze response dict so mode switches and repeat
+# Analyzes skip the full 25s computation.  Staleness is checked on every
+# hit via one cheap SELECT MAX(trade_date).  Keyed by all params that
+# affect the computation result.
+# Max 4 entries × ~15MB each ≈ 60MB ceiling.
+_ANALYZE_CACHE: dict = {}
+_ANALYZE_CACHE_MAX = 4
+
 
 def _sec_score_key(cache_key: str, selected_primary_bins, n_bins: int, filtered_dates) -> str:
     """Stable hash for deduplicating secondary score jobs."""
@@ -216,6 +225,33 @@ async def analyze(
 
     _tlog('start')
 
+    # ── W2: full-response cache (staleness-checked) ───────────────────────────
+    _ac_key = (f"{ticker}:{metric}:{outcome}:{spec.kind}:"
+               f"{spec.cutoff.isoformat() if spec.kind == 'train_test' else ''}:"
+               f"{date_from or ''}:{date_to or ''}")
+
+    if _ac_key in _ANALYZE_CACHE:
+        _cached = _ANALYZE_CACHE[_ac_key]
+        _stale = True  # default: recompute if the staleness check itself fails
+        try:
+            async with pool.acquire() as _sc:
+                if is_all:
+                    _fresh_max = await _sc.fetchval(
+                        "SELECT MAX(trade_date) FROM daily_features")
+                else:
+                    _fresh_max = await _sc.fetchval(
+                        "SELECT MAX(trade_date) FROM daily_features WHERE ticker = $1",
+                        ticker)
+            _stale = str(_fresh_max) != _cached.get("data_as_of", "")
+        except Exception:
+            pass  # DB error → treat as stale, fall through to recompute
+        if not _stale:
+            _tlog('W2 cache hit')
+            _hit = dict(_cached)          # shallow copy — don't mutate the stored entry
+            _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
+            return _hit
+        # Stale or check failed — fall through to full recompute
+
     # Build date filter params (shared by both modes)
     date_conditions = ""
     params: list = []
@@ -229,6 +265,8 @@ async def analyze(
 
     horizon = _parse_horizon(outcome)
 
+    _max_trade_date: str = ""   # set after each branch's DB fetch; stored in cache for staleness
+
     # ── Data fetch & bucketing ────────────────────────────────────────────
     if is_all:
         # Per-ticker normalization: fetch all tickers, decile each independently
@@ -239,6 +277,8 @@ async def analyze(
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
                 f"ORDER BY ticker, trade_date", *params)
         row_dicts = [dict(r) for r in rows]
+        if row_dicts:
+            _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
         _tlog(f'ALL db_fetch1 ({len(row_dicts)} rows)')
 
         by_ticker: dict = defaultdict(list)
@@ -398,6 +438,8 @@ async def analyze(
                 f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {single_ticker_cond}"
                 f"{date_conditions} ORDER BY trade_date", *params_single)
         row_dicts = [dict(r) for r in rows]
+        if row_dicts:
+            _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
         _tlog(f'single db_fetch1 ({len(row_dicts)} rows)')
         # Single-ticker rows don't carry a "ticker" column in the SQL
         # SELECT; inject it so the row_compute Assigners can group
@@ -983,7 +1025,7 @@ async def analyze(
         today_decile = pairs_decile[-1] if pairs_decile else None
 
     _tlog('DONE')
-    return {
+    _result = {
         "ticker":   ticker,
         "metric":   metric,
         "outcome":  outcome,
@@ -1038,7 +1080,16 @@ async def analyze(
         # compare with client `server+1stbyte` to isolate FastAPI serialization cost.
         # Remove when W1 ships and the measurement confirms serialization collapsed.
         "_handler_ms":      round((_time.perf_counter() - _t0) * 1000),
+
+        # W2: max trade_date in the fetched rows — used as the staleness token
+        # for the response cache.  Also surfaced to the client for display.
+        "data_as_of":       _max_trade_date,
     }
+    # W2: populate response cache (evict oldest if at capacity)
+    if len(_ANALYZE_CACHE) >= _ANALYZE_CACHE_MAX:
+        del _ANALYZE_CACHE[next(iter(_ANALYZE_CACHE))]
+    _ANALYZE_CACHE[_ac_key] = _result
+    return _result
 
 
 # ── Trade-detail endpoints (W1) ───────────────────────────────────────────────
