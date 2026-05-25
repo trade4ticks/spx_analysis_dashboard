@@ -618,13 +618,23 @@ async def analyze(
         max_dd = 0.0
         points = []
         wins = 0
+        _prev_date_str: str = ""
         for date, ret in trades:
             cum += ret
             peak = max(peak, cum)
             max_dd = min(max_dd, cum - peak)
             if ret > 0:
                 wins += 1
-            points.append({"date": str(date), "value": round(cum, 6)})
+            # Deduplicate to one point per calendar date: multiple trades on
+            # the same date (e.g. different tickers in ALL mode) all contribute
+            # to the cumulative sum, but only the final value for that date is
+            # emitted.  Reduces points from ~17K/decile → ~1250 (trading days).
+            _ds = str(date)
+            if _ds == _prev_date_str:
+                points[-1]["value"] = round(cum, 6)
+            else:
+                points.append({"date": _ds, "value": round(cum, 6)})
+                _prev_date_str = _ds
         nn = len(trades)
         return {
             "points":     points,
