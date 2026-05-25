@@ -195,11 +195,13 @@ document.addEventListener('alpine:init', () => {
       this.$watch('outcome', () => {
         this._stopIcBatchPolling();
         this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
+        this.icBatchRefreshAt = null; // clear: Refresh was for old combo, don't poison new combo's cache reads
         this.loadIcBatch();
       });
       this.$watch('pageMode', () => {
         this._stopIcBatchPolling();
         this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
+        this.icBatchRefreshAt = null; // clear: Refresh was for old combo, don't poison new combo's cache reads
         this.loadIcBatch();
       });
       this.loadIcBatch();
@@ -4745,6 +4747,11 @@ document.addEventListener('alpine:init', () => {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
       if (!this.ticker || !this.outcome) return;
+      // Seq guard: read current seq without bumping (loadIcBatch owns bumping).
+      // If outcome/mode changes while the POST is in-flight, icBatchSeq will
+      // have been bumped by the new loadIcBatch() call, and the stale POST
+      // response will bail before writing any state.
+      const _seq = this.icBatchSeq;
       this.icBatchLoading  = true;
       this.icBatchError    = null;
       this.icBatchData     = null;
@@ -4754,8 +4761,10 @@ document.addEventListener('alpine:init', () => {
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
+        if (_seq !== this.icBatchSeq) return; // outcome/mode changed mid-flight — discard
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
+        if (_seq !== this.icBatchSeq) return; // changed during json parse — discard
         if (d.error) throw new Error(d.error);
 
         if (d.status === 'busy') {
@@ -4770,11 +4779,12 @@ document.addEventListener('alpine:init', () => {
           this._startIcBatchPolling();
         }
       } catch (e) {
+        if (_seq !== this.icBatchSeq) return; // stale error — discard
         this.icBatchStatus = 'failed';
         this.icBatchError  = e.message;
         this._stopIcBatchPolling();
       } finally {
-        this.icBatchLoading = false;
+        if (_seq === this.icBatchSeq) this.icBatchLoading = false;
       }
     },
 
