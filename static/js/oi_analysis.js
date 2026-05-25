@@ -240,8 +240,13 @@ document.addEventListener('alpine:init', () => {
         setTimeout(() => {
           this._renderCharts();
           const _ct3 = performance.now();
+          // _handler_ms: time inside the Python handler (measured at return stmt).
+          // serialize_est: (server+1stbyte) - handler — the FastAPI JSON-serialize gap.
+          const _handlerS  = (this.data._handler_ms || 0) / 1000;
+          const _serEst    = Math.max(0, (_ct1 - _ct0) / 1000 - _handlerS).toFixed(2);
           console.log(
-            `[loadAnalysis] server+1stbyte: ${((_ct1-_ct0)/1000).toFixed(2)}s` +
+            `[loadAnalysis] handler: ${_handlerS.toFixed(2)}s` +
+            `  serialize_est: ${_serEst}s` +
             `  body+parse: ${((_ct2-_ct1)/1000).toFixed(2)}s` +
             `  render: ${((_ct3-_ct2)/1000).toFixed(2)}s` +
             `  total: ${((_ct3-_ct0)/1000).toFixed(2)}s  [${this.ticker}|${this.pageMode}]`

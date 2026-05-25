@@ -948,6 +948,11 @@ async def analyze(
         "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
         "dropped_warmup_n": wf_dropped,
         "start_date":       str(pairs[0][2]) if pairs else None,
+
+        # Diagnostic: handler elapsed time (ms) measured at the return statement.
+        # compare with client `server+1stbyte` to isolate FastAPI serialization cost.
+        # Remove when W1 ships and the measurement confirms serialization collapsed.
+        "_handler_ms":      round((_time.perf_counter() - _t0) * 1000),
     }
 
 
