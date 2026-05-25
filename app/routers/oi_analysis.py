@@ -19,6 +19,13 @@ _SEC_SCORE_CACHE: dict = {}    # scan_key  → {status, result, error_msg}
 _SEC_SCORE_CACHE_MAX = 50      # evict oldest entry when exceeded
 _sec_scan_running: bool = False  # one background job at a time
 
+# ── Trade-detail cache (W1) ────────────────────────────────────────────────────
+# Populated by /analyze; read by GET /trades and GET /trades/csv.
+# Key: "{ticker}:{metric}:{outcome}:{mode}:{cutoff_date}"
+# Value: list of full trade-detail dicts (one per pair).
+_TRADE_CACHE: dict = {}
+_TRADE_CACHE_MAX = 5  # keep last 5 unique (ticker,metric,outcome,mode) analyses
+
 
 def _sec_score_key(cache_key: str, selected_primary_bins, n_bins: int, filtered_dates) -> str:
     """Stable hash for deduplicating secondary score jobs."""
@@ -293,8 +300,8 @@ async def analyze(
         #   walk-forward: legacy has no bucket-iteration step; same-date rows
         #     come out in alphabetical-ticker order (matches mine without
         #     extra tie-break).
-        # `dow_data` is the canary — it iterates `pairs` in order and the
-        # harness can't key it by (ticker, date) because the field is absent.
+        # Pairs iteration order is chronological (walk_forward) or
+        # (date, bin, ticker, x) (in_sample/train_test) — matching legacy ordering.
         if walk_forward:
             valid_a10.sort(key=lambda a: a.trade_date)
         else:
@@ -832,62 +839,127 @@ async def analyze(
         }
     _tlog('common rolling_ic (252d + 21d)')
 
-    # ── Trade calendar & day-of-week (uses per-ticker decile assignments) ─
+    # ── Slim trade_calendar + server-side aggregated stats (W1) ──────────────
+    # trade_calendar ships {date, ret, ticker, decile20} only — heavy per-row
+    # fields are served lazily via GET /trades.  DOW / monthly / yearly /
+    # activity stats are pre-aggregated by (date20) bucket here so the
+    # frontend can filter by selectedBins20 without a large payload.
     spot_by_date = {s["date"]: s["value"] for s in spot_series} if spot_series else {}
-    # Index into the complete (unfiltered) trading-day list for correct exit_date offsets
     all_spot_date_idx = {d: i for i, d in enumerate(all_spot_dates)} if all_spot_dates else {}
 
+    _dow_acc: dict = defaultdict(lambda: defaultdict(list))  # [dow][dec20] → [ret]
+    _mo_acc:  dict = defaultdict(lambda: defaultdict(list))  # [(yr,mo)][dec20] → [ret]
+    _yr_acc:  dict = defaultdict(lambda: defaultdict(list))  # [yr][dec20] → [ret]
+    _act_acc: dict = defaultdict(lambda: defaultdict(int))   # [date][dec20] → entry_count
+    _trade_details: list = []  # full detail per pair; stored in _TRADE_CACHE for /trades
+
     trade_calendar = []
-    dow_data = []
     for idx, pair in enumerate(pairs):
         x, y, d = pair[0], pair[1], pair[2]
-        tkr = pair[3] if len(pair) > 3 else ticker
-        yr  = d.year     if hasattr(d, 'year')    else int(str(d)[:4])
-        mo  = d.month    if hasattr(d, 'month')   else int(str(d)[5:7])
-        dow = d.weekday() if hasattr(d, 'weekday') else 0
+        tkr  = pair[3] if len(pair) > 3 else ticker
+        yr   = d.year      if hasattr(d, 'year')     else int(str(d)[:4])
+        mo   = d.month     if hasattr(d, 'month')    else int(str(d)[5:7])
+        dow  = d.weekday() if hasattr(d, 'weekday')  else 0
         date_str = str(d.date() if hasattr(d, 'date') else d)
-        dec  = pairs_decile[idx]
+        dec   = pairs_decile[idx]
         dec20 = (pairs_decile20[idx] or None) if pairs_decile20 else None
-        entry = {
-            "ticker": tkr, "metric_val": round(x, 6),
-            "year": yr, "month": mo, "date": date_str,
-            "ret": round(y, 6), "decile": dec,
-        }
+
+        # Slim calendar entry — used for equity curve (needs date+ret+decile20)
+        # and secondary scanner filtered_dates (needs ticker+date+decile20).
+        entry = {"date": date_str, "ret": round(y, 6), "ticker": tkr}
         if dec20 is not None:
             entry["decile20"] = dec20
-        # entry = open of trade_date; exit = close of trade_date + (N-1) trading days
+        trade_calendar.append(entry)
+
+        # Accumulate into aggregated stats (only when dec20 is known)
+        if dec20 is not None:
+            _dow_acc[dow][dec20].append(y)
+            _mo_acc[(yr, mo)][dec20].append(y)
+            _yr_acc[yr][dec20].append(y)
+            _act_acc[date_str][dec20] += 1
+
+        # Full detail record for /trades endpoint
+        detail: dict = {
+            "date": date_str, "ticker": tkr,
+            "metric_val": round(x, 6), "ret": round(y, 6),
+            "decile": dec, "decile20": dec20,
+        }
         if is_all:
             eo = all_open_by_tkr_date.get((tkr, date_str))
             if eo is not None:
-                entry["spot_entry"] = eo
-            tkr_idx = all_date_idx_by_tkr.get(tkr, {})
+                detail["spot_entry"] = eo
+            tkr_idx   = all_date_idx_by_tkr.get(tkr, {})
             tkr_dates = all_dates_list_by_tkr.get(tkr, [])
             if date_str in tkr_idx:
                 ei = tkr_idx[date_str] + max(horizon - 1, 0)
                 if ei < len(tkr_dates):
                     ed = tkr_dates[ei]
-                    entry["exit_date"] = ed
+                    detail["exit_date"] = ed
                     ec = all_close_by_tkr.get(tkr, {}).get(ed)
                     if ec is not None:
-                        entry["spot_exit"] = ec
+                        detail["spot_exit"] = ec
         else:
             if open_by_date and date_str in open_by_date:
-                entry["spot_entry"] = open_by_date[date_str]
+                detail["spot_entry"] = open_by_date[date_str]
             elif spot_by_date and date_str in spot_by_date:
-                entry["spot_entry"] = spot_by_date[date_str]
+                detail["spot_entry"] = spot_by_date[date_str]
             if all_spot_date_idx and date_str in all_spot_date_idx:
                 ei = all_spot_date_idx[date_str] + max(horizon - 1, 0)
                 if ei < len(all_spot_dates):
                     exit_date_str = all_spot_dates[ei]
-                    entry["exit_date"] = exit_date_str
+                    detail["exit_date"] = exit_date_str
                     if exit_date_str in close_by_date:
-                        entry["spot_exit"] = close_by_date[exit_date_str]
-        trade_calendar.append(entry)
-        dow_entry = {"dow": dow, "ret": round(y, 6), "decile": dec}
-        if dec20 is not None:
-            dow_entry["decile20"] = dec20
-        dow_data.append(dow_entry)
-    _tlog(f'common trade_cal + dow ({len(trade_calendar)} entries)')
+                        detail["spot_exit"] = close_by_date[exit_date_str]
+        _trade_details.append(detail)
+
+    # Build server-side aggregated stats
+    def _agg(rets):
+        n = len(rets)
+        if not n:
+            return None
+        avg = float(np.mean(rets))
+        wr  = float(np.mean([1.0 if v > 0 else 0.0 for v in rets]))
+        return n, round(avg, 6), round(wr, 4)
+
+    dow_stats: list = []
+    for _dv, _dm in sorted(_dow_acc.items()):
+        for _dc, _rets in sorted(_dm.items()):
+            r = _agg(_rets)
+            if r:
+                dow_stats.append({"dow": _dv, "decile20": _dc,
+                                   "n": r[0], "avg_ret": r[1], "win_rate": r[2]})
+
+    monthly_stats: list = []
+    for (_yr2, _mo2), _dm in sorted(_mo_acc.items()):
+        for _dc, _rets in sorted(_dm.items()):
+            r = _agg(_rets)
+            if r:
+                monthly_stats.append({"year": _yr2, "month": _mo2, "decile20": _dc,
+                                       "n": r[0], "avg_ret": r[1]})
+
+    yearly_stats: list = []
+    for _yr2, _dm in sorted(_yr_acc.items()):
+        for _dc, _rets in sorted(_dm.items()):
+            r = _agg(_rets)
+            if r:
+                yearly_stats.append({"year": _yr2, "decile20": _dc,
+                                      "n": r[0], "avg_ret": r[1], "win_rate": r[2]})
+
+    activity_by_date: list = [
+        {"date": _dt, "decile20": _dc, "n": _cnt}
+        for _dt, _dm in sorted(_act_acc.items())
+        for _dc, _cnt in sorted(_dm.items())
+    ]
+
+    # Store full trade details for /trades endpoint
+    _tc_key = (f"{ticker}:{metric}:{outcome}:{spec.kind}:"
+               f"{spec.cutoff.isoformat() if spec.kind == 'train_test' else ''}")
+    if len(_TRADE_CACHE) >= _TRADE_CACHE_MAX:
+        del _TRADE_CACHE[next(iter(_TRADE_CACHE))]
+    _TRADE_CACHE[_tc_key] = _trade_details
+
+    _tlog(f'common trade_cal+stats ({len(trade_calendar)} trades, '
+          f'{len(dow_stats)} dow, {len(yearly_stats)} yr, {len(activity_by_date)} act rows)')
 
     # ── Today's value (single-ticker only) ───────────────────────────────
     # today_decile is the bin the Assigner already computed for the latest
@@ -931,7 +1003,10 @@ async def analyze(
         "yearly_consistency": yearly_consistency,
         "rolling_ic":         rolling_ic_payload,
         "trade_calendar":     trade_calendar,
-        "dow_data":           dow_data,
+        "dow_stats":          dow_stats,
+        "monthly_stats":      monthly_stats,
+        "yearly_stats":       yearly_stats,
+        "activity_by_date":   activity_by_date,
         "spot_series":        spot_series,
 
         # Today (null in ALL mode)
@@ -954,6 +1029,119 @@ async def analyze(
         # Remove when W1 ships and the measurement confirms serialization collapsed.
         "_handler_ms":      round((_time.perf_counter() - _t0) * 1000),
     }
+
+
+# ── Trade-detail endpoints (W1) ───────────────────────────────────────────────
+# /trades  — paginated full trade list from the most-recent /analyze cache.
+# /trades/csv — streaming CSV download of the same data.
+
+@router.get("/trades")
+async def get_trades(
+    ticker:      str            = Query(...),
+    metric:      str            = Query(...),
+    outcome:     str            = Query(...),
+    mode:        str            = Query("walk_forward"),
+    cutoff_date: Optional[str]  = Query(None),
+    decile20:    Optional[List[int]] = Query(None),
+    sort_key:    str            = Query("date"),
+    sort_dir:    str            = Query("desc"),
+    page:        int            = Query(0),
+    page_size:   int            = Query(250),
+):
+    """Return a paginated list of full trade details from the in-memory cache
+    populated by /analyze.  Returns {trades, total, page, page_size} or
+    {error:'not_cached'} if no matching analysis has been run yet."""
+    _tc_key = f"{ticker}:{metric}:{outcome}:{mode}:{cutoff_date or ''}"
+    trades = _TRADE_CACHE.get(_tc_key)
+    if trades is None:
+        return {"trades": [], "total": 0, "page": page, "page_size": page_size,
+                "error": "not_cached"}
+
+    # Apply decile20 filter
+    if decile20:
+        dec_set = set(decile20)
+        filtered: list = [t for t in trades if t.get("decile20") in dec_set]
+    else:
+        filtered = list(trades)
+
+    # Sort
+    _str_keys = {"date", "ticker", "exit_date"}
+    _desc = (sort_dir != "asc")
+
+    def _sort_val(t):
+        if sort_key == "bin":
+            v = t.get("decile20") or t.get("decile") or 0
+        else:
+            v = t.get(sort_key)
+        if v is None:
+            return "" if sort_key in _str_keys else float("-inf")
+        return v
+
+    try:
+        filtered.sort(key=_sort_val, reverse=_desc)
+    except TypeError:
+        pass  # mixed types — leave unsorted
+
+    total = len(filtered)
+    start = page * page_size
+    return {
+        "trades":    filtered[start:start + page_size],
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/trades/csv")
+async def get_trades_csv(
+    ticker:      str            = Query(...),
+    metric:      str            = Query(...),
+    outcome:     str            = Query(...),
+    mode:        str            = Query("walk_forward"),
+    cutoff_date: Optional[str]  = Query(None),
+    decile20:    Optional[List[int]] = Query(None),
+):
+    """Stream all matching trades as a CSV file attachment."""
+    import csv, io
+    from fastapi.responses import Response
+    from datetime import date as _date
+
+    _tc_key = f"{ticker}:{metric}:{outcome}:{mode}:{cutoff_date or ''}"
+    trades = _TRADE_CACHE.get(_tc_key)
+    if trades is None:
+        return Response(content=b"not_cached — run /analyze first",
+                        status_code=404, media_type="text/plain")
+
+    if decile20:
+        dec_set = set(decile20)
+        filtered: list = [t for t in trades if t.get("decile20") in dec_set]
+    else:
+        filtered = list(trades)
+
+    filtered.sort(key=lambda t: t.get("date", ""))
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["date", "ticker", metric or "metric", "spot_entry", "spot_exit",
+                     "ret_pct", "exit_date", "bin20"])
+    for t in filtered:
+        writer.writerow([
+            t.get("date", ""),
+            t.get("ticker", ""),
+            t.get("metric_val", ""),
+            t.get("spot_entry", ""),
+            t.get("spot_exit", ""),
+            f"{t.get('ret', 0) * 100:.6f}",
+            t.get("exit_date", ""),
+            t.get("decile20") or t.get("decile") or "",
+        ])
+
+    fname = f"trades_{ticker}_{metric}_{_date.today().isoformat()}.csv"
+    return Response(
+        content=buf.getvalue().encode("utf-8"),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/heatmap")

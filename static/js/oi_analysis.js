@@ -662,25 +662,32 @@ document.addEventListener('alpine:init', () => {
 
     _renderYearly() {
       const el = document.getElementById('chart-yearly');
-      if (!el || !this.data?.trade_calendar) return;
+      if (!el || !this.data) return;
       if (this._charts['yearly']) this._charts['yearly'].destroy();
 
-      const cal = this.data.trade_calendar || [];
-      const has20y = !!(cal[0]?.decile20);
-      const filtered = has20y && this.selectedBins20.size > 0
-        ? cal.filter(c => this.selectedBins20.has(c.decile20))
-        : cal;
+      // W1: use pre-aggregated yearly_stats (server-side) instead of trade_calendar.
+      const ystats = this.data.yearly_stats;
+      if (!ystats?.length) return;
+
+      const hasBins = ystats.some(y => y.decile20 != null);
+      const filtered = hasBins && this.selectedBins20.size > 0
+        ? ystats.filter(y => this.selectedBins20.has(y.decile20))
+        : ystats;
+
+      // N-weighted avg and win-rate, grouped by year.
       const byYear = {};
-      for (const c of filtered) {
-        if (!byYear[c.year]) byYear[c.year] = { rets: [], wins: 0 };
-        byYear[c.year].rets.push(c.ret);
-        if (c.ret > 0) byYear[c.year].wins++;
+      for (const y of filtered) {
+        if (!byYear[y.year]) byYear[y.year] = { n: 0, sumRet: 0, wins: 0 };
+        byYear[y.year].n      += y.n;
+        byYear[y.year].sumRet += y.avg_ret * y.n;
+        byYear[y.year].wins   += y.win_rate * y.n;
       }
       const years = Object.keys(byYear).sort();
       const avgs = years.map(yr => {
-        const r = byYear[yr].rets;
-        return r.length ? r.reduce((a,b) => a+b, 0) / r.length * 100 : 0;
+        const b = byYear[yr];
+        return b.n > 0 ? b.sumRet / b.n * 100 : 0;
       });
+
       const g_y = 20 / this.decileBins;
       const _lbl = this.decileBins === 20 ? 'B' : 'D';
       const selDispY = new Set([...this.selectedBins20].map(b => Math.ceil(b / g_y)));
@@ -705,10 +712,10 @@ document.addEventListener('alpine:init', () => {
               callbacks: {
                 label: ctx => {
                   const yr = years[ctx.dataIndex];
-                  const info = byYear[yr];
-                  const avg = info.rets.reduce((a,b)=>a+b,0) / info.rets.length;
-                  const wr = info.wins / info.rets.length;
-                  return [`Avg: ${(avg*100).toFixed(3)}%`, `WR: ${(wr*100).toFixed(0)}%`, `n: ${info.rets.length}`];
+                  const b  = byYear[yr];
+                  const avg = b.n > 0 ? b.sumRet / b.n : 0;
+                  const wr  = b.n > 0 ? b.wins   / b.n : 0;
+                  return [`Avg: ${(avg*100).toFixed(3)}%`, `WR: ${(wr*100).toFixed(0)}%`, `n: ${b.n}`];
                 },
               },
             },
@@ -1359,39 +1366,41 @@ document.addEventListener('alpine:init', () => {
     // ── Trade calendar (month × year heatmap) ───────────────────────────
     _renderTradeCalendar() {
       const el = document.getElementById('chart-calendar');
-      if (!el || !this.data?.trade_calendar) return;
+      if (!el || !this.data) return;
       if (this._charts['calendar']) this._charts['calendar'].destroy();
 
-      const cal = this.data.trade_calendar || [];
-      const has20c = !!(cal[0]?.decile20);
-      const filtered = has20c && this.selectedBins20.size > 0
-        ? cal.filter(c => this.selectedBins20.has(c.decile20))
-        : cal;
+      // W1: use pre-aggregated monthly_stats (server-side) instead of trade_calendar.
+      const mstats = this.data.monthly_stats;
+      if (!mstats?.length) return;
 
-      // Group by year × month
+      const hasBins = mstats.some(m => m.decile20 != null);
+      const filtered = hasBins && this.selectedBins20.size > 0
+        ? mstats.filter(m => this.selectedBins20.has(m.decile20))
+        : mstats;
+
+      // N-weighted avg grouped by (year, month).
       const byYM = {};
-      for (const c of filtered) {
-        const k = `${c.year}-${c.month}`;
-        if (!byYM[k]) byYM[k] = [];
-        byYM[k].push(c.ret);
+      for (const m of filtered) {
+        const k = `${m.year}-${m.month}`;
+        if (!byYM[k]) byYM[k] = { sumN: 0, sumRet: 0, year: m.year, month: m.month };
+        byYM[k].sumN   += m.n;
+        byYM[k].sumRet += m.avg_ret * m.n;
       }
 
-      const years = [...new Set(filtered.map(c => c.year))].sort();
-      const months = [1,2,3,4,5,6,7,8,9,10,11,12];
+      const years = [...new Set(filtered.map(m => m.year))].sort();
       const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-      // Build bubble data
       const points = [];
       let minAvg = Infinity, maxAvg = -Infinity;
       for (let yi = 0; yi < years.length; yi++) {
         for (let mi = 0; mi < 12; mi++) {
-          const rets = byYM[`${years[yi]}-${mi+1}`];
-          if (!rets?.length) continue;
-          const avg = rets.reduce((a,b)=>a+b,0) / rets.length;
+          const agg = byYM[`${years[yi]}-${mi+1}`];
+          if (!agg || !agg.sumN) continue;
+          const avg = agg.sumRet / agg.sumN;
           minAvg = Math.min(minAvg, avg);
           maxAvg = Math.max(maxAvg, avg);
-          points.push({ x: mi, y: yi, r: Math.min(Math.max(rets.length, 4), 15),
-                        avg, n: rets.length, year: years[yi], month: mi+1 });
+          points.push({ x: mi, y: yi, r: Math.min(Math.max(agg.sumN, 4), 15),
+                        avg, n: agg.sumN, year: years[yi], month: mi+1 });
         }
       }
 
@@ -1431,29 +1440,32 @@ document.addEventListener('alpine:init', () => {
     // ── Day of week P&L ────────────────────────────────────────────────
     _renderDOW() {
       const el = document.getElementById('chart-dow');
-      if (!el || !this.data?.dow_data) return;
+      if (!el || !this.data) return;
       if (this._charts['dow']) this._charts['dow'].destroy();
 
-      const dowNames = ['Mon','Tue','Wed','Thu','Fri'];
-      const has20d = !!(this.data.dow_data?.[0]?.decile20);
-      const filtered = has20d && this.selectedBins20.size > 0
-        ? this.data.dow_data.filter(d => this.selectedBins20.has(d.decile20))
-        : this.data.dow_data;
+      // W1: use pre-aggregated dow_stats (server-side) instead of dow_data.
+      const dstats = this.data.dow_stats;
+      if (!dstats?.length) return;
 
+      const dowNames = ['Mon','Tue','Wed','Thu','Fri'];
+      const hasBins = dstats.some(d => d.decile20 != null);
+      const filtered = hasBins && this.selectedBins20.size > 0
+        ? dstats.filter(d => this.selectedBins20.has(d.decile20))
+        : dstats;
+
+      // N-weighted avg_ret and win_rate by day-of-week.
       const byDow = {};
       for (const d of filtered) {
-        if (!byDow[d.dow]) byDow[d.dow] = [];
-        byDow[d.dow].push(d.ret);
+        if (!byDow[d.dow]) byDow[d.dow] = { sumN: 0, sumRet: 0, sumWr: 0 };
+        byDow[d.dow].sumN   += d.n;
+        byDow[d.dow].sumRet += d.avg_ret * d.n;
+        byDow[d.dow].sumWr  += d.win_rate * d.n;
       }
-      const avgs = dowNames.map((_, i) => {
-        const rets = byDow[i] || [];
-        return rets.length ? rets.reduce((a,b)=>a+b,0) / rets.length * 100 : 0;
-      });
-      const counts = dowNames.map((_, i) => (byDow[i] || []).length);
-      const wrs = dowNames.map((_, i) => {
-        const rets = byDow[i] || [];
-        return rets.length ? rets.filter(r => r > 0).length / rets.length * 100 : 0;
-      });
+      const avgs   = dowNames.map((_, i) =>
+        byDow[i] && byDow[i].sumN ? byDow[i].sumRet / byDow[i].sumN * 100 : 0);
+      const counts = dowNames.map((_, i) => byDow[i]?.sumN || 0);
+      const wrs    = dowNames.map((_, i) =>
+        byDow[i] && byDow[i].sumN ? byDow[i].sumWr / byDow[i].sumN * 100 : 0);
 
       this._charts['dow'] = new Chart(el, {
         type: 'bar',
@@ -1517,48 +1529,42 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Trade activity: entries/open per day (computed client-side from trade_calendar) ──
+    // ── Trade activity: entries/open per day ──────────────────────────────────
     _renderActivity() {
       const el = document.getElementById('chart-activity');
-      if (!el || !this.data?.trade_calendar) return;
+      if (!el || !this.data) return;
       if (this._charts['activity']) this._charts['activity'].destroy();
 
-      const cal = this.data.trade_calendar || [];
-      if (!cal.length) return;
-
-      const has20a = !!(cal[0]?.decile20);
-      const filtered = has20a && this.selectedBins20.size > 0
-        ? cal.filter(c => this.selectedBins20.has(c.decile20))
-        : cal;
-      if (!filtered.length) return;
+      // W1: use pre-aggregated activity_by_date (server-side).
+      // dedupeConc.primary is dropped — slim trade_calendar no longer carries ticker.
+      const actData = this.data.activity_by_date;
+      if (!actData?.length) return;
 
       const horizon = this.data.horizon || 1;
+      const hasBins = actData.some(a => a.decile20 != null);
+      const filtered = hasBins && this.selectedBins20.size > 0
+        ? actData.filter(a => this.selectedBins20.has(a.decile20))
+        : actData;
 
-      // True calendar x-axis: spot_series = all trading days (single-ticker);
-      // ALL mode: union of entry dates (covers most trading days across tickers)
-      const spotSeries = this.data.spot_series || [];
+      // Sum entry counts by date across selected bins.
+      const entriesByDate = {};
+      for (const a of filtered) {
+        entriesByDate[a.date] = (entriesByDate[a.date] || 0) + a.n;
+      }
+
+      // Trading-day axis: spot_series for single-ticker; activity dates for ALL.
+      const spotSeries  = this.data.spot_series || [];
       const tradingDays = spotSeries.length > 0
         ? spotSeries.map(s => s.date)
-        : [...new Set(cal.map(c => c.date))].sort();
-
-      // Optionally drop entries that overlap a still-open trade of the same ticker.
-      const entries = filtered.map(c => ({ ticker: c.ticker, date: c.date }));
-      const kept = this.dedupeConc.primary
-        ? this._dedupeConcurrent(entries, tradingDays, horizon)
-        : entries;
-      const entriesByDate = {};
-      for (const t of kept) entriesByDate[t.date] = (entriesByDate[t.date] || 0) + 1;
+        : [...new Set(actData.map(a => a.date))].sort();
 
       const entered = tradingDays.map(d => entriesByDate[d] || 0);
-
-      // Open positions on day i = entries in the N-trading-day window ending at i.
-      // A trade entered on day T is open for exactly N trading days (T..T+N-1),
-      // so on day D (index i) count entries from index max(0, i-N+1) to i.
-      // Maximum open count can never exceed N.
+      // Open = entries in the N-trading-day window [i-N+1 .. i]
       const open = tradingDays.map((_, i) => {
-        const startIdx = Math.max(0, i - horizon + 1);
         let count = 0;
-        for (let j = startIdx; j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
+        for (let j = Math.max(0, i - horizon + 1); j <= i; j++) {
+          count += entriesByDate[tradingDays[j]] || 0;
+        }
         return count;
       });
 
@@ -1643,53 +1649,65 @@ document.addEventListener('alpine:init', () => {
       const headEl = document.getElementById('trade-table-head');
       const bodyEl = document.getElementById('trade-table-body');
       const cntEl  = document.getElementById('trade-table-count');
-      if (!bodyEl || !this.data?.trade_calendar) return;
-
-      const cal = this.data.trade_calendar || [];
-      const has20 = !!(cal[0]?.decile20);
-      // Bin filter from the decile pane above — same filter both views see.
-      const filtered = has20 && this.selectedBins20.size > 0
-        ? cal.filter(c => this.selectedBins20.has(c.decile20))
-        : cal;
+      if (!bodyEl || !this.data) return;
 
       if (this.tradeView === 'by_ticker') {
+        // By-ticker view aggregates from slim trade_calendar (has ticker+ret+decile20).
+        const cal = this.data.trade_calendar || [];
+        const has20 = !!(cal[0]?.decile20);
+        const filtered = has20 && this.selectedBins20.size > 0
+          ? cal.filter(c => this.selectedBins20.has(c.decile20))
+          : cal;
         this._renderTradeTableByTicker(headEl, bodyEl, cntEl, filtered);
       } else {
-        this._renderTradeTableFlat(headEl, bodyEl, cntEl, filtered);
+        // Flat view fetches full trade details from /trades endpoint (W1).
+        this._renderTradeTableFlat(headEl, bodyEl, cntEl).catch(e => {
+          if (bodyEl) bodyEl.innerHTML =
+            `<tr><td colspan="8" style="color:#e84393;padding:8px">Error: ${e.message}</td></tr>`;
+        });
       }
     },
 
-    _renderTradeTableFlat(headEl, bodyEl, cntEl, filtered) {
-      const key = this.tradeSortKey;
-      const dir = this.tradeSortDir === 'asc' ? 1 : -1;
-      const strKeys = new Set(['date', 'ticker', 'exit_date']);
-      const sortVal = (c) => {
-        switch (key) {
-          case 'date':       return c.date       || '';
-          case 'ticker':     return c.ticker     || '';
-          case 'metric_val': return c.metric_val ?? -Infinity;
-          case 'spot_entry': return c.spot_entry ?? -Infinity;
-          case 'spot_exit':  return c.spot_exit  ?? -Infinity;
-          case 'ret':        return c.ret        ?? -Infinity;
-          case 'exit_date':  return c.exit_date  || '';
-          case 'bin':        return c.decile20   || c.decile || 0;
-          default:           return '';
-        }
-      };
-      const sorted = filtered.slice().sort((a, b) => {
-        const va = sortVal(a), vb = sortVal(b);
-        if (strKeys.has(key)) return dir * String(va).localeCompare(String(vb));
-        return dir * (va - vb);
+    async _renderTradeTableFlat(headEl, bodyEl, cntEl) {
+      // W1: fetch full trade details from /trades endpoint (server-side cache).
+      if (!this.data) return;
+      if (bodyEl) bodyEl.innerHTML =
+        '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Loading…</td></tr>';
+
+      const mode = this.pageMode === 'train_test' ? 'train_test'
+                 : this.pageMode === 'in_sample'  ? 'in_sample'
+                 : 'walk_forward';
+      const params = new URLSearchParams({
+        ticker:   this.ticker,
+        metric:   this.metric,
+        outcome:  this.outcome,
+        mode,
+        sort_key: this.tradeSortKey,
+        sort_dir: this.tradeSortDir,
+        page:     0,
+        page_size: 250,
       });
-      const LIMIT = 250;
-      const rows = sorted.slice(0, LIMIT);
+      if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
+      for (const b of this.selectedBins20) params.append('decile20', b);
+
+      const r = await fetch(`/api/oi-analysis/trades?${params}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+
+      if (d.error === 'not_cached') {
+        if (bodyEl) bodyEl.innerHTML =
+          '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Run Analyze first</td></tr>';
+        return;
+      }
+
+      const rows  = d.trades || [];
+      const total = d.total  || 0;
 
       if (cntEl) {
-        cntEl.textContent = filtered.length > LIMIT
-          ? `Showing ${LIMIT} of ${filtered.length.toLocaleString()} trades — export CSV for all`
-          : `${filtered.length.toLocaleString()} trades`;
+        cntEl.textContent = total > 250
+          ? `Showing 250 of ${total.toLocaleString()} trades — export CSV for all`
+          : `${total.toLocaleString()} trades`;
       }
-      // Column widths
       const colsEl = document.getElementById('trade-table-cols');
       if (colsEl) {
         colsEl.innerHTML = `
@@ -1726,24 +1744,26 @@ document.addEventListener('alpine:init', () => {
           ${hdr('bin',        'Bin',                   true)}
         </tr>`;
       }
-      bodyEl.innerHTML = rows.map(c => {
-        const entrySpot = c.spot_entry ?? null;
-        const exitSpot  = c.spot_exit  ?? null;
-        const exitDate  = c.exit_date  || '';
-        const retPct    = (c.ret * 100).toFixed(3);
-        const sign      = c.ret >= 0 ? '+' : '';
-        const color     = c.ret >= 0 ? '#3498db' : '#e84393';
-        return `<tr>
-          <td>${c.date}</td>
-          <td>${c.ticker || ''}</td>
-          <td class="num">${c.metric_val != null ? c.metric_val.toFixed(4) : ''}</td>
-          <td class="num">${entrySpot != null ? entrySpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
-          <td class="num">${exitSpot  != null ? exitSpot .toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
-          <td class="num" style="color:${color}">${sign}${retPct}%</td>
-          <td>${exitDate}</td>
-          <td class="num" style="color:#888">${c.decile20 || c.decile || ''}</td>
-        </tr>`;
-      }).join('');
+      if (bodyEl) {
+        bodyEl.innerHTML = rows.map(t => {
+          const entrySpot = t.spot_entry ?? null;
+          const exitSpot  = t.spot_exit  ?? null;
+          const exitDate  = t.exit_date  || '';
+          const retPct    = (t.ret * 100).toFixed(3);
+          const sign      = t.ret >= 0 ? '+' : '';
+          const color     = t.ret >= 0 ? '#3498db' : '#e84393';
+          return `<tr>
+            <td>${t.date}</td>
+            <td>${t.ticker || ''}</td>
+            <td class="num">${t.metric_val != null ? t.metric_val.toFixed(4) : ''}</td>
+            <td class="num">${entrySpot != null ? entrySpot.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
+            <td class="num">${exitSpot  != null ? exitSpot .toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : ''}</td>
+            <td class="num" style="color:${color}">${sign}${retPct}%</td>
+            <td>${exitDate}</td>
+            <td class="num" style="color:#888">${t.decile20 || t.decile || ''}</td>
+          </tr>`;
+        }).join('');
+      }
     },
 
     _renderTradeTableByTicker(headEl, bodyEl, cntEl, filtered) {
@@ -1846,33 +1866,22 @@ document.addEventListener('alpine:init', () => {
     },
 
     exportTradeCSV() {
-      if (!this.data?.trade_calendar) return;
-      const cal = this.data.trade_calendar || [];
-      const has20 = !!(cal[0]?.decile20);
-      const filtered = has20 && this.selectedBins20.size > 0
-        ? cal.filter(c => this.selectedBins20.has(c.decile20))
-        : cal;
-
-      const metric = this.metric || 'metric';
-
-      const header = `trade_date,ticker,${metric},entry_spot,exit_spot,ret_pct,exit_date,bin20`;
-      const rows = filtered.slice().sort((a, b) => a.date.localeCompare(b.date)).map(c => {
-        const entrySpot = c.spot_entry ?? '';
-        const exitSpot = c.spot_exit != null ? c.spot_exit.toFixed(2) : '';
-        return [
-          c.date, c.ticker || '', c.metric_val ?? '', entrySpot,
-          exitSpot, (c.ret * 100).toFixed(6), c.exit_date || '', c.decile20 || c.decile || '',
-        ].join(',');
+      // W1: download via /trades/csv endpoint (server-side cache).
+      if (!this.data) return;
+      const mode = this.pageMode === 'train_test' ? 'train_test'
+                 : this.pageMode === 'in_sample'  ? 'in_sample'
+                 : 'walk_forward';
+      const params = new URLSearchParams({
+        ticker:  this.ticker,
+        metric:  this.metric,
+        outcome: this.outcome,
+        mode,
       });
-
-      const csv = [header, ...rows].join('\n');
-      const blob = new Blob([csv], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
+      if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
+      for (const b of this.selectedBins20) params.append('decile20', b);
       const a = document.createElement('a');
-      a.href = url;
-      a.download = `trades_${this.ticker}_${this.metric}_${new Date().toISOString().slice(0,10)}.csv`;
+      a.href = `/api/oi-analysis/trades/csv?${params}`;
       a.click();
-      URL.revokeObjectURL(url);
     },
 
     _renderAllCharts() {
