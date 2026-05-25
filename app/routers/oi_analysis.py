@@ -1109,7 +1109,7 @@ async def get_trades_csv(
     _tc_key = f"{ticker}:{metric}:{outcome}:{mode}:{cutoff_date or ''}"
     trades = _TRADE_CACHE.get(_tc_key)
     if trades is None:
-        return Response(content=b"not_cached — run /analyze first",
+        return Response(content=b"not_cached - run /analyze first",
                         status_code=404, media_type="text/plain")
 
     if decile20:
