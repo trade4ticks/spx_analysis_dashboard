@@ -142,8 +142,8 @@ document.addEventListener('alpine:init', () => {
       window._oiTradeSort = (key) => this._tradeSort(key);
 
       const [tkRes, colRes] = await Promise.all([
-        fetch('/api/oi-analysis/tickers'),
-        fetch('/api/oi-analysis/columns'),
+        fetch('/api/factor-analysis/tickers'),
+        fetch('/api/factor-analysis/columns'),
       ]);
       if (tkRes.ok) {
         this.tickers = ['ALL', ...(await tkRes.json())];
@@ -234,7 +234,7 @@ document.addEventListener('alpine:init', () => {
       this.corrSelections = {};
       this.corrResult = null;
       try {
-        let url = `/api/oi-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
+        let url = `/api/factor-analysis/analyze?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
@@ -958,7 +958,7 @@ document.addEventListener('alpine:init', () => {
       }
       try {
         const r = await fetch(
-          `/api/oi-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
+          `/api/factor-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric_x=${encodeURIComponent(this.metric)}`
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`
@@ -1001,7 +1001,7 @@ document.addEventListener('alpine:init', () => {
       let wf = '';
       if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
       else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-      const base = `/api/oi-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
+      const base = `/api/factor-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
         + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.hmBins1d}`
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
         + (this.dateTo ? `&date_to=${this.dateTo}` : '')
@@ -1110,7 +1110,7 @@ document.addEventListener('alpine:init', () => {
       this.aiSummary = '';
       try {
         const r = await fetch(
-          `/api/oi-analysis/ai-summary?ticker=${encodeURIComponent(this.ticker)}`
+          `/api/factor-analysis/ai-summary?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric=${encodeURIComponent(this.metric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`);
         if (r.ok) {
@@ -1706,7 +1706,7 @@ document.addEventListener('alpine:init', () => {
       if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
       for (const b of this.selectedBins20) params.append('decile20', b);
 
-      const r = await fetch(`/api/oi-analysis/trades?${params}`);
+      const r = await fetch(`/api/factor-analysis/trades?${params}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
 
@@ -1896,7 +1896,7 @@ document.addEventListener('alpine:init', () => {
       if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
       for (const b of this.selectedBins20) params.append('decile20', b);
       const a = document.createElement('a');
-      a.href = `/api/oi-analysis/trades/csv?${params}`;
+      a.href = `/api/factor-analysis/trades/csv?${params}`;
       a.click();
     },
 
@@ -2129,8 +2129,8 @@ document.addEventListener('alpine:init', () => {
         const cutoffQ = smMode === 'train_test'
           ? `&cutoff_date=${encodeURIComponent(this.cutoffDate)}` : '';
         const [metaRes, statusRes] = await Promise.all([
-          fetch('/api/oi-analysis/score-matrix/meta?mode=' + smMode + cutoffQ),
-          fetch('/api/oi-analysis/batch-score-status'),
+          fetch('/api/factor-analysis/score-matrix/meta?mode=' + smMode + cutoffQ),
+          fetch('/api/factor-analysis/batch-score-status'),
         ]);
         if (metaRes.ok) this.smMeta = await metaRes.json();
         if (statusRes.ok) this.smStatus = await statusRes.json();
@@ -2164,12 +2164,12 @@ document.addEventListener('alpine:init', () => {
       if (this.smFilterFwd) params.set('fwd_ret', this.smFilterFwd);
 
       try {
-        const r = await fetch('/api/oi-analysis/score-matrix?' + params);
+        const r = await fetch('/api/factor-analysis/score-matrix?' + params);
         if (r.ok) this.smRows = await r.json();
         // Refresh meta too (mirror the cutoff_date filter).
         const metaParams = new URLSearchParams({ mode: smMode });
         if (smMode === 'train_test') metaParams.set('cutoff_date', this.cutoffDate);
-        const m = await fetch('/api/oi-analysis/score-matrix/meta?' + metaParams);
+        const m = await fetch('/api/factor-analysis/score-matrix/meta?' + metaParams);
         if (m.ok) this.smMeta = await m.json();
       } catch (_) {}
     },
@@ -2196,7 +2196,7 @@ document.addEventListener('alpine:init', () => {
 
     async runBatchScore() {
       try {
-        const r = await fetch('/api/oi-analysis/run-batch-score', {
+        const r = await fetch('/api/factor-analysis/run-batch-score', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2216,7 +2216,7 @@ document.addEventListener('alpine:init', () => {
       if (this.smPollTimer) return;
       this.smPollTimer = setInterval(async () => {
         try {
-          const r = await fetch('/api/oi-analysis/batch-score-status');
+          const r = await fetch('/api/factor-analysis/batch-score-status');
           if (r.ok) {
             this.smStatus = await r.json();
             if (!this.smStatus.running) {
@@ -2245,7 +2245,7 @@ document.addEventListener('alpine:init', () => {
       if (fwdRet) params.set('fwd_ret', fwdRet);
       if (ticker) params.set('ticker', ticker);
       try {
-        const r = await fetch('/api/oi-analysis/score-matrix/summary?' + params);
+        const r = await fetch('/api/factor-analysis/score-matrix/summary?' + params);
         if (r.ok) {
           this.smSummary = await r.json();
           this.smSelectedMetric = metric || '';
@@ -2495,7 +2495,7 @@ document.addEventListener('alpine:init', () => {
     // ── Feature Clusters ──────────────────────────────────────────────
     async loadClusters() {
       try {
-        const r = await fetch('/api/oi-analysis/feature-clusters');
+        const r = await fetch('/api/factor-analysis/feature-clusters');
         if (r.ok) this.ifClusters = await r.json();
       } catch (_) {}
     },
@@ -2506,7 +2506,7 @@ document.addEventListener('alpine:init', () => {
       if (metrics.length < 2) return;
       this.ifLastScannedMetrics = metrics;
       try {
-        const r = await fetch('/api/oi-analysis/run-2f-scan', {
+        const r = await fetch('/api/factor-analysis/run-2f-scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ metrics }),
@@ -2524,7 +2524,7 @@ document.addEventListener('alpine:init', () => {
       if (this.ifPollTimer) return;
       this.ifPollTimer = setInterval(async () => {
         try {
-          const r = await fetch('/api/oi-analysis/2f-scan-status');
+          const r = await fetch('/api/factor-analysis/2f-scan-status');
           if (r.ok) {
             this.ifStatus = await r.json();
             if (!this.ifStatus.running) {
@@ -2542,7 +2542,7 @@ document.addEventListener('alpine:init', () => {
       if (this.ifFwdFilter) params.set('fwd_ret', this.ifFwdFilter);
       (this.ifLastScannedMetrics || []).forEach(m => params.append('metrics', m));
       try {
-        const r = await fetch('/api/oi-analysis/interaction-matrix?' + params);
+        const r = await fetch('/api/factor-analysis/interaction-matrix?' + params);
         if (r.ok) this.ifRows = await r.json();
       } catch (_) {}
     },
@@ -2563,7 +2563,7 @@ document.addEventListener('alpine:init', () => {
       if (this.ifDetailTicker) params.set('ticker', this.ifDetailTicker);
       if (this.ifDetailFwd) params.set('fwd_ret', this.ifDetailFwd);
       try {
-        const r = await fetch('/api/oi-analysis/interaction-detail?' + params);
+        const r = await fetch('/api/factor-analysis/interaction-detail?' + params);
         if (r.ok) {
           this.ifDetail = (await r.json()).sort((a, b) => (b.interaction_lift || 0) - (a.interaction_lift || 0));
           this.ifDetailRow = this.ifDetail[0] || null;
@@ -2647,7 +2647,7 @@ document.addEventListener('alpine:init', () => {
           await new Promise(res => setTimeout(res, 3000));
           polls++;
           if (!this.secScanKey) break;
-          const r = await fetch('/api/oi-analysis/secondary-score-status', {
+          const r = await fetch('/api/factor-analysis/secondary-score-status', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scan_key: this.secScanKey }),
@@ -2689,7 +2689,7 @@ document.addEventListener('alpine:init', () => {
       this.corrSelections = {};
       this.corrResult = null;
       try {
-        const r = await fetch('/api/oi-analysis/secondary-load', {
+        const r = await fetch('/api/factor-analysis/secondary-load', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2729,7 +2729,7 @@ document.addEventListener('alpine:init', () => {
       this.secStatus.loading = true;
       let keepLoading = false;
       try {
-        const r = await fetch('/api/oi-analysis/secondary-scan', {
+        const r = await fetch('/api/factor-analysis/secondary-scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2771,7 +2771,7 @@ document.addEventListener('alpine:init', () => {
       this.secDetailLoading = true;
       this.secDetail = null;
       try {
-        const r = await fetch('/api/oi-analysis/secondary-detail', {
+        const r = await fetch('/api/factor-analysis/secondary-detail', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -3077,7 +3077,7 @@ document.addEventListener('alpine:init', () => {
       try {
         if (forceRefresh) {
           try {
-            await fetch('/api/oi-analysis/threshold-drift/invalidate', { method: 'POST' });
+            await fetch('/api/factor-analysis/threshold-drift/invalidate', { method: 'POST' });
           } catch (_) {}
         }
         const params = new URLSearchParams({
@@ -3087,7 +3087,7 @@ document.addEventListener('alpine:init', () => {
           n_bins:  '20',
           bins:    this.tdBinsToShow.join(','),
         });
-        const r = await fetch('/api/oi-analysis/threshold-drift?' + params);
+        const r = await fetch('/api/factor-analysis/threshold-drift?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
           this.tdData = { error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}`,
@@ -3284,7 +3284,7 @@ document.addEventListener('alpine:init', () => {
       try {
         if (forceRefresh) {
           try {
-            await fetch('/api/oi-analysis/global-metric-bins/invalidate', { method: 'POST' });
+            await fetch('/api/factor-analysis/global-metric-bins/invalidate', { method: 'POST' });
           } catch (_) {}
         }
         const params = new URLSearchParams({
@@ -3294,7 +3294,7 @@ document.addEventListener('alpine:init', () => {
           walk_forward: this.pageMode === 'walk_forward' ? '1' : '0',
         });
         if (this.pageMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
-        const r = await fetch('/api/oi-analysis/global-metric-bins?' + params);
+        const r = await fetch('/api/factor-analysis/global-metric-bins?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
           this.topBinsData = { metrics: [], total_rows: 0,
@@ -3418,7 +3418,7 @@ document.addEventListener('alpine:init', () => {
     async corrLoadMiniData() {
       this.corrMiniLoading = true;
       try {
-        const r = await fetch('/api/oi-analysis/secondary-corr-bins', {
+        const r = await fetch('/api/factor-analysis/secondary-corr-bins', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -3483,7 +3483,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const selections = Object.entries(this.corrSelections)
           .map(([metric, bins]) => ({ metric, bins }));
-        const r = await fetch('/api/oi-analysis/secondary-correlation', {
+        const r = await fetch('/api/factor-analysis/secondary-correlation', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -4101,7 +4101,7 @@ document.addEventListener('alpine:init', () => {
 
     async loadPortfolios() {
       try {
-        const r = await fetch('/api/oi-analysis/portfolios');
+        const r = await fetch('/api/factor-analysis/portfolios');
         if (r.ok) this.portfolios = await r.json();
       } catch (_) {}
     },
@@ -4112,7 +4112,7 @@ document.addEventListener('alpine:init', () => {
       if (!id) { this.portfolio = null; return; }
       this.portLoading = true;
       try {
-        const r = await fetch(`/api/oi-analysis/portfolios/${id}`);
+        const r = await fetch(`/api/factor-analysis/portfolios/${id}`);
         if (r.ok) this.portfolio = await r.json();
         else { this.portfolio = null; return; }
         await this.loadPortfolioAggregate();
@@ -4130,7 +4130,7 @@ document.addEventListener('alpine:init', () => {
         date_to:   this.dateTo   || null,
       };
       try {
-        const r = await fetch('/api/oi-analysis/portfolios', {
+        const r = await fetch('/api/factor-analysis/portfolios', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4148,7 +4148,7 @@ document.addEventListener('alpine:init', () => {
       const name = prompt('New name:', current);
       if (!name || name.trim() === current) return;
       try {
-        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}`, {
+        const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: name.trim() }),
         });
@@ -4163,7 +4163,7 @@ document.addEventListener('alpine:init', () => {
       const name = this.portfolio?.portfolio?.name || '?';
       if (!confirm(`Delete portfolio "${name}" and all its systems?`)) return;
       try {
-        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}`, { method: 'DELETE' });
+        const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}`, { method: 'DELETE' });
         if (!r.ok) { alert('Delete failed: ' + await r.text()); return; }
         this.portfolioId = null;
         this.portfolio = null;
@@ -4195,8 +4195,8 @@ document.addEventListener('alpine:init', () => {
       };
       const editingId = this.editingSystemId;
       const url = editingId
-        ? `/api/oi-analysis/portfolios/${this.portfolioId}/systems/${editingId}`
-        : `/api/oi-analysis/portfolios/${this.portfolioId}/systems`;
+        ? `/api/factor-analysis/portfolios/${this.portfolioId}/systems/${editingId}`
+        : `/api/factor-analysis/portfolios/${this.portfolioId}/systems`;
       const method = editingId ? 'PUT' : 'POST';
       try {
         const r = await fetch(url, {
@@ -4222,7 +4222,7 @@ document.addEventListener('alpine:init', () => {
 
     async toggleSystem(sid, enabled) {
       try {
-        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
+        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled }),
         });
@@ -4237,7 +4237,7 @@ document.addEventListener('alpine:init', () => {
       const name = prompt('Rename system:', currentName);
       if (!name || name.trim() === currentName) return;
       try {
-        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
+        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: name.trim() }),
         });
@@ -4253,7 +4253,7 @@ document.addEventListener('alpine:init', () => {
       if (!confirm(`Remove "${sys?.name || 'system'}" from this portfolio?\n\n` +
                    `This does not delete it from the Library — saved copies stay available for other portfolios.`)) return;
       try {
-        await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/systems/${sid}`, { method: 'DELETE' });
+        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, { method: 'DELETE' });
         await this.selectPortfolio(this.portfolioId);
         await this.loadPortfolios();
       } catch (_) {}
@@ -4319,7 +4319,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.portfolioId) return;
       this.portLoading = true;
       try {
-        const r = await fetch(`/api/oi-analysis/portfolios/${this.portfolioId}/aggregate`, {
+        const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/aggregate`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             walk_forward: this.pageMode === 'walk_forward',
@@ -4584,7 +4584,7 @@ document.addEventListener('alpine:init', () => {
 
     async loadLibrarySystems() {
       try {
-        const r = await fetch('/api/oi-analysis/library/systems');
+        const r = await fetch('/api/factor-analysis/library/systems');
         if (r.ok) this.librarySystems = await r.json();
       } catch (_) {}
     },
@@ -4606,7 +4606,7 @@ document.addEventListener('alpine:init', () => {
         is_short: sys.is_short || false,
       };
       try {
-        const r = await fetch('/api/oi-analysis/library/systems', {
+        const r = await fetch('/api/factor-analysis/library/systems', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4622,7 +4622,7 @@ document.addEventListener('alpine:init', () => {
       }
       try {
         const r = await fetch(
-          `/api/oi-analysis/portfolios/${this.portfolioId}/systems/from-library/${lid}`,
+          `/api/factor-analysis/portfolios/${this.portfolioId}/systems/from-library/${lid}`,
           { method: 'POST' });
         if (!r.ok) { alert('Add from library failed: ' + await r.text()); return; }
         await this.selectPortfolio(this.portfolioId);
@@ -4634,7 +4634,7 @@ document.addEventListener('alpine:init', () => {
       const name = prompt('Rename library system:', currentName);
       if (!name || name.trim() === currentName) return;
       try {
-        await fetch(`/api/oi-analysis/library/systems/${lid}`, {
+        await fetch(`/api/factor-analysis/library/systems/${lid}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: name.trim() }),
         });
@@ -4646,7 +4646,7 @@ document.addEventListener('alpine:init', () => {
       const item = this.librarySystems.find(x => x.id === lid);
       if (!confirm(`Delete library system "${item?.name || '?'}"? (Existing portfolio copies are untouched.)`)) return;
       try {
-        await fetch(`/api/oi-analysis/library/systems/${lid}`, { method: 'DELETE' });
+        await fetch(`/api/factor-analysis/library/systems/${lid}`, { method: 'DELETE' });
         await this.loadLibrarySystems();
       } catch (_) {}
     },
@@ -4682,7 +4682,7 @@ document.addEventListener('alpine:init', () => {
       this.icBatchLoading = true;
       this.icBatchError = null;
       try {
-        let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
+        let url = `/api/factor-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
@@ -4762,7 +4762,7 @@ document.addEventListener('alpine:init', () => {
       this.icBatchData     = null;
       this.icBatchRefreshAt = Date.now(); // used by loadIcBatch to reject stale cache hits
       try {
-        let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
+        let url = `/api/factor-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
@@ -5251,7 +5251,7 @@ document.addEventListener('alpine:init', () => {
       this.icDecompLoading = true;
       this.icDecompError   = null;
       try {
-        let url = `/api/oi-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
+        let url = `/api/factor-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);

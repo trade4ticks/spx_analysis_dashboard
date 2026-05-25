@@ -43,9 +43,9 @@ app.include_router(today.router,        prefix="/api/today")
 app.include_router(ai_explorer.router,  prefix="/api/ai-explorer")
 app.include_router(research.router,     prefix="/api/research")
 app.include_router(research2.router,    prefix="/api/research2")
-app.include_router(oi_signals.router,   prefix="/api/oi-signals")
-app.include_router(oi_analysis.router,  prefix="/api/oi-analysis")
-app.include_router(oi_portfolios.router, prefix="/api/oi-analysis")
+app.include_router(oi_signals.router,   prefix="/api/factor-signals")
+app.include_router(oi_analysis.router,  prefix="/api/factor-analysis")
+app.include_router(oi_portfolios.router, prefix="/api/factor-analysis")
 app.include_router(backtest_iv.router,  prefix="/api/backtest-iv")
 
 
@@ -74,13 +74,13 @@ async def research2_page():
     return FileResponse(str(BASE_DIR / "templates" / "research2.html"))
 
 
-@app.get("/oi-analysis")
-async def oi_analysis_page():
+@app.get("/factor-analysis")
+async def factor_analysis_page():
     return FileResponse(str(BASE_DIR / "templates" / "oi_analysis.html"))
 
 
-@app.get("/oi-signals")
-async def oi_signals_page():
+@app.get("/factor-signals")
+async def factor_signals_page():
     return FileResponse(str(BASE_DIR / "templates" / "oi_signals.html"))
 
 

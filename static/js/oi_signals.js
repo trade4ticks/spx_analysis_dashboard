@@ -54,8 +54,8 @@ document.addEventListener('alpine:init', () => {
     async _loadMeta() {
       try {
         const [tr, cr] = await Promise.all([
-          fetch('/api/oi-analysis/tickers'),
-          fetch('/api/oi-analysis/columns'),
+          fetch('/api/factor-analysis/tickers'),
+          fetch('/api/factor-analysis/columns'),
         ]);
         if (tr.ok) this.availTickers = await tr.json();
         if (cr.ok) {
@@ -69,7 +69,7 @@ document.addEventListener('alpine:init', () => {
     // ── Triggers CRUD ────────────────────────────────────────────────────
     async loadTriggers() {
       try {
-        const r = await fetch('/api/oi-signals/triggers');
+        const r = await fetch('/api/factor-signals/triggers');
         if (r.ok) this.triggers = await r.json();
       } catch (_) {}
     },
@@ -108,7 +108,7 @@ document.addEventListener('alpine:init', () => {
           max_val: f.max_val !== '' && f.max_val !== null ? parseFloat(f.max_val) : null,
           color: f.color,
         };
-        const url    = f.id ? `/api/oi-signals/triggers/${f.id}` : '/api/oi-signals/triggers';
+        const url    = f.id ? `/api/factor-signals/triggers/${f.id}` : '/api/factor-signals/triggers';
         const method = f.id ? 'PUT' : 'POST';
         const r = await fetch(url, {
           method,
@@ -126,7 +126,7 @@ document.addEventListener('alpine:init', () => {
 
     async deleteTrigger(id) {
       if (!confirm('Delete this trigger? Its calendar entries will also be removed.')) return;
-      await fetch(`/api/oi-signals/triggers/${id}`, { method: 'DELETE' });
+      await fetch(`/api/factor-signals/triggers/${id}`, { method: 'DELETE' });
       await this.loadTriggers();
       await this.loadFiring();
       await this.loadCalendar();
@@ -172,7 +172,7 @@ document.addEventListener('alpine:init', () => {
       this._trigMiniCharts = {};
       try {
         const qs = this.firingDate ? `?date=${this.firingDate}` : '';
-        const r = await fetch('/api/oi-signals/firing' + qs);
+        const r = await fetch('/api/factor-signals/firing' + qs);
         if (r.ok) {
           const d = await r.json();
           this.firingResults = d.results || [];
@@ -215,7 +215,7 @@ document.addEventListener('alpine:init', () => {
     // ── Portfolio firings ─────────────────────────────────────────────────
     async loadPortfolios() {
       try {
-        const r = await fetch('/api/oi-analysis/portfolios');
+        const r = await fetch('/api/factor-analysis/portfolios');
         if (r.ok) this.portfolios = await r.json();
       } catch (_) {}
     },
@@ -224,7 +224,7 @@ document.addEventListener('alpine:init', () => {
       this.portfolioFiringsLoading = true;
       try {
         const qs = this.firingDate ? `?date=${this.firingDate}` : '';
-        const r = await fetch('/api/oi-signals/firing-portfolios' + qs);
+        const r = await fetch('/api/factor-signals/firing-portfolios' + qs);
         if (r.ok) {
           const d = await r.json();
           this.portfolioFirings = d.results || [];
@@ -237,7 +237,7 @@ document.addEventListener('alpine:init', () => {
 
     async toggleMonitored(pid, monitored) {
       try {
-        await fetch(`/api/oi-analysis/portfolios/${pid}`, {
+        await fetch(`/api/factor-analysis/portfolios/${pid}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ monitored: !!monitored }),
         });
@@ -303,7 +303,7 @@ document.addEventListener('alpine:init', () => {
     async addToCalendar(triggerId, entryDate) {
       if (!entryDate) return;
       try {
-        const r = await fetch('/api/oi-signals/calendar', {
+        const r = await fetch('/api/factor-signals/calendar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ trigger_id: triggerId, entry_date: entryDate }),
@@ -315,7 +315,7 @@ document.addEventListener('alpine:init', () => {
     async addPortfolioToCalendar(portfolioId, systemId, ticker, entryDate) {
       if (!entryDate || !systemId || !portfolioId || !ticker) return;
       try {
-        const r = await fetch('/api/oi-signals/calendar', {
+        const r = await fetch('/api/factor-signals/calendar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -332,7 +332,7 @@ document.addEventListener('alpine:init', () => {
     async loadCalendar() {
       this.calLoading = true;
       try {
-        const r = await fetch('/api/oi-signals/calendar');
+        const r = await fetch('/api/factor-signals/calendar');
         if (r.ok) {
           this.calEntries = await r.json();
           this._updateGanttRange();
@@ -342,7 +342,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async removeFromCalendar(id) {
-      await fetch(`/api/oi-signals/calendar/${id}`, { method: 'DELETE' });
+      await fetch(`/api/factor-signals/calendar/${id}`, { method: 'DELETE' });
       this.calEntries = this.calEntries.filter(e => e.id !== id);
       this._updateGanttRange();
     },

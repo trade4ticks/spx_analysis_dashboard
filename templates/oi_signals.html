@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SPX IV — OI Signals</title>
+  <title>SPX IV — Factor Signals</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
     .sig-body { flex: 1; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 28px; }
@@ -206,7 +206,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=7"></script>
+  <script src="/static/js/oi_signals.js?v=8"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -218,8 +218,8 @@
       <a class="nav-link" href="/">Dashboard</a>
       <a class="nav-link" href="/heatmap">Heatmap</a>
       <a class="nav-link" href="/today">Today</a>
-      <a class="nav-link on" href="/oi-signals">OI Signals</a>
-      <a class="nav-link" href="/oi-analysis">OI Analysis</a>
+      <a class="nav-link on" href="/factor-signals">Factor Signals</a>
+      <a class="nav-link" href="/factor-analysis">Factor Analysis</a>
       <a class="nav-link" href="/ai-explorer">AI Explorer</a>
       <a class="nav-link" href="/research">Research</a>
       <a class="nav-link" href="/research2">Research 2</a>
@@ -399,7 +399,7 @@
         <span class="loading-hint" x-show="portfolioFiringsLoading" style="margin-left:8px">Loading…</span>
       </div>
       <div x-show="!portfolios.length" class="empty-hint">
-        No saved portfolios yet — build one on the OI Analysis page.
+        No saved portfolios yet — build one on the Factor Analysis page.
       </div>
       <div class="port-list">
         <template x-for="p in portfolios" :key="'port-'+p.id">
