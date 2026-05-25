@@ -229,6 +229,7 @@ async def analyze(
     _ac_key = (f"{ticker}:{metric}:{outcome}:{spec.kind}:"
                f"{spec.cutoff.isoformat() if spec.kind == 'train_test' else ''}:"
                f"{date_from or ''}:{date_to or ''}")
+    _tlog(f'W2 key="{_ac_key}" cache_size={len(_ANALYZE_CACHE)} in_cache={_ac_key in _ANALYZE_CACHE}')
 
     if _ac_key in _ANALYZE_CACHE:
         _cached = _ANALYZE_CACHE[_ac_key]
@@ -243,7 +244,9 @@ async def analyze(
                         "SELECT MAX(trade_date) FROM daily_features WHERE ticker = $1",
                         ticker)
             _stale = str(_fresh_max) != _cached.get("data_as_of", "")
-        except Exception:
+            _tlog(f'W2 staleness: stored="{_cached.get("data_as_of","")}" fresh_raw={repr(_fresh_max)} fresh_str="{str(_fresh_max)}" stale={_stale}')
+        except Exception as _sc_exc:
+            _tlog(f'W2 staleness check FAILED: {type(_sc_exc).__name__}: {_sc_exc}')
             pass  # DB error → treat as stale, fall through to recompute
         if not _stale:
             _tlog('W2 cache hit')
@@ -1086,6 +1089,7 @@ async def analyze(
         "data_as_of":       _max_trade_date,
     }
     # W2: populate response cache (evict oldest if at capacity)
+    _tlog(f'W2 write key="{_ac_key}" data_as_of="{_max_trade_date}"')
     if len(_ANALYZE_CACHE) >= _ANALYZE_CACHE_MAX:
         del _ANALYZE_CACHE[next(iter(_ANALYZE_CACHE))]
     _ANALYZE_CACHE[_ac_key] = _result
