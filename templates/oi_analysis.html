@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=118"></script>
+  <script src="/static/js/oi_analysis.js?v=119"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -348,13 +348,6 @@
               </template>
             </select>
           </template>
-          <span style="font-size:11px;color:var(--dim)">Bins:</span>
-          <template x-for="b in [1,5,10,20]" :key="'tdb-'+b">
-            <span class="btn-action small"
-                  :class="{ off: !tdBinsToShow.includes(b) }"
-                  @click="tdToggleBin(b)"
-                  x-text="'B'+b"></span>
-          </template>
           <button x-show="tdData" @click="loadTd(true)"
                   :disabled="tdLoading"
                   :style="tdLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
@@ -371,7 +364,10 @@
           <div x-show="tdExpanded && !tdLoading && !tdHasSeries"
                style="font-size:12px;color:var(--dim);padding:6px 0">
             <span x-show="!tdMetric">Pick a metric to load.</span>
-            <span x-show="tdMetric && !tdBinsToShow.length">Select at least one bin (B1, B5, …) to plot.</span>
+          </div>
+          <div x-show="tdData && !tdData.error"
+               style="font-size:10px;color:var(--dim);padding:4px 0 0;font-style:italic">
+            Click a legend entry to toggle that bin's line + IQR band together.
           </div>
         </div>
       </template>

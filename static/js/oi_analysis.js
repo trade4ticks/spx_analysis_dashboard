@@ -3053,13 +3053,11 @@ document.addEventListener('alpine:init', () => {
       return Object.values(s).some(arr => Array.isArray(arr) && arr.length > 0);
     },
 
-    tdToggleBin(b) {
-      const i = this.tdBinsToShow.indexOf(b);
-      if (i >= 0) this.tdBinsToShow.splice(i, 1);
-      else        this.tdBinsToShow.push(b);
-      this.tdBinsToShow = [...this.tdBinsToShow].sort((a, b) => a - b);
-      if (this.tdData) this.loadTd(true);
-    },
+    // tdBinsToShow is now a fixed [1, 20] — the chart always renders both
+    // and the user toggles bin visibility via the chart legend (which
+    // toggles the median line AND its IQR band together; see the custom
+    // legend.onClick in _renderTdChart). The per-bin pill toggle UI was
+    // removed because in practice only the extreme bins are useful.
 
     async toggleTd() {
       this.tdExpanded = !this.tdExpanded;
@@ -3238,7 +3236,34 @@ document.addEventListener('alpine:init', () => {
             legend: {
               labels: {
                 color: '#aaa', font: { size: 10 },
+                // Hide the invisible q75/band datasets from the legend —
+                // only the median lines are user-visible legend entries.
                 filter: (item) => !item.text.includes('q75') && !item.text.includes('band'),
+              },
+              // Toggle the median line AND its companion IQR band datasets
+              // together — clicking "B1 (median)" hides the B1 q75 fence,
+              // the B1 band fill, and the B1 line as one unit. Without this,
+              // toggling the median leaves a stray IQR band on the chart.
+              onClick: (e, legendItem, legend) => {
+                const chart = legend.chart;
+                const m = (legendItem.text || '').match(/^B(\d+)/);
+                if (!m) return;
+                const binPrefix = `B${m[1]}`;
+                // Determine the new hidden state from the clicked dataset.
+                const clickedMeta = chart.getDatasetMeta(legendItem.datasetIndex);
+                const willHide = !clickedMeta.hidden;
+                // Apply that state to every dataset belonging to this bin
+                // (median + q75 fence + band fill). In native_single mode
+                // the q75/band datasets don't exist; the loop is a no-op
+                // for those and just toggles the single median dataset.
+                chart.data.datasets.forEach((ds, idx) => {
+                  const label = ds.label || '';
+                  if (label === binPrefix
+                      || label.startsWith(`${binPrefix} `)) {
+                    chart.getDatasetMeta(idx).hidden = willHide;
+                  }
+                });
+                chart.update();
               },
             },
             tooltip: {
