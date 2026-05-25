@@ -8,16 +8,36 @@
   <style>
     .oi-body { flex:1; overflow:auto; padding:16px; }
     .sel-bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
-    .sel-bar label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; }
+    .sel-bar label { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; }
     .sel-bar select {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
-      font-size:12px; padding:5px 8px; border-radius:4px; max-width:320px;
+      font-size:13px; padding:5px 8px; border-radius:4px; max-width:320px;
     }
     .sel-bar .go-btn {
       background:var(--accent); border:none; color:#fff; padding:6px 18px;
-      border-radius:4px; font-size:12px; font-weight:700; cursor:pointer;
+      border-radius:4px; font-size:13px; font-weight:700; cursor:pointer;
     }
     .sel-bar .go-btn:hover { opacity:.85; }
+
+    /* Solid action button — Analyze-button shape, usable anywhere on the
+       page (Signal Survey Refresh, Compute Correlation, Threshold Drift
+       bin toggles). `.pink` swaps the blue accent for the bright pink
+       used elsewhere on the page; `.small` shrinks the padding/font for
+       contexts where a full-size Analyze button would dominate. */
+    .btn-action {
+      background:var(--accent); border:none; color:#fff;
+      padding:6px 18px; border-radius:4px;
+      font-size:13px; font-weight:700; cursor:pointer;
+    }
+    .btn-action:hover { opacity:.85; }
+    .btn-action:disabled { opacity:.4; cursor:not-allowed; }
+    .btn-action.pink { background:#e84393; }
+    .btn-action.small { padding:3px 10px; font-size:12px; }
+    .btn-action.off {
+      background:var(--raised); color:var(--dim); font-weight:600;
+      border:1px solid var(--border);
+    }
+    .btn-action.off:hover { opacity:1; border-color:var(--dim); }
 
     /* Stats card */
     .stats-card {
@@ -25,7 +45,7 @@
       gap:1px; background:var(--border); border-radius:6px; overflow:hidden; margin-bottom:16px;
     }
     .stat-item { background:var(--surface); padding:10px 12px; }
-    .stat-label { font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+    .stat-label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
     .stat-value { font-size:15px; font-weight:700; }
     .stat-value.pos { color:#3498db; }
     .stat-value.neg { color:#e84393; }
@@ -38,7 +58,7 @@
       padding:10px; min-height:280px;
     }
     .chart-title {
-      font-size:11px; font-weight:700; color:var(--muted); margin-bottom:6px;
+      font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px;
       display:flex; align-items:center; gap:8px;
     }
     .chart-canvas { height:240px; position:relative; }
@@ -47,7 +67,7 @@
     .decile-btns { display:flex; gap:3px; flex-wrap:wrap; margin-bottom:8px; }
     .decile-btn {
       background:var(--raised); border:1px solid var(--border); color:var(--dim);
-      padding:3px 8px; border-radius:3px; font-size:10px; cursor:pointer; font-weight:600;
+      padding:3px 8px; border-radius:3px; font-size:11px; cursor:pointer; font-weight:600;
     }
     .decile-btn.on { background:rgba(52,152,219,.2); border-color:var(--accent); color:var(--accent); }
     .decile-btn:hover { border-color:var(--dim); }
@@ -55,7 +75,7 @@
     /* 2F metric picker pills */
     .if-pill {
       background:var(--raised); border:1px solid var(--border); color:var(--dim);
-      padding:3px 10px; border-radius:3px; font-size:10px; cursor:pointer; font-family:monospace;
+      padding:3px 10px; border-radius:3px; font-size:11px; cursor:pointer; font-family:monospace;
     }
     .if-pill.on { background:rgba(52,152,219,.2); border-color:var(--accent); color:var(--accent); font-weight:700; }
     .if-pill:hover { border-color:var(--dim); }
@@ -63,7 +83,7 @@
     /* Equity mode toggle */
     .mode-seg { display:inline-flex; border:1px solid var(--border); border-radius:3px; overflow:hidden; }
     .mode-seg span {
-      padding:3px 8px; font-size:10px; cursor:pointer; color:var(--dim);
+      padding:3px 8px; font-size:11px; cursor:pointer; color:var(--dim);
       background:var(--raised); border-right:1px solid var(--border);
     }
     .mode-seg span:last-child { border-right:none; }
@@ -76,7 +96,7 @@
        Concurrent/Non-Overlap, etc.). */
     .sel-bar .mode-seg { border-radius:4px; }
     .sel-bar .mode-seg span {
-      padding:6px 14px; font-size:12px; font-weight:700;
+      padding:6px 14px; font-size:13px; font-weight:700;
     }
 
     /* Stats table */
@@ -108,7 +128,7 @@
     /* Fullscreen */
     .fs-btn {
       background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1);
-      border-radius:3px; padding:1px 5px; font-size:12px; color:var(--dim);
+      border-radius:3px; padding:1px 5px; font-size:13px; color:var(--dim);
       cursor:pointer; margin-left:auto;
     }
     .fs-btn:hover { background:rgba(255,255,255,.12); color:var(--muted); }
@@ -124,7 +144,7 @@
     }
     .fs-overlay .fs-bar button {
       background:var(--raised); border:1px solid var(--border); border-radius:4px;
-      padding:5px 12px; font-size:11px; color:var(--muted); cursor:pointer;
+      padding:5px 12px; font-size:12px; color:var(--muted); cursor:pointer;
     }
     .fs-overlay .fs-body { flex:1; padding:12px; position:relative; }
     .fs-overlay .fs-body canvas {
@@ -135,14 +155,14 @@
     /* Signal Survey pane system (IC.5 + IC.7 layout) */
     .survey-pane { background:var(--surface); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
     .survey-pane-hdr { display:flex; align-items:center; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border); min-height:30px; }
-    .survey-pane-title { font-size:11px; font-weight:700; color:var(--muted); white-space:nowrap; }
-    .survey-pane-hint { font-size:9px; color:var(--dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+    .survey-pane-title { font-size:12px; font-weight:700; color:var(--muted); white-space:nowrap; }
+    .survey-pane-hint { font-size:10px; color:var(--dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
     /* Placeholder shown when a pane has no data yet */
-    .survey-pane-ph { display:flex; align-items:center; justify-content:center; min-height:340px; color:var(--dim); font-size:11px; text-align:center; padding:0 24px; line-height:1.6; }
+    .survey-pane-ph { display:flex; align-items:center; justify-content:center; min-height:340px; color:var(--dim); font-size:12px; text-align:center; padding:0 24px; line-height:1.6; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=116"></script>
+  <script src="/static/js/oi_analysis.js?v=117"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -173,8 +193,8 @@
           <canvas id="fs-canvas"></canvas>
         </template>
         <template x-if="fsChartId === 'trade-table'">
-          <div style="font-size:11px">
-            <div style="margin-bottom:8px;color:var(--dim);font-size:10px"
+          <div style="font-size:12px">
+            <div style="margin-bottom:8px;color:var(--dim);font-size:11px"
                  x-text="'Trade Data — ' + (data?.trade_data?.length || 0) + ' trades'"></div>
             <div id="fs-trade-table-mount"></div>
           </div>
@@ -194,32 +214,32 @@
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
         <div @click="toggleTopBins()"
              style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
-          <span style="font-size:12px;color:var(--muted)"
+          <span style="font-size:13px;color:var(--muted)"
                 x-text="topBinsExpanded ? '▾' : '▸'"></span>
-          <span style="font-size:12px;font-weight:700;color:var(--text)">All-Ticker Metric Bins</span>
-          <span style="font-size:10px;color:var(--dim)"
+          <span style="font-size:13px;font-weight:700;color:var(--text)">All-Ticker Metric Bins</span>
+          <span style="font-size:11px;color:var(--dim)"
                 x-show="!topBinsData?.error"
                 x-text="topBinsData ? ('· ' + (topBinsData.metrics?.length || 0) + ' metrics · ' + (topBinsData.total_rows || 0).toLocaleString() + ' rows · ' + topBinsData.outcome) : '— click to load'"></span>
           <span x-show="topBinsData?.mode === 'walk_forward'"
-                style="font-size:10px;color:#f39c12;font-weight:600"
+                style="font-size:11px;color:#f39c12;font-weight:600"
                 x-text="topBinsData ? ('WALK-FWD · ' + (topBinsData.total_rows - (topBinsData.dropped_warmup_n||0)).toLocaleString() + ' rows used · ' + (topBinsData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (topBinsData.warmup||252) + 'd)') : ''"></span>
           <span x-show="topBinsData?.cached_at && !topBinsData?.error"
-                style="font-size:10px;color:var(--dim)"
+                style="font-size:11px;color:var(--dim)"
                 x-text="topBinsData?.cached_at ? ('· as of ' + new Date(topBinsData.cached_at).toLocaleString()) : ''"></span>
-          <span x-show="topBinsData?.error" style="font-size:10px;color:#e84393"
+          <span x-show="topBinsData?.error" style="font-size:11px;color:#e84393"
                 x-text="'Error: ' + topBinsData?.error"></span>
-          <span x-show="topBinsLoading" style="font-size:10px;color:#3498db">Loading…</span>
+          <span x-show="topBinsLoading" style="font-size:11px;color:#3498db">Loading…</span>
         </div>
         <!-- Outcome selector + Refresh stay visible whether collapsed or
              expanded — fetch is slow, so let the user pick the fwd-ret
              window before triggering a load. -->
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
-          <span style="font-size:10px;color:var(--dim)">Outcome:</span>
+          <span style="font-size:11px;color:var(--dim)">Outcome:</span>
           <select id="select-topbins-outcome" autocomplete="off"
                   :value="topBinsOutcome"
                   @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:10px;padding:2px 6px;border-radius:3px">
+                         font-size:11px;padding:2px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tbo-'+o">
               <option :value="o" x-text="o"></option>
             </template>
@@ -228,7 +248,7 @@
                   :disabled="topBinsLoading"
                   :style="topBinsLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:10px;padding:2px 10px;border-radius:3px"
+                         font-size:11px;padding:2px 10px;border-radius:3px"
                   title="Re-fetch and bypass server cache (after adding new metrics)">⟳ Refresh</button>
         </div>
       </div>
@@ -239,7 +259,7 @@
               <template x-for="mdata in topBinsData.metrics" :key="'tb-'+mdata.name">
                 <div style="background:var(--surface);border:1px solid var(--border);
                             border-radius:4px;padding:6px 8px">
-                  <div style="font-size:10px;color:var(--muted);font-family:monospace;
+                  <div style="font-size:11px;color:var(--muted);font-family:monospace;
                               overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px"
                        :title="mdata.name" x-text="mdata.name"></div>
                   <div style="position:relative;height:48px;display:flex;gap:1px">
@@ -262,7 +282,7 @@
             </div>
           </template>
           <div x-show="topBinsExpanded && !topBinsLoading && !topBinsData?.metrics?.length"
-               style="font-size:11px;color:var(--dim);padding:6px 0">
+               style="font-size:12px;color:var(--dim);padding:6px 0">
             No metrics scored. Try refreshing.
           </div>
         </div>
@@ -279,41 +299,41 @@
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
         <div @click="toggleTd()"
              style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
-          <span style="font-size:12px;color:var(--muted)"
+          <span style="font-size:13px;color:var(--muted)"
                 x-text="tdExpanded ? '▾' : '▸'"></span>
-          <span style="font-size:12px;font-weight:700;color:var(--text)">Threshold Drift</span>
-          <span style="font-size:10px;color:var(--dim)"
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Threshold Drift</span>
+          <span style="font-size:11px;color:var(--dim)"
                 x-show="!tdData?.error"
                 x-text="tdData ? ('· bins ' + (tdData.bins || []).join(',') + ' · warmup ' + tdData.warmup + 'd · ' + (tdData.total_rows || 0).toLocaleString() + ' rows') : '— walk-forward threshold per bin over time'"></span>
-          <span x-show="tdData?.error" style="font-size:10px;color:#e84393"
+          <span x-show="tdData?.error" style="font-size:11px;color:#e84393"
                 x-text="'Error: ' + tdData?.error"></span>
-          <span x-show="tdLoading" style="font-size:10px;color:#3498db">Loading…</span>
+          <span x-show="tdLoading" style="font-size:11px;color:#3498db">Loading…</span>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" @click.stop>
-          <span style="font-size:10px;color:var(--dim)">Metric:</span>
+          <span style="font-size:11px;color:var(--dim)">Metric:</span>
           <select autocomplete="off"
                   :value="tdMetric"
                   @change="tdMetric = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:10px;padding:2px 6px;border-radius:3px;max-width:240px">
+                         font-size:11px;padding:2px 6px;border-radius:3px;max-width:240px">
             <template x-for="f in features" :key="'tdf-'+f">
               <option :value="f" x-text="f"></option>
             </template>
           </select>
-          <span style="font-size:10px;color:var(--dim)">Outcome:</span>
+          <span style="font-size:11px;color:var(--dim)">Outcome:</span>
           <select id="select-td-outcome" autocomplete="off"
                   :value="tdOutcome"
                   @change="tdOutcome = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:10px;padding:2px 6px;border-radius:3px">
+                         font-size:11px;padding:2px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tdo-'+o">
               <option :value="o" x-text="o"></option>
             </template>
           </select>
-          <span style="font-size:10px;color:var(--dim)">Mode:</span>
+          <span style="font-size:11px;color:var(--dim)">Mode:</span>
           <select x-model="tdMode" @change="_renderTdChart()"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:10px;padding:2px 6px;border-radius:3px">
+                         font-size:11px;padding:2px 6px;border-radius:3px">
             <option value="ratio">Drift ratio (all tickers)</option>
             <option value="native_single">Native units (one ticker)</option>
           </select>
@@ -322,18 +342,16 @@
                     :value="tdSingleTicker"
                     @change="tdSingleTicker = $event.target.value; _renderTdChart()"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:10px;padding:2px 6px;border-radius:3px;max-width:120px">
+                           font-size:11px;padding:2px 6px;border-radius:3px;max-width:120px">
               <template x-for="t in (tdData?.tickers_eligible || [])" :key="'tdt-'+t">
                 <option :value="t" x-text="t"></option>
               </template>
             </select>
           </template>
-          <span style="font-size:10px;color:var(--dim)">Bins:</span>
-          <template x-for="b in [1,5,10,15,20]" :key="'tdb-'+b">
-            <span style="padding:1px 6px;font-size:9px;border-radius:3px;cursor:pointer;font-family:monospace;border:1px solid"
-                  :style="(tdBinsToShow.includes(b))
-                    ? 'background:rgba(52,152,219,.2);border-color:#3498db;color:#3498db'
-                    : 'background:var(--raised);border-color:var(--border);color:var(--dim)'"
+          <span style="font-size:11px;color:var(--dim)">Bins:</span>
+          <template x-for="b in [1,5,10,20]" :key="'tdb-'+b">
+            <span class="btn-action small"
+                  :class="{ off: !tdBinsToShow.includes(b) }"
                   @click="tdToggleBin(b)"
                   x-text="'B'+b"></span>
           </template>
@@ -341,7 +359,7 @@
                   :disabled="tdLoading"
                   :style="tdLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:10px;padding:2px 10px;border-radius:3px"
+                         font-size:11px;padding:2px 10px;border-radius:3px"
                   title="Re-fetch and bypass server cache">⟳ Refresh</button>
         </div>
       </div>
@@ -351,7 +369,7 @@
             <canvas id="chart-threshold-drift"></canvas>
           </div>
           <div x-show="tdExpanded && !tdLoading && !tdHasSeries"
-               style="font-size:11px;color:var(--dim);padding:6px 0">
+               style="font-size:12px;color:var(--dim);padding:6px 0">
             <span x-show="!tdMetric">Pick a metric to load.</span>
             <span x-show="tdMetric && !tdBinsToShow.length">Select at least one bin (B1, B5, …) to plot.</span>
           </div>
@@ -389,13 +407,13 @@
         <label>From</label><br>
         <input type="date" x-model="dateFrom"
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:11px;padding:5px 6px;border-radius:4px">
+                      font-size:12px;padding:5px 6px;border-radius:4px">
       </div>
       <div>
         <label>To</label><br>
         <input type="date" x-model="dateTo"
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:11px;padding:5px 6px;border-radius:4px">
+                      font-size:12px;padding:5px 6px;border-radius:4px">
       </div>
       <div style="padding-top:14px">
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
@@ -414,9 +432,9 @@
         <input type="date" x-model="cutoffDate"
                @change="setPageMode('train_test')"
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:11px;padding:5px 6px;border-radius:4px">
+                      font-size:12px;padding:5px 6px;border-radius:4px">
       </div>
-      <div x-show="loading" style="color:var(--dim);font-size:11px;padding-top:14px">Loading…</div>
+      <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
     </div>
 
     <!-- ── Signal Survey (IC.5 + IC.7) ────────────────────────────────────
@@ -429,15 +447,13 @@
 
       <!-- Survey header -->
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
-        <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Survey</span>
-        <span style="font-size:10px;color:var(--dim)"
+        <span style="font-size:13px;font-weight:700;color:var(--text)">Signal Survey</span>
+        <span style="font-size:11px;color:var(--dim)"
               x-text="icBatchSubtitle()"></span>
         <div style="flex:1"></div>
-        <button @click="refreshIcBatch()"
+        <button class="btn-action pink" @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
-                :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
-                style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                       font-size:10px;padding:2px 10px;border-radius:3px"
+                :style="icBatchLoading ? 'cursor:wait' : ''"
                 title="Recompute Signal Survey for current Outcome + Mode — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
       </div>
 
@@ -446,20 +462,20 @@
            "legitimately no cross-sectional data"; undefined means stale. -->
       <div x-show="icBatchData && icBatchData.metrics?.[0] && !('concentration_gini' in (icBatchData.metrics[0] ?? {}))"
            style="margin:0 12px 8px;padding:8px 12px;border:1px solid #e6a23c55;border-radius:4px;
-                  background:#e6a23c0d;font-size:11px;color:#e6a23c;line-height:1.5">
+                  background:#e6a23c0d;font-size:12px;color:#e6a23c;line-height:1.5">
         ⚠ Cache predates breadth data — click Refresh for full Signal Survey (strength · stability · breadth).
       </div>
 
       <!-- Status panels (between header and pane grid; hidden once data is loaded) -->
       <div style="padding:0 12px">
         <div x-show="icBatchLoading && !icBatchStatus"
-             style="font-size:12px;color:var(--dim);padding:10px 0">Checking cache…</div>
+             style="font-size:13px;color:var(--dim);padding:10px 0">Checking cache…</div>
 
         <div x-show="icBatchStatus === 'not_ready'"
              style="padding:14px;border:1px solid var(--border);border-radius:4px;
                     background:var(--raised);line-height:1.6;margin-bottom:8px">
-          <span x-show="ticker !== 'ALL'" style="font-size:12px;color:var(--dim)">Starting computation…</span>
-          <span x-show="ticker === 'ALL'" style="font-size:12px;color:var(--dim)">
+          <span x-show="ticker !== 'ALL'" style="font-size:13px;color:var(--dim)">Starting computation…</span>
+          <span x-show="ticker === 'ALL'" style="font-size:13px;color:var(--dim)">
             This horizon isn't computed yet —
             click <strong>⟳ Refresh</strong> to run (~10–15 min, polls every 30 s automatically).
           </span>
@@ -468,12 +484,12 @@
         <div x-show="icBatchStatus === 'computing'"
              style="padding:16px;border:1px solid #3498db55;border-radius:4px;
                     background:#3498db0d;line-height:1.7;margin-bottom:8px">
-          <div style="font-size:14px;font-weight:600;color:#3498db;margin-bottom:6px">⏳ Computing Signal Survey</div>
-          <div style="font-size:12px;color:var(--dim)"
+          <div style="font-size:15px;font-weight:600;color:#3498db;margin-bottom:6px">⏳ Computing Signal Survey</div>
+          <div style="font-size:13px;color:var(--dim)"
                x-text="ticker === 'ALL'
                  ? 'ALL-mode (cross-sectional, all tickers): ~10–15 min on the VPS.'
                  : 'Single-ticker (time-series): ~1–2 min on the VPS.'"></div>
-          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+          <div style="font-size:13px;color:var(--dim);margin-top:4px">
             Checking every 30 s — charts appear when the job finishes. You can navigate the page freely.
           </div>
         </div>
@@ -481,8 +497,8 @@
         <div x-show="icBatchStatus === 'queued'"
              style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
                     background:#e6a23c0d;line-height:1.7;margin-bottom:8px">
-          <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">⏳ Queued</div>
-          <div style="font-size:12px;color:var(--dim)">
+          <div style="font-size:15px;font-weight:600;color:#e6a23c;margin-bottom:6px">⏳ Queued</div>
+          <div style="font-size:13px;color:var(--dim)">
             Another IC job is running — this key starts automatically when the slot frees (checking every 30 s).
           </div>
         </div>
@@ -490,8 +506,8 @@
         <div x-show="icBatchStatus === 'timeout'"
              style="padding:16px;border:1px solid #e6a23c55;border-radius:4px;
                     background:#e6a23c0d;line-height:1.7;margin-bottom:8px">
-          <div style="font-size:14px;font-weight:600;color:#e6a23c;margin-bottom:6px">⌛ Poll timed out (15 min)</div>
-          <div style="font-size:12px;color:var(--dim)">
+          <div style="font-size:15px;font-weight:600;color:#e6a23c;margin-bottom:6px">⌛ Poll timed out (15 min)</div>
+          <div style="font-size:13px;color:var(--dim)">
             The poll timer stopped. The job may still be running — click <strong>⟳ Refresh</strong> to restart polling.
           </div>
         </div>
@@ -499,9 +515,9 @@
         <div x-show="icBatchStatus === 'failed'"
              style="padding:16px;border:1px solid #e74c3c55;border-radius:4px;
                     background:#e74c3c0d;line-height:1.7;margin-bottom:8px">
-          <div style="font-size:14px;font-weight:600;color:#e74c3c;margin-bottom:4px">❌ Computation failed</div>
-          <div style="font-size:12px;color:var(--dim)" x-text="icBatchError || 'Unknown error'"></div>
-          <div style="font-size:11px;color:var(--dim);margin-top:8px">Click <strong>⟳ Refresh</strong> to retry.</div>
+          <div style="font-size:15px;font-weight:600;color:#e74c3c;margin-bottom:4px">❌ Computation failed</div>
+          <div style="font-size:13px;color:var(--dim)" x-text="icBatchError || 'Unknown error'"></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:8px">Click <strong>⟳ Refresh</strong> to retry.</div>
         </div>
       </div>
 
@@ -557,9 +573,9 @@
       <!-- Level-2: Signal Decomposition ──────────────────────────────── -->
       <div style="border-top:1px solid var(--border);padding:10px 12px 0">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-          <span style="font-size:11px;font-weight:700;color:var(--text)">Signal Decomposition</span>
+          <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Decomposition</span>
           <span x-show="ticker === 'ALL'"
-                style="font-size:10px;color:var(--dim)"
+                style="font-size:11px;color:var(--dim)"
                 x-text="(() => {
                   const hz  = (outcome || '').match(/(\d+d)/)?.[0] || '';
                   const mod = pageMode === 'train_test' ? 'train/test' : pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
@@ -569,9 +585,9 @@
                 })()">
           </span>
           <span x-show="icDecompLoading && ticker === 'ALL'"
-                style="font-size:10px;color:#3498db">Loading…</span>
+                style="font-size:11px;color:#3498db">Loading…</span>
           <span x-show="icDecompError && !icDecompLoading"
-                style="font-size:10px;color:#e74c3c"
+                style="font-size:11px;color:#e74c3c"
                 x-text="'Error: ' + icDecompError"></span>
           <div style="flex:1"></div>
           <div x-show="icDecompData && !icDecompError && ticker === 'ALL'">
@@ -608,11 +624,11 @@
           <!-- ALL mode: loading -->
           <div x-show="ticker === 'ALL' && icDecompLoading"
                style="height:420px;display:flex;align-items:center;justify-content:center">
-            <span style="font-size:12px;color:var(--dim)">Loading decomposition…</span>
+            <span style="font-size:13px;color:var(--dim)">Loading decomposition…</span>
           </div>
           <!-- ALL mode: chart -->
           <div x-show="ticker === 'ALL' && icDecompData && !icDecompError">
-            <div style="padding:4px 8px 2px;font-size:9px;color:var(--dim)">
+            <div style="padding:4px 8px 2px;font-size:10px;color:var(--dim)">
               X = sign agreement rate (0.5 = random) ·
               <span x-text="icDecompYMode === 'basket'
                 ? 'Y = avg return vs 128-ticker basket (per-ticker)'
@@ -626,8 +642,8 @@
           <!-- ALL mode: error -->
           <div x-show="ticker === 'ALL' && icDecompError && !icDecompLoading"
                style="padding:14px;margin:8px;border:1px solid #e74c3c55;border-radius:4px;background:#e74c3c0d">
-            <div style="font-size:13px;font-weight:600;color:#e74c3c">❌ Error</div>
-            <div style="font-size:12px;color:var(--dim)" x-text="icDecompError"></div>
+            <div style="font-size:14px;font-weight:600;color:#e74c3c">❌ Error</div>
+            <div style="font-size:13px;color:var(--dim)" x-text="icDecompError"></div>
           </div>
         </div>
 
@@ -646,7 +662,7 @@
           <!-- ALL mode: loading -->
           <div x-show="ticker === 'ALL' && icDecompLoading"
                style="height:420px;display:flex;align-items:center;justify-content:center">
-            <span style="font-size:12px;color:var(--dim)">Loading…</span>
+            <span style="font-size:13px;color:var(--dim)">Loading…</span>
           </div>
           <!-- ALL mode: no metric selected -->
           <div x-show="ticker === 'ALL' && !icDecompData && !icDecompLoading && !icDecompError"
@@ -661,15 +677,15 @@
           <!-- ALL mode: error -->
           <div x-show="ticker === 'ALL' && icDecompError && !icDecompLoading"
                style="padding:14px;margin:8px;border:1px solid #e74c3c55;border-radius:4px;background:#e74c3c0d">
-            <div style="font-size:13px;font-weight:600;color:#e74c3c">❌ Error</div>
-            <div style="font-size:12px;color:var(--dim)" x-text="icDecompError"></div>
+            <div style="font-size:14px;font-weight:600;color:#e74c3c">❌ Error</div>
+            <div style="font-size:13px;color:var(--dim)" x-text="icDecompError"></div>
           </div>
         </div>
 
       </div><!-- /level-2 panes -->
     </div><!-- /signal survey -->
 
-    <div x-show="error" style="color:var(--danger);padding:12px;font-size:12px" x-text="error"></div>
+    <div x-show="error" style="color:var(--danger);padding:12px;font-size:13px" x-text="error"></div>
 
     <!-- Results -->
     <template x-if="data && !data.error">
@@ -677,7 +693,7 @@
 
         <!-- Walk-forward subtitle (only when this analyze was walk-forward) -->
         <template x-if="data.mode === 'walk_forward'">
-          <div style="font-size:10px;color:#e6a23c;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
+          <div style="font-size:11px;color:#e6a23c;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
                x-text="'WALK-FORWARD · ' + (data.n||0).toLocaleString() + ' trades since ' + (data.start_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (data.warmup||252) + 'd)'"></div>
         </template>
 
@@ -685,7 +701,7 @@
              trade_date < cutoff); per-bin stats below are computed over
              TEST-window rows only. -->
         <template x-if="data.mode === 'train_test'">
-          <div style="font-size:10px;color:#9b59b6;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
+          <div style="font-size:11px;color:#9b59b6;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
                x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · bins frozen at cutoff ' + (data.cutoff_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows excluded (insufficient training history)'"></div>
         </template>
 
@@ -697,7 +713,7 @@
           </div>
           <div class="stat-item">
             <div class="stat-label">Pattern</div>
-            <div class="stat-value" style="font-size:12px" x-text="data.pattern"></div>
+            <div class="stat-value" style="font-size:13px" x-text="data.pattern"></div>
           </div>
           <div class="stat-item">
             <div class="stat-label">Pearson r</div>
@@ -742,7 +758,7 @@
           <div class="chart-box">
             <div class="chart-title">
               Quantile Avg Return
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bars to select</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
               <div class="mode-seg" style="margin-left:8px">
                 <span :class="{on: decileBins===5}"  @click="setDecileBins(5)">5</span>
                 <span :class="{on: decileBins===10}" @click="setDecileBins(10)">10</span>
@@ -768,10 +784,10 @@
               </div>
             </div>
             <div class="decile-btns">
-              <span class="decile-btn" @click="selectNone()" style="font-size:9px">None</span>
-              <span class="decile-btn" @click="selectExtremes()" style="font-size:9px"
+              <span class="decile-btn" @click="selectNone()" style="font-size:10px">None</span>
+              <span class="decile-btn" @click="selectExtremes()" style="font-size:10px"
                     x-text="decileBins===20 ? 'B1+B20' : 'D1+D10'"></span>
-              <span class="decile-btn" @click="selectAllDeciles()" style="font-size:9px">All</span>
+              <span class="decile-btn" @click="selectAllDeciles()" style="font-size:10px">All</span>
               <template x-if="decileBins !== 20">
                 <template x-for="d in [1,2,3,4,5,6,7,8,9,10]" :key="'db-'+d">
                   <span class="decile-btn" :class="{on: isDecileSelected(d)}"
@@ -785,7 +801,7 @@
                  This label prevents misreading the curve as full-history
                  when toggling between modes. -->
             <template x-if="data.mode === 'train_test'">
-              <div style="font-size:10px;color:#9b59b6;margin:2px 0 4px;font-family:monospace;letter-spacing:.5px;font-weight:600"
+              <div style="font-size:11px;color:#9b59b6;margin:2px 0 4px;font-family:monospace;letter-spacing:.5px;font-weight:600"
                    x-text="'TEST PERIOD · since ' + (data.cutoff_date || '?')"></div>
             </template>
             <div class="chart-canvas"><canvas id="chart-equity"></canvas></div>
@@ -795,14 +811,14 @@
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
             <div class="chart-box" style="min-height:0">
               <div class="chart-title">Avg Return by Year
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected</span>
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected</span>
                 <button class="fs-btn" @click="openFullscreen('chart-yearly')" title="Fullscreen">⛶</button>
               </div>
               <div class="chart-canvas" style="height:200px"><canvas id="chart-yearly"></canvas></div>
             </div>
             <div class="chart-box" style="min-height:0">
               <div class="chart-title">Avg Return by Day of Week
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected</span>
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected</span>
                 <button class="fs-btn" @click="openFullscreen('chart-dow')" title="Fullscreen">⛶</button>
               </div>
               <div class="chart-canvas" style="height:200px"><canvas id="chart-dow"></canvas></div>
@@ -812,7 +828,7 @@
           <!-- Trade Activity: entries + open positions over time -->
           <div class="chart-box">
             <div class="chart-title">Trade Activity
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— entries &amp; open positions</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— entries &amp; open positions</span>
               <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.primary }"
                       @click="toggleDedupeConc('primary')"
                       title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
@@ -824,7 +840,7 @@
           <!-- Boxplot -->
           <div class="chart-box">
             <div class="chart-title">Return Distribution by Decile
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— P5/Q1/Med/Q3/P95</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— P5/Q1/Med/Q3/P95</span>
               <button class="fs-btn" @click="openFullscreen('chart-boxplot')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-boxplot"></canvas></div>
@@ -833,7 +849,7 @@
           <!-- Drawdown -->
           <div class="chart-box">
             <div class="chart-title">Drawdown
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected deciles</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected deciles</span>
               <button class="fs-btn" @click="openFullscreen('chart-drawdown')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-drawdown"></canvas></div>
@@ -846,21 +862,21 @@
             </div>
             <div x-text="rollingIcSubtitle()"
                  x-show="data?.rolling_ic?.series?.length"
-                 style="font-size:10px;color:var(--dim);padding:0 6px 4px"></div>
+                 style="font-size:11px;color:var(--dim);padding:0 6px 4px"></div>
             <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
           </div>
 
           <!-- Win Rate + Return Distribution: half-width side by side -->
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
             <div class="chart-box" style="min-height:0">
-              <div class="chart-title" style="font-size:10px">Win Rate by Decile
+              <div class="chart-title" style="font-size:11px">Win Rate by Decile
                 <button class="fs-btn" @click="openFullscreen('chart-winrate')" title="Fullscreen">⛶</button>
               </div>
               <div class="chart-canvas" style="height:200px"><canvas id="chart-winrate"></canvas></div>
             </div>
             <div class="chart-box" style="min-height:0">
-              <div class="chart-title" style="font-size:10px">Return Distribution
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected vs all</span>
+              <div class="chart-title" style="font-size:11px">Return Distribution
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected vs all</span>
                 <button class="fs-btn" @click="openFullscreen('chart-dist')" title="Fullscreen">⛶</button>
               </div>
               <div class="chart-canvas" style="height:200px"><canvas id="chart-dist"></canvas></div>
@@ -871,7 +887,7 @@
           <div class="chart-box" style="overflow:hidden">
             <div class="chart-title">
               Trade Data
-              <span id="trade-table-count" style="font-weight:400;font-size:9px;color:var(--dim);margin-left:6px"></span>
+              <span id="trade-table-count" style="font-weight:400;font-size:10px;color:var(--dim);margin-left:6px"></span>
               <!-- View toggle — same look as the Equity Curve mode-seg.
                    The bin filter selected in the quantile pane above (D1..D10
                    or B1..B20) applies to both views, so toggling preserves
@@ -882,12 +898,12 @@
               </div>
               <button @click="exportTradeCSV()"
                 style="margin-left:auto;background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                       color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                       color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
                 Export CSV
               </button>
               <button class="fs-btn" @click="openTradeTableFullscreen()" title="Fullscreen">⛶</button>
             </div>
-            <div style="overflow-y:auto;max-height:280px;font-size:10px">
+            <div style="overflow-y:auto;max-height:280px;font-size:11px">
               <table class="trade-table" style="border-collapse:collapse;font-family:monospace">
                 <colgroup id="trade-table-cols"></colgroup>
                 <thead id="trade-table-head" style="position:sticky;top:0;background:var(--panel);z-index:1"></thead>
@@ -899,7 +915,7 @@
           <!-- Trade Calendar -->
           <div class="chart-box">
             <div class="chart-title">Trade Calendar
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— month × year avg return</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— month × year avg return</span>
               <button class="fs-btn" @click="openFullscreen('chart-calendar')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-calendar"></canvas></div>
@@ -909,17 +925,17 @@
           <div class="chart-box" style="grid-column:span 2">
             <div class="chart-title">
               2-Metric Heatmap
-              <span style="font-weight:400;font-size:9px;color:var(--dim)">— avg return by (X, Y) bins</span>
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— avg return by (X, Y) bins</span>
               <div class="mode-seg" style="margin-left:8px">
                 <span :class="{on: heatmapBins===3}"  @click="setHeatmapBins(3)">3×3</span>
                 <span :class="{on: heatmapBins===5}"  @click="setHeatmapBins(5)">5×5</span>
                 <span :class="{on: heatmapBins===10}" @click="setHeatmapBins(10)">10×10</span>
               </div>
               <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-                <label style="font-size:9px;color:var(--dim)">Y metric:</label>
+                <label style="font-size:10px;color:var(--dim)">Y metric:</label>
                 <select x-model="heatmapMetric"
                         style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                               font-size:10px;padding:3px 6px;border-radius:3px;max-width:240px">
+                               font-size:11px;padding:3px 6px;border-radius:3px;max-width:240px">
                   <option value="">— select —</option>
                   <template x-for="f in features" :key="'hm-'+f">
                     <option :value="f" x-text="f"></option>
@@ -927,10 +943,10 @@
                 </select>
                 <button @click="loadHeatmap()"
                         style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                               color:#3498db;font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                               color:#3498db;font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer">
                   Load
                 </button>
-                <span x-show="heatmapLoading" style="font-size:9px;color:var(--dim)">Loading…</span>
+                <span x-show="heatmapLoading" style="font-size:10px;color:var(--dim)">Loading…</span>
               </div>
             </div>
             <!-- Content: 2D grid + 1D bar charts -->
@@ -938,16 +954,16 @@
               <div style="display:flex;gap:16px;align-items:flex-start;padding:8px 0">
                 <!-- Left: 2D heatmap table -->
                 <div style="flex:0 0 auto;overflow-x:auto">
-                  <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
+                  <div style="font-size:10px;color:var(--dim);margin-bottom:6px">
                     cols = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_x"></span>
                     &nbsp;·&nbsp; rows = <span style="color:#aaa;font-family:monospace" x-text="heatmapData.metric_y"></span>
                   </div>
-                  <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
+                  <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
                     <thead>
                       <tr>
-                        <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:10px">Y↓ / X→</th>
+                        <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:11px">Y↓ / X→</th>
                         <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
-                          <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
+                          <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:11px;white-space:nowrap"></th>
                         </template>
                       </tr>
                     </thead>
@@ -955,15 +971,15 @@
                       <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
                         <tr>
                           <th x-text="heatmapData.y_labels[iy]"
-                              style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
+                              style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
                           <template x-for="(cell, ix) in row" :key="'hmcell-'+ix">
                             <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
                                 :title="cell && cell.n ? 'n=' + cell.n + '  avg=' + ((cell.avg_ret||0)*100).toFixed(3) + '%  wr=' + ((cell.win_rate||0)*100).toFixed(1) + '%' : 'n=0'">
                               <template x-if="cell && cell.n > 0">
                                 <div>
-                                  <span style="font-size:12px;font-weight:700;display:block;color:#fff"
+                                  <span style="font-size:13px;font-weight:700;display:block;color:#fff"
                                         x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                                  <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+                                  <span style="font-size:11px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
                                 </div>
                               </template>
                             </td>
@@ -976,7 +992,7 @@
                 <!-- Right: 1D metric bar charts -->
                 <div style="flex:1;min-width:180px;display:flex;flex-direction:column;gap:10px">
                   <div style="display:flex;align-items:center;gap:6px">
-                    <span style="font-size:9px;color:var(--dim)">Bins:</span>
+                    <span style="font-size:10px;color:var(--dim)">Bins:</span>
                     <div class="mode-seg">
                       <span :class="{on: hmBins1d===5}"  @click="setHmBins1d(5)">5</span>
                       <span :class="{on: hmBins1d===10}" @click="setHmBins1d(10)">10</span>
@@ -994,7 +1010,7 @@
             </template>
             <div x-show="!heatmapData || !heatmapData.grid"
                  style="height:180px;display:flex;align-items:center;justify-content:center;
-                        color:var(--dim);font-size:12px">
+                        color:var(--dim);font-size:13px">
               Select a Y metric and click Load
             </div>
           </div>
@@ -1002,7 +1018,7 @@
 
         <!-- Decile stats table -->
         <div style="margin-top:8px">
-          <div style="font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px">Decile Statistics</div>
+          <div style="font-size:13px;font-weight:700;color:var(--muted);margin-bottom:6px">Decile Statistics</div>
           <div style="overflow-x:auto">
             <table class="dec-table">
               <thead>
@@ -1023,7 +1039,7 @@
                     <td class="num" x-text="(d.win_rate*100).toFixed(1) + '%'"></td>
                     <td class="num" x-text="(d.std_dev*100).toFixed(3) + '%'"></td>
                     <td class="num" x-text="d.sharpe.toFixed(3)"></td>
-                    <td class="num" style="font-size:10px;color:var(--dim)"
+                    <td class="num" style="font-size:11px;color:var(--dim)"
                         x-text="d.min_val.toFixed(4) + ' – ' + d.max_val.toFixed(4)"></td>
                   </tr>
                 </template>
@@ -1035,17 +1051,17 @@
         <!-- AI Summary -->
         <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-            <div style="font-size:12px;font-weight:700;color:var(--muted)">AI Analysis</div>
+            <div style="font-size:13px;font-weight:700;color:var(--muted)">AI Analysis</div>
             <button @click="generateAISummary()"
                     style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                           color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
+                           color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
               Generate
             </button>
-            <span x-show="aiLoading" style="font-size:10px;color:var(--dim)">Generating…</span>
+            <span x-show="aiLoading" style="font-size:11px;color:var(--dim)">Generating…</span>
           </div>
           <div x-show="aiSummary"
                style="background:var(--surface);border:1px solid var(--border);border-radius:6px;
-                      padding:14px 18px;font-size:13px;color:var(--text);line-height:1.7"
+                      padding:14px 18px;font-size:14px;color:var(--text);line-height:1.7"
                x-text="aiSummary">
           </div>
         </div>
@@ -1059,17 +1075,17 @@
 
         <!-- Header row -->
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">Secondary Signal Scanner</div>
-          <span style="font-size:9px;color:#e6a23c;font-family:monospace;letter-spacing:.5px;background:rgba(230,162,60,.1);border:1px solid rgba(230,162,60,.3);padding:1px 6px;border-radius:3px">walk-forward · nomination only</span>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">Secondary Signal Scanner</div>
+          <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px;background:rgba(230,162,60,.1);border:1px solid rgba(230,162,60,.3);padding:1px 6px;border-radius:3px">walk-forward · nomination only</span>
           <button @click="secLoad()"
                   :disabled="secStatus.loading"
                   :style="{ opacity: secStatus.loading ? 0.5 : 1 }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
             <span x-text="secStatus.loading ? 'Loading…' : (secStatus.loaded ? 'Reload' : 'Load All Metrics')"></span>
           </button>
           <template x-if="secStatus.loaded && secBaseline">
-            <span style="font-size:10px;color:var(--dim)">
+            <span style="font-size:11px;color:var(--dim)">
               Baseline (primary filter): <b style="color:var(--text)" x-text="secBaseline.n + ' trades'"></b>
               · <b :style="'color:' + (secBaseline.avg_ret >= 0 ? '#3498db' : '#e84393')"
                    x-text="(secBaseline.avg_ret * 100).toFixed(3) + '%'"></b>
@@ -1078,19 +1094,19 @@
             </span>
           </template>
           <template x-if="secScanMeta && secScanMeta.mode === 'walk_forward'">
-            <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px"
+            <span style="font-size:11px;color:#e6a23c;font-family:monospace;letter-spacing:.5px"
                   x-text="'WALK-FORWARD · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · ' + (secScanMeta.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (252d)'"></span>
           </template>
           <template x-if="secScanMeta && secScanMeta.data_as_of">
-            <span style="font-size:10px;color:var(--dim)" x-text="'data through ' + secScanMeta.data_as_of"></span>
+            <span style="font-size:11px;color:var(--dim)" x-text="'data through ' + secScanMeta.data_as_of"></span>
           </template>
-          <span x-show="secStatus.loading" style="font-size:10px;color:#3498db">Computing secondary scores…</span>
-          <span x-show="secStatus.error" style="font-size:10px;color:#e84393" x-text="secStatus.error"></span>
+          <span x-show="secStatus.loading" style="font-size:11px;color:#3498db">Computing secondary scores…</span>
+          <span x-show="secStatus.error" style="font-size:11px;color:#e84393" x-text="secStatus.error"></span>
         </div>
 
         <!-- Empty state -->
         <div x-show="!secStatus.loaded && !secStatus.loading"
-             style="font-size:11px;color:var(--dim);padding:4px 0 12px">
+             style="font-size:12px;color:var(--dim);padding:4px 0 12px">
           Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
         </div>
 
@@ -1103,8 +1119,8 @@
             <div class="chart-box" style="min-width:0">
               <div class="chart-title">
                 Secondary Metrics by Lift
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— click a bar to drill in</span>
-                <span x-show="secStatus.loading" style="color:#3498db;font-size:9px;margin-left:6px">updating…</span>
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— click a bar to drill in</span>
+                <span x-show="secStatus.loading" style="color:#3498db;font-size:10px;margin-left:6px">updating…</span>
                 <button class="fs-btn" @click="openFullscreen('sec-bar-canvas')" title="Fullscreen">⛶</button>
               </div>
               <div style="overflow-x:auto;position:relative">
@@ -1119,8 +1135,8 @@
                 Equity Curves
                 <template x-if="secSelectedMetric">
                   <span>
-                    <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
-                    <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: +secondary</span>
+                    <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
+                    <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: +secondary</span>
                   </span>
                 </template>
                 <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen"
@@ -1132,7 +1148,7 @@
               </template>
               <template x-if="!secSelectedMetric">
                 <div class="chart-canvas"
-                     style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px">
+                     style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px">
                   Click a bar on the left to drill in
                 </div>
               </template>
@@ -1147,17 +1163,17 @@
             <!-- Detail sub-header: metric name, bin count selector, bin pills, close -->
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;
                         background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px">
-              <div style="font-size:11px;font-weight:700;color:var(--text);font-family:monospace"
+              <div style="font-size:12px;font-weight:700;color:var(--text);font-family:monospace"
                    x-text="secSelectedMetric"></div>
               <div class="mode-seg" style="margin-left:4px">
                 <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
                 <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
                 <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
               </div>
-              <span style="font-size:10px;color:var(--dim);margin-left:4px">bins · click to toggle →</span>
+              <span style="font-size:11px;color:var(--dim);margin-left:4px">bins · click to toggle →</span>
               <template x-if="secDetail && secDetail.bins">
                 <template x-for="b in secDetail.bins.filter(x => x)" :key="'sb-'+b.bin">
-                  <span style="padding:2px 8px;border-radius:3px;font-size:9px;cursor:pointer;border:1px solid;font-family:monospace"
+                  <span style="padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer;border:1px solid;font-family:monospace"
                         :style="{
                           background: secSelectedSecBins.includes(b.bin) ? 'rgba(232,67,147,.2)' : 'var(--raised)',
                           borderColor: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--border)',
@@ -1167,9 +1183,9 @@
                         x-text="'B' + b.bin"></span>
                 </template>
               </template>
-              <span x-show="secDetailLoading" style="font-size:10px;color:var(--dim)">Loading…</span>
+              <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
               <template x-if="secDetail">
-                <span style="font-size:10px;color:var(--dim);margin-left:auto">
+                <span style="font-size:11px;color:var(--dim);margin-left:auto">
                   Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
                   · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
                 </span>
@@ -1177,12 +1193,12 @@
               <template x-if="secDetail?.combined_trades?.length">
                 <button @click="secDownloadCSV()"
                         style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
-                               color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                               color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
                   ↓ CSV
                 </button>
               </template>
               <button @click="secSelectedMetric=null;secDetail=null"
-                      style="background:transparent;border:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px">✕</button>
+                      style="background:transparent;border:none;color:var(--dim);font-size:12px;cursor:pointer;padding:0 4px">✕</button>
             </div>
 
             <!-- Row 2: Secondary quantile bins (left) + Trade activity (right) -->
@@ -1190,7 +1206,7 @@
               <div class="chart-box">
                 <div class="chart-title">
                   Quantile — Secondary Metric
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— click bins to toggle filter</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— click bins to toggle filter</span>
                   <button class="fs-btn" @click="openFullscreen('sec-bins-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-bins-canvas"></canvas></div>
@@ -1198,7 +1214,7 @@
               <div class="chart-box">
                 <div class="chart-title">
                   Trade Activity
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— combined filter entries &amp; open positions</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— combined filter entries &amp; open positions</span>
                   <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.sec }"
                           @click="toggleDedupeConc('sec')"
                           title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
@@ -1213,12 +1229,12 @@
               <div class="chart-box">
                 <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                   <span>Ticker Breakdown</span>
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
                   <span x-show="secDetail?.tickers?.length"
-                        style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                        style="font-size:10px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
                                border-radius:3px;padding:1px 6px;color:var(--dim)"
                         x-text="_tickerCoverage(secDetail?.tickers)"></span>
-                  <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
+                  <span style="font-size:10px;color:var(--dim);margin-left:auto">min n:
                     <input type="range" min="1" max="10" step="1"
                            :value="secBubbleMinN"
                            @input="secSetBubbleMinN($event.target.value)"
@@ -1232,7 +1248,7 @@
               <div class="chart-box">
                 <div class="chart-title">
                   Avg Return by Year
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs +secondary</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— primary vs +secondary</span>
                   <button class="fs-btn" @click="openFullscreen('sec-yearly-canvas')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
@@ -1251,14 +1267,14 @@
 
         <!-- Header row -->
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">Multi-Metric Correlation</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">Multi-Metric Correlation</div>
           <button @click="corrTogglePanel()"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600"
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600"
                   x-text="corrPanelOpen ? 'Hide' : 'Open'"></button>
           <template x-if="corrPanelOpen">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span style="font-size:10px;color:var(--dim)">Bins:</span>
+              <span style="font-size:11px;color:var(--dim)">Bins:</span>
               <div class="mode-seg">
                 <span :class="{on: corrBinCount===5}"  @click="corrSetBinCount(5)">5</span>
                 <span :class="{on: corrBinCount===10}" @click="corrSetBinCount(10)">10</span>
@@ -1266,21 +1282,19 @@
               </div>
               <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
                       style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                             font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
-              <button @click="runCorrelation()"
+                             font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
+              <button class="btn-action pink small" @click="runCorrelation()"
                       :disabled="corrSelectedCount() < 2 || corrLoading"
-                      :style="corrSelectedCount() >= 2 && !corrLoading ? 'opacity:1;cursor:pointer' : 'opacity:.4;cursor:not-allowed'"
-                      style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
-                             color:#e84393;font-size:10px;padding:2px 12px;border-radius:3px;font-weight:600">
+                      :style="corrLoading ? 'cursor:wait' : ''">
                 <span x-text="corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
               </button>
-              <span x-show="corrSelectedCount() > 0" style="font-size:10px;color:var(--dim)"
+              <span x-show="corrSelectedCount() > 0" style="font-size:11px;color:var(--dim)"
                     x-text="corrSelectedCount() + ' metric' + (corrSelectedCount()===1?'':'s') + ' selected'"></span>
               <template x-if="corrResult?.combined_trades?.length">
                 <button @click="corrDownloadCSV()"
                         title="Download enriched trades CSV"
                         style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
-                               color:#3498db;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                               color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
                   ↓ CSV
                 </button>
               </template>
@@ -1292,13 +1306,13 @@
           <div>
 
             <!-- Loading spinner -->
-            <div x-show="corrMiniLoading" style="font-size:11px;color:var(--dim);padding:8px 0 12px">
+            <div x-show="corrMiniLoading" style="font-size:12px;color:var(--dim);padding:8px 0 12px">
               Loading metric bins…
             </div>
 
             <!-- Walk-forward subtitle -->
             <template x-if="!corrMiniLoading && corrMiniData?.mode === 'walk_forward'">
-              <div style="font-size:10px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
+              <div style="font-size:11px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
                    x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' in primary-bin filter / ' + (corrMiniData.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrMiniData.warmup||252) + 'd) · since ' + (corrMiniData.start_date||'?')"></div>
             </template>
 
@@ -1311,7 +1325,7 @@
                          : 'background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:6px 8px'">
 
                     <!-- Metric name -->
-                    <div style="font-size:10px;color:var(--dim);font-family:monospace;overflow:hidden;
+                    <div style="font-size:11px;color:var(--dim);font-family:monospace;overflow:hidden;
                                 text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px"
                          :title="mdata.name" x-text="mdata.name"></div>
 
@@ -1342,7 +1356,7 @@
 
                     <!-- Selected bins label -->
                     <div x-show="(corrSelections[mdata.name]||[]).length > 0"
-                         style="font-size:7px;color:#e84393;margin-top:2px;font-family:monospace"
+                         style="font-size:8px;color:#e84393;margin-top:2px;font-family:monospace"
                          x-text="'B' + [...(corrSelections[mdata.name]||[])].sort((a,b)=>a-b).join(', B')">
                     </div>
                   </div>
@@ -1352,7 +1366,7 @@
 
             <!-- Walk-forward subtitle (result pane) -->
             <template x-if="corrResult?.mode === 'walk_forward' && !corrResult.error">
-              <div style="font-size:10px;color:#e6a23c;margin:6px 0 6px;font-family:monospace;letter-spacing:.5px"
+              <div style="font-size:11px;color:#e6a23c;margin:6px 0 6px;font-family:monospace;letter-spacing:.5px"
                    x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows in primary-bin filter / ' + (corrResult.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrResult.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrResult.warmup||252) + 'd) · since ' + (corrResult.start_date||'?')"></div>
             </template>
 
@@ -1427,10 +1441,10 @@
               <div class="chart-box" style="margin-bottom:12px">
                 <div class="chart-title">
                   Phi Correlation Matrix
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— hover cell for overlap count · blue=positive · pink=negative</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— hover cell for overlap count · blue=positive · pink=negative</span>
                 </div>
                 <div style="overflow:auto;padding:8px 4px">
-                  <table style="border-collapse:separate;border-spacing:3px;font-size:11px;font-family:monospace">
+                  <table style="border-collapse:separate;border-spacing:3px;font-size:12px;font-family:monospace">
                     <thead>
                       <tr>
                         <th style="padding:0"></th>
@@ -1438,7 +1452,7 @@
                           <th style="padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;
                                      max-width:110px;overflow:hidden;text-overflow:ellipsis;
                                      writing-mode:vertical-lr;transform:rotate(180deg);
-                                     height:100px;vertical-align:bottom;text-align:left;font-size:11px"
+                                     height:100px;vertical-align:bottom;text-align:left;font-size:12px"
                               :title="m" x-text="m"></th>
                         </template>
                       </tr>
@@ -1447,7 +1461,7 @@
                       <template x-for="(row, i) in corrResult.phi" :key="'cr-'+i">
                         <tr>
                           <td style="padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;
-                                     max-width:130px;overflow:hidden;text-overflow:ellipsis;font-size:11px"
+                                     max-width:130px;overflow:hidden;text-overflow:ellipsis;font-size:12px"
                               :title="corrResult.metrics[i] + '  n=' + corrResult.n_each[i]"
                               x-text="corrResult.metrics[i]"></td>
                           <template x-for="(val, j) in row" :key="'cc-'+j">
@@ -1467,9 +1481,9 @@
             <!-- Union detail charts -->
             <template x-if="corrResult && !corrResult.error && corrResult.combined_n > 0">
               <div>
-                <div style="font-size:11px;font-weight:700;color:var(--muted);margin:12px 0 8px">
+                <div style="font-size:12px;font-weight:700;color:var(--muted);margin:12px 0 8px">
                   Selected Metrics — Aggregate View
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)"
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)"
                         x-text="'— ' + corrResult.combined_n + ' trades in any selected bin (vs baseline ' + corrResult.baseline_n + ')'"></span>
                 </div>
                 <!-- Equity + Activity -->
@@ -1477,8 +1491,8 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Equity Curve
-                      <span style="font-weight:400;font-size:9px;color:#3498db">— blue: primary filter</span>
-                      <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: selected bins (union)</span>
+                      <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
+                      <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: selected bins (union)</span>
                       <button class="fs-btn" @click="openFullscreen('corr-equity-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-equity-canvas"></canvas></div>
@@ -1486,7 +1500,7 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Trade Activity
-                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— selected bins entries &amp; open positions</span>
+                      <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected bins entries &amp; open positions</span>
                       <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.corr }"
                               @click="toggleDedupeConc('corr')"
                               title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
@@ -1500,7 +1514,7 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Yearly Returns
-                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary vs selected bins (union)</span>
+                      <span style="font-weight:400;font-size:10px;color:var(--dim)">— primary vs selected bins (union)</span>
                       <button class="fs-btn" @click="openFullscreen('corr-yearly-canvas')">⛶</button>
                     </div>
                     <div class="chart-canvas"><canvas id="corr-yearly-canvas"></canvas></div>
@@ -1508,12 +1522,12 @@
                   <div class="chart-box" style="position:relative">
                     <div class="chart-title">
                       Ticker Breakdown
-                      <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                      <span style="font-weight:400;font-size:10px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
                       <span x-show="corrResult?.tickers?.length"
-                            style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                            style="font-size:10px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
                                    border-radius:3px;padding:1px 6px;color:var(--dim)"
                             x-text="_tickerCoverage(corrResult?.tickers)"></span>
-                      <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
+                      <span style="font-size:10px;color:var(--dim);margin-left:auto">min n:
                         <input type="range" min="1" max="50" :value="corrBubbleMinN"
                                @input="corrSetBubbleMinN($event.target.value)"
                                style="width:60px;vertical-align:middle">
@@ -1528,7 +1542,7 @@
             </template>
 
             <!-- Error state -->
-            <div x-show="corrResult?.error" style="font-size:11px;color:#e84393;padding:4px 0"
+            <div x-show="corrResult?.error" style="font-size:12px;color:#e84393;padding:4px 0"
                  x-text="'Error: ' + corrResult?.error"></div>
 
           </div>
@@ -1544,11 +1558,11 @@
     <template x-if="true">
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:8px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">System Portfolio</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">System Portfolio</div>
 
           <select x-model.number="portfolioId" @change="selectPortfolio(portfolioId)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:11px;padding:3px 8px;border-radius:3px;min-width:200px">
+                         font-size:12px;padding:3px 8px;border-radius:3px;min-width:200px">
             <option :value="null">— Select portfolio —</option>
             <template x-for="p in portfolios" :key="p.id">
               <option :value="p.id"
@@ -1561,20 +1575,20 @@
                   class="if-pill" :style="portfolioId ? 'cursor:pointer' : 'opacity:.4;cursor:not-allowed'">Rename</button>
           <button @click="deletePortfolio()" :disabled="!portfolioId"
                   class="if-pill" :style="portfolioId ? 'cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)' : 'opacity:.4;cursor:not-allowed'">Delete</button>
-          <span x-show="portLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
+          <span x-show="portLoading" style="font-size:12px;color:var(--dim)">Loading…</span>
         </div>
 
         <!-- Active portfolio header -->
         <template x-if="portfolio">
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
-            <div style="font-size:10px;color:var(--dim);margin-bottom:6px">
+            <div style="font-size:11px;color:var(--dim);margin-bottom:6px">
               Anchor:
               <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.ticker"></span> ·
               <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.outcome"></span> ·
               <span x-text="(portfolio.portfolio?.date_from || 'earliest') + ' → ' + (portfolio.portfolio?.date_to || 'today')"></span>
             </div>
             <template x-if="portAggregate && portAggregate.mode === 'walk_forward'">
-              <div style="font-size:10px;color:#e6a23c;margin-bottom:6px;font-family:monospace;letter-spacing:.5px"
+              <div style="font-size:11px;color:#e6a23c;margin-bottom:6px;font-family:monospace;letter-spacing:.5px"
                    x-text="'WALK-FORWARD · ' + (portAggregate.combined_n||0).toLocaleString() + ' trades since ' + (portAggregate.start_date||'?') + ' · ' + (portAggregate.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (portAggregate.warmup||252) + 'd)'"></div>
             </template>
             <!-- Edit-mode banner -->
@@ -1582,15 +1596,15 @@
               <div style="background:rgba(232,67,147,0.08);border:1px solid rgba(232,67,147,0.4);
                           border-radius:4px;padding:6px 10px;margin-bottom:6px;
                           display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                <span style="font-size:11px;color:#e84393;font-weight:600">
+                <span style="font-size:12px;color:#e84393;font-weight:600">
                   Editing <span x-text="editingSystemName"></span>
                 </span>
-                <span style="font-size:10px;color:var(--dim)">
+                <span style="font-size:11px;color:var(--dim)">
                   Adjust primary bins above and/or secondary selections in the Correlation Explorer, then click Save Changes.
                 </span>
                 <button @click="cancelEditSystem()"
                         style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--dim);
-                               font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                               font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer">
                   Cancel Edit
                 </button>
               </div>
@@ -1599,18 +1613,18 @@
             <span x-show="portfolio" style="display:inline-flex;border-radius:4px;overflow:hidden;border:1px solid var(--border)">
               <button @click="portIsShort = false"
                       :style="!portIsShort ? 'background:rgba(52,152,219,.2);color:#3498db;font-weight:700' : 'background:var(--raised);color:var(--dim)'"
-                      style="font-size:10px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">LONG</button>
+                      style="font-size:11px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">LONG</button>
               <button @click="portIsShort = true"
                       :style="portIsShort ? 'background:rgba(232,67,147,.2);color:#e84393;font-weight:700' : 'background:var(--raised);color:var(--dim)'"
-                      style="font-size:10px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">SHORT</button>
+                      style="font-size:11px;padding:3px 10px;border:none;cursor:pointer;letter-spacing:.3px">SHORT</button>
             </span>
             <button @click="addCurrentSystem()"
                     :disabled="!canAddSystem"
                     :style="canAddSystem ? (editingSystemId ? 'background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);color:#e84393;cursor:pointer' : 'background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.4);color:#3498db;cursor:pointer') : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:not-allowed;opacity:.6'"
-                    style="font-size:11px;padding:5px 14px;border-radius:4px;font-weight:600"
+                    style="font-size:12px;padding:5px 14px;border-radius:4px;font-weight:600"
                     x-text="editingSystemId ? ('Save Changes to ' + editingSystemName) : '+ Add Current Setup as System'"></button>
             <span x-show="!canAddSystem && portfolio"
-                  style="font-size:10px;color:var(--dim);margin-left:10px">
+                  style="font-size:11px;color:var(--dim);margin-left:10px">
               Select primary bins above AND at least one secondary in the Correlation Explorer
             </span>
           </div>
@@ -1619,29 +1633,29 @@
         <!-- System Library — anchor-agnostic templates reusable across portfolios -->
         <div style="margin-bottom:10px">
           <div @click="libraryExpanded = !libraryExpanded"
-               style="cursor:pointer;font-size:11px;color:var(--muted);
+               style="cursor:pointer;font-size:12px;color:var(--muted);
                       display:inline-flex;align-items:center;gap:6px;user-select:none">
             <span x-text="libraryExpanded ? '▾' : '▸'"></span>
             <span><b>Library</b></span>
             <span x-text="'(' + librarySystems.length + ' saved)'" style="color:var(--dim)"></span>
-            <span style="color:var(--dim);font-size:10px;margin-left:4px">— click Save (💾) on any system card to add it here</span>
+            <span style="color:var(--dim);font-size:11px;margin-left:4px">— click Save (💾) on any system card to add it here</span>
           </div>
           <template x-if="libraryExpanded">
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
                         gap:6px;margin-top:8px;padding:8px;background:rgba(255,255,255,.02);
                         border:1px solid var(--border);border-radius:6px">
               <template x-if="!librarySystems.length">
-                <div style="font-size:11px;color:var(--dim);grid-column:1/-1;padding:6px">
+                <div style="font-size:12px;color:var(--dim);grid-column:1/-1;padding:6px">
                   No saved library systems yet. Save (💾) any system in this portfolio to start your library.
                 </div>
               </template>
               <template x-for="lib in librarySystems" :key="'lib-'+lib.id">
                 <div style="background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:8px">
                   <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-                    <span style="font-size:11px;font-weight:700;color:var(--text);flex:1"
+                    <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
                           x-text="lib.name"></span>
                     <span x-show="lib.is_short"
-                          style="font-size:9px;font-weight:700;letter-spacing:.4px;
+                          style="font-size:10px;font-weight:700;letter-spacing:.4px;
                                  background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);
                                  color:#e84393;border-radius:3px;padding:1px 5px">SHORT</span>
                     <span class="if-pill" style="cursor:pointer"
@@ -1654,7 +1668,7 @@
                     <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"
                           @click="deleteLibrarySystem(lib.id)" title="Delete from library">×</span>
                   </div>
-                  <div style="font-size:9px;color:var(--muted);font-family:monospace;line-height:1.5">
+                  <div style="font-size:10px;color:var(--muted);font-family:monospace;line-height:1.5">
                     <div>
                       <span style="color:var(--dim)">P:</span>
                       <span x-text="lib.primary_metric"></span>
@@ -1685,10 +1699,10 @@
                   <input type="checkbox" :checked="sys.enabled"
                          @change="toggleSystem(sys.id, $event.target.checked)"
                          style="cursor:pointer">
-                  <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
+                  <span style="font-size:13px;font-weight:700;color:var(--text);flex:1"
                         x-text="sys.name"></span>
                   <span x-show="sys.is_short"
-                        style="font-size:9px;font-weight:700;letter-spacing:.4px;
+                        style="font-size:10px;font-weight:700;letter-spacing:.4px;
                                background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.4);
                                color:#e84393;border-radius:3px;padding:1px 5px">SHORT</span>
                   <span class="if-pill" style="cursor:pointer" @click="saveSystemToLibrary(sys)" title="Save to Library">💾</span>
@@ -1698,7 +1712,7 @@
                         @click="deleteSystem(sys.id)"
                         title="Remove from this portfolio (does not delete from the Library)">×</span>
                 </div>
-                <div style="font-size:10px;color:var(--muted);font-family:monospace;line-height:1.5">
+                <div style="font-size:11px;color:var(--muted);font-family:monospace;line-height:1.5">
                   <div>
                     <span style="color:var(--dim)">P:</span>
                     <span x-text="sys.primary_metric"></span>
@@ -1715,7 +1729,7 @@
                   </template>
                 </div>
                 <template x-if="portAggSysMap[sys.id]">
-                  <div style="display:flex;gap:8px;margin-top:6px;font-size:10px;color:var(--muted)">
+                  <div style="display:flex;gap:8px;margin-top:6px;font-size:11px;color:var(--muted)">
                     <span><b x-text="(portAggSysMap[sys.id].n_trades || 0).toLocaleString()"></b> trades</span>
                     <span>win <b x-text="((portAggSysMap[sys.id].win_rate || 0) * 100).toFixed(1) + '%'"></b></span>
                     <span>avg <b x-text="((portAggSysMap[sys.id].avg_ret || 0) * 100).toFixed(3) + '%'"></b></span>
@@ -1802,8 +1816,8 @@
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
                   Equity Curve
-                  <span style="font-weight:400;font-size:9px;color:#3498db">— blue: any-system primary universe</span>
-                  <span style="font-weight:400;font-size:9px;color:#e84393"> · pink: portfolio union</span>
+                  <span style="font-weight:400;font-size:10px;color:#3498db">— blue: any-system primary universe</span>
+                  <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: portfolio union</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-equity')">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-equity"></canvas></div>
@@ -1811,7 +1825,7 @@
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
                   Trade Activity
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— union entries &amp; open positions</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— union entries &amp; open positions</span>
                   <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.port }"
                           @click="toggleDedupeConc('port')"
                           title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
@@ -1824,7 +1838,7 @@
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
                   Yearly Returns
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— primary universe vs portfolio union</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— primary universe vs portfolio union</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-yearly')">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-yearly"></canvas></div>
@@ -1832,12 +1846,12 @@
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
                   Ticker Breakdown
-                  <span style="font-weight:400;font-size:9px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
                   <span x-show="portAggregate?.tickers?.length"
-                        style="font-size:9px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                        style="font-size:10px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
                                border-radius:3px;padding:1px 6px;color:var(--dim)"
                         x-text="_tickerCoverage(portAggregate?.tickers)"></span>
-                  <span style="font-size:9px;color:var(--dim);margin-left:auto">min n:
+                  <span style="font-size:10px;color:var(--dim);margin-left:auto">min n:
                     <input type="range" min="1" max="50" :value="portBubbleMinN"
                            @input="portSetBubbleMinN($event.target.value)"
                            style="width:60px;vertical-align:middle">
@@ -1853,11 +1867,11 @@
             <div class="chart-box" style="margin-bottom:12px">
               <div class="chart-title">
                 System × System Correlation
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— high φ = systems trade together · low/negative = diversifying</span>
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— high φ = systems trade together · low/negative = diversifying</span>
               </div>
               <template x-if="portAggregate.phi_systems && portAggregate.phi_systems.length">
                 <div style="overflow:auto;padding:8px 4px">
-                  <table style="border-collapse:separate;border-spacing:3px;font-size:11px;font-family:monospace">
+                  <table style="border-collapse:separate;border-spacing:3px;font-size:12px;font-family:monospace">
                     <thead>
                       <tr>
                         <th style="padding:0"></th>
@@ -1865,7 +1879,7 @@
                           <th style="padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;
                                      max-width:110px;overflow:hidden;text-overflow:ellipsis;
                                      writing-mode:vertical-lr;transform:rotate(180deg);
-                                     height:80px;vertical-align:bottom;text-align:left;font-size:11px"
+                                     height:80px;vertical-align:bottom;text-align:left;font-size:12px"
                               :title="lab" x-text="lab"></th>
                         </template>
                       </tr>
@@ -1874,7 +1888,7 @@
                       <template x-for="(row, i) in portAggregate.phi_systems" :key="'psr-'+i">
                         <tr>
                           <td style="padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;
-                                     max-width:130px;overflow:hidden;text-overflow:ellipsis;font-size:11px"
+                                     max-width:130px;overflow:hidden;text-overflow:ellipsis;font-size:12px"
                               :title="portAggregate.system_labels[i] + '  n=' + (portAggregate.overlap_systems[i]?.[i] ?? 0)"
                               x-text="portAggregate.system_labels[i]"></td>
                           <template x-for="(val, j) in row" :key="'psc-'+j">
@@ -1889,7 +1903,7 @@
                 </div>
               </template>
               <div x-show="!portAggregate.phi_systems || !portAggregate.phi_systems.length"
-                   style="font-size:11px;color:var(--dim);padding:8px">
+                   style="font-size:12px;color:var(--dim);padding:8px">
                 Enable at least one system to compute correlations.
               </div>
             </div>
@@ -1898,16 +1912,16 @@
             <div class="chart-box" style="margin-bottom:12px">
               <div class="chart-title">
                 Pair × Pair Correlation
-                <span style="font-weight:400;font-size:9px;color:var(--dim)">— each system's primary × every secondary; separators between systems</span>
+                <span style="font-weight:400;font-size:10px;color:var(--dim)">— each system's primary × every secondary; separators between systems</span>
               </div>
               <template x-if="portAggregate.phi_pairs && portAggregate.phi_pairs.length">
                 <div style="overflow:auto;padding:8px 4px">
-                  <table style="border-collapse:separate;border-spacing:2px;font-size:10px;font-family:monospace">
+                  <table style="border-collapse:separate;border-spacing:2px;font-size:11px;font-family:monospace">
                     <thead>
                       <tr>
                         <th style="padding:0"></th>
                         <template x-for="(lab, j) in portAggregate.pair_labels" :key="'pph-'+j">
-                          <th :style="'padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;writing-mode:vertical-lr;transform:rotate(180deg);height:100px;vertical-align:bottom;text-align:left;font-size:10px;' + (portAggregate.system_boundaries.includes(j) && j > 0 ? 'border-left:2px solid #444' : '')"
+                          <th :style="'padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;writing-mode:vertical-lr;transform:rotate(180deg);height:100px;vertical-align:bottom;text-align:left;font-size:11px;' + (portAggregate.system_boundaries.includes(j) && j > 0 ? 'border-left:2px solid #444' : '')"
                               :title="lab" x-text="lab"></th>
                         </template>
                       </tr>
@@ -1915,7 +1929,7 @@
                     <tbody>
                       <template x-for="(row, i) in portAggregate.phi_pairs" :key="'ppr-'+i">
                         <tr>
-                          <td :style="'padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:10px;' + (portAggregate.system_boundaries.includes(i) && i > 0 ? 'border-top:2px solid #444' : '')"
+                          <td :style="'padding:2px 10px 2px 0;color:var(--dim);white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:11px;' + (portAggregate.system_boundaries.includes(i) && i > 0 ? 'border-top:2px solid #444' : '')"
                               :title="portAggregate.pair_labels[i] + '  n=' + (portAggregate.overlap_pairs[i]?.[i] ?? 0)"
                               x-text="portAggregate.pair_labels[i]"></td>
                           <template x-for="(val, j) in row" :key="'ppc-'+j">
@@ -1930,7 +1944,7 @@
                 </div>
               </template>
               <div x-show="!portAggregate.phi_pairs || !portAggregate.phi_pairs.length"
-                   style="font-size:11px;color:var(--dim);padding:8px">
+                   style="font-size:12px;color:var(--dim);padding:8px">
                 Add at least one system with secondary metric(s) to compute pair correlations.
               </div>
             </div>
@@ -1939,17 +1953,17 @@
             <div>
               <button @click="portCsvDownload()"
                       style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                             font-size:11px;padding:5px 14px;border-radius:4px;cursor:pointer">
+                             font-size:12px;padding:5px 14px;border-radius:4px;cursor:pointer">
                 ⬇ Download Union CSV
               </button>
-              <span style="font-size:10px;color:var(--dim);margin-left:8px"
+              <span style="font-size:11px;color:var(--dim);margin-left:8px"
                     x-text="(portAggregate.combined_n || 0).toLocaleString() + ' trades'"></span>
             </div>
           </div>
         </template>
 
         <template x-if="portfolio && portAggregate && (portAggregate.combined_n || 0) === 0">
-          <div style="font-size:11px;color:var(--dim);padding:8px">
+          <div style="font-size:12px;color:var(--dim);padding:8px">
             No union trades. Add systems with primary bins and at least one secondary.
           </div>
         </template>
@@ -1959,33 +1973,33 @@
     <!-- ── Score Matrix (independent of analysis above) ──────────────── -->
     <div style="margin-top:24px;border-top:2px solid var(--border);padding-top:16px">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-        <div style="font-size:14px;font-weight:700;color:var(--text)">Score Matrix</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text)">Score Matrix</div>
         <button @click="runBatchScore()"
                 :disabled="smStatus.running"
                 style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                       color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;
+                       color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;
                        cursor:pointer;font-weight:600">
           <span x-text="smStatus.running ? 'Running...' : 'Run Scan'"></span>
         </button>
         <button @click="loadScoreMatrix()"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                       font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer">
+                       font-size:12px;padding:4px 10px;border-radius:4px;cursor:pointer">
           Refresh
         </button>
         <span x-show="smStatus.message"
-              :style="`font-size:10px;color:${smStatus.message && smStatus.message.startsWith('Error') ? '#e74c3c' : 'var(--dim)'}`"
+              :style="`font-size:11px;color:${smStatus.message && smStatus.message.startsWith('Error') ? '#e74c3c' : 'var(--dim)'}`"
               x-text="smStatus.message"></span>
         <span x-show="smMeta.last_run && !smStatus.running"
-              style="font-size:10px;color:var(--dim);margin-left:auto"
+              style="font-size:11px;color:var(--dim);margin-left:auto"
               x-text="'Last: ' + (smMeta.last_run || 'never')"></span>
       </div>
 
       <!-- WF mode status -->
       <template x-if="pageMode === 'walk_forward'">
         <div style="margin-bottom:8px">
-          <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px">WALK-FORWARD MODE</span>
+          <span style="font-size:11px;color:#e6a23c;font-family:monospace;letter-spacing:.5px">WALK-FORWARD MODE</span>
           <template x-if="smMeta.count === 0 && !smStatus.running">
-            <span style="font-size:10px;color:var(--dim);margin-left:8px">
+            <span style="font-size:11px;color:var(--dim);margin-left:8px">
               No walk-forward scores computed yet — click <strong>Run Scan</strong> to generate them.
             </span>
           </template>
@@ -1995,9 +2009,9 @@
       <!-- TT mode status -->
       <template x-if="pageMode === 'train_test'">
         <div style="margin-bottom:8px">
-          <span style="font-size:10px;color:#9b59b6;font-family:monospace;letter-spacing:.5px">TRAIN-TEST MODE</span>
+          <span style="font-size:11px;color:#9b59b6;font-family:monospace;letter-spacing:.5px">TRAIN-TEST MODE</span>
           <template x-if="smMeta.count === 0 && !smStatus.running">
-            <span style="font-size:10px;color:var(--dim);margin-left:8px">
+            <span style="font-size:11px;color:var(--dim);margin-left:8px">
               No train-test scores computed yet — click <strong>Run Scan</strong> to generate them.
             </span>
           </template>
@@ -2008,7 +2022,7 @@
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
         <select x-model="smFilterTicker"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                       font-size:11px;padding:3px 6px;border-radius:3px">
+                       font-size:12px;padding:3px 6px;border-radius:3px">
           <option value="">All Tickers</option>
           <template x-for="t in smMeta.tickers" :key="'smt-'+t">
             <option :value="t" x-text="t"></option>
@@ -2016,7 +2030,7 @@
         </select>
         <select x-model="smFilterMetric"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                       font-size:11px;padding:3px 6px;border-radius:3px">
+                       font-size:12px;padding:3px 6px;border-radius:3px">
           <option value="">All Metrics</option>
           <template x-for="m in smMeta.metrics" :key="'smm-'+m">
             <option :value="m" x-text="m"></option>
@@ -2024,26 +2038,26 @@
         </select>
         <select x-model="smFilterFwd"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                       font-size:11px;padding:3px 6px;border-radius:3px">
+                       font-size:12px;padding:3px 6px;border-radius:3px">
           <option value="">All Fwd Rets</option>
           <template x-for="f in smMeta.fwd_rets" :key="'smf-'+f">
             <option :value="f" x-text="f"></option>
           </template>
         </select>
-        <label style="font-size:10px;color:var(--dim)">Min Score:</label>
+        <label style="font-size:11px;color:var(--dim)">Min Score:</label>
         <input type="number" x-model.number="smMinScore" min="0" max="100" step="5"
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:11px;padding:3px 6px;border-radius:3px;width:50px">
+                      font-size:12px;padding:3px 6px;border-radius:3px;width:50px">
         <button @click="loadScoreMatrix()"
                 style="background:rgba(52,152,219,.1);border:1px solid rgba(52,152,219,.2);
-                       color:#3498db;font-size:10px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                       color:#3498db;font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer">
           Apply
         </button>
       </div>
 
       <!-- Summary -->
       <div x-show="smMeta.count > 0"
-           style="font-size:10px;color:var(--dim);margin-bottom:6px">
+           style="font-size:11px;color:var(--dim);margin-bottom:6px">
         <span x-text="smMeta.count + ' scored'"></span>
         <span style="margin:0 6px">|</span>
         <span>Avg: <b x-text="smMeta.avg_score"></b></span>
@@ -2057,12 +2071,12 @@
 
       <!-- Table -->
       <div style="height:400px;overflow:auto;border:1px solid var(--border);border-radius:4px">
-        <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
           <thead>
             <tr>
               <template x-for="col in smColumns" :key="'smh-'+col.key">
                 <th @click="smSort(col.key)"
-                    style="background:var(--raised);color:var(--dim);font-size:9px;font-weight:700;
+                    style="background:var(--raised);color:var(--dim);font-size:10px;font-weight:700;
                            text-transform:uppercase;letter-spacing:.3px;padding:6px 8px;
                            border-bottom:1px solid var(--border);position:sticky;top:0;z-index:2;
                            cursor:pointer;user-select:none;white-space:nowrap"
@@ -2079,11 +2093,11 @@
                     x-text="row.composite_score?.toFixed(0)"></td>
                 <td style="padding:4px 8px;font-weight:600;color:var(--text)"
                     x-text="row.ticker"></td>
-                <td style="padding:4px 8px;color:var(--text);font-size:10px"
+                <td style="padding:4px 8px;color:var(--text);font-size:11px"
                     x-text="row.metric"></td>
-                <td style="padding:4px 8px;color:var(--dim);font-size:10px"
+                <td style="padding:4px 8px;color:var(--dim);font-size:11px"
                     x-text="row.fwd_ret"></td>
-                <td style="padding:4px 8px;color:var(--dim);font-size:10px"
+                <td style="padding:4px 8px;color:var(--dim);font-size:11px"
                     x-text="row.pattern"></td>
                 <td style="padding:4px 8px;text-align:right"
                     :style="{color: (row.spearman_r||0) >= 0 ? '#3498db' : '#e84393'}"
@@ -2114,11 +2128,11 @@
           </tbody>
         </table>
         <div x-show="smRows.length === 0 && smMeta.count === 0"
-             style="text-align:center;padding:40px;color:var(--dim);font-size:12px">
+             style="text-align:center;padding:40px;color:var(--dim);font-size:13px">
           No score data yet. Click "Run Scan" to generate scores for all ticker/metric combinations.
         </div>
         <div x-show="smRows.length === 0 && smMeta.count > 0"
-             style="text-align:center;padding:40px;color:var(--dim);font-size:12px">
+             style="text-align:center;padding:40px;color:var(--dim);font-size:13px">
           No results match current filters.
         </div>
       </div>
@@ -2126,9 +2140,9 @@
       <!-- Summary charts: avg score by metric + by fwd ret -->
       <div x-show="smMeta.count > 0" style="margin-top:16px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-          <div style="font-size:12px;font-weight:700;color:var(--text)">Score Summary</div>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">Score Summary</div>
           <span x-show="smSelectedMetric || smSelectedFwd || smSelectedTicker"
-                style="font-size:10px;color:var(--dim)">
+                style="font-size:11px;color:var(--dim)">
             Filtered:
             <b x-show="smSelectedMetric" x-text="smSelectedMetric" style="color:#3498db"></b>
             <span x-show="smSelectedMetric && (smSelectedFwd || smSelectedTicker)"> + </span>
@@ -2139,16 +2153,16 @@
           <button x-show="smSelectedMetric || smSelectedFwd || smSelectedTicker"
                   @click="smClearFilters()"
                   style="background:rgba(232,67,147,.1);border:1px solid rgba(232,67,147,.2);
-                         color:#e84393;font-size:10px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                         color:#e84393;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
             Clear All
           </button>
         </div>
         <div style="display:flex;gap:12px">
         <!-- Metric avg score (80%) -->
         <div style="flex:4;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
-          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:8px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">
             Avg Score by Metric
-            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
+            <span style="font-weight:400;color:var(--dim);font-size:10px">— click to filter</span>
           </div>
           <div style="height:280px">
             <canvas id="chart-sm-metric"></canvas>
@@ -2156,11 +2170,11 @@
         </div>
         <!-- Fwd ret avg score (20%) -->
         <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
-          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">
             Avg Score by Fwd Ret
-            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
+            <span style="font-weight:400;color:var(--dim);font-size:10px">— click to filter</span>
           </div>
-          <div style="font-size:9px;color:var(--dim);margin-bottom:8px"
+          <div style="font-size:10px;color:var(--dim);margin-bottom:8px"
                x-text="smSelectedMetric ? smSelectedMetric : 'All metrics'"></div>
           <div style="height:250px">
             <canvas id="chart-sm-fwd"></canvas>
@@ -2170,22 +2184,22 @@
         <!-- Ticker row: avg score by ticker (80%) + avg score by fwd ret for selected ticker (20%) -->
         <div style="display:flex;gap:12px;margin-top:12px">
         <div style="flex:4;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
-          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">
             Avg Score by Ticker
-            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
+            <span style="font-weight:400;color:var(--dim);font-size:10px">— click to filter</span>
           </div>
-          <div style="font-size:9px;color:var(--dim);margin-bottom:8px"
+          <div style="font-size:10px;color:var(--dim);margin-bottom:8px"
                x-text="(smSelectedMetric || smSelectedFwd) ? ('Filtered: ' + [smSelectedMetric, smSelectedFwd].filter(Boolean).join(' + ')) : 'All metrics × all fwd returns'"></div>
           <div style="height:200px">
             <canvas id="chart-sm-ticker"></canvas>
           </div>
         </div>
         <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px">
-          <div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px">
             Avg Score by Fwd Ret
-            <span style="font-weight:400;color:var(--dim);font-size:9px">— click to filter</span>
+            <span style="font-weight:400;color:var(--dim);font-size:10px">— click to filter</span>
           </div>
-          <div style="font-size:9px;color:var(--dim);margin-bottom:8px"
+          <div style="font-size:10px;color:var(--dim);margin-bottom:8px"
                x-text="smSelectedTicker ? smSelectedTicker : 'All tickers'"></div>
           <div style="height:170px">
             <canvas id="chart-sm-ticker-fwd"></canvas>
@@ -2196,11 +2210,11 @@
 
       <!-- 2F Interaction Scanner -->
       <div x-show="smMeta.count > 0" style="margin-top:20px;padding-bottom:32px">
-        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px">2-Factor Interaction Scanner</div>
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px">2-Factor Interaction Scanner</div>
 
         <!-- Metric picker -->
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:10px">
-          <div style="font-size:10px;color:var(--dim);margin-bottom:8px">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:8px">
             Select 2 or more metrics to compare — all pairs will be scanned across every ticker and forward return.
             <span x-show="$store.metricPicker.pairCount > 0" style="color:#3498db;font-weight:700"
                   x-text="' ' + $store.metricPicker.selected.length + ' selected → ' + $store.metricPicker.pairCount + ' pair(s)'"></span>
@@ -2220,14 +2234,14 @@
                     :style="{ opacity: ($store.metricPicker.selected.length >= 2 && !ifStatus.running) ? 1 : 0.4,
                               cursor: ($store.metricPicker.selected.length >= 2 && !ifStatus.running) ? 'pointer' : 'not-allowed' }"
                     style="background:#3a3a3a;border:1px solid rgba(52,152,219,.5);
-                           color:#3498db;font-size:11px;padding:4px 14px;border-radius:4px;font-weight:600">
+                           color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:600">
             </button>
             <button @click="$store.metricPicker.clear()"
                     x-show="$store.metricPicker.selected.length > 0 && !ifStatus.running"
-                    style="background:transparent;border:none;color:var(--dim);font-size:10px;cursor:pointer">
+                    style="background:transparent;border:none;color:var(--dim);font-size:11px;cursor:pointer">
               Clear
             </button>
-            <span x-show="ifStatus.message" style="font-size:11px;color:var(--dim)"
+            <span x-show="ifStatus.message" style="font-size:12px;color:var(--dim)"
                   x-text="ifStatus.message"></span>
           </div>
         </div>
@@ -2236,26 +2250,26 @@
         <div x-show="ifRows.length > 0"
              style="background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:12px">
           <div style="display:flex;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border)">
-            <span style="font-size:9px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.3px">Results</span>
+            <span style="font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.3px">Results</span>
             <select x-model="ifFwdFilter" @change="loadInteractionMatrix()"
                     style="margin-left:auto;background:var(--raised);border:1px solid var(--border);
-                           color:var(--text);font-size:11px;padding:3px 6px;border-radius:4px">
+                           color:var(--text);font-size:12px;padding:3px 6px;border-radius:4px">
               <option value="">All Fwd Rets</option>
               <template x-for="f in smMeta.fwd_rets" :key="f">
                 <option :value="f" x-text="f"></option>
               </template>
             </select>
           </div>
-          <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
             <thead>
               <tr style="border-bottom:1px solid var(--border)">
-                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FEAT A</th>
-                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FEAT B</th>
-                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:9px">FWD RET</th>
-                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">AVG LIFT</th>
-                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">MAX LIFT</th>
-                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">AVG SCORE</th>
-                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:9px">TICKERS</th>
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:10px">FEAT A</th>
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:10px">FEAT B</th>
+                <th style="padding:6px 10px;text-align:left;color:var(--dim);font-weight:600;font-size:10px">FWD RET</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:10px">AVG LIFT</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:10px">MAX LIFT</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:10px">AVG SCORE</th>
+                <th style="padding:6px 10px;text-align:right;color:var(--dim);font-weight:600;font-size:10px">TICKERS</th>
               </tr>
             </thead>
             <tbody>
@@ -2285,14 +2299,14 @@
 
         <!-- No results placeholder -->
         <div x-show="ifRows.length === 0 && !ifStatus.running"
-             style="text-align:center;padding:32px;color:var(--dim);font-size:12px">
+             style="text-align:center;padding:32px;color:var(--dim);font-size:13px">
           No interaction data yet. Click "Run 2F Scan" to compute cross-family combinations.
         </div>
 
         <!-- 2F Heatmap panel (shown when a row is selected) -->
         <div x-show="ifSelected" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px">
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
-            <div style="font-size:11px;font-weight:700;color:var(--text)">
+            <div style="font-size:12px;font-weight:700;color:var(--text)">
               <span x-text="ifSelected?.feat_a"></span>
               <span style="color:var(--dim)"> × </span>
               <span x-text="ifSelected?.feat_b"></span>
@@ -2300,7 +2314,7 @@
             <!-- Ticker selector -->
             <select x-model="ifDetailTicker" @change="loadInteractionDetail()"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:11px;padding:3px 6px;border-radius:4px">
+                           font-size:12px;padding:3px 6px;border-radius:4px">
               <option value="">All Tickers</option>
               <template x-for="d in [...new Set(ifDetail.map(x=>x.ticker))].sort()" :key="d">
                 <option :value="d" x-text="d"></option>
@@ -2309,13 +2323,13 @@
             <!-- Fwd ret selector -->
             <select x-model="ifDetailFwd" @change="loadInteractionDetail()"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:11px;padding:3px 6px;border-radius:4px">
+                           font-size:12px;padding:3px 6px;border-radius:4px">
               <option value="">All Fwd Rets</option>
               <template x-for="d in [...new Set(ifDetail.map(x=>x.fwd_ret))].sort()" :key="d">
                 <option :value="d" x-text="d"></option>
               </template>
             </select>
-            <span style="margin-left:auto;font-size:10px;color:var(--dim)">
+            <span style="margin-left:auto;font-size:11px;color:var(--dim)">
               Lift: <b :style="'color:' + ((ifDetailRow?.interaction_lift||0) >= 0 ? '#3498db' : '#e84393')"
                        x-text="ifDetailRow?.interaction_lift?.toFixed(3) ?? '—'"></b>
               &nbsp;·&nbsp; Score: <b style="color:var(--muted)"
@@ -2323,7 +2337,7 @@
               &nbsp;·&nbsp; n=<span x-text="ifDetailRow?.n ?? '—'"></span>
             </span>
             <button @click="ifSelected=null"
-                    style="background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:14px">✕</button>
+                    style="background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:15px">✕</button>
           </div>
 
           <!-- 2×2 heatmap grid -->
@@ -2331,78 +2345,78 @@
             <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:2px;max-width:520px">
               <!-- Header row -->
               <div></div>
-              <div style="text-align:center;font-size:9px;color:var(--dim);padding-bottom:4px"
+              <div style="text-align:center;font-size:10px;color:var(--dim);padding-bottom:4px"
                    x-text="(ifSelected?.feat_a ?? '') + ' LOW'"></div>
-              <div style="text-align:center;font-size:9px;color:var(--dim);padding-bottom:4px"
+              <div style="text-align:center;font-size:10px;color:var(--dim);padding-bottom:4px"
                    x-text="(ifSelected?.feat_a ?? '') + ' HIGH'"></div>
               <!-- feat_b HIGH row -->
-              <div style="display:flex;align-items:center;font-size:9px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
+              <div style="display:flex;align-items:center;font-size:10px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
                    x-text="(ifSelected?.feat_b ?? '') + ' HIGH'"></div>
               <template x-for="aHigh in [false, true]" :key="'bH-'+aHigh">
                 <div :style="'border-radius:4px;padding:12px 8px;min-height:80px;' +
                              'background:' + ifQuadrantColor(ifQuadCell(aHigh, true))">
                   <template x-if="ifQuadCell(aHigh, true)">
                     <div>
-                      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:4px"
+                      <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px"
                            x-text="((ifQuadCell(aHigh,true)?.avg_ret||0)*100).toFixed(2) + '%'"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.7)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.7)"
                            x-text="'WR ' + ((ifQuadCell(aHigh,true)?.win_rate||0)*100).toFixed(0) + '%'"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.6)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.6)"
                            x-text="'Sh ' + (ifQuadCell(aHigh,true)?.sharpe||0).toFixed(2)"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.5)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.5)"
                            x-text="'n=' + (ifQuadCell(aHigh,true)?.n||0)"></div>
                     </div>
                   </template>
                 </div>
               </template>
               <!-- feat_b LOW row -->
-              <div style="display:flex;align-items:center;font-size:9px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
+              <div style="display:flex;align-items:center;font-size:10px;color:var(--dim);padding-right:8px;writing-mode:vertical-rl;transform:rotate(180deg);text-align:center"
                    x-text="(ifSelected?.feat_b ?? '') + ' LOW'"></div>
               <template x-for="aHigh in [false, true]" :key="'bL-'+aHigh">
                 <div :style="'border-radius:4px;padding:12px 8px;min-height:80px;' +
                              'background:' + ifQuadrantColor(ifQuadCell(aHigh, false))">
                   <template x-if="ifQuadCell(aHigh, false)">
                     <div>
-                      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:4px"
+                      <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px"
                            x-text="((ifQuadCell(aHigh,false)?.avg_ret||0)*100).toFixed(2) + '%'"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.7)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.7)"
                            x-text="'WR ' + ((ifQuadCell(aHigh,false)?.win_rate||0)*100).toFixed(0) + '%'"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.6)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.6)"
                            x-text="'Sh ' + (ifQuadCell(aHigh,false)?.sharpe||0).toFixed(2)"></div>
-                      <div style="font-size:9px;color:rgba(255,255,255,.5)"
+                      <div style="font-size:10px;color:rgba(255,255,255,.5)"
                            x-text="'n=' + (ifQuadCell(aHigh,false)?.n||0)"></div>
                     </div>
                   </template>
                 </div>
               </template>
             </div>
-            <div style="margin-top:8px;font-size:9px;color:var(--dim)">
+            <div style="margin-top:8px;font-size:10px;color:var(--dim)">
               Best quadrant: <b style="color:var(--muted)" x-text="ifDetailRow?.best_quadrant ?? '—'"></b>
               &nbsp;·&nbsp; R² gain: <span x-text="ifDetailRow?.r2_gain?.toFixed(4) ?? '—'"></span>
             </div>
           </div>
           <div x-show="!ifDetailRow?.quadrants?.length"
-               style="color:var(--dim);font-size:11px;padding:16px">No quadrant data for this selection.</div>
+               style="color:var(--dim);font-size:12px;padding:16px">No quadrant data for this selection.</div>
 
           <!-- Per-ticker breakdown -->
           <div x-show="ifDetail.length > 0" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
-            <div style="font-size:9px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">
+            <div style="font-size:10px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.3px;margin-bottom:6px">
               Per-Ticker Breakdown
               <span style="font-weight:400;color:var(--dim)">— click row to update quadrant view</span>
             </div>
             <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:4px">
-              <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:monospace">
+              <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:monospace">
                 <thead>
                   <tr style="border-bottom:1px solid var(--border)">
-                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">TICKER</th>
-                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">FWD</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">LIFT</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">SCORE</th>
-                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">BEST QUAD</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">SHARPE</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">AVG RET</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">WIN%</th>
-                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:9px;font-weight:600;position:sticky;top:0;z-index:2">N</th>
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">TICKER</th>
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">FWD</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">LIFT</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">SCORE</th>
+                    <th style="padding:5px 8px;text-align:left;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">BEST QUAD</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">SHARPE</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">AVG RET</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">WIN%</th>
+                    <th style="padding:5px 8px;text-align:right;background:var(--raised);color:var(--dim);font-size:10px;font-weight:600;position:sticky;top:0;z-index:2">N</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2420,7 +2434,7 @@
                           x-text="(d.interaction_lift||0).toFixed(3)"></td>
                       <td style="padding:3px 8px;text-align:right;color:var(--muted)"
                           x-text="(d.composite_interaction_score||0).toFixed(1)"></td>
-                      <td style="padding:3px 8px;color:var(--dim);font-size:10px" x-text="d.best_quadrant || '—'"></td>
+                      <td style="padding:3px 8px;color:var(--dim);font-size:11px" x-text="d.best_quadrant || '—'"></td>
                       <td style="padding:3px 8px;text-align:right;color:var(--muted)"
                           x-text="d.best_quad_sharpe != null ? d.best_quad_sharpe.toFixed(3) : '—'"></td>
                       <td style="padding:3px 8px;text-align:right"

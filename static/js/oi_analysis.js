@@ -934,7 +934,7 @@ document.addEventListener('alpine:init', () => {
     heatmapMetric: '',
     heatmapData: null,
     heatmapLoading: false,
-    heatmapBins: 5,
+    heatmapBins: 10,
     hmBins1d: 10,
     hmXData: null,
     hmYData: null,
