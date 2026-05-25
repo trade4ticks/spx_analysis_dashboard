@@ -225,15 +225,28 @@ document.addEventListener('alpine:init', () => {
         if (this.dateTo) url += `&date_to=${this.dateTo}`;
         if (this.pageMode === 'walk_forward') url += '&walk_forward=true';
         if (this.pageMode === 'train_test')   url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        // Client-side timing: measures transmission + JSON-parse cost (diag, mirrors server _tlog).
+        const _ct0 = performance.now();
         const r = await fetch(url);
+        const _ct1 = performance.now();
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
+        const _ct2 = performance.now();
         if (this.data.error) { this.error = this.data.error; return; }
         // Recompute bar chart data for current mode with fresh decile_stats_20.
         this.decileBinsData = this.decileBins !== 10 ? this._computeDecileNBins(this.decileBins) : null;
         await this.$nextTick();
         await this.$nextTick();
-        setTimeout(() => this._renderCharts(), 80);
+        setTimeout(() => {
+          this._renderCharts();
+          const _ct3 = performance.now();
+          console.log(
+            `[loadAnalysis] server+1stbyte: ${((_ct1-_ct0)/1000).toFixed(2)}s` +
+            `  body+parse: ${((_ct2-_ct1)/1000).toFixed(2)}s` +
+            `  render: ${((_ct3-_ct2)/1000).toFixed(2)}s` +
+            `  total: ${((_ct3-_ct0)/1000).toFixed(2)}s  [${this.ticker}|${this.pageMode}]`
+          );
+        }, 80);
         // IC.5: always reload when key changes or data is absent (section always visible).
         // Clear stale data first so panes show status rather than wrong-mode charts.
         const _icKey = this._icBatchKey();
@@ -249,7 +262,7 @@ document.addEventListener('alpine:init', () => {
             this.loadIcDecomp();
           }
         }
-        if (this.heatmapMetric) await this.loadHeatmap();
+        if (this.heatmapMetric) this.loadHeatmap();  // W4: fire-and-forget; no longer blocks Analyze
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -3355,19 +3368,16 @@ document.addEventListener('alpine:init', () => {
       if (this.smMeta.count > 0) {
         this.smInit();  // reload score matrix in new mode
       }
-      // Heatmap (Step 5.5 continuation): re-fetch when mode flips. If a
-      // heatmap is currently rendered (heatmapData != null) it needs to
-      // re-bin under the new spec — both the 2D grid (via /heatmap) and
-      // the side bin charts (via /metric-bins).
-      if (this.heatmapData && this.heatmapMetric) {
-        this.loadHeatmap();  // fire-and-forget; chains into loadHmBins1d()
-      }
-      // IC.5: mode change shifts reference IC (train_test cutoff vs full
-      // history). Reload if the section is open. Clear stale data so the
-      // user sees status panels rather than wrong-mode bars.
-      this.icBatchData = null; this.loadIcBatch();
-      // IC.7: mode change shifts reference IC — always reload in ALL mode.
-      if (this.ticker === 'ALL') { this.icDecompData = null; this.loadIcDecomp(); }
+      // W5: heatmap re-fetch on mode switch is now handled inside loadAnalysis()
+      // (W4 fires it fire-and-forget when heatmapMetric is set). heatmapData is
+      // null at this point because loadAnalysis() clears it, so this block was
+      // always a no-op after W4 anyway — removing it makes the intent explicit.
+      //
+      // W7: loadIcBatch() / loadIcDecomp() are already called inside loadAnalysis()
+      // (key-guarded: fires only when key changes or data absent). The explicit
+      // calls here were a second unconditional fire on every mode switch — removed.
+      // train_test ↔ any: key changes → loadAnalysis() fires the reload. ✓
+      // in_sample ↔ walk_forward: key unchanged (W6) → no reload needed.  ✓
     },
 
     async corrLoadMiniData() {
@@ -4615,8 +4625,16 @@ document.addEventListener('alpine:init', () => {
     // Canonical cache-key for the current fetch context. Stored after a
     // successful load so expand/mode-change can detect stale data.
     _icBatchKey() {
-      const cut = this.pageMode === 'train_test' ? this.cutoffDate : '';
-      return `${this.ticker}:${this.outcome}:${this.pageMode}:${cut}`;
+      // W6: in_sample and walk_forward produce identical backend IC results
+      // (rolling IC is mode-independent; only reference_ic post-processing differs,
+      // and that's recomputed each time from the cached series).  Mapping both to
+      // the same JS key prevents unnecessary cache-busting on mode toggle.
+      // train_test gets a distinct key because the backend uses a different cache
+      // entry (different reference IC based on pre-cutoff windows only).
+      if (this.pageMode === 'train_test') {
+        return `${this.ticker}:${this.outcome}:train_test:${this.cutoffDate}`;
+      }
+      return `${this.ticker}:${this.outcome}:default:`;
     },
 
     async loadIcBatch() {
