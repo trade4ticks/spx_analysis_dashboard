@@ -122,6 +122,7 @@ document.addEventListener('alpine:init', () => {
     icBatchLoading:   false,
     icBatchError:     null,
     icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
+    icBatchSeq:       0,              // incremented on every loadIcBatch() call; stale responses check seq before writing state
     icBatchStatus:    null,           // 'not_ready' | 'computing' | 'queued' | 'failed' | 'timeout' | null
     icBatchPollTimer: null,           // setInterval handle for polling
     icBatchPollStart: null,           // Date.now() when polling started
@@ -4666,6 +4667,11 @@ document.addEventListener('alpine:init', () => {
 
     async loadIcBatch() {
       if (!this.ticker || !this.outcome) return;
+      // Sequence guard: stamp this call. Any response that arrives after the
+      // outcome/mode has changed will see a mismatched seq and bail without
+      // touching state — prevents a stale "computing" response for 7d from
+      // overwriting the just-rendered 5d data when the user switches mid-flight.
+      const _seq = ++this.icBatchSeq;
       this.icBatchLoading = true;
       this.icBatchError = null;
       try {
@@ -4673,8 +4679,10 @@ document.addEventListener('alpine:init', () => {
           + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
+        if (_seq !== this.icBatchSeq) return; // outcome/mode changed while awaiting — discard
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
+        if (_seq !== this.icBatchSeq) return; // changed during json parse — discard
 
         if (d.status === 'not_ready') {
           // No cache entry. Single-ticker auto-triggers a background job so
@@ -4705,9 +4713,6 @@ document.addEventListener('alpine:init', () => {
         } else {
           // Normal response: cached data.
           if (d.error) throw new Error(d.error);
-          // Stale-cache guard: if a ⟳ Refresh was triggered, ignore any
-          // cache entry older than the refresh click — keep polling until
-          // the background job writes a fresh result.
           // Stale-cache guard: if ⟳ Refresh was clicked, reject any cache entry
           // older than the click. Uses epoch-ms from server (cached_at_ms) so
           // there is no timezone string parsing — NaN is impossible.
@@ -4727,11 +4732,12 @@ document.addEventListener('alpine:init', () => {
           this._renderIcBatch();
         }
       } catch (e) {
+        if (_seq !== this.icBatchSeq) return; // stale error — discard
         this.icBatchStatus = 'failed';
         this.icBatchError  = e.message;
         this._stopIcBatchPolling();
       } finally {
-        this.icBatchLoading = false;
+        if (_seq === this.icBatchSeq) this.icBatchLoading = false;
       }
     },
 
