@@ -122,6 +122,7 @@ document.addEventListener('alpine:init', () => {
     icBatchLoading:   false,
     icBatchError:     null,
     icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
+    icBatchOutcome:   null,           // survey-specific horizon — decoupled from main analysis outcome
     icBatchStatus:    null,           // 'not_ready' | 'computing' | 'queued' | 'failed' | 'timeout' | null
     icBatchPollTimer: null,           // setInterval handle for polling
     icBatchPollStart: null,           // Date.now() when polling started
@@ -165,6 +166,7 @@ document.addEventListener('alpine:init', () => {
         // form-state cache even with autocomplete="off", and Alpine's
         // reactivity won't re-fire if state hasn't changed.
         this.outcome        = _pick;  // main analysis outcome
+        this.icBatchOutcome = _pick;  // survey horizon — independent after init
         await this.$nextTick();
         this.topBinsOutcome = _pick;
         this.tdOutcome      = _pick;
@@ -4645,19 +4647,23 @@ document.addEventListener('alpine:init', () => {
       // the same JS key prevents unnecessary cache-busting on mode toggle.
       // train_test gets a distinct key because the backend uses a different cache
       // entry (different reference IC based on pre-cutoff windows only).
+      // icBatchOutcome is the survey-specific horizon — independent of the main
+      // analysis outcome after init, controlled by the horizon buttons in the Survey header.
+      const _oc = this.icBatchOutcome || this.outcome;
       if (this.pageMode === 'train_test') {
-        return `${this.ticker}:${this.outcome}:train_test:${this.cutoffDate}`;
+        return `${this.ticker}:${_oc}:train_test:${this.cutoffDate}`;
       }
-      return `${this.ticker}:${this.outcome}:default:`;
+      return `${this.ticker}:${_oc}:default:`;
     },
 
     async loadIcBatch() {
-      if (!this.ticker || !this.outcome) return;
+      const _oc = this.icBatchOutcome || this.outcome;
+      if (!this.ticker || !_oc) return;
       this.icBatchLoading = true;
       this.icBatchError = null;
       try {
         let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`;
+          + `&outcome=${encodeURIComponent(_oc)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4725,14 +4731,15 @@ document.addEventListener('alpine:init', () => {
     async refreshIcBatch() {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
-      if (!this.ticker || !this.outcome) return;
+      const _oc = this.icBatchOutcome || this.outcome;
+      if (!this.ticker || !_oc) return;
       this.icBatchLoading  = true;
       this.icBatchError    = null;
       this.icBatchData     = null;
       this.icBatchRefreshAt = Date.now(); // used by loadIcBatch to reject stale cache hits
       try {
         let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`;
+          + `&outcome=${encodeURIComponent(_oc)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4784,6 +4791,19 @@ document.addEventListener('alpine:init', () => {
       this.icBatchPollStart = null;
     },
 
+    // Survey horizon selector — called by the 1d/3d/5d/… buttons in the Survey header.
+    // Instantly re-queries ic_batch_cache for the selected horizon without re-running /analyze.
+    // Stored horizons return in <1s; unstored ones show the "not computed yet" message.
+    _switchIcBatchOutcome(col) {
+      if (!col || col === this.icBatchOutcome) return;
+      this._stopIcBatchPolling();
+      this.icBatchOutcome = col;
+      this.icBatchData    = null;
+      this.icBatchKey     = null;
+      this.icBatchStatus  = null;
+      this.icBatchError   = null;
+      this.loadIcBatch();
+    },
 
     icBatchSubtitle() {
       if (this.icBatchLoading) return '';

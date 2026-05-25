@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=111"></script>
+  <script src="/static/js/oi_analysis.js?v=112"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -428,7 +428,7 @@
                 background:rgba(255,255,255,.02)">
 
       <!-- Survey header -->
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;flex-wrap:wrap">
         <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Survey</span>
         <span style="font-size:10px;color:var(--dim)"
               x-show="!icBatchLoading && !icBatchError"
@@ -437,13 +437,27 @@
         <span x-show="icBatchError && !icBatchLoading"
               style="font-size:10px;color:#e84393"
               x-text="'Error: ' + icBatchError"></span>
+        <!-- Horizon selector — instant re-query from ic_batch_cache; no /analyze re-run needed -->
+        <div style="display:flex;gap:3px;margin-left:4px" x-show="outcomes.length">
+          <template x-for="col in outcomes.filter(o => /^ret_\d+d_fwd_oc$/.test(o))" :key="col">
+            <button
+              @click="_switchIcBatchOutcome(col)"
+              :disabled="icBatchLoading"
+              :style="icBatchOutcome === col
+                ? 'background:#3498db;border-color:#3498db;color:#fff;cursor:default'
+                : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:pointer'"
+              style="font-size:10px;padding:1px 7px;border-radius:3px;border-width:1px;border-style:solid"
+              x-text="col.match(/(\d+d)/)[0]"
+              :title="'Survey horizon: ' + col"></button>
+          </template>
+        </div>
         <div style="flex:1"></div>
         <button @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
                 :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                        font-size:10px;padding:2px 10px;border-radius:3px"
-                title="Recompute all Signal Survey data — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
+                title="Recompute Signal Survey for the selected horizon — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
       </div>
 
       <!-- Stale-cache coherence banner: old DB cache entries lack the
@@ -465,8 +479,8 @@
                     background:var(--raised);line-height:1.6;margin-bottom:8px">
           <span x-show="ticker !== 'ALL'" style="font-size:12px;color:var(--dim)">Starting computation…</span>
           <span x-show="ticker === 'ALL'" style="font-size:12px;color:var(--dim)">
-            No cached data for this configuration.
-            Click <strong>⟳ Refresh</strong> to start (ALL-mode: ~10–15 min, polls every 30 s automatically).
+            This horizon isn't computed yet —
+            click <strong>⟳ Refresh</strong> to run (~10–15 min, polls every 30 s automatically).
           </span>
         </div>
 
