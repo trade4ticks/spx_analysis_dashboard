@@ -142,7 +142,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=112"></script>
+  <script src="/static/js/oi_analysis.js?v=113"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -428,36 +428,17 @@
                 background:rgba(255,255,255,.02)">
 
       <!-- Survey header -->
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
         <span style="font-size:12px;font-weight:700;color:var(--text)">Signal Survey</span>
         <span style="font-size:10px;color:var(--dim)"
-              x-show="!icBatchLoading && !icBatchError"
               x-text="icBatchSubtitle()"></span>
-        <span x-show="icBatchLoading" style="font-size:10px;color:#3498db">Loading…</span>
-        <span x-show="icBatchError && !icBatchLoading"
-              style="font-size:10px;color:#e84393"
-              x-text="'Error: ' + icBatchError"></span>
-        <!-- Horizon selector — instant re-query from ic_batch_cache; no /analyze re-run needed -->
-        <div style="display:flex;gap:3px;margin-left:4px" x-show="outcomes.length">
-          <template x-for="col in outcomes.filter(o => /^ret_\d+d_fwd_oc$/.test(o))" :key="col">
-            <button
-              @click="_switchIcBatchOutcome(col)"
-              :disabled="icBatchLoading"
-              :style="icBatchOutcome === col
-                ? 'background:#3498db;border-color:#3498db;color:#fff;cursor:default'
-                : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);cursor:pointer'"
-              style="font-size:10px;padding:1px 7px;border-radius:3px;border-width:1px;border-style:solid"
-              x-text="col.match(/(\d+d)/)[0]"
-              :title="'Survey horizon: ' + col"></button>
-          </template>
-        </div>
         <div style="flex:1"></div>
         <button @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
                 :style="icBatchLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
                 style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                        font-size:10px;padding:2px 10px;border-radius:3px"
-                title="Recompute Signal Survey for the selected horizon — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
+                title="Recompute Signal Survey for current Outcome + Mode — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
       </div>
 
       <!-- Stale-cache coherence banner: old DB cache entries lack the
@@ -577,11 +558,15 @@
       <div style="border-top:1px solid var(--border);padding:10px 12px 0">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
           <span style="font-size:11px;font-weight:700;color:var(--text)">Signal Decomposition</span>
-          <span x-show="icDecompData && !icDecompLoading && !icDecompError && ticker === 'ALL'"
+          <span x-show="ticker === 'ALL'"
                 style="font-size:10px;color:var(--dim)"
-                x-text="icDecompData
-                  ? `· ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} / ${icDecompData.n_tickers} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`
-                  : ''">
+                x-text="(() => {
+                  const hz  = (outcome || '').match(/(\d+d)/)?.[0] || '';
+                  const mod = pageMode === 'train_test' ? 'train/test' : pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
+                  const ctx = (metric ? metric + ' · ' : '') + (hz ? hz + ' · ' : '') + mod;
+                  if (!icDecompData) return ctx;
+                  return ctx + ` · ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`;
+                })()">
           </span>
           <span x-show="icDecompLoading && ticker === 'ALL'"
                 style="font-size:10px;color:#3498db">Loading…</span>

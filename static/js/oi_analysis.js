@@ -122,7 +122,6 @@ document.addEventListener('alpine:init', () => {
     icBatchLoading:   false,
     icBatchError:     null,
     icBatchKey:       null,           // last-loaded "ticker:outcome:mode:cutoff" key
-    icBatchOutcome:   null,           // survey-specific horizon — decoupled from main analysis outcome
     icBatchStatus:    null,           // 'not_ready' | 'computing' | 'queued' | 'failed' | 'timeout' | null
     icBatchPollTimer: null,           // setInterval handle for polling
     icBatchPollStart: null,           // Date.now() when polling started
@@ -166,7 +165,6 @@ document.addEventListener('alpine:init', () => {
         // form-state cache even with autocomplete="off", and Alpine's
         // reactivity won't re-fire if state hasn't changed.
         this.outcome        = _pick;  // main analysis outcome
-        this.icBatchOutcome = _pick;  // survey horizon — independent after init
         await this.$nextTick();
         this.topBinsOutcome = _pick;
         this.tdOutcome      = _pick;
@@ -190,6 +188,19 @@ document.addEventListener('alpine:init', () => {
       // Signal Survey — always-visible; load on init so charts appear without
       // requiring an Analyze click. Single-ticker auto-triggers; ALL stays idle
       // until explicit ⟳ Refresh (OOM guard).
+      // $watch: re-query ic_batch_cache whenever the page-level Outcome or Mode
+      // changes — instant for stored combos, 'not_ready' for uncomputed ones.
+      // No Analyze re-run needed; the survey has no controls of its own.
+      this.$watch('outcome', () => {
+        this._stopIcBatchPolling();
+        this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
+        this.loadIcBatch();
+      });
+      this.$watch('pageMode', () => {
+        this._stopIcBatchPolling();
+        this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
+        this.loadIcBatch();
+      });
       this.loadIcBatch();
     },
 
@@ -4647,23 +4658,19 @@ document.addEventListener('alpine:init', () => {
       // the same JS key prevents unnecessary cache-busting on mode toggle.
       // train_test gets a distinct key because the backend uses a different cache
       // entry (different reference IC based on pre-cutoff windows only).
-      // icBatchOutcome is the survey-specific horizon — independent of the main
-      // analysis outcome after init, controlled by the horizon buttons in the Survey header.
-      const _oc = this.icBatchOutcome || this.outcome;
       if (this.pageMode === 'train_test') {
-        return `${this.ticker}:${_oc}:train_test:${this.cutoffDate}`;
+        return `${this.ticker}:${this.outcome}:train_test:${this.cutoffDate}`;
       }
-      return `${this.ticker}:${_oc}:default:`;
+      return `${this.ticker}:${this.outcome}:default:`;
     },
 
     async loadIcBatch() {
-      const _oc = this.icBatchOutcome || this.outcome;
-      if (!this.ticker || !_oc) return;
+      if (!this.ticker || !this.outcome) return;
       this.icBatchLoading = true;
       this.icBatchError = null;
       try {
         let url = `/api/oi-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(_oc)}`;
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4731,15 +4738,14 @@ document.addEventListener('alpine:init', () => {
     async refreshIcBatch() {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
-      const _oc = this.icBatchOutcome || this.outcome;
-      if (!this.ticker || !_oc) return;
+      if (!this.ticker || !this.outcome) return;
       this.icBatchLoading  = true;
       this.icBatchError    = null;
       this.icBatchData     = null;
       this.icBatchRefreshAt = Date.now(); // used by loadIcBatch to reject stale cache hits
       try {
         let url = `/api/oi-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(_oc)}`;
+          + `&outcome=${encodeURIComponent(this.outcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -4791,31 +4797,23 @@ document.addEventListener('alpine:init', () => {
       this.icBatchPollStart = null;
     },
 
-    // Survey horizon selector — called by the 1d/3d/5d/… buttons in the Survey header.
-    // Instantly re-queries ic_batch_cache for the selected horizon without re-running /analyze.
-    // Stored horizons return in <1s; unstored ones show the "not computed yet" message.
-    _switchIcBatchOutcome(col) {
-      if (!col || col === this.icBatchOutcome) return;
-      this._stopIcBatchPolling();
-      this.icBatchOutcome = col;
-      this.icBatchData    = null;
-      this.icBatchKey     = null;
-      this.icBatchStatus  = null;
-      this.icBatchError   = null;
-      this.loadIcBatch();
-    },
-
     icBatchSubtitle() {
-      if (this.icBatchLoading) return '';
-      if (this.icBatchStatus === 'not_ready') return '— no cached data · click ⟳ Refresh to compute';
-      if (this.icBatchStatus === 'computing')  return '— computing in background · polling every 30 s…';
-      if (this.icBatchStatus === 'queued')     return '— queued · waiting for current IC job to finish…';
-      if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') return '';
-      if (!this.icBatchData?.metrics?.length) return '';
+      // Always show what the pane is displaying so the user can confirm it
+      // matches the page-level controls without needing to inspect state.
+      const _hz  = (this.outcome || '').match(/(\d+d)/)?.[0] || '';
+      const _mod = this.pageMode === 'train_test' ? 'train/test'
+                 : this.pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
+      const _ctx = _hz ? `${_hz} · ${_mod}` : _mod;
+      if (this.icBatchLoading) return `${_ctx}`;
+      if (this.icBatchStatus === 'not_ready') return `${_ctx} — not computed · click ⟳ Refresh to run`;
+      if (this.icBatchStatus === 'computing')  return `${_ctx} — computing · polling every 30 s…`;
+      if (this.icBatchStatus === 'queued')     return `${_ctx} — queued · waiting for IC job to finish…`;
+      if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') return _ctx;
+      if (!this.icBatchData?.metrics?.length) return _ctx;
       const n    = this.icBatchData.metrics.length;
       const nSup = this.icBatchData.metrics.filter(m => m.suppressed).length;
-      const mode = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';
-      let s = `· ${n} metrics · ${nSup} suppressed · ${mode}`;
+      const xsec = this.ticker === 'ALL' ? 'cross-sectional' : 'time-series';
+      let s = `${_ctx} · ${n} metrics · ${nSup} suppressed · ${xsec}`;
       if (this.icBatchData.cutoff_date) s += ` · cutoff ${this.icBatchData.cutoff_date}`;
       return s;
     },
