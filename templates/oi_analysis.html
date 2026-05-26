@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=119"></script>
+  <script src="/static/js/oi_analysis.js?v=120"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -926,6 +926,7 @@
                 <span :class="{on: heatmapBins===3}"  @click="setHeatmapBins(3)">3×3</span>
                 <span :class="{on: heatmapBins===5}"  @click="setHeatmapBins(5)">5×5</span>
                 <span :class="{on: heatmapBins===10}" @click="setHeatmapBins(10)">10×10</span>
+                <span :class="{on: heatmapBins===20}" @click="setHeatmapBins(20)">20×20</span>
               </div>
               <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
                 <label style="font-size:10px;color:var(--dim)">Y metric:</label>

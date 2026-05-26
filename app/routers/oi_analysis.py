@@ -1303,7 +1303,7 @@ async def heatmap_2d(
     metric_x: str = Query(...),
     metric_y: str = Query(...),
     outcome: str = Query(...),
-    bins: int = Query(5, ge=3, le=10),
+    bins: int = Query(5, ge=3, le=20),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
