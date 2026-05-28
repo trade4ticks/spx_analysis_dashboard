@@ -1,5 +1,9 @@
 'use strict';
 
+// ── Quantile compare-mode constants ───────────────────────────────────────────
+const LADDER_HORIZONS = [1, 3, 5, 7, 10, 20];
+const LADDER_PALETTE  = ['#74b9ff', '#0984e3', '#48dbfb', '#00b894', '#fdcb6e', '#ff7675'];
+
 document.addEventListener('alpine:init', () => {
   Alpine.store('metricPicker', {
     selected: [],
@@ -37,6 +41,10 @@ document.addEventListener('alpine:init', () => {
     equityXMode: 'calendar',   // 'calendar' | 'sequential'
     decileBins: 10,
     decileBinsData: null,
+    decileCompareMode: 'single',   // 'single' | 'compare' | 'ladder'
+    decileLadderAnchor: 'oc',      // 'oc' | 'cc' — ladder sub-toggle
+    _decileCompareCache: {},       // keyed by 'outcome:bins' → buckets[]
+    _decileCompareFetching: false,
 
     // Trade Data table view mode + sort. The bin filter is shared with
     // the flat trade view via selectedBins20 already.
@@ -213,6 +221,7 @@ document.addEventListener('alpine:init', () => {
       this.error = null;
       // Preserve decileBins and selectedBins20 across re-analyze.
       // decileBinsData is recomputed below once new data arrives.
+      this._decileCompareCache = {};  // stale on new analyze; re-fetched lazily
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
@@ -377,6 +386,14 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
+    // Like _darkScales() but forces maxRotation:0 so Chart.js allocates only the
+    // actual label height for the x-axis — prevents the blank gap that appears when
+    // labels stay horizontal but Chart.js pre-reserved height for 45° rotation.
+    _darkScalesNR() {
+      const s = this._darkScales();
+      return { ...s, x: { ...s.x, ticks: { ...s.x.ticks, maxRotation: 0 } } };
+    },
+
     _renderCharts() {
       if (!this.data) return;
       this._renderAllCharts();
@@ -386,7 +403,11 @@ document.addEventListener('alpine:init', () => {
       const el = document.getElementById('chart-decile');
       if (!el) return;
       if (this._charts['decile']) this._charts['decile'].destroy();
+      if (this.decileCompareMode !== 'single') { this._renderDecileBarMulti(el); return; }
+      this._renderDecileBarSingle(el);
+    },
 
+    _renderDecileBarSingle(el) {
       const bins = this.decileBins;
       const g = 20 / bins;  // group size: bins 20→1, 10→2, 5→4
       const stats = (this.decileBinsData || this.data.decile_stats || []).filter(d => d);
@@ -414,6 +435,7 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
@@ -448,9 +470,230 @@ document.addEventListener('alpine:init', () => {
               },
             },
           },
-          scales: this._darkScales(),
+          scales: this._darkScalesNR(),
         },
       });
+    },
+
+    // ── Multi-outcome compare modes (Anchor Compare + Horizon Ladder) ──────────
+
+    _hexToRgba(hex, alpha) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+    },
+
+    _outcomeAnchor() {
+      const m = (this.outcome || '').match(/_(oc|cc)$/i);
+      return m ? m[1].toLowerCase() : 'oc';
+    },
+
+    _outcomeHorizon() {
+      const m = (this.outcome || '').match(/ret_(\d+)d_fwd/i);
+      return m ? m[1] : null;
+    },
+
+    _outcomeBase() {
+      return (this.outcome || '').replace(/_(oc|cc)$/i, '');
+    },
+
+    async _decileFetchBuckets(outcome) {
+      const key = `${outcome}:${this.decileBins}`;
+      if (key in this._decileCompareCache) return this._decileCompareCache[key];
+      let url = `/api/factor-analysis/metric-bins`
+        + `?ticker=${encodeURIComponent(this.ticker)}`
+        + `&metric=${encodeURIComponent(this.metric)}`
+        + `&outcome=${encodeURIComponent(outcome)}`
+        + `&bins=${this.decileBins}`;
+      if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
+      if (this.dateTo)   url += `&date_to=${this.dateTo}`;
+      if (this.pageMode === 'walk_forward') url += '&walk_forward=true';
+      else if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+      try {
+        const r = await fetch(url);
+        if (!r.ok) { this._decileCompareCache[key] = null; return null; }
+        const d = await r.json();
+        const buckets = d.error ? null : (d.buckets || []);
+        this._decileCompareCache[key] = buckets;
+        return buckets;
+      } catch { this._decileCompareCache[key] = null; return null; }
+    },
+
+    async _loadDecileCompare() {
+      if (this._decileCompareFetching || !this.data || !this.outcome) return;
+      this._decileCompareFetching = true;
+      try {
+        if (this.decileCompareMode === 'compare') {
+          const alt = `${this._outcomeBase()}_${this._outcomeAnchor() === 'oc' ? 'cc' : 'oc'}`;
+          await this._decileFetchBuckets(alt);
+        } else if (this.decileCompareMode === 'ladder') {
+          const a = this.decileLadderAnchor;
+          const phz = this._outcomeHorizon(), pa = this._outcomeAnchor();
+          await Promise.all(LADDER_HORIZONS.map(h => {
+            if (String(h) === phz && a === pa) return Promise.resolve();  // already in data
+            return this._decileFetchBuckets(`ret_${h}d_fwd_${a}`);
+          }));
+        }
+      } finally {
+        this._decileCompareFetching = false;
+        this._renderDecileBar();
+      }
+    },
+
+    _renderDecileBarMulti(el) {
+      const bins = this.decileBins;
+      const g    = 20 / bins;
+      const primaryStats = (this.decileBinsData || this.data?.decile_stats || []).filter(d => d);
+      if (!primaryStats.length) return;
+      const self = this;
+
+      const _isSel = (d) => {
+        const lo = (d.bucket - 1) * g + 1;
+        for (let b = lo; b < lo + g; b++) { if (self.selectedBins20.has(b)) return true; }
+        return false;
+      };
+
+      const isCompare = this.decileCompareMode === 'compare';
+      const labels    = primaryStats.map(d => 'B' + d.bucket);
+      const datasets  = [];
+
+      if (isCompare) {
+        const anchor    = this._outcomeAnchor();
+        const altAnchor = anchor === 'oc' ? 'cc' : 'oc';
+        const altKey    = `${this._outcomeBase()}_${altAnchor}:${bins}`;
+        if (!(altKey in this._decileCompareCache)) {
+          this._renderDecileBarSingle(el);
+          if (!this._decileCompareFetching) this._loadDecileCompare();
+          return;
+        }
+        const altStats  = (this._decileCompareCache[altKey] || []).filter(d => d);
+        const hz = this._outcomeHorizon() ? ` (${this._outcomeHorizon()}d)` : '';
+
+        // OC always left, CC always right; primary gets brighter fill + bold label
+        const ocStats = anchor === 'oc' ? primaryStats : altStats;
+        const ccStats = anchor === 'cc' ? primaryStats : altStats;
+        const ocPrim  = anchor === 'oc';
+
+        datasets.push({
+          label: `OC${hz}${ocPrim ? ' ★' : ''}`,
+          data:  ocStats.map(d => d ? d.avg_ret * 100 : null),
+          backgroundColor: ocStats.map(d => {
+            if (!d) return 'transparent';
+            const a = ocPrim ? (_isSel(d) ? 0.92 : 0.38) : (_isSel(d) ? 0.72 : 0.26);
+            return d.avg_ret >= 0 ? `rgba(52,152,219,${a})` : `rgba(232,67,147,${a})`;
+          }),
+          borderWidth: ocPrim ? ocStats.map(d => d && _isSel(d) ? 1 : 0) : 0,
+          borderColor: '#fff',
+        });
+        datasets.push({
+          label: `CC${hz}${!ocPrim ? ' ★' : ''}`,
+          data:  ccStats.map(d => d ? d.avg_ret * 100 : null),
+          backgroundColor: ccStats.map(d => {
+            if (!d) return 'transparent';
+            const a = !ocPrim ? (_isSel(d) ? 0.92 : 0.38) : (_isSel(d) ? 0.72 : 0.26);
+            return d.avg_ret >= 0 ? `rgba(46,204,113,${a})` : `rgba(230,126,34,${a})`;
+          }),
+          borderWidth: !ocPrim ? ccStats.map(d => d && _isSel(d) ? 1 : 0) : 0,
+          borderColor: '#fff',
+        });
+
+      } else {  // ladder
+        const a  = this.decileLadderAnchor;
+        const phz = this._outcomeHorizon(), pa = this._outcomeAnchor();
+
+        for (let i = 0; i < LADDER_HORIZONS.length; i++) {
+          const h  = LADDER_HORIZONS[i];
+          const isPrimary = (String(h) === phz) && (a === pa);
+          let buckets;
+          if (isPrimary) {
+            buckets = primaryStats;
+          } else {
+            const ckey = `ret_${h}d_fwd_${a}:${bins}`;
+            if (!(ckey in this._decileCompareCache)) {
+              this._renderDecileBarSingle(el);
+              if (!this._decileCompareFetching) this._loadDecileCompare();
+              return;
+            }
+            buckets = (this._decileCompareCache[ckey] || []).filter(d => d);
+          }
+          const col = LADDER_PALETTE[i];
+          datasets.push({
+            label: `${h}d${isPrimary ? ' ★' : ''}`,
+            data:  buckets.map(d => d ? d.avg_ret * 100 : null),
+            backgroundColor: buckets.map(d => {
+              if (!d) return 'transparent';
+              return this._hexToRgba(col, isPrimary ? (_isSel(d) ? 0.95 : 0.42) : (_isSel(d) ? 0.70 : 0.22));
+            }),
+            borderWidth: isPrimary ? buckets.map(d => d && _isSel(d) ? 1 : 0) : 0,
+            borderColor: col,
+          });
+        }
+      }
+
+      const _clickHandler = (e, elements) => {
+        if (!elements.length) return;
+        const d = primaryStats[elements[0].index];
+        if (!d) return;
+        const lo = (d.bucket - 1) * g + 1;
+        const binSet = Array.from({length: g}, (_, i) => lo + i);
+        const allSelected = binSet.every(b => self.selectedBins20.has(b));
+        if (allSelected) {
+          if (self.selectedBins20.size > binSet.length) binSet.forEach(b => self.selectedBins20.delete(b));
+        } else {
+          binSet.forEach(b => self.selectedBins20.add(b));
+        }
+        self.selectedBins20 = new Set(self.selectedBins20);
+        self._onDecileChange();
+        self._renderDecileBar();
+      };
+
+      this._charts['decile'] = new Chart(el, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
+          onClick: _clickHandler,
+          plugins: {
+            legend: { display: true, labels: { color: '#888', font: { size: 9 }, boxWidth: 10, padding: 8 } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const v = ctx.parsed.y;
+                  return `${ctx.dataset.label.replace(' ★','')}: ${v != null ? v.toFixed(3)+'%' : '—'}`;
+                },
+              },
+            },
+          },
+          scales: {
+            ...this._darkScalesNR(),
+            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks, callback: v => v.toFixed(2)+'%' } },
+          },
+        },
+      });
+    },
+
+    setDecileCompareMode(mode) {
+      this.decileCompareMode = mode;
+      if (mode === 'single') { this._renderDecileBar(); return; }
+      this._loadDecileCompare();
+    },
+
+    setDecileLadderAnchor(anchor) {
+      this.decileLadderAnchor = anchor;
+      if (this.decileCompareMode === 'ladder') this._loadDecileCompare();
+    },
+
+    decileChartTitle() {
+      if (this.decileCompareMode === 'compare') {
+        const hz = this._outcomeHorizon();
+        return `Quantile Avg Return — OC vs CC${hz ? ' · ' + hz + 'd' : ''}`;
+      }
+      if (this.decileCompareMode === 'ladder')
+        return `Quantile Avg Return — Horizon Ladder (${this.decileLadderAnchor.toUpperCase()})`;
+      return 'Quantile Avg Return';
     },
 
     // Aggregate decile_stats_20 (always 20 bins) into n display groups.
@@ -494,7 +737,13 @@ document.addEventListener('alpine:init', () => {
       this.selectedBins20 = newBins20;
       this.decileBins = n;
       this.decileBinsData = n === 10 ? null : this._computeDecileNBins(n);
-      this._renderDecileBar();
+      // Compare/ladder cache is keyed by bins — stale after bin-count change
+      if (this.decileCompareMode !== 'single') {
+        this._decileCompareCache = {};
+        this._loadDecileCompare();  // async, fire-and-forget; will re-render when done
+      } else {
+        this._renderDecileBar();
+      }
       this._renderEquity();
       this._renderYearly();
       this._renderDOW();
@@ -722,6 +971,7 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
             legend: { labels:{color:'#aaa',font:{size:10}} },
             tooltip: {
@@ -737,7 +987,7 @@ document.addEventListener('alpine:init', () => {
             },
           },
           scales: {
-            ...this._darkScales(),
+            ...this._darkScalesNR(),
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(2) + '%' } },
           },
@@ -1366,13 +1616,15 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
             legend: { labels:{color:'#aaa',font:{size:10}} },
             tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
           },
           scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, title:{display:true,text:'Return %',color:'#888',font:{size:10}} },
+            ...this._darkScalesNR(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+                 title:{display:true,text:'Return %',color:'#888',font:{size:10}} },
             y: { ...this._darkScales().y, title:{display:true,text:'Count',color:'#888',font:{size:10}} },
           },
         },
@@ -1431,6 +1683,7 @@ document.addEventListener('alpine:init', () => {
         data: { datasets: [{ data: points, backgroundColor: colors, borderWidth: 0 }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
             legend: { display: false },
             tooltip: {
@@ -1445,7 +1698,7 @@ document.addEventListener('alpine:init', () => {
           },
           scales: {
             x: { ...this._darkScales().x, type:'linear', min:-0.5, max:11.5,
-                 ticks:{...this._darkScales().x.ticks, callback: v => monthNames[Math.round(v)] || ''} },
+                 ticks:{...this._darkScales().x.ticks, maxRotation: 0, callback: v => monthNames[Math.round(v)] || ''} },
             y: { ...this._darkScales().y, type:'linear', min:-0.5, max: years.length - 0.5,
                  ticks:{...this._darkScales().y.ticks, callback: v => years[Math.round(v)] || ''} },
           },
@@ -1493,6 +1746,7 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
             legend: { display: false },
             tooltip: { callbacks: { label: ctx => [
@@ -1502,7 +1756,7 @@ document.addEventListener('alpine:init', () => {
             ] } },
           },
           scales: {
-            ...this._darkScales(),
+            ...this._darkScalesNR(),
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(2) + '%' } },
           },
@@ -1529,6 +1783,7 @@ document.addEventListener('alpine:init', () => {
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
             legend: { display: false },
             tooltip: { callbacks: { label: ctx => {
@@ -1537,7 +1792,7 @@ document.addEventListener('alpine:init', () => {
             } } },
           },
           scales: {
-            ...this._darkScales(),
+            ...this._darkScalesNR(),
             y: { ...this._darkScales().y, min: 30, max: 70,
                  ticks: { ...this._darkScales().y.ticks, callback: v => v + '%' } },
           },

@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=120"></script>
+  <script src="/static/js/oi_analysis.js?v=121"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -246,9 +246,9 @@
           </select>
           <button x-show="topBinsData" @click="loadTopBins(true)"
                   :disabled="topBinsLoading"
-                  :style="topBinsLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
-                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:11px;padding:2px 10px;border-radius:3px"
+                  :style="topBinsLoading ? 'opacity:.5;cursor:wait' : ''"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
                   title="Re-fetch and bypass server cache (after adding new metrics)">⟳ Refresh</button>
         </div>
       </div>
@@ -350,9 +350,9 @@
           </template>
           <button x-show="tdData" @click="loadTd(true)"
                   :disabled="tdLoading"
-                  :style="tdLoading ? 'opacity:.5;cursor:wait' : 'cursor:pointer'"
-                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:11px;padding:2px 10px;border-radius:3px"
+                  :style="tdLoading ? 'opacity:.5;cursor:wait' : ''"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
                   title="Re-fetch and bypass server cache">⟳ Refresh</button>
         </div>
       </div>
@@ -447,9 +447,11 @@
         <span style="font-size:11px;color:var(--dim)"
               x-text="icBatchSubtitle()"></span>
         <div style="flex:1"></div>
-        <button class="btn-action pink" @click="refreshIcBatch()"
+        <button @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
-                :style="icBatchLoading ? 'cursor:wait' : ''"
+                :style="icBatchLoading ? 'opacity:.5;cursor:wait' : ''"
+                style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
+                       color:#e84393;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
                 title="Recompute Signal Survey for current Outcome + Mode — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
       </div>
 
@@ -753,14 +755,30 @@
           <!-- Decile bar (clickable) -->
           <div class="chart-box">
             <div class="chart-title">
-              Quantile Avg Return
-              <span style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
+              <span x-text="decileChartTitle()"></span>
+              <span x-show="decileCompareMode==='single'" style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
               <div class="mode-seg" style="margin-left:8px">
                 <span :class="{on: decileBins===5}"  @click="setDecileBins(5)">5</span>
                 <span :class="{on: decileBins===10}" @click="setDecileBins(10)">10</span>
                 <span :class="{on: decileBins===20}" @click="setDecileBins(20)">20</span>
               </div>
               <button class="fs-btn" @click="openFullscreen('chart-decile')" title="Fullscreen">⛶</button>
+            </div>
+            <!-- Compare mode toggle row -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+              <div class="mode-seg">
+                <span :class="{on: decileCompareMode==='single'}"  @click="setDecileCompareMode('single')">Single</span>
+                <span :class="{on: decileCompareMode==='compare'}" @click="setDecileCompareMode('compare')" title="OC vs CC — same horizon, same metric">Compare</span>
+                <span :class="{on: decileCompareMode==='ladder'}"  @click="setDecileCompareMode('ladder')"  title="All horizons (1d/3d/5d/7d/10d/20d) for one anchor">Ladder</span>
+              </div>
+              <template x-if="decileCompareMode==='ladder'">
+                <div class="mode-seg">
+                  <span :class="{on: decileLadderAnchor==='oc'}" @click="setDecileLadderAnchor('oc')">OC</span>
+                  <span :class="{on: decileLadderAnchor==='cc'}" @click="setDecileLadderAnchor('cc')">CC</span>
+                </div>
+              </template>
+              <span x-show="decileCompareMode!=='single' && _decileCompareFetching"
+                    style="font-size:10px;color:var(--dim)">Loading…</span>
             </div>
             <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
           </div>
