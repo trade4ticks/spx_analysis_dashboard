@@ -2836,6 +2836,31 @@ async def secondary_score_status(req: SecStatusReq):
     return response
 
 
+@router.post("/secondary-scan/invalidate")
+async def secondary_scan_invalidate(pool=Depends(get_oi_pool)):
+    """Drop every row from `sec_scan_cache`.
+
+    Use this when the underlying daily_features values have changed
+    (recomputed core metrics, new ingestion runs, etc.) so the next
+    /secondary-scan request can no longer be served from a stale
+    cached payload — it falls through to a fresh background scan.
+
+    Does NOT touch the in-memory `_SEC_CACHE` (the per-load row cache
+    keyed by /secondary-load's cache_key) — that one auto-clears on
+    dashboard restart and is keyed per-session anyway.
+
+    Mirrors /global-metric-bins/invalidate. Non-fatal on DB error.
+    """
+    if pool:
+        try:
+            await _ensure_sec_scan_table(pool)
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM sec_scan_cache")
+        except Exception:
+            pass
+    return {"ok": True}
+
+
 @router.post("/secondary-detail")
 async def secondary_detail(req: SecDetailReq):
     """2-factor deep dive: bins, equity curves, yearly for a selected secondary metric."""
@@ -3964,6 +3989,29 @@ async def ic_batch_refresh(
         )
 
     return {"status": "computing", "cache_key": cache_key}
+
+
+@router.post("/ic-batch/invalidate")
+async def ic_batch_invalidate(pool=Depends(get_oi_pool)):
+    """Drop every row from `ic_batch_cache`.
+
+    Use this when the underlying daily_features values have changed
+    (recomputed core metrics, new ingestion runs, etc.) so the next
+    /ic-batch request can no longer be served from a stale cached
+    payload. Single-ticker mode recomputes inline on next fetch;
+    ALL mode returns `not_ready` and waits for an explicit
+    /ic-batch/refresh (the existing background-job path).
+
+    Mirrors /global-metric-bins/invalidate. Non-fatal on DB error.
+    """
+    if pool:
+        try:
+            await _ensure_ic_batch_table(pool)
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM ic_batch_cache")
+        except Exception:
+            pass
+    return {"ok": True}
 
 
 # ── IC decomposition (IC.7) ──────────────────────────────────────────────
