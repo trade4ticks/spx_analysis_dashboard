@@ -419,8 +419,6 @@ document.addEventListener('alpine:init', () => {
       this._renderDrawdown();
       this._renderYearly();
       this._renderRollingCorr();
-      this._renderReturnDist();
-      this._renderTradeCalendar();
       this._renderDOW();
       this._renderActivity();
       this._renderTradeTable();
@@ -2123,149 +2121,6 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Return distribution (histogram with background) ─────────────────
-    _renderReturnDist() {
-      const el = document.getElementById('chart-dist');
-      if (!el || !this.data?.decile_stats) return;
-      if (this._charts['dist']) this._charts['dist'].destroy();
-
-      const effDec2 = this._effectiveDeciles();
-      const allRets = [];
-      const selRets = [];
-      for (const d of (this.data.decile_stats || [])) {
-        if (!d?.returns) continue;
-        allRets.push(...d.returns.map(r => r * 100));
-        if (effDec2.has(d.bucket)) {
-          selRets.push(...d.returns.map(r => r * 100));
-        }
-      }
-      if (!allRets.length) return;
-
-      // Build histogram bins — avoid spread on large arrays (V8 call-stack limit)
-      const nBins = 40;
-      let minRet = Infinity, maxRet = -Infinity;
-      for (const v of allRets) { if (v < minRet) minRet = v; if (v > maxRet) maxRet = v; }
-      const mn = Math.max(minRet, -15);
-      const mx = Math.min(maxRet,  15);
-      const step = (mx - mn) / nBins;
-      const labels = [];
-      const allCounts = new Array(nBins).fill(0);
-      const selCounts = new Array(nBins).fill(0);
-      for (let i = 0; i < nBins; i++) labels.push((mn + step * (i + 0.5)).toFixed(1));
-      for (const v of allRets) {
-        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
-        if (b >= 0) allCounts[b]++;
-      }
-      for (const v of selRets) {
-        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
-        if (b >= 0) selCounts[b]++;
-      }
-
-      const decLabel = effDec2.size > 0
-        ? Array.from(effDec2).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'None';
-
-      this._charts['dist'] = new Chart(el, {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [
-            { label: 'All Deciles', data: allCounts,
-              backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
-            { label: decLabel, data: selCounts,
-              backgroundColor: 'rgba(52,152,219,0.5)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
-          ],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          layout: { padding: { bottom: 0 } },
-          plugins: {
-            legend: { labels:{color:'#aaa',font:{size:10}} },
-            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
-          },
-          scales: {
-            ...this._darkScalesNR(),
-            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
-                 title:{display:true,text:'Return %',color:'#888',font:{size:10}} },
-            y: { ...this._darkScales().y, title:{display:true,text:'Count',color:'#888',font:{size:10}} },
-          },
-        },
-      });
-    },
-
-    // ── Trade calendar (month × year heatmap) ───────────────────────────
-    _renderTradeCalendar() {
-      const el = document.getElementById('chart-calendar');
-      if (!el || !this.data) return;
-      if (this._charts['calendar']) this._charts['calendar'].destroy();
-
-      // W1: use pre-aggregated monthly_stats (server-side) instead of trade_calendar.
-      const mstats = this.data.monthly_stats;
-      if (!mstats?.length) return;
-
-      const hasBins = mstats.some(m => m.decile20 != null);
-      const filtered = hasBins && this.selectedBins20.size > 0
-        ? mstats.filter(m => this.selectedBins20.has(m.decile20))
-        : mstats;
-
-      // N-weighted avg grouped by (year, month).
-      const byYM = {};
-      for (const m of filtered) {
-        const k = `${m.year}-${m.month}`;
-        if (!byYM[k]) byYM[k] = { sumN: 0, sumRet: 0, year: m.year, month: m.month };
-        byYM[k].sumN   += m.n;
-        byYM[k].sumRet += m.avg_ret * m.n;
-      }
-
-      const years = [...new Set(filtered.map(m => m.year))].sort();
-      const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-      const points = [];
-      let minAvg = Infinity, maxAvg = -Infinity;
-      for (let yi = 0; yi < years.length; yi++) {
-        for (let mi = 0; mi < 12; mi++) {
-          const agg = byYM[`${years[yi]}-${mi+1}`];
-          if (!agg || !agg.sumN) continue;
-          const avg = agg.sumRet / agg.sumN;
-          minAvg = Math.min(minAvg, avg);
-          maxAvg = Math.max(maxAvg, avg);
-          points.push({ x: mi, y: yi, r: Math.min(Math.max(agg.sumN, 4), 15),
-                        avg, n: agg.sumN, year: years[yi], month: mi+1 });
-        }
-      }
-
-      const range = Math.max(Math.abs(minAvg), Math.abs(maxAvg)) || 0.01;
-      const colors = points.map(p =>
-        p.avg >= 0
-          ? `rgba(52,152,219,${Math.min(Math.abs(p.avg/range)*0.8+0.2,1)})`
-          : `rgba(232,67,147,${Math.min(Math.abs(p.avg/range)*0.8+0.2,1)})`);
-
-      this._charts['calendar'] = new Chart(el, {
-        type: 'bubble',
-        data: { datasets: [{ data: points, backgroundColor: colors, borderWidth: 0 }] },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          layout: { padding: { bottom: 0 } },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const p = points[ctx.dataIndex];
-                  return [`${monthNames[p.month-1]} ${p.year}`,
-                          `Avg: ${(p.avg*100).toFixed(3)}%`, `n: ${p.n}`];
-                },
-              },
-            },
-          },
-          scales: {
-            x: { ...this._darkScales().x, type:'linear', min:-0.5, max:11.5,
-                 ticks:{...this._darkScales().x.ticks, maxRotation: 0, callback: v => monthNames[Math.round(v)] || ''} },
-            y: { ...this._darkScales().y, type:'linear', min:-0.5, max: years.length - 0.5,
-                 ticks:{...this._darkScales().y.ticks, callback: v => years[Math.round(v)] || ''} },
-          },
-        },
-      });
-    },
-
     // ── Day of week P&L ────────────────────────────────────────────────
     _renderDOW() {
       const el = document.getElementById('chart-dow');
@@ -2319,42 +2174,6 @@ document.addEventListener('alpine:init', () => {
             ...this._darkScalesNR(),
             y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
                   callback: v => v.toFixed(2) + '%' } },
-          },
-        },
-      });
-    },
-
-    // ── Win rate by decile ───────────────────────────────────────────────
-    _renderWinRate() {
-      const el = document.getElementById('chart-winrate');
-      if (!el || !this.data?.decile_stats) return;
-      if (this._charts['winrate']) this._charts['winrate'].destroy();
-
-      const stats = (this.data.decile_stats || []).filter(d => d);
-      this._charts['winrate'] = new Chart(el, {
-        type: 'bar',
-        data: {
-          labels: stats.map(d => 'D' + d.bucket),
-          datasets: [{
-            data: stats.map(d => d.win_rate * 100),
-            backgroundColor: stats.map(d => d.win_rate >= 0.5 ? '#3498db' : '#e84393'),
-            borderWidth: 0,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          layout: { padding: { bottom: 0 } },
-          plugins: {
-            legend: { display: false },
-            tooltip: { callbacks: { label: ctx => {
-              const d = stats[ctx.dataIndex];
-              return [`WR: ${(d.win_rate*100).toFixed(1)}%`, `n: ${d.n}`];
-            } } },
-          },
-          scales: {
-            ...this._darkScalesNR(),
-            y: { ...this._darkScales().y, min: 30, max: 70,
-                 ticks: { ...this._darkScales().y.ticks, callback: v => v + '%' } },
           },
         },
       });
@@ -2722,10 +2541,7 @@ document.addEventListener('alpine:init', () => {
       this._renderBoxplot();
       this._renderDrawdown();
       this._renderRollingCorr();
-      this._renderReturnDist();
-      this._renderTradeCalendar();
       this._renderDOW();
-      this._renderWinRate();
       this._renderActivity();
       this._renderTradeTable();
     },
@@ -2778,10 +2594,7 @@ document.addEventListener('alpine:init', () => {
           'chart-rolling':       () => this._renderRollingCorr(),
           'chart-boxplot':       () => this._renderBoxplot(),
           'chart-drawdown':      () => this._renderDrawdown(),
-          'chart-dist':          () => this._renderReturnDist(),
-          'chart-calendar':      () => this._renderTradeCalendar(),
           'chart-dow':           () => this._renderDOW(),
-          'chart-winrate':       () => this._renderWinRate(),
           'chart-activity':      () => this._renderActivity(),
           // Secondary scanner
           'sec-bar-canvas':       () => this._renderSecBar(),
@@ -2854,10 +2667,7 @@ document.addEventListener('alpine:init', () => {
           'chart-rolling':       () => this._renderRollingCorr(),
           'chart-boxplot':       () => this._renderBoxplot(),
           'chart-drawdown':      () => this._renderDrawdown(),
-          'chart-dist':          () => this._renderReturnDist(),
-          'chart-calendar':      () => this._renderTradeCalendar(),
           'chart-dow':           () => this._renderDOW(),
-          'chart-winrate':       () => this._renderWinRate(),
           'chart-activity':      () => this._renderActivity(),
           'sec-bar-canvas':      () => this._renderSecBar(),
           'sec-equity-canvas':   () => this._renderSecEquity(),

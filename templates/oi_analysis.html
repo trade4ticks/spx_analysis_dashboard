@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=128"></script>
+  <script src="/static/js/oi_analysis.js?v=129"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -992,23 +992,6 @@
             <div class="chart-canvas"><canvas id="chart-rolling"></canvas></div>
           </div>
 
-          <!-- Win Rate + Return Distribution: half-width side by side -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="chart-box" style="min-height:0">
-              <div class="chart-title" style="font-size:11px">Win Rate by Decile
-                <button class="fs-btn" @click="openFullscreen('chart-winrate')" title="Fullscreen">⛶</button>
-              </div>
-              <div class="chart-canvas" style="height:200px"><canvas id="chart-winrate"></canvas></div>
-            </div>
-            <div class="chart-box" style="min-height:0">
-              <div class="chart-title" style="font-size:11px">Return Distribution
-                <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected vs all</span>
-                <button class="fs-btn" @click="openFullscreen('chart-dist')" title="Fullscreen">⛶</button>
-              </div>
-              <div class="chart-canvas" style="height:200px"><canvas id="chart-dist"></canvas></div>
-            </div>
-          </div>
-
           <!-- Trade Data Table -->
           <div class="chart-box" style="overflow:hidden">
             <div class="chart-title">
@@ -1036,15 +1019,6 @@
                 <tbody id="trade-table-body"></tbody>
               </table>
             </div>
-          </div>
-
-          <!-- Trade Calendar -->
-          <div class="chart-box">
-            <div class="chart-title">Trade Calendar
-              <span style="font-weight:400;font-size:10px;color:var(--dim)">— month × year avg return</span>
-              <button class="fs-btn" @click="openFullscreen('chart-calendar')" title="Fullscreen">⛶</button>
-            </div>
-            <div class="chart-canvas"><canvas id="chart-calendar"></canvas></div>
           </div>
 
           <!-- 2D Heatmap (table grid) -->
