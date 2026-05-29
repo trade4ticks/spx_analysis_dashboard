@@ -2654,11 +2654,55 @@ document.addEventListener('alpine:init', () => {
     },
 
     exportTradeCSV() {
-      // W1: download via /trades/csv endpoint (server-side cache).
+      // Default outcome → server /trades/csv (cache is warm, streams the
+      // full filtered set). Non-default outcomes → client-side build
+      // from the bundle, same row shape and column order as the server
+      // (oi_analysis.py:1278). Bin filter (selectedBins20) honored on
+      // both paths.
       if (!this.data) return;
       const mode = this.pageMode === 'train_test' ? 'train_test'
                  : this.pageMode === 'in_sample'  ? 'in_sample'
                  : 'walk_forward';
+      const isDefault = this.outcome === 'ret_5d_fwd_oc';
+      const bundleRows = !isDefault ? this._buildFlatTradesFromBundle(this.outcome) : null;
+      if (bundleRows) {
+        const filtered = this.selectedBins20.size > 0
+          ? bundleRows.filter(t => this.selectedBins20.has(t.decile20))
+          : bundleRows;
+        filtered.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        // CSV escape for any field that contains a comma, quote, or newline.
+        const esc = (v) => {
+          if (v == null) return '';
+          const s = String(v);
+          return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        };
+        const header = ['date', 'ticker', this.metric || 'metric',
+                        'spot_entry', 'spot_exit', 'ret_pct', 'exit_date', 'bin20'];
+        const lines = [header.map(esc).join(',')];
+        for (const t of filtered) {
+          lines.push([
+            t.date, t.ticker,
+            t.metric_val ?? '',
+            t.spot_entry ?? '',
+            t.spot_exit  ?? '',
+            (t.ret != null ? (t.ret * 100).toFixed(6) : ''),
+            t.exit_date ?? '',
+            t.decile20  ?? '',
+          ].map(esc).join(','));
+        }
+        const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+        const today = new Date().toISOString().slice(0, 10);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `trades_${this.ticker}_${this.metric}_${today}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // Free the object URL on the next tick; the click handler has
+        // already kicked off the download by then.
+        setTimeout(() => URL.revokeObjectURL(a.href), 0);
+        return;
+      }
       const params = new URLSearchParams({
         ticker:  this.ticker,
         metric:  this.metric,
