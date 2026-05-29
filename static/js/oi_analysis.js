@@ -424,6 +424,7 @@ document.addEventListener('alpine:init', () => {
       this._renderActivity();
       this._renderTradeTable();
       if (this.secStatus.loaded && !this.secStatus.loading) this.secScan();
+      this._computeSelectedStats();
     },
 
 
@@ -461,6 +462,7 @@ document.addEventListener('alpine:init', () => {
     _renderCharts() {
       if (!this.data) return;
       this._renderAllCharts();
+      this._computeSelectedStats();
     },
 
     // ── P3: lower-section chart rendering ─────────────────────────────────
@@ -1298,6 +1300,7 @@ document.addEventListener('alpine:init', () => {
           this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
         }
         if (this.heatmapMetric) this.loadHeatmap();
+        this._computeSelectedStats();
         return;
       }
       const outcome = this.decileActiveOutcome;
@@ -1316,6 +1319,7 @@ document.addEventListener('alpine:init', () => {
       // user action) but outcome switches are now backed by the bundle
       // and cheap, so manual Load was friction without purpose.
       if (this.heatmapMetric) this.loadHeatmap();
+      this._computeSelectedStats();
     },
 
     // ── P3 setters ────────────────────────────────────────────────────────
@@ -3107,6 +3111,8 @@ document.addEventListener('alpine:init', () => {
     smSelectedFwd: '',
     smSelectedTicker: '',
     smSummary: { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] },
+    smExpanded: true,
+    selectedStats: null,
 
     // ── Interaction Scan ──
     ifClusters: [],
@@ -3138,6 +3144,63 @@ document.addEventListener('alpine:init', () => {
       { key: 'pearson_r',       label: 'Pearson',  align: 'right'  },
       { key: 'loyo_fragile',    label: 'LOYO',     align: 'center' },
     ],
+
+    toggleSm() {
+      this.smExpanded = !this.smExpanded;
+      if (this.smExpanded && this.smMeta.count > 0) {
+        setTimeout(() => {
+          this._renderSmMetricChart();
+          this._renderSmFwdChart();
+          this._renderSmTickerChart();
+          this._renderSmTickerFwdChart();
+        }, 50);
+      }
+    },
+
+    _computeSelectedStats() {
+      if (!this.data?.trade_calendar?.length) { this.selectedStats = null; return; }
+      const tc = this.data.trade_calendar;
+      const rets = [];
+      const hasSel = this.selectedBins20.size > 0;
+      for (const t of tc) {
+        if (!hasSel || this.selectedBins20.has(t.decile20)) rets.push(t.ret);
+      }
+      if (!rets.length) { this.selectedStats = null; return; }
+      const n = rets.length;
+      const sorted = [...rets].sort((a, b) => a - b);
+      const sum = rets.reduce((a, b) => a + b, 0);
+      const mean = sum / n;
+      const wins   = rets.filter(r => r > 0);
+      const losses = rets.filter(r => r <= 0);
+      let ssq = 0;
+      for (const r of rets) { const d = r - mean; ssq += d * d; }
+      const std  = Math.sqrt(ssq / n);
+      const p5   = sorted[Math.max(0, Math.floor(n * 0.05))];
+      const p95  = sorted[Math.min(n - 1, Math.floor(n * 0.95))];
+      let years = 1;
+      const filtDates = tc
+        .filter(t => !hasSel || this.selectedBins20.has(t.decile20))
+        .map(t => t.date);
+      if (filtDates.length > 1) {
+        const sd  = [...filtDates].sort();
+        const ms  = new Date(sd[sd.length - 1]) - new Date(sd[0]);
+        const yrs = ms / (365.25 * 24 * 3600 * 1000);
+        if (yrs > 0.1) years = yrs;
+      }
+      this.selectedStats = {
+        n,
+        avg_ret:         mean,
+        median:          sorted[Math.floor((n - 1) / 2)],
+        std,
+        p5,
+        p95,
+        win_rate:        wins.length / n,
+        n_winners:       wins.length,
+        avg_winners:     wins.length  ? wins.reduce((a, b)   => a + b, 0) / wins.length   : 0,
+        avg_losers:      losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0,
+        trades_per_year: n / years,
+      };
+    },
 
     async smInit() {
       try {
