@@ -96,8 +96,8 @@
     }
     .mode-seg span:last-child { border-right:none; }
     .mode-seg span.on { background:rgba(255,255,255,0.14); color:var(--text); font-weight:600; }
-    /* P3 control bar — selected mode/bin shows accent colour */
-    .control-bar .mode-seg span.on { color: var(--accent); }
+    /* P3 control bar — selected mode/bin shows bright blue + bold */
+    .control-bar .mode-seg span.on { color: #74c0fc; font-weight: 700; }
 
     /* Page-header Mode toggle: size each segment to match the Analyze
        button (.go-btn) so the control row reads as one consistent strip
@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=137"></script>
+  <script src="/static/js/oi_analysis.js?v=138"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -790,118 +790,37 @@
       </template>
     </div>
 
-    <!-- Selectors -->
-    <div class="sel-bar">
-      <div>
-        <label>Ticker</label><br>
-        <select x-model="ticker">
-          <template x-for="t in tickers" :key="t">
-            <option :value="t" x-text="t"></option>
-          </template>
-        </select>
-      </div>
-      <div>
-        <label>Metric (X)</label><br>
-        <select x-model="metric">
-          <template x-for="f in features" :key="f">
-            <option :value="f" x-text="f"></option>
-          </template>
-        </select>
-      </div>
-      <!-- P2: OUTCOME (Y) was removed from the upper Analyze bar. The
-           Signal Survey panel has its own local outcome control
-           (persisted to localStorage). The Quantile chart's active
-           outcome will be controlled by the new lower control bar in
-           P3 (Single mode inline dropdown + Entry/Horizon mode bar-click
-           promotion). For now, `this.outcome` is still set on init to
-           ret_5d_fwd_oc and continues to drive /analyze + downstream
-           visuals until P3 wires up the lower bar. -->
-      <div>
-        <label>From</label><br>
-        <input type="date" x-model="dateFrom"
-               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:12px;padding:5px 6px;border-radius:4px">
-      </div>
-      <div>
-        <label>To</label><br>
-        <input type="date" x-model="dateTo"
-               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:12px;padding:5px 6px;border-radius:4px">
-      </div>
-      <div style="padding-top:14px">
-        <button class="go-btn" @click="loadAnalysis()">Analyze</button>
-      </div>
-      <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
-           (via the existing /analyze fast path); the 12-outcome bundle
-           computes in the background and unlocks P3+ mode views when
-           ready. This indicator is invisible while idle/ready. -->
-      <div style="padding-top:14px;display:flex;align-items:center"
-           x-show="analyzeBundleStatus === 'computing' || analyzeBundleStatus === 'failed'">
-        <span x-show="analyzeBundleStatus === 'computing'"
-              style="font-size:11px;color:var(--dim);font-style:italic">
-          <span x-show="ticker === 'ALL'">Computing other outcomes… (~5 min background)</span>
-          <span x-show="ticker !== 'ALL'">Computing other outcomes…</span>
-        </span>
-        <span x-show="analyzeBundleStatus === 'failed'"
-              :title="analyzeBundleError"
-              style="font-size:11px;color:#e84393;font-style:italic">
-          Other-outcome bundle failed — see console (analyzeBundleError)
-        </span>
-      </div>
-      <div title="Page-wide bin mode. Drives every binning analysis on the page. In-sample uses the entire history. Walk-forward computes per-ticker bins via bisect_left against a running sorted list with a 252-day warmup. Train-test freezes bin thresholds on data BEFORE the cutoff and ranks all rows against that frozen training history — out-of-sample test rows can pile into the extreme bins.">
-        <label>Mode</label><br>
-        <div class="mode-seg">
-          <span :class="{on: pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
-          <span :class="{on: pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
-          <span :class="{on: pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
-        </div>
-      </div>
-      <div x-show="pageMode === 'train_test'"
-           title="Bins are computed using rows with trade_date < this date (the 'training' window). Rows at or after the cutoff (the 'test' window) are ranked against those frozen training thresholds — they can land in B1 or B(n_bins) when they exceed the training range.">
-        <label>Cutoff</label><br>
-        <input type="date" x-model="cutoffDate"
-               @change="setPageMode('train_test')"
-               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:12px;padding:5px 6px;border-radius:4px">
-      </div>
-      <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
-    </div>
-
     <!-- ── Signal Survey (IC.5 + IC.7) ────────────────────────────────────
-         Three always-visible Level-1 panes (Leaderboard · Signal Scatter ·
-         Breadth Beeswarm) and two always-visible Level-2 panes (Ticker
-         Contributions · Lorenz Curve). No expand/collapse — fixed page shape.
-         OOM guard preserved: ALL-mode compute only via explicit ⟳ Refresh. -->
+         Collapsible — Outcome + Refresh stay visible in header when collapsed. -->
     <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
                 background:rgba(255,255,255,.02)">
-
-      <!-- Survey header -->
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
-        <span style="font-size:13px;font-weight:700;color:var(--text)">Signal Survey</span>
-        <span style="font-size:11px;color:var(--dim)"
-              x-text="icBatchSubtitle()"></span>
-        <div style="flex:1"></div>
-        <!-- P2: local OUTCOME control (moved from upper Analyze bar).
-             Persisted to localStorage under
-             'factor-analysis.signalSurvey.outcome'; first-load default
-             ret_5d_fwd_oc. Change triggers a Signal Survey reload only —
-             does NOT affect the main /analyze chart. -->
-        <label style="font-size:11px;color:var(--dim)">Outcome:</label>
-        <select x-model="surveyOutcome" @change="setSurveyOutcome($event.target.value)"
-                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                       font-size:12px;padding:3px 6px;border-radius:3px;max-width:200px">
-          <template x-for="o in outcomes" :key="'sov-'+o">
-            <option :value="o" x-text="o"></option>
-          </template>
-        </select>
-        <button @click="refreshIcBatch()"
-                :disabled="icBatchLoading"
-                :style="{ opacity: icBatchLoading ? 0.5 : 1, cursor: icBatchLoading ? 'wait' : 'pointer' }"
-                style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
-                       color:#e84393;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
-                title="Recompute Signal Survey for current Outcome + Mode — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
+        <div @click="toggleSurvey()"
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
+          <span style="font-size:13px;color:var(--muted)" x-text="surveyExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Signal Survey</span>
+          <span style="font-size:11px;color:var(--dim)"
+                x-text="icBatchSubtitle()"></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center" @click.stop>
+          <label style="font-size:11px;color:var(--dim)">Outcome:</label>
+          <select x-model="surveyOutcome" @change="setSurveyOutcome($event.target.value)"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                         font-size:12px;padding:3px 6px;border-radius:3px;max-width:200px">
+            <template x-for="o in outcomes" :key="'sov-'+o">
+              <option :value="o" x-text="o"></option>
+            </template>
+          </select>
+          <button @click="refreshIcBatch()"
+                  :disabled="icBatchLoading"
+                  :style="{ opacity: icBatchLoading ? 0.5 : 1, cursor: icBatchLoading ? 'wait' : 'pointer' }"
+                  style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
+                         color:#e84393;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
+                  title="Recompute Signal Survey for current Outcome + Mode">⟳ Refresh</button>
+        </div>
       </div>
-
+      <template x-if="surveyExpanded">
+        <div>
       <!-- Stale-cache coherence banner: old DB cache entries lack the
            concentration_gini key entirely (undefined ≠ null). null means
            "legitimately no cross-sectional data"; undefined means stale. -->
@@ -1128,6 +1047,9 @@
         </div>
 
       </div><!-- /level-2 panes -->
+
+        </div>
+      </template>
     </div><!-- /signal survey -->
 
     <!-- ── Threshold Drift (walk-forward bin boundaries over time) ─────────
@@ -1214,6 +1136,83 @@
       </template>
     </div>
 
+    <!-- Selectors -->
+    <div class="sel-bar">
+      <div>
+        <label>Ticker</label><br>
+        <select x-model="ticker">
+          <template x-for="t in tickers" :key="t">
+            <option :value="t" x-text="t"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label>Metric (X)</label><br>
+        <select x-model="metric">
+          <template x-for="f in features" :key="f">
+            <option :value="f" x-text="f"></option>
+          </template>
+        </select>
+      </div>
+      <!-- P2: OUTCOME (Y) was removed from the upper Analyze bar. The
+           Signal Survey panel has its own local outcome control
+           (persisted to localStorage). The Quantile chart's active
+           outcome will be controlled by the new lower control bar in
+           P3 (Single mode inline dropdown + Entry/Horizon mode bar-click
+           promotion). For now, `this.outcome` is still set on init to
+           ret_5d_fwd_oc and continues to drive /analyze + downstream
+           visuals until P3 wires up the lower bar. -->
+      <div>
+        <label>From</label><br>
+        <input type="date" x-model="dateFrom"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:12px;padding:5px 6px;border-radius:4px">
+      </div>
+      <div>
+        <label>To</label><br>
+        <input type="date" x-model="dateTo"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:12px;padding:5px 6px;border-radius:4px">
+      </div>
+      <div style="padding-top:14px">
+        <button class="go-btn" @click="loadAnalysis()">Analyze</button>
+      </div>
+      <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
+           (via the existing /analyze fast path); the 12-outcome bundle
+           computes in the background and unlocks P3+ mode views when
+           ready. This indicator is invisible while idle/ready. -->
+      <div style="padding-top:14px;display:flex;align-items:center"
+           x-show="analyzeBundleStatus === 'computing' || analyzeBundleStatus === 'failed'">
+        <span x-show="analyzeBundleStatus === 'computing'"
+              style="font-size:11px;color:var(--dim);font-style:italic">
+          <span x-show="ticker === 'ALL'">Computing other outcomes… (~5 min background)</span>
+          <span x-show="ticker !== 'ALL'">Computing other outcomes…</span>
+        </span>
+        <span x-show="analyzeBundleStatus === 'failed'"
+              :title="analyzeBundleError"
+              style="font-size:11px;color:#e84393;font-style:italic">
+          Other-outcome bundle failed — see console (analyzeBundleError)
+        </span>
+      </div>
+      <div title="Page-wide bin mode. Drives every binning analysis on the page. In-sample uses the entire history. Walk-forward computes per-ticker bins via bisect_left against a running sorted list with a 252-day warmup. Train-test freezes bin thresholds on data BEFORE the cutoff and ranks all rows against that frozen training history — out-of-sample test rows can pile into the extreme bins.">
+        <label>Mode</label><br>
+        <div class="mode-seg">
+          <span :class="{on: pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
+          <span :class="{on: pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
+          <span :class="{on: pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
+        </div>
+      </div>
+      <div x-show="pageMode === 'train_test'"
+           title="Bins are computed using rows with trade_date < this date (the 'training' window). Rows at or after the cutoff (the 'test' window) are ranked against those frozen training thresholds — they can land in B1 or B(n_bins) when they exceed the training range.">
+        <label>Cutoff</label><br>
+        <input type="date" x-model="cutoffDate"
+               @change="setPageMode('train_test')"
+               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                      font-size:12px;padding:5px 6px;border-radius:4px">
+      </div>
+      <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
+    </div>
+
     <div x-show="error" style="color:var(--danger);padding:12px;font-size:13px" x-text="error"></div>
 
     <!-- Results -->
@@ -1239,80 +1238,82 @@
                     margin-bottom:8px;padding:5px 10px;
                     background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:6px;
                     font-size:11px;color:var(--dim)">
-          <!-- Tickers — ALL mode only -->
-          <template x-if="data.all_mode">
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Tickers</span>&nbsp;
-              <span style="color:var(--text);font-weight:700"
-                    x-text="(data.n_tickers ?? '—') + ''"></span>
-            </span>
-          </template>
+          <!-- Ticker — always: count in ALL mode, name in single mode -->
+          <span style="margin-right:14px;white-space:nowrap">
+            <span style="color:var(--muted);font-weight:600"
+                  x-text="data.all_mode ? 'Tickers' : 'Ticker'"></span>&nbsp;
+            <span style="color:var(--text);font-weight:700"
+                  x-text="data.all_mode ? ((data.n_tickers ?? '—') + '') : ticker"></span>
+          </span>
           <!-- N -->
           <span style="margin-right:14px;white-space:nowrap">
             <span style="color:var(--muted);font-weight:600">N</span>&nbsp;
             <span style="color:var(--text);font-weight:700"
                   x-text="selectedStats ? selectedStats.n.toLocaleString() : (data.n?.toLocaleString() ?? '—')"></span>
           </span>
+          <!-- All remaining stats — x-if requires a single root child, so wrap in display:contents -->
           <template x-if="selectedStats">
-            <!-- Avg Ret -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Avg&nbsp;Ret</span>&nbsp;
-              <span :style="selectedStats.avg_ret >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                    x-text="(selectedStats.avg_ret * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- Median -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Med</span>&nbsp;
-              <span :style="selectedStats.median >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                    x-text="(selectedStats.median * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- Std Dev -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Std</span>&nbsp;
-              <span style="color:var(--text);font-weight:700"
-                    x-text="(selectedStats.std * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- P5 -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">P5</span>&nbsp;
-              <span :style="selectedStats.p5 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                    x-text="(selectedStats.p5 * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- P95 -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">P95</span>&nbsp;
-              <span :style="selectedStats.p95 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                    x-text="(selectedStats.p95 * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- Win % -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Win%</span>&nbsp;
-              <span style="color:var(--text);font-weight:700"
-                    x-text="(selectedStats.win_rate * 100).toFixed(1) + '%'"></span>
-            </span>
-            <!-- # Win -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">#Win</span>&nbsp;
-              <span style="color:var(--text);font-weight:700"
-                    x-text="selectedStats.n_winners.toLocaleString()"></span>
-            </span>
-            <!-- Avg Win -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">AvgWin</span>&nbsp;
-              <span style="color:#3498db;font-weight:700"
-                    x-text="(selectedStats.avg_winners * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- Avg Loss -->
-            <span style="margin-right:14px;white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">AvgLoss</span>&nbsp;
-              <span style="color:#e84393;font-weight:700"
-                    x-text="(selectedStats.avg_losers * 100).toFixed(3) + '%'"></span>
-            </span>
-            <!-- Trd/Yr -->
-            <span style="white-space:nowrap">
-              <span style="color:var(--muted);font-weight:600">Trd/Yr</span>&nbsp;
-              <span style="color:var(--text);font-weight:700"
-                    x-text="selectedStats.trades_per_year.toFixed(1)"></span>
+            <span style="display:contents">
+              <!-- Avg Ret -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">Avg&nbsp;Ret</span>&nbsp;
+                <span :style="selectedStats.avg_ret >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
+                      x-text="(selectedStats.avg_ret * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- Median -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">Med</span>&nbsp;
+                <span :style="selectedStats.median >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
+                      x-text="(selectedStats.median * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- Std Dev -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">Std</span>&nbsp;
+                <span style="color:var(--text);font-weight:700"
+                      x-text="(selectedStats.std * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- P5 -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">P5</span>&nbsp;
+                <span :style="selectedStats.p5 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
+                      x-text="(selectedStats.p5 * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- P95 -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">P95</span>&nbsp;
+                <span :style="selectedStats.p95 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
+                      x-text="(selectedStats.p95 * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- Win % -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">Win%</span>&nbsp;
+                <span style="color:var(--text);font-weight:700"
+                      x-text="(selectedStats.win_rate * 100).toFixed(1) + '%'"></span>
+              </span>
+              <!-- # Win -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">#Win</span>&nbsp;
+                <span style="color:var(--text);font-weight:700"
+                      x-text="selectedStats.n_winners.toLocaleString()"></span>
+              </span>
+              <!-- Avg Win -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">AvgWin</span>&nbsp;
+                <span style="color:#3498db;font-weight:700"
+                      x-text="(selectedStats.avg_winners * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- Avg Loss -->
+              <span style="margin-right:14px;white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">AvgLoss</span>&nbsp;
+                <span style="color:#e84393;font-weight:700"
+                      x-text="(selectedStats.avg_losers * 100).toFixed(3) + '%'"></span>
+              </span>
+              <!-- Trd/Yr -->
+              <span style="white-space:nowrap">
+                <span style="color:var(--muted);font-weight:600">Trd/Yr</span>&nbsp;
+                <span style="color:var(--text);font-weight:700"
+                      x-text="selectedStats.trades_per_year.toFixed(1)"></span>
+              </span>
             </span>
           </template>
         </div>

@@ -3111,7 +3111,8 @@ document.addEventListener('alpine:init', () => {
     smSelectedFwd: '',
     smSelectedTicker: '',
     smSummary: { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] },
-    smExpanded: true,
+    smExpanded: false,
+    surveyExpanded: false,
     selectedStats: null,
 
     // ── Interaction Scan ──
@@ -3153,6 +3154,17 @@ document.addEventListener('alpine:init', () => {
           this._renderSmFwdChart();
           this._renderSmTickerChart();
           this._renderSmTickerFwdChart();
+        }, 50);
+      }
+    },
+
+    toggleSurvey() {
+      this.surveyExpanded = !this.surveyExpanded;
+      if (this.surveyExpanded) {
+        // Re-render all IC charts after the pane becomes visible in the DOM.
+        setTimeout(() => {
+          if (this.icBatchData) this._renderIcBatch();
+          if (this.icDecompData) { this._renderIcDecomp(); this._renderIcLorenz(); }
         }, 50);
       }
     },
