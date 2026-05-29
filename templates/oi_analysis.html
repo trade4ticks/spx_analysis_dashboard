@@ -50,9 +50,17 @@
     .stat-value.pos { color:#3498db; }
     .stat-value.neg { color:#e84393; }
 
-    /* Chart grid */
-    .chart-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px; }
-    @media (max-width:1100px) { .chart-grid { grid-template-columns:1fr; } }
+    /* Chart grid.
+       grid-template-columns uses minmax(0, 1fr) — not bare 1fr — because
+       CSS grid expands 1fr to minmax(auto, 1fr), and `auto` minimum lets a
+       wide child (a long ticker name in the Trade Data table, a fat
+       Chart.js legend, etc.) inflate its column past 1fr. That used to
+       force a horizontal scrollbar on the page and broke the responsive
+       collapse below 1100px — the media query fired but the explicit
+       child intrinsic width kept the grid wider than viewport. Explicit
+       `0` min lets columns shrink to fit and snap back symmetrically. */
+    .chart-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; margin-bottom:16px; }
+    @media (max-width:1100px) { .chart-grid { grid-template-columns:minmax(0,1fr); } }
     .chart-box {
       background:var(--surface); border:1px solid var(--border); border-radius:6px;
       padding:10px 10px 2px; min-height:280px;
@@ -162,7 +170,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=129"></script>
+  <script src="/static/js/oi_analysis.js?v=130"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -934,7 +942,7 @@
           </div>
 
           <!-- Yearly + Day of Week side by side (one column) -->
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px">
             <div class="chart-box" style="min-height:0">
               <div class="chart-title">Avg Return by Year
                 <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected</span>
@@ -963,13 +971,13 @@
             <div class="chart-canvas"><canvas id="chart-activity"></canvas></div>
           </div>
 
-          <!-- Boxplot -->
+          <!-- Return Distribution (histogram of trade returns: selected vs all) -->
           <div class="chart-box">
-            <div class="chart-title">Return Distribution by Decile
-              <span style="font-weight:400;font-size:10px;color:var(--dim)">— P5/Q1/Med/Q3/P95</span>
-              <button class="fs-btn" @click="openFullscreen('chart-boxplot')" title="Fullscreen">⛶</button>
+            <div class="chart-title">Return Distribution
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— selected vs all</span>
+              <button class="fs-btn" @click="openFullscreen('chart-dist')" title="Fullscreen">⛶</button>
             </div>
-            <div class="chart-canvas"><canvas id="chart-boxplot"></canvas></div>
+            <div class="chart-canvas"><canvas id="chart-dist"></canvas></div>
           </div>
 
           <!-- Drawdown -->
@@ -984,6 +992,7 @@
           <!-- Rolling Signal Strength = rolling IC + sign-stability (IC.2) -->
           <div class="chart-box">
             <div class="chart-title">Rolling Signal Strength (252d Spearman IC)
+              <span style="font-weight:400;font-size:10px;color:var(--dim)">— all bins (universe-wide)</span>
               <button class="fs-btn" @click="openFullscreen('chart-rolling')" title="Fullscreen">⛶</button>
             </div>
             <div x-text="rollingIcSubtitle()"

@@ -419,6 +419,7 @@ document.addEventListener('alpine:init', () => {
       this._renderDrawdown();
       this._renderYearly();
       this._renderRollingCorr();
+      this._renderReturnDist();
       this._renderDOW();
       this._renderActivity();
       this._renderTradeTable();
@@ -1583,59 +1584,75 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Boxplot (5th-95th percentile + IQR + median) ───────────────────
-    _renderBoxplot() {
-      const el = document.getElementById('chart-boxplot');
+    // ── Return Distribution (histogram: selected bins vs all) ─────────────
+    // Uses /analyze's per-trade decile_stats[].returns array (only present
+    // for the /analyze default outcome; after a P4 bundle-driven swap the
+    // returns array is empty, so this chart silently renders nothing for
+    // non-ret_5d_fwd_oc outcomes — that's intentional given the bundle's
+    // memory budget).
+    _renderReturnDist() {
+      const el = document.getElementById('chart-dist');
       if (!el || !this.data?.decile_stats) return;
-      if (this._charts['boxplot']) this._charts['boxplot'].destroy();
+      if (this._charts['dist']) this._charts['dist'].destroy();
 
-      const stats = (this.data.decile_stats || []).filter(d => d && d.returns?.length >= 5);
-      const labels = stats.map(d => 'D' + d.bucket);
-      const boxData = stats.map(d => {
-        const s = [...d.returns].sort((a,b) => a-b);
-        const pct = p => s[Math.floor(s.length * p)] * 100;
-        return { p5: pct(0.05), q1: pct(0.25), med: pct(0.5), q3: pct(0.75), p95: pct(0.95) };
-      });
+      const effDec2 = this._effectiveDeciles();
+      const allRets = [];
+      const selRets = [];
+      for (const d of (this.data.decile_stats || [])) {
+        if (!d?.returns) continue;
+        allRets.push(...d.returns.map(r => r * 100));
+        if (effDec2.has(d.bucket)) {
+          selRets.push(...d.returns.map(r => r * 100));
+        }
+      }
+      if (!allRets.length) return;
 
-      // IQR as floating bars, whiskers as error-bar-like lines, median as points
-      this._charts['boxplot'] = new Chart(el, {
+      // Build histogram bins — avoid spread on large arrays (V8 call-stack limit)
+      const nBins = 40;
+      let minRet = Infinity, maxRet = -Infinity;
+      for (const v of allRets) { if (v < minRet) minRet = v; if (v > maxRet) maxRet = v; }
+      const mn = Math.max(minRet, -15);
+      const mx = Math.min(maxRet,  15);
+      const step = (mx - mn) / nBins;
+      const labels = [];
+      const allCounts = new Array(nBins).fill(0);
+      const selCounts = new Array(nBins).fill(0);
+      for (let i = 0; i < nBins; i++) labels.push((mn + step * (i + 0.5)).toFixed(1));
+      for (const v of allRets) {
+        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
+        if (b >= 0) allCounts[b]++;
+      }
+      for (const v of selRets) {
+        const b = Math.min(Math.floor((v - mn) / step), nBins - 1);
+        if (b >= 0) selCounts[b]++;
+      }
+
+      const decLabel = effDec2.size > 0
+        ? Array.from(effDec2).sort((a,b)=>a-b).map(d=>'D'+d).join('+') : 'None';
+
+      this._charts['dist'] = new Chart(el, {
         type: 'bar',
         data: {
           labels,
           datasets: [
-            // Whisker range (5th-95th) as thin faint bars behind
-            { label: 'P5-P95', data: boxData.map(b => [b.p5, b.p95]),
-              backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.2)',
-              borderWidth: 1, barPercentage: 0.15 },
-            // IQR as thicker bars
-            { label: 'IQR', data: boxData.map(b => [b.q1, b.q3]),
-              backgroundColor: 'rgba(52,152,219,0.3)', borderColor: '#3498db',
-              borderWidth: 1, barPercentage: 0.5 },
-            // Median as point line
-            { label: 'Median', data: boxData.map(b => b.med), type: 'line',
-              borderColor: '#fff', backgroundColor: 'transparent',
-              borderWidth: 2, pointRadius: 4, pointBackgroundColor: '#fff', pointBorderWidth: 0 },
+            { label: 'All Deciles', data: allCounts,
+              backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
+            { label: decLabel, data: selCounts,
+              backgroundColor: 'rgba(52,152,219,0.5)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
           plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const b = boxData[ctx.dataIndex];
-                  return [`P5: ${b.p5.toFixed(2)}%`, `Q1: ${b.q1.toFixed(2)}%`,
-                          `Med: ${b.med.toFixed(2)}%`, `Q3: ${b.q3.toFixed(2)}%`,
-                          `P95: ${b.p95.toFixed(2)}%`];
-                },
-              },
-            },
+            legend: { labels:{color:'#aaa',font:{size:10}} },
+            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
           },
           scales: {
-            ...this._darkScales(),
-            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
-                  callback: v => v.toFixed(1) + '%' } },
+            ...this._darkScalesNR(),
+            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+                 title:{display:true,text:'Return %',color:'#888',font:{size:10}} },
+            y: { ...this._darkScales().y, title:{display:true,text:'Count',color:'#888',font:{size:10}} },
           },
         },
       });
@@ -2538,9 +2555,9 @@ document.addEventListener('alpine:init', () => {
       this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
-      this._renderBoxplot();
       this._renderDrawdown();
       this._renderRollingCorr();
+      this._renderReturnDist();
       this._renderDOW();
       this._renderActivity();
       this._renderTradeTable();
@@ -2592,7 +2609,7 @@ document.addEventListener('alpine:init', () => {
           'chart-equity':        () => this._renderEquity(),
           'chart-yearly':        () => this._renderYearly(),
           'chart-rolling':       () => this._renderRollingCorr(),
-          'chart-boxplot':       () => this._renderBoxplot(),
+          'chart-dist':          () => this._renderReturnDist(),
           'chart-drawdown':      () => this._renderDrawdown(),
           'chart-dow':           () => this._renderDOW(),
           'chart-activity':      () => this._renderActivity(),
@@ -2665,7 +2682,7 @@ document.addEventListener('alpine:init', () => {
           'chart-equity':        () => this._renderEquity(),
           'chart-yearly':        () => this._renderYearly(),
           'chart-rolling':       () => this._renderRollingCorr(),
-          'chart-boxplot':       () => this._renderBoxplot(),
+          'chart-dist':          () => this._renderReturnDist(),
           'chart-drawdown':      () => this._renderDrawdown(),
           'chart-dow':           () => this._renderDOW(),
           'chart-activity':      () => this._renderActivity(),
