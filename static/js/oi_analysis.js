@@ -112,6 +112,18 @@ document.addEventListener('alpine:init', () => {
     topBinsData:     null,
     topBinsOutcome:  'ret_5d_fwd_oc',
 
+    // P1: 12-outcome analyze bundle (drives P3+ mode views).
+    // Two-stage render: /analyze fires first for ret_5d_fwd_oc immediately;
+    // then loadAnalyzeBundle() pulls the full 12-outcome bundle in the
+    // background. ALL-mode bundles are persisted to analyze_cache (cache
+    // key omits FROM/TO); single-ticker bundles compute inline (~2-5s) and
+    // live only in this Alpine state.
+    analyzeBundle:       null,    // {trade_meta, per_outcome_returns, per_bin, rolling_ic, ...}
+    analyzeBundleStatus: 'idle',  // 'idle' | 'computing' | 'ready' | 'failed' | 'not_computed'
+    analyzeBundleKey:    null,    // tracks current (ticker, metric, mode, cutoff) so we don't redundantly refetch
+    analyzeBundleError:  null,    // surfaces server-side errors for inspection
+    _analyzeBundlePollTimer: null,
+
     // Threshold Drift (walk-forward bin boundaries over time)
     tdExpanded:     false,
     tdLoading:      false,
@@ -293,6 +305,14 @@ document.addEventListener('alpine:init', () => {
           }
         }
         if (this.heatmapMetric) this.loadHeatmap();  // W4: fire-and-forget; no longer blocks Analyze
+        // P1: fire-and-forget kick of the 12-outcome bundle so P3+ mode views
+        // have it ready. Single-ticker computes inline (~2-5s); ALL goes
+        // through the background-job + poll path (~5 min on cache miss).
+        // The bundle key is reset here too so a stale bundle from the prior
+        // (ticker, metric, mode, cutoff) doesn't bleed into the new view.
+        this.analyzeBundle    = null;
+        this.analyzeBundleKey = null;
+        this.loadAnalyzeBundle();
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -4929,6 +4949,140 @@ document.addEventListener('alpine:init', () => {
         await fetch(`/api/factor-analysis/library/systems/${lid}`, { method: 'DELETE' });
         await this.loadLibrarySystems();
       } catch (_) {}
+    },
+
+    // ── P1: analyze_cache 12-outcome bundle ───────────────────────────────
+    // Two-stage render flow:
+    //   1. loadAnalysis() fires /analyze → single-outcome view (ret_5d_fwd_oc default)
+    //   2. loadAnalyzeBundle() fires /analyze-bundle → all 12 outcomes
+    // The bundle is what P3+ mode buttons consume. P1 just plumbs the data
+    // path and surfaces a status indicator; no UI rendering off the bundle yet.
+
+    _analyzeBundleMode() {
+      return this.pageMode === 'walk_forward' ? 'walk_forward'
+           : this.pageMode === 'train_test'   ? 'train_test'
+           : 'in_sample';
+    },
+    _analyzeBundleKey() {
+      // Cache key for analyze-bundle, excluding outcome and FROM/TO.
+      // FROM/TO is display windowing only (applied client-side). Outcome
+      // is irrelevant because the bundle contains all 12.
+      const cd = this.pageMode === 'train_test' ? this.cutoffDate : '';
+      return `${this.ticker}:${this.metric}:${this._analyzeBundleMode()}:${cd}`;
+    },
+    _analyzeBundleBaseUrl() {
+      let url = '/api/factor-analysis/analyze-bundle'
+        + `?ticker=${encodeURIComponent(this.ticker)}`
+        + `&metric=${encodeURIComponent(this.metric)}`
+        + `&mode=${this._analyzeBundleMode()}`;
+      if (this.pageMode === 'train_test')
+        url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+      return url;
+    },
+
+    async loadAnalyzeBundle() {
+      if (!this.ticker || !this.metric) return;
+      this.analyzeBundleStatus = 'computing';
+      this.analyzeBundleError  = null;
+      this._stopAnalyzeBundlePolling();
+      try {
+        const r = await fetch(this._analyzeBundleBaseUrl());
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error && !d.status) throw new Error(d.error);
+
+        if (d.status === 'ready') {
+          this.analyzeBundle       = d.bundle;
+          this.analyzeBundleStatus = 'ready';
+          this.analyzeBundleKey    = this._analyzeBundleKey();
+        } else if (d.status === 'computing') {
+          // ALL-mode background job already in flight — start polling.
+          this.analyzeBundleStatus = 'computing';
+          this.analyzeBundle       = null;
+          this._startAnalyzeBundlePolling();
+        } else if (d.status === 'not_computed') {
+          // ALL-mode cache miss with no running job. Auto-trigger refresh
+          // so the user gets a bundle without an extra click.
+          this.analyzeBundleStatus = 'computing';
+          this.analyzeBundle       = null;
+          await this.refreshAnalyzeBundle();
+        } else {
+          this.analyzeBundleStatus = 'failed';
+          this.analyzeBundleError  = `unexpected response: ${JSON.stringify(d).slice(0, 200)}`;
+        }
+      } catch (e) {
+        this.analyzeBundleStatus = 'failed';
+        this.analyzeBundleError  = e.message;
+      }
+    },
+
+    async refreshAnalyzeBundle() {
+      // ALL mode: POST kicks off the background compute, then poll.
+      // Single-ticker: GET computes inline; no separate refresh path.
+      if (!this.ticker || !this.metric) return;
+      if (this.ticker !== 'ALL') {
+        return this.loadAnalyzeBundle();
+      }
+      this.analyzeBundleStatus = 'computing';
+      this.analyzeBundleError  = null;
+      try {
+        const url = '/api/factor-analysis/analyze-bundle/refresh'
+          + `?ticker=ALL`
+          + `&metric=${encodeURIComponent(this.metric)}`
+          + `&mode=${this._analyzeBundleMode()}`
+          + (this.pageMode === 'train_test'
+              ? `&cutoff_date=${encodeURIComponent(this.cutoffDate)}` : '');
+        const r = await fetch(url, { method: 'POST' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.error) throw new Error(d.error);
+        // 'computing' or 'busy' (another job already running for this key) —
+        // both states converge to "wait and poll".
+        this._startAnalyzeBundlePolling();
+      } catch (e) {
+        this.analyzeBundleStatus = 'failed';
+        this.analyzeBundleError  = e.message;
+      }
+    },
+
+    _startAnalyzeBundlePolling() {
+      this._stopAnalyzeBundlePolling();
+      const startTime = Date.now();
+      const POLL_INTERVAL_MS = 10000;       // 10s between polls
+      const POLL_TIMEOUT_MS  = 10 * 60 * 1000;   // 10 min ceiling
+      this._analyzeBundlePollTimer = setInterval(async () => {
+        if (Date.now() - startTime > POLL_TIMEOUT_MS) {
+          this._stopAnalyzeBundlePolling();
+          this.analyzeBundleStatus = 'failed';
+          this.analyzeBundleError  = 'poll_timeout_10min';
+          return;
+        }
+        try {
+          const r = await fetch(this._analyzeBundleBaseUrl());
+          if (!r.ok) return;   // transient
+          const d = await r.json();
+          if (d.status === 'ready') {
+            this.analyzeBundle       = d.bundle;
+            this.analyzeBundleStatus = 'ready';
+            this.analyzeBundleKey    = this._analyzeBundleKey();
+            this._stopAnalyzeBundlePolling();
+          } else if (d.status === 'not_computed' && d.previous_error) {
+            this.analyzeBundleStatus = 'failed';
+            this.analyzeBundleError  = d.previous_error;
+            this._stopAnalyzeBundlePolling();
+          }
+          // 'computing' → keep polling
+        } catch (_) {
+          // transient; keep polling
+        }
+      }, POLL_INTERVAL_MS);
+    },
+
+    _stopAnalyzeBundlePolling() {
+      if (this._analyzeBundlePollTimer) {
+        clearInterval(this._analyzeBundlePollTimer);
+        this._analyzeBundlePollTimer = null;
+      }
     },
 
     // ── IC.5 — Signal Stability (universe-wide leaderboard + scatter) ────

@@ -3516,6 +3516,90 @@ async def _ensure_ic_batch_table(pool) -> None:
     _ic_batch_table_ensured = True
 
 
+# ── analyze_cache (P1) ───────────────────────────────────────────────────
+# 12-outcome bundle cache. Each entry: one (ticker, metric, mode, cutoff)
+# tuple's full bundle covering all forward-return outcomes. Only ALL-mode
+# entries persist; single-ticker bundles compute inline (~2-5s) and never
+# reach this table.
+#
+# LRU eviction by aggregate size: on each write, while
+# pg_total_relation_size('analyze_cache') > 5 GB, drop the row with the
+# oldest `last_accessed`. The 5 GB cap protects the disk; in practice
+# ~25-30 ALL-mode entries fit before eviction kicks in.
+
+_ANALYZE_BUNDLE_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS analyze_cache (
+    cache_key     TEXT  PRIMARY KEY,
+    ticker        TEXT  NOT NULL,
+    metric        TEXT  NOT NULL,
+    mode          TEXT  NOT NULL,
+    cutoff_date   DATE,
+    payload       JSONB NOT NULL,
+    payload_bytes INT,
+    cached_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_accessed TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS analyze_cache_last_accessed
+    ON analyze_cache (last_accessed);
+"""
+_analyze_bundle_table_ensured = False
+
+# Background-job tracking — in-memory only; cleared on server restart.
+# Frontend's 15-min poll timeout covers sessions mid-poll at restart time.
+_analyze_bundle_running: set = set()   # cache_keys currently computing
+_analyze_bundle_status:  dict = {}     # cache_key → {"status":"failed","error":"…"}
+
+_ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
+_ANALYZE_BUNDLE_OUTCOMES = [
+    "ret_1d_fwd_oc", "ret_3d_fwd_oc", "ret_5d_fwd_oc",
+    "ret_7d_fwd_oc", "ret_10d_fwd_oc", "ret_20d_fwd_oc",
+    "ret_1d_fwd_cc", "ret_3d_fwd_cc", "ret_5d_fwd_cc",
+    "ret_7d_fwd_cc", "ret_10d_fwd_cc", "ret_20d_fwd_cc",
+]
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 1
+
+
+async def _ensure_analyze_bundle_table(pool) -> None:
+    global _analyze_bundle_table_ensured
+    if _analyze_bundle_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_ANALYZE_BUNDLE_TABLE_DDL)
+    _analyze_bundle_table_ensured = True
+
+
+def _analyze_bundle_cache_key(ticker: str, metric: str, mode: str,
+                              cutoff_date: Optional[str]) -> str:
+    """Stable cache key for (ticker, metric, mode, cutoff). Salted with the
+    schema version so a future bundle-shape change automatically invalidates
+    every stale entry on next read."""
+    cutoff_s = cutoff_date or "null"
+    return f"ab:v{_ANALYZE_BUNDLE_SCHEMA_VERSION}:{ticker}:{metric}:{mode}:{cutoff_s}"
+
+
+async def _evict_analyze_cache_lru(pool) -> int:
+    """Drop oldest-accessed rows until pg_total_relation_size('analyze_cache')
+    falls back under the cap. Returns the count of rows evicted. Called from
+    the write path after each successful insert/update.
+    """
+    evicted = 0
+    async with pool.acquire() as conn:
+        while True:
+            size_bytes = await conn.fetchval(
+                "SELECT pg_total_relation_size('analyze_cache')")
+            if size_bytes is None or size_bytes <= _ANALYZE_BUNDLE_CACHE_MAX_BYTES:
+                break
+            oldest_key = await conn.fetchval(
+                "SELECT cache_key FROM analyze_cache "
+                "ORDER BY last_accessed ASC LIMIT 1")
+            if oldest_key is None:
+                break   # table empty but pg_total_relation_size still > cap (bloat)
+            await conn.execute(
+                "DELETE FROM analyze_cache WHERE cache_key = $1", oldest_key)
+            evicted += 1
+    return evicted
+
+
 async def _fetch_ic_feature_columns(pool) -> list[str]:
     """Mirror /columns: numeric daily_features columns excluding outcomes."""
     async with pool.acquire() as conn:
@@ -3838,6 +3922,442 @@ async def _compute_ic_batch_all_bg(
 
     finally:
         _ic_batch_running.discard(cache_key)
+
+
+# ── analyze-bundle compute + endpoints (P1) ──────────────────────────────
+# The 12-outcome bundle drives the new lower-section modes (P3+). Compute
+# is shared with /analyze's existing per-outcome path at the SQL fetch
+# level — both ultimately hit daily_features — but the bundle does the
+# bin-assignment ONCE and aggregates per-outcome from there, instead of
+# running the Assigner 12 times.
+
+async def _fetch_analyze_bundle_rows(pool, ticker: str, metric: str) -> list[dict]:
+    """Fetch the rows needed for the bundle: trade_date, ticker, metric,
+    spot_co, spot_pc, and all 12 forward-return outcomes. Rows with NULL
+    metric are excluded at the SQL level. Single-ticker mode injects the
+    `ticker` column on the result dicts so downstream code can group
+    uniformly with ALL mode.
+    """
+    outcomes_sql = ", ".join(f'"{o}"' for o in _ANALYZE_BUNDLE_OUTCOMES)
+    if ticker == "ALL":
+        sql = (
+            f'SELECT ticker, trade_date, "{metric}", '
+            f'spot_co, spot_pc, {outcomes_sql} '
+            f'FROM daily_features '
+            f'WHERE "{metric}" IS NOT NULL '
+            f'ORDER BY ticker, trade_date'
+        )
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(sql, timeout=180)
+    else:
+        sql = (
+            f'SELECT trade_date, "{metric}", '
+            f'spot_co, spot_pc, {outcomes_sql} '
+            f'FROM daily_features '
+            f'WHERE ticker = $1 AND "{metric}" IS NOT NULL '
+            f'ORDER BY trade_date'
+        )
+        async with pool.acquire() as conn:
+            db_rows = await conn.fetch(sql, ticker, timeout=60)
+    rows = [dict(r) for r in db_rows]
+    if ticker != "ALL":
+        for r in rows:
+            r.setdefault("ticker", ticker)
+    return rows
+
+
+def _compute_analyze_bundle_sync(
+    rows: list[dict],
+    metric: str,
+    ticker: str,
+    mode: str,
+    cutoff_date: Optional[str],
+    n_bins: int = 10,
+) -> dict:
+    """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
+
+    Bin assignment is shared across all 12 outcomes — the Assigner is
+    invoked ONCE with ret_5d_fwd_oc as the filtering anchor (dashboard
+    default outcome). Per-outcome data is then derived in a thin pass
+    by looking up each outcome's column for every binned row.
+
+    Notes on the per-outcome math:
+      - Per-trade returns: `ret_pct` is the raw outcome column value;
+        `exit_date` is trade_date + (horizon - 1) trading days within
+        the same ticker; `exit_spot` is the close at exit_date
+        (= spot_pc of the day AFTER exit_date in the same ticker's
+        chronology). Returns are skipped (excluded from the array) for
+        any row where the specific outcome column is NULL/NaN.
+      - Per-bin stats: standard aggregations over the per-trade return
+        array (mean, median, std, win_rate, n).
+      - Rolling IC: 252-day trailing Spearman of (metric_val,
+        outcome_value) — mode-aware reference (full-history mean for
+        in_sample/walk_forward, pre-cutoff mean for train_test); ε is
+        mode-aware (single_ticker vs cross_sectional, horizon-corrected).
+
+    Returns a dict that JSON-serializes to the analyze_cache payload
+    shape (see _ANALYZE_BUNDLE_SCHEMA_VERSION for the contract).
+    """
+    from datetime import datetime
+    from app.routers.row_compute import ASSIGNERS, make_spec
+    from app.routers.ic_compute import (
+        rolling_ic_single_ticker, rolling_ic_cross_sectional,
+        classified_rolling_ic, noise_floor_epsilon, _horizon_from_outcome,
+    )
+
+    is_all = (ticker == "ALL")
+    outcomes = list(_ANALYZE_BUNDLE_OUTCOMES)
+
+    # ── 1. Index rows + build per-ticker chronology for exit-date offsets ──
+    # row_by_tkr_date: O(1) lookup from (ticker, date_str) to the raw row
+    # by_tkr_dates:   per-ticker sorted list of date strings (chronological)
+    # by_tkr_idx:     per-ticker date → index in by_tkr_dates
+    # close_by_tkr_date: close-of-day lookup. close(date) = spot_pc of the
+    #   NEXT trading day for the same ticker (canonical equivalence used
+    #   throughout the dashboard's trade-calendar code).
+    row_by_tkr_date: dict = {}
+    by_tkr_dates_unsorted: dict = defaultdict(list)
+    for r in rows:
+        tkr = r.get("ticker", ticker)
+        d = str(r.get("trade_date", ""))
+        row_by_tkr_date[(tkr, d)] = r
+        by_tkr_dates_unsorted[tkr].append(d)
+    by_tkr_dates = {t: sorted(set(ds)) for t, ds in by_tkr_dates_unsorted.items()}
+    by_tkr_idx   = {t: {d: i for i, d in enumerate(ds)} for t, ds in by_tkr_dates.items()}
+    close_by_tkr_date: dict = {}
+    for tkr, dates in by_tkr_dates.items():
+        for i, d in enumerate(dates[:-1]):
+            next_row = row_by_tkr_date.get((tkr, dates[i + 1]))
+            if next_row is None:
+                continue
+            pc = next_row.get("spot_pc")
+            if pc is None:
+                continue
+            try:
+                close_by_tkr_date[(tkr, d)] = float(pc)
+            except (TypeError, ValueError):
+                continue
+
+    # ── 2. Run Assigner once (anchor = ret_5d_fwd_oc, dashboard default) ──
+    anchor_outcome = "ret_5d_fwd_oc"
+    spec = make_spec(
+        walk_forward=(mode == "walk_forward"),
+        cutoff_date=cutoff_date if mode == "train_test" else None,
+    )
+    assigner = ASSIGNERS[spec.kind](spec)
+    state = assigner.fit(rows, metric, n_bins, is_all)
+    assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
+
+    # ── 3. Build trade_meta from valid assignments ────────────────────────
+    trade_meta: list = []
+    trade_id_by_key: dict = {}
+    for a in assignments:
+        if a.bin is None or a.dropped_reason is not None:
+            continue
+        tkr = a.ticker
+        # Normalize date to ISO string (asyncpg can hand back datetime.date).
+        d = (a.trade_date.isoformat()
+             if hasattr(a.trade_date, "isoformat") else str(a.trade_date))
+        key = (tkr, d)
+        if key in trade_id_by_key:
+            continue
+        r = row_by_tkr_date.get(key)
+        entry_spot = None
+        if r is not None and r.get("spot_co") is not None:
+            try:
+                entry_spot = round(float(r["spot_co"]), 2)
+            except (TypeError, ValueError):
+                pass
+        tid = len(trade_meta)
+        trade_id_by_key[key] = tid
+        trade_meta.append({
+            "trade_id":   tid,
+            "ticker":     tkr,
+            "trade_date": d,
+            "metric_val": round(float(a.metric_value), 6),
+            "entry_spot": entry_spot,
+            "bin":        a.bin,
+        })
+
+    # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────
+    per_outcome_returns: dict = {}
+    per_bin:             dict = {}
+    rolling_ic:          dict = {}
+
+    for outcome in outcomes:
+        horizon = _horizon_from_outcome(outcome)
+
+        out_records: list = []
+        bin_buckets: list = [[] for _ in range(n_bins)]
+        ic_rows:     list = []   # input for rolling_ic_* — needs trade_date + ticker keys
+
+        for meta in trade_meta:
+            tkr = meta["ticker"]
+            d   = meta["trade_date"]
+            r   = row_by_tkr_date.get((tkr, d))
+            if r is None:
+                continue
+            y = r.get(outcome)
+            if y is None:
+                continue
+            try:
+                yf = float(y)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(yf):
+                continue
+
+            # exit_date = trade_date + (horizon - 1) trading days for the
+            # same ticker; exit_spot = close (= spot_pc of the day after
+            # exit_date) for the same ticker.
+            exit_date = None
+            exit_spot = None
+            entry_idx = by_tkr_idx.get(tkr, {}).get(d)
+            if entry_idx is not None:
+                exit_idx  = entry_idx + max(horizon - 1, 0)
+                tkr_dates = by_tkr_dates.get(tkr, [])
+                if 0 <= exit_idx < len(tkr_dates):
+                    exit_date = tkr_dates[exit_idx]
+                    es = close_by_tkr_date.get((tkr, exit_date))
+                    if es is not None:
+                        exit_spot = round(es, 2)
+
+            out_records.append({
+                "trade_id":  meta["trade_id"],
+                "ret_pct":   round(yf, 6),
+                "exit_date": exit_date,
+                "exit_spot": exit_spot,
+            })
+            bin_buckets[meta["bin"] - 1].append(yf)
+            ic_rows.append({"trade_date": d, "ticker": tkr,
+                            "__m": meta["metric_val"], "__y": yf})
+
+        per_outcome_returns[outcome] = out_records
+
+        # Per-bin aggregates
+        bin_stats: list = []
+        for b_idx in range(n_bins):
+            vals = bin_buckets[b_idx]
+            if not vals:
+                bin_stats.append({"bin": b_idx + 1, "n": 0,
+                                  "avg_ret": None, "median": None,
+                                  "std": None, "win_rate": None})
+                continue
+            arr = np.array(vals, dtype=np.float64)
+            bin_stats.append({
+                "bin":      b_idx + 1,
+                "n":        int(len(arr)),
+                "avg_ret":  round(float(arr.mean()), 6),
+                "median":   round(float(np.median(arr)), 6),
+                "std":      round(float(arr.std()), 6),
+                "win_rate": round(float((arr > 0).mean()), 4),
+            })
+        per_bin[outcome] = bin_stats
+
+        # Rolling IC: same primitives /analyze uses for its rolling_ic field
+        if is_all:
+            ic_series = rolling_ic_cross_sectional(ic_rows, "__m", "__y", window=252)
+            median_k = int(np.median([p.n for p in ic_series])) if ic_series else 0
+            epsilon = noise_floor_epsilon(
+                "cross_sectional", window=252, horizon=horizon, k_tickers=median_k)
+        else:
+            ic_series = rolling_ic_single_ticker(ic_rows, "__m", "__y", window=252)
+            epsilon = noise_floor_epsilon(
+                "single_ticker", window=252, horizon=horizon)
+
+        if mode == "train_test" and cutoff_date:
+            pre = [p.ic for p in ic_series if str(p.date) < cutoff_date]
+            reference_ic = float(np.mean(pre)) if pre else 0.0
+        elif ic_series:
+            reference_ic = float(np.mean([p.ic for p in ic_series]))
+        else:
+            reference_ic = 0.0
+
+        classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
+        rolling_ic[outcome] = [
+            {"date":       str(p.date),
+             "ic":         p.ic,
+             "n":          p.n,
+             "sign_class": p.sign_class}
+            for p in classified
+        ]
+
+    # ── 5. Bundle ─────────────────────────────────────────────────────────
+    return {
+        "schema_version":      _ANALYZE_BUNDLE_SCHEMA_VERSION,
+        "ticker":              ticker,
+        "metric":              metric,
+        "mode":                mode,
+        "cutoff_date":         cutoff_date,
+        "n_bins":              n_bins,
+        "outcomes":            outcomes,
+        "trade_meta":          trade_meta,
+        "per_outcome_returns": per_outcome_returns,
+        "per_bin":             per_bin,
+        "rolling_ic":          rolling_ic,
+        "computed_at":         datetime.utcnow().isoformat() + "Z",
+    }
+
+
+async def _compute_analyze_bundle_bg(
+    cache_key: str, ticker: str, metric: str, mode: str,
+    cutoff_date: Optional[str], pool,
+) -> None:
+    """Background bundle compute for ALL mode. Writes result to
+    analyze_cache, triggers LRU eviction. Failures surface via
+    _analyze_bundle_status on next GET."""
+    try:
+        rows = await _fetch_analyze_bundle_rows(pool, ticker, metric)
+        if not rows:
+            _analyze_bundle_status[cache_key] = {
+                "status": "failed",
+                "error":  "no_data_for_ticker_metric",
+            }
+            return
+        bundle = await asyncio.to_thread(
+            _compute_analyze_bundle_sync,
+            rows, metric, ticker, mode, cutoff_date,
+        )
+        payload_json = json.dumps(bundle)
+        from datetime import date as _date_cls
+        cutoff_obj = _date_cls.fromisoformat(cutoff_date) if cutoff_date else None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO analyze_cache
+                   (cache_key, ticker, metric, mode, cutoff_date,
+                    payload, payload_bytes, cached_at, last_accessed)
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW(), NOW())
+                   ON CONFLICT (cache_key) DO UPDATE
+                   SET payload       = EXCLUDED.payload,
+                       payload_bytes = EXCLUDED.payload_bytes,
+                       cached_at     = NOW(),
+                       last_accessed = NOW()""",
+                cache_key, ticker, metric, mode, cutoff_obj,
+                payload_json, len(payload_json),
+            )
+        try:
+            await _evict_analyze_cache_lru(pool)
+        except Exception as evict_e:
+            import logging
+            logging.warning("analyze_cache LRU eviction failed: %r", evict_e)
+    except Exception as e:
+        _analyze_bundle_status[cache_key] = {
+            "status": "failed",
+            "error":  f"{type(e).__name__}: {e}",
+        }
+    finally:
+        _analyze_bundle_running.discard(cache_key)
+
+
+@router.get("/analyze-bundle")
+async def analyze_bundle_get(
+    ticker:      str           = Query(...),
+    metric:      str           = Query(...),
+    mode:        str           = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Return the 12-outcome bundle for (ticker, metric, mode, cutoff).
+
+    Three response shapes:
+
+      {status: "ready",        bundle: {...}, cached_at?: "..."}
+      {status: "computing",    cache_key: "..."}                     # ALL only
+      {status: "not_computed", previous_error?: "..."}               # ALL only
+
+    Behavior:
+      - Single-ticker (`ticker != "ALL"`): computes inline (~2-5s) and
+        returns `ready` with the bundle. Never writes to analyze_cache.
+      - ALL: cache-only. Cache hit → `ready` + bundle. Background job
+        running → `computing`. Neither → `not_computed`. The frontend
+        triggers POST /analyze-bundle/refresh to start a compute.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    if ticker != "ALL":
+        try:
+            rows = await _fetch_analyze_bundle_rows(pool, ticker, metric)
+        except Exception as e:
+            return {"status": "not_computed",
+                    "error": f"db_fetch_failed: {type(e).__name__}: {e}"}
+        if not rows:
+            return {"status": "ready", "bundle": None, "error": "no_data"}
+        bundle = await asyncio.to_thread(
+            _compute_analyze_bundle_sync,
+            rows, metric, ticker, mode, cutoff_date,
+        )
+        return {"status": "ready", "bundle": bundle}
+
+    # ALL mode: cache-only
+    await _ensure_analyze_bundle_table(pool)
+    cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload, cached_at FROM analyze_cache WHERE cache_key = $1",
+            cache_key,
+        )
+    if row is not None:
+        # Touch last_accessed for LRU. Fire-and-forget — no need to await
+        # before returning the bundle.
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE analyze_cache SET last_accessed = NOW() "
+                    "WHERE cache_key = $1", cache_key)
+        except Exception:
+            pass
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return {"status": "ready", "bundle": payload,
+                "cached_at": str(row["cached_at"])}
+
+    if cache_key in _analyze_bundle_running:
+        return {"status": "computing", "cache_key": cache_key}
+
+    failed = _analyze_bundle_status.pop(cache_key, None)
+    if failed and failed.get("status") == "failed":
+        return {"status": "not_computed",
+                "previous_error": failed.get("error")}
+    return {"status": "not_computed"}
+
+
+@router.post("/analyze-bundle/refresh")
+async def analyze_bundle_refresh(
+    ticker:      str           = Query(...),
+    metric:      str           = Query(...),
+    mode:        str           = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Start a background bundle compute for ALL mode. Single-ticker
+    bundles compute inline via GET — calling refresh on a single-ticker
+    request is a 400-class error (returns {"error": ...}).
+
+    Returns immediately with one of:
+      {status: "computing", cache_key: "..."}
+      {status: "busy",      cache_key: "..."}   # another job is in flight
+    """
+    if ticker != "ALL":
+        return {"error": "refresh is ALL-mode only; single-ticker computes inline via GET"}
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    await _ensure_analyze_bundle_table(pool)
+    cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
+
+    if cache_key in _analyze_bundle_running:
+        return {"status": "busy", "cache_key": cache_key}
+
+    _analyze_bundle_running.add(cache_key)
+    asyncio.create_task(
+        _compute_analyze_bundle_bg(
+            cache_key, ticker, metric, mode, cutoff_date, pool,
+        )
+    )
+    return {"status": "computing", "cache_key": cache_key}
 
 
 @router.get("/ic-batch")
