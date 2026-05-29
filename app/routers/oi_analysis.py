@@ -3550,13 +3550,13 @@ _analyze_bundle_running: set = set()   # cache_keys currently computing
 _analyze_bundle_status:  dict = {}     # cache_key → {"status":"failed","error":"…"}
 
 _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
-_ANALYZE_BUNDLE_OUTCOMES = [
-    "ret_1d_fwd_oc", "ret_3d_fwd_oc", "ret_5d_fwd_oc",
-    "ret_7d_fwd_oc", "ret_10d_fwd_oc", "ret_20d_fwd_oc",
-    "ret_1d_fwd_cc", "ret_3d_fwd_cc", "ret_5d_fwd_cc",
-    "ret_7d_fwd_cc", "ret_10d_fwd_cc", "ret_20d_fwd_cc",
-]
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 1
+# The set of outcome columns is discovered at runtime (mirrors /columns):
+# any numeric daily_features column matching `ret_*_fwd*`. This way the
+# bundle survives a schema change (new horizons added, anchor suffix
+# changed, etc.) without a code edit. The discovered list is recorded
+# on the bundle in the `outcomes` field — consumers MUST iterate that
+# field rather than assuming a fixed set.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 2  # bumped from 1: dynamic outcomes (v1 caches re-compute)
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -3931,14 +3931,39 @@ async def _compute_ic_batch_all_bg(
 # bin-assignment ONCE and aggregates per-outcome from there, instead of
 # running the Assigner 12 times.
 
-async def _fetch_analyze_bundle_rows(pool, ticker: str, metric: str) -> list[dict]:
-    """Fetch the rows needed for the bundle: trade_date, ticker, metric,
-    spot_co, spot_pc, and all 12 forward-return outcomes. Rows with NULL
-    metric are excluded at the SQL level. Single-ticker mode injects the
-    `ticker` column on the result dicts so downstream code can group
-    uniformly with ALL mode.
+async def _discover_analyze_bundle_outcomes(pool) -> list[str]:
+    """Discover the set of forward-return outcome columns in daily_features.
+    Matches /columns: numeric columns with 'ret_' and 'fwd' in the name.
+    Excludes the metric/ticker/date/timestamp meta-columns.
     """
-    outcomes_sql = ", ".join(f'"{o}"' for o in _ANALYZE_BUNDLE_OUTCOMES)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'daily_features' AND table_schema = 'public'
+               AND data_type IN ('double precision','numeric','real',
+                                 'integer','bigint','smallint')
+               AND column_name NOT IN ('id','ticker','trade_date',
+                                       'created_at','updated_at')
+               ORDER BY ordinal_position""")
+    all_cols = [r["column_name"] for r in rows]
+    return [c for c in all_cols if "ret_" in c and "fwd" in c]
+
+
+async def _fetch_analyze_bundle_rows(
+    pool, ticker: str, metric: str, outcomes: list[str],
+) -> list[dict]:
+    """Fetch the rows needed for the bundle: trade_date, ticker, metric,
+    spot_co, spot_pc, and the discovered forward-return outcome columns.
+    Rows with NULL metric are excluded at the SQL level. Single-ticker
+    mode injects the `ticker` column on the result dicts so downstream
+    code can group uniformly with ALL mode.
+    """
+    if not outcomes:
+        # Defensive — no outcomes discovered. Return empty so the caller
+        # surfaces a clean error instead of building a SELECT with a
+        # trailing comma.
+        return []
+    outcomes_sql = ", ".join(f'"{o}"' for o in outcomes)
     if ticker == "ALL":
         sql = (
             f'SELECT ticker, trade_date, "{metric}", '
@@ -3972,6 +3997,7 @@ def _compute_analyze_bundle_sync(
     ticker: str,
     mode: str,
     cutoff_date: Optional[str],
+    outcomes: list[str],
     n_bins: int = 10,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
@@ -4006,7 +4032,17 @@ def _compute_analyze_bundle_sync(
     )
 
     is_all = (ticker == "ALL")
-    outcomes = list(_ANALYZE_BUNDLE_OUTCOMES)
+    outcomes = list(outcomes)
+
+    # Pick an anchor outcome for the Assigner filter. Prefer
+    # ret_5d_fwd_oc (dashboard default) if present; otherwise fall back
+    # to the first discovered outcome. The choice only affects which rows
+    # get an anchored bin assignment — per-outcome aggregations skip
+    # NULL rows per-outcome independently, so a row with the anchor
+    # NULL is excluded from ALL aggregations (acceptable trade-off; the
+    # 12 forward-returns share a near-identical NULL pattern in
+    # practice since they're all derived from the same spot series).
+    anchor_outcome = "ret_5d_fwd_oc" if "ret_5d_fwd_oc" in outcomes else outcomes[0]
 
     # ── 1. Index rows + build per-ticker chronology for exit-date offsets ──
     # row_by_tkr_date: O(1) lookup from (ticker, date_str) to the raw row
@@ -4038,8 +4074,7 @@ def _compute_analyze_bundle_sync(
             except (TypeError, ValueError):
                 continue
 
-    # ── 2. Run Assigner once (anchor = ret_5d_fwd_oc, dashboard default) ──
-    anchor_outcome = "ret_5d_fwd_oc"
+    # ── 2. Run Assigner once (anchor selected above) ──────────────────────
     spec = make_spec(
         walk_forward=(mode == "walk_forward"),
         cutoff_date=cutoff_date if mode == "train_test" else None,
@@ -4207,7 +4242,14 @@ async def _compute_analyze_bundle_bg(
     analyze_cache, triggers LRU eviction. Failures surface via
     _analyze_bundle_status on next GET."""
     try:
-        rows = await _fetch_analyze_bundle_rows(pool, ticker, metric)
+        outcomes = await _discover_analyze_bundle_outcomes(pool)
+        if not outcomes:
+            _analyze_bundle_status[cache_key] = {
+                "status": "failed",
+                "error":  "no_forward_return_columns_in_daily_features",
+            }
+            return
+        rows = await _fetch_analyze_bundle_rows(pool, ticker, metric, outcomes)
         if not rows:
             _analyze_bundle_status[cache_key] = {
                 "status": "failed",
@@ -4216,7 +4258,7 @@ async def _compute_analyze_bundle_bg(
             return
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
-            rows, metric, ticker, mode, cutoff_date,
+            rows, metric, ticker, mode, cutoff_date, outcomes,
         )
         payload_json = json.dumps(bundle)
         from datetime import date as _date_cls
@@ -4277,7 +4319,11 @@ async def analyze_bundle_get(
 
     if ticker != "ALL":
         try:
-            rows = await _fetch_analyze_bundle_rows(pool, ticker, metric)
+            outcomes = await _discover_analyze_bundle_outcomes(pool)
+            if not outcomes:
+                return {"status": "ready", "bundle": None,
+                        "error": "no_forward_return_columns_in_daily_features"}
+            rows = await _fetch_analyze_bundle_rows(pool, ticker, metric, outcomes)
         except Exception as e:
             return {"status": "not_computed",
                     "error": f"db_fetch_failed: {type(e).__name__}: {e}"}
@@ -4285,7 +4331,7 @@ async def analyze_bundle_get(
             return {"status": "ready", "bundle": None, "error": "no_data"}
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
-            rows, metric, ticker, mode, cutoff_date,
+            rows, metric, ticker, mode, cutoff_date, outcomes,
         )
         return {"status": "ready", "bundle": bundle}
 
