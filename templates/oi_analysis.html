@@ -244,9 +244,9 @@
               <option :value="o" x-text="o"></option>
             </template>
           </select>
-          <button x-show="topBinsData" @click="loadTopBins(true)"
+          <button @click="loadTopBins(true)"
                   :disabled="topBinsLoading"
-                  :style="topBinsLoading ? 'opacity:.5;cursor:wait' : ''"
+                  :style="{ opacity: topBinsLoading ? 0.5 : 1, cursor: topBinsLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
                   title="Re-fetch and bypass server cache (after adding new metrics)">⟳ Refresh</button>
@@ -348,9 +348,9 @@
               </template>
             </select>
           </template>
-          <button x-show="tdData" @click="loadTd(true)"
+          <button @click="loadTd(true)"
                   :disabled="tdLoading"
-                  :style="tdLoading ? 'opacity:.5;cursor:wait' : ''"
+                  :style="{ opacity: tdLoading ? 0.5 : 1, cursor: tdLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
                   title="Re-fetch and bypass server cache">⟳ Refresh</button>
@@ -449,7 +449,7 @@
         <div style="flex:1"></div>
         <button @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
-                :style="icBatchLoading ? 'opacity:.5;cursor:wait' : ''"
+                :style="{ opacity: icBatchLoading ? 0.5 : 1, cursor: icBatchLoading ? 'wait' : 'pointer' }"
                 style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
                        color:#e84393;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
                 title="Recompute Signal Survey for current Outcome + Mode — ALL-mode: ~10-15 min background job · single ticker: ~1-2 min · polls automatically">⟳ Refresh</button>
