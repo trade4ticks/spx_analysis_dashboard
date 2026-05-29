@@ -4574,6 +4574,76 @@ async def analyze_bundle_refresh(
     return {"status": "computing", "cache_key": cache_key}
 
 
+@router.post("/analyze-cache/invalidate")
+async def analyze_cache_invalidate(
+    ticker: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Drop entries from `analyze_cache` so the next GET /analyze-bundle
+    request re-computes from source.
+
+    Three scopes (most → least permissive):
+      - No params                 → wipe everything (all versions, all keys).
+      - `ticker` only             → wipe every entry for that ticker.
+      - `ticker` AND `metric`     → wipe (ticker, metric, *, *) entries
+                                    (covers in_sample / walk_forward /
+                                    train_test and every cutoff date).
+
+    When to call this:
+      - Schema version unchanged but underlying daily_features values
+        changed (re-ingestion, recomputed metrics, manual SQL fix).
+      - A specific (ticker, metric) view looks stale and you don't want
+        to nuke the whole table.
+      - Debugging — force a fresh compute path without bumping schema.
+
+    Schema bumps do NOT need this: incrementing
+    `_ANALYZE_BUNDLE_SCHEMA_VERSION` makes stale-version keys
+    unreachable on read AND the next call to _ensure_analyze_bundle_table
+    runs a one-shot DELETE of non-current-version rows on startup.
+
+    Returns: {"ok": true, "deleted": <row_count>, "scope": "<all|ticker|ticker+metric>"}
+    Mirrors /secondary-scan/invalidate and /ic-batch/invalidate.
+    Non-fatal on DB error.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    try:
+        await _ensure_analyze_bundle_table(pool)
+    except Exception:
+        return {"error": "init_failed"}
+
+    # Build the WHERE clause for the requested scope. Cache key shape is
+    # `ab:v{N}:{ticker}:{metric}:{mode}:{cutoff}` — we match across all
+    # schema versions so the endpoint also clears legacy rows the
+    # startup auto-wipe hasn't reached yet.
+    scope = "all"
+    sql = "DELETE FROM analyze_cache"
+    params: list = []
+    if ticker and metric:
+        scope = "ticker+metric"
+        sql += " WHERE cache_key LIKE $1"
+        params.append(f"ab:v%:{ticker}:{metric}:%")
+    elif ticker:
+        scope = "ticker"
+        sql += " WHERE cache_key LIKE $1"
+        params.append(f"ab:v%:{ticker}:%")
+
+    deleted = 0
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
+        # asyncpg returns "DELETE N" — parse N from the tag.
+        if result and result.startswith("DELETE "):
+            try:
+                deleted = int(result.split()[-1])
+            except ValueError:
+                pass
+    except Exception:
+        return {"error": "delete_failed"}
+    return {"ok": True, "deleted": deleted, "scope": scope}
+
+
 @router.get("/ic-batch")
 async def ic_batch(
     ticker:      str  = Query("ALL"),

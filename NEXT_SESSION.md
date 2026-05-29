@@ -2,6 +2,52 @@
 
 Read top-to-bottom on the new machine. Self-contained briefing for picking up where the previous session left off.
 
+## Factor Analysis `analyze_cache` — canonical reset sequence (2026-05-29)
+
+The Factor Analysis page caches its per-(ticker, metric, mode, cutoff)
+compute bundle in the `analyze_cache` table. Cache keys are
+**version-salted**: `ab:v{N}:{ticker}:{metric}:{mode}:{cutoff}`. Current
+N is in `_ANALYZE_BUNDLE_SCHEMA_VERSION` (oi_analysis.py). v5 carries
+anchored entry fields (`entry_date_oc/cc`, `entry_spot_oc/cc`) in
+`trade_meta`; v4 carried a single OC-anchored `entry_spot` and is
+considered stale.
+
+### Three ways to wipe entries
+
+1. **HTTP endpoint** — `POST /api/factor-analysis/analyze-cache/invalidate`
+   - No params → wipe everything (all versions, all keys).
+   - `?ticker=ALL` → wipe one ticker (all versions, all metrics, all modes).
+   - `?ticker=ALL&metric=oi_concavity_30d` → wipe a single (ticker, metric)
+     across all modes / cutoffs.
+   - Returns `{ok, deleted: <row_count>, scope}`.
+2. **Auto-wipe on schema bump** — incrementing `_ANALYZE_BUNDLE_SCHEMA_VERSION`
+   makes `_ensure_analyze_bundle_table` run a one-shot
+   `DELETE WHERE cache_key NOT LIKE 'ab:v{N}:%'` on the next FastAPI
+   startup. No human action needed.
+3. **SQL fallback** — `TRUNCATE analyze_cache;` if you need to bypass the
+   FastAPI layer (e.g., from a psql shell on the VPS).
+
+### When to wipe
+
+| Trigger                                          | Use                                  |
+|--------------------------------------------------|--------------------------------------|
+| Bundle compute logic changed                     | Schema bump → auto-wipe              |
+| Underlying daily_features values changed         | `/analyze-cache/invalidate` (no params) |
+| One (ticker, metric) view looks stale            | `/analyze-cache/invalidate?ticker=...&metric=...` |
+| Debugging a single ticker                        | `?ticker=...`                        |
+| Total reset after VPS migration                  | `TRUNCATE analyze_cache;` then restart |
+
+### What stale-version rows look like
+
+Cache keys are read-checked against the current version, so stale-version
+rows are **already unreachable on read** — bumping the schema makes them
+invisible to the application even before the auto-wipe runs. They sit in
+the table consuming space until LRU eviction (~5 GB cap) or the next
+startup's auto-wipe reclaims them. Use the endpoint when you want
+immediate reclamation without restart.
+
+---
+
 ## TL;DR — current state (2026-05-23)
 
 Two long-running initiatives done, IC.5 in progress:
