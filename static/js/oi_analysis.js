@@ -26,6 +26,9 @@ document.addEventListener('alpine:init', () => {
     // Selectors
     tickers: [], features: [], outcomes: [],
     ticker: '', metric: '', outcome: '',
+    // P2: Signal Survey has its own outcome (separate from the main chart's
+    // `outcome`). Persisted across page reloads via localStorage.
+    surveyOutcome: '',
     dateFrom: '', dateTo: new Date().toISOString().slice(0, 10),
     // Page-wide bin mode. Drives every binning analysis on the page so
     // primary / corr explorer / portfolio aggregate all use the same flavor.
@@ -185,7 +188,17 @@ document.addEventListener('alpine:init', () => {
         // because some browsers restore the previously-chosen option from
         // form-state cache even with autocomplete="off", and Alpine's
         // reactivity won't re-fire if state hasn't changed.
-        this.outcome        = _pick;  // main analysis outcome
+        this.outcome        = _pick;  // main analysis outcome (chart + downstream)
+        // P2: Signal Survey outcome is now persisted via localStorage.
+        // Fall back to _pick (ret_5d_fwd_oc) if no saved value or if the
+        // saved one isn't in the discovered outcomes list (e.g., schema
+        // change since last visit).
+        try {
+          const _saved = localStorage.getItem('factor-analysis.signalSurvey.outcome');
+          this.surveyOutcome = (_saved && this.outcomes.includes(_saved)) ? _saved : _pick;
+        } catch (_) {
+          this.surveyOutcome = _pick;
+        }
         await this.$nextTick();
         this.topBinsOutcome = _pick;
         this.tdOutcome      = _pick;
@@ -5091,6 +5104,18 @@ document.addEventListener('alpine:init', () => {
     // the scatter (IC strength × stability). Click on any bar/dot sets the
     // Metric selector and fires /analyze below.
 
+    // P2: Signal Survey's local outcome control. The on-change handler in
+    // the template calls this with the new value. Persists to localStorage
+    // and triggers a Signal Survey reload (the main chart is unaffected).
+    setSurveyOutcome(newOutcome) {
+      this.surveyOutcome = newOutcome;
+      try {
+        localStorage.setItem('factor-analysis.signalSurvey.outcome', newOutcome);
+      } catch (_) { /* private mode etc. — non-fatal */ }
+      this.loadIcBatch();
+      if (this.ticker === 'ALL') this.loadIcDecomp();
+    },
+
     // Canonical cache-key for the current fetch context. Stored after a
     // successful load so expand/mode-change can detect stale data.
     _icBatchKey() {
@@ -5101,13 +5126,13 @@ document.addEventListener('alpine:init', () => {
       // train_test gets a distinct key because the backend uses a different cache
       // entry (different reference IC based on pre-cutoff windows only).
       if (this.pageMode === 'train_test') {
-        return `${this.ticker}:${this.outcome}:train_test:${this.cutoffDate}`;
+        return `${this.ticker}:${this.surveyOutcome}:train_test:${this.cutoffDate}`;
       }
-      return `${this.ticker}:${this.outcome}:default:`;
+      return `${this.ticker}:${this.surveyOutcome}:default:`;
     },
 
     async loadIcBatch() {
-      if (!this.ticker || !this.outcome) return;
+      if (!this.ticker || !this.surveyOutcome) return;
       // Sequence guard: stamp this call. Any response that arrives after the
       // outcome/mode has changed will see a mismatched seq and bail without
       // touching state — prevents a stale "computing" response for 7d from
@@ -5117,7 +5142,7 @@ document.addEventListener('alpine:init', () => {
       this.icBatchError = null;
       try {
         let url = `/api/factor-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`;
+          + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
         if (_seq !== this.icBatchSeq) return; // outcome/mode changed while awaiting — discard
@@ -5185,7 +5210,7 @@ document.addEventListener('alpine:init', () => {
     async refreshIcBatch() {
       // POST /ic-batch/refresh for any ticker (single or ALL).
       // Returns immediately; background job writes cache; poll picks it up.
-      if (!this.ticker || !this.outcome) return;
+      if (!this.ticker || !this.surveyOutcome) return;
       // Seq guard: read current seq without bumping (loadIcBatch owns bumping).
       // If outcome/mode changes while the POST is in-flight, icBatchSeq will
       // have been bumped by the new loadIcBatch() call, and the stale POST
@@ -5197,7 +5222,7 @@ document.addEventListener('alpine:init', () => {
       this.icBatchRefreshAt = Date.now(); // used by loadIcBatch to reject stale cache hits
       try {
         let url = `/api/factor-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`;
+          + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
         if (_seq !== this.icBatchSeq) return; // outcome/mode changed mid-flight — discard
@@ -5255,7 +5280,7 @@ document.addEventListener('alpine:init', () => {
     icBatchSubtitle() {
       // Always show what the pane is displaying so the user can confirm it
       // matches the page-level controls without needing to inspect state.
-      const _hz  = (this.outcome || '').match(/(\d+d)/)?.[0] || '';
+      const _hz  = (this.surveyOutcome || '').match(/(\d+d)/)?.[0] || '';
       const _mod = this.pageMode === 'train_test' ? 'train/test'
                  : this.pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
       const _ctx = _hz ? `${_hz} · ${_mod}` : _mod;
@@ -5676,17 +5701,17 @@ document.addEventListener('alpine:init', () => {
 
     _icDecompKey() {
       const cut = this.pageMode === 'train_test' ? this.cutoffDate : '';
-      return `${this.metric}:${this.outcome}:${this.pageMode}:${cut}`;
+      return `${this.metric}:${this.surveyOutcome}:${this.pageMode}:${cut}`;
     },
 
 
     async loadIcDecomp() {
-      if (this.ticker !== 'ALL' || !this.metric || !this.outcome) return;
+      if (this.ticker !== 'ALL' || !this.metric || !this.surveyOutcome) return;
       this.icDecompLoading = true;
       this.icDecompError   = null;
       try {
         let url = `/api/factor-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}`;
+          + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
         if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

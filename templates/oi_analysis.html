@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=122"></script>
+  <script src="/static/js/oi_analysis.js?v=123"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -391,14 +391,14 @@
           </template>
         </select>
       </div>
-      <div>
-        <label>Outcome (Y)</label><br>
-        <select x-model="outcome">
-          <template x-for="o in outcomes" :key="o">
-            <option :value="o" x-text="o"></option>
-          </template>
-        </select>
-      </div>
+      <!-- P2: OUTCOME (Y) was removed from the upper Analyze bar. The
+           Signal Survey panel has its own local outcome control
+           (persisted to localStorage). The Quantile chart's active
+           outcome will be controlled by the new lower control bar in
+           P3 (Single mode inline dropdown + Entry/Horizon mode bar-click
+           promotion). For now, `this.outcome` is still set on init to
+           ret_5d_fwd_oc and continues to drive /analyze + downstream
+           visuals until P3 wires up the lower bar. -->
       <div>
         <label>From</label><br>
         <input type="date" x-model="dateFrom"
@@ -464,6 +464,19 @@
         <span style="font-size:11px;color:var(--dim)"
               x-text="icBatchSubtitle()"></span>
         <div style="flex:1"></div>
+        <!-- P2: local OUTCOME control (moved from upper Analyze bar).
+             Persisted to localStorage under
+             'factor-analysis.signalSurvey.outcome'; first-load default
+             ret_5d_fwd_oc. Change triggers a Signal Survey reload only —
+             does NOT affect the main /analyze chart. -->
+        <label style="font-size:11px;color:var(--dim)">Outcome:</label>
+        <select x-model="surveyOutcome" @change="setSurveyOutcome($event.target.value)"
+                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                       font-size:12px;padding:3px 6px;border-radius:3px;max-width:200px">
+          <template x-for="o in outcomes" :key="'sov-'+o">
+            <option :value="o" x-text="o"></option>
+          </template>
+        </select>
         <button @click="refreshIcBatch()"
                 :disabled="icBatchLoading"
                 :style="{ opacity: icBatchLoading ? 0.5 : 1, cursor: icBatchLoading ? 'wait' : 'pointer' }"
