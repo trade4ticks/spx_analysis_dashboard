@@ -3556,7 +3556,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 3  # bumped from 2: per_outcome_returns moved to parallel-array shape (v2 caches re-compute)
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 4  # bumped from 3: bundle now stores 20-bin granularity only; client aggregates to 5/10 (v3 caches re-compute)
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -3998,7 +3998,7 @@ def _compute_analyze_bundle_sync(
     mode: str,
     cutoff_date: Optional[str],
     outcomes: list[str],
-    n_bins: int = 10,
+    n_bins: int = 20,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -4111,7 +4111,7 @@ def _compute_analyze_bundle_sync(
             "trade_date": d,
             "metric_val": round(float(a.metric_value), 6),
             "entry_spot": entry_spot,
-            "bin":        a.bin,
+            "bin_20":     a.bin,    # 1..20; client aggregates pairs/quartets for 10/5 views
         })
 
     # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────
@@ -4172,7 +4172,7 @@ def _compute_analyze_bundle_sync(
             out_ret_pcts.append(round(yf, 6))
             out_exit_dates.append(exit_date)
             out_exit_spots.append(exit_spot)
-            bin_buckets[meta["bin"] - 1].append(yf)
+            bin_buckets[meta["bin_20"] - 1].append(yf)
             ic_rows.append({"trade_date": d, "ticker": tkr,
                             "__m": meta["metric_val"], "__y": yf})
 

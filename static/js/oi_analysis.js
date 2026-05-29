@@ -464,11 +464,12 @@ document.addEventListener('alpine:init', () => {
       this._renderDecileBarSingle(el);
     },
 
-    // Normalized per-bin stats for a single outcome. Returns an array of
-    // {bucket, n, avg_ret, win_rate, std, sharpe} indexed by bin 1..10 —
-    // sharpe is derived from avg_ret/std at read time (the bundle doesn't
-    // pre-compute it). Returns null when the data isn't yet available.
-    _bundlePerBin(outcome) {
+    // Bundle's per_bin is 20-bin granularity only. This returns the
+    // normalized 20-bin array (or null if not in bundle). Field names are
+    // unified with the existing decile_stats shape downstream (std_dev,
+    // sharpe-derived). The chart's 5/10-bin views are produced by
+    // _aggregateBin20ToN below, run client-side.
+    _bundlePerBin20(outcome) {
       const pb = this.analyzeBundle?.per_bin?.[outcome];
       if (!Array.isArray(pb)) return null;
       return pb.map(r => r ? {
@@ -482,22 +483,63 @@ document.addEventListener('alpine:init', () => {
       } : null);
     },
 
-    // Single-outcome stats for the *active* outcome. Prefers the bundle
-    // when available; falls back to this.data.decile_stats when the bundle
-    // hasn't loaded yet AND the active outcome matches what /analyze
-    // returned (always ret_5d_fwd_oc in P2; in P3 the chart locks to
-    // ret_5d_fwd_oc until the user picks something else via the Single
-    // mode inline outcome dropdown — at which point only the bundle path
-    // works, and that requires bundle ready).
-    _activeOutcomeStats() {
-      const fromBundle = this._bundlePerBin(this.decileActiveOutcome);
-      if (fromBundle) return fromBundle.filter(Boolean);
-      // Bundle not ready. If active outcome matches what /analyze returned,
-      // fall back to that.
-      if (this.decileActiveOutcome === 'ret_5d_fwd_oc') {
-        return (this.data?.decile_stats || []).filter(Boolean);
+    // Aggregate 20-bin stats array to a coarser n-bin view (n ∈ {5, 10, 20}).
+    // avg_ret and win_rate are trade-count-weighted; n is summed; median
+    // and std_dev are *not* derivable from per-bin stats so they're null
+    // at coarser granularities (the bundle keeps them at 20-bin only, per
+    // the user directive).
+    _aggregateBin20ToN(perBin20, n) {
+      if (!perBin20 || !perBin20.length) return [];
+      if (n === 20) return perBin20;
+      const g = 20 / n;
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const group = perBin20.slice(i * g, (i + 1) * g).filter(Boolean);
+        if (!group.length) { out.push(null); continue; }
+        const totalN = group.reduce((a, d) => a + d.n, 0);
+        if (!totalN) { out.push(null); continue; }
+        out.push({
+          bucket:   i + 1,
+          n:        totalN,
+          avg_ret:  group.reduce((a, d) => a + d.avg_ret * d.n, 0) / totalN,
+          win_rate: group.reduce((a, d) => a + d.win_rate * d.n, 0) / totalN,
+          median:   null,    // not derivable from per-bin stats
+          std_dev:  null,
+          sharpe:   null,
+        });
       }
-      return [];
+      return out;
+    },
+
+    // Bundle-backed stats for an outcome at the current display granularity.
+    _bundlePerBin(outcome) {
+      const pb20 = this._bundlePerBin20(outcome);
+      if (!pb20) return null;
+      return this._aggregateBin20ToN(pb20, this.decileBins);
+    },
+
+    // Stats for the *active* outcome at the current display granularity.
+    // Prefers the bundle; falls back to this.data.decile_stats* (which
+    // /analyze populates at 10-bin AND 20-bin) when the active outcome is
+    // the /analyze-driven default (ret_5d_fwd_oc) and the bundle hasn't
+    // arrived yet.
+    _activeOutcomeStats() {
+      const pb20 = this._bundlePerBin20(this.decileActiveOutcome);
+      if (pb20) return this._aggregateBin20ToN(pb20, this.decileBins).filter(Boolean);
+      if (this.decileActiveOutcome !== 'ret_5d_fwd_oc') return [];
+      // Fall back to /analyze's decile_stats. /analyze always emits
+      // decile_stats (10-bin) and decile_stats_20 (20-bin), so 10 and 20
+      // views are direct lookups; 5 aggregates from the 20-bin.
+      if (this.decileBins === 10) return (this.data?.decile_stats || []).filter(Boolean);
+      if (this.decileBins === 20) return (this.data?.decile_stats_20 || []).filter(Boolean);
+      // 5-bin: aggregate the legacy 20-bin payload through the same path
+      const ds20 = (this.data?.decile_stats_20 || []).map(d => d ? {
+        bucket: d.bucket, n: d.n,
+        avg_ret: d.avg_ret, win_rate: d.win_rate,
+        median: d.med_ret, std_dev: d.std_dev,
+        sharpe: d.sharpe,
+      } : null);
+      return this._aggregateBin20ToN(ds20, 5).filter(Boolean);
     },
 
     _renderDecileBarSingle(el) {
@@ -505,10 +547,11 @@ document.addEventListener('alpine:init', () => {
       if (!stats.length) return;
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
-      // selectedBins20 is the canonical 20-bin set; display bucket k maps
-      // to bins {2k-1, 2k}. (Same convention as decile_stats_20 and
-      // trade_calendar.decile20 downstream.)
-      const _isSel = (d) => self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket);
+      // selectedBins20 is the canonical 20-bin set. Display bucket k at
+      // current granularity decileBins maps to bins {(k-1)g+1..kg} where
+      // g = 20/decileBins. Selection appears "on" if ANY 20-bin member of
+      // the display bucket is in selectedBins20.
+      const _isSel = (d) => self._displayBucketIsSelected(d.bucket);
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
@@ -554,14 +597,26 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // Display bucket k (1..decileBins) is "selected" if ANY 20-bin member
+    // of the bucket is in selectedBins20. Used by every chart renderer.
+    _displayBucketIsSelected(bucket) {
+      const g = 20 / this.decileBins;
+      const lo = (bucket - 1) * g + 1;
+      for (let b = lo; b < lo + g; b++) if (this.selectedBins20.has(b)) return true;
+      return false;
+    },
+
     // Helper for single-bin toggle (P3 still single-select; P4 adds the
     // proper multi-select-within-subset rules + outcome-promotion logic).
-    // `bin` is the 10-bin display index (1..10); maps to {2b-1, 2b} in
-    // selectedBins20.
-    _toggleSingleBin(bin) {
-      const lo = 2 * bin - 1, hi = 2 * bin;
-      const isOn = this.selectedBins20.has(lo) && this.selectedBins20.has(hi);
-      this.selectedBins20 = new Set(isOn ? [] : [lo, hi]);
+    // `bucket` is the display bucket index (1..decileBins). Maps to a
+    // contiguous group of 20-bin indices (size g = 20/decileBins).
+    _toggleSingleBin(bucket) {
+      const g = 20 / this.decileBins;
+      const lo = (bucket - 1) * g + 1;
+      const newSel = [];
+      for (let b = lo; b < lo + g; b++) newSel.push(b);
+      const allOn = newSel.every(b => this.selectedBins20.has(b));
+      this.selectedBins20 = new Set(allOn ? [] : newSel);
       this._onDecileChange();
       this._renderDecileBar();
     },
@@ -591,7 +646,7 @@ document.addEventListener('alpine:init', () => {
       if (!ocStats.length && !ccStats.length) return;
       const primaryStats = ocStats.length ? ocStats : ccStats;
       const self  = this;
-      const _isSel = (d) => d && (self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket));
+      const _isSel = (d) => d && self._displayBucketIsSelected(d.bucket);
       const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
 
       // Active outcome gets the brighter fill + star marker; the other is dim.
@@ -661,7 +716,7 @@ document.addEventListener('alpine:init', () => {
       const primaryStats = series.find(s => s.length) || [];
       if (!primaryStats.length) return;
       const self  = this;
-      const _isSel = (d) => d && (self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket));
+      const _isSel = (d) => d && self._displayBucketIsSelected(d.bucket);
       const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
 
       // Active outcome gets the star marker (when the active outcome matches
@@ -721,7 +776,13 @@ document.addEventListener('alpine:init', () => {
     // the entry-day overnight gap. Computed at render time from the bundle's
     // per_outcome_returns parallel arrays (zip-by-trade_id), so no extra
     // cache entry is needed.
-    _overnightGapPerBin() {
+    // Per-bin (20-bin) stats for the entry-day overnight gap:
+    //   gap = ret_1d_fwd_cc − ret_1d_fwd_oc
+    // Computed at render time from the bundle's per_outcome_returns
+    // parallel arrays. Returns 20-bin stats; the renderer aggregates to
+    // current display granularity via _aggregateBin20ToN. No separate
+    // cache entry needed.
+    _overnightGapPerBin20() {
       const cc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_cc;
       const oc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_oc;
       const meta = this.analyzeBundle?.trade_meta;
@@ -731,18 +792,17 @@ document.addEventListener('alpine:init', () => {
       for (let i = 0; i < oc.trade_ids.length; i++) {
         ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
       }
-      // Bin lookup by trade_id from trade_meta. meta is an array of objects;
-      // direct index by trade_id assumes trade_meta is built in trade_id
-      // order (it is — see _compute_analyze_bundle_sync).
-      const buckets = Array.from({length: 10}, () => []);
+      // trade_meta is an array of objects, index-aligned with trade_id
+      // (see _compute_analyze_bundle_sync).
+      const buckets = Array.from({length: 20}, () => []);
       for (let i = 0; i < cc.trade_ids.length; i++) {
         const tid = cc.trade_ids[i];
         const ocRet = ocByTid.get(tid);
         if (ocRet == null) continue;
         const gap = cc.ret_pcts[i] - ocRet;
-        const bin = meta[tid]?.bin;
-        if (bin == null || bin < 1 || bin > 10) continue;
-        buckets[bin - 1].push(gap);
+        const bin20 = meta[tid]?.bin_20;
+        if (bin20 == null || bin20 < 1 || bin20 > 20) continue;
+        buckets[bin20 - 1].push(gap);
       }
       return buckets.map((arr, idx) => {
         if (!arr.length) return null;
@@ -763,11 +823,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderDecileBarOvernightGap(el) {
-      const stats = (this._overnightGapPerBin() || []).filter(Boolean);
+      const stats20 = this._overnightGapPerBin20();
+      if (!stats20) return;
+      const stats = this._aggregateBin20ToN(stats20, this.decileBins).filter(Boolean);
       if (!stats.length) return;
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
-      const _isSel = (d) => self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket);
+      const _isSel = (d) => self._displayBucketIsSelected(d.bucket);
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
@@ -932,12 +994,13 @@ document.addEventListener('alpine:init', () => {
       }
       this.selectedBins20 = newBins20;
       this.decileBins = n;
-      this.decileBinsData = n === 10 ? null : this._computeDecileNBins(n);
-      // P3: bundle is always 10-bin. The 5/10/20 toggle is removed from
-      // the lower-section chart; this method survives only for any
-      // legacy caller that still pings it. Re-render whichever the
-      // active mode is — Single uses this.data (or bundle if active
-      // outcome ≠ default); Entry/Horizon/Overnight Gap use the bundle.
+      // P3: bundle is 20-bin; all chart paths aggregate via
+      // _aggregateBin20ToN(_, n). decileBinsData (the legacy
+      // _computeDecileNBins fallback for the chart-only 5/20 view from
+      // this.data) is still used by the *initial* Single-mode render
+      // when the bundle hasn't loaded yet AND the active outcome is
+      // ret_5d_fwd_oc. Other modes/outcomes wait for the bundle.
+      this.decileBinsData = null;
       this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
