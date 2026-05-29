@@ -6006,8 +6006,18 @@ document.addEventListener('alpine:init', () => {
     // Belt-and-suspenders: update both Alpine state and the DOM select value
     // (same pattern as init()'s _forceSelect) so browser form-cache can't
     // resist the programmatic change.
+    //
+    // P2 (drill-in): propagate the Signal Survey outcome to the main chart's
+    // `outcome` before firing /analyze. The user picked a metric in the
+    // context of `surveyOutcome` (e.g., they were exploring 10d signals);
+    // dropping them into the main chart at a different outcome (the
+    // default ret_5d_fwd_oc) would be confusing. This matches what was
+    // implicit pre-P2 when the upper bar dropdown drove both surfaces.
     _icBatchClickMetric(name) {
       this.metric = name;
+      if (this.surveyOutcome && this.surveyOutcome !== this.outcome) {
+        this.outcome = this.surveyOutcome;
+      }
       const el = document.querySelector('select[x-model="metric"]');
       if (el) el.value = name;
       this.loadAnalysis();
