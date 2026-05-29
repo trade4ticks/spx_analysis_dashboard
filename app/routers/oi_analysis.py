@@ -3556,7 +3556,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 2  # bumped from 1: dynamic outcomes (v1 caches re-compute)
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 3  # bumped from 2: per_outcome_returns moved to parallel-array shape (v2 caches re-compute)
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -4122,9 +4122,20 @@ def _compute_analyze_bundle_sync(
     for outcome in outcomes:
         horizon = _horizon_from_outcome(outcome)
 
-        out_records: list = []
-        bin_buckets: list = [[] for _ in range(n_bins)]
-        ic_rows:     list = []   # input for rolling_ic_* — needs trade_date + ticker keys
+        # Parallel arrays for memory-efficient JSONB storage. Object-per-trade
+        # shape (the v2 design) repeated field names ("trade_id", "ret_pct",
+        # …) 12 times per trade — for ALL mode at ~150K trades × 12 outcomes
+        # that's ~300 MB of JSONB, exceeding the 256 MB per-object limit.
+        # Parallel arrays drop the field-name overhead and bring the bundle
+        # to ~80 MB total. JS consumers iterate by index across the four
+        # arrays per outcome (trade_ids[i], ret_pcts[i], exit_dates[i],
+        # exit_spots[i]) — equivalent semantics, cheaper storage.
+        out_trade_ids:  list = []
+        out_ret_pcts:   list = []
+        out_exit_dates: list = []
+        out_exit_spots: list = []
+        bin_buckets:    list = [[] for _ in range(n_bins)]
+        ic_rows:        list = []   # input for rolling_ic_* — needs trade_date + ticker keys
 
         for meta in trade_meta:
             tkr = meta["ticker"]
@@ -4157,17 +4168,20 @@ def _compute_analyze_bundle_sync(
                     if es is not None:
                         exit_spot = round(es, 2)
 
-            out_records.append({
-                "trade_id":  meta["trade_id"],
-                "ret_pct":   round(yf, 6),
-                "exit_date": exit_date,
-                "exit_spot": exit_spot,
-            })
+            out_trade_ids.append(meta["trade_id"])
+            out_ret_pcts.append(round(yf, 6))
+            out_exit_dates.append(exit_date)
+            out_exit_spots.append(exit_spot)
             bin_buckets[meta["bin"] - 1].append(yf)
             ic_rows.append({"trade_date": d, "ticker": tkr,
                             "__m": meta["metric_val"], "__y": yf})
 
-        per_outcome_returns[outcome] = out_records
+        per_outcome_returns[outcome] = {
+            "trade_ids":  out_trade_ids,
+            "ret_pcts":   out_ret_pcts,
+            "exit_dates": out_exit_dates,
+            "exit_spots": out_exit_spots,
+        }
 
         # Per-bin aggregates
         bin_stats: list = []
@@ -4260,7 +4274,18 @@ async def _compute_analyze_bundle_bg(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
         )
-        payload_json = json.dumps(bundle)
+        # allow_nan=False catches NaN / inf escaping into the payload — any
+        # stray non-finite float would either be rejected at the asyncpg
+        # boundary or, worse, stored as the string "NaN" in JSONB and crash
+        # downstream JSON parsers. Failure is surfaced cleanly via status.
+        try:
+            payload_json = json.dumps(bundle, allow_nan=False)
+        except ValueError as je:
+            _analyze_bundle_status[cache_key] = {
+                "status": "failed",
+                "error":  f"json_nan_inf_in_bundle: {je}",
+            }
+            return
         from datetime import date as _date_cls
         cutoff_obj = _date_cls.fromisoformat(cutoff_date) if cutoff_date else None
         async with pool.acquire() as conn:
