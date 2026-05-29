@@ -3659,7 +3659,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 4  # bumped from 3: bundle now stores 20-bin granularity only; client aggregates to 5/10 (v3 caches re-compute)
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 5  # bumped from 4: trade_meta now carries entry_date_oc/cc + entry_spot_oc/cc (per-anchor). v4 carried a single shared entry_spot computed against the OC anchor only — wrong for CC outcomes (entered at C_{T-1}, not O_T) and for Gap mode (CC-anchor entry semantics). v4 caches re-compute on first read.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -3668,6 +3668,17 @@ async def _ensure_analyze_bundle_table(pool) -> None:
         return
     async with pool.acquire() as conn:
         await conn.execute(_ANALYZE_BUNDLE_TABLE_DDL)
+        # Wipe entries from any prior schema version. Cache keys are
+        # salted with the schema version (see _analyze_bundle_cache_key),
+        # so stale entries are already unreachable on read — but they
+        # sit in the table consuming space until LRU eviction kicks in.
+        # This one-shot DELETE reclaims the space immediately. Becomes a
+        # no-op once the table holds only current-version entries.
+        prefix = f"ab:v{_ANALYZE_BUNDLE_SCHEMA_VERSION}:"
+        await conn.execute(
+            "DELETE FROM analyze_cache WHERE cache_key NOT LIKE $1",
+            f"{prefix}%",
+        )
     _analyze_bundle_table_ensured = True
 
 
@@ -4187,6 +4198,13 @@ def _compute_analyze_bundle_sync(
     assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
 
     # ── 3. Build trade_meta from valid assignments ────────────────────────
+    # v5: entry fields are anchored. OC outcomes enter at open of T;
+    # CC outcomes enter at close of T-1 (the prior trading day for the
+    # same ticker). Overnight Gap mode also reads the CC-anchored entry
+    # fields (it enters at C_{T-1} and exits at O_T). trade_date stays
+    # as the *signal* date T — used by yearly/dow/activity aggregations
+    # which treat each trade as "a signal on day T" regardless of when
+    # the position was opened.
     trade_meta: list = []
     trade_id_by_key: dict = {}
     for a in assignments:
@@ -4200,21 +4218,43 @@ def _compute_analyze_bundle_sync(
         if key in trade_id_by_key:
             continue
         r = row_by_tkr_date.get(key)
-        entry_spot = None
+
+        # OC anchor: entry on T, at open of T (= spot_co).
+        entry_date_oc = d
+        entry_spot_oc = None
         if r is not None and r.get("spot_co") is not None:
             try:
-                entry_spot = round(float(r["spot_co"]), 2)
+                entry_spot_oc = round(float(r["spot_co"]), 2)
             except (TypeError, ValueError):
                 pass
+
+        # CC anchor: entry on T-1, at close of T-1 (= close_by_tkr_date
+        # keyed on T-1, which the rest of the bundle code defines as
+        # "close at end of date d"). For a ticker's first trading day,
+        # T-1 doesn't exist → fields are None.
+        entry_date_cc = None
+        entry_spot_cc = None
+        entry_idx = by_tkr_idx.get(tkr, {}).get(d)
+        if entry_idx is not None and entry_idx > 0:
+            tkr_dates = by_tkr_dates.get(tkr, [])
+            if 0 <= entry_idx - 1 < len(tkr_dates):
+                entry_date_cc = tkr_dates[entry_idx - 1]
+                _es_cc = close_by_tkr_date.get((tkr, entry_date_cc))
+                if _es_cc is not None:
+                    entry_spot_cc = round(float(_es_cc), 2)
+
         tid = len(trade_meta)
         trade_id_by_key[key] = tid
         trade_meta.append({
-            "trade_id":   tid,
-            "ticker":     tkr,
-            "trade_date": d,
-            "metric_val": round(float(a.metric_value), 6),
-            "entry_spot": entry_spot,
-            "bin_20":     a.bin,    # 1..20; client aggregates pairs/quartets for 10/5 views
+            "trade_id":      tid,
+            "ticker":        tkr,
+            "trade_date":    d,
+            "metric_val":    round(float(a.metric_value), 6),
+            "entry_date_oc": entry_date_oc,
+            "entry_spot_oc": entry_spot_oc,
+            "entry_date_cc": entry_date_cc,
+            "entry_spot_cc": entry_spot_cc,
+            "bin_20":        a.bin,    # 1..20; client aggregates pairs/quartets for 10/5 views
         })
 
     # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────

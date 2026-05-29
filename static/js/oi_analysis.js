@@ -2576,6 +2576,10 @@ document.addEventListener('alpine:init', () => {
         for (let i = 0; i < oc.trade_ids.length; i++) {
           ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
         }
+        // Gap shares the CC anchor's entry semantics (entered at C_{T-1}
+        // and exited at O_T). entry_date / spot_entry use CC fields;
+        // exit_date / spot_exit use OC fields (open of T = the gap's
+        // exit price). Bundle schema v5 carries both anchor pairs.
         const out = [];
         for (let i = 0; i < cc.trade_ids.length; i++) {
           const tid = cc.trade_ids[i];
@@ -2584,30 +2588,35 @@ document.addEventListener('alpine:init', () => {
           const m = tm[tid];
           if (!m) continue;
           out.push({
-            date:       m.trade_date,
+            date:       m.entry_date_cc,
             ticker:     m.ticker,
             metric_val: m.metric_val,
-            spot_entry: m.entry_spot,
-            spot_exit:  cc.exit_spots[i],
+            spot_entry: m.entry_spot_cc,
+            spot_exit:  m.entry_spot_oc,
             ret:        cc.ret_pcts[i] - ocRet,
-            exit_date:  cc.exit_dates[i],
+            exit_date:  m.entry_date_oc,
             decile20:   m.bin_20,
           });
         }
         return out;
       }
 
+      // Real outcomes — entry fields keyed off the outcome's anchor
+      // (oc or cc). v5: trade_meta carries both pairs; pick by suffix.
       const ret = b.per_outcome_returns?.[outcome];
       if (!ret) return null;
+      const anchor = this._outcomeAnchor(outcome);
+      const dateKey = `entry_date_${anchor}`;
+      const spotKey = `entry_spot_${anchor}`;
       const out = [];
       for (let i = 0; i < ret.trade_ids.length; i++) {
         const m = tm[ret.trade_ids[i]];
         if (!m) continue;
         out.push({
-          date:       m.trade_date,
+          date:       m[dateKey],
           ticker:     m.ticker,
           metric_val: m.metric_val,
-          spot_entry: m.entry_spot,
+          spot_entry: m[spotKey],
           spot_exit:  ret.exit_spots[i],
           ret:        ret.ret_pcts[i],
           exit_date:  ret.exit_dates[i],
