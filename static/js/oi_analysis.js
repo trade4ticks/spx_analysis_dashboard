@@ -296,6 +296,25 @@ document.addEventListener('alpine:init', () => {
         this.data = await r.json();
         const _ct2 = performance.now();
         if (this.data.error) { this.error = this.data.error; return; }
+        // P4: snapshot the outcome-tied fields of the /analyze response (always
+        // ret_5d_fwd_oc) so we can restore them when the user picks
+        // ret_5d_fwd_oc as active again after a bundle-driven swap. We keep
+        // boxplot returns + yearly_consistency + min_val/max_val that the
+        // bundle slice doesn't carry. Snap each fresh fetch — replaces any
+        // prior snapshot from a prior (ticker, metric, mode) selection.
+        this._originalAnalyzeData = {
+          trade_calendar:    this.data.trade_calendar,
+          decile_stats:      this.data.decile_stats,
+          decile_stats_20:   this.data.decile_stats_20,
+          equity_by_decile:  this.data.equity_by_decile,
+          rolling_ic:        this.data.rolling_ic,
+          yearly_stats:      this.data.yearly_stats,
+          dow_stats:         this.data.dow_stats,
+          activity_by_date:  this.data.activity_by_date,
+          horizon:           this.data.horizon,
+        };
+        // Default-active outcome resets to the /analyze outcome on every fresh fetch.
+        this.decileActiveOutcome = this.outcome;
         // Recompute bar chart data for current mode with fresh decile_stats_20.
         this.decileBinsData = this.decileBins !== 10 ? this._computeDecileNBins(this.decileBins) : null;
         await this.$nextTick();
@@ -571,7 +590,7 @@ document.addEventListener('alpine:init', () => {
           onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
-            self._toggleSingleBin(d.bucket);
+            self._clickBarSingle(d.bucket);
           },
           plugins: {
             legend: { display: false },
@@ -604,21 +623,6 @@ document.addEventListener('alpine:init', () => {
       const lo = (bucket - 1) * g + 1;
       for (let b = lo; b < lo + g; b++) if (this.selectedBins20.has(b)) return true;
       return false;
-    },
-
-    // Helper for single-bin toggle (P3 still single-select; P4 adds the
-    // proper multi-select-within-subset rules + outcome-promotion logic).
-    // `bucket` is the display bucket index (1..decileBins). Maps to a
-    // contiguous group of 20-bin indices (size g = 20/decileBins).
-    _toggleSingleBin(bucket) {
-      const g = 20 / this.decileBins;
-      const lo = (bucket - 1) * g + 1;
-      const newSel = [];
-      for (let b = lo; b < lo + g; b++) newSel.push(b);
-      const allOn = newSel.every(b => this.selectedBins20.has(b));
-      this.selectedBins20 = new Set(allOn ? [] : newSel);
-      this._onDecileChange();
-      this._renderDecileBar();
     },
 
     _hexToRgba(hex, alpha) {
@@ -686,8 +690,9 @@ document.addEventListener('alpine:init', () => {
           layout: { padding: { bottom: 0 } },
           onClick: (e, elements) => {
             if (!elements.length) return;
-            const d = primaryStats[elements[0].index];
-            if (d) self._toggleSingleBin(d.bucket);
+            const el0 = elements[0];
+            const d = primaryStats[el0.index];
+            if (d) self._clickBarEntry(d.bucket, el0.datasetIndex);
           },
           plugins: {
             legend: { display: true, labels: { color: '#888', font: { size: 10 }, boxWidth: 10, padding: 8 } },
@@ -749,8 +754,9 @@ document.addEventListener('alpine:init', () => {
           layout: { padding: { bottom: 0 } },
           onClick: (e, elements) => {
             if (!elements.length) return;
-            const d = primaryStats[elements[0].index];
-            if (d) self._toggleSingleBin(d.bucket);
+            const el0 = elements[0];
+            const d = primaryStats[el0.index];
+            if (d) self._clickBarHorizon(d.bucket, el0.datasetIndex);
           },
           plugins: {
             legend: { display: true, labels: { color: '#888', font: { size: 10 }, boxWidth: 10, padding: 8 } },
@@ -850,7 +856,7 @@ document.addEventListener('alpine:init', () => {
           onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
-            self._toggleSingleBin(d.bucket);
+            self._clickBarOvernightGap(d.bucket);
           },
           plugins: {
             legend: { display: false },
@@ -875,6 +881,255 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // ── P4: click handlers + data swap ────────────────────────────────────
+    // The decile bar is the canonical selector for the lower section. Each
+    // mode has its own subset semantics:
+    //   Single        → 1 subset (the current granularity bins). Click toggles.
+    //   Entry         → 2 subsets at the active horizon: OC bins and CC bins.
+    //                   Click within active subset = toggle. Click on the OTHER
+    //                   subset = promote that outcome, single-select that bin.
+    //   Horizon       → 6 subsets at the active anchor (1d/3d/5d/7d/10d/20d).
+    //                   Same rule: same-horizon click = toggle; cross-horizon
+    //                   click = promote + single-select.
+    //   Overnight Gap → 1 subset. Click toggles.
+
+    // Multi-select toggle for a display bucket (1..decileBins). The bucket
+    // maps to g = 20/decileBins contiguous 20-bin indices; the toggle applies
+    // to ALL members atomically (so the on/off state is consistent across
+    // granularity boundaries).
+    _toggleBucketInSelection(bucket) {
+      const g = 20 / this.decileBins;
+      const lo = (bucket - 1) * g + 1;
+      const members = [];
+      for (let b = lo; b < lo + g; b++) members.push(b);
+      const allOn = members.every(b => this.selectedBins20.has(b));
+      const next = new Set(this.selectedBins20);
+      if (allOn) {
+        for (const b of members) next.delete(b);
+      } else {
+        for (const b of members) next.add(b);
+      }
+      this.selectedBins20 = next;
+      this._onDecileChange();
+      this._renderDecileBar();
+    },
+
+    // Replace the selection with a single display bucket (used after a
+    // cross-subset click triggers outcome promotion: clear prior selection,
+    // single-select the just-clicked bucket).
+    _setSingleBucket(bucket) {
+      const g = 20 / this.decileBins;
+      const lo = (bucket - 1) * g + 1;
+      const next = new Set();
+      for (let b = lo; b < lo + g; b++) next.add(b);
+      this.selectedBins20 = next;
+      this._onDecileChange();
+      this._renderDecileBar();
+    },
+
+    // Promote the active outcome (Entry/Horizon cross-subset click, or the
+    // Single-mode dropdown). Re-points downstream visuals via _swapData.
+    // The caller is responsible for triggering re-render (typically
+    // _setSingleBucket or _onDecileChange).
+    _promoteOutcome(newOutcome) {
+      if (this.decileActiveOutcome === newOutcome) return;
+      this.decileActiveOutcome = newOutcome;
+      this.outcome = newOutcome;
+      this._swapDataForActiveOutcome();
+    },
+
+    _clickBarSingle(bucket)                  { this._toggleBucketInSelection(bucket); },
+    _clickBarOvernightGap(bucket)            { this._toggleBucketInSelection(bucket); },
+
+    _clickBarEntry(bucket, datasetIdx) {
+      // Dataset 0 = OC, dataset 1 = CC.
+      const clickedAnchor = (datasetIdx === 0) ? 'oc' : 'cc';
+      const activeAnchor  = this._outcomeAnchor(this.decileActiveOutcome);
+      if (clickedAnchor === activeAnchor) {
+        this._toggleBucketInSelection(bucket);
+      } else {
+        this._promoteOutcome(`ret_${this.decileEntryHorizon}d_fwd_${clickedAnchor}`);
+        this._setSingleBucket(bucket);
+      }
+    },
+
+    _clickBarHorizon(bucket, datasetIdx) {
+      // datasetIdx i ∈ [0, HORIZON_LIST.length-1] → HORIZON_LIST[i] horizon.
+      const clickedH = HORIZON_LIST[datasetIdx];
+      const activeH  = this._outcomeHorizon(this.decileActiveOutcome);
+      if (clickedH === activeH) {
+        this._toggleBucketInSelection(bucket);
+      } else {
+        this._promoteOutcome(`ret_${clickedH}d_fwd_${this.decileHorizonAnchor}`);
+        this._setSingleBucket(bucket);
+      }
+    },
+
+    // Build the outcome-specific data slice from the bundle, matching the
+    // shape that /analyze would emit if that outcome had been the primary.
+    // Used to mutate this.data when active outcome changes. Returns null if
+    // the bundle isn't loaded yet (caller leaves this.data untouched).
+    _buildOutcomeDataSlice(outcome) {
+      const b = this.analyzeBundle;
+      if (!b) return null;
+      const tm    = b.trade_meta;
+      const ret   = b.per_outcome_returns?.[outcome];
+      const perBin = b.per_bin?.[outcome];
+      if (!Array.isArray(tm) || !ret || !Array.isArray(perBin)) return null;
+
+      // trade_calendar: one row per trade where the outcome value is non-null.
+      // Shape matches /analyze's slim trade_calendar (date, ret, ticker, decile20).
+      const tc = [];
+      for (let i = 0; i < ret.trade_ids.length; i++) {
+        const m = tm[ret.trade_ids[i]];
+        if (!m) continue;
+        tc.push({
+          date:     m.trade_date,
+          ret:      ret.ret_pcts[i],
+          ticker:   m.ticker,
+          decile20: m.bin_20,
+        });
+      }
+
+      // decile_stats_20 = per_bin (already 20-bin); decile_stats (10-bin)
+      // aggregates pairs (trade-count-weighted). median/std/sharpe at the
+      // 10-bin view aren't recoverable from per-bin summary so they're
+      // null — same constraint as the bar-chart's _aggregateBin20ToN.
+      const ds20 = perBin.map(r => (r && r.n) ? {
+        bucket:   r.bin,
+        n:        r.n,
+        avg_ret:  r.avg_ret,
+        med_ret:  r.median,
+        win_rate: r.win_rate,
+        std_dev:  r.std,
+        sharpe:   (r.std && r.std > 0) ? (r.avg_ret / r.std) : 0,
+        min_val:  null,
+        max_val:  null,
+        returns:  [],     // bundle doesn't carry per-trade returns; boxplot will skip
+      } : null);
+      const ds10 = [];
+      for (let i = 0; i < 10; i++) {
+        const pair = [ds20[i*2], ds20[i*2 + 1]].filter(Boolean);
+        if (!pair.length) { ds10.push(null); continue; }
+        const totalN = pair.reduce((a, d) => a + d.n, 0);
+        if (!totalN) { ds10.push(null); continue; }
+        ds10.push({
+          bucket:   i + 1,
+          n:        totalN,
+          avg_ret:  pair.reduce((a, d) => a + d.avg_ret  * d.n, 0) / totalN,
+          med_ret:  null,
+          win_rate: pair.reduce((a, d) => a + d.win_rate * d.n, 0) / totalN,
+          std_dev:  null,
+          sharpe:   null,
+          min_val:  null,
+          max_val:  null,
+          returns:  [],
+        });
+      }
+
+      // Yearly / DoW / Activity aggregates derived from trade_calendar. Same
+      // (year, decile20) / (dow, decile20) / (date, decile20) keys as the
+      // server-side stats so downstream renderers don't change.
+      const yrAcc  = new Map();
+      const dowAcc = new Map();
+      const actAcc = new Map();
+      for (const t of tc) {
+        const yr = +t.date.slice(0, 4);
+        // ISO date → Mon=1..Sun=7 via JS Date getDay (Sun=0..Sat=6). The
+        // server uses Python weekday() (Mon=0..Sun=6) — match that.
+        const jd = new Date(t.date + 'T12:00:00Z').getUTCDay();
+        const dow = (jd + 6) % 7;      // shift Sun=0..Sat=6 → Mon=0..Sun=6
+        const yk = `${yr}|${t.decile20}`;
+        if (!yrAcc.has(yk)) yrAcc.set(yk, {year: yr, decile20: t.decile20, sum: 0, wins: 0, n: 0});
+        const ya = yrAcc.get(yk);
+        ya.sum += t.ret; ya.wins += (t.ret > 0 ? 1 : 0); ya.n++;
+        if (dow <= 4) {
+          const dk = `${dow}|${t.decile20}`;
+          if (!dowAcc.has(dk)) dowAcc.set(dk, {dow, decile20: t.decile20, sum: 0, wins: 0, n: 0});
+          const da = dowAcc.get(dk);
+          da.sum += t.ret; da.wins += (t.ret > 0 ? 1 : 0); da.n++;
+        }
+        const ak = `${t.date}|${t.decile20}`;
+        if (!actAcc.has(ak)) actAcc.set(ak, {date: t.date, decile20: t.decile20, n: 0});
+        actAcc.get(ak).n++;
+      }
+      const yearly_stats = Array.from(yrAcc.values()).map(a => ({
+        year: a.year, decile20: a.decile20,
+        n: a.n, avg_ret: a.sum / a.n, win_rate: a.wins / a.n,
+      })).sort((a, b) => a.year - b.year || a.decile20 - b.decile20);
+      const dow_stats = Array.from(dowAcc.values()).map(a => ({
+        dow: a.dow, decile20: a.decile20,
+        n: a.n, avg_ret: a.sum / a.n, win_rate: a.wins / a.n,
+      })).sort((a, b) => a.dow - b.dow || a.decile20 - b.decile20);
+      const activity_by_date = Array.from(actAcc.values())
+        .sort((a, b) => a.date.localeCompare(b.date) || a.decile20 - b.decile20);
+
+      // rolling_ic: /analyze emits {series, reference_ic, epsilon, cutoff_date,
+      // short_series}. Bundle stores only the classified series. We wrap it
+      // and compute reference_ic = mean(ic) as the backend does in non-
+      // train_test mode. epsilon (noise-floor band) and short_series (5d
+      // context line) aren't in the bundle — they're omitted, so the band
+      // collapses to zero for swapped outcomes. Bundle schema would need
+      // a bump to carry them; deferred.
+      const icSeries = b.rolling_ic?.[outcome] || [];
+      const icVals = icSeries.map(p => p.ic).filter(v => v != null);
+      const refIc = icVals.length ? icVals.reduce((a, v) => a + v, 0) / icVals.length : 0;
+
+      return {
+        trade_calendar:    tc,
+        decile_stats:      ds10,
+        decile_stats_20:   ds20,
+        rolling_ic: {
+          series:        icSeries,
+          reference_ic:  refIc,
+          epsilon:       0,
+          cutoff_date:   null,
+          short_series:  [],
+        },
+        yearly_stats,
+        dow_stats,
+        activity_by_date,
+        horizon:           this._outcomeHorizon(outcome) || 1,
+      };
+    },
+
+    // Rebuild equity_by_decile (10-bin) from a trade_calendar. Reads
+    // this.data.horizon for non_overlapping spacing — caller must set
+    // this.data.horizon to the new outcome's horizon FIRST.
+    _buildEquityByDecileFromCal(cal) {
+      const out = {};
+      for (let d = 1; d <= 10; d++) {
+        const binCal = cal.filter(c => Math.ceil(c.decile20 / 2) === d);
+        out[d] = {
+          concurrent:      this._getEquityCurveFromCal(binCal, 'concurrent'),
+          non_overlapping: this._getEquityCurveFromCal(binCal, 'non_overlapping'),
+        };
+      }
+      return out;
+    },
+
+    // Mutate this.data so downstream renderers (equity, drawdown, rolling
+    // IC, yearly, dow, activity, decile stats, trade table) reflect the
+    // current active outcome. Three branches:
+    //   1. ret_5d_fwd_oc + _originalAnalyzeData snapshot → restore from
+    //      snapshot (keeps boxplot returns, yearly_consistency etc.).
+    //   2. Bundle is loaded → build slice from bundle.
+    //   3. No bundle yet → leave this.data unchanged (soft-fail; charts
+    //      will show stale ret_5d_fwd_oc data with the new outcome label).
+    _swapDataForActiveOutcome() {
+      if (!this.data) return;
+      const outcome = this.decileActiveOutcome;
+      if (outcome === 'ret_5d_fwd_oc' && this._originalAnalyzeData) {
+        Object.assign(this.data, this._originalAnalyzeData);
+        return;
+      }
+      const slice = this._buildOutcomeDataSlice(outcome);
+      if (!slice) return;
+      Object.assign(this.data, slice);
+      // equity_by_decile depends on horizon (now updated) + new trade_calendar.
+      this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
+    },
+
     // ── P3 setters ────────────────────────────────────────────────────────
 
     setDecileMode(mode) {
@@ -890,6 +1145,18 @@ document.addEventListener('alpine:init', () => {
       this.decileHorizonAnchor = anchor;
       // Clear bin selection — different anchor = different subset
       this.selectedBins20 = new Set();
+      // In Horizon mode the anchor pill defines the subset, so promote the
+      // active outcome to {currentHorizon}d_{newAnchor} so the star follows
+      // the user's anchor choice.
+      if (this.decileMode === 'horizon') {
+        const h = this._outcomeHorizon(this.decileActiveOutcome) || 5;
+        const newOutcome = `ret_${h}d_fwd_${anchor}`;
+        if (this.decileActiveOutcome !== newOutcome) {
+          this.decileActiveOutcome = newOutcome;
+          this.outcome = newOutcome;
+          this._swapDataForActiveOutcome();
+        }
+      }
       this._onDecileChange();
       if (this.decileMode === 'horizon') this._renderDecileBar();
     },
@@ -897,17 +1164,30 @@ document.addEventListener('alpine:init', () => {
     setDecileEntryHorizon(h) {
       this.decileEntryHorizon = h;
       this.selectedBins20 = new Set();
+      // In Entry mode the horizon pill defines the subset, so promote the
+      // active outcome to {newH}d_{currentAnchor}.
+      if (this.decileMode === 'entry') {
+        const a = this._outcomeAnchor(this.decileActiveOutcome);
+        const newOutcome = `ret_${h}d_fwd_${a}`;
+        if (this.decileActiveOutcome !== newOutcome) {
+          this.decileActiveOutcome = newOutcome;
+          this.outcome = newOutcome;
+          this._swapDataForActiveOutcome();
+        }
+      }
       this._onDecileChange();
       if (this.decileMode === 'entry') this._renderDecileBar();
     },
 
     setDecileActiveOutcome(outcome) {
+      if (this.decileActiveOutcome === outcome) return;
       this.decileActiveOutcome = outcome;
       // Same outcome on this.outcome too so downstream visuals (Equity, IC,
-      // etc.) reflect the new choice. /analyze isn't re-fired — downstream
-      // re-renders read from this.data + bundle.
+      // etc.) reflect the new choice. /analyze isn't re-fired; this.data is
+      // swapped from the bundle slice (or restored from _originalAnalyzeData
+      // when outcome = the /analyze default).
       this.outcome = outcome;
-      this._renderDecileBar();
+      this._swapDataForActiveOutcome();
       this._onDecileChange();
     },
 
