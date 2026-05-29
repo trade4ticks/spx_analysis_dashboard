@@ -1000,16 +1000,24 @@ document.addEventListener('alpine:init', () => {
 
       // trade_calendar: one row per trade where the outcome value is non-null.
       // Shape matches /analyze's slim trade_calendar (date, ret, ticker, decile20).
+      // We also accumulate per-bin (10-bin) raw return arrays here so the
+      // Return Distribution histogram can read decile_stats[i].returns
+      // for swapped outcomes — without this it filters every bar out via
+      // `d.returns?.length >= 5` and renders blank.
       const tc = [];
+      const returnsByBin10 = Array.from({length: 10}, () => []);
       for (let i = 0; i < ret.trade_ids.length; i++) {
         const m = tm[ret.trade_ids[i]];
         if (!m) continue;
+        const r = ret.ret_pcts[i];
         tc.push({
           date:     m.trade_date,
-          ret:      ret.ret_pcts[i],
+          ret:      r,
           ticker:   m.ticker,
           decile20: m.bin_20,
         });
+        const bin10 = Math.ceil(m.bin_20 / 2);
+        if (bin10 >= 1 && bin10 <= 10) returnsByBin10[bin10 - 1].push(r);
       }
 
       // decile_stats_20 = per_bin (already 20-bin); decile_stats (10-bin)
@@ -1044,7 +1052,7 @@ document.addEventListener('alpine:init', () => {
           sharpe:   null,
           min_val:  null,
           max_val:  null,
-          returns:  [],
+          returns:  returnsByBin10[i],
         });
       }
 
@@ -2386,40 +2394,102 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // Build the Flat trade list from the analyze_cache bundle. Used for
+    // non-default outcomes (the /trades server cache only carries the
+    // /analyze default = ret_5d_fwd_oc; other outcomes returned
+    // not_cached → "Run Analyze first" placeholder). Bundle has every
+    // field the table renders: trade_meta gives ticker/date/metric_val/
+    // entry_spot/bin_20; per_outcome_returns gives ret/exit_date/exit_spot.
+    _buildFlatTradesFromBundle(outcome) {
+      const b = this.analyzeBundle;
+      if (!b) return null;
+      const tm = b.trade_meta;
+      const ret = b.per_outcome_returns?.[outcome];
+      if (!Array.isArray(tm) || !ret) return null;
+      const out = [];
+      for (let i = 0; i < ret.trade_ids.length; i++) {
+        const m = tm[ret.trade_ids[i]];
+        if (!m) continue;
+        out.push({
+          date:       m.trade_date,
+          ticker:     m.ticker,
+          metric_val: m.metric_val,
+          spot_entry: m.entry_spot,
+          spot_exit:  ret.exit_spots[i],
+          ret:        ret.ret_pcts[i],
+          exit_date:  ret.exit_dates[i],
+          decile20:   m.bin_20,
+        });
+      }
+      return out;
+    },
+
+    _sortFlatTrades(rows, key, dir) {
+      // Map "bin" → "decile20" the same way /trades does server-side; the
+      // table header sends sort_key="bin" but bundle rows carry decile20.
+      const resolved = key === 'bin' ? 'decile20' : key;
+      const strKeys = new Set(['date', 'ticker', 'exit_date']);
+      const sgn = dir === 'asc' ? 1 : -1;
+      const cmp = (a, b) => {
+        const va = a[resolved], vb = b[resolved];
+        if (strKeys.has(resolved)) {
+          return sgn * String(va ?? '').localeCompare(String(vb ?? ''));
+        }
+        const na = (va == null) ? -Infinity : va;
+        const nb = (vb == null) ? -Infinity : vb;
+        return sgn * (na - nb);
+      };
+      return rows.slice().sort(cmp);
+    },
+
     async _renderTradeTableFlat(headEl, bodyEl, cntEl) {
-      // W1: fetch full trade details from /trades endpoint (server-side cache).
+      // Bundle-backed for non-default outcomes; /trades fetch otherwise.
+      // See _buildFlatTradesFromBundle for context.
       if (!this.data) return;
       if (bodyEl) bodyEl.innerHTML =
         '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Loading…</td></tr>';
 
-      const mode = this.pageMode === 'train_test' ? 'train_test'
-                 : this.pageMode === 'in_sample'  ? 'in_sample'
-                 : 'walk_forward';
-      const params = new URLSearchParams({
-        ticker:   this.ticker,
-        metric:   this.metric,
-        outcome:  this.outcome,
-        mode,
-        sort_key: this.tradeSortKey,
-        sort_dir: this.tradeSortDir,
-        page:     0,
-        page_size: 250,
-      });
-      if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
-      for (const b of this.selectedBins20) params.append('decile20', b);
+      let rows, total;
+      const isDefaultOutcome = this.outcome === 'ret_5d_fwd_oc';
+      const bundleRows = !isDefaultOutcome ? this._buildFlatTradesFromBundle(this.outcome) : null;
 
-      const r = await fetch(`/api/factor-analysis/trades?${params}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const d = await r.json();
+      if (bundleRows) {
+        const filtered = this.selectedBins20.size > 0
+          ? bundleRows.filter(t => this.selectedBins20.has(t.decile20))
+          : bundleRows;
+        const sorted = this._sortFlatTrades(filtered, this.tradeSortKey, this.tradeSortDir);
+        total = sorted.length;
+        rows  = sorted.slice(0, 250);
+      } else {
+        // Server-cached path (default outcome, or bundle not ready).
+        const mode = this.pageMode === 'train_test' ? 'train_test'
+                   : this.pageMode === 'in_sample'  ? 'in_sample'
+                   : 'walk_forward';
+        const params = new URLSearchParams({
+          ticker:   this.ticker,
+          metric:   this.metric,
+          outcome:  this.outcome,
+          mode,
+          sort_key: this.tradeSortKey,
+          sort_dir: this.tradeSortDir,
+          page:     0,
+          page_size: 250,
+        });
+        if (mode === 'train_test' && this.cutoffDate) params.set('cutoff_date', this.cutoffDate);
+        for (const b of this.selectedBins20) params.append('decile20', b);
 
-      if (d.error === 'not_cached') {
-        if (bodyEl) bodyEl.innerHTML =
-          '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Run Analyze first</td></tr>';
-        return;
+        const r = await fetch(`/api/factor-analysis/trades?${params}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+
+        if (d.error === 'not_cached') {
+          if (bodyEl) bodyEl.innerHTML =
+            '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Run Analyze first</td></tr>';
+          return;
+        }
+        rows  = d.trades || [];
+        total = d.total  || 0;
       }
-
-      const rows  = d.trades || [];
-      const total = d.total  || 0;
 
       if (cntEl) {
         cntEl.textContent = total > 250
