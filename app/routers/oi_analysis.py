@@ -1512,6 +1512,9 @@ async def heatmap_2d(
     }
 
 
+_METRIC_BINS_CANONICAL = 20
+
+
 @router.get("/metric-bins")
 async def metric_bins_1d(
     ticker: str = Query(...),
@@ -1530,10 +1533,19 @@ async def metric_bins_1d(
     matching the main quantile chart's methodology. Single-ticker mode
     uses flat rank-based binning. Both modes flow through the
     row_compute Assigner — `walk_forward=true` and (Step 6) train-test
-    are first-class modes. This endpoint backs the heatmap's side bin
-    charts; pre-Step-5.5-continuation it was on inline math with no
-    walk-forward support, producing in-sample hindsight-monotone shapes
-    that didn't match the page's other binning panes.
+    are first-class modes.
+
+    Canonical 20-bin internal: regardless of the requested `bins`, the
+    Assigner is invoked at n_bins=20 and the result is aggregated to the
+    requested display granularity via trade-count weighting. This locks
+    the endpoint to the same ticker-row-count exclusion threshold as the
+    analyze_cache bundle (which always bins at 20). Pre-canonicalization,
+    requesting bins=10 here included tickers with 10-19 rows that the
+    bundle excluded at the 20-row threshold — producing a systematic
+    ~8 bps gap between the heatmap sidebar and the main quantile pane.
+    Non-divisor `bins` (e.g. 3, 7) fall back to the legacy direct
+    Assigner call so they still work for /global-metric-bins or other
+    callers that pass arbitrary granularities.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -1575,15 +1587,21 @@ async def metric_bins_1d(
         for r in rows_for_assigner:
             r.setdefault("ticker", ticker)
 
-    state = assigner.fit(rows_for_assigner, metric, bins, is_all)
-    assignments = assigner.assign(rows_for_assigner, metric, bins, is_all, state, outcome)
+    # Canonical 20-bin internal when the requested display bins evenly
+    # divides 20 ({2, 4, 5, 10, 20}). Otherwise direct-bin at the
+    # requested granularity (legacy path, kept for non-divisor callers).
+    canonicalize = (_METRIC_BINS_CANONICAL % bins == 0)
+    n_internal = _METRIC_BINS_CANONICAL if canonicalize else bins
+    g = n_internal // bins  # # of canonical sub-bins merged per display bin
 
-    # Build buckets_data: list of (xf, yf) tuples per bin (1-indexed →
-    # 0-indexed list position). Drops bin=None rows (warmup, missing_value,
-    # insufficient_history) AND train-test pre_cutoff rows (training-window
-    # rows that have bin set but are excluded from test-period aggregation).
-    # For in_sample/walk_forward the dropped_reason check is a no-op.
-    buckets_data: list = [[] for _ in range(bins)]
+    state = assigner.fit(rows_for_assigner, metric, n_internal, is_all)
+    assignments = assigner.assign(rows_for_assigner, metric, n_internal, is_all, state, outcome)
+
+    # Build buckets_data: list of (xf, yf) tuples per canonical bin
+    # (1-indexed → 0-indexed list position). Drops bin=None rows (warmup,
+    # missing_value, insufficient_history) AND train-test pre_cutoff rows
+    # (training-window rows excluded from test-period aggregation).
+    buckets_data: list = [[] for _ in range(n_internal)]
     total_n = 0
     for a in assignments:
         if a.bin is None or a.dropped_reason is not None:
@@ -1596,34 +1614,42 @@ async def metric_bins_1d(
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
         return {"error": f"Insufficient data: {total_n} rows"}
 
+    # Aggregate canonical buckets to display granularity. Each display bin
+    # i collects trades from canonical sub-bins [i*g .. (i+1)*g - 1].
+    # Stats are recomputed on the merged per-trade arrays (NOT a weighted
+    # average of sub-bin stats) so std_dev/sharpe stay correct.
     result = []
-    for i, bucket in enumerate(buckets_data):
-        if not bucket:
+    for i in range(bins):
+        merged: list = []
+        for sub in range(g):
+            merged.extend(buckets_data[i * g + sub])
+        if not merged:
             result.append(None)
             continue
-        ys = np.array([p[1] for p in bucket])
-        xs = [p[0] for p in bucket]
+        ys = np.array([p[1] for p in merged])
+        xs = [p[0] for p in merged]
         result.append({
             "bucket":   i + 1,
-            "n":        len(bucket),
+            "n":        len(merged),
             "avg_ret":  round(float(ys.mean()), 6),
             "win_rate": round(float((ys > 0).mean()), 4),
             "std_dev":  round(float(ys.std()), 6),
             "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
             # In ALL mode these are the cross-ticker min/max of observed
-            # values that landed in this bin — informational only, since
-            # each ticker's bin boundary is independent.
+            # values that landed in this display bin — informational only,
+            # since each ticker's bin boundary is independent.
             "min_val":  round(float(min(xs)), 6),
             "max_val":  round(float(max(xs)), 6),
         })
     out: dict = {
-        "metric":     metric,
-        "outcome":    outcome,
-        "bins":       bins,
-        "n":          total_n,
-        "buckets":    result,
-        "per_ticker": is_all,
-        "mode":       spec.kind,
+        "metric":          metric,
+        "outcome":         outcome,
+        "bins":            bins,
+        "canonical_bins":  n_internal,    # 20 for divisor display bins; bins otherwise
+        "n":               total_n,
+        "buckets":         result,
+        "per_ticker":      is_all,
+        "mode":            spec.kind,
     }
     from app.routers.row_compute import dropped_count_for_mode
     if spec.kind == "walk_forward":
