@@ -1297,6 +1297,54 @@ async def get_trades_csv(
     )
 
 
+# ── Synthetic outcomes ───────────────────────────────────────────────────
+# Some "outcomes" don't correspond to a single column in daily_features;
+# they're computed from multiple columns per-row. Add new entries here +
+# wire the per-row compute in _outcome_value.
+
+_OVERNIGHT_GAP_OUTCOME = "overnight_gap"
+_OVERNIGHT_GAP_COLS    = ("ret_1d_fwd_cc", "ret_1d_fwd_oc")
+
+
+def _outcome_select_cols(outcome: str) -> list[str]:
+    """SQL columns to SELECT for this outcome. Real columns return
+    `[outcome]`; the synthetic overnight_gap returns its two component
+    columns (the per-row cc − oc gap is computed after fetch)."""
+    if outcome == _OVERNIGHT_GAP_OUTCOME:
+        return list(_OVERNIGHT_GAP_COLS)
+    return [outcome]
+
+
+def _outcome_where_clause(outcome: str) -> str:
+    """`<col1> IS NOT NULL AND <col2> IS NOT NULL ...` — every component
+    column must be present for the row to be valid."""
+    return " AND ".join(f"{c} IS NOT NULL" for c in _outcome_select_cols(outcome))
+
+
+def _outcome_value(row, outcome: str) -> Optional[float]:
+    """Resolve the outcome value for a single row (asyncpg Record or dict).
+    Returns None if any required component is missing or non-numeric.
+    For overnight_gap, returns float(cc) − float(oc) per the user spec:
+    the gap is the per-trade mean of (ret_1d_fwd_cc − ret_1d_fwd_oc),
+    NOT the difference of two separately-aggregated heatmaps."""
+    if outcome == _OVERNIGHT_GAP_OUTCOME:
+        cc = row["ret_1d_fwd_cc"] if "ret_1d_fwd_cc" in row else None
+        oc = row["ret_1d_fwd_oc"] if "ret_1d_fwd_oc" in row else None
+        if cc is None or oc is None:
+            return None
+        try:
+            return float(cc) - float(oc)
+        except (TypeError, ValueError):
+            return None
+    v = row[outcome] if outcome in row else None
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/heatmap")
 async def heatmap_2d(
     ticker: str = Query(...),
@@ -1354,10 +1402,16 @@ async def heatmap_2d(
     # SELECT trade_date too so the row_compute Assigner can populate the
     # RowAssignment.trade_date field (used downstream for the WALK-FORWARD
     # subtitle's start_date — when wired in Step 6).
+    # Outcome may be a synthetic compound (e.g., overnight_gap = cc - oc);
+    # _outcome_select_cols expands it to the component column list and
+    # _outcome_where_clause builds the NOT-NULL guard for each component.
+    outcome_cols    = _outcome_select_cols(outcome)
+    outcome_sql_sel = ", ".join(outcome_cols)
+    outcome_sql_nn  = _outcome_where_clause(outcome)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, trade_date, {metric_x}, {metric_y}, {outcome} FROM daily_features "
-            f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome} IS NOT NULL"
+            f"SELECT ticker, trade_date, {metric_x}, {metric_y}, {outcome_sql_sel} FROM daily_features "
+            f"WHERE {metric_x} IS NOT NULL AND {metric_y} IS NOT NULL AND {outcome_sql_nn}"
             f"{date_conditions} ORDER BY trade_date",
             *params)
 
@@ -1373,12 +1427,16 @@ async def heatmap_2d(
         # Pre-filter to rows with all three fields valid + numeric. This
         # mirrors the legacy validity gate exactly so the per-ticker
         # row counts the Assigner sees match the legacy by_ticker.values()
-        # iteration.
+        # iteration. Synthetic outcomes go through _outcome_value (computes
+        # cc - oc per row) so the rest of the pipeline sees a single float.
         rows_clean: list = []
         for r in rows:
             try:
-                xv, yv, ov = float(r[metric_x]), float(r[metric_y]), float(r[outcome])
+                xv, yv = float(r[metric_x]), float(r[metric_y])
             except (TypeError, ValueError):
+                continue
+            ov = _outcome_value(r, outcome)
+            if ov is None:
                 continue
             if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
                 continue
@@ -1461,14 +1519,20 @@ async def heatmap_2d(
         return out
 
     # Single-ticker mode — original absolute-percentile binning.
+    # Synthetic outcomes (overnight_gap) compute the per-row gap via
+    # _outcome_value before the validity check.
     valid = []
     for r in rows:
         try:
-            xv, yv, ov = float(r[metric_x]), float(r[metric_y]), float(r[outcome])
-            if not (math.isnan(xv) or math.isnan(yv) or math.isnan(ov)):
-                valid.append((xv, yv, ov))
+            xv, yv = float(r[metric_x]), float(r[metric_y])
         except (ValueError, TypeError):
             continue
+        ov = _outcome_value(r, outcome)
+        if ov is None:
+            continue
+        if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
+            continue
+        valid.append((xv, yv, ov))
 
     if len(valid) < 50:
         return {"error": f"Insufficient data: {len(valid)} rows"}
@@ -1567,10 +1631,15 @@ async def metric_bins_1d(
     # (WalkForwardAssigner sorts per-ticker pairs by trade_date — empty
     # strings would still work via stable sort + chronological SQL order,
     # but explicit dates are more robust against schema changes).
+    # Outcome may be synthetic (overnight_gap = cc - oc); _outcome_select_cols
+    # expands to the component columns and _outcome_where_clause guards them.
+    outcome_cols    = _outcome_select_cols(outcome)
+    outcome_sql_sel = ", ".join(outcome_cols)
+    outcome_sql_nn  = _outcome_where_clause(outcome)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"SELECT ticker, trade_date, {metric}, {outcome} FROM daily_features "
-            f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
+            f"SELECT ticker, trade_date, {metric}, {outcome_sql_sel} FROM daily_features "
+            f"WHERE {metric} IS NOT NULL AND {outcome_sql_nn} {date_conditions} "
             f"ORDER BY trade_date", *params)
 
     # Spec-dispatched binning. Both ALL and single-ticker flow through
@@ -1580,12 +1649,20 @@ async def metric_bins_1d(
     spec = make_spec(walk_forward, cutoff_date)
     assigner = ASSIGNERS[spec.kind](spec)
 
-    rows_for_assigner = [dict(r) for r in rows]
-    if not is_all:
-        # Single-ticker rows don't carry a "ticker" column from the SQL
-        # SELECT — inject it so the Assigner can group consistently.
-        for r in rows_for_assigner:
-            r.setdefault("ticker", ticker)
+    # For synthetic outcomes, populate the synthetic key on each row so
+    # the Assigner's r.get(outcome_col) lookup just works. For real
+    # outcomes, the row already carries the column directly.
+    rows_for_assigner: list = []
+    for r in rows:
+        d = dict(r)
+        if outcome == _OVERNIGHT_GAP_OUTCOME:
+            v = _outcome_value(d, outcome)
+            if v is None:
+                continue
+            d[_OVERNIGHT_GAP_OUTCOME] = v
+        if not is_all:
+            d.setdefault("ticker", ticker)
+        rows_for_assigner.append(d)
 
     # Canonical 20-bin internal when the requested display bins evenly
     # divides 20 ({2, 4, 5, 10, 20}). Otherwise direct-bin at the

@@ -1155,11 +1155,19 @@ document.addEventListener('alpine:init', () => {
 
     setDecileMode(mode) {
       // P3: bin selection clears on any subset-defining change (per the
-      // spec; P4 will refine the multi-select rules within each subset).
+      // spec; P4 refines multi-select rules within each subset).
+      const prevMode = this.decileMode;
       this.decileMode = mode;
       this.selectedBins20 = new Set();
       this._onDecileChange();
       this._renderDecileBar();
+      // P5: heatmap + sidebar bin charts switch to the synthetic
+      // overnight_gap outcome when entering Gap mode (and back to
+      // this.outcome on exit). Reload when the mode toggles either
+      // direction so the heatmap reflects the active outcome.
+      const gapBefore = prevMode === 'overnight_gap';
+      const gapAfter  = mode === 'overnight_gap';
+      if (gapBefore !== gapAfter && this.heatmapMetric) this.loadHeatmap();
     },
 
     setDecileHorizonAnchor(anchor) {
@@ -1765,6 +1773,14 @@ document.addEventListener('alpine:init', () => {
     hmYData: null,
     _hmRange: null,
 
+    // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
+    // the synthetic outcome `overnight_gap`, which the backend resolves
+    // to per-trade (ret_1d_fwd_cc − ret_1d_fwd_oc). Outside Gap mode,
+    // they follow whatever the active outcome is.
+    _heatmapOutcome() {
+      return this.decileMode === 'overnight_gap' ? 'overnight_gap' : this.outcome;
+    },
+
     async loadHeatmap() {
       if (!this.heatmapMetric || !this.data) return;
       this.heatmapLoading = true;
@@ -1786,7 +1802,7 @@ document.addEventListener('alpine:init', () => {
           `/api/factor-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric_x=${encodeURIComponent(this.metric)}`
           + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
-          + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.heatmapBins}`
+          + `&outcome=${encodeURIComponent(this._heatmapOutcome())}&bins=${this.heatmapBins}`
           + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
           + (this.dateTo   ? `&date_to=${this.dateTo}`     : '')
           + wf);
@@ -1827,7 +1843,7 @@ document.addEventListener('alpine:init', () => {
       if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
       else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
       const base = `/api/factor-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
-        + `&outcome=${encodeURIComponent(this.outcome)}&bins=${this.hmBins1d}`
+        + `&outcome=${encodeURIComponent(this._heatmapOutcome())}&bins=${this.hmBins1d}`
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
         + (this.dateTo ? `&date_to=${this.dateTo}` : '')
         + wf;
