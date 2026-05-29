@@ -1142,13 +1142,19 @@ document.addEventListener('alpine:init', () => {
       const outcome = this.decileActiveOutcome;
       if (outcome === 'ret_5d_fwd_oc' && this._originalAnalyzeData) {
         Object.assign(this.data, this._originalAnalyzeData);
-        return;
+      } else {
+        const slice = this._buildOutcomeDataSlice(outcome);
+        if (slice) {
+          Object.assign(this.data, slice);
+          // equity_by_decile depends on horizon (now updated) + new trade_calendar.
+          this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
+        }
       }
-      const slice = this._buildOutcomeDataSlice(outcome);
-      if (!slice) return;
-      Object.assign(this.data, slice);
-      // equity_by_decile depends on horizon (now updated) + new trade_calendar.
-      this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
+      // Heatmap auto-refresh on outcome change. The pre-cache Load button
+      // is kept for Y-metric changes (separate computation, deliberate
+      // user action) but outcome switches are now backed by the bundle
+      // and cheap, so manual Load was friction without purpose.
+      if (this.heatmapMetric) this.loadHeatmap();
     },
 
     // ── P3 setters ────────────────────────────────────────────────────────
@@ -1847,6 +1853,35 @@ document.addEventListener('alpine:init', () => {
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
         + (this.dateTo ? `&date_to=${this.dateTo}` : '')
         + wf;
+
+      // Overnight Gap mode: serve the X-axis sidebar directly from the
+      // bundle so its values match the main Quantile pane exactly. The
+      // bundle's bin_20 assignments come from the anchor-outcome
+      // (ret_5d_fwd_oc) row-validity set; /metric-bins for the synthetic
+      // gap outcome filters on (cc AND oc) non-null, which is a different
+      // row set and produces a different ticker exclusion — symptom is
+      // the residual ~few-bp gap between sidebar and main pane after
+      // canonical-20 binning. Bundle-derived path bypasses /metric-bins
+      // for X and is faster (no round-trip).
+      // Y still fetches because its metric differs from the main pane
+      // and the bundle doesn't carry per-bin stats for arbitrary metrics.
+      if (this.decileMode === 'overnight_gap' && this.analyzeBundle) {
+        const x20 = this._overnightGapPerBin20();
+        const xAgg = x20 ? this._aggregateBin20ToN(x20, this.hmBins1d) : null;
+        this.hmXData = xAgg ? xAgg.filter(Boolean) : null;
+        try {
+          const ry = await fetch(base + `&metric=${encodeURIComponent(this.heatmapMetric)}`);
+          if (ry.ok) {
+            const d = await ry.json();
+            this.hmYData = d.buckets || null;
+          }
+        } catch (e) { console.error('[hmBins1d gap Y] fetch failed', e); }
+        await this.$nextTick();
+        this._renderHmBar1d('chart-hm-x', this.hmXData, this.metric);
+        this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
+        return;
+      }
+
       try {
         const [rx, ry] = await Promise.all([
           fetch(base + `&metric=${encodeURIComponent(this.metric)}`),
