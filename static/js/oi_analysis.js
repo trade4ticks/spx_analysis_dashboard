@@ -1122,6 +1122,145 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
+    // P6: synthesized data slice for Overnight Gap mode. Each trade's
+    // "return" is the per-trade gap = ret_1d_fwd_cc − ret_1d_fwd_oc.
+    // Trades are intersected on trade_id between the two columns so
+    // every row has both legs. Bin assignment comes from trade_meta
+    // (anchor-outcome filtered, n_bins=20) — same as the main Quantile
+    // pane in Gap mode and the X-sidebar after the P5 fixup, so all
+    // three agree exactly.
+    //
+    // Rolling IC is intentionally empty: the bundle stores IC per real
+    // outcome, not for the synthetic gap. Computing it client-side
+    // means a 252-day rolling Spearman over ~150K trades (~minutes in
+    // JS without a worker). The Rolling Signal Strength chart will
+    // render blank in Gap mode until a bundle schema bump adds it.
+    _buildGapDataSlice() {
+      const b = this.analyzeBundle;
+      if (!b) return null;
+      const tm = b.trade_meta;
+      const cc = b.per_outcome_returns?.ret_1d_fwd_cc;
+      const oc = b.per_outcome_returns?.ret_1d_fwd_oc;
+      if (!Array.isArray(tm) || !cc || !oc) return null;
+
+      // OC lookup by trade_id, then walk CC computing the gap.
+      const ocByTid = new Map();
+      for (let i = 0; i < oc.trade_ids.length; i++) {
+        ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
+      }
+
+      const tc = [];
+      const returnsByBin10 = Array.from({length: 10}, () => []);
+      const bin20Buckets  = Array.from({length: 20}, () => []);
+      for (let i = 0; i < cc.trade_ids.length; i++) {
+        const tid = cc.trade_ids[i];
+        const ocRet = ocByTid.get(tid);
+        if (ocRet == null) continue;
+        const m = tm[tid];
+        if (!m) continue;
+        const gap = cc.ret_pcts[i] - ocRet;
+        const bin20 = m.bin_20;
+        tc.push({ date: m.trade_date, ret: gap, ticker: m.ticker, decile20: bin20 });
+        if (bin20 >= 1 && bin20 <= 20) bin20Buckets[bin20 - 1].push(gap);
+        const bin10 = Math.ceil(bin20 / 2);
+        if (bin10 >= 1 && bin10 <= 10) returnsByBin10[bin10 - 1].push(gap);
+      }
+
+      // Per-bin stats (20-bin) directly from per-trade gap arrays. mean,
+      // win_rate, std (population), sharpe = mean/std.
+      const ds20 = bin20Buckets.map((arr, idx) => {
+        if (!arr.length) return null;
+        const n = arr.length;
+        let sum = 0, wins = 0;
+        for (const v of arr) { sum += v; if (v > 0) wins++; }
+        const mean = sum / n;
+        let ssq = 0;
+        for (const v of arr) { const d = v - mean; ssq += d * d; }
+        const std = Math.sqrt(ssq / n);
+        return {
+          bucket:   idx + 1,
+          n,
+          avg_ret:  mean,
+          med_ret:  null,
+          win_rate: wins / n,
+          std_dev:  std,
+          sharpe:   std > 0 ? mean / std : 0,
+          min_val:  null,
+          max_val:  null,
+          returns:  [],
+        };
+      });
+
+      // 10-bin aggregation (trade-count-weighted), with per-bin returns
+      // arrays for the Return Distribution histogram.
+      const ds10 = [];
+      for (let i = 0; i < 10; i++) {
+        const pair = [ds20[i*2], ds20[i*2 + 1]].filter(Boolean);
+        if (!pair.length) { ds10.push(null); continue; }
+        const totalN = pair.reduce((a, d) => a + d.n, 0);
+        if (!totalN) { ds10.push(null); continue; }
+        ds10.push({
+          bucket:   i + 1,
+          n:        totalN,
+          avg_ret:  pair.reduce((a, d) => a + d.avg_ret  * d.n, 0) / totalN,
+          med_ret:  null,
+          win_rate: pair.reduce((a, d) => a + d.win_rate * d.n, 0) / totalN,
+          std_dev:  null,
+          sharpe:   null,
+          min_val:  null,
+          max_val:  null,
+          returns:  returnsByBin10[i],
+        });
+      }
+
+      // Yearly / DoW / Activity — same aggregation shape as the real-
+      // outcome branch in _buildOutcomeDataSlice.
+      const yrAcc  = new Map();
+      const dowAcc = new Map();
+      const actAcc = new Map();
+      for (const t of tc) {
+        const yr = +t.date.slice(0, 4);
+        const jd = new Date(t.date + 'T12:00:00Z').getUTCDay();
+        const dow = (jd + 6) % 7;
+        const yk = `${yr}|${t.decile20}`;
+        if (!yrAcc.has(yk)) yrAcc.set(yk, {year: yr, decile20: t.decile20, sum: 0, wins: 0, n: 0});
+        const ya = yrAcc.get(yk);
+        ya.sum += t.ret; ya.wins += (t.ret > 0 ? 1 : 0); ya.n++;
+        if (dow <= 4) {
+          const dk = `${dow}|${t.decile20}`;
+          if (!dowAcc.has(dk)) dowAcc.set(dk, {dow, decile20: t.decile20, sum: 0, wins: 0, n: 0});
+          const da = dowAcc.get(dk);
+          da.sum += t.ret; da.wins += (t.ret > 0 ? 1 : 0); da.n++;
+        }
+        const ak = `${t.date}|${t.decile20}`;
+        if (!actAcc.has(ak)) actAcc.set(ak, {date: t.date, decile20: t.decile20, n: 0});
+        actAcc.get(ak).n++;
+      }
+      const yearly_stats = Array.from(yrAcc.values()).map(a => ({
+        year: a.year, decile20: a.decile20,
+        n: a.n, avg_ret: a.sum / a.n, win_rate: a.wins / a.n,
+      })).sort((a, b) => a.year - b.year || a.decile20 - b.decile20);
+      const dow_stats = Array.from(dowAcc.values()).map(a => ({
+        dow: a.dow, decile20: a.decile20,
+        n: a.n, avg_ret: a.sum / a.n, win_rate: a.wins / a.n,
+      })).sort((a, b) => a.dow - b.dow || a.decile20 - b.decile20);
+      const activity_by_date = Array.from(actAcc.values())
+        .sort((a, b) => a.date.localeCompare(b.date) || a.decile20 - b.decile20);
+
+      return {
+        trade_calendar:    tc,
+        decile_stats:      ds10,
+        decile_stats_20:   ds20,
+        rolling_ic: {
+          series: [], reference_ic: 0, epsilon: 0, cutoff_date: null, short_series: [],
+        },
+        yearly_stats,
+        dow_stats,
+        activity_by_date,
+        horizon: 1,
+      };
+    },
+
     // Rebuild equity_by_decile (10-bin) from a trade_calendar. Reads
     // this.data.horizon for non_overlapping spacing — caller must set
     // this.data.horizon to the new outcome's horizon FIRST.
@@ -1147,6 +1286,20 @@ document.addEventListener('alpine:init', () => {
     //      will show stale ret_5d_fwd_oc data with the new outcome label).
     _swapDataForActiveOutcome() {
       if (!this.data) return;
+      // P6: Overnight Gap mode takes precedence — the lower section's
+      // "outcome" is the synthetic gap (cc - oc), not whatever
+      // decileActiveOutcome happens to be. decileActiveOutcome stays
+      // pointing at the prior real outcome so leaving Gap mode restores
+      // cleanly via the normal outcome branch below.
+      if (this.decileMode === 'overnight_gap') {
+        const slice = this._buildGapDataSlice();
+        if (slice) {
+          Object.assign(this.data, slice);
+          this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
+        }
+        if (this.heatmapMetric) this.loadHeatmap();
+        return;
+      }
       const outcome = this.decileActiveOutcome;
       if (outcome === 'ret_5d_fwd_oc' && this._originalAnalyzeData) {
         Object.assign(this.data, this._originalAnalyzeData);
@@ -1173,15 +1326,19 @@ document.addEventListener('alpine:init', () => {
       const prevMode = this.decileMode;
       this.decileMode = mode;
       this.selectedBins20 = new Set();
-      this._onDecileChange();
-      this._renderDecileBar();
-      // P5: heatmap + sidebar bin charts switch to the synthetic
-      // overnight_gap outcome when entering Gap mode (and back to
-      // this.outcome on exit). Reload when the mode toggles either
-      // direction so the heatmap reflects the active outcome.
+      // P6: when the mode toggles into or out of Overnight Gap, swap
+      // this.data so the downstream visuals (equity, drawdown, yearly,
+      // dow, activity, decile stats, trade table) reflect either the
+      // synthetic gap or the previously-active real outcome. The swap
+      // also reloads the heatmap (via _swapDataForActiveOutcome) so we
+      // don't need a separate loadHeatmap call here.
       const gapBefore = prevMode === 'overnight_gap';
       const gapAfter  = mode === 'overnight_gap';
-      if (gapBefore !== gapAfter && this.heatmapMetric) this.loadHeatmap();
+      if (gapBefore !== gapAfter) {
+        this._swapDataForActiveOutcome();
+      }
+      this._onDecileChange();
+      this._renderDecileBar();
     },
 
     setDecileHorizonAnchor(anchor) {
@@ -2400,12 +2557,48 @@ document.addEventListener('alpine:init', () => {
     // not_cached → "Run Analyze first" placeholder). Bundle has every
     // field the table renders: trade_meta gives ticker/date/metric_val/
     // entry_spot/bin_20; per_outcome_returns gives ret/exit_date/exit_spot.
+    //
+    // P6: outcome="overnight_gap" intersects ret_1d_fwd_cc and
+    // ret_1d_fwd_oc by trade_id and stores the per-row gap (cc - oc)
+    // in `ret`. exit_date/spot come from the cc leg (both legs land at
+    // close of trade_date for 1-day horizon).
     _buildFlatTradesFromBundle(outcome) {
       const b = this.analyzeBundle;
       if (!b) return null;
       const tm = b.trade_meta;
+      if (!Array.isArray(tm)) return null;
+
+      if (outcome === 'overnight_gap') {
+        const cc = b.per_outcome_returns?.ret_1d_fwd_cc;
+        const oc = b.per_outcome_returns?.ret_1d_fwd_oc;
+        if (!cc || !oc) return null;
+        const ocByTid = new Map();
+        for (let i = 0; i < oc.trade_ids.length; i++) {
+          ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
+        }
+        const out = [];
+        for (let i = 0; i < cc.trade_ids.length; i++) {
+          const tid = cc.trade_ids[i];
+          const ocRet = ocByTid.get(tid);
+          if (ocRet == null) continue;
+          const m = tm[tid];
+          if (!m) continue;
+          out.push({
+            date:       m.trade_date,
+            ticker:     m.ticker,
+            metric_val: m.metric_val,
+            spot_entry: m.entry_spot,
+            spot_exit:  cc.exit_spots[i],
+            ret:        cc.ret_pcts[i] - ocRet,
+            exit_date:  cc.exit_dates[i],
+            decile20:   m.bin_20,
+          });
+        }
+        return out;
+      }
+
       const ret = b.per_outcome_returns?.[outcome];
-      if (!Array.isArray(tm) || !ret) return null;
+      if (!ret) return null;
       const out = [];
       for (let i = 0; i < ret.trade_ids.length; i++) {
         const m = tm[ret.trade_ids[i]];
@@ -2450,8 +2643,13 @@ document.addEventListener('alpine:init', () => {
         '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Loading…</td></tr>';
 
       let rows, total;
-      const isDefaultOutcome = this.outcome === 'ret_5d_fwd_oc';
-      const bundleRows = !isDefaultOutcome ? this._buildFlatTradesFromBundle(this.outcome) : null;
+      // In Gap mode the effective outcome is the synthetic overnight_gap,
+      // even though this.outcome still points at the prior real outcome
+      // (so we can restore on Gap-mode exit).
+      const effectiveOutcome = this.decileMode === 'overnight_gap'
+        ? 'overnight_gap' : this.outcome;
+      const isDefaultOutcome = effectiveOutcome === 'ret_5d_fwd_oc';
+      const bundleRows = !isDefaultOutcome ? this._buildFlatTradesFromBundle(effectiveOutcome) : null;
 
       if (bundleRows) {
         const filtered = this.selectedBins20.size > 0
@@ -2663,8 +2861,12 @@ document.addEventListener('alpine:init', () => {
       const mode = this.pageMode === 'train_test' ? 'train_test'
                  : this.pageMode === 'in_sample'  ? 'in_sample'
                  : 'walk_forward';
-      const isDefault = this.outcome === 'ret_5d_fwd_oc';
-      const bundleRows = !isDefault ? this._buildFlatTradesFromBundle(this.outcome) : null;
+      // Gap mode → effective outcome is the synthetic overnight_gap; the
+      // CSV builder takes the same path as the Flat view.
+      const effectiveOutcome = this.decileMode === 'overnight_gap'
+        ? 'overnight_gap' : this.outcome;
+      const isDefault = effectiveOutcome === 'ret_5d_fwd_oc';
+      const bundleRows = !isDefault ? this._buildFlatTradesFromBundle(effectiveOutcome) : null;
       if (bundleRows) {
         const filtered = this.selectedBins20.size > 0
           ? bundleRows.filter(t => this.selectedBins20.has(t.decile20))
