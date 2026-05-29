@@ -650,12 +650,16 @@ document.addEventListener('alpine:init', () => {
       if (!ocStats.length && !ccStats.length) return;
       const primaryStats = ocStats.length ? ocStats : ccStats;
       const self  = this;
-      const _isSel = (d) => d && self._displayBucketIsSelected(d.bucket);
       const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
 
       // Active outcome gets the brighter fill + star marker; the other is dim.
       const activeAnchor = this._outcomeAnchor(this.decileActiveOutcome);
       const ocPrim = activeAnchor === 'oc';
+      // Selection highlight is anchored to the active (primary) dataset only.
+      // Bars in the non-primary dataset never reflect selection — clicking a
+      // primary bar must not also light up the sibling bar in the cluster.
+      const isSelOC = (d) => ocPrim && d && self._displayBucketIsSelected(d.bucket);
+      const isSelCC = (d) => !ocPrim && d && self._displayBucketIsSelected(d.bucket);
 
       const datasets = [
         {
@@ -663,10 +667,10 @@ document.addEventListener('alpine:init', () => {
           data:  ocStats.map(d => d ? d.avg_ret * 100 : null),
           backgroundColor: ocStats.map(d => {
             if (!d) return 'transparent';
-            const a = ocPrim ? (_isSel(d) ? 0.92 : 0.50) : (_isSel(d) ? 0.72 : 0.26);
+            const a = ocPrim ? (isSelOC(d) ? 0.92 : 0.50) : 0.26;
             return d.avg_ret >= 0 ? `rgba(52,152,219,${a})` : `rgba(232,67,147,${a})`;
           }),
-          borderWidth: ocPrim ? ocStats.map(d => _isSel(d) ? 1 : 0) : 0,
+          borderWidth: ocPrim ? ocStats.map(d => isSelOC(d) ? 1 : 0) : 0,
           borderColor: '#fff',
         },
         {
@@ -674,10 +678,10 @@ document.addEventListener('alpine:init', () => {
           data:  ccStats.map(d => d ? d.avg_ret * 100 : null),
           backgroundColor: ccStats.map(d => {
             if (!d) return 'transparent';
-            const a = !ocPrim ? (_isSel(d) ? 0.92 : 0.50) : (_isSel(d) ? 0.72 : 0.26);
+            const a = !ocPrim ? (isSelCC(d) ? 0.92 : 0.50) : 0.26;
             return d.avg_ret >= 0 ? `rgba(46,204,113,${a})` : `rgba(230,126,34,${a})`;
           }),
-          borderWidth: !ocPrim ? ccStats.map(d => _isSel(d) ? 1 : 0) : 0,
+          borderWidth: !ocPrim ? ccStats.map(d => isSelCC(d) ? 1 : 0) : 0,
           borderColor: '#fff',
         },
       ];
@@ -700,8 +704,16 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               callbacks: {
                 label: ctx => {
-                  const v = ctx.parsed.y;
-                  return `${ctx.dataset.label.replace(' ★','')}: ${v != null ? v.toFixed(3)+'%' : '—'}`;
+                  const d = ctx.datasetIndex === 0 ? ocStats[ctx.dataIndex]
+                                                   : ccStats[ctx.dataIndex];
+                  if (!d) return `${ctx.dataset.label.replace(' ★','')}: —`;
+                  return [
+                    `${ctx.dataset.label.replace(' ★','')}`,
+                    `Avg: ${(d.avg_ret*100).toFixed(3)}%`,
+                    `WR: ${(d.win_rate*100).toFixed(1)}%`,
+                    d.sharpe != null ? `Sharpe: ${d.sharpe.toFixed(3)}` : '',
+                    `n: ${d.n}`,
+                  ].filter(Boolean);
                 },
               },
             },
@@ -721,7 +733,6 @@ document.addEventListener('alpine:init', () => {
       const primaryStats = series.find(s => s.length) || [];
       if (!primaryStats.length) return;
       const self  = this;
-      const _isSel = (d) => d && self._displayBucketIsSelected(d.bucket);
       const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
 
       // Active outcome gets the star marker (when the active outcome matches
@@ -733,15 +744,19 @@ document.addEventListener('alpine:init', () => {
         const stats = series[i];
         const isPrimary = (h === activeH) && (a === activeAnchor);
         const col = HORIZON_PALETTE[i];
+        // Selection highlight is anchored to the primary (active) dataset.
+        // Non-primary horizons stay at their dim baseline so a click on the
+        // primary's bucket B3 doesn't also brighten the other 5 horizons' B3.
+        const isSel = (d) => isPrimary && d && self._displayBucketIsSelected(d.bucket);
         return {
           label: `${h}d${isPrimary ? ' ★' : ''}`,
           data:  stats.map(d => d ? d.avg_ret * 100 : null),
           backgroundColor: stats.map(d => {
             if (!d) return 'transparent';
             return self._hexToRgba(col,
-              isPrimary ? (_isSel(d) ? 0.95 : 0.50) : (_isSel(d) ? 0.70 : 0.28));
+              isPrimary ? (isSel(d) ? 0.95 : 0.50) : 0.28);
           }),
-          borderWidth: isPrimary ? stats.map(d => _isSel(d) ? 1 : 0) : 0,
+          borderWidth: isPrimary ? stats.map(d => isSel(d) ? 1 : 0) : 0,
           borderColor: col,
         };
       });
@@ -764,8 +779,15 @@ document.addEventListener('alpine:init', () => {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               callbacks: {
                 label: ctx => {
-                  const v = ctx.parsed.y;
-                  return `${ctx.dataset.label.replace(' ★','')}: ${v != null ? v.toFixed(3)+'%' : '—'}`;
+                  const d = series[ctx.datasetIndex]?.[ctx.dataIndex];
+                  if (!d) return `${ctx.dataset.label.replace(' ★','')}: —`;
+                  return [
+                    `${ctx.dataset.label.replace(' ★','')}`,
+                    `Avg: ${(d.avg_ret*100).toFixed(3)}%`,
+                    `WR: ${(d.win_rate*100).toFixed(1)}%`,
+                    d.sharpe != null ? `Sharpe: ${d.sharpe.toFixed(3)}` : '',
+                    `n: ${d.n}`,
+                  ].filter(Boolean);
                 },
               },
             },

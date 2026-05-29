@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=127"></script>
+  <script src="/static/js/oi_analysis.js?v=128"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -809,14 +809,21 @@
                   title="Entry-day overnight gap (CC − OC) — requires bundle">Overnight Gap</span>
           </div>
 
-          <!-- Single mode: inline outcome dropdown. Hidden in other modes. -->
+          <!-- Single mode: inline outcome dropdown. Hidden in other modes.
+               Uses :value + @change (NOT x-model) — x-model overwrites
+               decileActiveOutcome before @change fires, which made the
+               same-value guard inside setDecileActiveOutcome bail every
+               time. With :value the DOM follows state one-way, the setter
+               runs unconditionally with the user's new pick, and the
+               select re-mounts cleanly when Single mode is re-entered. -->
           <template x-if="decileMode==='single'">
-            <select x-model="decileActiveOutcome"
+            <select :value="decileActiveOutcome"
                     @change="setDecileActiveOutcome($event.target.value)"
+                    autocomplete="off"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                            font-size:11px;padding:2px 6px;border-radius:3px;max-width:180px">
               <template x-for="o in outcomes" :key="'sao-'+o">
-                <option :value="o" x-text="o"></option>
+                <option :value="o" :selected="o===decileActiveOutcome" x-text="o"></option>
               </template>
             </select>
           </template>
