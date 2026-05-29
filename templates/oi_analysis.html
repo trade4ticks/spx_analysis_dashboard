@@ -162,7 +162,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=124"></script>
+  <script src="/static/js/oi_analysis.js?v=125"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -782,34 +782,90 @@
         <!-- Charts -->
         <div class="chart-grid">
 
-          <!-- Decile bar (clickable) -->
+          <!-- P3: Quantile Avg Return — Single | Entry | Horizon | Overnight Gap -->
           <div class="chart-box">
             <div class="chart-title">
               <span x-text="decileChartTitle()"></span>
-              <span x-show="decileCompareMode==='single'" style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
-              <div class="mode-seg" style="margin-left:8px">
-                <span :class="{on: decileBins===5}"  @click="setDecileBins(5)">5</span>
-                <span :class="{on: decileBins===10}" @click="setDecileBins(10)">10</span>
-                <span :class="{on: decileBins===20}" @click="setDecileBins(20)">20</span>
-              </div>
+              <span x-show="decileMode==='single'" style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
               <button class="fs-btn" @click="openFullscreen('chart-decile')" title="Fullscreen">⛶</button>
             </div>
-            <!-- Compare mode toggle row -->
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+
+            <!-- Lower control bar: mode pills + contextual sub-controls + refresh -->
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:6px">
+
+              <!-- Mode pills. Entry / Horizon / Overnight Gap are disabled
+                   until the analyze bundle is ready (single-ticker ~2-5s;
+                   ALL ~5 min on cache miss, instant on hit). -->
               <div class="mode-seg">
-                <span :class="{on: decileCompareMode==='single'}"  @click="setDecileCompareMode('single')">Single</span>
-                <span :class="{on: decileCompareMode==='compare'}" @click="setDecileCompareMode('compare')" title="OC vs CC — same horizon, same metric">Compare</span>
-                <span :class="{on: decileCompareMode==='ladder'}"  @click="setDecileCompareMode('ladder')"  title="All horizons (1d/3d/5d/7d/10d/20d) for one anchor">Ladder</span>
+                <span :class="{on: decileMode==='single'}"
+                      @click="setDecileMode('single')">Single</span>
+                <span :class="{on: decileMode==='entry', disabled: analyzeBundleStatus !== 'ready'}"
+                      :style="analyzeBundleStatus !== 'ready' ? 'opacity:.4;cursor:not-allowed' : ''"
+                      @click="if (analyzeBundleStatus === 'ready') setDecileMode('entry')"
+                      title="OC vs CC entry anchor at one horizon — requires bundle">Entry</span>
+                <span :class="{on: decileMode==='horizon', disabled: analyzeBundleStatus !== 'ready'}"
+                      :style="analyzeBundleStatus !== 'ready' ? 'opacity:.4;cursor:not-allowed' : ''"
+                      @click="if (analyzeBundleStatus === 'ready') setDecileMode('horizon')"
+                      title="All 6 horizons at one anchor — requires bundle">Horizon</span>
+                <span :class="{on: decileMode==='overnight_gap', disabled: analyzeBundleStatus !== 'ready'}"
+                      :style="analyzeBundleStatus !== 'ready' ? 'opacity:.4;cursor:not-allowed' : ''"
+                      @click="if (analyzeBundleStatus === 'ready') setDecileMode('overnight_gap')"
+                      title="Entry-day overnight gap (CC − OC) — requires bundle">Overnight Gap</span>
               </div>
-              <template x-if="decileCompareMode==='ladder'">
+
+              <!-- Single mode: inline outcome dropdown. Hidden in other modes. -->
+              <template x-if="decileMode==='single'">
+                <select x-model="decileActiveOutcome"
+                        @change="setDecileActiveOutcome($event.target.value)"
+                        style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                               font-size:11px;padding:2px 6px;border-radius:3px;max-width:180px">
+                  <template x-for="o in outcomes" :key="'sao-'+o">
+                    <option :value="o" x-text="o"></option>
+                  </template>
+                </select>
+              </template>
+
+              <!-- Entry mode: horizon pills. -->
+              <template x-if="decileMode==='entry'">
                 <div class="mode-seg">
-                  <span :class="{on: decileLadderAnchor==='oc'}" @click="setDecileLadderAnchor('oc')">OC</span>
-                  <span :class="{on: decileLadderAnchor==='cc'}" @click="setDecileLadderAnchor('cc')">CC</span>
+                  <template x-for="h in [1,3,5,7,10,20]" :key="'eh-'+h">
+                    <span :class="{on: decileEntryHorizon === h}"
+                          @click="setDecileEntryHorizon(h)"
+                          x-text="h + 'd'"></span>
+                  </template>
                 </div>
               </template>
-              <span x-show="decileCompareMode!=='single' && _decileCompareFetching"
-                    style="font-size:10px;color:var(--dim)">Loading…</span>
+
+              <!-- Horizon mode: anchor pills (OC/CC). -->
+              <template x-if="decileMode==='horizon'">
+                <div class="mode-seg">
+                  <span :class="{on: decileHorizonAnchor==='oc'}" @click="setDecileHorizonAnchor('oc')">OC</span>
+                  <span :class="{on: decileHorizonAnchor==='cc'}" @click="setDecileHorizonAnchor('cc')">CC</span>
+                </div>
+              </template>
+
+              <!-- Breadcrumb — describes the dimension under analysis. -->
+              <span style="font-size:11px;color:var(--dim);font-style:italic"
+                    x-text="decileBreadcrumb()"></span>
+
+              <div style="flex:1"></div>
+
+              <!-- Cache-age timestamp. Empty when bundle not loaded yet. -->
+              <span style="font-size:10px;color:var(--dim)"
+                    x-show="decileCacheTimestamp()"
+                    x-text="decileCacheTimestamp()"></span>
+
+              <!-- Lower-section refresh. Confirm modal in decileRefresh().
+                   Re-computes the bundle only — doesn't touch upper-section
+                   views (Signal Decomposition + Score panel). -->
+              <button class="btn-action small" @click="decileRefresh()"
+                      :disabled="analyzeBundleStatus === 'computing'"
+                      :style="analyzeBundleStatus === 'computing' ? 'opacity:.5;cursor:wait' : ''"
+                      title="Recompute the 12-outcome bundle for this metric. Confirms first.">
+                ⟳ Refresh
+              </button>
             </div>
+
             <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
           </div>
 

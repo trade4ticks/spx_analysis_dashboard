@@ -1,8 +1,10 @@
 'use strict';
 
 // ── Quantile compare-mode constants ───────────────────────────────────────────
-const LADDER_HORIZONS = [1, 3, 5, 7, 10, 20];
-const LADDER_PALETTE  = ['#74b9ff', '#0984e3', '#48dbfb', '#00b894', '#fdcb6e', '#ff7675'];
+// P3: renamed from LADDER_* — used by both Horizon mode (6-bar groups)
+// and Entry mode's horizon sub-control. The palette runs short→long.
+const HORIZON_LIST    = [1, 3, 5, 7, 10, 20];
+const HORIZON_PALETTE = ['#74b9ff', '#0984e3', '#48dbfb', '#00b894', '#fdcb6e', '#ff7675'];
 
 document.addEventListener('alpine:init', () => {
   Alpine.store('metricPicker', {
@@ -42,12 +44,20 @@ document.addEventListener('alpine:init', () => {
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
     equityXMode: 'calendar',   // 'calendar' | 'sequential'
-    decileBins: 10,
+    decileBins: 10,                 // P3: always 10 (5/10/20 toggle removed)
     decileBinsData: null,
-    decileCompareMode: 'single',   // 'single' | 'compare' | 'ladder'
-    decileLadderAnchor: 'oc',      // 'oc' | 'cc' — ladder sub-toggle
-    _decileCompareCache: {},       // keyed by 'outcome:bins' → buckets[]
-    _decileCompareFetching: false,
+    // P3: lower section mode. Renamed from decileCompareMode for clarity —
+    // the new names describe the *dimension* being analyzed, not chart shape:
+    //   single        — one outcome, 10 bars
+    //   entry         — OC vs CC at one horizon, 20 bars
+    //   horizon       — 6 horizons at one anchor, 60 bars
+    //   overnight_gap — mean(ret_1d_fwd_cc − ret_1d_fwd_oc) per bin, 10 bars
+    decileMode: 'single',
+    decileHorizonAnchor: 'oc',      // 'oc' | 'cc' — Horizon mode sub-toggle (was decileLadderAnchor)
+    decileEntryHorizon: 5,          // 1|3|5|7|10|20 — Entry mode sub-toggle
+    decileActiveOutcome: 'ret_5d_fwd_oc',  // The outcome currently driving Single mode + downstream visuals.
+                                           // Default ret_5d_fwd_oc; user changes via Single mode inline
+                                           // dropdown OR (P4) bar-click promotion in Entry/Horizon modes.
 
     // Trade Data table view mode + sort. The bin filter is shared with
     // the flat trade view via selectedBins20 already.
@@ -246,7 +256,10 @@ document.addEventListener('alpine:init', () => {
       this.error = null;
       // Preserve decileBins and selectedBins20 across re-analyze.
       // decileBinsData is recomputed below once new data arrives.
-      this._decileCompareCache = {};  // stale on new analyze; re-fetched lazily
+      // P3: legacy lazy-fetch cache is gone. All non-Single modes read
+      // from analyzeBundle.per_bin / analyzeBundle.per_outcome_returns,
+      // which is populated by loadAnalyzeBundle() below.
+      this.decileActiveOutcome = 'ret_5d_fwd_oc';   // reset active outcome on new analyze
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
@@ -432,27 +445,70 @@ document.addEventListener('alpine:init', () => {
       this._renderAllCharts();
     },
 
+    // ── P3: lower-section chart rendering ─────────────────────────────────
+    // Dispatch on decileMode. Single / Entry / Horizon read from the
+    // analyze_cache bundle (analyzeBundle.per_bin[outcome]); Overnight Gap
+    // computes from analyzeBundle.per_outcome_returns at render time.
+    // Single mode falls back to this.data.decile_stats (the /analyze single-
+    // outcome payload) when the bundle hasn't arrived yet — so the initial
+    // ~25s /analyze view is always usable. Entry, Horizon, and Overnight Gap
+    // require the bundle (controls are disabled in template until ready).
+
     _renderDecileBar() {
       const el = document.getElementById('chart-decile');
       if (!el) return;
       if (this._charts['decile']) this._charts['decile'].destroy();
-      if (this.decileCompareMode !== 'single') { this._renderDecileBarMulti(el); return; }
+      if (this.decileMode === 'overnight_gap') { this._renderDecileBarOvernightGap(el); return; }
+      if (this.decileMode === 'entry')         { this._renderDecileBarEntry(el);        return; }
+      if (this.decileMode === 'horizon')       { this._renderDecileBarHorizon(el);      return; }
       this._renderDecileBarSingle(el);
     },
 
+    // Normalized per-bin stats for a single outcome. Returns an array of
+    // {bucket, n, avg_ret, win_rate, std, sharpe} indexed by bin 1..10 —
+    // sharpe is derived from avg_ret/std at read time (the bundle doesn't
+    // pre-compute it). Returns null when the data isn't yet available.
+    _bundlePerBin(outcome) {
+      const pb = this.analyzeBundle?.per_bin?.[outcome];
+      if (!Array.isArray(pb)) return null;
+      return pb.map(r => r ? {
+        bucket:   r.bin,
+        n:        r.n,
+        avg_ret:  r.avg_ret,
+        median:   r.median,
+        win_rate: r.win_rate,
+        std_dev:  r.std,
+        sharpe:   (r.std && r.std > 0) ? (r.avg_ret / r.std) : null,
+      } : null);
+    },
+
+    // Single-outcome stats for the *active* outcome. Prefers the bundle
+    // when available; falls back to this.data.decile_stats when the bundle
+    // hasn't loaded yet AND the active outcome matches what /analyze
+    // returned (always ret_5d_fwd_oc in P2; in P3 the chart locks to
+    // ret_5d_fwd_oc until the user picks something else via the Single
+    // mode inline outcome dropdown — at which point only the bundle path
+    // works, and that requires bundle ready).
+    _activeOutcomeStats() {
+      const fromBundle = this._bundlePerBin(this.decileActiveOutcome);
+      if (fromBundle) return fromBundle.filter(Boolean);
+      // Bundle not ready. If active outcome matches what /analyze returned,
+      // fall back to that.
+      if (this.decileActiveOutcome === 'ret_5d_fwd_oc') {
+        return (this.data?.decile_stats || []).filter(Boolean);
+      }
+      return [];
+    },
+
     _renderDecileBarSingle(el) {
-      const bins = this.decileBins;
-      const g = 20 / bins;  // group size: bins 20→1, 10→2, 5→4
-      const stats = (this.decileBinsData || this.data.decile_stats || []).filter(d => d);
+      const stats = this._activeOutcomeStats();
+      if (!stats.length) return;
       const avgs = stats.map(d => d.avg_ret * 100);
       const self = this;
-
-      // A display bucket is selected if ANY of its 20-bin members are in selectedBins20.
-      const _isSelected = (d) => {
-        const lo = (d.bucket - 1) * g + 1;
-        for (let b = lo; b < lo + g; b++) { if (self.selectedBins20.has(b)) return true; }
-        return false;
-      };
+      // selectedBins20 is the canonical 20-bin set; display bucket k maps
+      // to bins {2k-1, 2k}. (Same convention as decile_stats_20 and
+      // trade_calendar.decile20 downstream.)
+      const _isSel = (d) => self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket);
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
@@ -460,10 +516,10 @@ document.addEventListener('alpine:init', () => {
           labels: stats.map(d => 'B' + d.bucket),
           datasets: [{
             data: avgs,
-            backgroundColor: stats.map(d => _isSelected(d)
+            backgroundColor: stats.map(d => _isSel(d)
               ? (d.avg_ret >= 0 ? '#3498db' : '#e84393') : 'rgba(100,100,100,0.3)'),
-            borderColor:     stats.map(d => _isSelected(d) ? '#fff' : 'transparent'),
-            borderWidth:     stats.map(d => _isSelected(d) ? 1 : 0),
+            borderColor:     stats.map(d => _isSel(d) ? '#fff' : 'transparent'),
+            borderWidth:     stats.map(d => _isSel(d) ? 1 : 0),
           }],
         },
         options: {
@@ -472,17 +528,7 @@ document.addEventListener('alpine:init', () => {
           onClick: (e, elements) => {
             if (!elements.length) return;
             const d = stats[elements[0].index];
-            const lo = (d.bucket - 1) * g + 1;
-            const binSet = Array.from({length: g}, (_, i) => lo + i);
-            const allSelected = binSet.every(b => self.selectedBins20.has(b));
-            if (allSelected) {
-              if (self.selectedBins20.size > binSet.length) binSet.forEach(b => self.selectedBins20.delete(b));
-            } else {
-              binSet.forEach(b => self.selectedBins20.add(b));
-            }
-            self.selectedBins20 = new Set(self.selectedBins20);
-            self._onDecileChange();
-            self._renderDecileBar();
+            self._toggleSingleBin(d.bucket);
           },
           plugins: {
             legend: { display: false },
@@ -495,7 +541,7 @@ document.addEventListener('alpine:init', () => {
                   return [
                     `Avg: ${(d.avg_ret*100).toFixed(3)}%`,
                     `WR: ${(d.win_rate*100).toFixed(1)}%`,
-                    `Sharpe: ${d.sharpe?.toFixed(3) ?? '—'}`,
+                    d.sharpe != null ? `Sharpe: ${d.sharpe.toFixed(3)}` : '',
                     `n: ${d.n}`,
                     d.min_val != null ? `Range: ${d.min_val.toFixed(4)} – ${d.max_val.toFixed(4)}` : '',
                   ].filter(Boolean);
@@ -508,7 +554,17 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── Multi-outcome compare modes (Anchor Compare + Horizon Ladder) ──────────
+    // Helper for single-bin toggle (P3 still single-select; P4 adds the
+    // proper multi-select-within-subset rules + outcome-promotion logic).
+    // `bin` is the 10-bin display index (1..10); maps to {2b-1, 2b} in
+    // selectedBins20.
+    _toggleSingleBin(bin) {
+      const lo = 2 * bin - 1, hi = 2 * bin;
+      const isOn = this.selectedBins20.has(lo) && this.selectedBins20.has(hi);
+      this.selectedBins20 = new Set(isOn ? [] : [lo, hi]);
+      this._onDecileChange();
+      this._renderDecileBar();
+    },
 
     _hexToRgba(hex, alpha) {
       const r = parseInt(hex.slice(1, 3), 16);
@@ -517,169 +573,55 @@ document.addEventListener('alpine:init', () => {
       return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
     },
 
-    _outcomeAnchor() {
-      const m = (this.outcome || '').match(/_(oc|cc)$/i);
+    _outcomeAnchor(outcome) {
+      const m = (outcome || this.decileActiveOutcome || '').match(/_(oc|cc)$/i);
       return m ? m[1].toLowerCase() : 'oc';
     },
 
-    _outcomeHorizon() {
-      const m = (this.outcome || '').match(/ret_(\d+)d_fwd/i);
-      return m ? m[1] : null;
+    _outcomeHorizon(outcome) {
+      const m = (outcome || this.decileActiveOutcome || '').match(/ret_(\d+)d_fwd/i);
+      return m ? +m[1] : null;
     },
 
-    _outcomeBase() {
-      return (this.outcome || '').replace(/_(oc|cc)$/i, '');
-    },
+    // Entry mode: at a chosen horizon, compare OC vs CC. 20 bars (10 bins × 2 anchors).
+    _renderDecileBarEntry(el) {
+      const h = this.decileEntryHorizon;
+      const ocStats = this._bundlePerBin(`ret_${h}d_fwd_oc`) || [];
+      const ccStats = this._bundlePerBin(`ret_${h}d_fwd_cc`) || [];
+      if (!ocStats.length && !ccStats.length) return;
+      const primaryStats = ocStats.length ? ocStats : ccStats;
+      const self  = this;
+      const _isSel = (d) => d && (self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket));
+      const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
 
-    async _decileFetchBuckets(outcome) {
-      const key = `${outcome}:${this.decileBins}`;
-      if (key in this._decileCompareCache) return this._decileCompareCache[key];
-      let url = `/api/factor-analysis/metric-bins`
-        + `?ticker=${encodeURIComponent(this.ticker)}`
-        + `&metric=${encodeURIComponent(this.metric)}`
-        + `&outcome=${encodeURIComponent(outcome)}`
-        + `&bins=${this.decileBins}`;
-      if (this.dateFrom) url += `&date_from=${this.dateFrom}`;
-      if (this.dateTo)   url += `&date_to=${this.dateTo}`;
-      if (this.pageMode === 'walk_forward') url += '&walk_forward=true';
-      else if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-      try {
-        const r = await fetch(url);
-        if (!r.ok) { this._decileCompareCache[key] = null; return null; }
-        const d = await r.json();
-        const buckets = d.error ? null : (d.buckets || []);
-        this._decileCompareCache[key] = buckets;
-        return buckets;
-      } catch { this._decileCompareCache[key] = null; return null; }
-    },
+      // Active outcome gets the brighter fill + star marker; the other is dim.
+      const activeAnchor = this._outcomeAnchor(this.decileActiveOutcome);
+      const ocPrim = activeAnchor === 'oc';
 
-    async _loadDecileCompare() {
-      if (this._decileCompareFetching || !this.data || !this.outcome) return;
-      this._decileCompareFetching = true;
-      try {
-        if (this.decileCompareMode === 'compare') {
-          const alt = `${this._outcomeBase()}_${this._outcomeAnchor() === 'oc' ? 'cc' : 'oc'}`;
-          await this._decileFetchBuckets(alt);
-        } else if (this.decileCompareMode === 'ladder') {
-          const a = this.decileLadderAnchor;
-          const phz = this._outcomeHorizon(), pa = this._outcomeAnchor();
-          await Promise.all(LADDER_HORIZONS.map(h => {
-            if (String(h) === phz && a === pa) return Promise.resolve();  // already in data
-            return this._decileFetchBuckets(`ret_${h}d_fwd_${a}`);
-          }));
-        }
-      } finally {
-        this._decileCompareFetching = false;
-        this._renderDecileBar();
-      }
-    },
-
-    _renderDecileBarMulti(el) {
-      const bins = this.decileBins;
-      const g    = 20 / bins;
-      const primaryStats = (this.decileBinsData || this.data?.decile_stats || []).filter(d => d);
-      if (!primaryStats.length) return;
-      const self = this;
-
-      const _isSel = (d) => {
-        const lo = (d.bucket - 1) * g + 1;
-        for (let b = lo; b < lo + g; b++) { if (self.selectedBins20.has(b)) return true; }
-        return false;
-      };
-
-      const isCompare = this.decileCompareMode === 'compare';
-      const labels    = primaryStats.map(d => 'B' + d.bucket);
-      const datasets  = [];
-
-      if (isCompare) {
-        const anchor    = this._outcomeAnchor();
-        const altAnchor = anchor === 'oc' ? 'cc' : 'oc';
-        const altKey    = `${this._outcomeBase()}_${altAnchor}:${bins}`;
-        if (!(altKey in this._decileCompareCache)) {
-          this._renderDecileBarSingle(el);
-          if (!this._decileCompareFetching) this._loadDecileCompare();
-          return;
-        }
-        const altStats  = (this._decileCompareCache[altKey] || []).filter(d => d);
-        const hz = this._outcomeHorizon() ? ` (${this._outcomeHorizon()}d)` : '';
-
-        // OC always left, CC always right; primary gets brighter fill + bold label
-        const ocStats = anchor === 'oc' ? primaryStats : altStats;
-        const ccStats = anchor === 'cc' ? primaryStats : altStats;
-        const ocPrim  = anchor === 'oc';
-
-        datasets.push({
-          label: `OC${hz}${ocPrim ? ' ★' : ''}`,
+      const datasets = [
+        {
+          label: `OC (${h}d)${ocPrim ? ' ★' : ''}`,
           data:  ocStats.map(d => d ? d.avg_ret * 100 : null),
           backgroundColor: ocStats.map(d => {
             if (!d) return 'transparent';
-            const a = ocPrim ? (_isSel(d) ? 0.92 : 0.38) : (_isSel(d) ? 0.72 : 0.26);
+            const a = ocPrim ? (_isSel(d) ? 0.92 : 0.50) : (_isSel(d) ? 0.72 : 0.26);
             return d.avg_ret >= 0 ? `rgba(52,152,219,${a})` : `rgba(232,67,147,${a})`;
           }),
-          borderWidth: ocPrim ? ocStats.map(d => d && _isSel(d) ? 1 : 0) : 0,
+          borderWidth: ocPrim ? ocStats.map(d => _isSel(d) ? 1 : 0) : 0,
           borderColor: '#fff',
-        });
-        datasets.push({
-          label: `CC${hz}${!ocPrim ? ' ★' : ''}`,
+        },
+        {
+          label: `CC (${h}d)${!ocPrim ? ' ★' : ''}`,
           data:  ccStats.map(d => d ? d.avg_ret * 100 : null),
           backgroundColor: ccStats.map(d => {
             if (!d) return 'transparent';
-            const a = !ocPrim ? (_isSel(d) ? 0.92 : 0.38) : (_isSel(d) ? 0.72 : 0.26);
+            const a = !ocPrim ? (_isSel(d) ? 0.92 : 0.50) : (_isSel(d) ? 0.72 : 0.26);
             return d.avg_ret >= 0 ? `rgba(46,204,113,${a})` : `rgba(230,126,34,${a})`;
           }),
-          borderWidth: !ocPrim ? ccStats.map(d => d && _isSel(d) ? 1 : 0) : 0,
+          borderWidth: !ocPrim ? ccStats.map(d => _isSel(d) ? 1 : 0) : 0,
           borderColor: '#fff',
-        });
-
-      } else {  // ladder
-        const a  = this.decileLadderAnchor;
-        const phz = this._outcomeHorizon(), pa = this._outcomeAnchor();
-
-        for (let i = 0; i < LADDER_HORIZONS.length; i++) {
-          const h  = LADDER_HORIZONS[i];
-          const isPrimary = (String(h) === phz) && (a === pa);
-          let buckets;
-          if (isPrimary) {
-            buckets = primaryStats;
-          } else {
-            const ckey = `ret_${h}d_fwd_${a}:${bins}`;
-            if (!(ckey in this._decileCompareCache)) {
-              this._renderDecileBarSingle(el);
-              if (!this._decileCompareFetching) this._loadDecileCompare();
-              return;
-            }
-            buckets = (this._decileCompareCache[ckey] || []).filter(d => d);
-          }
-          const col = LADDER_PALETTE[i];
-          datasets.push({
-            label: `${h}d${isPrimary ? ' ★' : ''}`,
-            data:  buckets.map(d => d ? d.avg_ret * 100 : null),
-            backgroundColor: buckets.map(d => {
-              if (!d) return 'transparent';
-              return this._hexToRgba(col, isPrimary ? (_isSel(d) ? 0.95 : 0.42) : (_isSel(d) ? 0.70 : 0.22));
-            }),
-            borderWidth: isPrimary ? buckets.map(d => d && _isSel(d) ? 1 : 0) : 0,
-            borderColor: col,
-          });
-        }
-      }
-
-      const _clickHandler = (e, elements) => {
-        if (!elements.length) return;
-        const d = primaryStats[elements[0].index];
-        if (!d) return;
-        const lo = (d.bucket - 1) * g + 1;
-        const binSet = Array.from({length: g}, (_, i) => lo + i);
-        const allSelected = binSet.every(b => self.selectedBins20.has(b));
-        if (allSelected) {
-          if (self.selectedBins20.size > binSet.length) binSet.forEach(b => self.selectedBins20.delete(b));
-        } else {
-          binSet.forEach(b => self.selectedBins20.add(b));
-        }
-        self.selectedBins20 = new Set(self.selectedBins20);
-        self._onDecileChange();
-        self._renderDecileBar();
-      };
+        },
+      ];
 
       this._charts['decile'] = new Chart(el, {
         type: 'bar',
@@ -687,9 +629,13 @@ document.addEventListener('alpine:init', () => {
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { bottom: 0 } },
-          onClick: _clickHandler,
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const d = primaryStats[elements[0].index];
+            if (d) self._toggleSingleBin(d.bucket);
+          },
           plugins: {
-            legend: { display: true, labels: { color: '#888', font: { size: 9 }, boxWidth: 10, padding: 8 } },
+            legend: { display: true, labels: { color: '#888', font: { size: 10 }, boxWidth: 10, padding: 8 } },
             tooltip: {
               backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               callbacks: {
@@ -708,25 +654,242 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    setDecileCompareMode(mode) {
-      this.decileCompareMode = mode;
-      if (mode === 'single') { this._renderDecileBar(); return; }
-      this._loadDecileCompare();
+    // Horizon mode: at a chosen anchor, show all 6 horizons. 60 bars (10 × 6).
+    _renderDecileBarHorizon(el) {
+      const a = this.decileHorizonAnchor;
+      const series = HORIZON_LIST.map(h => this._bundlePerBin(`ret_${h}d_fwd_${a}`) || []);
+      const primaryStats = series.find(s => s.length) || [];
+      if (!primaryStats.length) return;
+      const self  = this;
+      const _isSel = (d) => d && (self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket));
+      const labels = primaryStats.map(d => d ? 'B' + d.bucket : '');
+
+      // Active outcome gets the star marker (when the active outcome matches
+      // anchor + one of the 6 horizons in this group).
+      const activeH = this._outcomeHorizon(this.decileActiveOutcome);
+      const activeAnchor = this._outcomeAnchor(this.decileActiveOutcome);
+
+      const datasets = HORIZON_LIST.map((h, i) => {
+        const stats = series[i];
+        const isPrimary = (h === activeH) && (a === activeAnchor);
+        const col = HORIZON_PALETTE[i];
+        return {
+          label: `${h}d${isPrimary ? ' ★' : ''}`,
+          data:  stats.map(d => d ? d.avg_ret * 100 : null),
+          backgroundColor: stats.map(d => {
+            if (!d) return 'transparent';
+            return self._hexToRgba(col,
+              isPrimary ? (_isSel(d) ? 0.95 : 0.50) : (_isSel(d) ? 0.70 : 0.28));
+          }),
+          borderWidth: isPrimary ? stats.map(d => _isSel(d) ? 1 : 0) : 0,
+          borderColor: col,
+        };
+      });
+
+      this._charts['decile'] = new Chart(el, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const d = primaryStats[elements[0].index];
+            if (d) self._toggleSingleBin(d.bucket);
+          },
+          plugins: {
+            legend: { display: true, labels: { color: '#888', font: { size: 10 }, boxWidth: 10, padding: 8 } },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const v = ctx.parsed.y;
+                  return `${ctx.dataset.label.replace(' ★','')}: ${v != null ? v.toFixed(3)+'%' : '—'}`;
+                },
+              },
+            },
+          },
+          scales: {
+            ...this._darkScalesNR(),
+            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks, callback: v => v.toFixed(2)+'%' } },
+          },
+        },
+      });
     },
 
-    setDecileLadderAnchor(anchor) {
-      this.decileLadderAnchor = anchor;
-      if (this.decileCompareMode === 'ladder') this._loadDecileCompare();
+    // Overnight Gap mode: per-bin mean of (ret_1d_fwd_cc - ret_1d_fwd_oc) ≈
+    // the entry-day overnight gap. Computed at render time from the bundle's
+    // per_outcome_returns parallel arrays (zip-by-trade_id), so no extra
+    // cache entry is needed.
+    _overnightGapPerBin() {
+      const cc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_cc;
+      const oc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_oc;
+      const meta = this.analyzeBundle?.trade_meta;
+      if (!cc || !oc || !meta) return null;
+      // Build trade_id → oc.ret_pct lookup, then walk cc and emit gaps.
+      const ocByTid = new Map();
+      for (let i = 0; i < oc.trade_ids.length; i++) {
+        ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
+      }
+      // Bin lookup by trade_id from trade_meta. meta is an array of objects;
+      // direct index by trade_id assumes trade_meta is built in trade_id
+      // order (it is — see _compute_analyze_bundle_sync).
+      const buckets = Array.from({length: 10}, () => []);
+      for (let i = 0; i < cc.trade_ids.length; i++) {
+        const tid = cc.trade_ids[i];
+        const ocRet = ocByTid.get(tid);
+        if (ocRet == null) continue;
+        const gap = cc.ret_pcts[i] - ocRet;
+        const bin = meta[tid]?.bin;
+        if (bin == null || bin < 1 || bin > 10) continue;
+        buckets[bin - 1].push(gap);
+      }
+      return buckets.map((arr, idx) => {
+        if (!arr.length) return null;
+        const n = arr.length;
+        const mean = arr.reduce((a, b) => a + b, 0) / n;
+        const wins = arr.filter(v => v > 0).length;
+        const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
+        const std = Math.sqrt(variance);
+        return {
+          bucket:   idx + 1,
+          n:        n,
+          avg_ret:  mean,
+          win_rate: wins / n,
+          std_dev:  std,
+          sharpe:   std > 0 ? mean / std : null,
+        };
+      });
+    },
+
+    _renderDecileBarOvernightGap(el) {
+      const stats = (this._overnightGapPerBin() || []).filter(Boolean);
+      if (!stats.length) return;
+      const avgs = stats.map(d => d.avg_ret * 100);
+      const self = this;
+      const _isSel = (d) => self.selectedBins20.has(2*d.bucket - 1) || self.selectedBins20.has(2*d.bucket);
+
+      this._charts['decile'] = new Chart(el, {
+        type: 'bar',
+        data: {
+          labels: stats.map(d => 'B' + d.bucket),
+          datasets: [{
+            data: avgs,
+            backgroundColor: stats.map(d => _isSel(d)
+              ? (d.avg_ret >= 0 ? '#9b59b6' : '#e74c3c')   // gap palette differs from Single
+              : 'rgba(155,89,182,0.30)'),
+            borderColor:     stats.map(d => _isSel(d) ? '#fff' : 'transparent'),
+            borderWidth:     stats.map(d => _isSel(d) ? 1 : 0),
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { bottom: 0 } },
+          onClick: (e, elements) => {
+            if (!elements.length) return;
+            const d = stats[elements[0].index];
+            self._toggleSingleBin(d.bucket);
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)',
+              borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const d = stats[ctx.dataIndex];
+                  return [
+                    `Gap: ${(d.avg_ret*100).toFixed(3)}%`,
+                    `WR: ${(d.win_rate*100).toFixed(1)}%`,
+                    d.sharpe != null ? `Sharpe: ${d.sharpe.toFixed(3)}` : '',
+                    `n: ${d.n}`,
+                  ].filter(Boolean);
+                },
+              },
+            },
+          },
+          scales: this._darkScalesNR(),
+        },
+      });
+    },
+
+    // ── P3 setters ────────────────────────────────────────────────────────
+
+    setDecileMode(mode) {
+      // P3: bin selection clears on any subset-defining change (per the
+      // spec; P4 will refine the multi-select rules within each subset).
+      this.decileMode = mode;
+      this.selectedBins20 = new Set();
+      this._onDecileChange();
+      this._renderDecileBar();
+    },
+
+    setDecileHorizonAnchor(anchor) {
+      this.decileHorizonAnchor = anchor;
+      // Clear bin selection — different anchor = different subset
+      this.selectedBins20 = new Set();
+      this._onDecileChange();
+      if (this.decileMode === 'horizon') this._renderDecileBar();
+    },
+
+    setDecileEntryHorizon(h) {
+      this.decileEntryHorizon = h;
+      this.selectedBins20 = new Set();
+      this._onDecileChange();
+      if (this.decileMode === 'entry') this._renderDecileBar();
+    },
+
+    setDecileActiveOutcome(outcome) {
+      this.decileActiveOutcome = outcome;
+      // Same outcome on this.outcome too so downstream visuals (Equity, IC,
+      // etc.) reflect the new choice. /analyze isn't re-fired — downstream
+      // re-renders read from this.data + bundle.
+      this.outcome = outcome;
+      this._renderDecileBar();
+      this._onDecileChange();
     },
 
     decileChartTitle() {
-      if (this.decileCompareMode === 'compare') {
-        const hz = this._outcomeHorizon();
-        return `Quantile Avg Return — OC vs CC${hz ? ' · ' + hz + 'd' : ''}`;
-      }
-      if (this.decileCompareMode === 'ladder')
-        return `Quantile Avg Return — Horizon Ladder (${this.decileLadderAnchor.toUpperCase()})`;
-      return 'Quantile Avg Return';
+      if (this.decileMode === 'overnight_gap') return 'Quantile Avg Return — Entry-day overnight gap (CC − OC)';
+      if (this.decileMode === 'entry')         return `Quantile Avg Return — OC vs CC · ${this.decileEntryHorizon}d`;
+      if (this.decileMode === 'horizon')       return `Quantile Avg Return — Horizon Ladder (${this.decileHorizonAnchor.toUpperCase()})`;
+      return `Quantile Avg Return — ${this.decileActiveOutcome}`;
+    },
+
+    // ── P3 breadcrumb + cache timestamp helpers ───────────────────────────
+    // Breadcrumb communicates "what filter is the lower section applying".
+    // The spec called for "drop the redundant 'active' wording" — this
+    // version reads as "<Mode> mode · <sub-control value>".
+    decileBreadcrumb() {
+      if (this.decileMode === 'overnight_gap') return 'Overnight Gap strategy';
+      if (this.decileMode === 'entry')         return `Entry mode · ${this.decileEntryHorizon}d horizon`;
+      if (this.decileMode === 'horizon')       return `Horizon mode · ${this.decileHorizonAnchor.toUpperCase()} anchor`;
+      return `Single mode · ${this.decileActiveOutcome}`;
+    },
+
+    // Relative cache-age string ("just now" / "3 min ago" / "2 days ago").
+    // Reads analyzeBundle.computed_at when the bundle is the source. Falls
+    // back to nothing while only this.data is loaded (no bundle yet).
+    decileCacheTimestamp() {
+      const ts = this.analyzeBundle?.computed_at;
+      if (!ts) return '';
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return '';
+      const ageSec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
+      if (ageSec < 60)        return 'cached just now';
+      if (ageSec < 60 * 60)   return `cached ${Math.round(ageSec / 60)} min ago`;
+      if (ageSec < 60 * 60 * 24) return `cached ${Math.round(ageSec / 3600)} h ago`;
+      return `cached ${Math.round(ageSec / 86400)} d ago`;
+    },
+
+    // Confirm-modal-gated refresh — recomputes the bundle for the current
+    // (ticker, metric, mode, cutoff). ALL mode → ~5 min background;
+    // single-ticker → ~2-5s inline. Doesn't touch upper-section views.
+    decileRefresh() {
+      if (!confirm('Recompute analysis for this metric? ALL mode takes ~5 min in the background; single-ticker takes ~2-5 seconds.')) return;
+      this.analyzeBundle = null;
+      this.analyzeBundleKey = null;
+      this.refreshAnalyzeBundle();
     },
 
     // Aggregate decile_stats_20 (always 20 bins) into n display groups.
@@ -770,13 +933,12 @@ document.addEventListener('alpine:init', () => {
       this.selectedBins20 = newBins20;
       this.decileBins = n;
       this.decileBinsData = n === 10 ? null : this._computeDecileNBins(n);
-      // Compare/ladder cache is keyed by bins — stale after bin-count change
-      if (this.decileCompareMode !== 'single') {
-        this._decileCompareCache = {};
-        this._loadDecileCompare();  // async, fire-and-forget; will re-render when done
-      } else {
-        this._renderDecileBar();
-      }
+      // P3: bundle is always 10-bin. The 5/10/20 toggle is removed from
+      // the lower-section chart; this method survives only for any
+      // legacy caller that still pings it. Re-render whichever the
+      // active mode is — Single uses this.data (or bundle if active
+      // outcome ≠ default); Entry/Horizon/Overnight Gap use the bundle.
+      this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
       this._renderDOW();
