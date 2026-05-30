@@ -109,14 +109,128 @@ async def _write_sec_scan_cache(
 _TRADE_CACHE: dict = {}
 _TRADE_CACHE_MAX = 5  # keep last 5 unique (ticker,metric,outcome,mode) analyses
 
-# ── Full-response cache (W2) ──────────────────────────────────────────────────
+# ── Full-response cache (W2) — in-memory hot tier ────────────────────────────
 # Caches the complete /analyze response dict so mode switches and repeat
-# Analyzes skip the full 25s computation.  Staleness is checked on every
-# hit via one cheap SELECT MAX(trade_date).  Keyed by all params that
-# affect the computation result.
-# Max 4 entries × ~15MB each ≈ 60MB ceiling.
+# Analyzes skip computation.  Backed by analyze_primary_cache (DB) so
+# evictions fall back to a fast DB read rather than a 2-min recompute.
+# Keyed by all params that affect the computation result.
+# Cap 20 entries (was 4); DB fallback makes eviction cheap.
 _ANALYZE_CACHE: dict = {}
-_ANALYZE_CACHE_MAX = 4
+_ANALYZE_CACHE_MAX = 20
+
+# ── Primary analyze DB persistence ────────────────────────────────────────────
+# Persistent JSONB store for the complete /analyze response.  Keyed on all
+# 7 dimensions that distinguish a result: ticker, metric, outcome, mode,
+# cutoff_date, date_from, date_to.  Bump _ANALYZE_PRIMARY_SCHEMA_VERSION to
+# auto-invalidate stale entries after a payload-shape change.
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 1
+_ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
+_ANALYZE_PRIMARY_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS analyze_primary_cache (
+    cache_key     TEXT  PRIMARY KEY,
+    ticker        TEXT  NOT NULL,
+    metric        TEXT  NOT NULL,
+    outcome       TEXT  NOT NULL,
+    mode          TEXT  NOT NULL,
+    cutoff_date   DATE,
+    date_from     DATE,
+    date_to       DATE,
+    payload       JSONB NOT NULL,
+    payload_bytes INT,
+    cached_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_accessed TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS analyze_primary_cache_last_accessed
+    ON analyze_primary_cache (last_accessed);
+"""
+_analyze_primary_table_ensured: bool = False
+
+
+def _analyze_primary_cache_key(
+    ticker: str, metric: str, outcome: str, mode: str,
+    cutoff_date: Optional[str], date_from: Optional[str], date_to: Optional[str],
+) -> str:
+    """Stable DB key for the primary /analyze result."""
+    cutoff_s    = cutoff_date or "null"
+    date_from_s = date_from or ""
+    date_to_s   = date_to or ""
+    return (f"ap:v{_ANALYZE_PRIMARY_SCHEMA_VERSION}:"
+            f"{ticker}:{metric}:{outcome}:{mode}:{cutoff_s}:{date_from_s}:{date_to_s}")
+
+
+async def _ensure_analyze_primary_table(pool) -> None:
+    global _analyze_primary_table_ensured
+    if _analyze_primary_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_ANALYZE_PRIMARY_TABLE_DDL)
+        prefix = f"ap:v{_ANALYZE_PRIMARY_SCHEMA_VERSION}:"
+        await conn.execute(
+            "DELETE FROM analyze_primary_cache WHERE cache_key NOT LIKE $1",
+            f"{prefix}%",
+        )
+    _analyze_primary_table_ensured = True
+
+
+async def _evict_analyze_primary_lru(pool) -> int:
+    """Drop oldest-accessed rows until table size falls back under the cap."""
+    evicted = 0
+    async with pool.acquire() as conn:
+        while True:
+            size_bytes = await conn.fetchval(
+                "SELECT pg_total_relation_size('analyze_primary_cache')")
+            if size_bytes is None or size_bytes <= _ANALYZE_PRIMARY_CACHE_MAX_BYTES:
+                break
+            oldest_key = await conn.fetchval(
+                "SELECT cache_key FROM analyze_primary_cache "
+                "ORDER BY last_accessed ASC LIMIT 1")
+            if oldest_key is None:
+                break
+            await conn.execute(
+                "DELETE FROM analyze_primary_cache WHERE cache_key = $1", oldest_key)
+            evicted += 1
+    return evicted
+
+
+async def _write_analyze_primary_cache(
+    pool, cache_key: str, ticker: str, metric: str, outcome: str,
+    mode: str, cutoff_date: Optional[str], date_from: Optional[str],
+    date_to: Optional[str], result: dict,
+) -> None:
+    """Upsert the primary /analyze result into analyze_primary_cache.
+    Fire-and-forget via asyncio.create_task — failures are non-fatal."""
+    import logging
+    from datetime import date as _date
+    from fastapi.encoders import jsonable_encoder
+    global _analyze_primary_table_ensured
+    try:
+        _analyze_primary_table_ensured = False  # reset so ensure re-runs on every write
+        await _ensure_analyze_primary_table(pool)
+        # jsonable_encoder converts numpy types / date objects before json.dumps
+        payload_json = json.dumps(jsonable_encoder(result))
+        cutoff_obj   = _date.fromisoformat(cutoff_date) if cutoff_date else None
+        from_obj     = _date.fromisoformat(date_from) if date_from else None
+        to_obj       = _date.fromisoformat(date_to) if date_to else None
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO analyze_primary_cache
+                   (cache_key, ticker, metric, outcome, mode, cutoff_date,
+                    date_from, date_to, payload, payload_bytes)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+                   ON CONFLICT (cache_key) DO UPDATE SET
+                       payload       = EXCLUDED.payload,
+                       payload_bytes = EXCLUDED.payload_bytes,
+                       cached_at     = NOW(),
+                       last_accessed = NOW()""",
+                cache_key, ticker, metric, outcome, mode, cutoff_obj,
+                from_obj, to_obj, payload_json, len(payload_json),
+            )
+        try:
+            await _evict_analyze_primary_lru(pool)
+        except Exception as _evict_e:
+            logging.warning("analyze_primary_cache LRU eviction failed: %r", _evict_e)
+    except Exception:
+        logging.exception("analyze_primary_cache write failed for key %r", cache_key)
 
 
 def _sec_score_key(cache_key: str, selected_primary_bins, n_bins: int, filtered_dates) -> str:
@@ -307,11 +421,18 @@ async def analyze(
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
     cutoff_date: Optional[str] = Query(None),
+    force: bool = Query(False),
     pool=Depends(get_oi_pool),
 ):
-    """Full analysis payload for one ticker/metric/outcome combo."""
+    """Full analysis payload for one ticker/metric/outcome combo.
+
+    `force=true` bypasses both in-memory and DB cache reads and recomputes
+    from source.  The Refresh button passes force=true; normal page loads
+    pass force=false (default).
+    """
     if not pool:
         return {"error": "OI database not configured"}
+    await _ensure_analyze_primary_table(pool)
 
     is_all = (ticker == "ALL")
 
@@ -334,17 +455,56 @@ async def analyze(
 
     _tlog('start')
 
-    # ── W2: full-response cache (staleness-checked) ───────────────────────────
+    # ── W2: full-response cache (in-memory → DB → compute) ───────────────────
+    _cutoff_s = spec.cutoff.isoformat() if spec.kind == 'train_test' else ''
     _ac_key = (f"{ticker}:{metric}:{outcome}:{spec.kind}:"
-               f"{spec.cutoff.isoformat() if spec.kind == 'train_test' else ''}:"
-               f"{date_from or ''}:{date_to or ''}")
-    _tlog(f'W2 key="{_ac_key}" cache_size={len(_ANALYZE_CACHE)} in_cache={_ac_key in _ANALYZE_CACHE}')
+               f"{_cutoff_s}:{date_from or ''}:{date_to or ''}")
+    _pc_key = _analyze_primary_cache_key(
+        ticker, metric, outcome, spec.kind,
+        _cutoff_s or None, date_from, date_to,
+    )
+    _tlog(f'W2 key="{_ac_key}" cache_size={len(_ANALYZE_CACHE)} in_cache={_ac_key in _ANALYZE_CACHE} force={force}')
 
-    if _ac_key in _ANALYZE_CACHE:
-        _tlog('W2 cache hit')
-        _hit = dict(_ANALYZE_CACHE[_ac_key])  # shallow copy — don't mutate the stored entry
-        _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
-        return _hit
+    if not force:
+        # Tier 1: in-memory hot cache
+        if _ac_key in _ANALYZE_CACHE:
+            _tlog('W2 mem-hit')
+            _hit = dict(_ANALYZE_CACHE[_ac_key])  # shallow copy — don't mutate stored entry
+            _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
+            return _hit
+
+        # Tier 2: DB persistent cache
+        try:
+            async with pool.acquire() as conn:
+                _db_row = await conn.fetchrow(
+                    "SELECT payload FROM analyze_primary_cache WHERE cache_key = $1",
+                    _pc_key,
+                )
+            if _db_row is not None:
+                _tlog('W2 db-hit')
+                _db_result = json.loads(_db_row["payload"])
+                # Warm in-memory tier; evict oldest if at cap
+                if len(_ANALYZE_CACHE) >= _ANALYZE_CACHE_MAX:
+                    del _ANALYZE_CACHE[next(iter(_ANALYZE_CACHE))]
+                _ANALYZE_CACHE[_ac_key] = _db_result
+                # Touch last_accessed in background (non-blocking)
+                async def _touch_primary(_key=_pc_key):
+                    try:
+                        async with pool.acquire() as _c:
+                            await _c.execute(
+                                "UPDATE analyze_primary_cache "
+                                "SET last_accessed = NOW() WHERE cache_key = $1", _key)
+                    except Exception:
+                        pass
+                asyncio.create_task(_touch_primary())
+                _hit = dict(_db_result)
+                _hit["_handler_ms"] = round((_time.perf_counter() - _t0) * 1000)
+                return _hit
+            _tlog('W2 db-miss — computing')
+        except Exception as _db_read_e:
+            import logging as _log
+            _log.warning("analyze_primary_cache read failed for %r: %r", _pc_key, _db_read_e)
+            _tlog(f'W2 db-read-error — computing')
 
     # Build date filter params (shared by both modes)
     date_conditions = ""
@@ -1179,11 +1339,17 @@ async def analyze(
         # for the response cache.  Also surfaced to the client for display.
         "data_as_of":       _max_trade_date,
     }
-    # W2: populate response cache (evict oldest if at capacity)
+    # W2: populate in-memory hot tier (evict oldest if at cap)
     _tlog(f'W2 write key="{_ac_key}" data_as_of="{_max_trade_date}"')
     if len(_ANALYZE_CACHE) >= _ANALYZE_CACHE_MAX:
         del _ANALYZE_CACHE[next(iter(_ANALYZE_CACHE))]
     _ANALYZE_CACHE[_ac_key] = _result
+    # W2: persist to DB in background (non-blocking; failure is non-fatal)
+    _cutoff_for_db = _cutoff_s or None
+    asyncio.create_task(_write_analyze_primary_cache(
+        pool, _pc_key, ticker, metric, outcome, spec.kind,
+        _cutoff_for_db, date_from, date_to, _result,
+    ))
     return _result
 
 
@@ -4687,6 +4853,70 @@ async def analyze_cache_invalidate(
         async with pool.acquire() as conn:
             result = await conn.execute(sql, *params)
         # asyncpg returns "DELETE N" — parse N from the tag.
+        if result and result.startswith("DELETE "):
+            try:
+                deleted = int(result.split()[-1])
+            except ValueError:
+                pass
+    except Exception:
+        return {"error": "delete_failed"}
+    return {"ok": True, "deleted": deleted, "scope": scope}
+
+
+@router.post("/analyze-primary/invalidate")
+async def analyze_primary_invalidate(
+    ticker: Optional[str] = Query(None),
+    metric: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Drop entries from `analyze_primary_cache`.
+
+    Four scopes:
+      - No params                         → wipe everything.
+      - `ticker` only                     → all entries for that ticker.
+      - `ticker` + `metric`               → all (ticker, metric) entries across
+                                            every outcome, mode, and date range.
+      - `ticker` + `metric` + `outcome`   → all (ticker, metric, outcome) entries.
+
+    Call this after a data rewrite when the primary /analyze results are stale.
+    (Also call /analyze-cache/invalidate for the bundle and the
+    /global-metric-bins/invalidate for global_bins_cache — no shared path.)
+
+    Schema bumps (increment _ANALYZE_PRIMARY_SCHEMA_VERSION) auto-invalidate
+    on the next server start; this endpoint handles data-only staleness.
+
+    Returns: {"ok": true, "deleted": <row_count>, "scope": "..."}
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    try:
+        await _ensure_analyze_primary_table(pool)
+    except Exception:
+        return {"error": "init_failed"}
+
+    # Cache key shape: `ap:v{N}:{ticker}:{metric}:{outcome}:{mode}:{cutoff}:{from}:{to}`
+    # LIKE patterns match across all schema versions so legacy rows are cleared too.
+    scope = "all"
+    sql = "DELETE FROM analyze_primary_cache"
+    params: list = []
+    if ticker and metric and outcome:
+        scope = "ticker+metric+outcome"
+        sql += " WHERE cache_key LIKE $1"
+        params.append(f"ap:v%:{ticker}:{metric}:{outcome}:%")
+    elif ticker and metric:
+        scope = "ticker+metric"
+        sql += " WHERE cache_key LIKE $1"
+        params.append(f"ap:v%:{ticker}:{metric}:%")
+    elif ticker:
+        scope = "ticker"
+        sql += " WHERE cache_key LIKE $1"
+        params.append(f"ap:v%:{ticker}:%")
+
+    deleted = 0
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
         if result and result.startswith("DELETE "):
             try:
                 deleted = int(result.split()[-1])
