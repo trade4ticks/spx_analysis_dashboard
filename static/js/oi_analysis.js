@@ -1983,8 +1983,11 @@ document.addEventListener('alpine:init', () => {
           + wf);
         if (r.ok) {
           const d = await r.json();
+          // Compute color scale from all grids combined so train and test
+          // heatmaps share the same intensity reference.
           let max = 0;
-          for (const row of (d.grid || [])) {
+          const _allGrids = [...(d.grid || []), ...(d.train_grid || []), ...(d.test_grid || [])];
+          for (const row of _allGrids) {
             for (const c of row) {
               if (c && c.n) max = Math.max(max, Math.abs(c.avg_ret || 0));
             }
@@ -2143,6 +2146,22 @@ document.addEventListener('alpine:init', () => {
       const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (this._hmRange || 0.01)));
       if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
       return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
+    },
+
+    // Tooltip for a heatmap cell. In train-test mode, appends the frozen
+    // training-set thresholds for both axes so the user can see what metric
+    // value ranges each bin corresponds to.
+    _hmCellTitle(cell, ix, iy) {
+      if (!cell || !cell.n) return 'n=0';
+      let s = `n=${cell.n}  avg=${((cell.avg_ret||0)*100).toFixed(3)}%  wr=${((cell.win_rate||0)*100).toFixed(1)}%`;
+      const xt = this.heatmapData?.x_thresholds;
+      const yt = this.heatmapData?.y_thresholds;
+      if (xt && yt) {
+        const fmt = v => v !== undefined ? v.toFixed(4) : '?';
+        s += `\nX (${this.metric}): ${fmt(xt[ix])} – ${fmt(xt[ix+1])}`;
+        s += `\nY (${this.heatmapMetric}): ${fmt(yt[iy])} – ${fmt(yt[iy+1])}`;
+      }
+      return s;
     },
 
     // ── AI Summary ──────────────────────────────────────────────────────

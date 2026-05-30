@@ -1460,7 +1460,10 @@ async def heatmap_2d(
 
         # cell_rets[y_bin][x_bin] — outer index is y so the returned grid
         # matches the frontend's grid[iy][ix] convention (rows=y, cols=x).
+        # train_cell_rets accumulates pre-cutoff rows (TT mode only) so we
+        # can return both a train and test heatmap for side-by-side display.
         cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
+        train_cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
         n_tickers_with_bins: set = set()
         total_n = 0
         for ax, ay, row in zip(a_x, a_y, rows_clean):
@@ -1468,37 +1471,62 @@ async def heatmap_2d(
             # under both Assigners (`_bucket_pairs_per_ticker` excludes
             # tickers below the threshold). Skip them — matches legacy
             # `if len(items) < bins: continue`.
-            # In train-test mode, pre-cutoff rows carry a real bin (frozen
-            # training thresholds applied to training rows) but must be
-            # excluded from the test-period aggregation — same as /analyze.
             if ax.bin is None or ay.bin is None:
                 continue
-            if ax.dropped_reason == "pre_cutoff" or ay.dropped_reason == "pre_cutoff":
-                continue
-            # 1-indexed → 0-indexed for Python list indexing.
-            cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
-            total_n += 1
-            n_tickers_with_bins.add(ax.ticker)
+            is_pre = (ax.dropped_reason == "pre_cutoff" or
+                      ay.dropped_reason == "pre_cutoff")
+            if is_pre:
+                # Train rows: bins were assigned against their own history;
+                # accumulate separately for the train heatmap.
+                train_cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
+            else:
+                # Test rows (or non-TT rows): the main aggregation.
+                cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
+                total_n += 1
+                n_tickers_with_bins.add(ax.ticker)
         n_tickers_used = len(n_tickers_with_bins)
 
         if total_n < 50:
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
 
-        grid = []
-        for iy in range(bins):
-            row = []
-            for ix in range(bins):
-                rets = cell_rets[iy][ix]
-                if len(rets) >= 5:
-                    a = np.array(rets)
-                    row.append({
-                        "avg_ret":  round(float(a.mean()), 6),
-                        "win_rate": round(float((a > 0).mean()), 4),
-                        "n":        int(len(rets)),
-                    })
-                else:
-                    row.append(None)
-            grid.append(row)
+        def _build_grid(cell_data):
+            g = []
+            for iy in range(bins):
+                r = []
+                for ix in range(bins):
+                    rets = cell_data[iy][ix]
+                    if len(rets) >= 5:
+                        a = np.array(rets)
+                        r.append({
+                            "avg_ret":  round(float(a.mean()), 6),
+                            "win_rate": round(float((a > 0).mean()), 4),
+                            "n":        int(len(rets)),
+                        })
+                    else:
+                        r.append(None)
+                g.append(r)
+            return g
+
+        def _bin_thresholds(train_history, n_bins):
+            """Median bin-boundary values across tickers (n_bins+1 values).
+            Used in train-test mode so tooltips can show the frozen threshold
+            range for each axis bin. Returns None when history is empty."""
+            per_ticker = []
+            for hist in train_history.values():
+                if len(hist) < n_bins:
+                    continue
+                N = len(hist)
+                edges = [hist[0]]
+                for k in range(1, n_bins):
+                    edges.append(hist[min(int(k * N / n_bins), N - 1)])
+                edges.append(hist[-1])
+                per_ticker.append(edges)
+            if not per_ticker:
+                return None
+            arr = np.array(per_ticker, dtype=float)
+            return [round(float(v), 4) for v in np.median(arr, axis=0).tolist()]
+
+        grid = _build_grid(cell_rets)
         # Bin labels — absolute ranges don't make sense in ALL mode since
         # each ticker has its own boundaries. Use B1..BN.
         x_labels = [f"B{i+1}" for i in range(bins)]
@@ -1519,6 +1547,13 @@ async def heatmap_2d(
         elif spec.kind == "train_test":
             out["cutoff_date"]      = spec.cutoff.isoformat()
             out["dropped_warmup_n"] = dropped_count_for_mode(spec, a_x)
+            # Side-by-side train/test grids + frozen thresholds for tooltips.
+            # `grid` (= test data) is kept for backward compat; train_grid and
+            # test_grid are the canonical split keys the frontend uses in TT mode.
+            out["test_grid"]     = grid
+            out["train_grid"]    = _build_grid(train_cell_rets)
+            out["x_thresholds"] = _bin_thresholds(state_x, bins)
+            out["y_thresholds"] = _bin_thresholds(state_y, bins)
         return out
 
     # Single-ticker mode — original absolute-percentile binning.
