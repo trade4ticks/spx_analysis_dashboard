@@ -99,7 +99,8 @@ async def _write_sec_scan_cache(
                 mode, cutoff_obj, n_bins, data_as_of_obj, n_input_rows, payload_json,
             )
     except Exception:
-        pass  # non-fatal — in-memory _SEC_SCORE_CACHE still works
+        import logging
+        logging.exception("sec_scan_cache DB write failed for structural_key=%s", structural_key)
 
 # ── Trade-detail cache (W1) ────────────────────────────────────────────────────
 # Populated by /analyze; read by GET /trades and GET /trades/csv.
@@ -197,7 +198,9 @@ def _run_sec_score(
                 )
                 future.result(timeout=15)  # block thread ≤15s; failure is non-fatal
             except Exception:
-                pass
+                import logging
+                logging.warning("sec_scan_cache background write did not complete within 15s or raised",
+                                exc_info=True)
     except Exception as exc:
         _SEC_SCORE_CACHE[scan_key] = {
             "status": "error",
@@ -2960,7 +2963,8 @@ async def secondary_scan_invalidate(pool=Depends(get_oi_pool)):
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM sec_scan_cache")
         except Exception:
-            pass
+            import logging
+            logging.warning("sec_scan_cache DELETE failed during invalidate", exc_info=True)
     return {"ok": True}
 
 
@@ -3398,6 +3402,7 @@ async def global_metric_bins(
     date_to:      Optional[str] = Query(None),
     walk_forward: bool = Query(False),
     cutoff_date:  Optional[str] = Query(None),
+    force:        bool = Query(False, description="Skip cache read; recompute and overwrite"),
     pool=Depends(get_oi_pool),
 ):
     """Per-bin avg return for every feature column at the given outcome, with
@@ -3420,7 +3425,7 @@ async def global_metric_bins(
     else:
         mode_tag = "is"
     cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
-    if cache_key in _GLOBAL_BINS_CACHE:
+    if not force and cache_key in _GLOBAL_BINS_CACHE:
         return _GLOBAL_BINS_CACHE[cache_key]
 
     # Check persistent DB cache before running the expensive computation.
@@ -3431,26 +3436,27 @@ async def global_metric_bins(
     # was cold. Pre-fix, the DB cache only ever served data that had
     # already been computed in the current process lifetime.
     await _ensure_bins_table(pool)
-    try:
-        async with pool.acquire() as conn:
-            db_row = await conn.fetchrow(
-                "SELECT payload, cached_at FROM global_bins_cache WHERE cache_key = $1",
-                cache_key)
-        if db_row:
-            payload = db_row["payload"]
-            if isinstance(payload, str):
-                payload = json.loads(payload)
-            out = dict(payload)
-            ca = db_row["cached_at"]
-            out["cached_at"] = ca.isoformat() if ca else None
-            _GLOBAL_BINS_CACHE[cache_key] = out
-            return out
-    except Exception as e:
-        # Log instead of silently swallowing — masked the JSONB parse
-        # failure for months. Still tolerate the failure so first-startup
-        # (table doesn't exist) falls through to compute cleanly.
-        import logging
-        logging.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
+    if not force:
+        try:
+            async with pool.acquire() as conn:
+                db_row = await conn.fetchrow(
+                    "SELECT payload, cached_at FROM global_bins_cache WHERE cache_key = $1",
+                    cache_key)
+            if db_row:
+                payload = db_row["payload"]
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                out = dict(payload)
+                ca = db_row["cached_at"]
+                out["cached_at"] = ca.isoformat() if ca else None
+                _GLOBAL_BINS_CACHE[cache_key] = out
+                return out
+        except Exception as e:
+            # Log instead of silently swallowing — masked the JSONB parse
+            # failure for months. Still tolerate the failure so first-startup
+            # (table doesn't exist) falls through to compute cleanly.
+            import logging
+            logging.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
 
     # Build date filter
     where = [f"{outcome} IS NOT NULL"]
@@ -3579,7 +3585,9 @@ async def global_metric_bins(
 
 @router.post("/global-metric-bins/invalidate")
 async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
-    """Drop the in-memory and DB cache so a fresh computation runs next request."""
+    """Drop the in-memory and DB cache so a fresh computation runs next request.
+    Call this only for bulk invalidation (e.g. underlying data was rewritten),
+    not as part of the routine UI Refresh flow — use force=true on the GET instead."""
     _GLOBAL_BINS_CACHE.clear()
     if pool:
         try:
@@ -3587,7 +3595,8 @@ async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM global_bins_cache")
         except Exception:
-            pass
+            import logging
+            logging.warning("global_bins_cache DELETE failed during invalidate", exc_info=True)
     return {"ok": True}
 
 
@@ -4823,7 +4832,8 @@ async def ic_batch_invalidate(pool=Depends(get_oi_pool)):
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM ic_batch_cache")
         except Exception:
-            pass
+            import logging
+            logging.warning("ic_batch_cache DELETE failed during invalidate", exc_info=True)
     return {"ok": True}
 
 
@@ -4937,6 +4947,7 @@ async def threshold_drift(
                           description="Comma-separated bin numbers to track"),
     date_from: Optional[str] = Query(None),
     date_to:   Optional[str] = Query(None),
+    force:     bool = Query(False, description="Skip cache read; recompute and overwrite"),
     pool=Depends(get_oi_pool),
 ):
     """For each requested bin K (1..n_bins), return its upper-edge
@@ -4964,7 +4975,7 @@ async def threshold_drift(
                  f"{ticker}|{metric}|{outcome}|{n_bins}|"
                  f"{','.join(str(b) for b in bins_to_track)}|"
                  f"{date_from or ''}|{date_to or ''}")
-    if cache_key in _THRESHOLD_DRIFT_CACHE:
+    if not force and cache_key in _THRESHOLD_DRIFT_CACHE:
         return _THRESHOLD_DRIFT_CACHE[cache_key]
 
     where = [f"{metric} IS NOT NULL", f"{outcome} IS NOT NULL"]

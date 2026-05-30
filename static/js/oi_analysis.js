@@ -4166,17 +4166,13 @@ document.addEventListener('alpine:init', () => {
       if (!this.tdMetric || !this.tdBinsToShow.length) return;
       this.tdLoading = true;
       try {
-        if (forceRefresh) {
-          try {
-            await fetch('/api/factor-analysis/threshold-drift/invalidate', { method: 'POST' });
-          } catch (_) {}
-        }
         const params = new URLSearchParams({
           metric:  this.tdMetric,
           outcome: this.tdOutcome || 'ret_5d_fwd_oc',
           ticker:  'ALL',
           n_bins:  '20',
           bins:    this.tdBinsToShow.join(','),
+          force:   forceRefresh ? '1' : '0',
         });
         const r = await fetch('/api/factor-analysis/threshold-drift?' + params);
         if (!r.ok) {
@@ -4400,16 +4396,12 @@ document.addEventListener('alpine:init', () => {
           ? 'ret_5d_fwd_oc' : this.outcomes[0];
       }
       try {
-        if (forceRefresh) {
-          try {
-            await fetch('/api/factor-analysis/global-metric-bins/invalidate', { method: 'POST' });
-          } catch (_) {}
-        }
         const params = new URLSearchParams({
           outcome:      this.topBinsOutcome || 'ret_5d_fwd_oc',
           ticker:       'ALL',
           n_bins:       '20',
           walk_forward: this.pageMode === 'walk_forward' ? '1' : '0',
+          force:        forceRefresh ? '1' : '0',
         });
         if (this.pageMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
         const r = await fetch('/api/factor-analysis/global-metric-bins?' + params);
