@@ -229,7 +229,8 @@
           <span style="font-size:13px;font-weight:700;color:var(--text)">Score Matrix</span>
           <span style="font-size:11px;color:var(--dim)"
                 x-text="smMeta.count > 0 ? '· ' + smMeta.count.toLocaleString() + ' rows · ' + smMeta.metrics.length + ' metrics · last: ' + (smMeta.last_run || 'never') : '— click to expand'"></span>
-          <span x-show="smStatus.running" style="font-size:11px;color:#3498db">Running…</span>
+          <span x-show="smStatus.running" style="font-size:11px;color:#3498db"
+                x-text="smStatus.message || 'Running…'"></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
           <button @click="runBatchScore()" :disabled="smStatus.running"
