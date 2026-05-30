@@ -3412,6 +3412,7 @@ async def global_metric_bins(
     For `ticker = ALL` each ticker is independently ranked into n_bins then
     pooled (per-ticker rank normalization). For a single ticker, flat rank.
     """
+    import logging as _log
     if not pool:
         return {"error": "OI database not configured"}
     n_bins = max(2, min(20, n_bins))
@@ -3425,7 +3426,10 @@ async def global_metric_bins(
     else:
         mode_tag = "is"
     cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
+    _log.info("global_bins request  key=%r  force=%s", cache_key, force)
+
     if not force and cache_key in _GLOBAL_BINS_CACHE:
+        _log.info("global_bins HIT  mem-cache  key=%r", cache_key)
         return _GLOBAL_BINS_CACHE[cache_key]
 
     # Check persistent DB cache before running the expensive computation.
@@ -3443,6 +3447,7 @@ async def global_metric_bins(
                     "SELECT payload, cached_at FROM global_bins_cache WHERE cache_key = $1",
                     cache_key)
             if db_row:
+                _log.info("global_bins HIT  db-cache  key=%r", cache_key)
                 payload = db_row["payload"]
                 if isinstance(payload, str):
                     payload = json.loads(payload)
@@ -3451,12 +3456,15 @@ async def global_metric_bins(
                 out["cached_at"] = ca.isoformat() if ca else None
                 _GLOBAL_BINS_CACHE[cache_key] = out
                 return out
+            else:
+                _log.info("global_bins MISS db-cache  key=%r", cache_key)
         except Exception as e:
             # Log instead of silently swallowing — masked the JSONB parse
             # failure for months. Still tolerate the failure so first-startup
             # (table doesn't exist) falls through to compute cleanly.
-            import logging
-            logging.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
+            _log.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
+    else:
+        _log.info("global_bins SKIP cache (force=True)  key=%r", cache_key)
 
     # Build date filter
     where = [f"{outcome} IS NOT NULL"]
