@@ -3533,7 +3533,14 @@ async def global_metric_bins(
             out["start_date"]       = wf_start
 
         # Persist to DB so next server restart loads instantly.
+        # _ensure_bins_table is called again here (not just before the read)
+        # because the table may have been dropped and recreated between the
+        # initial check and this write — _bins_table_ensured would still be
+        # True from the earlier call so the DDL would be skipped otherwise.
         try:
+            global _bins_table_ensured
+            _bins_table_ensured = False          # force re-check on every write
+            await _ensure_bins_table(pool)
             async with pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO global_bins_cache "
@@ -3549,7 +3556,9 @@ async def global_metric_bins(
                     "SELECT cached_at FROM global_bins_cache WHERE cache_key = $1",
                     cache_key)
             out["cached_at"] = row_ca["cached_at"].isoformat() if row_ca else None
-        except Exception:
+        except Exception as _write_exc:
+            import logging
+            logging.warning("global_bins_cache DB write failed for %s: %r", cache_key, _write_exc)
             out["cached_at"] = None
 
         _GLOBAL_BINS_CACHE[cache_key] = out
