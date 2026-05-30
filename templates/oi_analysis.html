@@ -738,7 +738,7 @@
           <span style="font-size:11px;color:var(--dim)">Outcome:</span>
           <select id="select-topbins-outcome" autocomplete="off"
                   :value="topBinsOutcome"
-                  @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(true)"
+                  @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(false)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tbo-'+o">
@@ -1076,7 +1076,7 @@
           <span style="font-size:11px;color:var(--dim)">Metric:</span>
           <select autocomplete="off"
                   :value="tdMetric"
-                  @change="tdMetric = $event.target.value; tdData && loadTd(true)"
+                  @change="tdMetric = $event.target.value; tdData && loadTd(false)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px;max-width:240px">
             <template x-for="f in features" :key="'tdf-'+f">
@@ -1086,7 +1086,7 @@
           <span style="font-size:11px;color:var(--dim)">Outcome:</span>
           <select id="select-td-outcome" autocomplete="off"
                   :value="tdOutcome"
-                  @change="tdOutcome = $event.target.value; tdData && loadTd(true)"
+                  @change="tdOutcome = $event.target.value; tdData && loadTd(false)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tdo-'+o">
