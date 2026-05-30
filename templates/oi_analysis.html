@@ -97,7 +97,7 @@
     .mode-seg span:last-child { border-right:none; }
     .mode-seg span.on { background:rgba(255,255,255,0.14); color:var(--text); font-weight:600; }
     /* P3 control bar — selected mode/bin shows bright blue + bold */
-    .control-bar .mode-seg span.on { color: #74c0fc; font-weight: 700; }
+    .control-bar .mode-seg span.on { color: #3498db; font-weight: 700; }
 
     /* Page-header Mode toggle: size each segment to match the Analyze
        button (.go-btn) so the control row reads as one consistent strip
@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=138"></script>
+  <script src="/static/js/oi_analysis.js?v=139"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -234,12 +234,12 @@
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
           <button @click="runBatchScore()" :disabled="smStatus.running"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600">
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700">
             <span x-text="smStatus.running ? 'Running...' : 'Run Scan'"></span>
           </button>
           <button @click="loadScoreMatrix()"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                         font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer">
             Refresh
           </button>
         </div>
@@ -740,7 +740,7 @@
                   :value="topBinsOutcome"
                   @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:11px;padding:2px 6px;border-radius:3px">
+                         font-size:12px;padding:3px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tbo-'+o">
               <option :value="o" x-text="o"></option>
             </template>
@@ -749,7 +749,7 @@
                   :disabled="topBinsLoading"
                   :style="{ opacity: topBinsLoading ? 0.5 : 1, cursor: topBinsLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
                   title="Re-fetch and bypass server cache (after adding new metrics)">⟳ Refresh</button>
         </div>
       </div>
@@ -1078,7 +1078,7 @@
                   :value="tdMetric"
                   @change="tdMetric = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:11px;padding:2px 6px;border-radius:3px;max-width:240px">
+                         font-size:12px;padding:3px 6px;border-radius:3px;max-width:240px">
             <template x-for="f in features" :key="'tdf-'+f">
               <option :value="f" x-text="f"></option>
             </template>
@@ -1088,7 +1088,7 @@
                   :value="tdOutcome"
                   @change="tdOutcome = $event.target.value; tdData && loadTd(true)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:11px;padding:2px 6px;border-radius:3px">
+                         font-size:12px;padding:3px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tdo-'+o">
               <option :value="o" x-text="o"></option>
             </template>
@@ -1096,7 +1096,7 @@
           <span style="font-size:11px;color:var(--dim)">Mode:</span>
           <select x-model="tdMode" @change="_renderTdChart()"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                         font-size:11px;padding:2px 6px;border-radius:3px">
+                         font-size:12px;padding:3px 6px;border-radius:3px">
             <option value="ratio">Drift ratio (all tickers)</option>
             <option value="native_single">Native units (one ticker)</option>
           </select>
@@ -1105,7 +1105,7 @@
                     :value="tdSingleTicker"
                     @change="tdSingleTicker = $event.target.value; _renderTdChart()"
                     style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                           font-size:11px;padding:2px 6px;border-radius:3px;max-width:120px">
+                           font-size:12px;padding:3px 6px;border-radius:3px;max-width:120px">
               <template x-for="t in (tdData?.tickers_eligible || [])" :key="'tdt-'+t">
                 <option :value="t" x-text="t"></option>
               </template>
@@ -1115,7 +1115,7 @@
                   :disabled="tdLoading"
                   :style="{ opacity: tdLoading ? 0.5 : 1, cursor: tdLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600"
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
                   title="Re-fetch and bypass server cache">⟳ Refresh</button>
         </div>
       </div>
@@ -1234,88 +1234,93 @@
         </template>
 
         <!-- Compact stats bar (bin-filtered, outcome-aware) -->
-        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:0;
-                    margin-bottom:8px;padding:5px 10px;
-                    background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:6px;
-                    font-size:11px;color:var(--dim)">
-          <!-- Ticker — always: count in ALL mode, name in single mode -->
-          <span style="margin-right:14px;white-space:nowrap">
-            <span style="color:var(--muted);font-weight:600"
-                  x-text="data.all_mode ? 'Tickers' : 'Ticker'"></span>&nbsp;
-            <span style="color:var(--text);font-weight:700"
-                  x-text="data.all_mode ? ((data.n_tickers ?? '—') + '') : ticker"></span>
-          </span>
+        <!-- Stats boxes — full-width, label above value, justified across page -->
+        <div style="display:flex;gap:4px;margin-bottom:8px">
+
+          <!-- Ticker/Tickers -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label" x-text="data.all_mode ? 'Tickers' : 'Ticker'"></div>
+            <div class="stat-value"
+                 x-text="data.all_mode ? ((data.n_tickers ?? '—') + '') : ticker"></div>
+          </div>
+
           <!-- N -->
-          <span style="margin-right:14px;white-space:nowrap">
-            <span style="color:var(--muted);font-weight:600">N</span>&nbsp;
-            <span style="color:var(--text);font-weight:700"
-                  x-text="selectedStats ? selectedStats.n.toLocaleString() : (data.n?.toLocaleString() ?? '—')"></span>
-          </span>
-          <!-- All remaining stats — x-if requires a single root child, so wrap in display:contents -->
-          <template x-if="selectedStats">
-            <span style="display:contents">
-              <!-- Avg Ret -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">Avg&nbsp;Ret</span>&nbsp;
-                <span :style="selectedStats.avg_ret >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                      x-text="(selectedStats.avg_ret * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- Median -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">Med</span>&nbsp;
-                <span :style="selectedStats.median >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                      x-text="(selectedStats.median * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- Std Dev -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">Std</span>&nbsp;
-                <span style="color:var(--text);font-weight:700"
-                      x-text="(selectedStats.std * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- P5 -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">P5</span>&nbsp;
-                <span :style="selectedStats.p5 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                      x-text="(selectedStats.p5 * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- P95 -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">P95</span>&nbsp;
-                <span :style="selectedStats.p95 >= 0 ? 'color:#3498db;font-weight:700' : 'color:#e84393;font-weight:700'"
-                      x-text="(selectedStats.p95 * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- Win % -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">Win%</span>&nbsp;
-                <span style="color:var(--text);font-weight:700"
-                      x-text="(selectedStats.win_rate * 100).toFixed(1) + '%'"></span>
-              </span>
-              <!-- # Win -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">#Win</span>&nbsp;
-                <span style="color:var(--text);font-weight:700"
-                      x-text="selectedStats.n_winners.toLocaleString()"></span>
-              </span>
-              <!-- Avg Win -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">AvgWin</span>&nbsp;
-                <span style="color:#3498db;font-weight:700"
-                      x-text="(selectedStats.avg_winners * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- Avg Loss -->
-              <span style="margin-right:14px;white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">AvgLoss</span>&nbsp;
-                <span style="color:#e84393;font-weight:700"
-                      x-text="(selectedStats.avg_losers * 100).toFixed(3) + '%'"></span>
-              </span>
-              <!-- Trd/Yr -->
-              <span style="white-space:nowrap">
-                <span style="color:var(--muted);font-weight:600">Trd/Yr</span>&nbsp;
-                <span style="color:var(--text);font-weight:700"
-                      x-text="selectedStats.trades_per_year.toFixed(1)"></span>
-              </span>
-            </span>
-          </template>
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">N</div>
+            <div class="stat-value"
+                 x-text="selectedStats ? selectedStats.n.toLocaleString() : (data.n?.toLocaleString() ?? '—')"></div>
+          </div>
+
+          <!-- Avg Ret -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Avg Ret</div>
+            <div :class="(selectedStats?.avg_ret ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
+                 x-text="selectedStats ? (selectedStats.avg_ret * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- Median -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Median</div>
+            <div :class="(selectedStats?.median ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
+                 x-text="selectedStats ? (selectedStats.median * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- Std Dev -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Std Dev</div>
+            <div class="stat-value"
+                 x-text="selectedStats ? (selectedStats.std * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- P5 -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">P5</div>
+            <div :class="(selectedStats?.p5 ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
+                 x-text="selectedStats ? (selectedStats.p5 * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- P95 -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">P95</div>
+            <div :class="(selectedStats?.p95 ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
+                 x-text="selectedStats ? (selectedStats.p95 * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- Win % -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Win %</div>
+            <div class="stat-value"
+                 x-text="selectedStats ? (selectedStats.win_rate * 100).toFixed(1) + '%' : '—'"></div>
+          </div>
+
+          <!-- # Win -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label"># Win</div>
+            <div class="stat-value"
+                 x-text="selectedStats ? selectedStats.n_winners.toLocaleString() : '—'"></div>
+          </div>
+
+          <!-- Avg Win -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Avg Win</div>
+            <div class="stat-value pos"
+                 x-text="selectedStats ? (selectedStats.avg_winners * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- Avg Loss -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Avg Loss</div>
+            <div class="stat-value neg"
+                 x-text="selectedStats ? (selectedStats.avg_losers * 100).toFixed(3) + '%' : '—'"></div>
+          </div>
+
+          <!-- Trd/Yr -->
+          <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+            <div class="stat-label">Trd/Yr</div>
+            <div class="stat-value"
+                 x-text="selectedStats ? selectedStats.trades_per_year.toFixed(1) : '—'"></div>
+          </div>
+
         </div>
 
         <!-- P3: Section-level control bar — drives the Quantile chart AND
@@ -1360,7 +1365,7 @@
             <select :value="decileActiveOutcome"
                     @change="setDecileActiveOutcome($event.target.value)"
                     autocomplete="off"
-                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                    style="background:var(--raised);border:1px solid var(--border);color:#3498db;
                            font-size:11px;padding:2px 6px;border-radius:3px;max-width:180px">
               <template x-for="o in outcomes" :key="'sao-'+o">
                 <option :value="o" :selected="o===decileActiveOutcome" x-text="o"></option>
@@ -1413,9 +1418,11 @@
           <!-- Lower-section refresh. Confirm modal in decileRefresh().
                Re-computes the bundle only — doesn't touch upper-section
                views (Signal Decomposition + Score panel). -->
-          <button class="btn-action small" @click="decileRefresh()"
+          <button @click="decileRefresh()"
                   :disabled="analyzeBundleStatus === 'computing'"
-                  :style="analyzeBundleStatus === 'computing' ? 'opacity:.5;cursor:wait' : ''"
+                  :style="{ opacity: analyzeBundleStatus === 'computing' ? 0.5 : 1, cursor: analyzeBundleStatus === 'computing' ? 'wait' : 'pointer' }"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
                   title="Recompute the 12-outcome bundle for this metric. Confirms first.">
             ⟳ Refresh
           </button>
