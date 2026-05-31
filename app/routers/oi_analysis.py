@@ -2875,6 +2875,75 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
     return samples, full_per_ticker, full_thresholds
 
 
+async def _ensure_sec_cache(pool, ticker: str, metric: str, outcome: str,
+                            date_from: str = "", date_to: str = "") -> str:
+    """Ensure _SEC_CACHE has rows for (ticker, metric, outcome, dates).
+
+    Returns the cache_key. No scanner job is dispatched — this is the
+    confirmation-layer-only fast path used by /secondary-prepare-rows.
+    If rows are already cached the call is a no-op (returns instantly).
+    """
+    cache_key = _sec_cache_key(ticker, metric, outcome, date_from, date_to)
+    if cache_key in _SEC_CACHE:
+        return cache_key
+
+    is_all = (ticker == "ALL")
+    date_conditions = ""
+    params: list = []
+    p = 1
+    if not is_all:
+        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
+    if date_from:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date >= ${p}"; params.append(_date.fromisoformat(date_from)); p += 1
+    if date_to:
+        from datetime import date as _date
+        date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
+
+    async with pool.acquire() as conn:
+        col_rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'daily_features' AND table_schema = 'public'
+               AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
+               AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
+               ORDER BY ordinal_position""")
+    all_num_cols = [r["column_name"] for r in col_rows]
+    outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
+    feature_cols = [c for c in all_num_cols
+                    if c not in outcome_cols_all and c != metric
+                    and not c.startswith("spot") and not c.endswith("_pc")]
+
+    select_cols = ", ".join(
+        ["ticker", "trade_date", outcome, metric, "spot_co", "spot_pc"]
+        + feature_cols)
+    async with pool.acquire() as conn:
+        db_rows = await conn.fetch(
+            f"SELECT {select_cols} FROM daily_features "
+            f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL"
+            f"{date_conditions} ORDER BY trade_date", *params)
+
+    rows = [dict(r) for r in db_rows]
+    for r in rows:
+        r["trade_date"] = str(r["trade_date"])
+
+    data_as_of = max((r["trade_date"] for r in rows), default=None) if rows else None
+    tickers_used = list({r.get("ticker") for r in rows if r.get("ticker")})
+    cal_by_tkr = await _fetch_ticker_calendars(pool, tickers_used) if tickers_used else {}
+
+    _SEC_CACHE[cache_key] = {
+        "rows":           rows,
+        "features":       feature_cols,
+        "outcome":        outcome,
+        "primary_metric": metric,
+        "calendars":      cal_by_tkr,
+        "data_as_of":     data_as_of,
+        # mode/cutoff don't affect the row set — SecDetailReq carries live mode
+        "mode":           "walk_forward",
+        "cutoff_date":    "",
+    }
+    return cache_key
+
+
 class SecLoadReq(BaseModel):
     ticker: str
     metric: str
@@ -3143,6 +3212,33 @@ async def secondary_score_status(req: SecStatusReq):
     elif entry["status"] == "done" and entry.get("result"):
         response.update(entry["result"])
     return response
+
+
+class SecPrepareReq(BaseModel):
+    ticker: str
+    metric: str
+    outcome: str
+    date_from: str = ""
+    date_to: str = ""
+
+
+@router.post("/secondary-prepare-rows")
+async def secondary_prepare_rows(req: SecPrepareReq, pool=Depends(get_oi_pool)):
+    """Ensure _SEC_CACHE has rows for this primary context. Returns cache_key.
+
+    Confirmation-layer fast path — called by the frontend when the primary
+    metric/ticker/outcome/dates change but the user has a secondary selected.
+    Does NOT dispatch a scanner job; just ensures the row-set is cached so
+    /secondary-detail can run immediately."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    try:
+        cache_key = await _ensure_sec_cache(
+            pool, req.ticker, req.metric, req.outcome, req.date_from, req.date_to)
+        return {"cache_key": cache_key}
+    except Exception as exc:
+        logging.exception("secondary_prepare_rows failed")
+        return {"error": str(exc)}
 
 
 @router.post("/secondary-scan/invalidate")

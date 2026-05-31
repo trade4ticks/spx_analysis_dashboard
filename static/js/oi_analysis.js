@@ -365,6 +365,34 @@ document.addEventListener('alpine:init', () => {
         this.analyzeBundle    = null;
         this.analyzeBundleKey = null;
         this.loadAnalyzeBundle();
+
+        // M2: secondary confirmation layer auto-recompute after primary changes.
+        // entry type + horizon are subsumed by outcome — no separate check needed.
+        if (this.secSelectedMetric) {
+          const newParams = {
+            ticker:   this.ticker,
+            metric:   this.metric,
+            outcome:  this.outcome,
+            dateFrom: this.dateFrom || '',
+            dateTo:   this.dateTo   || '',
+          };
+          const cacheStillValid = this.secCacheKey && this._secCacheParams &&
+            JSON.stringify(newParams) === JSON.stringify(this._secCacheParams);
+
+          // Mark scanner stale when primary context changed (not on mode-only toggle —
+          // scanner is WF-locked, so toggling WF↔TT doesn't invalidate scanner rankings).
+          if (this.secStatus.loaded && !cacheStillValid) this.secScannerStale = true;
+
+          if (cacheStillValid) {
+            // Mode/bin change only — row cache still valid; recompute with live mode params.
+            this.secDrillMetric(this.secSelectedMetric, false);
+          } else {
+            // Metric/ticker/outcome/dates changed — need row refetch for new primary context.
+            this.secCacheKey = null;
+            this._prepareSecRowsThenDrill();
+          }
+          this._secCacheParams = newParams;
+        }
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -430,7 +458,12 @@ document.addEventListener('alpine:init', () => {
       this._renderDOW();
       this._renderActivity();
       this._renderTradeTable();
-      if (this.secStatus.loaded && !this.secStatus.loading) this.secScan();
+      // M2: advisory layer goes stale — user must explicitly reload scanner
+      if (this.secStatus.loaded) this.secScannerStale = true;
+      // M2: confirmation layer is live — recompute immediately if a secondary is selected
+      if (this.secSelectedMetric && this.secCacheKey) {
+        this.secDrillMetric(this.secSelectedMetric, false);
+      }
       this._computeSelectedStats();
     },
 
@@ -3767,6 +3800,46 @@ document.addEventListener('alpine:init', () => {
       return [{ name: this.secSelectedMetric }, ...this.secMetrics];
     },
 
+    // M2: primary metric/ticker/outcome/dates changed → fetch rows for new primary context
+    // (no scanner dispatch), then redrill the current secondary.
+    async _prepareSecRowsThenDrill() {
+      if (!this.secSelectedMetric) return;
+      this.secDetailLoading = true;
+      try {
+        const r = await fetch('/api/factor-analysis/secondary-prepare-rows', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker:    this.ticker,
+            metric:    this.metric,
+            outcome:   this.outcome,
+            date_from: this.dateFrom || '',
+            date_to:   this.dateTo   || '',
+          }),
+        });
+        const d = await r.json();
+        if (d.error || !d.cache_key) {
+          this.secDetail = { error: d.error || 'Could not prepare secondary data for new primary.' };
+          return;
+        }
+        this.secCacheKey = d.cache_key;
+        this._secCacheParams = {
+          ticker:   this.ticker,
+          metric:   this.metric,
+          outcome:  this.outcome,
+          dateFrom: this.dateFrom || '',
+          dateTo:   this.dateTo   || '',
+        };
+        // secDrillMetric carries live walk_forward + cutoff_date from toggle —
+        // no second call to loadHeatmap needed here (it fires inside secDrillMetric).
+        await this.secDrillMetric(this.secSelectedMetric, false);
+      } catch (e) {
+        this.secDetail = { error: e.message };
+      } finally {
+        this.secDetailLoading = false;
+      }
+    },
+
     async _pollSecScore() {
       if (this.secPolling) return;
       this.secPolling = true;
@@ -3842,6 +3915,14 @@ document.addEventListener('alpine:init', () => {
         if (d.error && !d.scan_key) throw new Error(d.error);
         this.secCacheKey = d.cache_key;
         this.secScanKey  = d.scan_key;
+        // M2: snapshot params so loadAnalysis() can detect row-cache validity later
+        this._secCacheParams = {
+          ticker:   this.ticker,
+          metric:   this.metric,
+          outcome:  this.outcome,
+          dateFrom: this.dateFrom || '',
+          dateTo:   this.dateTo   || '',
+        };
         if (d.status === 'done') {
           this._applySecResults(d);
         } else if (d.status === 'computing') {
