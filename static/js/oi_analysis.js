@@ -369,7 +369,7 @@ document.addEventListener('alpine:init', () => {
             this.loadIcDecomp();
           }
         }
-        if (this.heatmapMetric) this.loadHeatmap();  // W4: fire-and-forget; no longer blocks Analyze
+        // M3: heatmap is now driven by secDrillMetric — no longer fires on analyze.
         // P1: fire-and-forget kick of the 12-outcome bundle so P3+ mode views
         // have it ready. Single-ticker computes inline (~2-5s); ALL goes
         // through the background-job + poll path (~5 min on cache miss).
@@ -1356,7 +1356,7 @@ document.addEventListener('alpine:init', () => {
           Object.assign(this.data, slice);
           this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
         }
-        if (this.heatmapMetric) this.loadHeatmap();
+        // M3: heatmap no longer auto-fires on outcome change — it's driven by secDrillMetric.
         this._computeSelectedStats();
         return;
       }
@@ -1371,11 +1371,7 @@ document.addEventListener('alpine:init', () => {
           this.data.equity_by_decile = this._buildEquityByDecileFromCal(slice.trade_calendar);
         }
       }
-      // Heatmap auto-refresh on outcome change. The pre-cache Load button
-      // is kept for Y-metric changes (separate computation, deliberate
-      // user action) but outcome switches are now backed by the bundle
-      // and cheap, so manual Load was friction without purpose.
-      if (this.heatmapMetric) this.loadHeatmap();
+      // M3: heatmap no longer auto-fires on outcome change — it's driven by secDrillMetric.
       this._computeSelectedStats();
     },
 
@@ -1995,8 +1991,7 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── 2D Heatmap ──────────────────────────────────────────────────────
-    heatmapMetric: '',
+    // ── 2D Heatmap ── M3: Y-axis is now secSelectedMetric; no standalone dropdown ──
     heatmapData: null,
     heatmapLoading: false,
     heatmapBins: 10,
@@ -2014,7 +2009,8 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadHeatmap() {
-      if (!this.heatmapMetric || !this.data) return;
+      // M3: Y-axis is now the selected secondary metric; no standalone dropdown.
+      if (!this.secSelectedMetric || !this.data) return;
       this.heatmapLoading = true;
       this.heatmapData = null;
       this.hmXData = null;
@@ -2033,7 +2029,7 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch(
           `/api/factor-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
           + `&metric_x=${encodeURIComponent(this.metric)}`
-          + `&metric_y=${encodeURIComponent(this.heatmapMetric)}`
+          + `&metric_y=${encodeURIComponent(this.secSelectedMetric)}`
           + `&outcome=${encodeURIComponent(this._heatmapOutcome())}&bins=${this.heatmapBins}`
           + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
           + (this.dateTo   ? `&date_to=${this.dateTo}`     : '')
@@ -2068,7 +2064,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadHmBins1d() {
-      if (!this.data || !this.heatmapMetric) return;
+      if (!this.data || !this.secSelectedMetric) return;
       // /metric-bins (post-Step-5.5-continuation) supports walk_forward
       // and (Step 6) train_test for both ALL and single-ticker modes via
       // the Assigner. Send the page-wide mode so the side bin charts
@@ -2099,7 +2095,7 @@ document.addEventListener('alpine:init', () => {
         const xAgg = x20 ? this._aggregateBin20ToN(x20, this.hmBins1d) : null;
         this.hmXData = xAgg ? xAgg.filter(Boolean) : null;
         try {
-          const ry = await fetch(base + `&metric=${encodeURIComponent(this.heatmapMetric)}`);
+          const ry = await fetch(base + `&metric=${encodeURIComponent(this.secSelectedMetric)}`);
           if (ry.ok) {
             const d = await ry.json();
             this.hmYData = d.buckets || null;
@@ -2107,14 +2103,14 @@ document.addEventListener('alpine:init', () => {
         } catch (e) { console.error('[hmBins1d gap Y] fetch failed', e); }
         await this.$nextTick();
         this._renderHmBar1d('chart-hm-x', this.hmXData, this.metric);
-        this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
+        this._renderHmBar1d('chart-hm-y', this.hmYData, this.secSelectedMetric);
         return;
       }
 
       try {
         const [rx, ry] = await Promise.all([
           fetch(base + `&metric=${encodeURIComponent(this.metric)}`),
-          fetch(base + `&metric=${encodeURIComponent(this.heatmapMetric)}`),
+          fetch(base + `&metric=${encodeURIComponent(this.secSelectedMetric)}`),
         ]);
         if (rx.ok) {
           const d = await rx.json();
@@ -2125,7 +2121,7 @@ document.addEventListener('alpine:init', () => {
         }
         if (ry.ok) {
           const d = await ry.json();
-          console.log('[hmBins1d Y]', this.heatmapMetric, d.error || `n=${d.n} buckets=${(d.buckets||[]).length}`, d);
+          console.log('[hmBins1d Y]', this.secSelectedMetric, d.error || `n=${d.n} buckets=${(d.buckets||[]).length}`, d);
           this.hmYData = d.buckets || null;
         } else {
           console.warn('[hmBins1d Y] HTTP', ry.status, await ry.text());
@@ -2133,7 +2129,7 @@ document.addEventListener('alpine:init', () => {
       } catch (e) { console.error('[hmBins1d] fetch failed', e); }
       await this.$nextTick();
       this._renderHmBar1d('chart-hm-x', this.hmXData, this.metric);
-      this._renderHmBar1d('chart-hm-y', this.hmYData, this.heatmapMetric);
+      this._renderHmBar1d('chart-hm-y', this.hmYData, this.secSelectedMetric);
     },
 
     _renderHmBar1d(canvasId, buckets, title, retries = 6) {
@@ -2216,7 +2212,7 @@ document.addEventListener('alpine:init', () => {
       if (xt && yt) {
         const fmt = v => v !== undefined ? v.toFixed(4) : '?';
         s += `\nX (${this.metric}): ${fmt(xt[ix])} – ${fmt(xt[ix+1])}`;
-        s += `\nY (${this.heatmapMetric}): ${fmt(yt[iy])} – ${fmt(yt[iy+1])}`;
+        s += `\nY (${this.secSelectedMetric}): ${fmt(yt[iy])} – ${fmt(yt[iy+1])}`;
       }
       return s;
     },
@@ -4085,6 +4081,11 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderSecDetail(), 60);
+        // M3: heatmap X-axis = primary metric, Y-axis = secSelectedMetric.
+        // Fires here so it triggers on both secondary-change AND primary-metric-change
+        // paths (_prepareSecRowsThenDrill awaits secDrillMetric, so heatmap fires
+        // exactly once per trigger via the chain — no double-fire).
+        this.loadHeatmap();
       } catch (e) {
         if (version !== this._secDrillVersion) return;
         const msg = e.message === 'insufficient_data'
@@ -4718,8 +4719,8 @@ document.addEventListener('alpine:init', () => {
       if (this.smMeta.count > 0) {
         this.smInit();  // reload score matrix in new mode
       }
-      // W5: heatmap re-fetch on mode switch is now handled inside loadAnalysis()
-      // (W4 fires it fire-and-forget when heatmapMetric is set). heatmapData is
+      // W5: heatmap re-fetch on mode switch is handled by secDrillMetric() (M3).
+      // heatmapData is
       // null at this point because loadAnalysis() clears it, so this block was
       // always a no-op after W4 anyway — removing it makes the intent explicit.
       //
