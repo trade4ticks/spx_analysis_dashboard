@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=143"></script>
+  <script src="/static/js/oi_analysis.js?v=144"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1790,57 +1790,77 @@
       </div>
     </template>
 
-    <!-- ── Secondary Signal Scanner sub-panel ───────────────────────────── -->
+    <!-- ── Secondary Section (control bar + advisory explorer + confirmation layer) ── -->
     <template x-if="data && !data.error">
       <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:4px">
 
-        <!-- Header row -->
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-          <div style="font-size:13px;font-weight:700;color:var(--text)">Secondary Signal Scanner</div>
-          <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px;background:rgba(230,162,60,.1);border:1px solid rgba(230,162,60,.3);padding:1px 6px;border-radius:3px">walk-forward · nomination only</span>
-          <button @click="secLoad()"
-                  :disabled="secStatus.loading"
+        <!-- A. Secondary Control Bar — single source of truth for selected secondary metric -->
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <label style="font-size:12px;font-weight:700;color:var(--text)">Secondary</label>
+          <select x-model="secSelectedMetric"
+                  @change="secSelectedMetric ? secDrillMetric(secSelectedMetric,false) : (secDetail=null)"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                         font-size:12px;padding:3px 8px;border-radius:3px;min-width:180px">
+            <option value="">— select metric —</option>
+            <template x-for="m in secMetricsForBar()" :key="m.name">
+              <option :value="m.name" x-text="m.name"></option>
+            </template>
+          </select>
+          <button x-show="secSelectedMetric" @click="secSelectedMetric=null;secDetail=null"
+                  style="background:transparent;border:none;color:var(--dim);font-size:12px;cursor:pointer;padding:0 4px">✕ Clear</button>
+          <div style="flex:1"></div>
+          <button @click="secAdvisoryOpen=!secAdvisoryOpen"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                         font-size:12px;padding:4px 12px;border-radius:4px;cursor:pointer">
+            <span x-text="secAdvisoryOpen ? '▴ Collapse Explorer' : '▾ Open Explorer'"></span>
+          </button>
+          <button @click="secLoad()" :disabled="secStatus.loading"
                   :style="{ opacity: secStatus.loading ? 0.5 : 1 }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600">
-            <span x-text="secStatus.loading ? 'Loading…' : (secStatus.loaded ? 'Reload' : 'Load All Metrics')"></span>
+            <span x-text="secStatus.loading ? 'Loading…' : (secStatus.loaded ? 'Reload All' : 'Load All Metrics')"></span>
           </button>
-          <template x-if="secStatus.loaded && secBaseline">
-            <span style="font-size:11px;color:var(--dim)">
-              Baseline (primary filter): <b style="color:var(--text)" x-text="secBaseline.n + ' trades'"></b>
-              · <b :style="'color:' + (secBaseline.avg_ret >= 0 ? '#3498db' : '#e84393')"
-                   x-text="(secBaseline.avg_ret * 100).toFixed(3) + '%'"></b>
-              · WR <b style="color:var(--muted)" x-text="(secBaseline.win_rate * 100).toFixed(1) + '%'"></b>
-              · <span x-text="secMetrics.length + ' metrics ranked'"></span>
-            </span>
-          </template>
+        </div>
+
+        <!-- B. Metadata strip — read-only summary, only visible when scanner has results -->
+        <div x-show="secStatus.loaded && secBaseline"
+             style="font-size:11px;color:var(--dim);margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          Baseline: <b style="color:var(--text)" x-text="(secBaseline?.n ?? 0) + ' trades'"></b>
+          · <b :style="'color:' + ((secBaseline?.avg_ret ?? 0) >= 0 ? '#3498db' : '#e84393')"
+               x-text="((secBaseline?.avg_ret ?? 0) * 100).toFixed(3) + '%'"></b>
+          · WR <b style="color:var(--muted)" x-text="((secBaseline?.win_rate ?? 0) * 100).toFixed(1) + '%'"></b>
+          · <span x-text="secMetrics.length + ' metrics ranked'"></span>
           <template x-if="secScanMeta && secScanMeta.mode === 'walk_forward'">
-            <span style="font-size:11px;color:#e6a23c;font-family:monospace;letter-spacing:.5px"
-                  x-text="'WALK-FORWARD · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · ' + (secScanMeta.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (252d)'"></span>
+            <span style="color:#e6a23c;font-family:monospace;letter-spacing:.5px"
+                  x-text="'WF · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · ' + (secScanMeta.dropped_warmup_n||0).toLocaleString() + ' dropped (252d warmup)'"></span>
           </template>
           <template x-if="secScanMeta && secScanMeta.data_as_of">
-            <span style="font-size:11px;color:var(--dim)" x-text="'data through ' + secScanMeta.data_as_of"></span>
+            <span x-text="'data through ' + secScanMeta.data_as_of"></span>
           </template>
+          <span x-show="secScannerStale" style="color:#e6a23c">⚠ stale — click Reload All</span>
+        </div>
+
+        <!-- C. Advisory block — scanner + minis, collapsible via x-show (DOM persists: no recompute on re-expand) -->
+        <div x-show="secAdvisoryOpen">
+
+          <!-- Loading / error / empty states -->
+          <div x-show="!secStatus.loaded && !secStatus.loading"
+               style="font-size:12px;color:var(--dim);padding:4px 0 12px">
+            Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
+          </div>
           <span x-show="secStatus.loading" style="font-size:11px;color:#3498db">Computing secondary scores…</span>
           <span x-show="secStatus.error" style="font-size:11px;color:#e84393" x-text="secStatus.error"></span>
-        </div>
 
-        <!-- Empty state -->
-        <div x-show="!secStatus.loaded && !secStatus.loading"
-             style="font-size:12px;color:var(--dim);padding:4px 0 12px">
-          Select primary bins, then click <b>Load All Metrics</b> to rank secondary metrics by their lift within the filtered subset.
-        </div>
-
-        <!-- Row 1: Ranked metrics bar chart (left) + Equity curves (right).
-             Both cells always render so the grid stays a true 50/50 — the
-             equity cell shows a "click a bar" hint until a metric is drilled. -->
-        <template x-if="secStatus.loaded && secMetrics.length > 0">
-          <div class="chart-grid" style="margin-bottom:12px">
-            <!-- Left: ranked secondary metrics — bars fill the half-width cell -->
-            <div class="chart-box" style="min-width:0">
+          <!-- Scanner lift bar — nomination-only, walk-forward-locked, no equity (equity moved to confirmation Row 1) -->
+          <template x-if="secStatus.loaded && secMetrics.length > 0">
+            <div class="chart-box" style="margin-bottom:12px">
               <div class="chart-title">
                 Secondary Metrics by Lift
                 <span style="font-weight:400;font-size:10px;color:var(--dim)">— click a bar to drill in</span>
+                <span style="font-size:10px;color:#e6a23c;font-family:monospace;letter-spacing:.5px;
+                             background:rgba(230,162,60,.1);border:1px solid rgba(230,162,60,.3);
+                             padding:1px 6px;border-radius:3px;margin-left:4px">walk-forward · nomination only</span>
+                <span x-show="secScannerStale" style="color:#e6a23c;font-size:10px;margin-left:4px">stale</span>
                 <span x-show="secStatus.loading" style="color:#3498db;font-size:10px;margin-left:6px">updating…</span>
                 <button class="fs-btn" @click="openFullscreen('sec-bar-canvas')" title="Fullscreen">⛶</button>
               </div>
@@ -1850,187 +1870,51 @@
                 </div>
               </div>
             </div>
-            <!-- Right: equity curves (placeholder until a metric is drilled) -->
-            <div class="chart-box" style="min-width:0">
-              <div class="chart-title">
-                Equity Curves
-                <template x-if="secSelectedMetric">
-                  <span>
-                    <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
-                    <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: +secondary</span>
-                  </span>
-                </template>
-                <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen"
-                        :disabled="!secSelectedMetric"
-                        :style="secSelectedMetric ? '' : 'opacity:.4;cursor:not-allowed'">⛶</button>
-              </div>
-              <template x-if="secSelectedMetric">
-                <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
-              </template>
-              <template x-if="!secSelectedMetric">
-                <div class="chart-canvas"
-                     style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px">
-                  Click a bar on the left to drill in
-                </div>
-              </template>
-            </div>
-          </div>
-        </template>
-
-        <!-- Detail rows: only shown when a secondary metric is selected -->
-        <template x-if="secSelectedMetric">
-          <div>
-
-            <!-- Detail sub-header: metric name, bin count selector, bin pills, close -->
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;
-                        background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px">
-              <div style="font-size:12px;font-weight:700;color:var(--text);font-family:monospace"
-                   x-text="secSelectedMetric"></div>
-              <div class="mode-seg" style="margin-left:4px">
-                <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
-                <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
-                <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
-              </div>
-              <span style="font-size:11px;color:var(--dim);margin-left:4px">bins · click to toggle →</span>
-              <template x-if="secDetail && secDetail.bins">
-                <template x-for="b in secDetail.bins.filter(x => x)" :key="'sb-'+b.bin">
-                  <span style="padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer;border:1px solid;font-family:monospace"
-                        :style="{
-                          background: secSelectedSecBins.includes(b.bin) ? 'rgba(232,67,147,.2)' : 'var(--raised)',
-                          borderColor: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--border)',
-                          color: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--dim)',
-                        }"
-                        @click="secToggleSecBin(b.bin)"
-                        x-text="'B' + b.bin"></span>
-                </template>
-              </template>
-              <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
-              <!-- Error message surfaced from backend or network -->
-              <template x-if="secDetail?.error">
-                <span style="font-size:11px;color:#e84393;margin-left:auto;font-style:italic"
-                      x-text="secDetail.error"></span>
-              </template>
-              <!-- Normal counts when detail succeeded -->
-              <template x-if="secDetail && !secDetail.error">
-                <span style="font-size:11px;color:var(--dim);margin-left:auto">
-                  Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
-                  · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
-                </span>
-              </template>
-              <template x-if="secDetail?.combined_trades?.length">
-                <button @click="secDownloadCSV()"
-                        style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
-                               color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
-                  ↓ CSV
-                </button>
-              </template>
-              <button @click="secSelectedMetric=null;secDetail=null"
-                      style="background:transparent;border:none;color:var(--dim);font-size:12px;cursor:pointer;padding:0 4px">✕</button>
-            </div>
-
-            <!-- Row 2: Secondary quantile bins (left) + Trade activity (right) -->
-            <div class="chart-grid" style="margin-bottom:12px">
-              <div class="chart-box">
-                <div class="chart-title">
-                  Quantile — Secondary Metric
-                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— click bins to toggle filter</span>
-                  <button class="fs-btn" @click="openFullscreen('sec-bins-canvas')" title="Fullscreen">⛶</button>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-bins-canvas"></canvas></div>
-              </div>
-              <div class="chart-box">
-                <div class="chart-title">
-                  Trade Activity
-                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— combined filter entries &amp; open positions</span>
-                  <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.sec }"
-                          @click="toggleDedupeConc('sec')"
-                          title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
-                  <button class="fs-btn" @click="openFullscreen('sec-activity-canvas')" title="Fullscreen">⛶</button>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
-              </div>
-            </div>
-
-            <!-- Row 3: Ticker bubble scatter (left) + Avg return by year (right) -->
-            <div class="chart-grid">
-              <div class="chart-box">
-                <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                  <span>Ticker Breakdown</span>
-                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
-                  <span x-show="secDetail?.tickers?.length"
-                        style="font-size:10px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
-                               border-radius:3px;padding:1px 6px;color:var(--dim)"
-                        x-text="_tickerCoverage(secDetail?.tickers)"></span>
-                  <span style="font-size:10px;color:var(--dim);margin-left:auto">min n:
-                    <input type="range" min="1" max="10" step="1"
-                           :value="secBubbleMinN"
-                           @input="secSetBubbleMinN($event.target.value)"
-                           style="width:60px;vertical-align:middle;accent-color:#3498db">
-                    <b x-text="secBubbleMinN" style="color:var(--text)"></b>
-                  </span>
-                  <button class="fs-btn" @click="openFullscreen('sec-bubble-canvas')" title="Fullscreen">⛶</button>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-bubble-canvas"></canvas></div>
-              </div>
-              <div class="chart-box">
-                <div class="chart-title">
-                  Avg Return by Year
-                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— primary vs +secondary</span>
-                  <button class="fs-btn" @click="openFullscreen('sec-yearly-canvas')" title="Fullscreen">⛶</button>
-                </div>
-                <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
-              </div>
-            </div>
-
-          </div>
-        </template>
-
-      </div>
-    </template>
-
-    <!-- ── Multi-Metric Correlation Explorer ────────────────────────────── -->
-    <template x-if="data && !data.error && secStatus.loaded">
-      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:4px">
-
-        <!-- Header row -->
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
-          <div style="font-size:13px;font-weight:700;color:var(--text)">Multi-Metric Correlation</div>
-          <button @click="corrTogglePanel()"
-                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600"
-                  x-text="corrPanelOpen ? 'Hide' : 'Open'"></button>
-          <template x-if="corrPanelOpen">
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span style="font-size:11px;color:var(--dim)">Bins:</span>
-              <div class="mode-seg">
-                <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
-                <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
-                <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
-              </div>
-              <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
-                      style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                             font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
-              <button class="btn-action pink small" @click="runCorrelation()"
-                      :disabled="!secStatus.loaded || corrMiniLoading"
-                      :style="(corrMiniLoading || corrLoading) ? 'cursor:wait' : ''">
-                <span x-text="corrMiniLoading || corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
-              </button>
-              <span x-show="corrSelectedCount() > 0" style="font-size:11px;color:var(--dim)"
-                    x-text="corrSelectedCount() + ' metric' + (corrSelectedCount()===1?'':'s') + ' selected'"></span>
-              <template x-if="corrResult?.combined_trades?.length">
-                <button @click="corrDownloadCSV()"
-                        title="Download enriched trades CSV"
-                        style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
-                               color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
-                  ↓ CSV
-                </button>
-              </template>
-            </div>
           </template>
-        </div>
 
-        <template x-if="corrPanelOpen">
-          <div>
+          <!-- Multi-Metric Correlation (minis) — inside advisory block, gated on scanner loaded -->
+          <template x-if="secStatus.loaded">
+            <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:12px">
+
+              <!-- Header row -->
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+                <div style="font-size:13px;font-weight:700;color:var(--text)">Multi-Metric Correlation</div>
+                <button @click="corrTogglePanel()"
+                        style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                               color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600"
+                        x-text="corrPanelOpen ? 'Hide' : 'Open'"></button>
+                <template x-if="corrPanelOpen">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span style="font-size:11px;color:var(--dim)">Bins:</span>
+                    <div class="mode-seg">
+                      <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
+                      <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
+                      <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
+                    </div>
+                    <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                                   font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
+                    <button class="btn-action pink small" @click="runCorrelation()"
+                            :disabled="!secStatus.loaded || corrMiniLoading"
+                            :style="(corrMiniLoading || corrLoading) ? 'cursor:wait' : ''">
+                      <span x-text="corrMiniLoading || corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
+                    </button>
+                    <span x-show="corrSelectedCount() > 0" style="font-size:11px;color:var(--dim)"
+                          x-text="corrSelectedCount() + ' metric' + (corrSelectedCount()===1?'':'s') + ' selected'"></span>
+                    <template x-if="corrResult?.combined_trades?.length">
+                      <button @click="corrDownloadCSV()"
+                              title="Download enriched trades CSV"
+                              style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                                     color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                        ↓ CSV
+                      </button>
+                    </template>
+                  </div>
+                </template>
+              </div>
+
+              <template x-if="corrPanelOpen">
+                <div>
 
             <!-- Loading spinner -->
             <div x-show="corrMiniLoading" style="font-size:12px;color:var(--dim);padding:8px 0 12px">
@@ -2280,11 +2164,212 @@
             <div x-show="corrResult?.error" style="font-size:12px;color:#e84393;padding:4px 0"
                  x-text="'Error: ' + corrResult?.error"></div>
 
+                </div>
+              </template>
+              <!-- end corrPanelOpen body -->
+
+            </div>
+            <!-- end minis inner div -->
+          </template>
+          <!-- end secStatus.loaded minis wrapper -->
+
+        </div>
+        <!-- end advisory block -->
+
+        <!-- D. Confirmation layer — live-updating; persists across all primary-side changes -->
+        <template x-if="secSelectedMetric">
+          <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+
+            <!-- Sub-header: metric name, bin-count toggle, bin pills, n counts, download, ✕ close -->
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;
+                        background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px">
+              <div style="font-size:12px;font-weight:700;color:var(--text);font-family:monospace"
+                   x-text="secSelectedMetric"></div>
+              <div class="mode-seg" style="margin-left:4px">
+                <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
+                <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
+                <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
+              </div>
+              <span style="font-size:11px;color:var(--dim);margin-left:4px">bins · click to toggle →</span>
+              <template x-if="secDetail && secDetail.bins">
+                <template x-for="b in secDetail.bins.filter(x => x)" :key="'sb-'+b.bin">
+                  <span style="padding:2px 8px;border-radius:3px;font-size:10px;cursor:pointer;border:1px solid;font-family:monospace"
+                        :style="{
+                          background: secSelectedSecBins.includes(b.bin) ? 'rgba(232,67,147,.2)' : 'var(--raised)',
+                          borderColor: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--border)',
+                          color: secSelectedSecBins.includes(b.bin) ? '#e84393' : 'var(--dim)',
+                        }"
+                        @click="secToggleSecBin(b.bin)"
+                        x-text="'B' + b.bin"></span>
+                </template>
+              </template>
+              <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
+              <template x-if="secDetail?.error">
+                <span style="font-size:11px;color:#e84393;margin-left:auto;font-style:italic"
+                      x-text="secDetail.error"></span>
+              </template>
+              <template x-if="secDetail && !secDetail.error">
+                <span style="font-size:11px;color:var(--dim);margin-left:auto">
+                  Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
+                  · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
+                </span>
+              </template>
+              <template x-if="secDetail?.combined_trades?.length">
+                <button @click="secDownloadCSV()"
+                        style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                               color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                  ↓ CSV
+                </button>
+              </template>
+              <button @click="secSelectedMetric=null;secDetail=null"
+                      style="background:transparent;border:none;color:var(--dim);font-size:12px;cursor:pointer;padding:0 4px">✕</button>
+            </div>
+
+            <!-- Row 1: Quantile–Secondary drill-down (left) | Equity Curves (right) -->
+            <div class="chart-grid" style="margin-bottom:12px">
+              <div class="chart-box">
+                <div class="chart-title">
+                  Quantile — Secondary Metric
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— click bins to toggle filter</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-bins-canvas')" title="Fullscreen">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-bins-canvas"></canvas></div>
+              </div>
+              <div class="chart-box" style="min-width:0">
+                <div class="chart-title">
+                  Equity Curves
+                  <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
+                  <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: +secondary</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen">⛶</button>
+                </div>
+                <template x-if="secDetail && !secDetail.error">
+                  <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
+                </template>
+                <template x-if="!secDetail || secDetail.error">
+                  <div class="chart-canvas"
+                       style="display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px">
+                    <span x-show="secDetailLoading">Loading…</span>
+                    <span x-show="!secDetailLoading" x-text="secDetail?.error || 'Waiting for data…'"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Row 2: Avg Return by Year (left) | Trade Activity (right) -->
+            <div class="chart-grid" style="margin-bottom:12px">
+              <div class="chart-box">
+                <div class="chart-title">
+                  Avg Return by Year
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— primary vs +secondary</span>
+                  <button class="fs-btn" @click="openFullscreen('sec-yearly-canvas')" title="Fullscreen">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-yearly-canvas"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">
+                  Trade Activity
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— combined filter entries &amp; open positions</span>
+                  <button class="fs-btn dedupe-btn" :class="{ on: dedupeConc.sec }"
+                          @click="toggleDedupeConc('sec')"
+                          title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
+                  <button class="fs-btn" @click="openFullscreen('sec-activity-canvas')" title="Fullscreen">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-activity-canvas"></canvas></div>
+              </div>
+            </div>
+
+            <!-- Row 3: Ticker Breakdown bubble (left) | Trade Data table (right) -->
+            <div class="chart-grid">
+              <div class="chart-box">
+                <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                  <span>Ticker Breakdown</span>
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)">— size: contribution · color: win rate (pink→blue)</span>
+                  <span x-show="secDetail?.tickers?.length"
+                        style="font-size:10px;font-family:monospace;background:var(--raised);border:1px solid var(--border);
+                               border-radius:3px;padding:1px 6px;color:var(--dim)"
+                        x-text="_tickerCoverage(secDetail?.tickers)"></span>
+                  <span style="font-size:10px;color:var(--dim);margin-left:auto">min n:
+                    <input type="range" min="1" max="10" step="1"
+                           :value="secBubbleMinN"
+                           @input="secSetBubbleMinN($event.target.value)"
+                           style="width:60px;vertical-align:middle;accent-color:#3498db">
+                    <b x-text="secBubbleMinN" style="color:var(--text)"></b>
+                  </span>
+                  <button class="fs-btn" @click="openFullscreen('sec-bubble-canvas')" title="Fullscreen">⛶</button>
+                </div>
+                <div class="chart-canvas"><canvas id="sec-bubble-canvas"></canvas></div>
+              </div>
+              <!-- Trade Data table — mirrors primary trade pane; wired to secDetail.combined_trades -->
+              <div class="chart-box" style="overflow:hidden">
+                <div class="chart-title">
+                  Trade Data
+                  <span x-show="secDetail?.combined_trades?.length"
+                        style="font-size:11px;font-weight:400;color:var(--dim)"
+                        x-text="'(' + (secDetail?.combined_trades?.length ?? 0) + ' trades)'"></span>
+                  <template x-if="secDetail?.combined_trades?.length">
+                    <button @click="secDownloadCSV()"
+                            style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                                   color:#3498db;font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">
+                      ↓ CSV
+                    </button>
+                  </template>
+                </div>
+                <div style="overflow-y:auto;max-height:280px;font-size:11px">
+                  <table class="trade-table" style="border-collapse:collapse;font-family:monospace;width:100%">
+                    <thead style="position:sticky;top:0;background:var(--surface);z-index:1">
+                      <tr>
+                        <th style="padding:3px 8px;text-align:left;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Date</th>
+                        <th style="padding:3px 8px;text-align:left;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Ticker</th>
+                        <th style="padding:3px 8px;text-align:right;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Primary</th>
+                        <th style="padding:3px 8px;text-align:right;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Secondary</th>
+                        <th style="padding:3px 8px;text-align:right;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Entry</th>
+                        <th style="padding:3px 8px;text-align:left;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Exit Date</th>
+                        <th style="padding:3px 8px;text-align:right;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Exit</th>
+                        <th style="padding:3px 8px;text-align:right;color:var(--dim);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--border)">Ret %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-if="secDetail?.combined_trades?.length">
+                        <template x-for="(t, i) in secDetail.combined_trades" :key="'sct-'+i">
+                          <tr :style="i % 2 === 0 ? 'background:var(--surface)' : 'background:var(--raised)'">
+                            <td style="padding:2px 8px;color:var(--muted);white-space:nowrap" x-text="t.trade_date"></td>
+                            <td style="padding:2px 8px;color:var(--text);white-space:nowrap" x-text="t.ticker"></td>
+                            <td style="padding:2px 8px;text-align:right;color:var(--dim);white-space:nowrap"
+                                x-text="t.primary_val != null ? t.primary_val.toFixed(4) : '—'"></td>
+                            <td style="padding:2px 8px;text-align:right;color:var(--dim);white-space:nowrap"
+                                x-text="t.secondary_val != null ? t.secondary_val.toFixed(4) : '—'"></td>
+                            <td style="padding:2px 8px;text-align:right;color:var(--muted);white-space:nowrap"
+                                x-text="t.spot_entry != null ? t.spot_entry.toFixed(2) : '—'"></td>
+                            <td style="padding:2px 8px;color:var(--muted);white-space:nowrap" x-text="t.exit_date || '—'"></td>
+                            <td style="padding:2px 8px;text-align:right;color:var(--muted);white-space:nowrap"
+                                x-text="t.spot_exit != null ? t.spot_exit.toFixed(2) : '—'"></td>
+                            <td style="padding:2px 8px;text-align:right;white-space:nowrap"
+                                :style="'color:' + ((t.ret ?? 0) >= 0 ? '#3498db' : '#e84393')"
+                                x-text="t.ret != null ? (t.ret * 100).toFixed(3) + '%' : '—'"></td>
+                          </tr>
+                        </template>
+                      </template>
+                      <template x-if="!secDetail?.combined_trades?.length">
+                        <tr>
+                          <td colspan="8" style="padding:12px 8px;color:var(--dim);text-align:center">
+                            <span x-show="secDetailLoading">Loading…</span>
+                            <span x-show="!secDetailLoading">No trade data available</span>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
           </div>
         </template>
+        <!-- end confirmation layer -->
 
       </div>
     </template>
+    <!-- end secondary section -->
 
     <!-- ── System Portfolio (third tier — anchors saved system compositions) ──── -->
     <!-- Always visible: portfolios + library persist server-side and don't

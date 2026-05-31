@@ -91,6 +91,9 @@ document.addEventListener('alpine:init', () => {
     secScanKey: null,
     secPolling: false,
     _secDrillVersion: 0,    // P1: version counter — discards stale secDrillMetric responses
+    secScannerStale: false,  // M1: scanner results stale due to primary-context change
+    _secCacheParams: null,   // M2: {ticker,metric,outcome,dateFrom,dateTo} at cache build time
+    secAdvisoryOpen: true,   // M1: advisory block (scanner+minis) expand/collapse — visual only
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
@@ -273,8 +276,9 @@ document.addEventListener('alpine:init', () => {
       this.secPolling  = false;
       this.secBaseline = null;
       this.secMetrics = [];
-      this.secSelectedMetric = null;
-      this.secDetail = null;
+      // secSelectedMetric and secDetail intentionally NOT cleared here — persists
+      // across primary-side changes (metric, mode, bins, dates). Move 2 adds
+      // auto-drill logic to recompute confirmation layer for the new primary context.
       this.secBinCount = 10;
       this.secSelectedSecBins = [10];
       this.secBubbleMinN = 1;
@@ -3749,7 +3753,18 @@ document.addEventListener('alpine:init', () => {
         data_as_of:       d.data_as_of || null,
       };
       this.secStatus = { loaded: true, loading: false, error: null };
+      this.secScannerStale = false;  // M1: fresh scan results clear stale flag
       this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
+    },
+
+    // M1: returns secMetrics for the control-bar <select>. If secSelectedMetric is set
+    // but absent from secMetrics (scanner not loaded yet, or different scan context),
+    // prepends a stub entry so the select always shows the current value.
+    secMetricsForBar() {
+      if (!this.secSelectedMetric) return this.secMetrics;
+      const inList = this.secMetrics.some(m => m.name === this.secSelectedMetric);
+      if (inList) return this.secMetrics;
+      return [{ name: this.secSelectedMetric }, ...this.secMetrics];
     },
 
     async _pollSecScore() {
@@ -3799,8 +3814,8 @@ document.addEventListener('alpine:init', () => {
     async secLoad() {
       if (!this.data || this.secStatus.loading || this.secPolling) return;
       this.secStatus = { loaded: false, loading: true, error: null };
-      this.secSelectedMetric = null;
-      this.secDetail = null;
+      // secSelectedMetric and secDetail intentionally NOT cleared here — scanner
+      // reload should not destroy the current confirmation selection.
       this.secSelectedSecBins = [this.secBinCount];
       this.corrMiniData = null;
       this.corrSelections = {};
