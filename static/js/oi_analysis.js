@@ -94,6 +94,7 @@ document.addEventListener('alpine:init', () => {
     secScannerStale: false,  // M1: scanner results stale due to primary-context change
     _secCacheParams: null,   // M2: {ticker,metric,outcome,dateFrom,dateTo} at cache build time
     secAdvisoryOpen: true,   // M1: advisory block (scanner+minis) expand/collapse — visual only
+    _tradeTableVersion: 0,   // R3: version counter — discards stale _renderTradeTableFlat writes
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
@@ -491,7 +492,10 @@ document.addEventListener('alpine:init', () => {
       // shouldn't blank out every time Analyze runs.
       for (const k of Object.keys(this._charts)) {
         // Preserve charts not tied to the primary analysis result.
-        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-')) continue;
+        // sec-bar is WF-locked and mode-toggle-invariant — preserving it avoids
+        // blanking the scanner lift bar on WF↔TT toggles. _applySecResults()
+        // recreates it when scanner results actually change.
+        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-') || k === 'sec-bar') continue;
         this._charts[k].destroy();
         delete this._charts[k];
       }
@@ -2724,6 +2728,8 @@ document.addEventListener('alpine:init', () => {
       // Bundle-backed for non-default outcomes; /trades fetch otherwise.
       // See _buildFlatTradesFromBundle for context.
       if (!this.data) return;
+      // R3: version guard — concurrent calls can overwrite each other; discard stale writes.
+      const _ver = ++this._tradeTableVersion;
       if (bodyEl) bodyEl.innerHTML =
         '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Loading…</td></tr>';
 
@@ -2766,6 +2772,7 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
 
         if (d.error === 'not_cached') {
+          if (_ver !== this._tradeTableVersion) return;  // R3: stale
           if (bodyEl) bodyEl.innerHTML =
             '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Run Analyze first</td></tr>';
           return;
@@ -2773,6 +2780,8 @@ document.addEventListener('alpine:init', () => {
         rows  = d.trades || [];
         total = d.total  || 0;
       }
+
+      if (_ver !== this._tradeTableVersion) return;  // R3: discard stale write
 
       if (cntEl) {
         cntEl.textContent = total > 250
@@ -3835,6 +3844,17 @@ document.addEventListener('alpine:init', () => {
         list.unshift({ name: this.secSelectedMetric, score: null });
       }
       return list;
+    },
+
+    // R2: single entry point for secondary metric selection (dropdown @change + lift-bar click).
+    // Routes to secDrillMetric() when rows are already cached, else fetches rows first.
+    secSelectMetric(name) {
+      if (!name) { this.secDetail = null; return; }
+      if (this.secCacheKey) {
+        this.secDrillMetric(name, false);
+      } else {
+        this._prepareSecRowsThenDrill();
+      }
     },
 
     // M2: primary metric/ticker/outcome/dates changed → fetch rows for new primary context
