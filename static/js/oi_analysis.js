@@ -94,7 +94,6 @@ document.addEventListener('alpine:init', () => {
     secScannerStale: false,  // M1: scanner results stale due to primary-context change
     _secCacheParams: null,   // M2: {ticker,metric,outcome,dateFrom,dateTo} at cache build time
     secAdvisoryOpen: true,   // M1: advisory block (scanner+minis) expand/collapse — visual only
-    _tradeTableVersion: 0,   // R3: version counter — discards stale _renderTradeTableFlat writes
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
@@ -252,6 +251,14 @@ document.addEventListener('alpine:init', () => {
         this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
         this.icBatchRefreshAt = null; // clear: Refresh was for old combo, don't poison new combo's cache reads
         this.loadIcBatch();
+      });
+      // v150: Re-fire trade table when bundle becomes ready — initial _renderTradeTable()
+      // fires before the bundle is populated (bundle is async, ~50ms single ticker).
+      // This $watch fires exactly once per analyze cycle (bundle goes null→object),
+      // catching that "bundle now ready" event and running through the synchronous
+      // bundle path — the same path manual bin/outcome changes use reliably.
+      this.$watch('analyzeBundle', (val) => {
+        if (val) this._renderTradeTable();
       });
       this.loadIcBatch();
     },
@@ -2724,8 +2731,6 @@ document.addEventListener('alpine:init', () => {
       // Bundle-backed for non-default outcomes; /trades fetch otherwise.
       // See _buildFlatTradesFromBundle for context.
       if (!this.data) return;
-      // R3: version guard — concurrent calls can overwrite each other; discard stale writes.
-      const _ver = ++this._tradeTableVersion;
       if (bodyEl) bodyEl.innerHTML =
         '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Loading…</td></tr>';
 
@@ -2772,7 +2777,6 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
 
         if (d.error === 'not_cached') {
-          if (_ver !== this._tradeTableVersion) return;  // R3: stale
           if (bodyEl) bodyEl.innerHTML =
             '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px">Run Analyze first</td></tr>';
           return;
@@ -2780,8 +2784,6 @@ document.addEventListener('alpine:init', () => {
         rows  = d.trades || [];
         total = d.total  || 0;
       }
-
-      if (_ver !== this._tradeTableVersion) return;  // R3: discard stale write
 
       if (cntEl) {
         cntEl.textContent = total > 250
