@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=142"></script>
+  <script src="/static/js/oi_analysis.js?v=143"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -2058,17 +2058,18 @@
                          ? 'background:rgba(232,67,147,0.07);border:1px solid rgba(232,67,147,0.3);border-radius:4px;padding:6px 8px'
                          : 'background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:6px 8px'">
 
-                    <!-- Metric name -->
+                    <!-- Metric name — hover shows total n for this metric -->
                     <div style="font-size:11px;color:var(--dim);font-family:monospace;overflow:hidden;
                                 text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px"
-                         :title="mdata.name" x-text="mdata.name"></div>
+                         :title="`${mdata.name}  ·  n=${(mdata.bin_ns||[]).reduce((a,b)=>a+b,0).toLocaleString()}`"
+                         x-text="mdata.name"></div>
 
-                    <!-- Mini diverging bar chart -->
+                    <!-- Mini diverging bar chart — hover shows avg ret + n per bin -->
                     <div style="position:relative;height:48px;display:flex;gap:1px">
                       <template x-for="(avg, bi) in mdata.bins" :key="bi">
                         <div style="flex:1;position:relative;height:100%;cursor:pointer"
                              @click="corrToggleBin(mdata.name, bi+1)"
-                             :title="`B${bi+1}: ${(avg*100).toFixed(3)}%`">
+                             :title="`B${bi+1}: ${(avg*100).toFixed(3)}%  ·  n=${mdata.bin_ns?.[bi] ?? 0}`">
                           <!-- positive bar: anchored at zero-line, grows up -->
                           <div :style="`position:absolute;left:1px;right:1px;bottom:${(100 - +mdata._zeroTopPct).toFixed(2)}%;
                                         height:${avg>=0 ? (avg/mdata._total*100).toFixed(2) : 0}%;

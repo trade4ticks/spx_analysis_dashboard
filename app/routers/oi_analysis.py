@@ -2904,6 +2904,8 @@ class SecDetailReq(BaseModel):
     sec_bin_count: int = 10
     ticker: str = "SPX"
     selected_primary_bins: Optional[List[int]] = None
+    walk_forward: bool = True                    # live mode from toggle
+    cutoff_date: Optional[str] = None            # train-test cutoff when set
 
 
 @router.post("/secondary-load")
@@ -3189,9 +3191,10 @@ async def secondary_detail(req: SecDetailReq):
         make_spec, filter_by_assignments, assign_secondary_buckets,
         mode_envelope,
     )
-    cached_mode   = cached.get("mode", "walk_forward")
-    cached_cutoff = cached.get("cutoff_date", "")
-    spec = make_spec(cached_mode == "walk_forward", cached_cutoff)
+    # Use the LIVE mode from the request, not the stale mode stored when the
+    # scan was first loaded. _SEC_CACHE is keyed without mode, so reading
+    # cached["mode"] would always return the mode at scan-load time.
+    spec = make_spec(req.walk_forward, req.cutoff_date)
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,

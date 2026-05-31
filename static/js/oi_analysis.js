@@ -3774,7 +3774,8 @@ document.addEventListener('alpine:init', () => {
             this._applySecResults(d);
             if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
             this._renderSecBar();
-            if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
+            // Minis stay out-of-sync after scan completes — user must click
+            // Compute Correlation explicitly. Out-of-sync banner covers this.
             break;
           } else if (d.status === 'error' || d.status === 'not_found') {
             this.secPolling = false;
@@ -3869,7 +3870,8 @@ document.addEventListener('alpine:init', () => {
           this._applySecResults(d);
           if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
           this._renderSecBar();
-          if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
+          // Minis stay out-of-sync after scan completes — user must click
+          // Compute Correlation explicitly. Out-of-sync banner covers this.
         } else if (d.status === 'computing') {
           keepLoading = true;
           this._pollSecScore();
@@ -3901,6 +3903,8 @@ document.addEventListener('alpine:init', () => {
             sec_bin_count:         this.secBinCount,
             ticker:                this.ticker,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
+            walk_forward:          this.pageMode === 'walk_forward',
+            cutoff_date:           this.pageMode === 'train_test' ? this.cutoffDate : null,
           }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
