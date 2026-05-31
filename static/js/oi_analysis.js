@@ -2739,8 +2739,12 @@ document.addEventListener('alpine:init', () => {
       // (so we can restore on Gap-mode exit).
       const effectiveOutcome = this.decileMode === 'overnight_gap'
         ? 'overnight_gap' : this.outcome;
-      const isDefaultOutcome = effectiveOutcome === 'ret_5d_fwd_oc';
-      const bundleRows = !isDefaultOutcome ? this._buildFlatTradesFromBundle(effectiveOutcome) : null;
+      // All outcomes (including the default ret_5d_fwd_oc) use the bundle when available.
+      // Sentinel that forced the default to the async server path has been removed —
+      // the bundle carries ret_5d_fwd_oc in per_outcome_returns like every other outcome,
+      // and the async server path was causing the blank-table regression (R3).
+      // Server fallback remains for when analyzeBundle is not yet loaded.
+      const bundleRows = this._buildFlatTradesFromBundle(effectiveOutcome);
 
       if (bundleRows) {
         const filtered = this.selectedBins20.size > 0
