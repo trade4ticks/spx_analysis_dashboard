@@ -4680,8 +4680,49 @@ document.addEventListener('alpine:init', () => {
 
     async corrTogglePanel() {
       this.corrPanelOpen = !this.corrPanelOpen;
-      if (this.corrPanelOpen && !this.corrMiniData && this.secCacheKey) {
-        await this.corrLoadMiniData();
+      if (this.corrPanelOpen && !this.corrMiniData) {
+        if (this.secCacheKey) {
+          await this.corrLoadMiniData();
+        } else {
+          // Rows not cached yet (scanner never ran) — prepare rows fast then compute minis.
+          // Minis depend on the conditioned-population rows, not the lift ranking.
+          await this._prepareSecRowsForMinis();
+        }
+      }
+    },
+
+    // Fetch /secondary-prepare-rows (~0.08s) to populate secCacheKey, then load minis.
+    // Lets the minis open without requiring the scanner lift scan to have run first.
+    async _prepareSecRowsForMinis() {
+      this.corrMiniLoading = true;   // show spinner during row-prep phase
+      try {
+        const r = await fetch('/api/factor-analysis/secondary-prepare-rows', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker:    this.ticker,
+            metric:    this.metric,
+            outcome:   this.outcome,
+            date_from: this.dateFrom || '',
+            date_to:   this.dateTo   || '',
+          }),
+        });
+        const d = await r.json();
+        if (d.error || !d.cache_key) {
+          this.corrMiniData = { error: d.error || 'Could not prepare secondary rows.' };
+          this.corrMiniLoading = false;
+          return;
+        }
+        this.secCacheKey = d.cache_key;
+        this._secCacheParams = {
+          ticker:    this.ticker,   metric:   this.metric,
+          outcome:   this.outcome,  dateFrom: this.dateFrom || '',
+          dateTo:    this.dateTo || '',
+        };
+        await this.corrLoadMiniData();  // corrLoadMiniData() manages corrMiniLoading to completion
+      } catch (e) {
+        this.corrMiniData = { error: e.message };
+        this.corrMiniLoading = false;
       }
     },
 

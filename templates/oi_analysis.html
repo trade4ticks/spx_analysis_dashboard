@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=150"></script>
+  <script src="/static/js/oi_analysis.js?v=151"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1675,8 +1675,10 @@
             </div>
           </template>
 
-          <!-- Multi-Metric Correlation (minis) — inside advisory block, gated on scanner loaded -->
-          <template x-if="secStatus.loaded">
+          <!-- Multi-Metric Correlation (minis) — inside advisory block, sibling of scanner.
+               Gated on primary being analyzed (data && !data.error), NOT scanner state.
+               Rows are fetched via /secondary-prepare-rows (~0.08s) on first Open. -->
+          <template x-if="data && !data.error">
             <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:12px">
 
               <!-- Header row -->
@@ -1698,7 +1700,7 @@
                             style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                                    font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
                     <button class="btn-action pink small" @click="runCorrelation()"
-                            :disabled="!secStatus.loaded || corrMiniLoading"
+                            :disabled="corrMiniLoading || corrLoading"
                             :style="(corrMiniLoading || corrLoading) ? 'cursor:wait' : ''">
                       <span x-text="corrMiniLoading || corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
                     </button>
@@ -1741,9 +1743,24 @@
             <template x-if="corrMiniData && !corrMiniData.error && !corrMiniLoading">
               <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:16px">
                 <template x-for="mdata in corrMiniData.metrics" :key="mdata.name">
-                  <div :style="(corrSelections[mdata.name]||[]).length
-                         ? 'background:rgba(232,67,147,0.07);border:1px solid rgba(232,67,147,0.3);border-radius:4px;padding:6px 8px'
-                         : 'background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:6px 8px'">
+                  <!-- Active secondary (secSelectedMetric) gets a blue tint;
+                       bins-selected gets pink tint; both can combine (blue bg, pink border). -->
+                  <div :style="{
+                         background: mdata.name === secSelectedMetric
+                           ? 'rgba(52,152,219,0.10)'
+                           : (corrSelections[mdata.name]||[]).length
+                             ? 'rgba(232,67,147,0.07)'
+                             : 'var(--surface)',
+                         border: mdata.name === secSelectedMetric
+                           ? ((corrSelections[mdata.name]||[]).length
+                               ? '1.5px solid rgba(232,67,147,0.5)'
+                               : '1.5px solid rgba(52,152,219,0.5)')
+                           : ((corrSelections[mdata.name]||[]).length
+                               ? '1px solid rgba(232,67,147,0.3)'
+                               : '1px solid var(--border)'),
+                         'border-radius': '4px',
+                         padding: '6px 8px'
+                       }">
 
                     <!-- Metric name — hover shows total n for this metric -->
                     <div style="font-size:11px;color:var(--dim);font-family:monospace;overflow:hidden;
@@ -1974,7 +1991,7 @@
             </div>
             <!-- end minis inner div -->
           </template>
-          <!-- end secStatus.loaded minis wrapper -->
+          <!-- end minis wrapper (data && !data.error) -->
 
         </div>
         <!-- end advisory block -->
