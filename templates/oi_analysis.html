@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=141"></script>
+  <script src="/static/js/oi_analysis.js?v=142"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1905,7 +1905,13 @@
                 </template>
               </template>
               <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
-              <template x-if="secDetail">
+              <!-- Error message surfaced from backend or network -->
+              <template x-if="secDetail?.error">
+                <span style="font-size:11px;color:#e84393;margin-left:auto;font-style:italic"
+                      x-text="secDetail.error"></span>
+              </template>
+              <!-- Normal counts when detail succeeded -->
+              <template x-if="secDetail && !secDetail.error">
                 <span style="font-size:11px;color:var(--dim);margin-left:auto">
                   Primary: <b style="color:#3498db" x-text="secDetail.baseline_n"></b>
                   · Combined: <b style="color:#e84393" x-text="secDetail.combined_n"></b>
@@ -1997,17 +2003,17 @@
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
               <span style="font-size:11px;color:var(--dim)">Bins:</span>
               <div class="mode-seg">
-                <span :class="{on: corrBinCount===5}"  @click="corrSetBinCount(5)">5</span>
-                <span :class="{on: corrBinCount===10}" @click="corrSetBinCount(10)">10</span>
-                <span :class="{on: corrBinCount===20}" @click="corrSetBinCount(20)">20</span>
+                <span :class="{on: secBinCount===5}"  @click="secSetBinCount(5)">5</span>
+                <span :class="{on: secBinCount===10}" @click="secSetBinCount(10)">10</span>
+                <span :class="{on: secBinCount===20}" @click="secSetBinCount(20)">20</span>
               </div>
               <button x-show="corrSelectedCount() > 0" @click="corrClearAll()"
                       style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
                              font-size:11px;padding:2px 10px;border-radius:3px;cursor:pointer">Clear All</button>
               <button class="btn-action pink small" @click="runCorrelation()"
-                      :disabled="corrSelectedCount() < 2 || corrLoading"
-                      :style="corrLoading ? 'cursor:wait' : ''">
-                <span x-text="corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
+                      :disabled="!secStatus.loaded || corrMiniLoading"
+                      :style="(corrMiniLoading || corrLoading) ? 'cursor:wait' : ''">
+                <span x-text="corrMiniLoading || corrLoading ? 'Computing…' : 'Compute Correlation'"></span>
               </button>
               <span x-show="corrSelectedCount() > 0" style="font-size:11px;color:var(--dim)"
                     x-text="corrSelectedCount() + ' metric' + (corrSelectedCount()===1?'':'s') + ' selected'"></span>
@@ -2036,6 +2042,13 @@
               <div style="font-size:11px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
                    x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' in primary-bin filter / ' + (corrMiniData.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrMiniData.warmup||252) + 'd) · since ' + (corrMiniData.start_date||'?')"></div>
             </template>
+
+            <!-- P4: Out-of-sync warning — primary bins changed since minis were last computed -->
+            <div x-show="corrMiniOutOfSync()"
+                 style="margin-bottom:8px;padding:7px 12px;border:1px solid #e6a23c55;border-radius:4px;
+                        background:#e6a23c0d;font-size:12px;color:#e6a23c;line-height:1.4">
+              ⚠ Out of sync — primary bins changed. Click <strong>Compute Correlation</strong> to update.
+            </div>
 
             <!-- 4-column metric grid -->
             <template x-if="corrMiniData && !corrMiniData.error && !corrMiniLoading">

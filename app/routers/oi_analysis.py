@@ -3186,10 +3186,12 @@ async def secondary_detail(req: SecDetailReq):
     # Both steps dispatch on the spec — single path for both in-sample and
     # walk-forward, no inline branches in this endpoint anymore.
     from app.routers.row_compute import (
-        WalkForwardSpec, filter_by_assignments, assign_secondary_buckets,
+        make_spec, filter_by_assignments, assign_secondary_buckets,
         mode_envelope,
     )
-    spec = WalkForwardSpec()
+    cached_mode   = cached.get("mode", "walk_forward")
+    cached_cutoff = cached.get("cutoff_date", "")
+    spec = make_spec(cached_mode == "walk_forward", cached_cutoff)
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,

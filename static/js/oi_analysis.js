@@ -90,12 +90,14 @@ document.addEventListener('alpine:init', () => {
     secScanMeta: null,
     secScanKey: null,
     secPolling: false,
+    _secDrillVersion: 0,    // P1: version counter — discards stale secDrillMetric responses
 
     // Multi-Metric Correlation Explorer
     corrPanelOpen: false,
-    corrBinCount: 20,
+    // corrBinCount removed — unified into secBinCount so detail and minis always match
     corrMiniData: null,
     corrMiniLoading: false,
+    corrMiniComputedBins: null,  // P4: primary-bin selection at last mini compute
     corrSelections: {},
     corrResult: null,
     corrLoading: false,
@@ -278,6 +280,7 @@ document.addEventListener('alpine:init', () => {
       this.secBubbleMinN = 1;
       this.corrPanelOpen = false;
       this.corrMiniData = null;
+      this.corrMiniComputedBins = null;
       this.corrSelections = {};
       this.corrResult = null;
       try {
@@ -3771,6 +3774,7 @@ document.addEventListener('alpine:init', () => {
             this._applySecResults(d);
             if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
             this._renderSecBar();
+            if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
             break;
           } else if (d.status === 'error' || d.status === 'not_found') {
             this.secPolling = false;
@@ -3865,6 +3869,7 @@ document.addEventListener('alpine:init', () => {
           this._applySecResults(d);
           if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
           this._renderSecBar();
+          if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
         } else if (d.status === 'computing') {
           keepLoading = true;
           this._pollSecScore();
@@ -3878,6 +3883,8 @@ document.addEventListener('alpine:init', () => {
 
     async secDrillMetric(metricName, resetBins = true) {
       if (!this.secCacheKey) return;
+      // P1: version counter cancels stale responses when a newer call supersedes this one.
+      const version = ++this._secDrillVersion;
       this.secSelectedMetric = metricName;
       if (resetBins) this.secSelectedSecBins = [5];
       this.secDetailLoading = true;
@@ -3898,13 +3905,25 @@ document.addEventListener('alpine:init', () => {
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (d.error) throw new Error(d.error);
+        if (version !== this._secDrillVersion) return;  // stale — newer call in flight
+        if (d.error) {
+          const msg = d.error === 'insufficient_data'
+            ? 'Insufficient data for this metric in the selected primary bins.'
+            : d.error;
+          this.secDetail = { error: msg };
+          return;
+        }
         this.secDetail = d;
         await this.$nextTick();
         await this.$nextTick();
         setTimeout(() => this._renderSecDetail(), 60);
-      } catch (_) {}
-      finally { this.secDetailLoading = false; }
+      } catch (e) {
+        if (version !== this._secDrillVersion) return;
+        const msg = e.message === 'insufficient_data'
+          ? 'Insufficient data for this metric in the selected primary bins.'
+          : e.message;
+        this.secDetail = { error: msg };
+      } finally { this.secDetailLoading = false; }
     },
 
     async secToggleSecBin(bin) {
@@ -3922,8 +3941,13 @@ document.addEventListener('alpine:init', () => {
     async secSetBinCount(n) {
       this.secBinCount = n;
       this.secSelectedSecBins = [n];  // reset to top bin
+      this.corrMiniData = null;       // n_bins changed — invalidate minis
+      this.corrMiniComputedBins = null;
+      this.corrSelections = {};
+      this.corrResult = null;
       await this.secScan();           // re-rank leaderboard with new bin count
       if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+      if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
     },
 
     _renderSecBar() {
@@ -4490,13 +4514,7 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async corrSetBinCount(n) {
-      this.corrBinCount = n;
-      this.corrMiniData = null;
-      this.corrSelections = {};
-      this.corrResult = null;
-      if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
-    },
+    // corrSetBinCount removed — use secSetBinCount() which now drives both detail and minis
 
     // Page-wide mode toggle. Cascades through every binning surface on
     // the page: All-Ticker Metric Bins, /analyze, corr explorer (mini +
@@ -4554,7 +4572,7 @@ document.addEventListener('alpine:init', () => {
             cache_key:      this.secCacheKey,
             filtered_dates: this._secFilteredDates(),
             ticker:         this.ticker,
-            n_bins:         this.corrBinCount,
+            n_bins:         this.secBinCount,
             walk_forward:   this.pageMode === 'walk_forward',
             cutoff_date:    this.pageMode === 'train_test' ? this.cutoffDate : null,
             selected_primary_bins: [...this.selectedBins20].sort((a, b) => a - b),
@@ -4572,11 +4590,22 @@ document.addEventListener('alpine:init', () => {
           });
         }
         this.corrMiniData = d;
+        if (!d.error) {
+          // P4: snapshot the primary-bin selection the minis were computed against
+          this.corrMiniComputedBins = [...this.selectedBins20].sort((a, b) => a - b);
+        }
       } catch (e) {
         this.corrMiniData = { error: e.message };
       } finally {
         this.corrMiniLoading = false;
       }
+    },
+
+    // P4: true when current primary-bin selection differs from last mini compute
+    corrMiniOutOfSync() {
+      if (!this.corrMiniComputedBins || !this.corrMiniData || this.corrMiniData.error) return false;
+      const cur = [...this.selectedBins20].sort((a, b) => a - b);
+      return JSON.stringify(cur) !== JSON.stringify(this.corrMiniComputedBins);
     },
 
     corrToggleBin(metric, bin) {
@@ -4606,7 +4635,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     async runCorrelation() {
-      if (this.corrSelectedCount() < 2 || !this.secCacheKey) return;
+      // P2: always refresh the 100 mini charts first (the primary purpose of this button).
+      // The phi-correlation matrix (requires 2+ selected metrics) runs after.
+      if (!this.secCacheKey) return;
+      await this.corrLoadMiniData();
+      if (this.corrSelectedCount() < 2) return;
+      // phi correlation matrix:
       this.corrLoading = true;
       this.corrResult = null;
       try {
@@ -4619,7 +4653,7 @@ document.addEventListener('alpine:init', () => {
             cache_key:      this.secCacheKey,
             filtered_dates: this._secFilteredDates(),
             ticker:         this.ticker,
-            n_bins:         this.corrBinCount,
+            n_bins:         this.secBinCount,
             selections,
             walk_forward:   this.pageMode === 'walk_forward',
             cutoff_date:    this.pageMode === 'train_test' ? this.cutoffDate : null,
@@ -5311,7 +5345,7 @@ document.addEventListener('alpine:init', () => {
           secondaries.push({
             metric,
             bins: [...bins].sort((a, b) => a - b),
-            bin_count: this.corrBinCount || 10,
+            bin_count: this.secBinCount || 10,
           });
         }
       }
@@ -5427,7 +5461,7 @@ document.addEventListener('alpine:init', () => {
 
       // Restore the corr explorer state.
       this.corrPanelOpen = true;
-      this.corrBinCount  = (sys.secondaries?.[0]?.bin_count) || 10;
+      this.secBinCount   = (sys.secondaries?.[0]?.bin_count) || 10;
       this.corrMiniData  = null;
       await this.corrLoadMiniData();
       const sels = {};
