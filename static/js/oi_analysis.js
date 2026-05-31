@@ -269,16 +269,28 @@ document.addEventListener('alpine:init', () => {
       this.hmXData = null;
       this.hmYData = null;
       this._destroyCharts();
-      // Clear secondary scanner cache when primary analysis changes
-      this.secStatus = { loaded: false, loading: false, error: null };
-      this.secCacheKey = null;
-      this.secScanKey  = null;
-      this.secPolling  = false;
-      this.secBaseline = null;
-      this.secMetrics = [];
-      // secSelectedMetric and secDetail intentionally NOT cleared here — persists
-      // across primary-side changes (metric, mode, bins, dates). Move 2 adds
-      // auto-drill logic to recompute confirmation layer for the new primary context.
+      // M2: scanner persists across primary changes — stale-but-visible, not wiped.
+      // Context key = ticker|metric|outcome|dates (NO mode — scanner is WF-locked).
+      // Mode-only toggle (WF↔TT same context): leave scanner completely untouched.
+      // Context change (new metric/ticker/outcome/dates): keep results, mark stale.
+      {
+        const _curCtx  = `${this.ticker}|${this.metric}|${this.outcome}|${this.dateFrom||''}|${this.dateTo||''}`;
+        const _scanCtx = this._secCacheParams
+          ? `${this._secCacheParams.ticker}|${this._secCacheParams.metric}|${this._secCacheParams.outcome}|${this._secCacheParams.dateFrom}|${this._secCacheParams.dateTo}`
+          : null;
+        const _ctxChanged = (_scanCtx !== null) && (_curCtx !== _scanCtx);
+        if (_ctxChanged) {
+          // Row cache + scan job are for the old context — invalidate them.
+          // Scanner results (secStatus/secMetrics/secBaseline) stay — just marked stale.
+          this.secCacheKey = null;
+          this.secScanKey  = null;
+          this.secPolling  = false;
+          if (this.secStatus.loaded) this.secScannerStale = true;
+        }
+        // Mode-only (_ctxChanged === false): touch nothing — scanner and row cache both valid.
+      }
+      // secSelectedMetric and secDetail intentionally NOT cleared — persists across
+      // primary-side changes. Auto-drill logic (M2) recomputes confirmation layer.
       this.secBinCount = 10;
       this.secSelectedSecBins = [10];
       this.secBubbleMinN = 1;
@@ -389,6 +401,7 @@ document.addEventListener('alpine:init', () => {
           } else {
             // Metric/ticker/outcome/dates changed — need row refetch for new primary context.
             this.secCacheKey = null;
+            console.log(`[loadAnalysis] firing _prepareSecRowsThenDrill at ${performance.now().toFixed(0)}ms`);
             this._prepareSecRowsThenDrill();
           }
           this._secCacheParams = newParams;
@@ -3790,14 +3803,38 @@ document.addEventListener('alpine:init', () => {
       this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
     },
 
-    // M1: returns secMetrics for the control-bar <select>. If secSelectedMetric is set
-    // but absent from secMetrics (scanner not loaded yet, or different scan context),
-    // prepends a stub entry so the select always shows the current value.
+    // M1/M3: returns the full static feature list for the control-bar <select>.
+    // Source: this.features (loaded at page-start from /columns — same list that
+    // feeds the primary metric dropdown). Scanner is NOT required; it only provides
+    // optional ranking (lift scores) that sorts metrics when available.
+    // Excludes the currently-selected primary metric to avoid self-reference.
+    // When scanner is loaded, sorts by |score| desc (top-ranked first).
+    // When scanner is not loaded, sorts alphabetically.
     secMetricsForBar() {
-      if (!this.secSelectedMetric) return this.secMetrics;
-      const inList = this.secMetrics.some(m => m.name === this.secSelectedMetric);
-      if (inList) return this.secMetrics;
-      return [{ name: this.secSelectedMetric }, ...this.secMetrics];
+      const scanMap = {};
+      for (const m of this.secMetrics) scanMap[m.name] = m.score;
+
+      const list = (this.features || [])
+        .filter(f => f !== this.metric)   // exclude active primary metric
+        .map(f => ({ name: f, score: scanMap[f] ?? null }));
+
+      if (this.secMetrics.length > 0) {
+        // Scanner loaded: rank by |score| descending, then alphabetical as tiebreak
+        list.sort((a, b) => {
+          const sa = a.score !== null ? Math.abs(a.score) : -1;
+          const sb = b.score !== null ? Math.abs(b.score) : -1;
+          return sb - sa || a.name.localeCompare(b.name);
+        });
+      } else {
+        list.sort((a, b) => a.name.localeCompare(b.name));
+      }
+
+      // Safety: if secSelectedMetric is set but not in features (shouldn't happen),
+      // prepend a stub entry so the select always shows the current value.
+      if (this.secSelectedMetric && !list.some(m => m.name === this.secSelectedMetric)) {
+        list.unshift({ name: this.secSelectedMetric, score: null });
+      }
+      return list;
     },
 
     // M2: primary metric/ticker/outcome/dates changed → fetch rows for new primary context
@@ -3805,6 +3842,9 @@ document.addEventListener('alpine:init', () => {
     async _prepareSecRowsThenDrill() {
       if (!this.secSelectedMetric) return;
       this.secDetailLoading = true;
+      // Issue 4 diagnostics: measure server round-trip time separately from drill time.
+      const _t0 = performance.now();
+      console.log(`[secPrepare] START — ${this.ticker} / ${this.metric} / ${this.outcome}`);
       try {
         const r = await fetch('/api/factor-analysis/secondary-prepare-rows', {
           method: 'POST',
@@ -3817,6 +3857,8 @@ document.addEventListener('alpine:init', () => {
             date_to:   this.dateTo   || '',
           }),
         });
+        const _t1 = performance.now();
+        console.log(`[secPrepare] /secondary-prepare-rows responded in ${((_t1-_t0)/1000).toFixed(2)}s`);
         const d = await r.json();
         if (d.error || !d.cache_key) {
           this.secDetail = { error: d.error || 'Could not prepare secondary data for new primary.' };
@@ -3833,6 +3875,8 @@ document.addEventListener('alpine:init', () => {
         // secDrillMetric carries live walk_forward + cutoff_date from toggle —
         // no second call to loadHeatmap needed here (it fires inside secDrillMetric).
         await this.secDrillMetric(this.secSelectedMetric, false);
+        const _t2 = performance.now();
+        console.log(`[secPrepare] full prepare+drill done in ${((_t2-_t0)/1000).toFixed(2)}s total`);
       } catch (e) {
         this.secDetail = { error: e.message };
       } finally {
