@@ -5479,3 +5479,193 @@ async def threshold_drift(
 async def threshold_drift_invalidate():
     _THRESHOLD_DRIFT_CACHE.clear()
     return {"ok": True}
+
+
+# ── Corner Scan endpoints ─────────────────────────────────────────────────────
+
+_corner_scan_tables_ensured: bool = False
+
+_DDL_CORNER_2F = """\
+CREATE TABLE IF NOT EXISTS corner_scan_2f (
+    primary_metric    TEXT NOT NULL,
+    secondary_metric  TEXT NOT NULL,
+    corner_direction  TEXT NOT NULL,
+    outcome           TEXT NOT NULL,
+    d_avg_ret         DOUBLE PRECISION,
+    d_ret_per_day     DOUBLE PRECISION,
+    d_n               INTEGER,
+    q_avg_ret         DOUBLE PRECISION,
+    q_ret_per_day     DOUBLE PRECISION,
+    q_n               INTEGER,
+    as_of             DATE NOT NULL,
+    PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome)
+);
+"""
+
+_DDL_CORNER_1F = """\
+CREATE TABLE IF NOT EXISTS corner_scan_1f (
+    metric        TEXT NOT NULL,
+    extreme       TEXT NOT NULL,
+    outcome       TEXT NOT NULL,
+    d_avg_ret     DOUBLE PRECISION,
+    d_ret_per_day DOUBLE PRECISION,
+    d_n           INTEGER,
+    q_avg_ret     DOUBLE PRECISION,
+    q_ret_per_day DOUBLE PRECISION,
+    q_n           INTEGER,
+    as_of         DATE NOT NULL,
+    PRIMARY KEY (metric, extreme, outcome)
+);
+"""
+
+_CS_2F_SORT_WHITELIST: frozenset = frozenset({
+    "primary_metric", "secondary_metric", "corner_direction", "outcome",
+    "d_avg_ret", "d_ret_per_day", "d_n",
+    "q_avg_ret", "q_ret_per_day", "q_n",
+})
+_CS_1F_SORT_WHITELIST: frozenset = frozenset({
+    "metric", "extreme", "outcome",
+    "d_avg_ret", "d_ret_per_day", "d_n",
+    "q_avg_ret", "q_ret_per_day", "q_n",
+})
+
+
+async def _ensure_corner_scan_tables(pool) -> None:
+    global _corner_scan_tables_ensured
+    if _corner_scan_tables_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_DDL_CORNER_2F)
+        await conn.execute(_DDL_CORNER_1F)
+    _corner_scan_tables_ensured = True
+
+
+@router.get("/corner-scan/meta")
+async def corner_scan_meta(pool=Depends(get_oi_pool)):
+    """Row counts, as_of date, and distinct-metric count for both corner-scan tables."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    await _ensure_corner_scan_tables(pool)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT
+                 (SELECT COUNT(*)                       FROM corner_scan_2f)         AS count_2f,
+                 (SELECT as_of                          FROM corner_scan_2f LIMIT 1) AS as_of_2f,
+                 (SELECT COUNT(*)                       FROM corner_scan_1f)         AS count_1f,
+                 (SELECT as_of                          FROM corner_scan_1f LIMIT 1) AS as_of_1f,
+                 (SELECT COUNT(DISTINCT primary_metric) FROM corner_scan_2f)         AS n_metrics"""
+        )
+    return {
+        "count_2f":  int(row["count_2f"]),
+        "as_of_2f":  str(row["as_of_2f"])  if row["as_of_2f"]  else None,
+        "count_1f":  int(row["count_1f"]),
+        "as_of_1f":  str(row["as_of_1f"])  if row["as_of_1f"]  else None,
+        "n_metrics": int(row["n_metrics"]),
+    }
+
+
+@router.get("/corner-scan/2f")
+async def corner_scan_2f_endpoint(
+    primary_metric:   Optional[str] = Query(None),
+    secondary_metric: Optional[str] = Query(None),
+    corner_direction: Optional[str] = Query(None),
+    outcome:          Optional[str] = Query(None),
+    min_d_n:          int           = Query(300, ge=0),
+    sort_key:         str           = Query("d_ret_per_day"),
+    sort_dir:         str           = Query("desc"),
+    limit:            int           = Query(200, ge=1, le=2000),
+    pool=Depends(get_oi_pool),
+):
+    """Filtered + sorted 2-factor corner rows.
+
+    Filters applied in SQL; sort key is whitelisted against _CS_2F_SORT_WHITELIST.
+    d_n >= min_d_n is the primary quality gate (default 300).
+    """
+    if not pool:
+        return {"rows": [], "total": 0}
+    await _ensure_corner_scan_tables(pool)
+
+    if sort_key not in _CS_2F_SORT_WHITELIST:
+        sort_key = "d_ret_per_day"
+    dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
+    nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
+
+    conds:  list[str] = ["d_n >= $1"]
+    params: list      = [min_d_n]
+    p = 2
+
+    if primary_metric:
+        conds.append(f"primary_metric   ILIKE ${p}"); params.append(f"%{primary_metric}%");   p += 1
+    if secondary_metric:
+        conds.append(f"secondary_metric ILIKE ${p}"); params.append(f"%{secondary_metric}%"); p += 1
+    if corner_direction:
+        conds.append(f"corner_direction = ${p}");     params.append(corner_direction);        p += 1
+    if outcome:
+        conds.append(f"outcome = ${p}");              params.append(outcome);                 p += 1
+
+    where = " AND ".join(conds)
+    order = f"{sort_key} {dir_sql} {nulls_sql}"
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM corner_scan_2f WHERE {where}", *params
+        )
+        rows = await conn.fetch(
+            f"""SELECT primary_metric, secondary_metric, corner_direction, outcome,
+                       d_avg_ret, d_ret_per_day, d_n,
+                       q_avg_ret, q_ret_per_day, q_n, as_of
+                FROM corner_scan_2f WHERE {where}
+                ORDER BY {order} LIMIT {limit}""",
+            *params,
+        )
+    return {"rows": [dict(r) for r in rows], "total": int(total)}
+
+
+@router.get("/corner-scan/1f")
+async def corner_scan_1f_endpoint(
+    metric:   Optional[str] = Query(None),
+    extreme:  Optional[str] = Query(None),
+    outcome:  Optional[str] = Query(None),
+    min_d_n:  int           = Query(300, ge=0),
+    sort_key: str           = Query("d_ret_per_day"),
+    sort_dir: str           = Query("desc"),
+    limit:    int           = Query(200, ge=1, le=2000),
+    pool=Depends(get_oi_pool),
+):
+    """Filtered + sorted 1-factor extreme-bin rows."""
+    if not pool:
+        return {"rows": [], "total": 0}
+    await _ensure_corner_scan_tables(pool)
+
+    if sort_key not in _CS_1F_SORT_WHITELIST:
+        sort_key = "d_ret_per_day"
+    dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
+    nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
+
+    conds:  list[str] = ["d_n >= $1"]
+    params: list      = [min_d_n]
+    p = 2
+
+    if metric:
+        conds.append(f"metric ILIKE ${p}"); params.append(f"%{metric}%"); p += 1
+    if extreme:
+        conds.append(f"extreme = ${p}");   params.append(extreme);        p += 1
+    if outcome:
+        conds.append(f"outcome = ${p}");   params.append(outcome);        p += 1
+
+    where = " AND ".join(conds)
+    order = f"{sort_key} {dir_sql} {nulls_sql}"
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM corner_scan_1f WHERE {where}", *params
+        )
+        rows = await conn.fetch(
+            f"""SELECT metric, extreme, outcome,
+                       d_avg_ret, d_ret_per_day, d_n,
+                       q_avg_ret, q_ret_per_day, q_n, as_of
+                FROM corner_scan_1f WHERE {where}
+                ORDER BY {order} LIMIT {limit}""",
+            *params,
+        )
+    return {"rows": [dict(r) for r in rows], "total": int(total)}

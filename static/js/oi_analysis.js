@@ -3195,6 +3195,16 @@ document.addEventListener('alpine:init', () => {
     smSelectedTicker: '',
     smSummary: { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] },
     smExpanded: false,
+
+    // ── Corner Scan ─────────────────────────────────────────────────────────
+    cs2fExpanded: false, cs2fLoading: false, cs2fMeta: null, cs2fRows: [], cs2fTotal: 0,
+    cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
+    cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
+
+    cs1fExpanded: false, cs1fLoading: false, cs1fRows: [], cs1fTotal: 0,
+    cs1fSortKey: 'd_ret_per_day', cs1fSortDir: 'desc',
+    cs1fFilterMetric: '', cs1fFilterExtreme: '', cs1fFilterOutcome: '', cs1fMinN: 300,
+
     surveyExpanded: false,
     selectedStats: null,
 
@@ -3368,6 +3378,79 @@ document.addEventListener('alpine:init', () => {
       } else {
         this.loadScoreMatrix();
       }
+    },
+
+    // ── Corner Scan ─────────────────────────────────────────────────────────
+    async toggleCs2f() {
+      this.cs2fExpanded = !this.cs2fExpanded;
+      if (this.cs2fExpanded && !this.cs2fRows.length) await this.loadCs2f();
+    },
+    async loadCs2f() {
+      this.cs2fLoading = true;
+      // Fetch meta once (shared by both panes).
+      if (!this.cs2fMeta) {
+        try {
+          const r = await fetch('/api/factor-analysis/corner-scan/meta');
+          if (r.ok) this.cs2fMeta = await r.json();
+        } catch (_) {}
+      }
+      const p = new URLSearchParams({
+        sort_key: this.cs2fSortKey, sort_dir: this.cs2fSortDir,
+        min_d_n:  this.cs2fMinN,   limit:    200,
+      });
+      if (this.cs2fFilterP)       p.set('primary_metric',   this.cs2fFilterP);
+      if (this.cs2fFilterS)       p.set('secondary_metric', this.cs2fFilterS);
+      if (this.cs2fFilterDir)     p.set('corner_direction', this.cs2fFilterDir);
+      if (this.cs2fFilterOutcome) p.set('outcome',          this.cs2fFilterOutcome);
+      try {
+        const r = await fetch('/api/factor-analysis/corner-scan/2f?' + p);
+        if (r.ok) { const d = await r.json(); this.cs2fRows = d.rows; this.cs2fTotal = d.total; }
+      } catch (_) {}
+      this.cs2fLoading = false;
+    },
+    cs2fSort(key) {
+      if (this.cs2fSortKey === key) {
+        this.cs2fSortDir = this.cs2fSortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        this.cs2fSortKey = key;
+        this.cs2fSortDir = 'desc';
+      }
+      this.loadCs2f();
+    },
+
+    async toggleCs1f() {
+      this.cs1fExpanded = !this.cs1fExpanded;
+      if (this.cs1fExpanded && !this.cs1fRows.length) await this.loadCs1f();
+    },
+    async loadCs1f() {
+      this.cs1fLoading = true;
+      if (!this.cs2fMeta) {
+        try {
+          const r = await fetch('/api/factor-analysis/corner-scan/meta');
+          if (r.ok) this.cs2fMeta = await r.json();
+        } catch (_) {}
+      }
+      const p = new URLSearchParams({
+        sort_key: this.cs1fSortKey, sort_dir: this.cs1fSortDir,
+        min_d_n:  this.cs1fMinN,   limit:    200,
+      });
+      if (this.cs1fFilterMetric)  p.set('metric',   this.cs1fFilterMetric);
+      if (this.cs1fFilterExtreme) p.set('extreme',  this.cs1fFilterExtreme);
+      if (this.cs1fFilterOutcome) p.set('outcome',  this.cs1fFilterOutcome);
+      try {
+        const r = await fetch('/api/factor-analysis/corner-scan/1f?' + p);
+        if (r.ok) { const d = await r.json(); this.cs1fRows = d.rows; this.cs1fTotal = d.total; }
+      } catch (_) {}
+      this.cs1fLoading = false;
+    },
+    cs1fSort(key) {
+      if (this.cs1fSortKey === key) {
+        this.cs1fSortDir = this.cs1fSortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        this.cs1fSortKey = key;
+        this.cs1fSortDir = 'desc';
+      }
+      this.loadCs1f();
     },
 
     async runBatchScore() {

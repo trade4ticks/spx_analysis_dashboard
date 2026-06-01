@@ -172,7 +172,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=151"></script>
+  <script src="/static/js/oi_analysis.js?v=152"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -706,6 +706,232 @@
           </div>
         </div>
       </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── Corner Scan: 2-factor ─────────────────────────────────────────── -->
+    <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
+                background:rgba(255,255,255,.02)">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none;flex-wrap:wrap">
+        <div @click="toggleCs2f()"
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+          <span style="font-size:13px;color:var(--muted)" x-text="cs2fExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Corner Scan — 2-Factor</span>
+          <span style="font-size:11px;color:var(--dim)"
+                x-text="cs2fMeta
+                  ? '· ' + (cs2fMeta.count_2f||0).toLocaleString() + ' rows · ' + (cs2fMeta.n_metrics||0) + ' metrics · as of ' + (cs2fMeta.as_of_2f||'—')
+                  : '— click to load'"></span>
+          <span x-show="cs2fLoading" style="font-size:11px;color:#3498db">Loading…</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
+          <input type="text" x-model="cs2fFilterP" placeholder="P metric…"
+                 style="width:110px;font-size:11px;padding:3px 6px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)">
+          <input type="text" x-model="cs2fFilterS" placeholder="S metric…"
+                 style="width:110px;font-size:11px;padding:3px 6px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)">
+          <select x-model="cs2fFilterDir"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text)">
+            <option value="">All dirs</option>
+            <option value="low-low">low-low</option>
+            <option value="low-high">low-high</option>
+            <option value="high-low">high-low</option>
+            <option value="high-high">high-high</option>
+          </select>
+          <select x-model="cs2fFilterOutcome"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text)">
+            <option value="">All outcomes</option>
+            <option value="ret_1d_fwd_oc">1d OC</option>
+            <option value="ret_3d_fwd_oc">3d OC</option>
+            <option value="ret_5d_fwd_oc">5d OC</option>
+            <option value="ret_7d_fwd_oc">7d OC</option>
+            <option value="ret_10d_fwd_oc">10d OC</option>
+            <option value="ret_20d_fwd_oc">20d OC</option>
+            <option value="ret_1d_fwd_cc">1d CC</option>
+            <option value="ret_3d_fwd_cc">3d CC</option>
+            <option value="ret_5d_fwd_cc">5d CC</option>
+            <option value="ret_7d_fwd_cc">7d CC</option>
+            <option value="ret_10d_fwd_cc">10d CC</option>
+            <option value="ret_20d_fwd_cc">20d CC</option>
+            <option value="overnight_gap">overnight gap</option>
+          </select>
+          <span style="font-size:11px;color:var(--dim)">min n:</span>
+          <input type="number" x-model.number="cs2fMinN" min="0" step="50"
+                 style="width:70px;font-size:11px;padding:3px 6px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)">
+          <button @click="loadCs2f()"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                         font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer">
+            ⟳ Refresh
+          </button>
+        </div>
+      </div>
+      <template x-if="cs2fExpanded">
+        <div style="padding:0 12px 12px">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:6px"
+               x-text="'Showing ' + cs2fRows.length.toLocaleString() + ' of ' + cs2fTotal.toLocaleString() + ' matched · sorted ' + cs2fSortKey + ' ' + cs2fSortDir + ' · decile resolution'"></div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border)">
+                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">P Metric <span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">S Metric <span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Dir <span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_avg_ret')"        style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs2fSortKey==='d_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_ret_per_day')"    style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs2fSortKey==='d_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_n')"              style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs2fSortKey==='d_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_n')"              style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-if="cs2fRows.length === 0 && !cs2fLoading">
+                  <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim)">
+                    No rows — try lowering min n or clearing filters.
+                  </td></tr>
+                </template>
+                <template x-for="row in cs2fRows" :key="row.primary_metric+'|'+row.secondary_metric+'|'+row.corner_direction+'|'+row.outcome">
+                  <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+                    <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.primary_metric"></td>
+                    <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.secondary_metric"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.d_avg_ret != null ? (row.d_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.d_avg_ret != null ? (row.d_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.q_avg_ret != null ? (row.q_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- ── Corner Scan: 1-factor ─────────────────────────────────────────── -->
+    <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:6px;
+                background:rgba(255,255,255,.02)">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none;flex-wrap:wrap">
+        <div @click="toggleCs1f()"
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+          <span style="font-size:13px;color:var(--muted)" x-text="cs1fExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:13px;font-weight:700;color:var(--text)">Corner Scan — 1-Factor</span>
+          <span style="font-size:11px;color:var(--dim)"
+                x-text="cs2fMeta
+                  ? '· ' + (cs2fMeta.count_1f||0).toLocaleString() + ' rows · as of ' + (cs2fMeta.as_of_1f||'—')
+                  : '— click to load'"></span>
+          <span x-show="cs1fLoading" style="font-size:11px;color:#3498db">Loading…</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
+          <input type="text" x-model="cs1fFilterMetric" placeholder="Metric…"
+                 style="width:140px;font-size:11px;padding:3px 6px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)">
+          <select x-model="cs1fFilterExtreme"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text)">
+            <option value="">low + high</option>
+            <option value="low">low (D1/Q1)</option>
+            <option value="high">high (D10/Q5)</option>
+          </select>
+          <select x-model="cs1fFilterOutcome"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text)">
+            <option value="">All outcomes</option>
+            <option value="ret_1d_fwd_oc">1d OC</option>
+            <option value="ret_3d_fwd_oc">3d OC</option>
+            <option value="ret_5d_fwd_oc">5d OC</option>
+            <option value="ret_7d_fwd_oc">7d OC</option>
+            <option value="ret_10d_fwd_oc">10d OC</option>
+            <option value="ret_20d_fwd_oc">20d OC</option>
+            <option value="ret_1d_fwd_cc">1d CC</option>
+            <option value="ret_3d_fwd_cc">3d CC</option>
+            <option value="ret_5d_fwd_cc">5d CC</option>
+            <option value="ret_7d_fwd_cc">7d CC</option>
+            <option value="ret_10d_fwd_cc">10d CC</option>
+            <option value="ret_20d_fwd_cc">20d CC</option>
+            <option value="overnight_gap">overnight gap</option>
+          </select>
+          <span style="font-size:11px;color:var(--dim)">min n:</span>
+          <input type="number" x-model.number="cs1fMinN" min="0" step="50"
+                 style="width:70px;font-size:11px;padding:3px 6px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)">
+          <button @click="loadCs1f()"
+                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
+                         font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer">
+            ⟳ Refresh
+          </button>
+        </div>
+      </div>
+      <template x-if="cs1fExpanded">
+        <div style="padding:0 12px 12px">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:6px"
+               x-text="'Showing ' + cs1fRows.length.toLocaleString() + ' of ' + cs1fTotal.toLocaleString() + ' matched · sorted ' + cs1fSortKey + ' ' + cs1fSortDir"></div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border)">
+                  <th @click="cs1fSort('metric')"        style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Metric <span x-text="cs1fSortKey==='metric'        ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('extreme')"       style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Extreme <span x-text="cs1fSortKey==='extreme'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('outcome')"       style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs1fSortKey==='outcome'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_avg_ret')"     style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs1fSortKey==='d_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_ret_per_day')" style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs1fSortKey==='d_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_n')"           style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs1fSortKey==='d_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_avg_ret')"     style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs1fSortKey==='q_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_ret_per_day')" style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs1fSortKey==='q_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_n')"           style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs1fSortKey==='q_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-if="cs1fRows.length === 0 && !cs1fLoading">
+                  <tr><td colspan="9" style="padding:16px 8px;text-align:center;color:var(--dim)">
+                    No rows — try lowering min n or clearing filters.
+                  </td></tr>
+                </template>
+                <template x-for="row in cs1fRows" :key="row.metric+'|'+row.extreme+'|'+row.outcome">
+                  <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+                    <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.metric"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.extreme"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.d_avg_ret != null ? (row.d_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.d_avg_ret != null ? (row.d_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.q_avg_ret != null ? (row.q_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
+                        :style="row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
           </div>
         </div>
       </template>
