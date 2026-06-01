@@ -3,10 +3,11 @@
 
 A 'corner' is a metric-pair (P × S) where both metrics are simultaneously in
 an extreme bin (D1/D10 decile or Q1/Q5 quintile) on the same trade-date.
-Bins are assigned walk-forward per ticker (no cross-sectional lookahead).
-For Phase 6 the secondary is re-binned walk-forward WITHIN the P-edge
-subsequence of each ticker — the same expanding-window algorithm, not a
-cross-sectional rank.
+Both P and S bins are the full-universe walk-forward decile/quintile computed
+in Phase 2+3 — each trade's bin reflects only the history available at that
+date for that ticker, with no lookahead and no cross-sectional contamination.
+The corner is the intersection: P in its full-universe WF extreme AND S in its
+OWN full-universe WF extreme.  Consistent with the heatmap Y-axis assignment.
 
 Output tables (OI DB):
   corner_scan_2f  — metric-pair corners  (PK: P, S, direction, outcome)
@@ -384,52 +385,41 @@ async def run(dry_run: bool, force: bool) -> None:
 
             for tkr in tickers_order:
                 s, e    = ticker_slices[tkr]
-                X_t     = X_full[s:e, :]        # (N_t, F) view
-                bd_t    = bins_d_full[s:e, :]   # (N_t, F) view
-                bq_t    = bins_q_full[s:e, :]   # (N_t, F) view
-                out_t   = out_full[s:e, :]      # (N_t, O) view
-                vld_t   = vld_full[s:e, :]      # (N_t, O) view
+                bd_t    = bins_d_full[s:e, :]   # (N_t, F) full-universe decile bins
+                bq_t    = bins_q_full[s:e, :]   # (N_t, F) full-universe quintile bins
+                out_t   = out_full[s:e, :]      # (N_t, O)
+                vld_t   = vld_full[s:e, :]      # (N_t, O) bool
 
                 # Four P-edge configurations: D-low, D-high, Q-low, Q-high.
-                # Each tuple: (P-bin column, P edge value, n_bins for S,
-                #              sums accumulator, cnts accumulator, p_ei index)
+                # Each tuple: (P-bin column, P edge value, S-bin matrix,
+                #              extreme S value, sums accumulator, cnts accumulator,
+                #              p_ei index)
+                # S-bin matrix is the full-universe WF bin array for each config:
+                #   D configs use bd_t (decile 1..10); Q configs use bq_t (quintile 1..5).
+                # Bin 0 means warmup or NaN — excluded naturally since 0 ≠ 1 and 0 ≠ 10/5.
                 pe_configs = [
-                    (bd_t[:, p_idx],  1, 10, d_sums, d_cnts, 0),  # D-low
-                    (bd_t[:, p_idx], 10, 10, d_sums, d_cnts, 1),  # D-high
-                    (bq_t[:, p_idx],  1,  5, q_sums, q_cnts, 0),  # Q-low
-                    (bq_t[:, p_idx],  5,  5, q_sums, q_cnts, 1),  # Q-high
+                    (bd_t[:, p_idx],  1, bd_t, 10, d_sums, d_cnts, 0),  # D-low
+                    (bd_t[:, p_idx], 10, bd_t, 10, d_sums, d_cnts, 1),  # D-high
+                    (bq_t[:, p_idx],  1, bq_t,  5, q_sums, q_cnts, 0),  # Q-low
+                    (bq_t[:, p_idx],  5, bq_t,  5, q_sums, q_cnts, 1),  # Q-high
                 ]
 
-                for p_col, p_edge_val, n_bins_S, sums_ref, cnts_ref, p_ei in pe_configs:
+                for p_col, p_edge_val, S_bin_mat, n_bins_S, sums_ref, cnts_ref, p_ei in pe_configs:
                     pe_rows = np.where(p_col == p_edge_val)[0]
                     n_pe    = len(pe_rows)
                     if n_pe < 2:
                         continue
 
-                    S_pe    = X_t[pe_rows, :]    # (n_pe, F) — all S feature values
-                    out_pe  = out_t[pe_rows, :]   # (n_pe, O)
-                    vld_pe  = vld_t[pe_rows, :]   # (n_pe, O) bool
+                    # Full-universe WF bins for all S metrics at the P-edge rows.
+                    # No recomputation needed — bins were already assigned in Phase 2+3.
+                    # Bin 0 (warmup/NaN) is never equal to 1 or n_bins_S, so those
+                    # rows are excluded from both S-low and S-high masks automatically.
+                    S_bins  = S_bin_mat[pe_rows, :]   # (n_pe, F)
+                    out_pe  = out_t[pe_rows, :]        # (n_pe, O)
+                    vld_pe  = vld_t[pe_rows, :]        # (n_pe, O) bool
 
                     # NaN outcomes → 0 so matmul sums correctly; vld_pe tracks counts.
                     out_cln = np.where(vld_pe, out_pe, 0.0)  # (n_pe, O)
-
-                    # WF rank of ALL S metrics within P-edge subsequence of this ticker.
-                    # Same expanding-window algorithm as the global Phase-3 binning —
-                    # no cross-sectional rank, no lookahead.
-                    wf_r = np.zeros((n_pe, F), dtype=np.int32)
-                    for j in range(n_pe - 1):
-                        wf_r[j + 1:] += S_pe[j + 1:] > S_pe[j]
-
-                    S_nan  = np.isnan(S_pe)
-                    vcum   = np.cumsum(~S_nan, axis=0, dtype=np.int32)
-                    safe_c = np.where(vcum > 0, vcum, 1).astype(np.float64)
-                    S_bins = (
-                        np.minimum(
-                            (wf_r.astype(np.float64) / safe_c * n_bins_S).astype(np.int32),
-                            n_bins_S - 1,
-                        ) + 1   # 1..n_bins_S
-                    )
-                    S_bins[S_nan] = 0  # NaN S values excluded from both edges
 
                     # Cast to float64 for BLAS matmul.
                     S_low_f  = (S_bins == 1       ).astype(np.float64)  # (n_pe, F)

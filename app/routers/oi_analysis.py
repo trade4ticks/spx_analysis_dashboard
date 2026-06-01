@@ -267,7 +267,10 @@ def _run_sec_score(
         filtered, dropped, universe = filter_by_assignments(
             rows, spec, primary_metric, selected_primary_bins, is_all, filtered_dates,
         )
-        metrics = _sec_score_metrics(filtered, outcome_col, feature_cols, is_all, n_bins, spec)
+        metrics = _sec_score_metrics(
+            filtered, outcome_col, feature_cols, is_all, n_bins, spec,
+            all_rows=rows,   # full cache → secondary binned on full-universe WF
+        )
         baseline_rets = [float(r[outcome_col]) for r in filtered
                          if r.get(outcome_col) is not None]
         baseline = {
@@ -2467,12 +2470,15 @@ def _sec_score_metrics(
     is_all: bool = False,
     n_bins: int = 10,
     spec=None,
+    all_rows=None,
 ) -> list:
     """Score each secondary feature by weighted_spread × breadth.
 
-    Binning: uses walk-forward assign_secondary_buckets, identical to the
-    drilled secondary_detail chart — leaderboard scores reconcile with
-    the per-bin tooltip spreads.
+    Binning: secondary bins are assigned on the full-universe walk-forward
+    distribution (all_rows, 252-day warmup) when all_rows is supplied —
+    identical to the heatmap's Y-axis assignment so leaderboard scores
+    reconcile with the per-bin tooltip spreads and the heatmap cells.
+    When all_rows is None the legacy within-filtered-subset WF is used.
 
     weighted_spread = (avg_ret[top_bin] − avg_ret[bottom_bin]) × w
       w = min(harmonic_mean(n_top, n_bottom) / _SEC_N_REF, 1.0)
@@ -2495,12 +2501,20 @@ def _sec_score_metrics(
     if not all_rets:
         return []
 
-    from app.routers.row_compute import assign_secondary_buckets, _sort_chrono
+    from app.routers.row_compute import (
+        assign_secondary_buckets, _sort_chrono, DEFAULT_WALKFWD_WARMUP,
+    )
 
-    # ── Pre-sort rows chronologically once (reused by every feature). ─────────
-    # assign_secondary_buckets (WF mode) calls _sort_chrono internally; passing
-    # rows_presorted=True skips that redundant O(N log N) sort per feature.
+    # ── Pre-sort primary-filtered rows (reused for every feature). ────────────
     rows_sorted = _sort_chrono(rows)
+
+    # ── Pre-sort full universe once for full-universe WF bin lookups. ─────────
+    # assign_secondary_buckets WF-full path uses all_rows_sorted to avoid
+    # redundant O(N log N) sort on every per-feature call.
+    if all_rows is not None and spec is not None and spec.kind == "walk_forward":
+        _all_sorted = _sort_chrono(all_rows)
+    else:
+        _all_sorted = None
 
     # ── Precompute per-row outcome float and ticker (ALL mode only). ──────────
     # Eliminates 4 per-row operations that are feature-independent:
@@ -2542,11 +2556,14 @@ def _sec_score_metrics(
         else:
             by_tkr = {}
 
-        # WF-consistent bucket assignment — same path as drilled chart.
-        # rows_presorted=True skips the internal _sort_chrono call.
+        # Full-universe WF bucket assignment — same bins as drilled chart +
+        # heatmap.  all_rows_sorted supplied so assign_secondary_buckets
+        # skips the redundant _sort_chrono(all_rows) call on each feature.
         buckets_raw = assign_secondary_buckets(
             spec, rows_sorted, feat, n_bins, outcome_col, is_all,
             rows_presorted=True,
+            all_rows=(all_rows if _all_sorted is not None else None),
+            all_rows_sorted=_all_sorted,
         )
         if buckets_raw is None:
             continue
@@ -3307,7 +3324,10 @@ async def secondary_detail(req: SecDetailReq):
     # (matches legacy, which always built buckets without a second check).
     buckets = assign_secondary_buckets(
         spec, filtered, req.metric_b, n_bins, outcome_col, is_all,
-        all_rows=(all_rows if spec.kind == "train_test" else None),
+        # Pass full row cache for WF and train-test so secondary bins are
+        # derived from the full-universe WF distribution, not the primary-
+        # filtered subset.  Matches the heatmap's Y-axis assignment exactly.
+        all_rows=(all_rows if spec.kind in ("walk_forward", "train_test") else None),
     )
     if buckets is None:
         return {"error": "insufficient_data"}

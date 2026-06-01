@@ -764,6 +764,7 @@ def assign_secondary_buckets(
     is_all: bool,
     *,
     all_rows=None,
+    all_rows_sorted=None,
     rows_presorted: bool = False,
 ):
     """Per-bin row tuples for ONE secondary metric, used by /secondary-detail.
@@ -839,12 +840,48 @@ def assign_secondary_buckets(
         return buckets
 
     if spec.kind == "walk_forward":
-        # Macro warmup already enforced by the primary filter; use a tiny
-        # inner warmup so even small subsets can produce bin assignments.
-        # Legacy WF branch did not impose a second "len < n_bins*2" check
-        # (only the IS branch did, on norm_rows). Mirror that — return
-        # whatever buckets the walk-forward assignments produced, possibly
-        # partly empty. Downstream `bins_out` handles empty buckets.
+        if all_rows is not None:
+            # Full-universe WF: assign secondary bins on the complete row
+            # population (same as the heatmap's Y-axis — 252-day warmup, per-
+            # ticker bisect_left expanding window, full population).  Then
+            # select only the already-primary-filtered rows for aggregation.
+            # all_rows_sorted: caller may supply a pre-sorted version to avoid
+            # redundant O(N log N) sort when this is called in a feature loop.
+            full_sorted = (
+                all_rows_sorted if all_rows_sorted is not None
+                else _sort_chrono(all_rows)
+            )
+            wf_full = _walk_forward_bins(
+                full_sorted, metric, n_bins, is_all, warmup=DEFAULT_WALKFWD_WARMUP
+            )
+            # (ticker, trade_date) → 1-indexed bin from the full-universe WF.
+            tkr_date_bin: dict = {}
+            for i, r in enumerate(full_sorted):
+                b = wf_full.get(i)
+                if b is not None:
+                    tkr_date_bin[(r.get("ticker"), r.get("trade_date"))] = b
+            filtered_chrono = rows_chrono if rows_presorted else _sort_chrono(rows_chrono)
+            buckets = [[] for _ in range(n_bins)]
+            for r in filtered_chrono:
+                b = tkr_date_bin.get((r.get("ticker"), r.get("trade_date")))
+                if b is None:
+                    continue
+                v = r.get(metric)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv = float(v); fo = float(o)
+                    if math.isnan(fv) or math.isnan(fo):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                buckets[b - 1].append(
+                    (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
+                )
+            return buckets
+        # Legacy path (all_rows not provided): WF within the primary-filtered
+        # subset, tiny warmup=n_bins so even small subsets produce assignments.
         # rows_presorted=True: caller already sorted; skip redundant O(N log N).
         filtered_chrono = rows_chrono if rows_presorted else _sort_chrono(rows_chrono)
         wf_sec = _walk_forward_bins(filtered_chrono, metric, n_bins, is_all, warmup=n_bins)
