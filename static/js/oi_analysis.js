@@ -31,6 +31,12 @@ document.addEventListener('alpine:init', () => {
     // P2: Signal Survey has its own outcome (separate from the main chart's
     // `outcome`). Persisted across page reloads via localStorage.
     surveyOutcome: '',
+    // Decomp pane's drilled-into metric. Decoupled from Analyze's
+    // this.metric so a leaderboard click does NOT mutate the Analyze
+    // section's metric selector. Set by _icBatchClickMetric or
+    // loadIcDecomp(name) — the only entry points that surface a metric
+    // into the Survey's decomp visuals.
+    surveyDecompMetric: '',
     dateFrom: '', dateTo: new Date().toISOString().slice(0, 10),
     // Page-wide bin mode. Drives every binning analysis on the page so
     // primary / corr explorer / portfolio aggregate all use the same flavor.
@@ -7147,18 +7153,27 @@ document.addEventListener('alpine:init', () => {
     // ── IC.7 Signal Decomposition ──────────────────────────────────────
 
     _icDecompKey() {
-      // Bucket A step 5: uses surveyMode + surveyCutoffDate.
+      // Bucket A: keyed on surveyDecompMetric (Survey-local), NOT
+      // this.metric (Analyze section's metric). The two are intentionally
+      // independent — drilling into a metric in the Survey's decomp pane
+      // does not touch the Analyze section's selectors.
       const cut = this.surveyMode === 'train_test' ? this.surveyCutoffDate : '';
-      return `${this.metric}:${this.surveyOutcome}:${this.surveyMode}:${cut}`;
+      return `${this.surveyDecompMetric}:${this.surveyOutcome}:${this.surveyMode}:${cut}`;
     },
 
 
-    async loadIcDecomp() {
-      if (this.ticker !== 'ALL' || !this.metric || !this.surveyOutcome) return;
+    async loadIcDecomp(metric) {
+      // `metric` arg is the Survey-local metric to drill into. Pass it
+      // explicitly so callers don't have to mutate this.metric (which
+      // would side-effect the Analyze section's selector). Falls back to
+      // surveyDecompMetric for a "re-fetch current decomp" semantic.
+      if (metric) this.surveyDecompMetric = metric;
+      const m = this.surveyDecompMetric;
+      if (this.ticker !== 'ALL' || !m || !this.surveyOutcome) return;
       this.icDecompLoading = true;
       this.icDecompError   = null;
       try {
-        let url = `/api/factor-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
+        let url = `/api/factor-analysis/ic-decomp?metric=${encodeURIComponent(m)}`
           + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
         if (this.surveyMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.surveyCutoffDate)}`;
         const r = await fetch(url);
@@ -7464,24 +7479,19 @@ document.addEventListener('alpine:init', () => {
     // default ret_5d_fwd_oc) would be confusing. This matches what was
     // implicit pre-P2 when the upper bar dropdown drove both surfaces.
     _icBatchClickMetric(name) {
-      this.metric = name;
-      if (this.surveyOutcome && this.surveyOutcome !== this.outcome) {
-        this.outcome = this.surveyOutcome;
-      }
-      const el = document.querySelector('select[x-model="metric"]');
-      if (el) el.value = name;
-      this.loadAnalysis();
-      // Bucket A step 5 hotfix: a leaderboard click is a Survey-internal
-      // action (the user is asking "show me the decomp for this metric"),
-      // so it dispatches the Survey-internal decomp fetch. This is the
-      // same semantic as the ⟳ Refresh button — both are explicit user
-      // requests within the Survey pane. Step 5's loadAnalysis-cascade
-      // removal correctly decoupled Survey from Analyze-section mode
-      // changes, but it also dropped this Survey-internal trigger; this
-      // line restores it without re-introducing the Analyze coupling.
-      // Single-ticker (this.ticker !== 'ALL') has no decomp; loadIcDecomp
-      // gates that case internally and returns immediately.
-      if (this.ticker === 'ALL') this.loadIcDecomp();
+      // Bucket A: leaderboard click is a Survey-INTERNAL action that
+      // populates the per-ticker decomposition panes for the chosen
+      // metric and does NOTHING ELSE. The Analyze section is not
+      // touched — no this.metric mutation, no this.outcome mutation,
+      // no DOM force-set, no loadAnalysis() call. The Survey is for
+      // fast exploration; deep-diving a metric in the primary visuals
+      // is a deliberate separate action (user selects the metric in
+      // the Analyze controls and clicks Analyze).
+      //
+      // Single-ticker (this.ticker !== 'ALL') has no decomp; the call
+      // is gated on ALL mode. loadIcDecomp returns immediately for
+      // non-ALL tickers regardless.
+      if (this.ticker === 'ALL') this.loadIcDecomp(name);
     },
   }));
 });
