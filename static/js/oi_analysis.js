@@ -3180,6 +3180,25 @@ document.addEventListener('alpine:init', () => {
     r4(v)  { return v != null ? v.toFixed(4) : '—'; },
 
     // ── Score Matrix ──────────────────────────────────────────────────
+    // Bucket A step 3: local mode state per the per-pane independence
+    // rule. The Score Matrix pane reads smMode / smCutoffDate, NOT the
+    // Analyze section's pageMode / cutoffDate. The pane's per-mode
+    // results live in smDataByMode; switching smMode swaps which slot
+    // is displayed (in-memory only — never auto-fetches). The Refresh
+    // button (and Run Scan, and Apply) fetches for the active smMode
+    // and writes into the matching slot.
+    smMode: 'walk_forward',
+    smCutoffDate: '2024-01-01',
+    smDataByMode: {
+      in_sample:    null,  // { meta, rows, summary } once loaded; null = never loaded
+      walk_forward: null,
+      train_test:   null,
+    },
+    smStatusByMode: {
+      in_sample:    'empty',  // 'empty' | 'loading' | 'ready' | 'no_data' | 'error'
+      walk_forward: 'empty',
+      train_test:   'empty',
+    },
     smRows: [],
     smMeta: { count: 0, tickers: [], metrics: [], fwd_rets: [], avg_score: 0, gte50: 0, gte70: 0, last_run: null },
     smStatus: { running: false, message: '', last_run: null },
@@ -3307,28 +3326,106 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
+    // Mode label for display (also reused by the consistent ".bucketA-
+    // mode-tag" span pattern across all 6 panes).
+    _smModeLabel(m) {
+      if (m === 'in_sample')    return 'In-sample';
+      if (m === 'train_test')   return 'Train-test';
+      return 'Walk-forward';
+    },
+
+    // Pane-header breadcrumb. Format is identical across all 6 panes:
+    //   "last: YYYY-MM-DD HH:MM:SS · <Mode label>"
+    // Falls back to "no data yet" prefix when the slot has never been
+    // loaded. last_run is already formatted server-side as the first 19
+    // chars of the timestamp (see score-matrix/meta:2158) so we use it
+    // verbatim.
+    smBreadcrumb() {
+      const slot = this.smDataByMode[this.smMode];
+      const label = this._smModeLabel(this.smMode);
+      if (!slot || !slot.meta || slot.meta.count === 0) {
+        return `no data yet · ${label}`;
+      }
+      const ts = slot.meta.last_run || 'unknown';
+      return `last: ${ts} · ${label}`;
+    },
+
+    // Mode-pill click handler. In-memory only — swaps display from the
+    // slot for the chosen mode; NEVER auto-fetches. User clicks Refresh
+    // to load.
+    setSmMode(m) {
+      if (m === this.smMode && m !== 'train_test') return;
+      this.smMode = m;
+      this._smSwapDisplayFromSlot();
+    },
+
+    // Cutoff-date input change in train_test mode is also in-memory only.
+    setSmCutoffDate(d) {
+      this.smCutoffDate = d;
+      // No fetch — user clicks Refresh to load for the new cutoff.
+    },
+
+    // Re-point the visible state (smMeta / smRows / smSummary) at the
+    // slot for the active smMode. If the slot is empty, reset display to
+    // an empty meta so the placeholder shows.
+    _smSwapDisplayFromSlot() {
+      const slot = this.smDataByMode[this.smMode];
+      if (slot && slot.meta) {
+        this.smMeta = slot.meta;
+        this.smRows = slot.rows || [];
+        this.smSummary = slot.summary || { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] };
+      } else {
+        this.smMeta = { count: 0, tickers: [], metrics: [], fwd_rets: [], avg_score: 0, gte50: 0, gte70: 0, last_run: null };
+        this.smRows = [];
+        this.smSummary = { by_metric: [], by_fwd: [], by_ticker: [], by_fwd_ticker: [] };
+      }
+      if (this.smExpanded && this.smMeta.count > 0) {
+        this.$nextTick(() => {
+          this._renderSmMetricChart();
+          this._renderSmFwdChart();
+          this._renderSmTickerChart();
+          this._renderSmTickerFwdChart();
+        });
+      }
+    },
+
+    // Write a freshly-loaded {meta, rows, summary} into the slot for the
+    // current smMode AND point the display at it. status reflects the
+    // fetched count.
+    _smStoreSlot(meta, rows, summary) {
+      this.smDataByMode[this.smMode] = { meta, rows: rows || [], summary: summary || null };
+      const cnt = (meta && meta.count) ? meta.count : 0;
+      this.smStatusByMode[this.smMode] = cnt > 0 ? 'ready' : 'no_data';
+      this._smSwapDisplayFromSlot();
+    },
+
     async smInit() {
+      // Initial load fires once on page boot for the default smMode
+      // (walk_forward). Subsequent mode switches do NOT auto-fetch —
+      // user clicks Refresh. Background-job polling continues as before.
       try {
-        const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : this.pageMode === 'train_test' ? 'train_test' : 'in_sample';
-        // For train_test, the score matrix is partitioned by cutoff_date.
-        // Send the active cutoff so the right slice loads.
-        const cutoffQ = smMode === 'train_test'
-          ? `&cutoff_date=${encodeURIComponent(this.cutoffDate)}` : '';
+        const m = this.smMode;
+        const cutoffQ = m === 'train_test'
+          ? `&cutoff_date=${encodeURIComponent(this.smCutoffDate)}` : '';
+        this.smStatusByMode[m] = 'loading';
         const [metaRes, statusRes] = await Promise.all([
-          fetch('/api/factor-analysis/score-matrix/meta?mode=' + smMode + cutoffQ),
+          fetch('/api/factor-analysis/score-matrix/meta?mode=' + m + cutoffQ),
           fetch('/api/factor-analysis/batch-score-status'),
         ]);
-        if (metaRes.ok) this.smMeta = await metaRes.json();
+        let meta = null;
+        if (metaRes.ok) meta = await metaRes.json();
         if (statusRes.ok) this.smStatus = await statusRes.json();
-        if (this.smMeta.count > 0) {
-          // loadSmSummary internally calls loadScoreMatrix, so the table
-          // populates as part of this single await. The setTimeout below
-          // re-renders the two ticker charts after layout settles.
+        if (meta && meta.count > 0) {
+          // loadSmSummary uses smMode + smCutoffDate and writes the slot
+          // via _smStoreSlot. It calls loadScoreMatrix internally.
           await this.loadSmSummary();
           setTimeout(() => {
             this._renderSmTickerChart();
             this._renderSmTickerFwdChart();
           }, 150);
+        } else if (meta) {
+          // No rows for this mode yet — display the placeholder.
+          this._smStoreSlot(meta, [], null);
         }
         if (this.smStatus.running) this._smStartPoll();
         if (this.ifStatus.running) this._ifStartPoll();
@@ -3336,28 +3433,32 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadScoreMatrix() {
-      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward' : this.pageMode === 'train_test' ? 'train_test' : 'in_sample';
+      const m = this.smMode;
       const params = new URLSearchParams({
         sort_by: this.smSortKey === 'd10_d1_spread' ? 'composite_score' : this.smSortKey,
         order: this.smSortDir,
         min_score: this.smMinScore,
-        mode: smMode,
+        mode: m,
       });
-      // For train_test, scope to the active cutoff_date.
-      if (smMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
+      if (m === 'train_test') params.set('cutoff_date', this.smCutoffDate);
       if (this.smFilterTicker) params.set('ticker', this.smFilterTicker);
       if (this.smFilterMetric) params.set('metric', this.smFilterMetric);
       if (this.smFilterFwd) params.set('fwd_ret', this.smFilterFwd);
 
+      this.smStatusByMode[m] = 'loading';
       try {
         const r = await fetch('/api/factor-analysis/score-matrix?' + params);
-        if (r.ok) this.smRows = await r.json();
-        // Refresh meta too (mirror the cutoff_date filter).
-        const metaParams = new URLSearchParams({ mode: smMode });
-        if (smMode === 'train_test') metaParams.set('cutoff_date', this.cutoffDate);
-        const m = await fetch('/api/factor-analysis/score-matrix/meta?' + metaParams);
-        if (m.ok) this.smMeta = await m.json();
-      } catch (_) {}
+        const rows = r.ok ? await r.json() : [];
+        const metaParams = new URLSearchParams({ mode: m });
+        if (m === 'train_test') metaParams.set('cutoff_date', this.smCutoffDate);
+        const mr = await fetch('/api/factor-analysis/score-matrix/meta?' + metaParams);
+        const meta = mr.ok ? await mr.json() : null;
+        // Preserve any prior summary in the slot (loadSmSummary writes it).
+        const priorSummary = this.smDataByMode[m]?.summary || null;
+        this._smStoreSlot(meta, rows, priorSummary);
+      } catch (_) {
+        this.smStatusByMode[m] = 'error';
+      }
     },
 
     smSort(key) {
@@ -3455,12 +3556,13 @@ document.addEventListener('alpine:init', () => {
 
     async runBatchScore() {
       try {
+        const m = this.smMode;
         const r = await fetch('/api/factor-analysis/run-batch-score', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            walk_forward: this.pageMode === 'walk_forward',
-            cutoff_date:  this.pageMode === 'train_test' ? this.cutoffDate : null,
+            walk_forward: m === 'walk_forward',
+            cutoff_date:  m === 'train_test' ? this.smCutoffDate : null,
           }),
         });
         if (r.ok) {
@@ -3494,12 +3596,9 @@ document.addEventListener('alpine:init', () => {
       if (metric === undefined) metric = this.smSelectedMetric;
       if (fwdRet === undefined) fwdRet = this.smSelectedFwd;
       if (ticker === undefined) ticker = this.smSelectedTicker;
-      const smMode = this.pageMode === 'walk_forward' ? 'walk_forward'
-                   : this.pageMode === 'train_test'   ? 'train_test'
-                   : 'in_sample';
-      const params = new URLSearchParams({ mode: smMode });
-      // For train_test, scope to the active cutoff_date.
-      if (smMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
+      const m = this.smMode;
+      const params = new URLSearchParams({ mode: m });
+      if (m === 'train_test') params.set('cutoff_date', this.smCutoffDate);
       if (metric) params.set('metric', metric);
       if (fwdRet) params.set('fwd_ret', fwdRet);
       if (ticker) params.set('ticker', ticker);
@@ -3507,6 +3606,11 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/factor-analysis/score-matrix/summary?' + params);
         if (r.ok) {
           this.smSummary = await r.json();
+          // Persist into the active mode's slot so a mode-switch swap
+          // restores the same summary without re-fetching.
+          if (this.smDataByMode[m]) {
+            this.smDataByMode[m].summary = this.smSummary;
+          }
           this.smSelectedMetric = metric || '';
           this.smSelectedFwd = fwdRet || '';
           this.smSelectedTicker = ticker || '';
