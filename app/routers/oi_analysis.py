@@ -5841,8 +5841,10 @@ CREATE TABLE IF NOT EXISTS corner_scan_2f (
     q_avg_ret         DOUBLE PRECISION,
     q_ret_per_day     DOUBLE PRECISION,
     q_n               INTEGER,
-    as_of             DATE NOT NULL,
-    PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome)
+    as_of             DATE        NOT NULL,
+    mode              TEXT        NOT NULL DEFAULT 'walk_forward',
+    scanned_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome, mode)
 );
 """
 
@@ -5857,9 +5859,78 @@ CREATE TABLE IF NOT EXISTS corner_scan_1f (
     q_avg_ret     DOUBLE PRECISION,
     q_ret_per_day DOUBLE PRECISION,
     q_n           INTEGER,
-    as_of         DATE NOT NULL,
-    PRIMARY KEY (metric, extreme, outcome)
+    as_of         DATE        NOT NULL,
+    mode          TEXT        NOT NULL DEFAULT 'walk_forward',
+    scanned_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (metric, extreme, outcome, mode)
 );
+"""
+
+# ── Migration DDL for pre-existing corner-scan tables ──
+# Bucket A step 1: adds `mode` and `scanned_at` columns + swaps the PK to
+# include `mode`. Idempotent — safe to run on already-migrated tables.
+# Existing rows are backfilled to mode='walk_forward' via the column
+# DEFAULT (i.e., implicit on column creation); scanned_at gets NOW() at
+# migration time, which represents "first known timestamp" for those
+# pre-existing rows. New scans set scanned_at explicitly via the writer.
+_DDL_CORNER_2F_MIGRATE_COLS = (
+    "ALTER TABLE corner_scan_2f "
+    "ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'walk_forward'"
+)
+_DDL_CORNER_2F_MIGRATE_TS = (
+    "ALTER TABLE corner_scan_2f "
+    "ADD COLUMN IF NOT EXISTS scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+)
+_DDL_CORNER_2F_MIGRATE_PK = """\
+DO $$
+DECLARE
+    pk_has_mode BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+          FROM information_schema.key_column_usage kcu
+          JOIN information_schema.table_constraints tc
+            ON kcu.constraint_name = tc.constraint_name
+         WHERE tc.table_name      = 'corner_scan_2f'
+           AND tc.constraint_type = 'PRIMARY KEY'
+           AND kcu.column_name    = 'mode'
+    ) INTO pk_has_mode;
+    IF NOT pk_has_mode THEN
+        ALTER TABLE corner_scan_2f DROP CONSTRAINT IF EXISTS corner_scan_2f_pkey;
+        ALTER TABLE corner_scan_2f
+            ADD PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome, mode);
+    END IF;
+END $$;
+"""
+
+_DDL_CORNER_1F_MIGRATE_COLS = (
+    "ALTER TABLE corner_scan_1f "
+    "ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'walk_forward'"
+)
+_DDL_CORNER_1F_MIGRATE_TS = (
+    "ALTER TABLE corner_scan_1f "
+    "ADD COLUMN IF NOT EXISTS scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+)
+_DDL_CORNER_1F_MIGRATE_PK = """\
+DO $$
+DECLARE
+    pk_has_mode BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+          FROM information_schema.key_column_usage kcu
+          JOIN information_schema.table_constraints tc
+            ON kcu.constraint_name = tc.constraint_name
+         WHERE tc.table_name      = 'corner_scan_1f'
+           AND tc.constraint_type = 'PRIMARY KEY'
+           AND kcu.column_name    = 'mode'
+    ) INTO pk_has_mode;
+    IF NOT pk_has_mode THEN
+        ALTER TABLE corner_scan_1f DROP CONSTRAINT IF EXISTS corner_scan_1f_pkey;
+        ALTER TABLE corner_scan_1f
+            ADD PRIMARY KEY (metric, extreme, outcome, mode);
+    END IF;
+END $$;
 """
 
 _CS_2F_SORT_WHITELIST: frozenset = frozenset({
@@ -5879,32 +5950,67 @@ async def _ensure_corner_scan_tables(pool) -> None:
     if _corner_scan_tables_ensured:
         return
     async with pool.acquire() as conn:
+        # 1. Create fresh tables (no-op if they already exist). New tables
+        #    already include `mode` + `scanned_at` + the mode-inclusive PK.
         await conn.execute(_DDL_CORNER_2F)
         await conn.execute(_DDL_CORNER_1F)
+        # 2. Migrate any pre-existing tables that were created with the
+        #    old schema. ADD COLUMN IF NOT EXISTS is a no-op when the
+        #    column already exists; the DO block PK swap is gated by an
+        #    information_schema check so it's a no-op on already-swapped
+        #    tables.
+        await conn.execute(_DDL_CORNER_2F_MIGRATE_COLS)
+        await conn.execute(_DDL_CORNER_2F_MIGRATE_TS)
+        await conn.execute(_DDL_CORNER_2F_MIGRATE_PK)
+        await conn.execute(_DDL_CORNER_1F_MIGRATE_COLS)
+        await conn.execute(_DDL_CORNER_1F_MIGRATE_TS)
+        await conn.execute(_DDL_CORNER_1F_MIGRATE_PK)
     _corner_scan_tables_ensured = True
 
 
 @router.get("/corner-scan/meta")
-async def corner_scan_meta(pool=Depends(get_oi_pool)):
-    """Row counts, as_of date, and distinct-metric count for both corner-scan tables."""
+async def corner_scan_meta(
+    mode: str = Query("walk_forward"),
+    pool=Depends(get_oi_pool),
+):
+    """Row counts, as_of date, scan timestamp, and distinct-metric count for
+    both corner-scan tables — filtered by `mode`.
+
+    `mode` defaults to walk_forward (the only mode with data in Bucket A's
+    pre-IS-batch state). Other modes return zero counts and null timestamps;
+    the frontend renders a placeholder for those.
+
+    `scanned_at_{2f,1f}` is `MAX(scanned_at)` per mode — used by the pane
+    breadcrumb in the consistent "last: YYYY-MM-DD HH:MM:SS" format across
+    all 6 panes.
+    """
     if not pool:
         return {"error": "OI database not configured"}
     await _ensure_corner_scan_tables(pool)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT
-                 (SELECT COUNT(*)                       FROM corner_scan_2f)         AS count_2f,
-                 (SELECT as_of                          FROM corner_scan_2f LIMIT 1) AS as_of_2f,
-                 (SELECT COUNT(*)                       FROM corner_scan_1f)         AS count_1f,
-                 (SELECT as_of                          FROM corner_scan_1f LIMIT 1) AS as_of_1f,
-                 (SELECT COUNT(DISTINCT primary_metric) FROM corner_scan_2f)         AS n_metrics"""
+                 (SELECT COUNT(*)            FROM corner_scan_2f WHERE mode = $1) AS count_2f,
+                 (SELECT MAX(as_of)          FROM corner_scan_2f WHERE mode = $1) AS as_of_2f,
+                 (SELECT MAX(scanned_at)     FROM corner_scan_2f WHERE mode = $1) AS scanned_at_2f,
+                 (SELECT COUNT(*)            FROM corner_scan_1f WHERE mode = $1) AS count_1f,
+                 (SELECT MAX(as_of)          FROM corner_scan_1f WHERE mode = $1) AS as_of_1f,
+                 (SELECT MAX(scanned_at)     FROM corner_scan_1f WHERE mode = $1) AS scanned_at_1f,
+                 (SELECT COUNT(DISTINCT primary_metric)
+                    FROM corner_scan_2f WHERE mode = $1)                          AS n_metrics""",
+            mode,
         )
+    def _iso(v):
+        return v.isoformat() if v is not None else None
     return {
-        "count_2f":  int(row["count_2f"]),
-        "as_of_2f":  str(row["as_of_2f"])  if row["as_of_2f"]  else None,
-        "count_1f":  int(row["count_1f"]),
-        "as_of_1f":  str(row["as_of_1f"])  if row["as_of_1f"]  else None,
-        "n_metrics": int(row["n_metrics"]),
+        "mode":          mode,
+        "count_2f":      int(row["count_2f"]),
+        "as_of_2f":      _iso(row["as_of_2f"]),
+        "scanned_at_2f": _iso(row["scanned_at_2f"]),
+        "count_1f":      int(row["count_1f"]),
+        "as_of_1f":      _iso(row["as_of_1f"]),
+        "scanned_at_1f": _iso(row["scanned_at_1f"]),
+        "n_metrics":     int(row["n_metrics"]),
     }
 
 
@@ -5914,19 +6020,27 @@ async def corner_scan_2f_endpoint(
     secondary_metric: Optional[str] = Query(None),
     corner_direction: Optional[str] = Query(None),
     outcome:          Optional[str] = Query(None),
+    mode:             str           = Query("walk_forward"),
     min_d_n:          int           = Query(300, ge=0),
     sort_key:         str           = Query("d_ret_per_day"),
     sort_dir:         str           = Query("desc"),
     limit:            int           = Query(200, ge=1, le=2000),
     pool=Depends(get_oi_pool),
 ):
-    """Filtered + sorted 2-factor corner rows.
+    """Filtered + sorted 2-factor corner rows for a single binning mode.
 
     Filters applied in SQL; sort key is whitelisted against _CS_2F_SORT_WHITELIST.
-    d_n >= min_d_n is the primary quality gate (default 300).
+    d_n >= min_d_n is the primary quality gate (default 300). `mode` defaults
+    to walk_forward (the only mode populated in Bucket A's pre-IS-batch
+    state); requesting a mode with no rows returns an empty list cleanly
+    (status="no_data"), and the frontend renders a placeholder.
+
+    Response includes per-row `mode` and `scanned_at` so the frontend can
+    display the "last: YYYY-MM-DD HH:MM:SS · <Mode>" breadcrumb without a
+    second meta call.
     """
     if not pool:
-        return {"rows": [], "total": 0}
+        return {"rows": [], "total": 0, "mode": mode, "status": "no_db"}
     await _ensure_corner_scan_tables(pool)
 
     if sort_key not in _CS_2F_SORT_WHITELIST:
@@ -5934,9 +6048,9 @@ async def corner_scan_2f_endpoint(
     dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
     nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
 
-    conds:  list[str] = ["d_n >= $1"]
-    params: list      = [min_d_n]
-    p = 2
+    conds:  list[str] = ["d_n >= $1", "mode = $2"]
+    params: list      = [min_d_n, mode]
+    p = 3
 
     if primary_metric:
         conds.append(f"primary_metric   ILIKE ${p}"); params.append(f"%{primary_metric}%");   p += 1
@@ -5957,12 +6071,18 @@ async def corner_scan_2f_endpoint(
         rows = await conn.fetch(
             f"""SELECT primary_metric, secondary_metric, corner_direction, outcome,
                        d_avg_ret, d_ret_per_day, d_n,
-                       q_avg_ret, q_ret_per_day, q_n, as_of
+                       q_avg_ret, q_ret_per_day, q_n,
+                       as_of, scanned_at, mode
                 FROM corner_scan_2f WHERE {where}
                 ORDER BY {order} LIMIT {limit}""",
             *params,
         )
-    return {"rows": [dict(r) for r in rows], "total": int(total)}
+    return {
+        "rows":   [dict(r) for r in rows],
+        "total":  int(total),
+        "mode":   mode,
+        "status": "ok" if int(total) > 0 else "no_data",
+    }
 
 
 @router.get("/corner-scan/1f")
@@ -5970,15 +6090,22 @@ async def corner_scan_1f_endpoint(
     metric:   Optional[str] = Query(None),
     extreme:  Optional[str] = Query(None),
     outcome:  Optional[str] = Query(None),
+    mode:     str           = Query("walk_forward"),
     min_d_n:  int           = Query(300, ge=0),
     sort_key: str           = Query("d_ret_per_day"),
     sort_dir: str           = Query("desc"),
     limit:    int           = Query(200, ge=1, le=2000),
     pool=Depends(get_oi_pool),
 ):
-    """Filtered + sorted 1-factor extreme-bin rows."""
+    """Filtered + sorted 1-factor extreme-bin rows for a single binning mode.
+
+    `mode` defaults to walk_forward; requesting a mode with no rows returns
+    an empty list cleanly (status="no_data") so the frontend can render the
+    "pending in-sample build" placeholder without an error path. Response
+    includes per-row `mode` and `scanned_at` for the breadcrumb.
+    """
     if not pool:
-        return {"rows": [], "total": 0}
+        return {"rows": [], "total": 0, "mode": mode, "status": "no_db"}
     await _ensure_corner_scan_tables(pool)
 
     if sort_key not in _CS_1F_SORT_WHITELIST:
@@ -5986,9 +6113,9 @@ async def corner_scan_1f_endpoint(
     dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
     nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
 
-    conds:  list[str] = ["d_n >= $1"]
-    params: list      = [min_d_n]
-    p = 2
+    conds:  list[str] = ["d_n >= $1", "mode = $2"]
+    params: list      = [min_d_n, mode]
+    p = 3
 
     if metric:
         conds.append(f"metric ILIKE ${p}"); params.append(f"%{metric}%"); p += 1
@@ -6007,9 +6134,15 @@ async def corner_scan_1f_endpoint(
         rows = await conn.fetch(
             f"""SELECT metric, extreme, outcome,
                        d_avg_ret, d_ret_per_day, d_n,
-                       q_avg_ret, q_ret_per_day, q_n, as_of
+                       q_avg_ret, q_ret_per_day, q_n,
+                       as_of, scanned_at, mode
                 FROM corner_scan_1f WHERE {where}
                 ORDER BY {order} LIMIT {limit}""",
             *params,
         )
-    return {"rows": [dict(r) for r in rows], "total": int(total)}
+    return {
+        "rows":   [dict(r) for r in rows],
+        "total":  int(total),
+        "mode":   mode,
+        "status": "ok" if int(total) > 0 else "no_data",
+    }
