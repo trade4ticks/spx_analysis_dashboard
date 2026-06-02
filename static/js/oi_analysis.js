@@ -7471,6 +7471,17 @@ document.addEventListener('alpine:init', () => {
       const el = document.querySelector('select[x-model="metric"]');
       if (el) el.value = name;
       this.loadAnalysis();
+      // Bucket A step 5 hotfix: a leaderboard click is a Survey-internal
+      // action (the user is asking "show me the decomp for this metric"),
+      // so it dispatches the Survey-internal decomp fetch. This is the
+      // same semantic as the ⟳ Refresh button — both are explicit user
+      // requests within the Survey pane. Step 5's loadAnalysis-cascade
+      // removal correctly decoupled Survey from Analyze-section mode
+      // changes, but it also dropped this Survey-internal trigger; this
+      // line restores it without re-introducing the Analyze coupling.
+      // Single-ticker (this.ticker !== 'ALL') has no decomp; loadIcDecomp
+      // gates that case internally and returns immediately.
+      if (this.ticker === 'ALL') this.loadIcDecomp();
     },
   }));
 });
