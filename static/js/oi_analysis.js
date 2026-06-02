@@ -188,20 +188,24 @@ document.addEventListener('alpine:init', () => {
     // dispatches a network round trip.
     surveyMode:          'walk_forward',
     surveyCutoffDate:    '2024-01-01',
-    // Per-(mode, outcome[, cutoff]) slot cache. Each leaf holds a snapshot
-    // of the displayed IC-batch + IC-decomp state so any of the three
-    // pickers (mode pill, outcome dropdown, cutoff input) can swap
-    // INSTANTLY between previously-loaded combos with no network call.
-    // Slot key:
-    //   non-TT:  surveyOutcome                                   (e.g., "ret_5d_fwd_oc")
-    //   TT:      `${surveyOutcome}|${surveyCutoffDate}`          (cutoff partitions data)
-    // Each value is { icBatchData, icBatchKey, icBatchStatus,
-    //                 icBatchError, icDecompData, icDecompKey,
-    //                 icDecompError }.
+    // Per-(slot bucket, slot key) cache. Two buckets, not three:
+    //   "default"     ← shared by IS and WF (rolling IC is rank-correlation
+    //                    based and mode-independent; the backend cache also
+    //                    keys IS and WF to the same row at mode_tag="default").
+    //   "train_test"  ← TT only; gets its own bucket because reference_ic
+    //                    is the pre-cutoff mean instead of the full mean
+    //                    (genuinely different leaderboard numbers).
+    // Switching IS↔WF is a no-op slot-wise — both pills point at the same
+    // bucket — so the swap is truly instant after either has been loaded.
+    // Slot key inside a bucket:
+    //   default:     surveyOutcome                            (e.g., "ret_5d_fwd_oc")
+    //   train_test:  `${surveyOutcome}|${surveyCutoffDate}`   (cutoff partitions data)
+    // Each leaf holds { icBatchData, icBatchKey, icBatchStatus,
+    //                   icBatchError, icDecompData, icDecompKey,
+    //                   icDecompError }.
     surveyDataByMode: {
-      in_sample:    {},
-      walk_forward: {},
-      train_test:   {},
+      default:    {},
+      train_test: {},
     },
     // Per-mode coarse status — written for telemetry; currently no readers.
     surveyStatusByMode: {
@@ -6507,6 +6511,18 @@ document.addEventListener('alpine:init', () => {
 
     setSurveyMode(m) {
       if (m === this.surveyMode && m !== 'train_test') return;
+      // IS↔WF are aliased to the same bucket — same data slot, no swap
+      // dance needed. Just flip the pill highlight (and the breadcrumb's
+      // mode label) so the UI reflects the selected pill, but DO NOT
+      // bump icBatchSeq or stop polling — an in-flight load for the
+      // shared bucket should continue uninterrupted.
+      const oldBucket = this._surveyBucketFor(this.surveyMode);
+      const newBucket = this._surveyBucketFor(m);
+      if (oldBucket === newBucket) {
+        this.surveyMode = m;
+        return;
+      }
+      // Cross-bucket switch (anything ↔ TT): persist current and swap.
       this._stopIcBatchPolling();
       this.icBatchSeq++;
       this._surveyStoreSlot();
@@ -6515,9 +6531,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     setSurveyCutoffDate(d) {
-      // Cutoff is only a slot dimension in train_test mode (the only mode
-      // whose cache key partitions by cutoff). Outside TT, just remember
-      // the input value for next time the user enters TT.
+      // Cutoff is only a slot dimension in train_test (only the TT bucket
+      // partitions by cutoff). Outside TT, just remember the value for
+      // next time the user enters TT.
       if (d === this.surveyCutoffDate) return;
       if (this.surveyMode !== 'train_test') {
         this.surveyCutoffDate = d;
@@ -6530,18 +6546,26 @@ document.addEventListener('alpine:init', () => {
       this._surveySwapDisplayFromSlot();
     },
 
-    // Slot key — outcome only for IS/WF; outcome+cutoff for TT.
+    // Map a mode to its slot bucket. IS and WF both bucket to "default"
+    // (mathematically identical for rolling IC + backend keys both to
+    // mode_tag="default"); TT gets its own bucket.
+    _surveyBucketFor(mode) {
+      return mode === 'train_test' ? 'train_test' : 'default';
+    },
+
+    // Slot key inside a bucket — outcome only for default; outcome+cutoff
+    // for train_test.
     _surveySlotKey() {
       return this.surveyMode === 'train_test'
         ? `${this.surveyOutcome}|${this.surveyCutoffDate}`
         : this.surveyOutcome;
     },
 
-    // Pull surveyDataByMode[surveyMode][slotKey] into the top-level
-    // icBatch* / icDecomp* fields the template binds to. If the slot is
-    // empty, reset top-level to nulls so the placeholder renders.
+    // Pull surveyDataByMode[bucket][slotKey] into the top-level icBatch*
+    // / icDecomp* fields the template binds to. If the slot is empty,
+    // reset top-level to nulls so the placeholder renders.
     _surveySwapDisplayFromSlot() {
-      const slot = this.surveyDataByMode[this.surveyMode]?.[this._surveySlotKey()];
+      const slot = this.surveyDataByMode[this._surveyBucketFor(this.surveyMode)]?.[this._surveySlotKey()];
       if (slot) {
         this.icBatchData   = slot.icBatchData;
         this.icBatchKey    = slot.icBatchKey;
@@ -6568,13 +6592,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Snapshot the currently-displayed IC state into the slot for the
-    // active (surveyMode, slotKey). Called after every successful load /
+    // active (bucket, slotKey). Called after every successful load /
     // refresh / decomp response, and right before a setter swap.
     _surveyStoreSlot() {
-      const m = this.surveyMode;
+      const b = this._surveyBucketFor(this.surveyMode);
       const k = this._surveySlotKey();
-      if (!this.surveyDataByMode[m]) this.surveyDataByMode[m] = {};
-      this.surveyDataByMode[m][k] = {
+      if (!this.surveyDataByMode[b]) this.surveyDataByMode[b] = {};
+      this.surveyDataByMode[b][k] = {
         icBatchData:   this.icBatchData,
         icBatchKey:    this.icBatchKey,
         icBatchStatus: this.icBatchStatus,
@@ -6583,6 +6607,10 @@ document.addEventListener('alpine:init', () => {
         icDecompKey:   this.icDecompKey,
         icDecompError: this.icDecompError,
       };
+      // Status telemetry, keyed by surveyMode for visual consistency
+      // (IS and WF report the same status because they share the bucket;
+      // not currently read by any UI but kept for future debugging).
+      const m = this.surveyMode;
       const cnt = this.icBatchData?.metrics?.length || 0;
       if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') {
         this.surveyStatusByMode[m] = 'error';
