@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=163"></script>
+  <script src="/static/js/oi_analysis.js?v=164"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -829,9 +829,11 @@
                   :disabled="!cs2fCanRefresh() || cs2fLoading"
                   :style="{ opacity: (cs2fCanRefresh() && !cs2fLoading) ? 1 : 0.5,
                             cursor:  (cs2fCanRefresh() && !cs2fLoading) ? 'pointer' : 'not-allowed' }"
-                  :title="cs2fCanRefresh() ? 'Re-fetch for the active mode' : 'Refresh disabled — corner-scan batch for this mode pending'"
-                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:12px;padding:4px 14px;border-radius:4px">
+                  :title="cs2fCanRefresh()
+                    ? 'Re-read corner_scan_2f for the active mode (fast — does not trigger the batch job)'
+                    : 'Refresh disabled — corner-scan batch for this mode pending'"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:700">
             ⟳ Refresh
           </button>
         </div>
@@ -967,9 +969,11 @@
                   :disabled="!cs1fCanRefresh() || cs1fLoading"
                   :style="{ opacity: (cs1fCanRefresh() && !cs1fLoading) ? 1 : 0.5,
                             cursor:  (cs1fCanRefresh() && !cs1fLoading) ? 'pointer' : 'not-allowed' }"
-                  :title="cs1fCanRefresh() ? 'Re-fetch for the active mode' : 'Refresh disabled — corner-scan batch for this mode pending'"
-                  style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:12px;padding:4px 14px;border-radius:4px">
+                  :title="cs1fCanRefresh()
+                    ? 'Re-read corner_scan_1f for the active mode (fast — does not trigger the batch job)'
+                    : 'Refresh disabled — corner-scan batch for this mode pending'"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:700">
             ⟳ Refresh
           </button>
         </div>
