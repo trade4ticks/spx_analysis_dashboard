@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=162"></script>
+  <script src="/static/js/oi_analysis.js?v=163"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -760,16 +760,31 @@
                 background:rgba(255,255,255,.02)">
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none;flex-wrap:wrap">
         <div @click="toggleCs2f()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0;flex-wrap:wrap">
           <span style="font-size:13px;color:var(--muted)" x-text="cs2fExpanded ? '▾' : '▸'"></span>
           <span style="font-size:13px;font-weight:700;color:var(--text)">Corner Scan — 2-Factor</span>
-          <span style="font-size:11px;color:var(--dim)"
-                x-text="cs2fMeta
-                  ? '· ' + (cs2fMeta.count_2f||0).toLocaleString() + ' rows · ' + (cs2fMeta.n_metrics||0) + ' metrics · as of ' + (cs2fMeta.as_of_2f||'—')
-                  : '— click to load'"></span>
+          <!-- Bucket A breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode>" -->
+          <span style="font-size:11px;color:var(--dim);font-family:monospace"
+                x-text="cs2fBreadcrumb()"></span>
+          <!-- Bucket A mode tag (color-coded per spec) -->
+          <span class="bucketA-mode-tag"
+                :class="{ wf: cs2fMode==='walk_forward', is: cs2fMode==='in_sample', tt: cs2fMode==='train_test' }"
+                x-text="cs2fMode==='walk_forward' ? 'WALK-FORWARD' : (cs2fMode==='in_sample' ? 'IN-SAMPLE' : 'TRAIN-TEST')"></span>
+          <span x-show="cs2fMeta && cs2fMeta.count_2f > 0" style="font-size:10px;color:var(--dim)"
+                x-text="'(' + (cs2fMeta?.count_2f||0).toLocaleString() + ' rows · ' + (cs2fMeta?.n_metrics||0) + ' metrics)'"></span>
           <span x-show="cs2fLoading" style="font-size:11px;color:#3498db">Loading…</span>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
+          <!-- Bucket A mode selector: in-memory swap only -->
+          <div class="bucketA-mode-seg">
+            <span :class="{on: cs2fMode==='walk_forward'}" @click="setCs2fMode('walk_forward')">WF</span>
+            <span :class="{on: cs2fMode==='in_sample'}"    @click="setCs2fMode('in_sample')">IS</span>
+            <span :class="{on: cs2fMode==='train_test'}"   @click="setCs2fMode('train_test')">TT</span>
+          </div>
+          <input type="date" x-show="cs2fMode==='train_test'"
+                 :value="cs2fCutoffDate"
+                 @change="setCs2fCutoffDate($event.target.value)"
+                 class="bucketA-cutoff-input">
           <input type="text" x-model="cs2fFilterP" placeholder="P metric…"
                  style="width:110px;font-size:11px;padding:3px 6px;
                         background:var(--raised);border:1px solid var(--border);
@@ -811,8 +826,12 @@
                         background:var(--raised);border:1px solid var(--border);
                         border-radius:4px;color:var(--text)">
           <button @click="loadCs2f()"
+                  :disabled="!cs2fCanRefresh() || cs2fLoading"
+                  :style="{ opacity: (cs2fCanRefresh() && !cs2fLoading) ? 1 : 0.5,
+                            cursor:  (cs2fCanRefresh() && !cs2fLoading) ? 'pointer' : 'not-allowed' }"
+                  :title="cs2fCanRefresh() ? 'Re-fetch for the active mode' : 'Refresh disabled — corner-scan batch for this mode pending'"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer">
+                         font-size:12px;padding:4px 14px;border-radius:4px">
             ⟳ Refresh
           </button>
         </div>
@@ -839,8 +858,17 @@
               </thead>
               <tbody>
                 <template x-if="cs2fRows.length === 0 && !cs2fLoading">
-                  <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim)">
-                    No rows — try lowering min n or clearing filters.
+                  <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
+                    <template x-if="cs2fMode === 'walk_forward'">
+                      <span>No rows — try lowering min n or clearing filters.</span>
+                    </template>
+                    <template x-if="cs2fMode !== 'walk_forward'">
+                      <span>
+                        Corner Scan 2-Factor not yet available for
+                        <strong x-text="_cornerScanModeLabel(cs2fMode)"></strong>
+                        — pending in-sample build.
+                      </span>
+                    </template>
                   </td></tr>
                 </template>
                 <template x-for="row in cs2fRows" :key="row.primary_metric+'|'+row.secondary_metric+'|'+row.corner_direction+'|'+row.outcome">
@@ -877,16 +905,30 @@
                 background:rgba(255,255,255,.02)">
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none;flex-wrap:wrap">
         <div @click="toggleCs1f()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0">
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0;flex-wrap:wrap">
           <span style="font-size:13px;color:var(--muted)" x-text="cs1fExpanded ? '▾' : '▸'"></span>
           <span style="font-size:13px;font-weight:700;color:var(--text)">Corner Scan — 1-Factor</span>
-          <span style="font-size:11px;color:var(--dim)"
-                x-text="cs2fMeta
-                  ? '· ' + (cs2fMeta.count_1f||0).toLocaleString() + ' rows · as of ' + (cs2fMeta.as_of_1f||'—')
-                  : '— click to load'"></span>
+          <!-- Bucket A breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode>" -->
+          <span style="font-size:11px;color:var(--dim);font-family:monospace"
+                x-text="cs1fBreadcrumb()"></span>
+          <!-- Bucket A mode tag (color-coded per spec) -->
+          <span class="bucketA-mode-tag"
+                :class="{ wf: cs1fMode==='walk_forward', is: cs1fMode==='in_sample', tt: cs1fMode==='train_test' }"
+                x-text="cs1fMode==='walk_forward' ? 'WALK-FORWARD' : (cs1fMode==='in_sample' ? 'IN-SAMPLE' : 'TRAIN-TEST')"></span>
+          <span x-show="cs1fMeta && cs1fMeta.count_1f > 0" style="font-size:10px;color:var(--dim)"
+                x-text="'(' + (cs1fMeta?.count_1f||0).toLocaleString() + ' rows)'"></span>
           <span x-show="cs1fLoading" style="font-size:11px;color:#3498db">Loading…</span>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
+          <div class="bucketA-mode-seg">
+            <span :class="{on: cs1fMode==='walk_forward'}" @click="setCs1fMode('walk_forward')">WF</span>
+            <span :class="{on: cs1fMode==='in_sample'}"    @click="setCs1fMode('in_sample')">IS</span>
+            <span :class="{on: cs1fMode==='train_test'}"   @click="setCs1fMode('train_test')">TT</span>
+          </div>
+          <input type="date" x-show="cs1fMode==='train_test'"
+                 :value="cs1fCutoffDate"
+                 @change="setCs1fCutoffDate($event.target.value)"
+                 class="bucketA-cutoff-input">
           <input type="text" x-model="cs1fFilterMetric" placeholder="Metric…"
                  style="width:140px;font-size:11px;padding:3px 6px;
                         background:var(--raised);border:1px solid var(--border);
@@ -922,8 +964,12 @@
                         background:var(--raised);border:1px solid var(--border);
                         border-radius:4px;color:var(--text)">
           <button @click="loadCs1f()"
+                  :disabled="!cs1fCanRefresh() || cs1fLoading"
+                  :style="{ opacity: (cs1fCanRefresh() && !cs1fLoading) ? 1 : 0.5,
+                            cursor:  (cs1fCanRefresh() && !cs1fLoading) ? 'pointer' : 'not-allowed' }"
+                  :title="cs1fCanRefresh() ? 'Re-fetch for the active mode' : 'Refresh disabled — corner-scan batch for this mode pending'"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--dim);
-                         font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer">
+                         font-size:12px;padding:4px 14px;border-radius:4px">
             ⟳ Refresh
           </button>
         </div>
@@ -949,8 +995,17 @@
               </thead>
               <tbody>
                 <template x-if="cs1fRows.length === 0 && !cs1fLoading">
-                  <tr><td colspan="9" style="padding:16px 8px;text-align:center;color:var(--dim)">
-                    No rows — try lowering min n or clearing filters.
+                  <tr><td colspan="9" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
+                    <template x-if="cs1fMode === 'walk_forward'">
+                      <span>No rows — try lowering min n or clearing filters.</span>
+                    </template>
+                    <template x-if="cs1fMode !== 'walk_forward'">
+                      <span>
+                        Corner Scan 1-Factor not yet available for
+                        <strong x-text="_cornerScanModeLabel(cs1fMode)"></strong>
+                        — pending in-sample build.
+                      </span>
+                    </template>
                   </td></tr>
                 </template>
                 <template x-for="row in cs1fRows" :key="row.metric+'|'+row.extreme+'|'+row.outcome">

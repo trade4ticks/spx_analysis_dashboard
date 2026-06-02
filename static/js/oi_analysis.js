@@ -3261,13 +3261,34 @@ document.addEventListener('alpine:init', () => {
     smExpanded: false,
 
     // ── Corner Scan ─────────────────────────────────────────────────────────
+    // Bucket A step 6: Corner Scan 2F local mode. Pane reads cs2fMode,
+    // NOT this.pageMode. Per-mode slot cache holds meta + rows + total
+    // independently for each binning mode. Mode-pill swap is in-memory
+    // only. Refresh fetches for the active local mode and writes the
+    // slot. Refresh is DISABLED for IS/TT until the in-sample / train-
+    // test corner-scan batch job exists (a future task).
     cs2fExpanded: false, cs2fLoading: false, cs2fMeta: null, cs2fRows: [], cs2fTotal: 0,
     cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
+    cs2fMode:       'walk_forward',
+    cs2fCutoffDate: '2024-01-01',
+    cs2fDataByMode: {
+      walk_forward: null,  // { meta, rows, total }
+      in_sample:    null,
+      train_test:   null,
+    },
 
     cs1fExpanded: false, cs1fLoading: false, cs1fRows: [], cs1fTotal: 0,
     cs1fSortKey: 'd_ret_per_day', cs1fSortDir: 'desc',
     cs1fFilterMetric: '', cs1fFilterExtreme: '', cs1fFilterOutcome: '', cs1fMinN: 300,
+    cs1fMeta:       null,  // pane-local meta (previously read from cs2fMeta — decoupled in step 6)
+    cs1fMode:       'walk_forward',
+    cs1fCutoffDate: '2024-01-01',
+    cs1fDataByMode: {
+      walk_forward: null,
+      in_sample:    null,
+      train_test:   null,
+    },
 
     surveyExpanded: false,
     selectedStats: null,
@@ -3527,31 +3548,140 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── Corner Scan ─────────────────────────────────────────────────────────
+    // Shared mode-label helper. The 2F and 1F panes own independent
+    // mode state but render the same label vocabulary.
+    _cornerScanModeLabel(m) {
+      if (m === 'in_sample')  return 'In-sample';
+      if (m === 'train_test') return 'Train-test';
+      return 'Walk-forward';
+    },
+
+    // Breadcrumb format identical to the other 5 Bucket A panes:
+    //   "last: YYYY-MM-DD HH:MM:SS · <Mode label>"
+    // The 2F-side timestamp comes from MAX(scanned_at) over rows with
+    // the active mode (returned by /corner-scan/meta?mode=<m>).
+    cs2fBreadcrumb() {
+      const label = this._cornerScanModeLabel(this.cs2fMode);
+      const meta = this.cs2fMeta;
+      if (!meta || !meta.scanned_at_2f) {
+        return `no data yet · ${label}`;
+      }
+      const ts = String(meta.scanned_at_2f).slice(0, 19).replace('T', ' ');
+      return `last: ${ts} · ${label}`;
+    },
+    cs1fBreadcrumb() {
+      const label = this._cornerScanModeLabel(this.cs1fMode);
+      const meta = this.cs1fMeta;
+      if (!meta || !meta.scanned_at_1f) {
+        return `no data yet · ${label}`;
+      }
+      const ts = String(meta.scanned_at_1f).slice(0, 19).replace('T', ' ');
+      return `last: ${ts} · ${label}`;
+    },
+
+    // Mode-pill / cutoff setters — in-memory swap only. Never auto-fetch.
+    setCs2fMode(m) {
+      if (m === this.cs2fMode && m !== 'train_test') return;
+      this.cs2fMode = m;
+      this._cs2fSwapDisplayFromSlot();
+    },
+    setCs2fCutoffDate(d) {
+      this.cs2fCutoffDate = d;
+    },
+    setCs1fMode(m) {
+      if (m === this.cs1fMode && m !== 'train_test') return;
+      this.cs1fMode = m;
+      this._cs1fSwapDisplayFromSlot();
+    },
+    setCs1fCutoffDate(d) {
+      this.cs1fCutoffDate = d;
+    },
+
+    // Refresh button is only meaningful for walk_forward today — the
+    // in-sample and train-test corner-scan batch jobs don't exist yet.
+    // Both the disabled state and the placeholder copy gate on this.
+    cs2fCanRefresh() { return this.cs2fMode === 'walk_forward'; },
+    cs1fCanRefresh() { return this.cs1fMode === 'walk_forward'; },
+
+    // Pull the active mode's slot into the top-level rows/meta/total
+    // fields the template binds to. Empty slot → empty state +
+    // placeholder.
+    _cs2fSwapDisplayFromSlot() {
+      const slot = this.cs2fDataByMode[this.cs2fMode];
+      if (slot) {
+        this.cs2fMeta  = slot.meta;
+        this.cs2fRows  = slot.rows  || [];
+        this.cs2fTotal = slot.total || 0;
+      } else {
+        this.cs2fMeta  = null;
+        this.cs2fRows  = [];
+        this.cs2fTotal = 0;
+      }
+    },
+    _cs1fSwapDisplayFromSlot() {
+      const slot = this.cs1fDataByMode[this.cs1fMode];
+      if (slot) {
+        this.cs1fMeta  = slot.meta;
+        this.cs1fRows  = slot.rows  || [];
+        this.cs1fTotal = slot.total || 0;
+      } else {
+        this.cs1fMeta  = null;
+        this.cs1fRows  = [];
+        this.cs1fTotal = 0;
+      }
+    },
+
+    _cs2fStoreSlot(meta, rows, total) {
+      this.cs2fDataByMode[this.cs2fMode] = { meta, rows: rows || [], total: total || 0 };
+      this._cs2fSwapDisplayFromSlot();
+    },
+    _cs1fStoreSlot(meta, rows, total) {
+      this.cs1fDataByMode[this.cs1fMode] = { meta, rows: rows || [], total: total || 0 };
+      this._cs1fSwapDisplayFromSlot();
+    },
+
     async toggleCs2f() {
       this.cs2fExpanded = !this.cs2fExpanded;
-      if (this.cs2fExpanded && !this.cs2fRows.length) await this.loadCs2f();
+      // First-expand auto-load only for walk_forward (the only mode with
+      // data today). IS / TT just display the placeholder until their
+      // batch jobs land.
+      if (this.cs2fExpanded
+          && !this.cs2fDataByMode[this.cs2fMode]
+          && this.cs2fMode === 'walk_forward') {
+        await this.loadCs2f();
+      }
     },
     async loadCs2f() {
+      // Refresh is gated on walk_forward; IS / TT just shouldn't fire.
+      // The endpoint would return status="no_data" cleanly even if we
+      // did fire — but skipping the call saves a round-trip.
+      if (!this.cs2fCanRefresh()) return;
       this.cs2fLoading = true;
-      // Fetch meta once (shared by both panes).
-      if (!this.cs2fMeta) {
-        try {
-          const r = await fetch('/api/factor-analysis/corner-scan/meta');
-          if (r.ok) this.cs2fMeta = await r.json();
-        } catch (_) {}
-      }
+      const cutoffQ = this.cs2fMode === 'train_test'
+        ? `&cutoff_date=${encodeURIComponent(this.cs2fCutoffDate)}` : '';
+      // Meta: counts + scanned_at for the breadcrumb. Always re-fetched
+      // on Refresh so the timestamp reflects the latest scan.
+      let meta = null;
+      try {
+        const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs2fMode}${cutoffQ}`);
+        if (r.ok) meta = await r.json();
+      } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs2fSortKey, sort_dir: this.cs2fSortDir,
         min_d_n:  this.cs2fMinN,   limit:    200,
+        mode:     this.cs2fMode,
       });
+      if (this.cs2fMode === 'train_test') p.set('cutoff_date', this.cs2fCutoffDate);
       if (this.cs2fFilterP)       p.set('primary_metric',   this.cs2fFilterP);
       if (this.cs2fFilterS)       p.set('secondary_metric', this.cs2fFilterS);
       if (this.cs2fFilterDir)     p.set('corner_direction', this.cs2fFilterDir);
       if (this.cs2fFilterOutcome) p.set('outcome',          this.cs2fFilterOutcome);
+      let rows = [], total = 0;
       try {
         const r = await fetch('/api/factor-analysis/corner-scan/2f?' + p);
-        if (r.ok) { const d = await r.json(); this.cs2fRows = d.rows; this.cs2fTotal = d.total; }
+        if (r.ok) { const d = await r.json(); rows = d.rows || []; total = d.total || 0; }
       } catch (_) {}
+      this._cs2fStoreSlot(meta, rows, total);
       this.cs2fLoading = false;
     },
     cs2fSort(key) {
@@ -3561,32 +3691,44 @@ document.addEventListener('alpine:init', () => {
         this.cs2fSortKey = key;
         this.cs2fSortDir = 'desc';
       }
-      this.loadCs2f();
+      // Sort change re-fetches with the new sort_key. Gated on the
+      // current pane's mode supporting a fetch.
+      if (this.cs2fCanRefresh()) this.loadCs2f();
     },
 
     async toggleCs1f() {
       this.cs1fExpanded = !this.cs1fExpanded;
-      if (this.cs1fExpanded && !this.cs1fRows.length) await this.loadCs1f();
+      if (this.cs1fExpanded
+          && !this.cs1fDataByMode[this.cs1fMode]
+          && this.cs1fMode === 'walk_forward') {
+        await this.loadCs1f();
+      }
     },
     async loadCs1f() {
+      if (!this.cs1fCanRefresh()) return;
       this.cs1fLoading = true;
-      if (!this.cs2fMeta) {
-        try {
-          const r = await fetch('/api/factor-analysis/corner-scan/meta');
-          if (r.ok) this.cs2fMeta = await r.json();
-        } catch (_) {}
-      }
+      const cutoffQ = this.cs1fMode === 'train_test'
+        ? `&cutoff_date=${encodeURIComponent(this.cs1fCutoffDate)}` : '';
+      let meta = null;
+      try {
+        const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs1fMode}${cutoffQ}`);
+        if (r.ok) meta = await r.json();
+      } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs1fSortKey, sort_dir: this.cs1fSortDir,
         min_d_n:  this.cs1fMinN,   limit:    200,
+        mode:     this.cs1fMode,
       });
+      if (this.cs1fMode === 'train_test') p.set('cutoff_date', this.cs1fCutoffDate);
       if (this.cs1fFilterMetric)  p.set('metric',   this.cs1fFilterMetric);
       if (this.cs1fFilterExtreme) p.set('extreme',  this.cs1fFilterExtreme);
       if (this.cs1fFilterOutcome) p.set('outcome',  this.cs1fFilterOutcome);
+      let rows = [], total = 0;
       try {
         const r = await fetch('/api/factor-analysis/corner-scan/1f?' + p);
-        if (r.ok) { const d = await r.json(); this.cs1fRows = d.rows; this.cs1fTotal = d.total; }
+        if (r.ok) { const d = await r.json(); rows = d.rows || []; total = d.total || 0; }
       } catch (_) {}
+      this._cs1fStoreSlot(meta, rows, total);
       this.cs1fLoading = false;
     },
     cs1fSort(key) {
@@ -3596,7 +3738,7 @@ document.addEventListener('alpine:init', () => {
         this.cs1fSortKey = key;
         this.cs1fSortDir = 'desc';
       }
-      this.loadCs1f();
+      if (this.cs1fCanRefresh()) this.loadCs1f();
     },
 
     async runBatchScore() {
