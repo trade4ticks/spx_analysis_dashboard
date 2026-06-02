@@ -178,6 +178,7 @@ def rolling_ic_single_ticker(
     outcome: str,
     window: int = 252,
     stride: int = 1,
+    _measure: bool = False,
 ) -> list[IcPoint]:
     """Rolling Spearman IC of (metric, outcome) over trailing `window` rows.
 
@@ -194,12 +195,21 @@ def rolling_ic_single_ticker(
     compute proportionally while leaving sign-stability counts accurate.
     The /analyze rolling-IC chart uses stride=1 (full resolution);
     /ic-batch uses stride=3 to stay under Cloudflare's 100s timeout.
+
+    `_measure=True` (diagnostic): switches to a hand-rolled Spearman that
+    explicitly ranks metric and outcome separately so we can attribute
+    time. Prints per-window cumulative timings to stdout via the caller's
+    measurement script. Behavior is unchanged (same series returned).
     """
     if window < 2:
         raise ValueError(f"window must be ≥ 2, got {window}")
     if stride < 1:
         raise ValueError(f"stride must be ≥ 1, got {stride}")
 
+    import time as _time
+    t_triples = t_metric_rank = t_outcome_rank = t_corr = 0.0
+    if _measure:
+        _t0 = _time.perf_counter()
     triples: list[tuple[Any, float, float]] = []
     for r in rows_chrono:
         d = r.get("trade_date")
@@ -207,22 +217,45 @@ def rolling_ic_single_ticker(
         if d is None or pair is None:
             continue
         triples.append((d, pair[0], pair[1]))
+    if _measure:
+        t_triples = _time.perf_counter() - _t0
 
     n = len(triples)
     if n < window:
+        if _measure:
+            print(f"  [rolling_ic_single_ticker:split] triples_build={t_triples:.4f}s  (n={n} < window={window}, no windows)")
         return []
 
     out: list[IcPoint] = []
+    n_windows_evaluated = 0
     for end in range(window, n + 1, stride):
         win = triples[end - window:end]
         xs = np.fromiter((t[1] for t in win), dtype=np.float64, count=window)
         ys = np.fromiter((t[2] for t in win), dtype=np.float64, count=window)
         if xs.std() == 0 or ys.std() == 0:
             continue
-        rho, _ = sp_stats.spearmanr(xs, ys)
+        if _measure:
+            _ts = _time.perf_counter()
+            rx = sp_stats.rankdata(xs)
+            t_metric_rank += _time.perf_counter() - _ts
+            _ts = _time.perf_counter()
+            ry = sp_stats.rankdata(ys)
+            t_outcome_rank += _time.perf_counter() - _ts
+            _ts = _time.perf_counter()
+            rho, _p = sp_stats.pearsonr(rx, ry)
+            t_corr += _time.perf_counter() - _ts
+        else:
+            rho, _ = sp_stats.spearmanr(xs, ys)
         if math.isnan(rho):
             continue
         out.append(IcPoint(date=win[-1][0], ic=round(float(rho), 6), n=window))
+        n_windows_evaluated += 1
+    if _measure:
+        total_corr_work = t_metric_rank + t_outcome_rank + t_corr
+        print(f"  [rolling_ic_single_ticker:split] triples_build={t_triples:.4f}s "
+              f"metric_rank={t_metric_rank:.4f}s outcome_rank={t_outcome_rank:.4f}s "
+              f"rank_corr={t_corr:.4f}s  (windows_evaluated={n_windows_evaluated}, "
+              f"sum_split={total_corr_work:.4f}s)")
     return out
 
 
@@ -233,6 +266,7 @@ def rolling_ic_cross_sectional(
     window: int = 252,
     min_tickers_per_day: int = 5,
     stride: int = 1,
+    _measure: bool = False,
 ) -> list[IcPoint]:
     """Cross-sectional daily IC then trailing-mean over `window` days.
 
@@ -252,6 +286,10 @@ def rolling_ic_cross_sectional(
     if window < 1:
         raise ValueError(f"window must be ≥ 1, got {window}")
 
+    import time as _time
+    t_by_date_build = t_metric_rank = t_outcome_rank = t_corr = t_rolling_mean = 0.0
+    if _measure:
+        _ts = _time.perf_counter()
     by_date: dict[Any, list[tuple[float, float]]] = {}
     for r in rows:
         d = r.get("trade_date")
@@ -263,8 +301,11 @@ def rolling_ic_cross_sectional(
         if pair is None:
             continue
         by_date.setdefault(d, []).append(pair)
+    if _measure:
+        t_by_date_build = _time.perf_counter() - _ts
 
     daily: list[tuple[Any, float, int]] = []  # (date, ic, n_tickers)
+    n_days_evaluated = 0
     for d in sorted(by_date.keys()):
         pairs = by_date[d]
         k = len(pairs)
@@ -274,21 +315,49 @@ def rolling_ic_cross_sectional(
         ys = np.fromiter((p[1] for p in pairs), dtype=np.float64, count=k)
         if xs.std() == 0 or ys.std() == 0:
             continue
-        rho, _ = sp_stats.spearmanr(xs, ys)
+        if _measure:
+            # Spearman = Pearson(rank(xs), rank(ys)). Split timing so we
+            # can attribute work to the metric-ranking portion (which is
+            # identical across all outcomes for the same date) vs the
+            # outcome-ranking + correlation portion (outcome-specific).
+            _ts = _time.perf_counter()
+            rx = sp_stats.rankdata(xs)
+            t_metric_rank += _time.perf_counter() - _ts
+            _ts = _time.perf_counter()
+            ry = sp_stats.rankdata(ys)
+            t_outcome_rank += _time.perf_counter() - _ts
+            _ts = _time.perf_counter()
+            rho, _p = sp_stats.pearsonr(rx, ry)
+            t_corr += _time.perf_counter() - _ts
+        else:
+            rho, _ = sp_stats.spearmanr(xs, ys)
         if math.isnan(rho):
             continue
         daily.append((d, float(rho), k))
+        n_days_evaluated += 1
 
     n_days = len(daily)
     if n_days < window:
+        if _measure:
+            print(f"  [rolling_ic_cross_sectional:split] by_date_build={t_by_date_build:.4f}s "
+                  f"metric_rank={t_metric_rank:.4f}s outcome_rank={t_outcome_rank:.4f}s "
+                  f"rank_corr={t_corr:.4f}s  (n_days={n_days} < window={window}, no windows)")
         return []
 
+    if _measure:
+        _ts = _time.perf_counter()
     out: list[IcPoint] = []
     for end in range(window, n_days + 1, stride):
         win = daily[end - window:end]
         ic_mean = float(np.mean([p[1] for p in win]))
         med_k = int(np.median([p[2] for p in win]))
         out.append(IcPoint(date=win[-1][0], ic=round(ic_mean, 6), n=med_k))
+    if _measure:
+        t_rolling_mean = _time.perf_counter() - _ts
+        print(f"  [rolling_ic_cross_sectional:split] by_date_build={t_by_date_build:.4f}s "
+              f"metric_rank={t_metric_rank:.4f}s outcome_rank={t_outcome_rank:.4f}s "
+              f"rank_corr={t_corr:.4f}s rolling_mean={t_rolling_mean:.4f}s  "
+              f"(days_evaluated={n_days_evaluated}, windows_emitted={len(out)})")
     return out
 
 

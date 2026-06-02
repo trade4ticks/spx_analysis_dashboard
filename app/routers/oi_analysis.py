@@ -4453,6 +4453,7 @@ def _compute_analyze_bundle_sync(
     cutoff_date: Optional[str],
     outcomes: list[str],
     n_bins: int = 20,
+    _measure: bool = False,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -4484,6 +4485,11 @@ def _compute_analyze_bundle_sync(
         rolling_ic_single_ticker, rolling_ic_cross_sectional,
         classified_rolling_ic, noise_floor_epsilon, _horizon_from_outcome,
     )
+    import time as _perf_time
+
+    def _tick():
+        """perf_counter helper for the _measure path. Always cheap."""
+        return _perf_time.perf_counter()
 
     is_all = (ticker == "ALL")
     outcomes = list(outcomes)
@@ -4505,6 +4511,7 @@ def _compute_analyze_bundle_sync(
     # close_by_tkr_date: close-of-day lookup. close(date) = spot_pc of the
     #   NEXT trading day for the same ticker (canonical equivalence used
     #   throughout the dashboard's trade-calendar code).
+    if _measure: _t_idx = _tick()
     row_by_tkr_date: dict = {}
     by_tkr_dates_unsorted: dict = defaultdict(list)
     for r in rows:
@@ -4527,6 +4534,10 @@ def _compute_analyze_bundle_sync(
                 close_by_tkr_date[(tkr, d)] = float(pc)
             except (TypeError, ValueError):
                 continue
+    if _measure:
+        print(f"[SHARED] index_build={_tick() - _t_idx:.3f}s  "
+              f"(rows={len(rows)}, tickers={len(by_tkr_dates)}, "
+              f"close_lookup_entries={len(close_by_tkr_date)})")
 
     # ── 2. Run Assigner once (anchor selected above) ──────────────────────
     spec = make_spec(
@@ -4534,8 +4545,16 @@ def _compute_analyze_bundle_sync(
         cutoff_date=cutoff_date if mode == "train_test" else None,
     )
     assigner = ASSIGNERS[spec.kind](spec)
+    if _measure: _t_fit = _tick()
     state = assigner.fit(rows, metric, n_bins, is_all)
+    if _measure:
+        _t_assign_start = _tick()
+        print(f"[SHARED] assigner_fit={_t_assign_start - _t_fit:.3f}s  "
+              f"(spec.kind={spec.kind})")
     assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
+    if _measure:
+        print(f"[SHARED] assigner_assign={_tick() - _t_assign_start:.3f}s  "
+              f"(assignments={len(assignments)})")
 
     # ── 3. Build trade_meta from valid assignments ────────────────────────
     # v5: entry fields are anchored. OC outcomes enter at open of T;
@@ -4545,6 +4564,7 @@ def _compute_analyze_bundle_sync(
     # as the *signal* date T — used by yearly/dow/activity aggregations
     # which treat each trade as "a signal on day T" regardless of when
     # the position was opened.
+    if _measure: _t_meta = _tick()
     trade_meta: list = []
     trade_id_by_key: dict = {}
     for a in assignments:
@@ -4597,12 +4617,21 @@ def _compute_analyze_bundle_sync(
             "bin_20":        a.bin,    # 1..20; client aggregates pairs/quartets for 10/5 views
         })
 
+    if _measure:
+        print(f"[SHARED] trade_meta_build={_tick() - _t_meta:.3f}s  "
+              f"(trade_meta_rows={len(trade_meta)})")
+
     # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────
     per_outcome_returns: dict = {}
     per_bin:             dict = {}
     rolling_ic:          dict = {}
+    if _measure:
+        _t_loop_start = _tick()
+        _sum_walk = _sum_bin_stats = _sum_rolling_ic = _sum_classify = 0.0
+        print(f"[PER-OUTCOME] starting loop over {len(outcomes)} outcomes "
+              f"(rolling-IC split timed only on FIRST outcome to keep noise low)")
 
-    for outcome in outcomes:
+    for _outcome_idx, outcome in enumerate(outcomes):
         horizon = _horizon_from_outcome(outcome)
 
         # Parallel arrays for memory-efficient JSONB storage. Object-per-trade
@@ -4620,6 +4649,7 @@ def _compute_analyze_bundle_sync(
         bin_buckets:    list = [[] for _ in range(n_bins)]
         ic_rows:        list = []   # input for rolling_ic_* — needs trade_date + ticker keys
 
+        if _measure: _t_walk = _tick()
         for meta in trade_meta:
             tkr = meta["ticker"]
             d   = meta["trade_date"]
@@ -4665,6 +4695,10 @@ def _compute_analyze_bundle_sync(
             "exit_dates": out_exit_dates,
             "exit_spots": out_exit_spots,
         }
+        if _measure:
+            _dt_walk = _tick() - _t_walk
+            _sum_walk += _dt_walk
+            _t_binstats = _tick()
 
         # Per-bin aggregates
         bin_stats: list = []
@@ -4685,15 +4719,25 @@ def _compute_analyze_bundle_sync(
                 "win_rate": round(float((arr > 0).mean()), 4),
             })
         per_bin[outcome] = bin_stats
+        if _measure:
+            _dt_binstats = _tick() - _t_binstats
+            _sum_bin_stats += _dt_binstats
+            _t_ic = _tick()
 
         # Rolling IC: same primitives /analyze uses for its rolling_ic field
         if is_all:
-            ic_series = rolling_ic_cross_sectional(ic_rows, "__m", "__y", window=252)
+            ic_series = rolling_ic_cross_sectional(
+                ic_rows, "__m", "__y", window=252,
+                _measure=(_measure and _outcome_idx == 0),
+            )
             median_k = int(np.median([p.n for p in ic_series])) if ic_series else 0
             epsilon = noise_floor_epsilon(
                 "cross_sectional", window=252, horizon=horizon, k_tickers=median_k)
         else:
-            ic_series = rolling_ic_single_ticker(ic_rows, "__m", "__y", window=252)
+            ic_series = rolling_ic_single_ticker(
+                ic_rows, "__m", "__y", window=252,
+                _measure=(_measure and _outcome_idx == 0),
+            )
             epsilon = noise_floor_epsilon(
                 "single_ticker", window=252, horizon=horizon)
 
@@ -4705,6 +4749,10 @@ def _compute_analyze_bundle_sync(
         else:
             reference_ic = 0.0
 
+        if _measure:
+            _dt_ic = _tick() - _t_ic
+            _sum_rolling_ic += _dt_ic
+            _t_classify = _tick()
         classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
         rolling_ic[outcome] = [
             {"date":       str(p.date),
@@ -4713,6 +4761,20 @@ def _compute_analyze_bundle_sync(
              "sign_class": p.sign_class}
             for p in classified
         ]
+        if _measure:
+            _dt_classify = _tick() - _t_classify
+            _sum_classify += _dt_classify
+            print(f"  [outcome {_outcome_idx+1:>2}/{len(outcomes)}] {outcome:<18s} "
+                  f"walk={_dt_walk:.3f}s  bin_stats={_dt_binstats:.3f}s  "
+                  f"rolling_ic={_dt_ic:.3f}s  classify={_dt_classify:.3f}s  "
+                  f"(emitted_trades={len(out_trade_ids)})")
+
+    if _measure:
+        _t_loop_total = _tick() - _t_loop_start
+        print(f"[PER-OUTCOME TOTALS over {len(outcomes)} outcomes] "
+              f"trade_walk={_sum_walk:.3f}s  bin_stats={_sum_bin_stats:.3f}s  "
+              f"rolling_ic={_sum_rolling_ic:.3f}s  classify={_sum_classify:.3f}s  "
+              f"=> loop_total={_t_loop_total:.3f}s")
 
     # ── 5. Bundle ─────────────────────────────────────────────────────────
     return {
