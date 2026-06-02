@@ -4445,6 +4445,121 @@ async def _fetch_analyze_bundle_rows(
     return rows
 
 
+# ── Parallel rolling-IC worker infrastructure ────────────────────────────
+#
+# Rolling IC (the per-outcome 252-day rolling Spearman) is the dominant
+# remaining cost in the bundle compute (~3 s × 12 outcomes = ~36 s after
+# the step-1 trade-walk vectorization). Each outcome's rolling IC is
+# independent of the others, so we parallelize across outcomes with a
+# ProcessPoolExecutor and a fork()-based start method.
+#
+# IPC strategy: fork() inherits parent memory pages via copy-on-write, so
+# the large shared inputs (Y matrix, tm_ticker, tm_date, tm_metric_val)
+# are stashed on module-level globals in the parent BEFORE the pool is
+# created. Workers read them through ordinary global access — no pickling,
+# no per-task IPC, no actual memory duplication unless a worker mutates a
+# page (which we never do; see the read-only contract on _rolling_ic_worker).
+#
+# Per-task IPC is tiny: (outcome_idx, outcome_name, horizon) primitives
+# in → (outcome_idx, classified_list, elapsed_s) out. ~kilobytes per task.
+
+_W_Y           = None  # numpy float64 (N, 12)
+_W_TICKER      = None  # Python list of strings
+_W_DATE        = None  # Python list of ISO date strings
+_W_METRIC_VAL  = None  # numpy float64 (N,)
+_W_IS_ALL      = None  # bool
+_W_MODE        = None  # str: "in_sample" | "walk_forward" | "train_test"
+_W_CUTOFF      = None  # ISO string or None
+
+
+def _compute_one_outcome_rolling_ic(
+    Y, tm_ticker, tm_date, tm_metric_val,
+    outcome_idx: int, outcome: str, horizon: int,
+    is_all: bool, mode: str, cutoff_date: Optional[str],
+):
+    """Compute one outcome's classified rolling-IC result list.
+
+    Shared between the parallel worker (_rolling_ic_worker, called from
+    pool tasks) and the serial fallback path (when parallelization is
+    disabled or single-ticker mode). Pure function: same inputs always
+    produce the same output, so the parallel path is byte-identical to
+    the serial path provided the inputs match.
+
+    READ-ONLY ACCESS to Y, tm_ticker, tm_date, tm_metric_val. Mutating
+    any of them would trigger copy-on-write on the worker side and
+    silently kill the speedup from fork-based sharing.
+    """
+    import numpy as _np
+    from app.routers.ic_compute import (
+        rolling_ic_single_ticker, rolling_ic_cross_sectional,
+        classified_rolling_ic, noise_floor_epsilon,
+    )
+
+    col = Y[:, outcome_idx]
+    valid = ~_np.isnan(col)
+    yf_raw = col[valid]
+    if yf_raw.size == 0:
+        return []
+
+    valid_list = valid.tolist()
+    valid_ticker = [t for t, ok in zip(tm_ticker, valid_list) if ok]
+    valid_date   = [d for d, ok in zip(tm_date,   valid_list) if ok]
+    valid_metric = tm_metric_val[valid].tolist()
+    valid_y      = yf_raw.tolist()
+    ic_rows = [
+        {"trade_date": d, "ticker": t, "__m": m, "__y": y}
+        for d, t, m, y in zip(valid_date, valid_ticker, valid_metric, valid_y)
+    ]
+
+    if is_all:
+        ic_series = rolling_ic_cross_sectional(ic_rows, "__m", "__y", window=252)
+        median_k = int(_np.median([p.n for p in ic_series])) if ic_series else 0
+        epsilon = noise_floor_epsilon(
+            "cross_sectional", window=252, horizon=horizon, k_tickers=median_k,
+        )
+    else:
+        ic_series = rolling_ic_single_ticker(ic_rows, "__m", "__y", window=252)
+        epsilon = noise_floor_epsilon(
+            "single_ticker", window=252, horizon=horizon,
+        )
+
+    if mode == "train_test" and cutoff_date:
+        pre = [p.ic for p in ic_series if str(p.date) < cutoff_date]
+        reference_ic = float(_np.mean(pre)) if pre else 0.0
+    elif ic_series:
+        reference_ic = float(_np.mean([p.ic for p in ic_series]))
+    else:
+        reference_ic = 0.0
+
+    classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
+    return [
+        {"date":       str(p.date),
+         "ic":         p.ic,
+         "n":          p.n,
+         "sign_class": p.sign_class}
+        for p in classified
+    ]
+
+
+def _rolling_ic_worker(task):
+    """ProcessPoolExecutor worker. Reads module globals stashed by the
+    parent before pool creation; returns (outcome_idx, result, elapsed).
+
+    READ-ONLY access to _W_Y / _W_TICKER / _W_DATE / _W_METRIC_VAL.
+    Any in-place write (e.g., Y[i, j] = ...) triggers copy-on-write on
+    the worker's pages and breaks the fork-sharing speedup, so don't.
+    """
+    import time as _time
+    outcome_idx, outcome, horizon = task
+    _t0 = _time.perf_counter()
+    result = _compute_one_outcome_rolling_ic(
+        _W_Y, _W_TICKER, _W_DATE, _W_METRIC_VAL,
+        outcome_idx, outcome, horizon,
+        _W_IS_ALL, _W_MODE, _W_CUTOFF,
+    )
+    return outcome_idx, result, _time.perf_counter() - _t0
+
+
 def _compute_analyze_bundle_sync(
     rows: list[dict],
     metric: str,
@@ -4454,6 +4569,7 @@ def _compute_analyze_bundle_sync(
     outcomes: list[str],
     n_bins: int = 20,
     _measure: bool = False,
+    _parallel_rolling_ic: bool = True,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -4726,15 +4842,22 @@ def _compute_analyze_bundle_sync(
         print(f"[SHARED] exit_arrays_build={_tick() - _t_exit:.3f}s  "
               f"(unique_horizons={unique_horizons})")
 
-    # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────
+    # ── 4. Per-outcome work, split into two passes ───────────────────────
+    # Pass 1 (serial, in main process): per_outcome_returns + per_bin.
+    #   These feed downstream quantile graphs + the P4 active-outcome swap
+    #   and are fast after step-1 vectorization (~3 s total).
+    # Pass 2 (parallel via ProcessPoolExecutor when is_all + len > 1):
+    #   rolling_ic + classify. Each outcome is independent so the work
+    #   parallelizes cleanly across cores. Workers receive only outcome
+    #   indices; the shared Y/ticker/date/metric arrays are inherited via
+    #   fork() copy-on-write, so per-task IPC is kilobytes not megabytes.
     per_outcome_returns: dict = {}
     per_bin:             dict = {}
     rolling_ic:          dict = {}
     if _measure:
-        _t_loop_start = _tick()
-        _sum_walk = _sum_bin_stats = _sum_rolling_ic = _sum_classify = 0.0
-        print(f"[PER-OUTCOME] starting loop over {len(outcomes)} outcomes "
-              f"(rolling-IC split timed only on FIRST outcome to keep noise low)")
+        _t_pass1_start = _tick()
+        _sum_walk = _sum_bin_stats = 0.0
+        print(f"[PASS 1] walk + bin_stats over {len(outcomes)} outcomes (serial)")
 
     for _outcome_idx, outcome in enumerate(outcomes):
         horizon = _horizon_from_outcome(outcome)
@@ -4744,12 +4867,10 @@ def _compute_analyze_bundle_sync(
         #   per_outcome_returns[outcome] = {trade_ids, ret_pcts, exit_dates,
         #                                   exit_spots}  (parallel arrays, valid
         #                                   trades only, in trade_meta order)
-        #   bin_buckets[b]                = list of raw yf values for bin b+1
-        #   ic_rows                       = list of dicts feeding rolling_ic_*
         if _measure: _t_walk = _tick()
         col   = Y[:, _outcome_idx]
         valid = ~np.isnan(col)
-        yf_raw = col[valid]                           # raw floats (for bin_stats + ic_rows)
+        yf_raw = col[valid]                           # raw floats (for bin_stats)
 
         # per_outcome_returns parallel arrays
         out_trade_ids  = tm_trade_id[valid].tolist()
@@ -4768,21 +4889,6 @@ def _compute_analyze_bundle_sync(
             "exit_dates": out_exit_dates,
             "exit_spots": out_exit_spots,
         }
-
-        # ic_rows — list of dicts feeding the rolling-IC primitives. Same
-        # field shape and order as the prior implementation. Built from
-        # numpy arrays via zip + comprehension. NB: __y uses yf_raw (the
-        # raw float), not the rounded ret_pcts, to match prior behavior.
-        # __m uses the trade_meta metric_val (already 6-decimal-rounded
-        # at trade_meta build time — same as the prior implementation).
-        valid_ticker = [t for t, ok in zip(tm_ticker, valid) if ok]
-        valid_date   = [d for d, ok in zip(tm_date,   valid) if ok]
-        valid_metric = tm_metric_val[valid].tolist()
-        valid_y      = yf_raw.tolist()
-        ic_rows: list = [
-            {"trade_date": d, "ticker": t, "__m": m, "__y": y}
-            for d, t, m, y in zip(valid_date, valid_ticker, valid_metric, valid_y)
-        ]
 
         # bin_buckets equivalent: group yf_raw by tm_bin20[valid]
         bin20_valid = tm_bin20[valid]
@@ -4815,59 +4921,122 @@ def _compute_analyze_bundle_sync(
         if _measure:
             _dt_binstats = _tick() - _t_binstats
             _sum_bin_stats += _dt_binstats
-            _t_ic = _tick()
-
-        # Rolling IC: same primitives /analyze uses for its rolling_ic field
-        if is_all:
-            ic_series = rolling_ic_cross_sectional(
-                ic_rows, "__m", "__y", window=252,
-                _measure=(_measure and _outcome_idx == 0),
-            )
-            median_k = int(np.median([p.n for p in ic_series])) if ic_series else 0
-            epsilon = noise_floor_epsilon(
-                "cross_sectional", window=252, horizon=horizon, k_tickers=median_k)
-        else:
-            ic_series = rolling_ic_single_ticker(
-                ic_rows, "__m", "__y", window=252,
-                _measure=(_measure and _outcome_idx == 0),
-            )
-            epsilon = noise_floor_epsilon(
-                "single_ticker", window=252, horizon=horizon)
-
-        if mode == "train_test" and cutoff_date:
-            pre = [p.ic for p in ic_series if str(p.date) < cutoff_date]
-            reference_ic = float(np.mean(pre)) if pre else 0.0
-        elif ic_series:
-            reference_ic = float(np.mean([p.ic for p in ic_series]))
-        else:
-            reference_ic = 0.0
-
-        if _measure:
-            _dt_ic = _tick() - _t_ic
-            _sum_rolling_ic += _dt_ic
-            _t_classify = _tick()
-        classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
-        rolling_ic[outcome] = [
-            {"date":       str(p.date),
-             "ic":         p.ic,
-             "n":          p.n,
-             "sign_class": p.sign_class}
-            for p in classified
-        ]
-        if _measure:
-            _dt_classify = _tick() - _t_classify
-            _sum_classify += _dt_classify
             print(f"  [outcome {_outcome_idx+1:>2}/{len(outcomes)}] {outcome:<18s} "
                   f"walk={_dt_walk:.3f}s  bin_stats={_dt_binstats:.3f}s  "
-                  f"rolling_ic={_dt_ic:.3f}s  classify={_dt_classify:.3f}s  "
                   f"(emitted_trades={len(out_trade_ids)})")
 
     if _measure:
-        _t_loop_total = _tick() - _t_loop_start
-        print(f"[PER-OUTCOME TOTALS over {len(outcomes)} outcomes] "
-              f"trade_walk={_sum_walk:.3f}s  bin_stats={_sum_bin_stats:.3f}s  "
-              f"rolling_ic={_sum_rolling_ic:.3f}s  classify={_sum_classify:.3f}s  "
-              f"=> loop_total={_t_loop_total:.3f}s")
+        print(f"[PASS 1 TOTALS over {len(outcomes)} outcomes] "
+              f"walk={_sum_walk:.3f}s  bin_stats={_sum_bin_stats:.3f}s  "
+              f"=> pass1_total={_tick() - _t_pass1_start:.3f}s")
+
+    # ── Pass 2: rolling_ic + classify ────────────────────────────────────
+    # Parallel via ProcessPoolExecutor on ALL mode with >1 outcome;
+    # serial fallback for single-ticker, single-outcome, or explicit
+    # opt-out (_parallel_rolling_ic=False, e.g., the measure-script
+    # --verify path which runs both and diffs).
+    horizons_per_outcome = [_horizon_from_outcome(o) for o in outcomes]
+    tasks = [(j, outcomes[j], horizons_per_outcome[j]) for j in range(len(outcomes))]
+    use_parallel = (
+        _parallel_rolling_ic
+        and is_all
+        and len(outcomes) > 1
+    )
+    if _measure:
+        _t_pass2_start = _tick()
+        _sum_worker_elapsed = 0.0
+        _per_outcome_elapsed: list = [0.0] * len(outcomes)
+
+    if use_parallel:
+        import os as _os
+        import multiprocessing as _mp
+        import concurrent.futures as _cf
+        import warnings as _warnings
+
+        n_workers = max(1, (_os.cpu_count() or 4) - 1)
+        n_workers = min(n_workers, len(outcomes))
+
+        # Stash shared inputs on module globals BEFORE pool creation so
+        # fork() inherits them via copy-on-write. The cleanup in `finally`
+        # is essential — leaving these set holds memory across requests.
+        global _W_Y, _W_TICKER, _W_DATE, _W_METRIC_VAL
+        global _W_IS_ALL, _W_MODE, _W_CUTOFF
+        _W_Y = Y
+        _W_TICKER = tm_ticker
+        _W_DATE = tm_date
+        _W_METRIC_VAL = tm_metric_val
+        _W_IS_ALL = is_all
+        _W_MODE = mode
+        _W_CUTOFF = cutoff_date
+
+        if _measure:
+            print(f"[PASS 2] rolling_ic + classify over {len(outcomes)} outcomes "
+                  f"(PARALLEL, n_workers={n_workers}, mp_ctx=fork)")
+        try:
+            # fork() in a multi-threaded Python (we're inside asyncio.to_thread)
+            # emits a DeprecationWarning in 3.12+. We suppress it at this
+            # call site — the bundle compute does not spawn threads itself
+            # and the shared arrays are read-only in workers, so the actual
+            # safety concerns the warning flags don't apply here.
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings(
+                    "ignore",
+                    category=DeprecationWarning,
+                    message=r".*fork.*multi-threaded.*",
+                )
+                mp_ctx = _mp.get_context("fork")
+                with _cf.ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=mp_ctx,
+                ) as pool:
+                    # pool.map preserves task order so the result list is in
+                    # the same order as `outcomes` — dict insertion order
+                    # below matches the serial path byte-for-byte.
+                    pool_results = list(pool.map(_rolling_ic_worker, tasks))
+            for outcome_idx, classified_list, elapsed in pool_results:
+                rolling_ic[outcomes[outcome_idx]] = classified_list
+                if _measure:
+                    _sum_worker_elapsed += elapsed
+                    _per_outcome_elapsed[outcome_idx] = elapsed
+                    print(f"  [worker outcome {outcome_idx+1:>2}/{len(outcomes)}] "
+                          f"{outcomes[outcome_idx]:<18s} elapsed={elapsed:.3f}s")
+        finally:
+            # Clear the stash. Workers have already exited; this releases
+            # the parent's references to the large arrays for the next
+            # request (or for GC if this was the only bundle compute).
+            _W_Y = None
+            _W_TICKER = None
+            _W_DATE = None
+            _W_METRIC_VAL = None
+            _W_IS_ALL = None
+            _W_MODE = None
+            _W_CUTOFF = None
+    else:
+        if _measure:
+            print(f"[PASS 2] rolling_ic + classify over {len(outcomes)} outcomes (SERIAL)")
+        for outcome_idx, outcome, horizon in tasks:
+            import time as _time_serial
+            _t_one = _time_serial.perf_counter()
+            classified_list = _compute_one_outcome_rolling_ic(
+                Y, tm_ticker, tm_date, tm_metric_val,
+                outcome_idx, outcome, horizon,
+                is_all, mode, cutoff_date,
+            )
+            elapsed = _time_serial.perf_counter() - _t_one
+            rolling_ic[outcome] = classified_list
+            if _measure:
+                _sum_worker_elapsed += elapsed
+                _per_outcome_elapsed[outcome_idx] = elapsed
+                print(f"  [outcome {outcome_idx+1:>2}/{len(outcomes)}] "
+                      f"{outcome:<18s} rolling_ic+classify={elapsed:.3f}s")
+
+    if _measure:
+        _t_pass2_total = _tick() - _t_pass2_start
+        _speedup = (_sum_worker_elapsed / _t_pass2_total) if _t_pass2_total > 0 else 0.0
+        print(f"[PASS 2 TOTALS over {len(outcomes)} outcomes] "
+              f"pool_wall={_t_pass2_total:.3f}s  sum_worker={_sum_worker_elapsed:.3f}s  "
+              f"effective_speedup={_speedup:.2f}x  "
+              f"(parallel={use_parallel})")
 
     # ── 5. Bundle ─────────────────────────────────────────────────────────
     return {

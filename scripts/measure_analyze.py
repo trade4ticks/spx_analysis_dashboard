@@ -130,15 +130,103 @@ async def main(args: argparse.Namespace) -> None:
                   file=sys.stderr)
             sys.exit(2)
 
+        # ── VERIFY MODE ──────────────────────────────────────────────────
+        # Runs the bundle compute twice (parallel + serial), then diffs
+        # rolling_ic per outcome. PASS = byte-identical; FAIL = mismatch
+        # with the first 5 differing entries printed per outcome.
+        # Wall-clock measurement is skipped in verify mode — it's
+        # correctness only. Run normal measurement (without --verify)
+        # after verify passes.
+        if args.verify:
+            _hr("VERIFY — parallel vs serial rolling_ic byte-identity")
+            _sub("Computing bundle with _parallel_rolling_ic=True")
+            t = time.perf_counter()
+            bundle_p = _compute_analyze_bundle_sync(
+                rows, args.metric, args.ticker, args.mode,
+                args.cutoff_date if args.mode == "train_test" else None,
+                outcomes, n_bins=20,
+                _measure=False, _parallel_rolling_ic=True,
+            )
+            print(f"  parallel_wall={time.perf_counter() - t:.3f}s", flush=True)
+
+            _sub("Computing bundle with _parallel_rolling_ic=False")
+            t = time.perf_counter()
+            bundle_s = _compute_analyze_bundle_sync(
+                rows, args.metric, args.ticker, args.mode,
+                args.cutoff_date if args.mode == "train_test" else None,
+                outcomes, n_bins=20,
+                _measure=False, _parallel_rolling_ic=False,
+            )
+            print(f"  serial_wall={time.perf_counter() - t:.3f}s", flush=True)
+
+            _sub("rolling_ic field-by-field diff per outcome")
+            passed = True
+            ric_p = bundle_p["rolling_ic"]
+            ric_s = bundle_s["rolling_ic"]
+            for o in outcomes:
+                p_list = ric_p.get(o, [])
+                s_list = ric_s.get(o, [])
+                if len(p_list) != len(s_list):
+                    passed = False
+                    print(f"  FAIL {o}: len mismatch "
+                          f"(parallel={len(p_list)} vs serial={len(s_list)})",
+                          flush=True)
+                    continue
+                diffs = []
+                for i, (p, s) in enumerate(zip(p_list, s_list)):
+                    if p != s:
+                        diffs.append((i, p, s))
+                        if len(diffs) >= 5:
+                            break
+                if diffs:
+                    passed = False
+                    print(f"  FAIL {o}: {len(diffs)} diffs (first 5):",
+                          flush=True)
+                    for i, p, s in diffs:
+                        print(f"    [{i}] parallel={p}", flush=True)
+                        print(f"         serial  ={s}", flush=True)
+                else:
+                    print(f"  PASS {o}: {len(p_list)} entries match",
+                          flush=True)
+
+            # Whole-dict JSON hash check for paranoia.
+            import hashlib as _hash
+            h_p = _hash.sha256(
+                json.dumps(ric_p, sort_keys=True).encode("utf-8"),
+            ).hexdigest()[:16]
+            h_s = _hash.sha256(
+                json.dumps(ric_s, sort_keys=True).encode("utf-8"),
+            ).hexdigest()[:16]
+            print(f"\n  rolling_ic JSON hash (parallel) = {h_p}", flush=True)
+            print(f"  rolling_ic JSON hash (serial)   = {h_s}", flush=True)
+            if h_p == h_s:
+                print(f"  hash match: TRUE", flush=True)
+            else:
+                passed = False
+                print(f"  hash match: FALSE", flush=True)
+
+            print("\n" + ("=" * 78), flush=True)
+            if passed:
+                print("  VERIFY PASSED — parallel rolling_ic is byte-identical to serial",
+                      flush=True)
+                print("=" * 78, flush=True)
+            else:
+                print("  VERIFY FAILED — see diffs above", flush=True)
+                print("=" * 78, flush=True)
+                sys.exit(1)
+            return
+
         # ── BUNDLE: 12 outcomes ──────────────────────────────────────────
         bundle_total = None
         if not args.single_only:
-            _hr(f"BUNDLE COMPUTE — {len(outcomes)} outcomes")
+            _hr(f"BUNDLE COMPUTE — {len(outcomes)} outcomes "
+                f"(parallel_rolling_ic={not args.no_parallel})")
             t = time.perf_counter()
             bundle = _compute_analyze_bundle_sync(
                 rows, args.metric, args.ticker, args.mode,
                 args.cutoff_date if args.mode == "train_test" else None,
                 outcomes, n_bins=20, _measure=True,
+                _parallel_rolling_ic=not args.no_parallel,
             )
             bundle_total = time.perf_counter() - t
             print(f"\n[TOTAL] _compute_analyze_bundle_sync (12 outcomes) "
@@ -161,6 +249,7 @@ async def main(args: argparse.Namespace) -> None:
                 rows, args.metric, args.ticker, args.mode,
                 args.cutoff_date if args.mode == "train_test" else None,
                 [single_outcome], n_bins=20, _measure=True,
+                _parallel_rolling_ic=not args.no_parallel,
             )
             single_total = time.perf_counter() - t
             print(f"\n[TOTAL] _compute_analyze_bundle_sync (1 outcome) "
@@ -215,6 +304,15 @@ def _parse() -> argparse.Namespace:
                    help="Skip the 12-outcome bundle (still fetches once).")
     p.add_argument("--json-write", action="store_true",
                    help="Also time json.dumps on the bundle dict.")
+    p.add_argument("--verify", action="store_true",
+                   help=("Run bundle compute twice (parallel + serial) and "
+                         "diff rolling_ic per outcome. PASS = byte-identical. "
+                         "Exits non-zero on any mismatch. Skips wall-clock "
+                         "measurement — run normal measurement after PASS."))
+    p.add_argument("--no-parallel", action="store_true",
+                   help=("Disable parallel rolling_ic (force the serial "
+                         "fallback). Useful for A/B wall-clock comparisons; "
+                         "not the same path --verify takes."))
     return p.parse_args()
 
 
