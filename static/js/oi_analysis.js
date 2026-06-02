@@ -188,13 +188,22 @@ document.addEventListener('alpine:init', () => {
     // dispatches a network round trip.
     surveyMode:          'walk_forward',
     surveyCutoffDate:    '2024-01-01',
-    // Each slot stores a snapshot of the displayed IC-batch + IC-decomp
-    // state so a mode-pill swap restores exactly what the user saw.
+    // Per-(mode, outcome[, cutoff]) slot cache. Each leaf holds a snapshot
+    // of the displayed IC-batch + IC-decomp state so any of the three
+    // pickers (mode pill, outcome dropdown, cutoff input) can swap
+    // INSTANTLY between previously-loaded combos with no network call.
+    // Slot key:
+    //   non-TT:  surveyOutcome                                   (e.g., "ret_5d_fwd_oc")
+    //   TT:      `${surveyOutcome}|${surveyCutoffDate}`          (cutoff partitions data)
+    // Each value is { icBatchData, icBatchKey, icBatchStatus,
+    //                 icBatchError, icDecompData, icDecompKey,
+    //                 icDecompError }.
     surveyDataByMode: {
-      in_sample:    null,  // { icBatchData, icBatchKey, icBatchStatus, icBatchError, icDecompData, icDecompKey, icDecompError }
-      walk_forward: null,
-      train_test:   null,
+      in_sample:    {},
+      walk_forward: {},
+      train_test:   {},
     },
+    // Per-mode coarse status — written for telemetry; currently no readers.
     surveyStatusByMode: {
       in_sample:    'empty',  // 'empty' | 'loading' | 'ready' | 'no_data' | 'error'
       walk_forward: 'empty',
@@ -6454,14 +6463,24 @@ document.addEventListener('alpine:init', () => {
     // the template calls this with the new value. Persists to localStorage
     // and triggers a Signal Survey reload (the main chart is unaffected).
     setSurveyOutcome(newOutcome) {
-      // Bucket A step 5: dropdown change is in-memory only. User clicks
-      // ⟳ Refresh to fetch for the new (mode, outcome) combo. The displayed
-      // slot may still carry the prior outcome's data — that's visible via
-      // the breadcrumb + supplementary subtitle.
-      this.surveyOutcome = newOutcome;
+      // Bucket A: dropdown change is an INSTANT in-memory swap to that
+      // outcome's previously-cached slot — no network. If the (mode,
+      // outcome) combo has never been loaded, the swap yields a null
+      // display state and the placeholder shows ("not yet computed for
+      // this outcome — click ⟳ Refresh"). User clicks Refresh to
+      // compute + cache, and from then on subsequent visits to that
+      // outcome are instant.
+      if (newOutcome === this.surveyOutcome) return;
       try {
         localStorage.setItem('factor-analysis.signalSurvey.outcome', newOutcome);
       } catch (_) { /* private mode etc. — non-fatal */ }
+      // Same persist-then-swap pattern as the mode pill, applied to the
+      // outcome dimension.
+      this._stopIcBatchPolling();
+      this.icBatchSeq++;
+      this._surveyStoreSlot();
+      this.surveyOutcome = newOutcome;
+      this._surveySwapDisplayFromSlot();
     },
 
     // ── Bucket A local-mode helpers (Signal Survey) ─────────────────────
@@ -6488,28 +6507,41 @@ document.addEventListener('alpine:init', () => {
 
     setSurveyMode(m) {
       if (m === this.surveyMode && m !== 'train_test') return;
-      // Stop any in-flight polling for the previous mode and bump the seq
-      // so the response (if any) is discarded on arrival.
       this._stopIcBatchPolling();
       this.icBatchSeq++;
-      // Persist current displayed state into the OLD mode's slot so a
-      // future swap back restores exactly this view (incl. mid-poll
-      // status, error, decomp).
       this._surveyStoreSlot();
       this.surveyMode = m;
       this._surveySwapDisplayFromSlot();
     },
 
     setSurveyCutoffDate(d) {
+      // Cutoff is only a slot dimension in train_test mode (the only mode
+      // whose cache key partitions by cutoff). Outside TT, just remember
+      // the input value for next time the user enters TT.
+      if (d === this.surveyCutoffDate) return;
+      if (this.surveyMode !== 'train_test') {
+        this.surveyCutoffDate = d;
+        return;
+      }
+      this._stopIcBatchPolling();
+      this.icBatchSeq++;
+      this._surveyStoreSlot();
       this.surveyCutoffDate = d;
-      // No fetch. User clicks Refresh.
+      this._surveySwapDisplayFromSlot();
     },
 
-    // Pull surveyDataByMode[surveyMode] into the top-level icBatch* /
-    // icDecomp* fields the template binds to. If the slot is empty, reset
-    // top-level to nulls so the placeholder renders.
+    // Slot key — outcome only for IS/WF; outcome+cutoff for TT.
+    _surveySlotKey() {
+      return this.surveyMode === 'train_test'
+        ? `${this.surveyOutcome}|${this.surveyCutoffDate}`
+        : this.surveyOutcome;
+    },
+
+    // Pull surveyDataByMode[surveyMode][slotKey] into the top-level
+    // icBatch* / icDecomp* fields the template binds to. If the slot is
+    // empty, reset top-level to nulls so the placeholder renders.
     _surveySwapDisplayFromSlot() {
-      const slot = this.surveyDataByMode[this.surveyMode];
+      const slot = this.surveyDataByMode[this.surveyMode]?.[this._surveySlotKey()];
       if (slot) {
         this.icBatchData   = slot.icBatchData;
         this.icBatchKey    = slot.icBatchKey;
@@ -6536,11 +6568,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Snapshot the currently-displayed IC state into the slot for the
-    // active surveyMode. Called after every successful load / refresh /
-    // decomp response, and right before a mode swap.
+    // active (surveyMode, slotKey). Called after every successful load /
+    // refresh / decomp response, and right before a setter swap.
     _surveyStoreSlot() {
       const m = this.surveyMode;
-      this.surveyDataByMode[m] = {
+      const k = this._surveySlotKey();
+      if (!this.surveyDataByMode[m]) this.surveyDataByMode[m] = {};
+      this.surveyDataByMode[m][k] = {
         icBatchData:   this.icBatchData,
         icBatchKey:    this.icBatchKey,
         icBatchStatus: this.icBatchStatus,
