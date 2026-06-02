@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=154"></script>
+  <script src="/static/js/oi_analysis.js?v=155"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -985,31 +985,50 @@
                 background:rgba(255,255,255,.02)">
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
         <div @click="toggleTopBins()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap">
           <span style="font-size:13px;color:var(--muted)"
                 x-text="topBinsExpanded ? '▾' : '▸'"></span>
           <span style="font-size:13px;font-weight:700;color:var(--text)">All-Ticker Metric Bins</span>
-          <span style="font-size:11px;color:var(--dim)"
-                x-show="!topBinsData?.error"
-                x-text="topBinsData ? ('· ' + (topBinsData.metrics?.length || 0) + ' metrics · ' + (topBinsData.total_rows || 0).toLocaleString() + ' rows · ' + topBinsData.outcome) : '— click to load'"></span>
-          <span x-show="topBinsData?.mode === 'walk_forward'"
-                style="font-size:11px;color:#f39c12;font-weight:600"
-                x-text="topBinsData ? ('WALK-FWD · ' + (topBinsData.total_rows - (topBinsData.dropped_warmup_n||0)).toLocaleString() + ' rows used · ' + (topBinsData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (topBinsData.warmup||252) + 'd)') : ''"></span>
-          <span x-show="topBinsData?.cached_at && !topBinsData?.error"
-                style="font-size:11px;color:var(--dim)"
-                x-text="topBinsData?.cached_at ? ('· as of ' + new Date(topBinsData.cached_at).toLocaleString()) : ''"></span>
+          <!-- Bucket A breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode>" -->
+          <span style="font-size:11px;color:var(--dim);font-family:monospace"
+                x-text="topBinsBreadcrumb()"></span>
+          <!-- Bucket A mode tag (color-coded per spec) — replaces the
+               WALK-FWD-only yellow tag; shows for ALL three modes. -->
+          <span class="bucketA-mode-tag"
+                :class="{ wf: topBinsMode==='walk_forward', is: topBinsMode==='in_sample', tt: topBinsMode==='train_test' }"
+                x-text="topBinsMode==='walk_forward' ? 'WALK-FORWARD' : (topBinsMode==='in_sample' ? 'IN-SAMPLE' : 'TRAIN-TEST')"></span>
+          <!-- Per-mode supplementary tag: shows row counts + warmup info
+               that the breadcrumb format doesn't carry. -->
+          <span x-show="topBinsData?.mode === 'walk_forward' && !topBinsData?.error"
+                style="font-size:10px;color:#b3aae6;font-family:monospace"
+                x-text="topBinsData ? ('(' + (topBinsData.total_rows - (topBinsData.dropped_warmup_n||0)).toLocaleString() + ' rows used · ' + (topBinsData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup ' + (topBinsData.warmup||252) + 'd)') : ''"></span>
+          <span x-show="topBinsData?.mode === 'in_sample' && !topBinsData?.error"
+                style="font-size:10px;color:#8fd3ac;font-family:monospace"
+                x-text="topBinsData ? ('(' + (topBinsData.total_rows||0).toLocaleString() + ' rows)') : ''"></span>
+          <span x-show="topBinsData?.mode === 'train_test' && !topBinsData?.error"
+                style="font-size:10px;color:#e0b066;font-family:monospace"
+                x-text="topBinsData ? ('(cutoff ' + (topBinsData.cutoff_date || '?') + ' · ' + (topBinsData.total_rows||0).toLocaleString() + ' rows)') : ''"></span>
           <span x-show="topBinsData?.error" style="font-size:11px;color:#e84393"
                 x-text="'Error: ' + topBinsData?.error"></span>
           <span x-show="topBinsLoading" style="font-size:11px;color:#3498db">Loading…</span>
         </div>
-        <!-- Outcome selector + Refresh stay visible whether collapsed or
-             expanded — fetch is slow, so let the user pick the fwd-ret
-             window before triggering a load. -->
+        <!-- Mode selector + Cutoff input + Outcome selector + Refresh stay
+             visible whether collapsed or expanded. None of these auto-
+             trigger a fetch — user clicks ⟳ Refresh to dispatch one. -->
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
+          <div class="bucketA-mode-seg">
+            <span :class="{on: topBinsMode==='walk_forward'}" @click="setTopBinsMode('walk_forward')">WF</span>
+            <span :class="{on: topBinsMode==='in_sample'}"    @click="setTopBinsMode('in_sample')">IS</span>
+            <span :class="{on: topBinsMode==='train_test'}"   @click="setTopBinsMode('train_test')">TT</span>
+          </div>
+          <input type="date" x-show="topBinsMode==='train_test'"
+                 :value="topBinsCutoffDate"
+                 @change="setTopBinsCutoffDate($event.target.value)"
+                 class="bucketA-cutoff-input">
           <span style="font-size:11px;color:var(--dim)">Outcome:</span>
           <select id="select-topbins-outcome" autocomplete="off"
                   :value="topBinsOutcome"
-                  @change="topBinsOutcome = $event.target.value; topBinsData && loadTopBins(false)"
+                  @change="setTopBinsOutcome($event.target.value)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px">
             <template x-for="o in outcomes" :key="'tbo-'+o">
@@ -1021,7 +1040,7 @@
                   :style="{ opacity: topBinsLoading ? 0.5 : 1, cursor: topBinsLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
-                  title="Re-fetch and bypass server cache (after adding new metrics)">⟳ Refresh</button>
+                  title="Re-fetch for the active mode + outcome (bypasses server cache)">⟳ Refresh</button>
         </div>
       </div>
       <template x-if="topBinsExpanded">
@@ -1053,9 +1072,25 @@
               </template>
             </div>
           </template>
+          <!-- Bucket A placeholder: shown when the active local mode's
+               slot is empty (never loaded, no_data response, or error). -->
           <div x-show="topBinsExpanded && !topBinsLoading && !topBinsData?.metrics?.length"
-               style="font-size:12px;color:var(--dim);padding:6px 0">
-            No metrics scored. Try refreshing.
+               class="bucketA-placeholder">
+            <template x-if="!topBinsData">
+              <span>
+                All-Ticker Metric Bins not yet available for
+                <strong x-text="_topBinsModeLabel(topBinsMode)"></strong>
+                — click <strong>⟳ Refresh</strong> to load.
+              </span>
+            </template>
+            <template x-if="topBinsData && !topBinsData?.metrics?.length">
+              <span>
+                No metrics returned for
+                <strong x-text="_topBinsModeLabel(topBinsMode)"></strong>
+                <span x-show="topBinsData?.error" x-text="' (' + topBinsData.error + ')'"></span>.
+                Click <strong>⟳ Refresh</strong> to retry.
+              </span>
+            </template>
           </div>
         </div>
       </template>

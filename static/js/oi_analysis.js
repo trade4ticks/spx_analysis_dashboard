@@ -125,10 +125,28 @@ document.addEventListener('alpine:init', () => {
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
 
     // All-Ticker Metric Bins (top-of-page browser, independent of analysis)
+    // Bucket A step 4: local mode state per the per-pane independence rule.
+    // Pane reads topBinsMode / topBinsCutoffDate, NOT this.pageMode.
+    // topBinsDataByMode holds per-mode slots; switching topBinsMode swaps
+    // which slot is displayed (in-memory only). Outcome dropdown and
+    // cutoff input changes also do NOT auto-fetch — only ⟳ Refresh
+    // triggers a network round trip.
     topBinsExpanded: false,
     topBinsLoading:  false,
     topBinsData:     null,
     topBinsOutcome:  'ret_5d_fwd_oc',
+    topBinsMode:        'walk_forward',
+    topBinsCutoffDate:  '2024-01-01',
+    topBinsDataByMode: {
+      in_sample:    null,  // most-recent topBinsData dict for this mode; null = never loaded
+      walk_forward: null,
+      train_test:   null,
+    },
+    topBinsStatusByMode: {
+      in_sample:    'empty',  // 'empty' | 'loading' | 'ready' | 'no_data' | 'error'
+      walk_forward: 'empty',
+      train_test:   'empty',
+    },
 
     // P1: 12-outcome analyze bundle (drives P3+ mode views).
     // Two-stage render: /analyze fires first for ret_5d_fwd_oc immediately;
@@ -4781,9 +4799,69 @@ document.addEventListener('alpine:init', () => {
     },
 
     // All-Ticker Metric Bins (top-of-page collapsable browser)
+
+    // Bucket A — shared label / breadcrumb helpers (mirror Score Matrix's).
+    _topBinsModeLabel(m) {
+      if (m === 'in_sample')  return 'In-sample';
+      if (m === 'train_test') return 'Train-test';
+      return 'Walk-forward';
+    },
+
+    // Breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode label>" — identical
+    // format across all 6 panes. cached_at is an ISO-ish timestamp from
+    // the backend; we slice it to the first 19 chars to match Score
+    // Matrix's `str(scanned_at)[:19]` server-side format.
+    topBinsBreadcrumb() {
+      const slot = this.topBinsDataByMode[this.topBinsMode];
+      const label = this._topBinsModeLabel(this.topBinsMode);
+      if (!slot || slot.error || !(slot.metrics?.length)) {
+        return `no data yet · ${label}`;
+      }
+      const ts = slot.cached_at ? String(slot.cached_at).slice(0, 19) : 'unknown';
+      return `last: ${ts} · ${label}`;
+    },
+
+    // Mode-pill / cutoff / outcome setters — all in-memory only.
+    setTopBinsMode(m) {
+      if (m === this.topBinsMode && m !== 'train_test') return;
+      this.topBinsMode = m;
+      this._topBinsSwapDisplayFromSlot();
+    },
+    setTopBinsCutoffDate(d) {
+      this.topBinsCutoffDate = d;
+    },
+    setTopBinsOutcome(o) {
+      // No auto-fetch. The displayed slot may still carry the prior
+      // outcome's bins until the user clicks ⟳ Refresh; the dropdown
+      // shows the chosen outcome and topBinsData.outcome shows what's
+      // actually displayed, so any mismatch is visible in the UI.
+      this.topBinsOutcome = o;
+    },
+
+    _topBinsSwapDisplayFromSlot() {
+      const slot = this.topBinsDataByMode[this.topBinsMode];
+      this.topBinsData = slot || null;
+    },
+
+    _topBinsStoreSlot(d) {
+      const m = this.topBinsMode;
+      this.topBinsDataByMode[m] = d;
+      if (d && d.error) {
+        this.topBinsStatusByMode[m] = 'error';
+      } else if (d && d.metrics?.length) {
+        this.topBinsStatusByMode[m] = 'ready';
+      } else {
+        this.topBinsStatusByMode[m] = 'no_data';
+      }
+      this._topBinsSwapDisplayFromSlot();
+    },
+
     async toggleTopBins() {
       this.topBinsExpanded = !this.topBinsExpanded;
-      if (this.topBinsExpanded && !this.topBinsData) {
+      // First-expand auto-load: if nothing has ever been loaded for the
+      // active local mode, fetch once. Subsequent mode / outcome / cutoff
+      // changes do NOT auto-fetch — user clicks ⟳ Refresh.
+      if (this.topBinsExpanded && !this.topBinsDataByMode[this.topBinsMode]) {
         await this.loadTopBins();
       }
     },
@@ -4796,35 +4874,41 @@ document.addEventListener('alpine:init', () => {
         this.topBinsOutcome = this.outcomes.includes('ret_5d_fwd_oc')
           ? 'ret_5d_fwd_oc' : this.outcomes[0];
       }
+      const m = this.topBinsMode;
+      this.topBinsStatusByMode[m] = 'loading';
       try {
         const params = new URLSearchParams({
           outcome:      this.topBinsOutcome || 'ret_5d_fwd_oc',
           ticker:       'ALL',
           n_bins:       '20',
-          walk_forward: this.pageMode === 'walk_forward' ? '1' : '0',
+          walk_forward: m === 'walk_forward' ? '1' : '0',
           force:        forceRefresh ? '1' : '0',
         });
-        if (this.pageMode === 'train_test') params.set('cutoff_date', this.cutoffDate);
+        if (m === 'train_test') params.set('cutoff_date', this.topBinsCutoffDate);
         const r = await fetch('/api/factor-analysis/global-metric-bins?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
-          this.topBinsData = { metrics: [], total_rows: 0,
-                               error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}` };
+          this._topBinsStoreSlot({
+            metrics: [], total_rows: 0,
+            error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}`,
+          });
           return;
         }
         const d = await r.json();
         // Compute _zeroTopPct + _total per metric for the diverging-bar layout
         // (same pattern the corr explorer uses for its mini charts).
-        for (const m of (d.metrics || [])) {
-          const maxPos = Math.max(0, ...m.bins);
-          const maxNeg = Math.abs(Math.min(0, ...m.bins));
-          m._total      = Math.max(0.0001, (maxPos + maxNeg) * 1.06);
-          m._zeroTopPct = (maxPos / m._total * 100).toFixed(2);
+        for (const m_ of (d.metrics || [])) {
+          const maxPos = Math.max(0, ...m_.bins);
+          const maxNeg = Math.abs(Math.min(0, ...m_.bins));
+          m_._total      = Math.max(0.0001, (maxPos + maxNeg) * 1.06);
+          m_._zeroTopPct = (maxPos / m_._total * 100).toFixed(2);
         }
-        this.topBinsData = d;
+        this._topBinsStoreSlot(d);
       } catch (e) {
         console.error('loadTopBins', e);
-        this.topBinsData = { metrics: [], total_rows: 0, error: e.message };
+        this._topBinsStoreSlot({
+          metrics: [], total_rows: 0, error: e.message,
+        });
       } finally {
         this.topBinsLoading = false;
       }
