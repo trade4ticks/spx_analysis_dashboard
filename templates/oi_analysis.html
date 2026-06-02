@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=158"></script>
+  <script src="/static/js/oi_analysis.js?v=159"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1276,9 +1276,21 @@
           <span x-show="ticker === 'ALL'"
                 style="font-size:11px;color:var(--dim)"
                 x-text="(() => {
-                  const hz  = (outcome || '').match(/(\d+d)/)?.[0] || '';
-                  const mod = pageMode === 'train_test' ? 'train/test' : pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
-                  const ctx = (metric ? metric + ' · ' : '') + (hz ? hz + ' · ' : '') + mod;
+                  // Bucket A: this Signal Decomposition breadcrumb reads
+                  // ONLY Survey-local state, not Analyze-section state.
+                  // The decomp's metric is surveyDecompMetric (set by the
+                  // leaderboard click); the outcome comes from
+                  // icDecompData.outcome (actually-displayed) with a
+                  // fallback to surveyOutcome (pending). Mode comes from
+                  // surveyMode. Pre-step-5, this read `outcome` (Analyze)
+                  // and `pageMode` (Analyze), which caused the 3d/5d
+                  // mismatch: dropdown said 3d while the breadcrumb
+                  // labeled the data 5d.
+                  const dispOutcome = icDecompData?.outcome || surveyOutcome;
+                  const hz  = (dispOutcome || '').match(/(\d+d)/)?.[0] || '';
+                  const mod = surveyMode === 'train_test' ? 'train/test' : surveyMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
+                  const m   = (icDecompData?.metric || surveyDecompMetric || '');
+                  const ctx = (m ? m + ' · ' : '') + (hz ? hz + ' · ' : '') + mod;
                   if (!icDecompData) return ctx;
                   return ctx + ` · ${icDecompData.n_tickers} tickers · eff N ${(icDecompData.effective_n||0).toFixed(1)} · Gini ${(icDecompData.concentration_gini||0).toFixed(3)} · ${icDecompData.n_same_sign}↑ ${icDecompData.n_opposite_sign}↓`;
                 })()">
@@ -1307,7 +1319,7 @@
         <div class="survey-pane">
           <div class="survey-pane-hdr">
             <span class="survey-pane-title">Ticker Contributions</span>
-            <span class="survey-pane-hint">X = sign agreement · Y = avg return when flagged · size = n days · click dot → drill into ticker</span>
+            <span class="survey-pane-hint">X = sign agreement · Y = avg return when flagged · size = n days</span>
             <button class="fs-btn" @click="openFullscreen('chart-ic-decomp')"
                     x-show="!!(icDecompData && !icDecompError && ticker === 'ALL')" title="Fullscreen">⛶</button>
           </div>
@@ -1332,7 +1344,7 @@
               <span x-text="icDecompYMode === 'basket'
                 ? 'Y = avg return vs 128-ticker basket (per-ticker)'
                 : 'Y = avg return when flagged (raw)'"></span> ·
-              size = n flagged · blue = same sign as IC · pink = opposite · click a dot to drill into that ticker
+              size = n flagged · blue = same sign as IC · pink = opposite
             </div>
             <div style="height:390px;position:relative">
               <canvas id="chart-ic-decomp"></canvas>

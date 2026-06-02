@@ -6732,8 +6732,16 @@ document.addEventListener('alpine:init', () => {
     icBatchSubtitle() {
       // Supplementary subtitle alongside the standardized breadcrumb +
       // mode tag in the header. Shows horizon + status / metric counts.
-      // Bucket A step 5: reads surveyMode, NOT this.pageMode.
-      const _hz  = (this.surveyOutcome || '').match(/(\d+d)/)?.[0] || '';
+      //
+      // Bucket A: horizon comes from icBatchData.outcome — the actually-
+      // displayed data's outcome — NOT this.surveyOutcome (the pending
+      // dropdown value). Otherwise changing the outcome dropdown shifts
+      // the breadcrumb's horizon before the user clicks Refresh,
+      // misrepresenting what's on screen. Falls back to surveyOutcome
+      // only when no data is displayed (so the pre-load placeholder
+      // shows the pending selection).
+      const displayedOutcome = this.icBatchData?.outcome || this.surveyOutcome;
+      const _hz  = (displayedOutcome || '').match(/(\d+d)/)?.[0] || '';
       const _mod = this.surveyMode === 'train_test' ? 'train/test'
                  : this.surveyMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
       const _ctx = _hz ? `${_hz} · ${_mod}` : _mod;
@@ -7257,20 +7265,17 @@ document.addEventListener('alpine:init', () => {
         },
       };
 
-      const self = this;
+      // Bucket A: ticker-click in the decomp bubble chart used to set
+      // this.ticker + force the ticker SELECT + fire loadAnalysis(), same
+      // anti-pattern as the leaderboard metric-click. Removed. Hovering
+      // a bubble still shows the tooltip; clicking is a no-op. The
+      // Signal Survey is for fast exploration; deep-diving a ticker is
+      // a deliberate separate action via the Analyze ticker selector.
       this._charts['ic-decomp'] = new Chart(el, {
         type: 'bubble',
         data: { datasets: [{ data: bubbleData, backgroundColor: bgColors, borderWidth: 0 }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          onClick(e, elements) {
-            if (!elements.length) return;
-            const tkr = bubbleData[elements[0].index]._t.ticker;
-            self.ticker = tkr;
-            const sel = document.querySelector('select[x-model="ticker"]');
-            if (sel) sel.value = tkr;
-            self.loadAnalysis();
-          },
           plugins: {
             legend: { display: false },
             tooltip: {
