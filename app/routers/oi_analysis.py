@@ -4621,6 +4621,111 @@ def _compute_analyze_bundle_sync(
         print(f"[SHARED] trade_meta_build={_tick() - _t_meta:.3f}s  "
               f"(trade_meta_rows={len(trade_meta)})")
 
+    # ── 3b. Vectorization pre-computation (run once, shared across all 12 outcomes) ──
+    # The per-outcome trade walk used to be a Python for-meta-in-trade_meta
+    # loop doing dict-gets, float-coercion, and exit-date arithmetic per
+    # trade per outcome (~1.6 s × 12 = ~20 s measured). Replace with:
+    #   - tm_* numpy arrays of the trade_meta fields  (one-time, ~0.3 s)
+    #   - Y matrix of outcome values, shape (N, len(outcomes))  (one-time, ~2 s)
+    #   - per-unique-horizon exit_date/exit_spot arrays — there are only six
+    #     unique horizons (1/3/5/7/10/20d) among the twelve outcomes, so OC
+    #     and CC variants share the same exit arrays  (one-time, ~0.5 s)
+    # Then per-outcome work is numpy slicing + bincount-style grouping.
+    # Output is byte-identical to the prior Python-loop implementation.
+    if _measure: _t_vec = _tick()
+    N = len(trade_meta)
+    tm_ticker     = [m["ticker"]     for m in trade_meta]   # list of strings
+    tm_date       = [m["trade_date"] for m in trade_meta]   # list of ISO strings
+    tm_metric_val = np.array([m["metric_val"] for m in trade_meta], dtype=np.float64)
+    tm_bin20      = np.array([m["bin_20"]     for m in trade_meta], dtype=np.int64)
+    tm_trade_id   = np.arange(N, dtype=np.int64)            # trade_id == position
+    # Per-trade entry index in their ticker's chronology
+    tm_entry_idx  = np.fromiter(
+        (by_tkr_idx.get(t, {}).get(d, -1) for t, d in zip(tm_ticker, tm_date)),
+        dtype=np.int64, count=N,
+    )
+
+    # Flatten the per-ticker chronologies into one big array so exit_date
+    # lookups become array indexing instead of dict-of-list-of-string lookups.
+    # Each ticker's dates occupy a contiguous slice [offset, offset+length).
+    ticker_to_offset: dict = {}
+    flat_dates_list:  list = []
+    flat_closes_list: list = []
+    _off = 0
+    for tkr in sorted(by_tkr_dates.keys()):
+        ticker_to_offset[tkr] = _off
+        dates = by_tkr_dates[tkr]
+        flat_dates_list.extend(dates)
+        flat_closes_list.extend(
+            close_by_tkr_date.get((tkr, d), np.nan) for d in dates
+        )
+        _off += len(dates)
+    flat_dates  = np.array(flat_dates_list,  dtype=object)
+    flat_closes = np.array(flat_closes_list, dtype=np.float64)
+    ticker_to_length: dict = {t: len(d) for t, d in by_tkr_dates.items()}
+    tm_ticker_offset = np.fromiter(
+        (ticker_to_offset[t] for t in tm_ticker), dtype=np.int64, count=N,
+    )
+    tm_ticker_length = np.fromiter(
+        (ticker_to_length[t] for t in tm_ticker), dtype=np.int64, count=N,
+    )
+    if _measure:
+        print(f"[SHARED] vectorize_setup={_tick() - _t_vec:.3f}s  "
+              f"(flat_chronology_entries={len(flat_dates_list)})")
+
+    # Outcome value matrix Y of shape (N, len(outcomes)). One pass over
+    # row_by_tkr_date populates all 12 outcomes' values at once — replaces
+    # the per-outcome `r = row_by_tkr_date.get(...); y = r.get(outcome)`
+    # dict-get duplicated across 12 outcomes.
+    if _measure: _t_Y = _tick()
+    Y = np.full((N, len(outcomes)), np.nan, dtype=np.float64)
+    for i, (t, d) in enumerate(zip(tm_ticker, tm_date)):
+        r = row_by_tkr_date.get((t, d))
+        if r is None:
+            continue
+        for j, o in enumerate(outcomes):
+            v = r.get(o)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            # math.isnan check is folded into the np.isnan filter below; we
+            # store fv even if NaN — the valid mask sees it correctly.
+            Y[i, j] = fv
+    if _measure:
+        print(f"[SHARED] outcome_matrix_build={_tick() - _t_Y:.3f}s  "
+              f"(matrix_shape=({N},{len(outcomes)}))")
+
+    # Per-unique-horizon exit_date and exit_spot arrays of length N. Built
+    # once and looked up by horizon below — OC and CC variants at the same
+    # horizon share the same arrays so this is at most 6 horizon computes
+    # instead of 12.
+    if _measure: _t_exit = _tick()
+    unique_horizons = sorted({_horizon_from_outcome(o) for o in outcomes})
+    exit_date_by_horizon: dict = {}
+    exit_spot_by_horizon: dict = {}
+    for h in unique_horizons:
+        exit_idx_h  = tm_entry_idx + max(h - 1, 0)
+        valid_exit  = (tm_entry_idx >= 0) & (exit_idx_h >= 0) & (exit_idx_h < tm_ticker_length)
+        # safe_pos avoids OOB at the array level; results are masked back to
+        # None / NaN via valid_exit before use.
+        safe_pos    = np.where(valid_exit, tm_ticker_offset + exit_idx_h, 0)
+        raw_dates   = flat_dates[safe_pos]
+        raw_closes  = flat_closes[safe_pos]
+        # exit_date: string where valid_exit, None otherwise.
+        exit_dates_h = np.where(valid_exit, raw_dates, None)
+        # exit_spot: round(close, 2) where valid_exit, NaN otherwise. NaN-to-
+        # None conversion happens per-outcome at output-list build time.
+        rounded_closes = np.round(raw_closes, 2)
+        exit_spots_h = np.where(valid_exit, rounded_closes, np.nan)
+        exit_date_by_horizon[h] = exit_dates_h
+        exit_spot_by_horizon[h] = exit_spots_h
+    if _measure:
+        print(f"[SHARED] exit_arrays_build={_tick() - _t_exit:.3f}s  "
+              f"(unique_horizons={unique_horizons})")
+
     # ── 4. Per-outcome: returns + per-bin stats + rolling IC ──────────────
     per_outcome_returns: dict = {}
     per_bin:             dict = {}
@@ -4634,60 +4739,28 @@ def _compute_analyze_bundle_sync(
     for _outcome_idx, outcome in enumerate(outcomes):
         horizon = _horizon_from_outcome(outcome)
 
-        # Parallel arrays for memory-efficient JSONB storage. Object-per-trade
-        # shape (the v2 design) repeated field names ("trade_id", "ret_pct",
-        # …) 12 times per trade — for ALL mode at ~150K trades × 12 outcomes
-        # that's ~300 MB of JSONB, exceeding the 256 MB per-object limit.
-        # Parallel arrays drop the field-name overhead and bring the bundle
-        # to ~80 MB total. JS consumers iterate by index across the four
-        # arrays per outcome (trade_ids[i], ret_pcts[i], exit_dates[i],
-        # exit_spots[i]) — equivalent semantics, cheaper storage.
-        out_trade_ids:  list = []
-        out_ret_pcts:   list = []
-        out_exit_dates: list = []
-        out_exit_spots: list = []
-        bin_buckets:    list = [[] for _ in range(n_bins)]
-        ic_rows:        list = []   # input for rolling_ic_* — needs trade_date + ticker keys
-
+        # Per-outcome trade walk — vectorized. Output shapes / values match
+        # the prior Python-loop implementation byte-for-byte:
+        #   per_outcome_returns[outcome] = {trade_ids, ret_pcts, exit_dates,
+        #                                   exit_spots}  (parallel arrays, valid
+        #                                   trades only, in trade_meta order)
+        #   bin_buckets[b]                = list of raw yf values for bin b+1
+        #   ic_rows                       = list of dicts feeding rolling_ic_*
         if _measure: _t_walk = _tick()
-        for meta in trade_meta:
-            tkr = meta["ticker"]
-            d   = meta["trade_date"]
-            r   = row_by_tkr_date.get((tkr, d))
-            if r is None:
-                continue
-            y = r.get(outcome)
-            if y is None:
-                continue
-            try:
-                yf = float(y)
-            except (TypeError, ValueError):
-                continue
-            if math.isnan(yf):
-                continue
+        col   = Y[:, _outcome_idx]
+        valid = ~np.isnan(col)
+        yf_raw = col[valid]                           # raw floats (for bin_stats + ic_rows)
 
-            # exit_date = trade_date + (horizon - 1) trading days for the
-            # same ticker; exit_spot = close (= spot_pc of the day after
-            # exit_date) for the same ticker.
-            exit_date = None
-            exit_spot = None
-            entry_idx = by_tkr_idx.get(tkr, {}).get(d)
-            if entry_idx is not None:
-                exit_idx  = entry_idx + max(horizon - 1, 0)
-                tkr_dates = by_tkr_dates.get(tkr, [])
-                if 0 <= exit_idx < len(tkr_dates):
-                    exit_date = tkr_dates[exit_idx]
-                    es = close_by_tkr_date.get((tkr, exit_date))
-                    if es is not None:
-                        exit_spot = round(es, 2)
-
-            out_trade_ids.append(meta["trade_id"])
-            out_ret_pcts.append(round(yf, 6))
-            out_exit_dates.append(exit_date)
-            out_exit_spots.append(exit_spot)
-            bin_buckets[meta["bin_20"] - 1].append(yf)
-            ic_rows.append({"trade_date": d, "ticker": tkr,
-                            "__m": meta["metric_val"], "__y": yf})
+        # per_outcome_returns parallel arrays
+        out_trade_ids  = tm_trade_id[valid].tolist()
+        out_ret_pcts   = np.round(yf_raw, 6).tolist()
+        exit_dates_h   = exit_date_by_horizon[horizon]
+        exit_spots_h   = exit_spot_by_horizon[horizon]
+        out_exit_dates = exit_dates_h[valid].tolist()
+        # NaN → None for JSON-safety. Use the NaN!=NaN idiom on the Python
+        # list (faster than per-element np.isnan calls here).
+        _spots = exit_spots_h[valid].tolist()
+        out_exit_spots = [None if v != v else v for v in _spots]
 
         per_outcome_returns[outcome] = {
             "trade_ids":  out_trade_ids,
@@ -4695,24 +4768,44 @@ def _compute_analyze_bundle_sync(
             "exit_dates": out_exit_dates,
             "exit_spots": out_exit_spots,
         }
+
+        # ic_rows — list of dicts feeding the rolling-IC primitives. Same
+        # field shape and order as the prior implementation. Built from
+        # numpy arrays via zip + comprehension. NB: __y uses yf_raw (the
+        # raw float), not the rounded ret_pcts, to match prior behavior.
+        # __m uses the trade_meta metric_val (already 6-decimal-rounded
+        # at trade_meta build time — same as the prior implementation).
+        valid_ticker = [t for t, ok in zip(tm_ticker, valid) if ok]
+        valid_date   = [d for d, ok in zip(tm_date,   valid) if ok]
+        valid_metric = tm_metric_val[valid].tolist()
+        valid_y      = yf_raw.tolist()
+        ic_rows: list = [
+            {"trade_date": d, "ticker": t, "__m": m, "__y": y}
+            for d, t, m, y in zip(valid_date, valid_ticker, valid_metric, valid_y)
+        ]
+
+        # bin_buckets equivalent: group yf_raw by tm_bin20[valid]
+        bin20_valid = tm_bin20[valid]
         if _measure:
             _dt_walk = _tick() - _t_walk
             _sum_walk += _dt_walk
             _t_binstats = _tick()
 
-        # Per-bin aggregates
+        # Per-bin aggregates — same numbers as before, computed by boolean-
+        # indexing yf_raw with bin20_valid == bin instead of materializing a
+        # list-of-lists. Same n, avg_ret, median, std, win_rate.
         bin_stats: list = []
         for b_idx in range(n_bins):
-            vals = bin_buckets[b_idx]
-            if not vals:
+            bin_mask = bin20_valid == (b_idx + 1)
+            if not bin_mask.any():
                 bin_stats.append({"bin": b_idx + 1, "n": 0,
                                   "avg_ret": None, "median": None,
                                   "std": None, "win_rate": None})
                 continue
-            arr = np.array(vals, dtype=np.float64)
+            arr = yf_raw[bin_mask]
             bin_stats.append({
                 "bin":      b_idx + 1,
-                "n":        int(len(arr)),
+                "n":        int(arr.size),
                 "avg_ret":  round(float(arr.mean()), 6),
                 "median":   round(float(np.median(arr)), 6),
                 "std":      round(float(arr.std()), 6),
