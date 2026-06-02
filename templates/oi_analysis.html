@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=155"></script>
+  <script src="/static/js/oi_analysis.js?v=156"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1102,15 +1102,35 @@
                 background:rgba(255,255,255,.02)">
       <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;user-select:none">
         <div @click="toggleSurvey()"
-             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1">
+             style="cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;flex-wrap:wrap">
           <span style="font-size:13px;color:var(--muted)" x-text="surveyExpanded ? '▾' : '▸'"></span>
           <span style="font-size:13px;font-weight:700;color:var(--text)">Signal Survey</span>
+          <!-- Bucket A breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode>" -->
+          <span style="font-size:11px;color:var(--dim);font-family:monospace"
+                x-text="surveyBreadcrumb()"></span>
+          <!-- Bucket A mode tag (color-coded per spec) -->
+          <span class="bucketA-mode-tag"
+                :class="{ wf: surveyMode==='walk_forward', is: surveyMode==='in_sample', tt: surveyMode==='train_test' }"
+                x-text="surveyMode==='walk_forward' ? 'WALK-FORWARD' : (surveyMode==='in_sample' ? 'IN-SAMPLE' : 'TRAIN-TEST')"></span>
+          <!-- Supplementary detail (metric counts, status etc.) — slimmed
+               from the pre-Bucket-A subtitle now that mode is in the tag. -->
           <span style="font-size:11px;color:var(--dim)"
                 x-text="icBatchSubtitle()"></span>
         </div>
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
+          <!-- Bucket A mode selector + cutoff. In-memory swap only —
+               never auto-fetches. User clicks ⟳ Refresh to load. -->
+          <div class="bucketA-mode-seg">
+            <span :class="{on: surveyMode==='walk_forward'}" @click="setSurveyMode('walk_forward')">WF</span>
+            <span :class="{on: surveyMode==='in_sample'}"    @click="setSurveyMode('in_sample')">IS</span>
+            <span :class="{on: surveyMode==='train_test'}"   @click="setSurveyMode('train_test')">TT</span>
+          </div>
+          <input type="date" x-show="surveyMode==='train_test'"
+                 :value="surveyCutoffDate"
+                 @change="setSurveyCutoffDate($event.target.value)"
+                 class="bucketA-cutoff-input">
           <label style="font-size:11px;color:var(--dim)">Outcome:</label>
-          <select x-model="surveyOutcome" @change="setSurveyOutcome($event.target.value)"
+          <select :value="surveyOutcome" @change="setSurveyOutcome($event.target.value)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px;max-width:200px">
             <template x-for="o in outcomes" :key="'sov-'+o">
@@ -1122,7 +1142,7 @@
                   :style="{ opacity: icBatchLoading ? 0.5 : 1, cursor: icBatchLoading ? 'wait' : 'pointer' }"
                   style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
                          color:#e84393;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
-                  title="Recompute Signal Survey for current Outcome + Mode">⟳ Refresh</button>
+                  title="Recompute Signal Survey for current Mode + Outcome">⟳ Refresh</button>
         </div>
       </div>
       <template x-if="surveyExpanded">
@@ -1138,6 +1158,15 @@
 
       <!-- Status panels (between header and pane grid; hidden once data is loaded) -->
       <div style="padding:0 12px">
+        <!-- Bucket A placeholder: shown when the active mode's slot is
+             empty AND no other status panel is taking precedence. -->
+        <div x-show="!icBatchData && !icBatchLoading && !icBatchStatus && !icBatchError"
+             class="bucketA-placeholder">
+          Signal Survey not yet available for
+          <strong x-text="_surveyModeLabel(surveyMode)"></strong>
+          — click <strong>⟳ Refresh</strong> to load.
+        </div>
+
         <div x-show="icBatchLoading && !icBatchStatus"
              style="font-size:13px;color:var(--dim);padding:10px 0">Checking cache…</div>
 

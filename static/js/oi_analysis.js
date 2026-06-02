@@ -174,6 +174,26 @@ document.addEventListener('alpine:init', () => {
     // Lazy-loaded on first expand (user-initiated, same as All-Ticker Metric
     // Bins). Also reloads when the section is open and mode changes. Fresh
     // compute takes ~2-3 min on the VPS; cached reads are sub-second.
+    // Bucket A step 5: Signal Survey owns its own mode + cutoff state.
+    // Pane reads surveyMode / surveyCutoffDate, NOT this.pageMode /
+    // this.cutoffDate. Per-mode in-memory cache (surveyDataByMode); the
+    // mode-pill swap is in-memory only. Outcome dropdown and cutoff
+    // input changes also do NOT auto-fetch — only the ⟳ Refresh button
+    // dispatches a network round trip.
+    surveyMode:          'walk_forward',
+    surveyCutoffDate:    '2024-01-01',
+    // Each slot stores a snapshot of the displayed IC-batch + IC-decomp
+    // state so a mode-pill swap restores exactly what the user saw.
+    surveyDataByMode: {
+      in_sample:    null,  // { icBatchData, icBatchKey, icBatchStatus, icBatchError, icDecompData, icDecompKey, icDecompError }
+      walk_forward: null,
+      train_test:   null,
+    },
+    surveyStatusByMode: {
+      in_sample:    'empty',  // 'empty' | 'loading' | 'ready' | 'no_data' | 'error'
+      walk_forward: 'empty',
+      train_test:   'empty',
+    },
     icBatchData:      null,
     icBatchLoading:   false,
     icBatchError:     null,
@@ -253,23 +273,18 @@ document.addEventListener('alpine:init', () => {
       // System library (anchor-agnostic reusable system templates)
       this.loadLibrarySystems();
       // Signal Survey — always-visible; load on init so charts appear without
-      // requiring an Analyze click. Single-ticker auto-triggers; ALL stays idle
-      // until explicit ⟳ Refresh (OOM guard).
-      // $watch: re-query ic_batch_cache whenever the page-level Outcome or Mode
-      // changes — instant for stored combos, 'not_ready' for uncomputed ones.
-      // No Analyze re-run needed; the survey has no controls of its own.
-      this.$watch('outcome', () => {
-        this._stopIcBatchPolling();
-        this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
-        this.icBatchRefreshAt = null; // clear: Refresh was for old combo, don't poison new combo's cache reads
-        this.loadIcBatch();
-      });
-      this.$watch('pageMode', () => {
-        this._stopIcBatchPolling();
-        this.icBatchData = null; this.icBatchKey = null; this.icBatchStatus = null;
-        this.icBatchRefreshAt = null; // clear: Refresh was for old combo, don't poison new combo's cache reads
-        this.loadIcBatch();
-      });
+      // requiring a click. Single-ticker auto-triggers a compute on cache miss;
+      // ALL stays idle until explicit ⟳ Refresh (OOM guard).
+      //
+      // Bucket A step 5: the watchers that USED to live here ($watch on
+      // this.outcome and this.pageMode, both clearing IC-batch state and
+      // re-firing loadIcBatch) are removed. Signal Survey now owns its
+      // own surveyMode + surveyCutoffDate; outcome lives in surveyOutcome
+      // (which is independent of this.outcome). Mode-pill / outcome-
+      // dropdown / cutoff-input changes are in-memory only — the user
+      // clicks ⟳ Refresh to dispatch any network work. This means
+      // changing the Analyze section's mode or promoting a lower-section
+      // outcome no longer affects the Signal Survey pane.
       // v150: Re-fire trade table when bundle becomes ready — initial _renderTradeTable()
       // fires before the bundle is populated (bundle is async, ~50ms single ticker).
       // This $watch fires exactly once per analyze cycle (bundle goes null→object),
@@ -379,21 +394,14 @@ document.addEventListener('alpine:init', () => {
             `  total: ${((_ct3-_ct0)/1000).toFixed(2)}s  [${this.ticker}|${this.pageMode}]`
           );
         }, 80);
-        // IC.5: always reload when key changes or data is absent (section always visible).
-        // Clear stale data first so panes show status rather than wrong-mode charts.
-        const _icKey = this._icBatchKey();
-        if (_icKey !== this.icBatchKey || !this.icBatchData) {
-          if (_icKey !== this.icBatchKey) this.icBatchData = null;
-          this.loadIcBatch();
-        }
-        // IC.7: reload decomp when metric/mode changes (ALL mode only; single-ticker has no decomp).
-        if (this.ticker === 'ALL') {
-          const _dcKey = this._icDecompKey();
-          if (_dcKey !== this.icDecompKey || !this.icDecompData) {
-            if (_dcKey !== this.icDecompKey) this.icDecompData = null;
-            this.loadIcDecomp();
-          }
-        }
+        // Bucket A step 5: Signal Survey cascade removed. Survey is a
+        // fully independent pane — it reads surveyMode / surveyOutcome
+        // (not pageMode / outcome) and only its own ⟳ Refresh button
+        // fetches new data. Clicking Analyze used to also re-load IC
+        // Batch + IC Decomp when the cache key changed (e.g., ticker
+        // changed). It no longer does. If the user changes the Analyze
+        // ticker, the Survey continues to show the previously-loaded
+        // ticker's data until the user clicks Refresh in the Survey pane.
         // M3: heatmap is now driven by secDrillMetric — no longer fires on analyze.
         // P1: fire-and-forget kick of the 12-outcome bundle so P3+ mode views
         // have it ready. Single-ticker computes inline (~2-5s); ALL goes
@@ -6440,12 +6448,111 @@ document.addEventListener('alpine:init', () => {
     // the template calls this with the new value. Persists to localStorage
     // and triggers a Signal Survey reload (the main chart is unaffected).
     setSurveyOutcome(newOutcome) {
+      // Bucket A step 5: dropdown change is in-memory only. User clicks
+      // ⟳ Refresh to fetch for the new (mode, outcome) combo. The displayed
+      // slot may still carry the prior outcome's data — that's visible via
+      // the breadcrumb + supplementary subtitle.
       this.surveyOutcome = newOutcome;
       try {
         localStorage.setItem('factor-analysis.signalSurvey.outcome', newOutcome);
       } catch (_) { /* private mode etc. — non-fatal */ }
-      this.loadIcBatch();
-      if (this.ticker === 'ALL') this.loadIcDecomp();
+    },
+
+    // ── Bucket A local-mode helpers (Signal Survey) ─────────────────────
+    _surveyModeLabel(m) {
+      if (m === 'in_sample')  return 'In-sample';
+      if (m === 'train_test') return 'Train-test';
+      return 'Walk-forward';
+    },
+
+    // Breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode label>" — identical
+    // shape across all 6 panes. The IC-batch response carries cached_at
+    // (ISO-ish string) which we slice to the first 19 chars to match
+    // the YYYY-MM-DD HH:MM:SS format used by Score Matrix etc.
+    surveyBreadcrumb() {
+      const label = this._surveyModeLabel(this.surveyMode);
+      if (!this.icBatchData?.metrics?.length) {
+        return `no data yet · ${label}`;
+      }
+      const ts = this.icBatchData.cached_at
+        ? String(this.icBatchData.cached_at).slice(0, 19)
+        : 'unknown';
+      return `last: ${ts} · ${label}`;
+    },
+
+    setSurveyMode(m) {
+      if (m === this.surveyMode && m !== 'train_test') return;
+      // Stop any in-flight polling for the previous mode and bump the seq
+      // so the response (if any) is discarded on arrival.
+      this._stopIcBatchPolling();
+      this.icBatchSeq++;
+      // Persist current displayed state into the OLD mode's slot so a
+      // future swap back restores exactly this view (incl. mid-poll
+      // status, error, decomp).
+      this._surveyStoreSlot();
+      this.surveyMode = m;
+      this._surveySwapDisplayFromSlot();
+    },
+
+    setSurveyCutoffDate(d) {
+      this.surveyCutoffDate = d;
+      // No fetch. User clicks Refresh.
+    },
+
+    // Pull surveyDataByMode[surveyMode] into the top-level icBatch* /
+    // icDecomp* fields the template binds to. If the slot is empty, reset
+    // top-level to nulls so the placeholder renders.
+    _surveySwapDisplayFromSlot() {
+      const slot = this.surveyDataByMode[this.surveyMode];
+      if (slot) {
+        this.icBatchData   = slot.icBatchData;
+        this.icBatchKey    = slot.icBatchKey;
+        this.icBatchStatus = slot.icBatchStatus;
+        this.icBatchError  = slot.icBatchError;
+        this.icDecompData  = slot.icDecompData;
+        this.icDecompKey   = slot.icDecompKey;
+        this.icDecompError = slot.icDecompError;
+      } else {
+        this.icBatchData   = null;
+        this.icBatchKey    = null;
+        this.icBatchStatus = null;
+        this.icBatchError  = null;
+        this.icDecompData  = null;
+        this.icDecompKey   = null;
+        this.icDecompError = null;
+      }
+      if (this.surveyExpanded && this.icBatchData?.metrics?.length) {
+        this.$nextTick(() => {
+          this._renderIcBatch();
+          if (this.icDecompData) { this._renderIcDecomp(); this._renderIcLorenz(); }
+        });
+      }
+    },
+
+    // Snapshot the currently-displayed IC state into the slot for the
+    // active surveyMode. Called after every successful load / refresh /
+    // decomp response, and right before a mode swap.
+    _surveyStoreSlot() {
+      const m = this.surveyMode;
+      this.surveyDataByMode[m] = {
+        icBatchData:   this.icBatchData,
+        icBatchKey:    this.icBatchKey,
+        icBatchStatus: this.icBatchStatus,
+        icBatchError:  this.icBatchError,
+        icDecompData:  this.icDecompData,
+        icDecompKey:   this.icDecompKey,
+        icDecompError: this.icDecompError,
+      };
+      const cnt = this.icBatchData?.metrics?.length || 0;
+      if (this.icBatchStatus === 'failed' || this.icBatchStatus === 'timeout') {
+        this.surveyStatusByMode[m] = 'error';
+      } else if (this.icBatchStatus === 'computing' || this.icBatchStatus === 'queued') {
+        this.surveyStatusByMode[m] = 'loading';
+      } else if (cnt > 0) {
+        this.surveyStatusByMode[m] = 'ready';
+      } else {
+        this.surveyStatusByMode[m] = 'no_data';
+      }
     },
 
     // Canonical cache-key for the current fetch context. Stored after a
@@ -6457,8 +6564,8 @@ document.addEventListener('alpine:init', () => {
       // the same JS key prevents unnecessary cache-busting on mode toggle.
       // train_test gets a distinct key because the backend uses a different cache
       // entry (different reference IC based on pre-cutoff windows only).
-      if (this.pageMode === 'train_test') {
-        return `${this.ticker}:${this.surveyOutcome}:train_test:${this.cutoffDate}`;
+      if (this.surveyMode === 'train_test') {
+        return `${this.ticker}:${this.surveyOutcome}:train_test:${this.surveyCutoffDate}`;
       }
       return `${this.ticker}:${this.surveyOutcome}:default:`;
     },
@@ -6475,7 +6582,7 @@ document.addEventListener('alpine:init', () => {
       try {
         let url = `/api/factor-analysis/ic-batch?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
-        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        if (this.surveyMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.surveyCutoffDate)}`;
         const r = await fetch(url);
         if (_seq !== this.icBatchSeq) return; // outcome/mode changed while awaiting — discard
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -6529,11 +6636,16 @@ document.addEventListener('alpine:init', () => {
           await this.$nextTick();
           this._renderIcBatch();
         }
+        // Persist whatever we just landed into the active mode's slot
+        // so a mode-pill swap can restore it later. Runs for every
+        // status branch (not_ready / computing / failed / data).
+        this._surveyStoreSlot();
       } catch (e) {
         if (_seq !== this.icBatchSeq) return; // stale error — discard
         this.icBatchStatus = 'failed';
         this.icBatchError  = e.message;
         this._stopIcBatchPolling();
+        this._surveyStoreSlot();
       } finally {
         if (_seq === this.icBatchSeq) this.icBatchLoading = false;
       }
@@ -6555,7 +6667,7 @@ document.addEventListener('alpine:init', () => {
       try {
         let url = `/api/factor-analysis/ic-batch/refresh?ticker=${encodeURIComponent(this.ticker)}`
           + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
-        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        if (this.surveyMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.surveyCutoffDate)}`;
         const r = await fetch(url, { method: 'POST' });
         if (_seq !== this.icBatchSeq) return; // outcome/mode changed mid-flight — discard
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -6574,11 +6686,13 @@ document.addEventListener('alpine:init', () => {
           this.icBatchStatus = 'computing';
           this._startIcBatchPolling();
         }
+        this._surveyStoreSlot();
       } catch (e) {
         if (_seq !== this.icBatchSeq) return; // stale error — discard
         this.icBatchStatus = 'failed';
         this.icBatchError  = e.message;
         this._stopIcBatchPolling();
+        this._surveyStoreSlot();
       } finally {
         if (_seq === this.icBatchSeq) this.icBatchLoading = false;
       }
@@ -6610,11 +6724,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     icBatchSubtitle() {
-      // Always show what the pane is displaying so the user can confirm it
-      // matches the page-level controls without needing to inspect state.
+      // Supplementary subtitle alongside the standardized breadcrumb +
+      // mode tag in the header. Shows horizon + status / metric counts.
+      // Bucket A step 5: reads surveyMode, NOT this.pageMode.
       const _hz  = (this.surveyOutcome || '').match(/(\d+d)/)?.[0] || '';
-      const _mod = this.pageMode === 'train_test' ? 'train/test'
-                 : this.pageMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
+      const _mod = this.surveyMode === 'train_test' ? 'train/test'
+                 : this.surveyMode === 'walk_forward' ? 'walk-forward' : 'in-sample';
       const _ctx = _hz ? `${_hz} · ${_mod}` : _mod;
       if (this.icBatchLoading) return `${_ctx}`;
       if (this.icBatchStatus === 'not_ready') return `${_ctx} — not computed · click ⟳ Refresh to run`;
@@ -7032,8 +7147,9 @@ document.addEventListener('alpine:init', () => {
     // ── IC.7 Signal Decomposition ──────────────────────────────────────
 
     _icDecompKey() {
-      const cut = this.pageMode === 'train_test' ? this.cutoffDate : '';
-      return `${this.metric}:${this.surveyOutcome}:${this.pageMode}:${cut}`;
+      // Bucket A step 5: uses surveyMode + surveyCutoffDate.
+      const cut = this.surveyMode === 'train_test' ? this.surveyCutoffDate : '';
+      return `${this.metric}:${this.surveyOutcome}:${this.surveyMode}:${cut}`;
     },
 
 
@@ -7044,7 +7160,7 @@ document.addEventListener('alpine:init', () => {
       try {
         let url = `/api/factor-analysis/ic-decomp?metric=${encodeURIComponent(this.metric)}`
           + `&outcome=${encodeURIComponent(this.surveyOutcome)}`;
-        if (this.pageMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+        if (this.surveyMode === 'train_test') url += `&cutoff_date=${encodeURIComponent(this.surveyCutoffDate)}`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
@@ -7052,8 +7168,10 @@ document.addEventListener('alpine:init', () => {
         this.icDecompData = d;
         this.icDecompKey  = this._icDecompKey();
         this.$nextTick(() => { this._renderIcDecomp(); this._renderIcLorenz(); });
+        this._surveyStoreSlot();
       } catch (e) {
         this.icDecompError = e.message;
+        this._surveyStoreSlot();
       } finally {
         this.icDecompLoading = false;
       }
