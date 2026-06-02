@@ -6485,6 +6485,11 @@ document.addEventListener('alpine:init', () => {
       this._surveyStoreSlot();
       this.surveyOutcome = newOutcome;
       this._surveySwapDisplayFromSlot();
+      // If the swap landed on an empty client slot, try a server-cache
+      // lookup. Pure read — no compute kickoff — so a server-cache miss
+      // yields the "not_ready · click Refresh" placeholder rather than
+      // an implicit ~1–2 min single-ticker auto-compute.
+      if (!this.icBatchData) this.loadIcBatch({ allowAutoCompute: false });
     },
 
     // ── Bucket A local-mode helpers (Signal Survey) ─────────────────────
@@ -6528,6 +6533,8 @@ document.addEventListener('alpine:init', () => {
       this._surveyStoreSlot();
       this.surveyMode = m;
       this._surveySwapDisplayFromSlot();
+      // Empty new slot → server cache lookup (no compute kickoff).
+      if (!this.icBatchData) this.loadIcBatch({ allowAutoCompute: false });
     },
 
     setSurveyCutoffDate(d) {
@@ -6544,6 +6551,8 @@ document.addEventListener('alpine:init', () => {
       this._surveyStoreSlot();
       this.surveyCutoffDate = d;
       this._surveySwapDisplayFromSlot();
+      // Empty new slot → server cache lookup (no compute kickoff).
+      if (!this.icBatchData) this.loadIcBatch({ allowAutoCompute: false });
     },
 
     // Map a mode to its slot bucket. IS and WF both bucket to "default"
@@ -6638,7 +6647,16 @@ document.addEventListener('alpine:init', () => {
       return `${this.ticker}:${this.surveyOutcome}:default:`;
     },
 
-    async loadIcBatch() {
+    // Pure cache read against ic_batch_cache via GET /ic-batch.
+    // `allowAutoCompute` (default true) controls whether a single-ticker
+    // cache miss auto-fires refreshIcBatch (the ~1–2 min compute). When
+    // called from a setter on an empty client slot, we pass
+    // allowAutoCompute=false so the server is just queried for an
+    // already-cached row; if there isn't one, the user sees the
+    // "not_ready · click Refresh" placeholder rather than triggering an
+    // implicit compute.
+    async loadIcBatch(opts = {}) {
+      const { allowAutoCompute = true } = opts;
       if (!this.ticker || !this.surveyOutcome) return;
       // Sequence guard: stamp this call. Any response that arrives after the
       // outcome/mode has changed will see a mismatched seq and bail without
@@ -6663,7 +6681,7 @@ document.addEventListener('alpine:init', () => {
           // ALL-mode requires an explicit ⟳ Refresh click (2-3 min job).
           this.icBatchStatus = 'not_ready';
           this.icBatchData   = null;
-          if (this.ticker !== 'ALL') {
+          if (this.ticker !== 'ALL' && allowAutoCompute) {
             // refreshIcBatch() owns the polling-state transition from here —
             // don't call _stopIcBatchPolling() first so a queued cycle keeps
             // its timer running across successive not_ready → busy → not_ready
