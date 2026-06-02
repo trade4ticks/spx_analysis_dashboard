@@ -4815,46 +4815,45 @@ document.addEventListener('alpine:init', () => {
     // the page: All-Ticker Metric Bins, /analyze, corr explorer (mini +
     // result), System Portfolio aggregate, Score Matrix, and the heatmap
     // (grid + side bars). Called by the segmented mode toggle AND by the
-    // cutoff-date input's @change — in train_test mode the cutoffDate may
-    // have shifted even though the mode label didn't, so the early
-    // return only applies when the new mode is in_sample/walk_forward.
-    async setPageMode(m) {
+    // Bucket A step 2: the Analyze-section mode pill (and the cutoff-date
+    // input that calls setPageMode('train_test') on @change) are now
+    // INERT — they only update this.pageMode (and the bound this.cutoffDate
+    // via x-model) and do nothing else.
+    //
+    // The Analyze button is the only thing that fires loadAnalysis() now,
+    // so users can change mode + cutoff + ticker + metric + outcome and
+    // then dispatch one fetch. This matches the design rule: the Analyze
+    // section's mode has NO connection to any of the 6 top-level panes.
+    //
+    // What used to live here that is now gone:
+    //   - this.topBinsData / loadTopBins cascade  → All-Ticker Metric Bins
+    //                                                gets local mode in step 4
+    //   - corrMiniData / corrResult / corrLoadMiniData / runCorrelation
+    //                                              → loadAnalysis() now
+    //                                                handles these via its
+    //                                                own cascade, fired by
+    //                                                the Analyze button
+    //   - loadAnalysis() itself                    → moved to the Analyze
+    //                                                button click
+    //   - loadPortfolioAggregate()                 → fires inside
+    //                                                loadAnalysis()'s
+    //                                                cascade when needed
+    //   - smInit() (Score Matrix re-init)          → Score Matrix gets
+    //                                                local mode in step 3
+    //
+    // Signal Survey still listens to pageMode via the $watch at the top
+    // of init() until step 5 decouples it. The watcher keeps firing
+    // loadIcBatch on mode change in this intermediate state.
+    //
+    // The early-return guard stays: in train_test mode the cutoffDate
+    // may have shifted even though the mode label didn't (the
+    // cutoff-date input @change fires setPageMode('train_test')), so
+    // we allow re-entry when mode is train_test even if the label is
+    // unchanged — currently a no-op, but kept so a future caller can
+    // hook a reaction without re-introducing the gate.
+    setPageMode(m) {
       if (m === this.pageMode && m !== 'train_test') return;
       this.pageMode = m;
-      // Top bins: always clear so the next open (or current expanded view)
-      // re-fetches in the new mode.
-      this.topBinsData = null;
-      if (this.topBinsExpanded) {
-        this.loadTopBins();  // fire-and-forget; don't block primary reloads
-      }
-      this.corrMiniData = null;
-      const hadCorrResult = !!(this.corrResult && !this.corrResult.error);
-      this.corrResult = null;
-      if (this.data && !this.error) {
-        await this.loadAnalysis();
-      }
-      if (this.corrPanelOpen && this.secCacheKey) {
-        await this.corrLoadMiniData();
-        if (hadCorrResult && this.corrSelectedCount() >= 2) {
-          await this.runCorrelation();
-        }
-      }
-      if (this.portfolioId && this.portAggregate) {
-        this.loadPortfolioAggregate();  // fire-and-forget
-      }
-      if (this.smMeta.count > 0) {
-        this.smInit();  // reload score matrix in new mode
-      }
-      // W5: heatmap re-fetch on mode switch is handled by secDrillMetric() (M3).
-      // heatmapData is
-      // null at this point because loadAnalysis() clears it, so this block was
-      // always a no-op after W4 anyway — removing it makes the intent explicit.
-      //
-      // W7: loadIcBatch() / loadIcDecomp() are already called inside loadAnalysis()
-      // (key-guarded: fires only when key changes or data absent). The explicit
-      // calls here were a second unconditional fire on every mode switch — removed.
-      // train_test ↔ any: key changes → loadAnalysis() fires the reload. ✓
-      // in_sample ↔ walk_forward: key unchanged (W6) → no reload needed.  ✓
     },
 
     async corrLoadMiniData() {
