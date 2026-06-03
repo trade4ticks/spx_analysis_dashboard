@@ -4081,7 +4081,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 6  # bumped from 5: bundle split into slim/trade_meta/outcome tables for lazy frontend loading. v5 stored everything in one analyze_cache row (144 MB on cache hit); v6 splits into ~1.3 MB slim + ~41 MB trade_meta + 12 × ~7.4 MB outcome rows so the frontend pays only for what it needs. v5 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 7  # bumped from 6: server-side precompute of synthetic overnight_gap outcome. v6 left gap synthesis to the client which required fetching trade_meta (41 MB) + ret_1d_fwd_cc (7.4 MB) + ret_1d_fwd_oc (7.4 MB) = ~56 MB and ~12s of client-side parse + synthesis on Gap-mode entry. v7 precomputes the gap as a 13th synthetic outcome in analyze_cache_outcome (~8 MB) and adds per_bin[overnight_gap] to the slim payload (~1.8 KB) so the Quantile bar chart renders instantly. Gap-mode entry drops from ~17s to ~6-11s (mostly the equity-build + 9-chart-render floor that's shared with other modes). v6 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5152,6 +5152,78 @@ def _compute_analyze_bundle_sync(
               f"effective_speedup={_speedup:.2f}x  "
               f"(parallel={use_parallel})")
 
+    # ── 4b. Synthetic overnight_gap outcome (server-side precompute, v7) ──
+    # Gap = ret_1d_fwd_cc − ret_1d_fwd_oc per trade_id where BOTH legs
+    # exist. Bin assignment + ticker + trade_date are carried inline so
+    # the frontend doesn't need trade_meta to render any Gap-mode view:
+    # trade_calendar (date+ret+ticker+decile20), yearly / DoW / activity
+    # aggregates, and equity curves all derive from the inline arrays.
+    # The flat trade table for Gap mode still uses the existing
+    # trade_meta + 1d_cc + 1d_oc lookup path (separate optional fetch
+    # when the user actually opens it).
+    #
+    # Shape (parallel arrays, index-aligned — no trade_id lookup needed):
+    #   ret_pcts    — gap value (cc − oc)
+    #   trade_dates — signal date T
+    #   tickers     — ticker per trade
+    #   bin_20s     — bin assignment (1..20)
+    # Plus per_bin["overnight_gap"] = 20-row aggregate (same shape as
+    # real outcomes), which lives in the slim payload so the Gap-mode
+    # quantile bar chart renders instantly without any deferred fetch.
+    if "ret_1d_fwd_cc" in per_outcome_returns and "ret_1d_fwd_oc" in per_outcome_returns:
+        _cc_data = per_outcome_returns["ret_1d_fwd_cc"]
+        _oc_data = per_outcome_returns["ret_1d_fwd_oc"]
+        _oc_by_tid = dict(zip(_oc_data["trade_ids"], _oc_data["ret_pcts"]))
+        _gap_ret_pcts:    list = []
+        _gap_trade_dates: list = []
+        _gap_tickers:     list = []
+        _gap_bin_20s:     list = []
+        for _i, _tid in enumerate(_cc_data["trade_ids"]):
+            if _tid not in _oc_by_tid:
+                continue
+            if _tid >= len(trade_meta):
+                continue
+            _m = trade_meta[_tid]
+            _gap_ret_pcts.append(round(_cc_data["ret_pcts"][_i] - _oc_by_tid[_tid], 6))
+            _gap_trade_dates.append(_m["trade_date"])
+            _gap_tickers.append(_m["ticker"])
+            _gap_bin_20s.append(_m["bin_20"])
+        per_outcome_returns["overnight_gap"] = {
+            "ret_pcts":    _gap_ret_pcts,
+            "trade_dates": _gap_trade_dates,
+            "tickers":     _gap_tickers,
+            "bin_20s":     _gap_bin_20s,
+        }
+        # Per-bin aggregates for gap. Same numpy bin_stats shape as real
+        # outcomes (above). Empty per_bin list when no overlap is rare
+        # but possible (e.g., 1d_cc and 1d_oc both empty for a metric).
+        _bin_stats_gap: list = []
+        if _gap_ret_pcts:
+            _gap_rets_arr = np.array(_gap_ret_pcts, dtype=np.float64)
+            _gap_bins_arr = np.array(_gap_bin_20s,  dtype=np.int64)
+            for _b_idx in range(n_bins):
+                _bmask = _gap_bins_arr == (_b_idx + 1)
+                if not _bmask.any():
+                    _bin_stats_gap.append({"bin": _b_idx + 1, "n": 0,
+                                           "avg_ret": None, "median": None,
+                                           "std": None, "win_rate": None})
+                    continue
+                _arr = _gap_rets_arr[_bmask]
+                _bin_stats_gap.append({
+                    "bin":      _b_idx + 1,
+                    "n":        int(_arr.size),
+                    "avg_ret":  round(float(_arr.mean()),  6),
+                    "median":   round(float(np.median(_arr)), 6),
+                    "std":      round(float(_arr.std()),   6),
+                    "win_rate": round(float((_arr > 0).mean()), 4),
+                })
+        else:
+            for _b_idx in range(n_bins):
+                _bin_stats_gap.append({"bin": _b_idx + 1, "n": 0,
+                                       "avg_ret": None, "median": None,
+                                       "std": None, "win_rate": None})
+        per_bin["overnight_gap"] = _bin_stats_gap
+
     # ── 5. Bundle ─────────────────────────────────────────────────────────
     return {
         "schema_version":      _ANALYZE_BUNDLE_SCHEMA_VERSION,
@@ -5219,8 +5291,11 @@ async def _compute_analyze_bundle_bg(
                 json.dumps, trade_meta_obj, allow_nan=False,
             )
             outcome_jsons: dict[str, str] = {}
-            for outcome_name in outcomes:
-                outcome_data = per_outcome_returns_obj.get(outcome_name, {})
+            # v7: iterate the actual per_outcome_returns dict (12 real
+            # outcomes + the synthetic overnight_gap row when both 1d
+            # legs were computed). Each key becomes one row in
+            # analyze_cache_outcome — frontend fetches by outcome name.
+            for outcome_name, outcome_data in per_outcome_returns_obj.items():
                 outcome_jsons[outcome_name] = await asyncio.to_thread(
                     json.dumps, outcome_data, allow_nan=False,
                 )

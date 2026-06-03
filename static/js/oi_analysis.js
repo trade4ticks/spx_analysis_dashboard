@@ -995,54 +995,25 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // Overnight Gap mode: per-bin mean of (ret_1d_fwd_cc - ret_1d_fwd_oc) ≈
-    // the entry-day overnight gap. Computed at render time from the bundle's
-    // per_outcome_returns parallel arrays (zip-by-trade_id), so no extra
-    // cache entry is needed.
-    // Per-bin (20-bin) stats for the entry-day overnight gap:
-    //   gap = ret_1d_fwd_cc − ret_1d_fwd_oc
-    // Computed at render time from the bundle's per_outcome_returns
-    // parallel arrays. Returns 20-bin stats; the renderer aggregates to
-    // current display granularity via _aggregateBin20ToN. No separate
-    // cache entry needed.
+    // Overnight Gap per-bin stats (20-bin) for the Quantile bar chart.
+    // v7: read straight from the precomputed per_bin["overnight_gap"]
+    // already in the slim payload — no fetch, no synthesis, no
+    // trade_meta needed. The renderer aggregates to current display
+    // granularity via _aggregateBin20ToN. v6 computed gap at render
+    // time by zipping ret_1d_fwd_cc + ret_1d_fwd_oc + trade_meta (~56
+    // MB transfer + ~1s client synthesis); v7 serves the same 20-row
+    // result from the slim payload in microseconds.
     _overnightGapPerBin20() {
-      const cc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_cc;
-      const oc = this.analyzeBundle?.per_outcome_returns?.ret_1d_fwd_oc;
-      const meta = this.analyzeBundle?.trade_meta;
-      if (!cc || !oc || !meta) return null;
-      // Build trade_id → oc.ret_pct lookup, then walk cc and emit gaps.
-      const ocByTid = new Map();
-      for (let i = 0; i < oc.trade_ids.length; i++) {
-        ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
-      }
-      // trade_meta is an array of objects, index-aligned with trade_id
-      // (see _compute_analyze_bundle_sync).
-      const buckets = Array.from({length: 20}, () => []);
-      for (let i = 0; i < cc.trade_ids.length; i++) {
-        const tid = cc.trade_ids[i];
-        const ocRet = ocByTid.get(tid);
-        if (ocRet == null) continue;
-        const gap = cc.ret_pcts[i] - ocRet;
-        const bin20 = meta[tid]?.bin_20;
-        if (bin20 == null || bin20 < 1 || bin20 > 20) continue;
-        buckets[bin20 - 1].push(gap);
-      }
-      return buckets.map((arr, idx) => {
-        if (!arr.length) return null;
-        const n = arr.length;
-        const mean = arr.reduce((a, b) => a + b, 0) / n;
-        const wins = arr.filter(v => v > 0).length;
-        const variance = arr.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-        const std = Math.sqrt(variance);
-        return {
-          bucket:   idx + 1,
-          n:        n,
-          avg_ret:  mean,
-          win_rate: wins / n,
-          std_dev:  std,
-          sharpe:   std > 0 ? mean / std : null,
-        };
-      });
+      const pb = this.analyzeBundle?.per_bin?.overnight_gap;
+      if (!Array.isArray(pb)) return null;
+      return pb.map(r => r ? {
+        bucket:   r.bin,
+        n:        r.n,
+        avg_ret:  r.avg_ret,
+        win_rate: r.win_rate,
+        std_dev:  r.std,
+        sharpe:   (r.std && r.std > 0) ? (r.avg_ret / r.std) : null,
+      } : null);
     },
 
     _renderDecileBarOvernightGap(el) {
@@ -1337,60 +1308,49 @@ document.addEventListener('alpine:init', () => {
     // JS without a worker). The Rolling Signal Strength chart will
     // render blank in Gap mode until a bundle schema bump adds it.
     _buildGapDataSlice() {
+      // v7: read straight from the precomputed overnight_gap outcome.
+      // Server computed gap = ret_1d_fwd_cc − ret_1d_fwd_oc per trade
+      // and shipped it as 4 inline parallel arrays (ret_pcts,
+      // trade_dates, tickers, bin_20s) plus per_bin["overnight_gap"]
+      // (already in slim). No client-side synthesis, no trade_meta
+      // lookup. Drops Gap-mode entry from ~17s to ~6-11s.
       const b = this.analyzeBundle;
       if (!b) return null;
-      const tm = b.trade_meta;
-      const cc = b.per_outcome_returns?.ret_1d_fwd_cc;
-      const oc = b.per_outcome_returns?.ret_1d_fwd_oc;
-      if (!Array.isArray(tm) || !cc || !oc) return null;
-
-      // OC lookup by trade_id, then walk CC computing the gap.
-      const ocByTid = new Map();
-      for (let i = 0; i < oc.trade_ids.length; i++) {
-        ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
-      }
+      const gap = b.per_outcome_returns?.overnight_gap;
+      const gapPerBin = b.per_bin?.overnight_gap;
+      if (!gap || !Array.isArray(gap.trade_dates) || !Array.isArray(gapPerBin)) return null;
 
       const tc = [];
       const returnsByBin10 = Array.from({length: 10}, () => []);
-      const bin20Buckets  = Array.from({length: 20}, () => []);
-      for (let i = 0; i < cc.trade_ids.length; i++) {
-        const tid = cc.trade_ids[i];
-        const ocRet = ocByTid.get(tid);
-        if (ocRet == null) continue;
-        const m = tm[tid];
-        if (!m) continue;
-        const gap = cc.ret_pcts[i] - ocRet;
-        const bin20 = m.bin_20;
-        tc.push({ date: m.trade_date, ret: gap, ticker: m.ticker, decile20: bin20 });
-        if (bin20 >= 1 && bin20 <= 20) bin20Buckets[bin20 - 1].push(gap);
+      for (let i = 0; i < gap.trade_dates.length; i++) {
+        const ret   = gap.ret_pcts[i];
+        const bin20 = gap.bin_20s[i];
+        tc.push({
+          date:     gap.trade_dates[i],
+          ret:      ret,
+          ticker:   gap.tickers[i],
+          decile20: bin20,
+        });
         const bin10 = Math.ceil(bin20 / 2);
-        if (bin10 >= 1 && bin10 <= 10) returnsByBin10[bin10 - 1].push(gap);
+        if (bin10 >= 1 && bin10 <= 10) returnsByBin10[bin10 - 1].push(ret);
       }
 
-      // Per-bin stats (20-bin) directly from per-trade gap arrays. mean,
-      // win_rate, std (population), sharpe = mean/std.
-      const ds20 = bin20Buckets.map((arr, idx) => {
-        if (!arr.length) return null;
-        const n = arr.length;
-        let sum = 0, wins = 0;
-        for (const v of arr) { sum += v; if (v > 0) wins++; }
-        const mean = sum / n;
-        let ssq = 0;
-        for (const v of arr) { const d = v - mean; ssq += d * d; }
-        const std = Math.sqrt(ssq / n);
-        return {
-          bucket:   idx + 1,
-          n,
-          avg_ret:  mean,
-          med_ret:  null,
-          win_rate: wins / n,
-          std_dev:  std,
-          sharpe:   std > 0 ? mean / std : 0,
-          min_val:  null,
-          max_val:  null,
-          returns:  [],
-        };
-      });
+      // Per-bin stats (20-bin) from the precomputed server aggregate.
+      // Shape mirrors what _buildOutcomeDataSlice produces for real
+      // outcomes so downstream renderers (decile bar, return dist,
+      // boxplot) consume it uniformly.
+      const ds20 = gapPerBin.map(r => (r && r.n) ? {
+        bucket:   r.bin,
+        n:        r.n,
+        avg_ret:  r.avg_ret,
+        med_ret:  r.median,
+        win_rate: r.win_rate,
+        std_dev:  r.std,
+        sharpe:   (r.std && r.std > 0) ? (r.avg_ret / r.std) : 0,
+        min_val:  null,
+        max_val:  null,
+        returns:  [],
+      } : null);
 
       // 10-bin aggregation (trade-count-weighted), with per-bin returns
       // arrays for the Return Distribution histogram.
@@ -1499,12 +1459,16 @@ document.addEventListener('alpine:init', () => {
       // pointing at the prior real outcome so leaving Gap mode restores
       // cleanly via the normal outcome branch below.
       if (this.decileMode === 'overnight_gap') {
-        // Gap synthesises cc - oc per trade with bin from trade_meta.
-        // Need trade_meta + per_outcome_returns[ret_1d_fwd_cc, ret_1d_fwd_oc].
+        // v7: gap is precomputed server-side as a synthetic 13th outcome.
+        // per_bin["overnight_gap"] is already in the slim payload (bar
+        // chart renders instantly); per_outcome_returns["overnight_gap"]
+        // is the lazy slice (~8 MB) carrying inline trade_dates / tickers
+        // / bin_20s so we don't need trade_meta or the 1d_cc / 1d_oc
+        // slices. Drops Gap-mode entry from ~17s (v6: 56 MB fetch + parse
+        // + client synthesis) to ~6-11s (mostly equity build + chart
+        // render floor, shared with other modes).
         await this._runDeferred([
-          this._ensureTradeMeta(),
-          this._ensureOutcome('ret_1d_fwd_cc'),
-          this._ensureOutcome('ret_1d_fwd_oc'),
+          this._ensureOutcome('overnight_gap'),
         ]);
         const slice = this._buildGapDataSlice();
         if (slice) {
