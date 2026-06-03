@@ -212,7 +212,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=167"></script>
+  <script src="/static/js/oi_analysis.js?v=168"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1644,6 +1644,23 @@
       <div style="padding-top:14px">
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
       </div>
+      <!-- Recompute button. Forces a from-scratch compute of the current
+           (ticker, metric, mode, cutoff) and overwrites the cached row.
+           Lives next to the Analyze button so it's findable — the
+           compute-once-serve-forever cache contract makes this the only
+           way to refresh stale cached entries. Confirm modal in
+           decileRefresh() guards the 60s+ op. -->
+      <div style="padding-top:14px">
+        <button @click="decileRefresh()"
+                :disabled="!analyzeBundle || analyzeBundleStatus === 'computing'"
+                :style="{ opacity: (analyzeBundle && analyzeBundleStatus !== 'computing') ? 1 : 0.5,
+                          cursor:  (analyzeBundle && analyzeBundleStatus !== 'computing') ? 'pointer' : (analyzeBundleStatus === 'computing' ? 'wait' : 'not-allowed') }"
+                style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                       color:#3498db;font-size:12px;padding:7px 14px;border-radius:4px;font-weight:700"
+                :title="analyzeBundle ? 'Recompute this metric from scratch and overwrite the cached bundle. ALL mode takes ~5 min in the background; single-ticker takes ~2-5 seconds. Confirms first.' : 'Refresh disabled — click Analyze to load a bundle first'">
+          ⟳ Recompute
+        </button>
+      </div>
       <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
       <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
            (via /analyze); the 12-outcome bundle computes in the background
@@ -1871,23 +1888,6 @@
                 x-text="decileBreadcrumb()"></span>
 
           <div style="flex:1"></div>
-
-          <!-- Cache-age timestamp. Empty when bundle not loaded yet. -->
-          <span style="font-size:10px;color:var(--dim)"
-                x-show="decileCacheTimestamp()"
-                x-text="decileCacheTimestamp()"></span>
-
-          <!-- Lower-section refresh. Confirm modal in decileRefresh().
-               Re-computes the bundle only — doesn't touch upper-section
-               views (Signal Decomposition + Score panel). -->
-          <button @click="decileRefresh()"
-                  :disabled="analyzeBundleStatus === 'computing'"
-                  :style="{ opacity: analyzeBundleStatus === 'computing' ? 0.5 : 1, cursor: analyzeBundleStatus === 'computing' ? 'wait' : 'pointer' }"
-                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:700"
-                  title="Recompute the 12-outcome bundle for this metric. Confirms first.">
-            ⟳ Refresh
-          </button>
         </div>
 
         <!-- Charts -->

@@ -1552,21 +1552,6 @@ document.addEventListener('alpine:init', () => {
       return `last: ${ts} · ${label}`;
     },
 
-    // Relative cache-age string ("just now" / "3 min ago" / "2 days ago").
-    // Reads analyzeBundle.computed_at when the bundle is the source. Falls
-    // back to nothing while only this.data is loaded (no bundle yet).
-    decileCacheTimestamp() {
-      const ts = this.analyzeBundle?.computed_at;
-      if (!ts) return '';
-      const d = new Date(ts);
-      if (isNaN(d.getTime())) return '';
-      const ageSec = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
-      if (ageSec < 60)        return 'cached just now';
-      if (ageSec < 60 * 60)   return `cached ${Math.round(ageSec / 60)} min ago`;
-      if (ageSec < 60 * 60 * 24) return `cached ${Math.round(ageSec / 3600)} h ago`;
-      return `cached ${Math.round(ageSec / 86400)} d ago`;
-    },
-
     // Confirm-modal-gated refresh — recomputes the bundle for the current
     // (ticker, metric, mode, cutoff). ALL mode → ~5 min background;
     // single-ticker → ~2-5s inline. Doesn't touch upper-section views.
