@@ -167,14 +167,29 @@ document.addEventListener('alpine:init', () => {
     _analyzeBundlePollTimer: null,
 
     // Threshold Drift (walk-forward bin boundaries over time)
+    // Bucket A step 7: Threshold Drift owns its own binning mode +
+    // cutoff. Pane reads tdBinMode (NOT this.pageMode), and tdScope is
+    // the visualization toggle (renamed from tdMode to free the word
+    // "mode" for the actual binning mode). IS / TT modes show a clean
+    // placeholder — the in-sample threshold-drift computation is a
+    // FUTURE task (it's a settled-threshold time series, NOT the WF
+    // logic with a flag flipped), so no endpoint exists yet for those
+    // selector positions. Refresh is gated to walk_forward.
     tdExpanded:     false,
     tdLoading:      false,
     tdData:         null,
     tdMetric:       '',
     tdOutcome:      'ret_5d_fwd_oc',
     tdBinsToShow:   [1, 20],
-    tdMode:         'ratio',   // 'ratio' (all tickers, dimensionless) | 'native_single'
+    tdScope:        'ratio',   // 'ratio' (all tickers, dimensionless) | 'native_single' — RENAMED from tdMode
     tdSingleTicker: '',
+    tdBinMode:       'walk_forward',     // local binning mode for this pane
+    tdCutoffDate:    '2024-01-01',
+    tdDataByMode: {
+      walk_forward: null,                // { tdData, loaded_at }
+      in_sample:    null,
+      train_test:   null,
+    },
 
     // IC.5 — Signal Stability (universe-wide IC leaderboard + scatter)
     // Lazy-loaded on first expand (user-initiated, same as All-Ticker Metric
@@ -4740,9 +4755,75 @@ document.addEventListener('alpine:init', () => {
     // legend.onClick in _renderTdChart). The per-bin pill toggle UI was
     // removed because in practice only the extreme bins are useful.
 
+    // Bucket A step 7: Threshold Drift helpers / setters / breadcrumb.
+
+    _tdModeLabel(m) {
+      if (m === 'in_sample')  return 'In-sample';
+      if (m === 'train_test') return 'Train-test';
+      return 'Walk-forward';
+    },
+
+    // Breadcrumb: "last: YYYY-MM-DD HH:MM:SS · <Mode label>".
+    // Threshold Drift's cache is client-side in-memory (no DB table), so
+    // the timestamp is when the data was last loaded into this session's
+    // slot — analogous to scanned_at on the corner-scan tables.
+    tdBreadcrumb() {
+      const label = this._tdModeLabel(this.tdBinMode);
+      const slot = this.tdDataByMode[this.tdBinMode];
+      if (!slot || !slot.tdData || slot.tdData.error) {
+        return `no data yet · ${label}`;
+      }
+      const ts = slot.loaded_at
+        ? new Date(slot.loaded_at).toISOString().slice(0, 19).replace('T', ' ')
+        : 'unknown';
+      return `last: ${ts} · ${label}`;
+    },
+
+    // Refresh is only meaningful for walk_forward today. IS / TT are
+    // future work — the IS computation is materially different from WF
+    // (settled-threshold position over time, not rolling threshold), so
+    // it's NOT a flag flip on the existing endpoint. Until that lands,
+    // the selector positions are placeholder-only.
+    tdCanRefresh() { return this.tdBinMode === 'walk_forward'; },
+
+    setTdBinMode(m) {
+      if (m === this.tdBinMode && m !== 'train_test') return;
+      this.tdBinMode = m;
+      this._tdSwapDisplayFromSlot();
+    },
+    setTdCutoffDate(d) { this.tdCutoffDate = d; },
+
+    // Metric / outcome setters — no auto-fetch. User clicks Refresh.
+    // The scope toggle (tdScope) re-renders without refetch, which is
+    // already correct.
+    setTdMetric(m)  { this.tdMetric = m; },
+    setTdOutcome(o) { this.tdOutcome = o; },
+
+    _tdSwapDisplayFromSlot() {
+      const slot = this.tdDataByMode[this.tdBinMode];
+      this.tdData = slot ? slot.tdData : null;
+      if (this.tdExpanded && this.tdData && !this.tdData.error) {
+        this.$nextTick(() => this._renderTdChart());
+      }
+    },
+
+    _tdStoreSlot(data) {
+      this.tdDataByMode[this.tdBinMode] = {
+        tdData:    data,
+        loaded_at: Date.now(),
+      };
+      this._tdSwapDisplayFromSlot();
+    },
+
     async toggleTd() {
       this.tdExpanded = !this.tdExpanded;
-      if (this.tdExpanded && this.tdMetric && !this.tdData) {
+      // First-expand auto-load only for walk_forward (the only mode with
+      // a working endpoint today). Loads if there's no slot data yet AND
+      // a metric is picked. IS / TT just show the placeholder.
+      if (this.tdExpanded
+          && this.tdMetric
+          && !this.tdDataByMode[this.tdBinMode]
+          && this.tdBinMode === 'walk_forward') {
         await this.loadTd();
       }
       // Re-render even if data was already loaded — the canvas may have
@@ -4751,6 +4832,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async loadTd(forceRefresh = false) {
+      // Gated to walk_forward — IS / TT have no endpoint yet, so we
+      // don't fire a request to a non-existent path.
+      if (!this.tdCanRefresh()) return;
       if (!this.tdMetric || !this.tdBinsToShow.length) return;
       this.tdLoading = true;
       try {
@@ -4765,16 +4849,19 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/factor-analysis/threshold-drift?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
-          this.tdData = { error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}`,
-                          series: {}, in_sample_ref: {} };
+          this._tdStoreSlot({
+            error: `HTTP ${r.status}${txt ? ': ' + txt.slice(0, 200) : ''}`,
+            series: {}, in_sample_ref: {},
+          });
           return;
         }
-        this.tdData = await r.json();
+        const d = await r.json();
+        this._tdStoreSlot(d);
         await this.$nextTick();
         this._renderTdChart();
       } catch (e) {
         console.error('loadTd', e);
-        this.tdData = { error: e.message, series: {}, in_sample_ref: {} };
+        this._tdStoreSlot({ error: e.message, series: {}, in_sample_ref: {} });
       } finally {
         this.tdLoading = false;
       }
@@ -4791,7 +4878,10 @@ document.addEventListener('alpine:init', () => {
       // reference line is at 1.0 ("matches today's threshold").
       // Mode 'native_single': raw threshold values for ONE picked ticker.
       // Y-axis label and reference values differ per mode.
-      const mode = this.tdMode || 'ratio';
+      // Bucket A step 7: tdMode renamed to tdScope (the visualization
+      // toggle: 'ratio' / 'native_single'). Local variable name `mode`
+      // kept to minimize chart-render churn.
+      const mode = this.tdScope || 'ratio';
       let series, refValues, yLabel;
       if (mode === 'native_single') {
         // Materialise this single ticker's per-bin time series in the same
