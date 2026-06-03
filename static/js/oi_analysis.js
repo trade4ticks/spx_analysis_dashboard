@@ -426,7 +426,16 @@ document.addEventListener('alpine:init', () => {
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
-      this._destroyCharts();
+      // Defensive wrap: a failure inside chart teardown must not crash
+      // loadAnalysis partway through. Pre-v8 _destroyCharts had no
+      // null-guard and threw TypeError on a null chart slot (Gap mode's
+      // rolling-IC slot is the canonical case), wedging the entire
+      // Analyze cycle before any network request fired. _destroyCharts
+      // is now null-guarded internally, but the outer try here is the
+      // last-resort safety net so any future teardown edge case can
+      // only log and continue, never wedge the page.
+      try { this._destroyCharts(); }
+      catch (e) { console.warn('[loadAnalysis] _destroyCharts crashed, continuing:', e); }
       // M2: scanner persists across primary changes — stale-but-visible, not wiped.
       // Context key = ticker|metric|outcome|dates (NO mode — scanner is WF-locked).
       // Mode-only toggle (WF↔TT same context): leave scanner completely untouched.
@@ -646,7 +655,22 @@ document.addEventListener('alpine:init', () => {
         // blanking the scanner lift bar on WF↔TT toggles. _applySecResults()
         // recreates it when scanner results actually change.
         if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-') || k === 'sec-bar') continue;
-        this._charts[k].destroy();
+        // Null-guard each slot before calling .destroy(). Some render
+        // functions explicitly null their slot when the chart has no
+        // data — _renderRollingCorr does this at 'rolling' when
+        // rolling_ic.series is empty, which is Gap mode's permanent
+        // state (the gap synth never emits a rolling-IC series). Before
+        // this guard, clicking Analyze while in Gap mode threw
+        // TypeError: Cannot read properties of null (reading 'destroy')
+        // and wedged the whole loadAnalysis call before any fetch fired.
+        // try/catch on the .destroy() call itself is belt-and-suspenders
+        // for any future Chart.js teardown edge case so one bad chart
+        // can't stop the loop and leave the rest of the page half-destroyed.
+        const ch = this._charts[k];
+        if (ch) {
+          try { ch.destroy(); }
+          catch (e) { console.warn(`[_destroyCharts] destroy() failed for '${k}':`, e); }
+        }
         delete this._charts[k];
       }
     },
