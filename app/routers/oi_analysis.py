@@ -4985,6 +4985,25 @@ def _compute_analyze_bundle_sync(
                     message=r".*fork.*multi-threaded.*",
                 )
                 mp_ctx = _mp.get_context("fork")
+
+                # DIAG (fork-after-asyncpg corruption suspected): log the
+                # start method actually selected + the asyncpg oi_pool state
+                # at fork time. systemd journal timestamps these prints so
+                # subsequent TimeoutError tracebacks can be correlated to
+                # pool teardown. Removed once parallelization is disabled.
+                try:
+                    from app import db as _db_diag
+                    _oip = _db_diag._oi_pool
+                    _diag_sz  = _oip.get_size()      if _oip else -1
+                    _diag_idl = _oip.get_idle_size() if _oip else -1
+                except Exception:
+                    _diag_sz, _diag_idl = -2, -2
+                print(f"[BUNDLE POOL PRE-FORK] "
+                      f"start_method={mp_ctx.get_start_method()} "
+                      f"oi_pool_size={_diag_sz} oi_pool_idle={_diag_idl} "
+                      f"ticker={ticker} metric={metric} mode={mode}",
+                      flush=True)
+
                 with _cf.ProcessPoolExecutor(
                     max_workers=n_workers,
                     mp_context=mp_ctx,
@@ -4993,6 +5012,22 @@ def _compute_analyze_bundle_sync(
                     # the same order as `outcomes` — dict insertion order
                     # below matches the serial path byte-for-byte.
                     pool_results = list(pool.map(_rolling_ic_worker, tasks))
+
+                # DIAG: pool teardown timestamp + post-fork asyncpg pool
+                # state. If subsequent asyncpg queries hit TimeoutError in
+                # the journal within ~30s of this line, fork-corruption of
+                # the inherited Postgres sockets is confirmed.
+                try:
+                    from app import db as _db_diag2
+                    _oip2 = _db_diag2._oi_pool
+                    _diag_sz2  = _oip2.get_size()      if _oip2 else -1
+                    _diag_idl2 = _oip2.get_idle_size() if _oip2 else -1
+                except Exception:
+                    _diag_sz2, _diag_idl2 = -2, -2
+                print(f"[BUNDLE POOL POST-FORK] "
+                      f"oi_pool_size={_diag_sz2} oi_pool_idle={_diag_idl2} "
+                      f"ticker={ticker} metric={metric} mode={mode}",
+                      flush=True)
             for outcome_idx, classified_list, elapsed in pool_results:
                 rolling_ic[outcomes[outcome_idx]] = classified_list
                 if _measure:
