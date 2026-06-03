@@ -1621,9 +1621,6 @@
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                       font-size:12px;padding:5px 6px;border-radius:4px">
       </div>
-      <div style="padding-top:14px">
-        <button class="go-btn" @click="loadAnalysis()">Analyze</button>
-      </div>
       <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
            (via the existing /analyze fast path); the 12-outcome bundle
            computes in the background and unlocks P3+ mode views when
@@ -1656,6 +1653,13 @@
                @change="setPageMode('train_test')"
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                       font-size:12px;padding:5px 6px;border-radius:4px">
+      </div>
+      <!-- Analyze button — far right so it visually owns every control to
+           its left (Ticker, Metric, From, To, Mode, Cutoff). Pre-Bucket-A
+           the button sat between the dates and the mode pills, which read
+           as if it only applied to its left-side controls. -->
+      <div style="padding-top:14px">
+        <button class="go-btn" @click="loadAnalysis()">Analyze</button>
       </div>
       <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
     </div>
