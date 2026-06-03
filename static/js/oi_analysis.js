@@ -404,6 +404,19 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !this.metric || !this.outcome) return;
       this.loading = true;
       this.error = null;
+      // v8 defensive reset: any in-flight deferred fetch / chart spinner
+      // / in-flight promise tracker from a prior render must not bleed
+      // across an Analyze cycle. Without this, the chart overlay could
+      // stay "Loading data for the selected outcome…" until the stale
+      // fetches resolve against the OLD cache_key (or never resolve, if
+      // the server hangs them). Stale _outcomesInFlight entries could
+      // also dedupe a freshly-needed fetch back to a promise that's
+      // about to write the old metric's data into the new bundle. By
+      // clearing all of this at the top of every Analyze, we ensure the
+      // page can never wedge on the cross-Analyze handoff.
+      this._deferredLoading   = false;
+      this._tradeMetaInFlight = null;
+      this._outcomesInFlight  = {};
       // Preserve decileBins and selectedBins20 across re-analyze.
       // decileBinsData is recomputed below once new data arrives.
       // P3: legacy lazy-fetch cache is gone. All non-Single modes read
@@ -2773,44 +2786,38 @@ document.addEventListener('alpine:init', () => {
     _buildFlatTradesFromBundle(outcome) {
       const b = this.analyzeBundle;
       if (!b) return null;
-      const tm = b.trade_meta;
-      if (!Array.isArray(tm)) return null;
 
+      // v8: Gap uses the precomputed overnight_gap slice — every flat-
+      // table field is carried inline (entry_dates_cc, entry_spots_cc,
+      // entry_spots_oc, metric_vals + the chart fields from v7). No
+      // trade_meta dependency, no 1d_cc / 1d_oc dependency. This is what
+      // eliminates the 56 MB fetch trigger that caused the 24s Gap-mode
+      // entry and the Analyze-in-Gap-mode wedge symptom.
       if (outcome === 'overnight_gap') {
-        const cc = b.per_outcome_returns?.ret_1d_fwd_cc;
-        const oc = b.per_outcome_returns?.ret_1d_fwd_oc;
-        if (!cc || !oc) return null;
-        const ocByTid = new Map();
-        for (let i = 0; i < oc.trade_ids.length; i++) {
-          ocByTid.set(oc.trade_ids[i], oc.ret_pcts[i]);
-        }
-        // Gap shares the CC anchor's entry semantics (entered at C_{T-1}
-        // and exited at O_T). entry_date / spot_entry use CC fields;
-        // exit_date / spot_exit use OC fields (open of T = the gap's
-        // exit price). Bundle schema v5 carries both anchor pairs.
+        const gap = b.per_outcome_returns?.overnight_gap;
+        if (!gap || !Array.isArray(gap.trade_dates)) return null;
         const out = [];
-        for (let i = 0; i < cc.trade_ids.length; i++) {
-          const tid = cc.trade_ids[i];
-          const ocRet = ocByTid.get(tid);
-          if (ocRet == null) continue;
-          const m = tm[tid];
-          if (!m) continue;
+        for (let i = 0; i < gap.trade_dates.length; i++) {
           out.push({
-            date:       m.entry_date_cc,
-            ticker:     m.ticker,
-            metric_val: m.metric_val,
-            spot_entry: m.entry_spot_cc,
-            spot_exit:  m.entry_spot_oc,
-            ret:        cc.ret_pcts[i] - ocRet,
-            exit_date:  m.entry_date_oc,
-            decile20:   m.bin_20,
+            date:       gap.entry_dates_cc[i],   // entry T−1
+            ticker:     gap.tickers[i],
+            metric_val: gap.metric_vals[i],
+            spot_entry: gap.entry_spots_cc[i],   // close T−1
+            spot_exit:  gap.entry_spots_oc[i],   // open T
+            ret:        gap.ret_pcts[i],         // gap = cc − oc
+            exit_date:  gap.trade_dates[i],      // T = OC-anchor exit
+            decile20:   gap.bin_20s[i],
           });
         }
         return out;
       }
 
-      // Real outcomes — entry fields keyed off the outcome's anchor
-      // (oc or cc). v5: trade_meta carries both pairs; pick by suffix.
+      // Real outcomes still use trade_meta + per_outcome_returns[outcome].
+      // The trade-meta dependency here is unchanged from v6/v7 because
+      // non-gap outcomes carry only ret/exit_date/exit_spot in their
+      // slice; entry fields and metric_val come from trade_meta.
+      const tm = b.trade_meta;
+      if (!Array.isArray(tm)) return null;
       const ret = b.per_outcome_returns?.[outcome];
       if (!ret) return null;
       const anchor = this._outcomeAnchor(outcome);
@@ -2882,10 +2889,14 @@ document.addEventListener('alpine:init', () => {
       //     short-circuit; falls through to bundle rendering below.
       if (this.ticker === 'ALL' && this.analyzeBundle) {
         if (effectiveOutcome === 'overnight_gap') {
+          // v8: precomputed gap slice carries every flat-table field
+          // inline — no trade_meta, no 1d_cc / 1d_oc fetches. The same
+          // _ensureOutcome('overnight_gap') call that _swapData fires
+          // covers this render too (dedup'd via in-flight map). On a
+          // warm v8 cache the data is usually already present from the
+          // Gap-mode-entry swap that just happened.
           await this._runDeferred([
-            this._ensureTradeMeta(),
-            this._ensureOutcome('ret_1d_fwd_cc'),
-            this._ensureOutcome('ret_1d_fwd_oc'),
+            this._ensureOutcome('overnight_gap'),
           ]);
         } else if (effectiveOutcome !== 'ret_5d_fwd_oc') {
           await this._runDeferred([
@@ -6827,6 +6838,11 @@ document.addEventListener('alpine:init', () => {
       if (this.analyzeBundle?.trade_meta) return;
       if (this.ticker !== 'ALL') return;
       if (this._tradeMetaInFlight) return this._tradeMetaInFlight;
+      // v8: snapshot the bundle key the fetch was started for so a
+      // stale promise resolving after the user clicked Analyze (and
+      // moved on to a different cache_key) can't write old-metric data
+      // into the new bundle. Silent no-op on key mismatch.
+      const startedForKey = this._analyzeBundleKey();
       this._tradeMetaInFlight = (async () => {
         try {
           const url = this._analyzeBundleBaseUrl()
@@ -6835,7 +6851,9 @@ document.addEventListener('alpine:init', () => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const d = await r.json();
           if (d.error) throw new Error(d.error);
-          if (this.analyzeBundle) this.analyzeBundle.trade_meta = d.trade_meta;
+          if (this.analyzeBundle && this._analyzeBundleKey() === startedForKey) {
+            this.analyzeBundle.trade_meta = d.trade_meta;
+          }
         } finally {
           this._tradeMetaInFlight = null;
         }
@@ -6853,6 +6871,8 @@ document.addEventListener('alpine:init', () => {
       if (this.analyzeBundle?.per_outcome_returns?.[outcome]) return;
       if (this.ticker !== 'ALL') return;
       if (this._outcomesInFlight[outcome]) return this._outcomesInFlight[outcome];
+      // v8: same cache-key snapshot guard as _ensureTradeMeta.
+      const startedForKey = this._analyzeBundleKey();
       this._outcomesInFlight[outcome] = (async () => {
         try {
           const url = this._analyzeBundleBaseUrl()
@@ -6862,7 +6882,7 @@ document.addEventListener('alpine:init', () => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const d = await r.json();
           if (d.error) throw new Error(d.error);
-          if (this.analyzeBundle) {
+          if (this.analyzeBundle && this._analyzeBundleKey() === startedForKey) {
             this.analyzeBundle.per_outcome_returns ??= {};
             this.analyzeBundle.per_outcome_returns[outcome] = d.data;
           }

@@ -4081,7 +4081,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 7  # bumped from 6: server-side precompute of synthetic overnight_gap outcome. v6 left gap synthesis to the client which required fetching trade_meta (41 MB) + ret_1d_fwd_cc (7.4 MB) + ret_1d_fwd_oc (7.4 MB) = ~56 MB and ~12s of client-side parse + synthesis on Gap-mode entry. v7 precomputes the gap as a 13th synthetic outcome in analyze_cache_outcome (~8 MB) and adds per_bin[overnight_gap] to the slim payload (~1.8 KB) so the Quantile bar chart renders instantly. Gap-mode entry drops from ~17s to ~6-11s (mostly the equity-build + 9-chart-render floor that's shared with other modes). v6 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 8  # bumped from 7: gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path. v7's precompute only covered the chart/swap path; the trade-table render in Gap mode kept firing the old fetches, which made v7 ~24s (worse than v6's 17s) and was the source of the wedge when clicking Analyze in Gap mode. v8 extends per_outcome_returns["overnight_gap"] with entry_dates_cc + entry_spots_cc + entry_spots_oc + metric_vals so the precomputed gap row (~12-13 MB) covers EVERY Gap-mode view including the flat trade table — no trade_meta dependency anywhere. v7 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5152,21 +5152,25 @@ def _compute_analyze_bundle_sync(
               f"effective_speedup={_speedup:.2f}x  "
               f"(parallel={use_parallel})")
 
-    # ── 4b. Synthetic overnight_gap outcome (server-side precompute, v7) ──
+    # ── 4b. Synthetic overnight_gap outcome (server-side precompute, v8) ──
     # Gap = ret_1d_fwd_cc − ret_1d_fwd_oc per trade_id where BOTH legs
-    # exist. Bin assignment + ticker + trade_date are carried inline so
-    # the frontend doesn't need trade_meta to render any Gap-mode view:
-    # trade_calendar (date+ret+ticker+decile20), yearly / DoW / activity
-    # aggregates, and equity curves all derive from the inline arrays.
-    # The flat trade table for Gap mode still uses the existing
-    # trade_meta + 1d_cc + 1d_oc lookup path (separate optional fetch
-    # when the user actually opens it).
+    # exist. ALL fields needed by EVERY Gap-mode client view are carried
+    # inline so the frontend never has to fetch trade_meta or the 1d_cc /
+    # 1d_oc slices to render Gap mode — not for the quantile chart,
+    # equity, yearly / DoW / activity aggregates, OR the flat trade
+    # table. v7 covered the chart/swap path but left the trade-table
+    # render firing the 56 MB v6 fetches; v8 extends the precompute so
+    # there's no fallback path that needs trade_meta.
     #
     # Shape (parallel arrays, index-aligned — no trade_id lookup needed):
-    #   ret_pcts    — gap value (cc − oc)
-    #   trade_dates — signal date T
-    #   tickers     — ticker per trade
-    #   bin_20s     — bin assignment (1..20)
+    #   ret_pcts        — gap value (cc − oc)
+    #   trade_dates     — signal date T (also = OC-anchor exit date)
+    #   tickers         — ticker per trade
+    #   bin_20s         — bin assignment (1..20)
+    #   entry_dates_cc  — T−1 (CC anchor entry date = flat-table date)
+    #   entry_spots_cc  — close T−1 (= flat-table spot_entry)
+    #   entry_spots_oc  — open T (= flat-table spot_exit)
+    #   metric_vals     — metric value at signal (= flat-table metric_val)
     # Plus per_bin["overnight_gap"] = 20-row aggregate (same shape as
     # real outcomes), which lives in the slim payload so the Gap-mode
     # quantile bar chart renders instantly without any deferred fetch.
@@ -5174,10 +5178,14 @@ def _compute_analyze_bundle_sync(
         _cc_data = per_outcome_returns["ret_1d_fwd_cc"]
         _oc_data = per_outcome_returns["ret_1d_fwd_oc"]
         _oc_by_tid = dict(zip(_oc_data["trade_ids"], _oc_data["ret_pcts"]))
-        _gap_ret_pcts:    list = []
-        _gap_trade_dates: list = []
-        _gap_tickers:     list = []
-        _gap_bin_20s:     list = []
+        _gap_ret_pcts:       list = []
+        _gap_trade_dates:    list = []
+        _gap_tickers:        list = []
+        _gap_bin_20s:        list = []
+        _gap_entry_dates_cc: list = []
+        _gap_entry_spots_cc: list = []
+        _gap_entry_spots_oc: list = []
+        _gap_metric_vals:    list = []
         for _i, _tid in enumerate(_cc_data["trade_ids"]):
             if _tid not in _oc_by_tid:
                 continue
@@ -5188,11 +5196,19 @@ def _compute_analyze_bundle_sync(
             _gap_trade_dates.append(_m["trade_date"])
             _gap_tickers.append(_m["ticker"])
             _gap_bin_20s.append(_m["bin_20"])
+            _gap_entry_dates_cc.append(_m["entry_date_cc"])
+            _gap_entry_spots_cc.append(_m["entry_spot_cc"])
+            _gap_entry_spots_oc.append(_m["entry_spot_oc"])
+            _gap_metric_vals.append(_m["metric_val"])
         per_outcome_returns["overnight_gap"] = {
-            "ret_pcts":    _gap_ret_pcts,
-            "trade_dates": _gap_trade_dates,
-            "tickers":     _gap_tickers,
-            "bin_20s":     _gap_bin_20s,
+            "ret_pcts":       _gap_ret_pcts,
+            "trade_dates":    _gap_trade_dates,
+            "tickers":        _gap_tickers,
+            "bin_20s":        _gap_bin_20s,
+            "entry_dates_cc": _gap_entry_dates_cc,
+            "entry_spots_cc": _gap_entry_spots_cc,
+            "entry_spots_oc": _gap_entry_spots_oc,
+            "metric_vals":    _gap_metric_vals,
         }
         # Per-bin aggregates for gap. Same numpy bin_stats shape as real
         # outcomes (above). Empty per_bin list when no overlap is rare
