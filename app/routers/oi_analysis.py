@@ -5067,31 +5067,15 @@ async def _compute_analyze_bundle_bg(
     """Background bundle compute for ALL mode. Writes result to
     analyze_cache, triggers LRU eviction. Failures surface via
     _analyze_bundle_status on next GET."""
-    # DIAG (bundle 500 investigation): time each stage so the systemd
-    # journal lets us identify which phase (DB fetch / pure compute /
-    # json.dumps / 150MB UPSERT) overlaps with the polling fetchrow
-    # TimeoutError. Removed once the fix lands.
-    import time as _diag_pt
-    _diag_ck = cache_key[-50:]
-    _diag_t0 = _diag_pt.perf_counter()
     try:
         outcomes = await _discover_analyze_bundle_outcomes(pool)
-        _diag_t1 = _diag_pt.perf_counter()
         if not outcomes:
             _analyze_bundle_status[cache_key] = {
                 "status": "failed",
                 "error":  "no_forward_return_columns_in_daily_features",
             }
             return
-        print(f"[BUNDLE BG] ck={_diag_ck} discover_ms={(_diag_t1-_diag_t0)*1000:.0f} "
-              f"pool_sz={pool.get_size()} pool_idle={pool.get_idle_size()}",
-              flush=True)
         rows = await _fetch_analyze_bundle_rows(pool, ticker, metric, outcomes)
-        _diag_t2 = _diag_pt.perf_counter()
-        print(f"[BUNDLE BG] ck={_diag_ck} fetch_ms={(_diag_t2-_diag_t1)*1000:.0f} "
-              f"n_rows={len(rows)} pool_sz={pool.get_size()} "
-              f"pool_idle={pool.get_idle_size()}",
-              flush=True)
         if not rows:
             _analyze_bundle_status[cache_key] = {
                 "status": "failed",
@@ -5102,32 +5086,26 @@ async def _compute_analyze_bundle_bg(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
         )
-        _diag_t3 = _diag_pt.perf_counter()
-        print(f"[BUNDLE BG] ck={_diag_ck} compute_ms={(_diag_t3-_diag_t2)*1000:.0f} "
-              f"pool_sz={pool.get_size()} pool_idle={pool.get_idle_size()}",
-              flush=True)
-        # allow_nan=False catches NaN / inf escaping into the payload — any
-        # stray non-finite float would either be rejected at the asyncpg
-        # boundary or, worse, stored as the string "NaN" in JSONB and crash
-        # downstream JSON parsers. Failure is surfaced cleanly via status.
+        # json.dumps on a ~130MB bundle blocks the asyncio event loop for
+        # ~5s on stdlib's pure-Python encoder, which starves every
+        # concurrent coroutine — including in-flight `/analyze-bundle`
+        # polls' fetchrow awaits, which then trip asyncpg's 30s
+        # command_timeout and surface as HTTP 500s. Always thread it.
+        # allow_nan=False still rejects NaN/inf; the ValueError
+        # propagates back here and is recorded as a failed status.
         try:
-            payload_json = json.dumps(bundle, allow_nan=False)
+            payload_json = await asyncio.to_thread(
+                json.dumps, bundle, allow_nan=False,
+            )
         except ValueError as je:
             _analyze_bundle_status[cache_key] = {
                 "status": "failed",
                 "error":  f"json_nan_inf_in_bundle: {je}",
             }
             return
-        _diag_t4 = _diag_pt.perf_counter()
-        _diag_payload_mb = len(payload_json) / 1024.0 / 1024.0
-        print(f"[BUNDLE BG] ck={_diag_ck} dumps_ms={(_diag_t4-_diag_t3)*1000:.0f} "
-              f"payload_mb={_diag_payload_mb:.1f}",
-              flush=True)
         from datetime import date as _date_cls
         cutoff_obj = _date_cls.fromisoformat(cutoff_date) if cutoff_date else None
-        _diag_t_acq = _diag_pt.perf_counter()
         async with pool.acquire() as conn:
-            _diag_t_acq_end = _diag_pt.perf_counter()
             await conn.execute(
                 """INSERT INTO analyze_cache
                    (cache_key, ticker, metric, mode, cutoff_date,
@@ -5141,31 +5119,16 @@ async def _compute_analyze_bundle_bg(
                 cache_key, ticker, metric, mode, cutoff_obj,
                 payload_json, len(payload_json),
             )
-        _diag_t5 = _diag_pt.perf_counter()
-        print(f"[BUNDLE BG] ck={_diag_ck} "
-              f"upsert_acq_ms={(_diag_t_acq_end-_diag_t_acq)*1000:.0f} "
-              f"upsert_exec_ms={(_diag_t5-_diag_t_acq_end)*1000:.0f} "
-              f"upsert_total_ms={(_diag_t5-_diag_t_acq)*1000:.0f} "
-              f"payload_mb={_diag_payload_mb:.1f} "
-              f"pool_sz={pool.get_size()} pool_idle={pool.get_idle_size()}",
-              flush=True)
         try:
             await _evict_analyze_cache_lru(pool)
         except Exception as evict_e:
             import logging
             logging.warning("analyze_cache LRU eviction failed: %r", evict_e)
-        _diag_t6 = _diag_pt.perf_counter()
-        print(f"[BUNDLE BG] ck={_diag_ck} TOTAL_ms={(_diag_t6-_diag_t0)*1000:.0f} "
-              f"payload_mb={_diag_payload_mb:.1f}",
-              flush=True)
     except Exception as e:
         _analyze_bundle_status[cache_key] = {
             "status": "failed",
             "error":  f"{type(e).__name__}: {e}",
         }
-        print(f"[BUNDLE BG FAIL] ck={_diag_ck} err={type(e).__name__}: {e} "
-              f"elapsed_ms={(_diag_pt.perf_counter()-_diag_t0)*1000:.0f}",
-              flush=True)
     finally:
         _analyze_bundle_running.discard(cache_key)
 
@@ -5178,20 +5141,34 @@ async def analyze_bundle_get(
     cutoff_date: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
-    """Return the 12-outcome bundle for (ticker, metric, mode, cutoff).
+    """Return the 12-outcome bundle status for (ticker, metric, mode, cutoff).
 
-    Three response shapes:
+    Response shapes:
 
-      {status: "ready",        bundle: {...}, cached_at?: "..."}
-      {status: "computing",    cache_key: "..."}                     # ALL only
-      {status: "not_computed", previous_error?: "..."}               # ALL only
+      # single-ticker path (computes inline, ~2-5s)
+      {status: "ready", bundle: {...}}
+
+      # ALL-mode polling path (lean — never carries the bundle)
+      {status: "ready",        cached_at: "...", payload_bytes: N}
+      {status: "computing",    cache_key: "..."}
+      {status: "not_computed", previous_error?: "..."}
 
     Behavior:
-      - Single-ticker (`ticker != "ALL"`): computes inline (~2-5s) and
-        returns `ready` with the bundle. Never writes to analyze_cache.
-      - ALL: cache-only. Cache hit → `ready` + bundle. Background job
-        running → `computing`. Neither → `not_computed`. The frontend
-        triggers POST /analyze-bundle/refresh to start a compute.
+      - Single-ticker (`ticker != "ALL"`): computes inline and returns
+        `ready` with the bundle. Never writes to analyze_cache.
+      - ALL: cache-only. Cache hit → status-only `ready`; the client
+        downloads the ~130MB body separately via
+        `GET /analyze-bundle/payload`. Background job running →
+        `computing`. Neither → `not_computed`; frontend POSTs
+        `/analyze-bundle/refresh` to start a compute.
+
+    Why the split: pre-split, every cache-hit poll loaded the 130MB
+    JSONB over asyncpg, json.loads-parsed it, and FastAPI re-serialised
+    it — three synchronous CPU phases that hogged the event loop and
+    starved concurrent fetchrow awaits past the 30s asyncpg
+    command_timeout, surfacing as intermittent HTTP 500s on later polls.
+    Polling now only checks `cached_at`/`payload_bytes` so the hot path
+    is sub-millisecond.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -5214,64 +5191,19 @@ async def analyze_bundle_get(
         )
         return {"status": "ready", "bundle": bundle}
 
-    # ALL mode: cache-only
+    # ALL mode: cache-only. Lean SELECT — no payload column.
     await _ensure_analyze_bundle_table(pool)
     cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
 
-    # DIAG (bundle 500 investigation): time the pool-acquire and fetchrow
-    # legs separately, log row size + pool stats. A 30s TimeoutError in
-    # bind_execute would show up as a print of the surrounding state right
-    # before the exception, plus a [POLL FAIL] line in the except handler
-    # below. Removed once the fix lands.
-    import time as _diag_pt2
-    _diag_ck2 = cache_key[-50:]
-    _diag_pool_sz_before  = pool.get_size()      if pool else -1
-    _diag_pool_idle_before= pool.get_idle_size() if pool else -1
-    _diag_t_poll0 = _diag_pt2.perf_counter()
-    try:
-        _diag_t_acq0 = _diag_pt2.perf_counter()
-        async with pool.acquire() as conn:
-            _diag_t_acq1 = _diag_pt2.perf_counter()
-            _diag_t_fr0  = _diag_pt2.perf_counter()
-            row = await conn.fetchrow(
-                "SELECT payload, cached_at FROM analyze_cache WHERE cache_key = $1",
-                cache_key,
-            )
-            _diag_t_fr1 = _diag_pt2.perf_counter()
-    except Exception as _diag_e:
-        _diag_t_fail = _diag_pt2.perf_counter()
-        print(f"[BUNDLE POLL FAIL] ck={_diag_ck2} "
-              f"pool_sz_before={_diag_pool_sz_before} "
-              f"pool_idle_before={_diag_pool_idle_before} "
-              f"pool_sz_now={pool.get_size() if pool else -1} "
-              f"pool_idle_now={pool.get_idle_size() if pool else -1} "
-              f"elapsed_ms={(_diag_t_fail-_diag_t_poll0)*1000:.0f} "
-              f"err={type(_diag_e).__name__}: {_diag_e}",
-              flush=True)
-        raise
-
-    _diag_row_bytes = 0
-    if row is not None:
-        try:
-            _diag_p = row["payload"]
-            if isinstance(_diag_p, (str, bytes, bytearray)):
-                _diag_row_bytes = len(_diag_p)
-            else:
-                _diag_row_bytes = -1
-        except Exception:
-            _diag_row_bytes = -2
-    print(f"[BUNDLE POLL] ck={_diag_ck2} "
-          f"acq_ms={(_diag_t_acq1-_diag_t_acq0)*1000:.1f} "
-          f"fr_ms={(_diag_t_fr1-_diag_t_fr0)*1000:.1f} "
-          f"row={'HIT' if row else 'miss'} row_bytes={_diag_row_bytes} "
-          f"pool_sz_before={_diag_pool_sz_before} "
-          f"pool_idle_before={_diag_pool_idle_before} "
-          f"pool_sz_after={pool.get_size()} pool_idle_after={pool.get_idle_size()}",
-          flush=True)
-
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT cached_at, payload_bytes FROM analyze_cache "
+            "WHERE cache_key = $1",
+            cache_key,
+        )
     if row is not None:
         # Touch last_accessed for LRU. Fire-and-forget — no need to await
-        # before returning the bundle.
+        # before returning status.
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
@@ -5279,18 +5211,9 @@ async def analyze_bundle_get(
                     "WHERE cache_key = $1", cache_key)
         except Exception:
             pass
-        _diag_t_parse0 = _diag_pt2.perf_counter()
-        payload = row["payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        _diag_t_parse1 = _diag_pt2.perf_counter()
-        print(f"[BUNDLE POLL HIT] ck={_diag_ck2} "
-              f"parse_ms={(_diag_t_parse1-_diag_t_parse0)*1000:.0f} "
-              f"row_bytes={_diag_row_bytes} "
-              f"total_pre_serialize_ms={(_diag_t_parse1-_diag_t_poll0)*1000:.0f}",
-              flush=True)
-        return {"status": "ready", "bundle": payload,
-                "cached_at": str(row["cached_at"])}
+        return {"status":        "ready",
+                "cached_at":     str(row["cached_at"]),
+                "payload_bytes": row["payload_bytes"]}
 
     if cache_key in _analyze_bundle_running:
         return {"status": "computing", "cache_key": cache_key}
@@ -5300,6 +5223,80 @@ async def analyze_bundle_get(
         return {"status": "not_computed",
                 "previous_error": failed.get("error")}
     return {"status": "not_computed"}
+
+
+@router.get("/analyze-bundle/payload")
+async def analyze_bundle_payload(
+    ticker:      str           = Query(...),
+    metric:      str           = Query(...),
+    mode:        str           = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """One-shot ALL-mode payload download.
+
+    Companion to the lean status-only `/analyze-bundle` poll. After the
+    client sees `status=ready` from a poll, it calls this endpoint ONCE
+    to download the ~130MB body. Single-ticker bundles are NOT served
+    here — they return inline on the regular GET and never reach
+    analyze_cache.
+
+    Implementation note: the payload is already stored as a JSON string
+    in JSONB (asyncpg returns JSONB as `str` by default), so we skip the
+    round trip of `json.loads → dict → FastAPI json.dumps`. Instead the
+    response envelope is concatenated around the raw payload string
+    inside `asyncio.to_thread` and emitted via a plain `Response`. This
+    keeps the event loop responsive while a 130MB body is being
+    produced for the wire.
+    """
+    from fastapi.responses import Response
+
+    if not pool:
+        return {"error": "OI database not configured"}
+    if ticker != "ALL":
+        return {"error": "payload endpoint is ALL-mode only; "
+                         "single-ticker bundles return inline via /analyze-bundle"}
+
+    await _ensure_analyze_bundle_table(pool)
+    cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload, cached_at FROM analyze_cache WHERE cache_key = $1",
+            cache_key,
+        )
+    if row is None:
+        return {"error": "not_in_cache",
+                "hint":  "poll /analyze-bundle until status=ready, then GET this"}
+
+    # Fire-and-forget last_accessed touch — pure LRU bookkeeping.
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE analyze_cache SET last_accessed = NOW() "
+                "WHERE cache_key = $1", cache_key)
+    except Exception:
+        pass
+
+    payload_raw   = row["payload"]
+    cached_at_str = str(row["cached_at"])
+
+    def _compose_body() -> bytes:
+        # asyncpg returns JSONB as `str` by default; fall back to
+        # json.dumps only on the unusual path where the driver returned a
+        # parsed dict (e.g., a custom type codec was registered).
+        if isinstance(payload_raw, str):
+            payload_json = payload_raw
+        else:
+            payload_json = json.dumps(payload_raw, allow_nan=False)
+        envelope = (
+            '{"status":"ready","cached_at":' + json.dumps(cached_at_str)
+            + ',"bundle":' + payload_json + '}'
+        )
+        return envelope.encode("utf-8")
+
+    body = await asyncio.to_thread(_compose_body)
+    return Response(content=body, media_type="application/json")
 
 
 @router.post("/analyze-bundle/refresh")

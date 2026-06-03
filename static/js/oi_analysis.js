@@ -6596,9 +6596,18 @@ document.addEventListener('alpine:init', () => {
         if (d.error && !d.status) throw new Error(d.error);
 
         if (d.status === 'ready') {
-          this.analyzeBundle       = d.bundle;
-          this.analyzeBundleStatus = 'ready';
-          this.analyzeBundleKey    = this._analyzeBundleKey();
+          // Single-ticker GET embeds the bundle inline (small payload,
+          // fast). ALL-mode GET returns a lean status only — payload
+          // fetched separately via /analyze-bundle/payload so polling
+          // never carries the ~130MB body. The shape disambiguator is
+          // `bundle` being present in the response.
+          if (d.bundle !== undefined) {
+            this.analyzeBundle       = d.bundle;
+            this.analyzeBundleStatus = 'ready';
+            this.analyzeBundleKey    = this._analyzeBundleKey();
+          } else {
+            await this._fetchAnalyzeBundlePayload();
+          }
         } else if (d.status === 'computing') {
           // ALL-mode background job already in flight — start polling.
           this.analyzeBundleStatus = 'computing';
@@ -6618,6 +6627,23 @@ document.addEventListener('alpine:init', () => {
         this.analyzeBundleStatus = 'failed';
         this.analyzeBundleError  = e.message;
       }
+    },
+
+    async _fetchAnalyzeBundlePayload() {
+      // One-shot ALL-mode payload fetch — called after polling sees
+      // status=ready, or after the initial GET on an already-cached
+      // ALL-mode result. Polling itself never returns the 130MB body
+      // (see backend split for why). On failure, surface the error
+      // through the same status fields the rest of the bundle flow uses.
+      const baseUrl = this._analyzeBundleBaseUrl();
+      const url     = baseUrl.replace('/analyze-bundle?', '/analyze-bundle/payload?');
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      this.analyzeBundle       = d.bundle;
+      this.analyzeBundleStatus = 'ready';
+      this.analyzeBundleKey    = this._analyzeBundleKey();
     },
 
     async refreshAnalyzeBundle() {
@@ -6666,10 +6692,17 @@ document.addEventListener('alpine:init', () => {
           if (!r.ok) return;   // transient
           const d = await r.json();
           if (d.status === 'ready') {
-            this.analyzeBundle       = d.bundle;
-            this.analyzeBundleStatus = 'ready';
-            this.analyzeBundleKey    = this._analyzeBundleKey();
+            // Stop polling FIRST so a slow payload fetch doesn't get
+            // overlapped by another setInterval tick (the prior pile-up
+            // pattern is what caused the event-loop starvation we just
+            // fixed). Then download the 130MB body one time.
             this._stopAnalyzeBundlePolling();
+            try {
+              await this._fetchAnalyzeBundlePayload();
+            } catch (e) {
+              this.analyzeBundleStatus = 'failed';
+              this.analyzeBundleError  = e.message;
+            }
           } else if (d.status === 'not_computed' && d.previous_error) {
             this.analyzeBundleStatus = 'failed';
             this.analyzeBundleError  = d.previous_error;
