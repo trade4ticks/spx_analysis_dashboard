@@ -2902,10 +2902,20 @@ document.addEventListener('alpine:init', () => {
       const effectiveOutcome = this.decileMode === 'overnight_gap'
         ? 'overnight_gap' : this.outcome;
 
-      // v6 lazy-load: Flat view for non-default outcomes or Gap mode reads
-      // trade_meta + per_outcome_returns[outcome]. Trigger fetches if
-      // missing — the bundle is slim by default. _ensureTradeMeta and
-      // _ensureOutcome are no-ops on single-ticker (full bundle inline).
+      // v6 lazy-load behaviour by outcome class:
+      //   - Gap mode / non-default outcome: explicit user action — chart
+      //     overlay spinner shows during the await (existing).
+      //   - Default outcome (ret_5d_fwd_oc): the most-used view. Bundle
+      //     prefetch was kicked off in the background when slim arrived
+      //     (_prefetchDefaultOutcomeAfterBundle). If the prefetch has
+      //     already resolved, render from bundle immediately. If it's
+      //     still in flight, show a passive "Loading trade data…"
+      //     placeholder — NO chart spinner, NO await. When the prefetch
+      //     resolves it triggers a re-render and the table populates.
+      //     This keeps the main visuals fully decoupled from the trade
+      //     fetch.
+      //   - Single-ticker: bundle is inline complete; lazy-fetch helpers
+      //     short-circuit; falls through to bundle rendering below.
       if (this.ticker === 'ALL' && this.analyzeBundle) {
         if (effectiveOutcome === 'overnight_gap') {
           await this._runDeferred([
@@ -2918,17 +2928,21 @@ document.addEventListener('alpine:init', () => {
             this._ensureTradeMeta(),
             this._ensureOutcome(effectiveOutcome),
           ]);
+        } else {
+          // Default outcome — passive placeholder if data not yet loaded.
+          // The background prefetch will trigger a re-render when ready.
+          const haveTradeMeta = !!this.analyzeBundle.trade_meta;
+          const haveOutcome   = !!this.analyzeBundle.per_outcome_returns?.[effectiveOutcome];
+          if (!haveTradeMeta || !haveOutcome) {
+            if (bodyEl) bodyEl.innerHTML =
+              '<tr><td colspan="8" style="text-align:center;color:#888;padding:12px;font-style:italic">'
+              + 'Loading trade data…'
+              + '</td></tr>';
+            return;
+          }
         }
-        // Default outcome (ret_5d_fwd_oc) Flat view falls through to the
-        // server /trades cache below if bundle parts are missing — no
-        // forced lazy-fetch for the common path.
       }
 
-      // All outcomes (including the default ret_5d_fwd_oc) use the bundle when available.
-      // Sentinel that forced the default to the async server path has been removed —
-      // the bundle carries ret_5d_fwd_oc in per_outcome_returns like every other outcome,
-      // and the async server path was causing the blank-table regression (R3).
-      // Server fallback remains for when analyzeBundle is not yet loaded.
       const bundleRows = this._buildFlatTradesFromBundle(effectiveOutcome);
 
       if (bundleRows) {
@@ -2939,7 +2953,10 @@ document.addEventListener('alpine:init', () => {
         total = sorted.length;
         rows  = sorted.slice(0, 250);
       } else {
-        // Server-cached path (default outcome, or bundle not ready).
+        // Defensive fallback for edge cases (single-ticker bundle still
+        // loading, or ALL-mode with no analyzeBundle yet). The v6
+        // ALL-mode default-outcome path is handled above and never
+        // reaches this branch — see the lazy-load gate at the top.
         const mode = this.pageMode === 'train_test' ? 'train_test'
                    : this.pageMode === 'in_sample'  ? 'in_sample'
                    : 'walk_forward';
@@ -6797,6 +6814,45 @@ document.addEventListener('alpine:init', () => {
       // the new bundle are absent by definition (just-arrived slim).
       this._tradeMetaInFlight = null;
       this._outcomesInFlight  = {};
+      // Hybrid prefetch: kick off trade_meta + the default outcome's
+      // per_outcome_returns silently in the background so the default-
+      // outcome flat trade table populates without the user waiting on
+      // a click. Fire-and-forget — main visuals already rendered from
+      // /analyze before slim arrival; this never blocks any chart. By
+      // the time the user scrolls/clicks to the trade table, the data is
+      // usually already on the bundle and the table renders instantly.
+      // If the user clicks first, the flat-view render shows a passive
+      // "Loading trade data…" placeholder until the prefetch resolves.
+      this._prefetchDefaultOutcomeAfterBundle();
+    },
+
+    async _prefetchDefaultOutcomeAfterBundle() {
+      // Background prefetch of the current outcome's trade data + shared
+      // trade_meta. Used by the slim-bundle path so the default-outcome
+      // flat trade table populates silently after the main visuals are
+      // on screen. ALL-mode only — single-ticker bundles already carry
+      // everything inline. Gap mode skipped — entering Gap mode triggers
+      // its own (different) lazy-fetch with a chart spinner because the
+      // user explicitly switched into it.
+      if (this.ticker !== 'ALL') return;
+      if (!this.analyzeBundle) return;
+      const outcome = this.outcome;
+      if (!outcome || outcome === 'overnight_gap') return;
+      try {
+        await Promise.all([
+          this._ensureTradeMeta(),
+          this._ensureOutcome(outcome),
+        ]);
+        // Bundle now has trade_meta + per_outcome_returns[outcome].
+        // Re-render the trade table — the prior render likely showed
+        // the "Loading trade data…" placeholder; this swap populates
+        // the rows without any spinner overlay or user action.
+        this._renderTradeTable();
+      } catch (e) {
+        // Silent failure — the placeholder stays. User can click
+        // Recompute to re-fire the bundle flow including this prefetch.
+        console.warn('[prefetch] default-outcome trade-data fetch failed:', e);
+      }
     },
 
     async _ensureTradeMeta() {
