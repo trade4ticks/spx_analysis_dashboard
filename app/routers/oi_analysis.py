@@ -4009,18 +4009,30 @@ async def _ensure_ic_batch_table(pool) -> None:
 
 
 # ── analyze_cache (P1) ───────────────────────────────────────────────────
-# 12-outcome bundle cache. Each entry: one (ticker, metric, mode, cutoff)
-# tuple's full bundle covering all forward-return outcomes. Only ALL-mode
-# entries persist; single-ticker bundles compute inline (~2-5s) and never
-# reach this table.
+# 12-outcome bundle cache, split across three tables since v6 to support
+# lazy-loading on the frontend. Each ALL-mode (ticker, metric, mode, cutoff)
+# bundle is stored as:
+#   analyze_cache_slim        — 1 row, ~1.3 MB: per_bin + rolling_ic + meta
+#   analyze_cache_trade_meta  — 1 row, ~41 MB:  the trade_meta array
+#   analyze_cache_outcome     — 12 rows, ~7.4 MB each: per_outcome_returns
+#                                                       keyed by outcome
+# Reads target one table at a time so the frontend pays only for what it
+# needs (slim eagerly, trade_meta + outcomes on demand). Writes happen in
+# a single transaction so readers never see a partial bundle. Single-ticker
+# bundles compute inline at /analyze-bundle and never reach these tables.
 #
-# LRU eviction by aggregate size: on each write, while
-# pg_total_relation_size('analyze_cache') > 5 GB, drop the row with the
-# oldest `last_accessed`. The 5 GB cap protects the disk; in practice
-# ~25-30 ALL-mode entries fit before eviction kicks in.
+# LRU eviction: sum pg_total_relation_size across all 3 tables, drop the
+# oldest cache_key (by analyze_cache_slim.last_accessed) from all 3 in a
+# single transaction. Cap stays 5 GB total across the family. last_accessed
+# lives only on the slim table; every read endpoint touches it so a
+# deeply-explored bundle stays warm.
+#
+# Old v5 `analyze_cache` table: untouched by v6 code. v5 cache keys are
+# unreachable since the schema-version salt changed (5 → 6). Drop the
+# legacy table manually after confirming v6 works.
 
-_ANALYZE_BUNDLE_TABLE_DDL = """\
-CREATE TABLE IF NOT EXISTS analyze_cache (
+_ANALYZE_CACHE_SLIM_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS analyze_cache_slim (
     cache_key     TEXT  PRIMARY KEY,
     ticker        TEXT  NOT NULL,
     metric        TEXT  NOT NULL,
@@ -4031,9 +4043,30 @@ CREATE TABLE IF NOT EXISTS analyze_cache (
     cached_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_accessed TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS analyze_cache_last_accessed
-    ON analyze_cache (last_accessed);
+CREATE INDEX IF NOT EXISTS analyze_cache_slim_last_accessed
+    ON analyze_cache_slim (last_accessed);
 """
+
+_ANALYZE_CACHE_TRADE_META_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS analyze_cache_trade_meta (
+    cache_key     TEXT  PRIMARY KEY,
+    payload       JSONB NOT NULL,
+    payload_bytes INT,
+    cached_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+_ANALYZE_CACHE_OUTCOME_TABLE_DDL = """\
+CREATE TABLE IF NOT EXISTS analyze_cache_outcome (
+    cache_key     TEXT  NOT NULL,
+    outcome       TEXT  NOT NULL,
+    payload       JSONB NOT NULL,
+    payload_bytes INT,
+    cached_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (cache_key, outcome)
+);
+"""
+
 _analyze_bundle_table_ensured = False
 
 # Background-job tracking — in-memory only; cleared on server restart.
@@ -4048,26 +4081,40 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 5  # bumped from 4: trade_meta now carries entry_date_oc/cc + entry_spot_oc/cc (per-anchor). v4 carried a single shared entry_spot computed against the OC anchor only — wrong for CC outcomes (entered at C_{T-1}, not O_T) and for Gap mode (CC-anchor entry semantics). v4 caches re-compute on first read.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 6  # bumped from 5: bundle split into slim/trade_meta/outcome tables for lazy frontend loading. v5 stored everything in one analyze_cache row (144 MB on cache hit); v6 splits into ~1.3 MB slim + ~41 MB trade_meta + 12 × ~7.4 MB outcome rows so the frontend pays only for what it needs. v5 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
+    """Create the v6 3-table family. Idempotent. The legacy `analyze_cache`
+    table (v5 and earlier) is intentionally NOT touched — v5 cache keys are
+    already unreachable due to the schema-version salt change. Drop it
+    manually post-deploy when comfortable."""
     global _analyze_bundle_table_ensured
     if _analyze_bundle_table_ensured:
         return
     async with pool.acquire() as conn:
-        await conn.execute(_ANALYZE_BUNDLE_TABLE_DDL)
-        # Wipe entries from any prior schema version. Cache keys are
-        # salted with the schema version (see _analyze_bundle_cache_key),
-        # so stale entries are already unreachable on read — but they
-        # sit in the table consuming space until LRU eviction kicks in.
-        # This one-shot DELETE reclaims the space immediately. Becomes a
-        # no-op once the table holds only current-version entries.
+        await conn.execute(_ANALYZE_CACHE_SLIM_TABLE_DDL)
+        await conn.execute(_ANALYZE_CACHE_TRADE_META_TABLE_DDL)
+        await conn.execute(_ANALYZE_CACHE_OUTCOME_TABLE_DDL)
+        # Wipe entries from any prior schema version across all 3 tables.
+        # Cache keys are salted (see _analyze_bundle_cache_key), so stale
+        # entries are already unreachable on read but consume disk until
+        # this DELETE reclaims them. No-op once tables hold only current-
+        # version entries.
         prefix = f"ab:v{_ANALYZE_BUNDLE_SCHEMA_VERSION}:"
-        await conn.execute(
-            "DELETE FROM analyze_cache WHERE cache_key NOT LIKE $1",
-            f"{prefix}%",
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM analyze_cache_slim WHERE cache_key NOT LIKE $1",
+                f"{prefix}%",
+            )
+            await conn.execute(
+                "DELETE FROM analyze_cache_trade_meta WHERE cache_key NOT LIKE $1",
+                f"{prefix}%",
+            )
+            await conn.execute(
+                "DELETE FROM analyze_cache_outcome WHERE cache_key NOT LIKE $1",
+                f"{prefix}%",
+            )
     _analyze_bundle_table_ensured = True
 
 
@@ -4081,24 +4128,37 @@ def _analyze_bundle_cache_key(ticker: str, metric: str, mode: str,
 
 
 async def _evict_analyze_cache_lru(pool) -> int:
-    """Drop oldest-accessed rows until pg_total_relation_size('analyze_cache')
-    falls back under the cap. Returns the count of rows evicted. Called from
-    the write path after each successful insert/update.
+    """Drop oldest-accessed cache_keys until the combined disk footprint of
+    the 3 analyze_cache_* tables falls back under the cap. Each evicted
+    cache_key clears its row from all 3 tables in a single transaction.
+    Returns the count of cache_keys evicted. Called from the write path
+    after each successful UPSERT.
     """
     evicted = 0
     async with pool.acquire() as conn:
         while True:
-            size_bytes = await conn.fetchval(
-                "SELECT pg_total_relation_size('analyze_cache')")
+            size_bytes = await conn.fetchval("""
+                SELECT pg_total_relation_size('analyze_cache_slim')
+                     + pg_total_relation_size('analyze_cache_trade_meta')
+                     + pg_total_relation_size('analyze_cache_outcome')
+            """)
             if size_bytes is None or size_bytes <= _ANALYZE_BUNDLE_CACHE_MAX_BYTES:
                 break
             oldest_key = await conn.fetchval(
-                "SELECT cache_key FROM analyze_cache "
+                "SELECT cache_key FROM analyze_cache_slim "
                 "ORDER BY last_accessed ASC LIMIT 1")
             if oldest_key is None:
-                break   # table empty but pg_total_relation_size still > cap (bloat)
-            await conn.execute(
-                "DELETE FROM analyze_cache WHERE cache_key = $1", oldest_key)
+                break   # tables empty but total size still > cap (TOAST bloat)
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM analyze_cache_slim WHERE cache_key = $1",
+                    oldest_key)
+                await conn.execute(
+                    "DELETE FROM analyze_cache_trade_meta WHERE cache_key = $1",
+                    oldest_key)
+                await conn.execute(
+                    "DELETE FROM analyze_cache_outcome WHERE cache_key = $1",
+                    oldest_key)
             evicted += 1
     return evicted
 
@@ -5113,8 +5173,11 @@ async def _compute_analyze_bundle_bg(
     cache_key: str, ticker: str, metric: str, mode: str,
     cutoff_date: Optional[str], pool,
 ) -> None:
-    """Background bundle compute for ALL mode. Writes result to
-    analyze_cache, triggers LRU eviction. Failures surface via
+    """Background bundle compute for ALL mode. Computes the full bundle dict
+    via _compute_analyze_bundle_sync, splits it into the 3 storage layers
+    (slim / trade_meta / per-outcome), serialises each in to_thread, then
+    UPSERTs all 14 rows (1 slim + 1 trade_meta + 12 outcome) in a single
+    transaction. Triggers LRU eviction. Failures surface via
     _analyze_bundle_status on next GET."""
     try:
         outcomes = await _discover_analyze_bundle_outcomes(pool)
@@ -5135,39 +5198,78 @@ async def _compute_analyze_bundle_bg(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
         )
-        # json.dumps on a ~130MB bundle blocks the asyncio event loop for
-        # ~5s on stdlib's pure-Python encoder, which starves every
-        # concurrent coroutine — including in-flight `/analyze-bundle`
-        # polls' fetchrow awaits, which then trip asyncpg's 30s
-        # command_timeout and surface as HTTP 500s. Always thread it.
-        # allow_nan=False still rejects NaN/inf; the ValueError
-        # propagates back here and is recorded as a failed status.
+
+        # Split the bundle into the 3 storage layers. trade_meta and
+        # per_outcome_returns are popped off so the remainder serialises as
+        # the slim payload (per_bin + rolling_ic + scalar metadata).
+        trade_meta_obj         = bundle.pop("trade_meta", [])
+        per_outcome_returns_obj = bundle.pop("per_outcome_returns", {})
+        # `bundle` is now the slim payload — same shape as v5 minus the two
+        # heavy keys. Frontend reads it as `analyzeBundle` directly.
+
+        # json.dumps each layer in to_thread. allow_nan=False rejects NaN/inf;
+        # the ValueError propagates and is recorded as failed status. We
+        # thread the dumps so the event loop stays free during the ~5s of
+        # serialisation work — same precaution that fixed the v5 500s.
         try:
-            payload_json = await asyncio.to_thread(
+            slim_json = await asyncio.to_thread(
                 json.dumps, bundle, allow_nan=False,
             )
+            trade_meta_json = await asyncio.to_thread(
+                json.dumps, trade_meta_obj, allow_nan=False,
+            )
+            outcome_jsons: dict[str, str] = {}
+            for outcome_name in outcomes:
+                outcome_data = per_outcome_returns_obj.get(outcome_name, {})
+                outcome_jsons[outcome_name] = await asyncio.to_thread(
+                    json.dumps, outcome_data, allow_nan=False,
+                )
         except ValueError as je:
             _analyze_bundle_status[cache_key] = {
                 "status": "failed",
                 "error":  f"json_nan_inf_in_bundle: {je}",
             }
             return
+
         from datetime import date as _date_cls
         cutoff_obj = _date_cls.fromisoformat(cutoff_date) if cutoff_date else None
         async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO analyze_cache
-                   (cache_key, ticker, metric, mode, cutoff_date,
-                    payload, payload_bytes, cached_at, last_accessed)
-                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW(), NOW())
-                   ON CONFLICT (cache_key) DO UPDATE
-                   SET payload       = EXCLUDED.payload,
-                       payload_bytes = EXCLUDED.payload_bytes,
-                       cached_at     = NOW(),
-                       last_accessed = NOW()""",
-                cache_key, ticker, metric, mode, cutoff_obj,
-                payload_json, len(payload_json),
-            )
+            async with conn.transaction():
+                await conn.execute(
+                    """INSERT INTO analyze_cache_slim
+                       (cache_key, ticker, metric, mode, cutoff_date,
+                        payload, payload_bytes, cached_at, last_accessed)
+                       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW(), NOW())
+                       ON CONFLICT (cache_key) DO UPDATE
+                       SET payload       = EXCLUDED.payload,
+                           payload_bytes = EXCLUDED.payload_bytes,
+                           cached_at     = NOW(),
+                           last_accessed = NOW()""",
+                    cache_key, ticker, metric, mode, cutoff_obj,
+                    slim_json, len(slim_json),
+                )
+                await conn.execute(
+                    """INSERT INTO analyze_cache_trade_meta
+                       (cache_key, payload, payload_bytes, cached_at)
+                       VALUES ($1, $2::jsonb, $3, NOW())
+                       ON CONFLICT (cache_key) DO UPDATE
+                       SET payload       = EXCLUDED.payload,
+                           payload_bytes = EXCLUDED.payload_bytes,
+                           cached_at     = NOW()""",
+                    cache_key, trade_meta_json, len(trade_meta_json),
+                )
+                for outcome_name, outcome_payload_json in outcome_jsons.items():
+                    await conn.execute(
+                        """INSERT INTO analyze_cache_outcome
+                           (cache_key, outcome, payload, payload_bytes, cached_at)
+                           VALUES ($1, $2, $3::jsonb, $4, NOW())
+                           ON CONFLICT (cache_key, outcome) DO UPDATE
+                           SET payload       = EXCLUDED.payload,
+                               payload_bytes = EXCLUDED.payload_bytes,
+                               cached_at     = NOW()""",
+                        cache_key, outcome_name,
+                        outcome_payload_json, len(outcome_payload_json),
+                    )
         try:
             await _evict_analyze_cache_lru(pool)
         except Exception as evict_e:
@@ -5246,7 +5348,7 @@ async def analyze_bundle_get(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT cached_at, payload_bytes FROM analyze_cache "
+            "SELECT cached_at, payload_bytes FROM analyze_cache_slim "
             "WHERE cache_key = $1",
             cache_key,
         )
@@ -5256,7 +5358,7 @@ async def analyze_bundle_get(
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE analyze_cache SET last_accessed = NOW() "
+                    "UPDATE analyze_cache_slim SET last_accessed = NOW() "
                     "WHERE cache_key = $1", cache_key)
         except Exception:
             pass
@@ -5274,6 +5376,18 @@ async def analyze_bundle_get(
     return {"status": "not_computed"}
 
 
+async def _touch_slim_last_accessed(pool, cache_key: str) -> None:
+    """Fire-and-forget LRU touch from any of the v6 read endpoints.
+    Deeper exploration (trade-meta + outcome reads) keeps the bundle warm."""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE analyze_cache_slim SET last_accessed = NOW() "
+                "WHERE cache_key = $1", cache_key)
+    except Exception:
+        pass
+
+
 @router.get("/analyze-bundle/payload")
 async def analyze_bundle_payload(
     ticker:      str           = Query(...),
@@ -5282,21 +5396,16 @@ async def analyze_bundle_payload(
     cutoff_date: Optional[str] = Query(None),
     pool=Depends(get_oi_pool),
 ):
-    """One-shot ALL-mode payload download.
+    """One-shot ALL-mode SLIM payload download (~1.3 MB).
 
-    Companion to the lean status-only `/analyze-bundle` poll. After the
-    client sees `status=ready` from a poll, it calls this endpoint ONCE
-    to download the ~130MB body. Single-ticker bundles are NOT served
-    here — they return inline on the regular GET and never reach
-    analyze_cache.
+    Returns the slim bundle: schema_version, metadata, per_bin, rolling_ic.
+    Does NOT include trade_meta or per_outcome_returns — those load lazily
+    via /analyze-bundle/trade-meta and /analyze-bundle/outcome. Single-
+    ticker bundles return inline at /analyze-bundle and never hit this.
 
-    Implementation note: the payload is already stored as a JSON string
-    in JSONB (asyncpg returns JSONB as `str` by default), so we skip the
-    round trip of `json.loads → dict → FastAPI json.dumps`. Instead the
-    response envelope is concatenated around the raw payload string
-    inside `asyncio.to_thread` and emitted via a plain `Response`. This
-    keeps the event loop responsive while a 130MB body is being
-    produced for the wire.
+    Server-side fast path: asyncpg returns JSONB as `str`, we concat the
+    response envelope around it in to_thread and emit via plain `Response`
+    — skipping json.loads + FastAPI's re-serialise round trip.
     """
     from fastapi.responses import Response
 
@@ -5311,29 +5420,20 @@ async def analyze_bundle_payload(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT payload, cached_at FROM analyze_cache WHERE cache_key = $1",
+            "SELECT payload, cached_at FROM analyze_cache_slim "
+            "WHERE cache_key = $1",
             cache_key,
         )
     if row is None:
         return {"error": "not_in_cache",
                 "hint":  "poll /analyze-bundle until status=ready, then GET this"}
 
-    # Fire-and-forget last_accessed touch — pure LRU bookkeeping.
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE analyze_cache SET last_accessed = NOW() "
-                "WHERE cache_key = $1", cache_key)
-    except Exception:
-        pass
+    await _touch_slim_last_accessed(pool, cache_key)
 
     payload_raw   = row["payload"]
     cached_at_str = str(row["cached_at"])
 
     def _compose_body() -> bytes:
-        # asyncpg returns JSONB as `str` by default; fall back to
-        # json.dumps only on the unusual path where the driver returned a
-        # parsed dict (e.g., a custom type codec was registered).
         if isinstance(payload_raw, str):
             payload_json = payload_raw
         else:
@@ -5342,6 +5442,113 @@ async def analyze_bundle_payload(
             '{"status":"ready","cached_at":' + json.dumps(cached_at_str)
             + ',"bundle":' + payload_json + '}'
         )
+        return envelope.encode("utf-8")
+
+    body = await asyncio.to_thread(_compose_body)
+    return Response(content=body, media_type="application/json")
+
+
+@router.get("/analyze-bundle/trade-meta")
+async def analyze_bundle_trade_meta(
+    ticker:      str           = Query(...),
+    metric:      str           = Query(...),
+    mode:        str           = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Lazy ALL-mode trade_meta download (~41 MB).
+
+    Triggered by the frontend on first need: Overnight Gap mode entry,
+    non-default outcome promotion, or Flat trade-table render for any
+    non-default outcome. Cached client-side on `analyzeBundle.trade_meta`
+    for the session.
+
+    Same fast-path envelope concat as /payload — no parse/re-serialise.
+    """
+    from fastapi.responses import Response
+
+    if not pool:
+        return {"error": "OI database not configured"}
+    if ticker != "ALL":
+        return {"error": "trade-meta endpoint is ALL-mode only"}
+
+    await _ensure_analyze_bundle_table(pool)
+    cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM analyze_cache_trade_meta WHERE cache_key = $1",
+            cache_key,
+        )
+    if row is None:
+        return {"error": "not_in_cache",
+                "hint":  "this metric's bundle hasn't been computed yet"}
+
+    await _touch_slim_last_accessed(pool, cache_key)
+
+    payload_raw = row["payload"]
+
+    def _compose_body() -> bytes:
+        if isinstance(payload_raw, str):
+            payload_json = payload_raw
+        else:
+            payload_json = json.dumps(payload_raw, allow_nan=False)
+        envelope = '{"trade_meta":' + payload_json + '}'
+        return envelope.encode("utf-8")
+
+    body = await asyncio.to_thread(_compose_body)
+    return Response(content=body, media_type="application/json")
+
+
+@router.get("/analyze-bundle/outcome")
+async def analyze_bundle_outcome(
+    ticker:      str           = Query(...),
+    metric:      str           = Query(...),
+    outcome:     str           = Query(...),
+    mode:        str           = Query("in_sample"),
+    cutoff_date: Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Lazy ALL-mode per-outcome download (~7.4 MB per outcome).
+
+    Triggered by the frontend on first need for a specific outcome:
+    Overnight Gap mode (1d_cc + 1d_oc), non-default outcome promotion, or
+    Flat trade-table render. Cached client-side per outcome for the
+    session — subsequent visits to the same outcome are zero-network.
+
+    Same fast-path envelope concat as /payload — no parse/re-serialise.
+    """
+    from fastapi.responses import Response
+
+    if not pool:
+        return {"error": "OI database not configured"}
+    if ticker != "ALL":
+        return {"error": "outcome endpoint is ALL-mode only"}
+
+    await _ensure_analyze_bundle_table(pool)
+    cache_key = _analyze_bundle_cache_key(ticker, metric, mode, cutoff_date)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT payload FROM analyze_cache_outcome "
+            "WHERE cache_key = $1 AND outcome = $2",
+            cache_key, outcome,
+        )
+    if row is None:
+        return {"error": "not_in_cache",
+                "hint":  "this (metric, outcome) bundle hasn't been computed yet"}
+
+    await _touch_slim_last_accessed(pool, cache_key)
+
+    payload_raw = row["payload"]
+
+    def _compose_body() -> bytes:
+        if isinstance(payload_raw, str):
+            payload_json = payload_raw
+        else:
+            payload_json = json.dumps(payload_raw, allow_nan=False)
+        envelope = ('{"outcome":' + json.dumps(outcome)
+                    + ',"data":' + payload_json + '}')
         return envelope.encode("utf-8")
 
     body = await asyncio.to_thread(_compose_body)
@@ -5428,22 +5635,30 @@ async def analyze_cache_invalidate(
     # schema versions so the endpoint also clears legacy rows the
     # startup auto-wipe hasn't reached yet.
     scope = "all"
-    sql = "DELETE FROM analyze_cache"
+    where = ""
     params: list = []
     if ticker and metric:
         scope = "ticker+metric"
-        sql += " WHERE cache_key LIKE $1"
+        where = " WHERE cache_key LIKE $1"
         params.append(f"ab:v%:{ticker}:{metric}:%")
     elif ticker:
         scope = "ticker"
-        sql += " WHERE cache_key LIKE $1"
+        where = " WHERE cache_key LIKE $1"
         params.append(f"ab:v%:{ticker}:%")
 
+    # v6: invalidation cascades across the 3-table family. Count is from
+    # the slim table (1 row per cache_key) — easier to interpret than the
+    # raw sum (1 slim + 1 trade_meta + 12 outcome = 14 rows per cache_key).
     deleted = 0
     try:
         async with pool.acquire() as conn:
-            result = await conn.execute(sql, *params)
-        # asyncpg returns "DELETE N" — parse N from the tag.
+            async with conn.transaction():
+                result = await conn.execute(
+                    f"DELETE FROM analyze_cache_slim{where}", *params)
+                await conn.execute(
+                    f"DELETE FROM analyze_cache_trade_meta{where}", *params)
+                await conn.execute(
+                    f"DELETE FROM analyze_cache_outcome{where}", *params)
         if result and result.startswith("DELETE "):
             try:
                 deleted = int(result.split()[-1])

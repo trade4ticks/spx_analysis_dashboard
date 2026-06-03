@@ -111,6 +111,13 @@
     }
     .chart-canvas { height:240px; position:relative; }
 
+    /* v6 bundle lazy-load spinner — used in the decile-chart overlay
+       (Gap-mode entry, non-default outcome promotion). */
+    @keyframes bundle-spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
     /* Decile selector buttons */
     .decile-btns { display:flex; gap:3px; flex-wrap:wrap; margin-bottom:8px; }
     .decile-btn {
@@ -212,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=169"></script>
+  <script src="/static/js/oi_analysis.js?v=170"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1895,13 +1902,31 @@
 
           <!-- P3: Quantile Avg Return chart. Title + canvas only — the
                section-level control bar above drives mode + sub-control. -->
-          <div class="chart-box">
+          <div class="chart-box" style="position:relative">
             <div class="chart-title">
               <span x-text="decileChartTitle()"></span>
               <span x-show="decileMode==='single'" style="font-weight:400;font-size:10px;color:var(--dim)">— click bars to select</span>
               <button class="fs-btn" @click="openFullscreen('chart-decile')" title="Fullscreen">⛶</button>
             </div>
             <div class="chart-canvas"><canvas id="chart-decile"></canvas></div>
+            <!-- v6 lazy-load overlay. Shows while trade_meta or a
+                 per-outcome slice is being fetched (Gap-mode entry,
+                 non-default outcome promotion, Flat trade-table render).
+                 Sits above the canvas but below the title so the user
+                 still sees what view they're loading into. -->
+            <div x-show="_deferredLoading"
+                 x-transition.opacity
+                 style="position:absolute;top:0;left:0;right:0;bottom:0;
+                        background:rgba(15,15,15,0.78);
+                        display:flex;align-items:center;justify-content:center;
+                        flex-direction:column;gap:10px;
+                        font-size:12px;color:var(--dim);font-style:italic;
+                        z-index:5;pointer-events:none">
+              <div style="width:32px;height:32px;border:3px solid rgba(120,120,120,0.25);
+                          border-top-color:#3498db;border-radius:50%;
+                          animation:bundle-spin 0.8s linear infinite"></div>
+              <span>Loading data for the selected outcome…</span>
+            </div>
           </div>
 
           <!-- Equity curve -->

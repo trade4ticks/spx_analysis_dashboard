@@ -165,11 +165,22 @@ document.addEventListener('alpine:init', () => {
     // background. ALL-mode bundles are persisted to analyze_cache (cache
     // key omits FROM/TO); single-ticker bundles compute inline (~2-5s) and
     // live only in this Alpine state.
-    analyzeBundle:       null,    // {trade_meta, per_outcome_returns, per_bin, rolling_ic, ...}
+    analyzeBundle:       null,    // {trade_meta?, per_outcome_returns?, per_bin, rolling_ic, ...}
     analyzeBundleStatus: 'idle',  // 'idle' | 'computing' | 'ready' | 'failed' | 'not_computed'
     analyzeBundleKey:    null,    // tracks current (ticker, metric, mode, cutoff) so we don't redundantly refetch
     analyzeBundleError:  null,    // surfaces server-side errors for inspection
     _analyzeBundlePollTimer: null,
+    // v6 lazy-load: ALL-mode bundle arrives slim (per_bin + rolling_ic, ~1.3MB).
+    // trade_meta and per_outcome_returns[outcome] fetch on demand the first
+    // time a user action needs them (Gap mode, non-default promotion, Flat
+    // trade table for non-default outcome). Results cached on analyzeBundle
+    // for the session. _deferredLoading drives a spinner overlay; the two
+    // in-flight maps de-dupe concurrent triggers so a rapid click sequence
+    // doesn't fire duplicate fetches. Single-ticker bundles return inline
+    // with all 4 parts present — the ensure helpers short-circuit on that path.
+    _deferredLoading:    false,
+    _tradeMetaInFlight:  null,    // Promise | null
+    _outcomesInFlight:   {},      // { outcome: Promise } per-outcome dedupe
 
     // Threshold Drift (walk-forward bin boundaries over time)
     // Bucket A step 7: Threshold Drift owns its own binning mode +
@@ -1137,36 +1148,41 @@ document.addEventListener('alpine:init', () => {
     // Single-mode dropdown). Re-points downstream visuals via _swapData.
     // The caller is responsible for triggering re-render (typically
     // _setSingleBucket or _onDecileChange).
-    _promoteOutcome(newOutcome) {
+    async _promoteOutcome(newOutcome) {
       if (this.decileActiveOutcome === newOutcome) return;
       this.decileActiveOutcome = newOutcome;
       this.outcome = newOutcome;
-      this._swapDataForActiveOutcome();
+      // v6: _swapDataForActiveOutcome lazy-loads trade_meta + outcome
+      // data for non-default outcomes. Await so callers can rely on
+      // this.data being fresh by the time we return — _clickBar* below
+      // calls _setSingleBucket after this, which triggers the chart
+      // re-renders that need to read the new this.data.
+      await this._swapDataForActiveOutcome();
     },
 
     _clickBarSingle(bucket)                  { this._toggleBucketInSelection(bucket); },
     _clickBarOvernightGap(bucket)            { this._toggleBucketInSelection(bucket); },
 
-    _clickBarEntry(bucket, datasetIdx) {
+    async _clickBarEntry(bucket, datasetIdx) {
       // Dataset 0 = OC, dataset 1 = CC.
       const clickedAnchor = (datasetIdx === 0) ? 'oc' : 'cc';
       const activeAnchor  = this._outcomeAnchor(this.decileActiveOutcome);
       if (clickedAnchor === activeAnchor) {
         this._toggleBucketInSelection(bucket);
       } else {
-        this._promoteOutcome(`ret_${this.decileEntryHorizon}d_fwd_${clickedAnchor}`);
+        await this._promoteOutcome(`ret_${this.decileEntryHorizon}d_fwd_${clickedAnchor}`);
         this._setSingleBucket(bucket);
       }
     },
 
-    _clickBarHorizon(bucket, datasetIdx) {
+    async _clickBarHorizon(bucket, datasetIdx) {
       // datasetIdx i ∈ [0, HORIZON_LIST.length-1] → HORIZON_LIST[i] horizon.
       const clickedH = HORIZON_LIST[datasetIdx];
       const activeH  = this._outcomeHorizon(this.decileActiveOutcome);
       if (clickedH === activeH) {
         this._toggleBucketInSelection(bucket);
       } else {
-        this._promoteOutcome(`ret_${clickedH}d_fwd_${this.decileHorizonAnchor}`);
+        await this._promoteOutcome(`ret_${clickedH}d_fwd_${this.decileHorizonAnchor}`);
         this._setSingleBucket(bucket);
       }
     },
@@ -1469,7 +1485,13 @@ document.addEventListener('alpine:init', () => {
     //   2. Bundle is loaded → build slice from bundle.
     //   3. No bundle yet → leave this.data unchanged (soft-fail; charts
     //      will show stale ret_5d_fwd_oc data with the new outcome label).
-    _swapDataForActiveOutcome() {
+    //
+    // v6 lazy-load: Gap mode and non-default outcomes need trade_meta +
+    // per_outcome_returns[outcome] which arrive on demand. This method
+    // awaits those fetches with _deferredLoading=true so callers (and
+    // their downstream render calls) see fresh this.data when they
+    // resume after the await.
+    async _swapDataForActiveOutcome() {
       if (!this.data) return;
       // P6: Overnight Gap mode takes precedence — the lower section's
       // "outcome" is the synthetic gap (cc - oc), not whatever
@@ -1477,6 +1499,13 @@ document.addEventListener('alpine:init', () => {
       // pointing at the prior real outcome so leaving Gap mode restores
       // cleanly via the normal outcome branch below.
       if (this.decileMode === 'overnight_gap') {
+        // Gap synthesises cc - oc per trade with bin from trade_meta.
+        // Need trade_meta + per_outcome_returns[ret_1d_fwd_cc, ret_1d_fwd_oc].
+        await this._runDeferred([
+          this._ensureTradeMeta(),
+          this._ensureOutcome('ret_1d_fwd_cc'),
+          this._ensureOutcome('ret_1d_fwd_oc'),
+        ]);
         const slice = this._buildGapDataSlice();
         if (slice) {
           Object.assign(this.data, slice);
@@ -1490,6 +1519,11 @@ document.addEventListener('alpine:init', () => {
       if (outcome === 'ret_5d_fwd_oc' && this._originalAnalyzeData) {
         Object.assign(this.data, this._originalAnalyzeData);
       } else {
+        // Non-default outcome — need trade_meta + per_outcome_returns[outcome].
+        await this._runDeferred([
+          this._ensureTradeMeta(),
+          this._ensureOutcome(outcome),
+        ]);
         const slice = this._buildOutcomeDataSlice(outcome);
         if (slice) {
           Object.assign(this.data, slice);
@@ -1503,7 +1537,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── P3 setters ────────────────────────────────────────────────────────
 
-    setDecileMode(mode) {
+    async setDecileMode(mode) {
       // P3: bin selection clears on any subset-defining change (per the
       // spec; P4 refines multi-select rules within each subset).
       const prevMode = this.decileMode;
@@ -1515,16 +1549,20 @@ document.addEventListener('alpine:init', () => {
       // synthetic gap or the previously-active real outcome. The swap
       // also reloads the heatmap (via _swapDataForActiveOutcome) so we
       // don't need a separate loadHeatmap call here.
+      //
+      // v6: Gap-mode entry triggers lazy-load of trade_meta + 1d_cc + 1d_oc.
+      // _swapDataForActiveOutcome handles the await; we then continue to
+      // _renderDecileBar with fresh this.data.
       const gapBefore = prevMode === 'overnight_gap';
       const gapAfter  = mode === 'overnight_gap';
       if (gapBefore !== gapAfter) {
-        this._swapDataForActiveOutcome();
+        await this._swapDataForActiveOutcome();
       }
       this._onDecileChange();
       this._renderDecileBar();
     },
 
-    setDecileHorizonAnchor(anchor) {
+    async setDecileHorizonAnchor(anchor) {
       this.decileHorizonAnchor = anchor;
       // Clear bin selection — different anchor = different subset
       this.selectedBins20 = new Set();
@@ -1537,14 +1575,14 @@ document.addEventListener('alpine:init', () => {
         if (this.decileActiveOutcome !== newOutcome) {
           this.decileActiveOutcome = newOutcome;
           this.outcome = newOutcome;
-          this._swapDataForActiveOutcome();
+          await this._swapDataForActiveOutcome();
         }
       }
       this._onDecileChange();
       if (this.decileMode === 'horizon') this._renderDecileBar();
     },
 
-    setDecileEntryHorizon(h) {
+    async setDecileEntryHorizon(h) {
       this.decileEntryHorizon = h;
       this.selectedBins20 = new Set();
       // In Entry mode the horizon pill defines the subset, so promote the
@@ -1555,14 +1593,14 @@ document.addEventListener('alpine:init', () => {
         if (this.decileActiveOutcome !== newOutcome) {
           this.decileActiveOutcome = newOutcome;
           this.outcome = newOutcome;
-          this._swapDataForActiveOutcome();
+          await this._swapDataForActiveOutcome();
         }
       }
       this._onDecileChange();
       if (this.decileMode === 'entry') this._renderDecileBar();
     },
 
-    setDecileActiveOutcome(outcome) {
+    async setDecileActiveOutcome(outcome) {
       if (this.decileActiveOutcome === outcome) return;
       this.decileActiveOutcome = outcome;
       // Same outcome on this.outcome too so downstream visuals (Equity, IC,
@@ -1570,7 +1608,7 @@ document.addEventListener('alpine:init', () => {
       // swapped from the bundle slice (or restored from _originalAnalyzeData
       // when outcome = the /analyze default).
       this.outcome = outcome;
-      this._swapDataForActiveOutcome();
+      await this._swapDataForActiveOutcome();
       this._onDecileChange();
     },
 
@@ -2863,6 +2901,29 @@ document.addEventListener('alpine:init', () => {
       // (so we can restore on Gap-mode exit).
       const effectiveOutcome = this.decileMode === 'overnight_gap'
         ? 'overnight_gap' : this.outcome;
+
+      // v6 lazy-load: Flat view for non-default outcomes or Gap mode reads
+      // trade_meta + per_outcome_returns[outcome]. Trigger fetches if
+      // missing — the bundle is slim by default. _ensureTradeMeta and
+      // _ensureOutcome are no-ops on single-ticker (full bundle inline).
+      if (this.ticker === 'ALL' && this.analyzeBundle) {
+        if (effectiveOutcome === 'overnight_gap') {
+          await this._runDeferred([
+            this._ensureTradeMeta(),
+            this._ensureOutcome('ret_1d_fwd_cc'),
+            this._ensureOutcome('ret_1d_fwd_oc'),
+          ]);
+        } else if (effectiveOutcome !== 'ret_5d_fwd_oc') {
+          await this._runDeferred([
+            this._ensureTradeMeta(),
+            this._ensureOutcome(effectiveOutcome),
+          ]);
+        }
+        // Default outcome (ret_5d_fwd_oc) Flat view falls through to the
+        // server /trades cache below if bundle parts are missing — no
+        // forced lazy-fetch for the common path.
+      }
+
       // All outcomes (including the default ret_5d_fwd_oc) use the bundle when available.
       // Sentinel that forced the default to the async server path has been removed —
       // the bundle carries ret_5d_fwd_oc in per_outcome_returns like every other outcome,
@@ -6714,11 +6775,14 @@ document.addEventListener('alpine:init', () => {
     },
 
     async _fetchAnalyzeBundlePayload() {
-      // One-shot ALL-mode payload fetch — called after polling sees
-      // status=ready, or after the initial GET on an already-cached
-      // ALL-mode result. Polling itself never returns the 130MB body
-      // (see backend split for why). On failure, surface the error
-      // through the same status fields the rest of the bundle flow uses.
+      // One-shot ALL-mode SLIM payload fetch (~1.3 MB, v6) — called after
+      // polling sees status=ready, or after the initial GET on an already-
+      // cached ALL-mode result. Slim payload carries per_bin + rolling_ic
+      // + scalar metadata; trade_meta (~41 MB) and per_outcome_returns
+      // (~7.4 MB per outcome) load lazily via _ensureTradeMeta /
+      // _ensureOutcome the first time a user action needs them. On
+      // failure, surface the error through the same status fields the
+      // rest of the bundle flow uses.
       const baseUrl = this._analyzeBundleBaseUrl();
       const url     = baseUrl.replace('/analyze-bundle?', '/analyze-bundle/payload?');
       const r = await fetch(url);
@@ -6728,6 +6792,75 @@ document.addEventListener('alpine:init', () => {
       this.analyzeBundle       = d.bundle;
       this.analyzeBundleStatus = 'ready';
       this.analyzeBundleKey    = this._analyzeBundleKey();
+      // Fresh slim bundle — discard any v6 lazy-load promises queued
+      // against the prior cache_key. trade_meta / per_outcome_returns on
+      // the new bundle are absent by definition (just-arrived slim).
+      this._tradeMetaInFlight = null;
+      this._outcomesInFlight  = {};
+    },
+
+    async _ensureTradeMeta() {
+      // Lazy-load trade_meta (~41 MB) the first time a user action needs
+      // it. Cached on this.analyzeBundle.trade_meta for the session.
+      // Single-ticker bundles always have trade_meta inline → no fetch.
+      // Concurrent triggers (rapid clicks) share the same in-flight promise.
+      if (this.analyzeBundle?.trade_meta) return;
+      if (this.ticker !== 'ALL') return;
+      if (this._tradeMetaInFlight) return this._tradeMetaInFlight;
+      this._tradeMetaInFlight = (async () => {
+        try {
+          const url = this._analyzeBundleBaseUrl()
+            .replace('/analyze-bundle?', '/analyze-bundle/trade-meta?');
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+          if (this.analyzeBundle) this.analyzeBundle.trade_meta = d.trade_meta;
+        } finally {
+          this._tradeMetaInFlight = null;
+        }
+      })();
+      return this._tradeMetaInFlight;
+    },
+
+    async _ensureOutcome(outcome) {
+      // Lazy-load one outcome's per_outcome_returns (~7.4 MB) the first
+      // time a user action needs it. Cached on
+      // this.analyzeBundle.per_outcome_returns[outcome] for the session.
+      // Single-ticker bundles always have all outcomes inline → no fetch.
+      // Per-outcome dedupe so a Gap-mode toggle that calls _ensureOutcome
+      // for 1d_cc + 1d_oc in parallel doesn't double-fetch each.
+      if (this.analyzeBundle?.per_outcome_returns?.[outcome]) return;
+      if (this.ticker !== 'ALL') return;
+      if (this._outcomesInFlight[outcome]) return this._outcomesInFlight[outcome];
+      this._outcomesInFlight[outcome] = (async () => {
+        try {
+          const url = this._analyzeBundleBaseUrl()
+            .replace('/analyze-bundle?', '/analyze-bundle/outcome?')
+            + `&outcome=${encodeURIComponent(outcome)}`;
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+          if (this.analyzeBundle) {
+            this.analyzeBundle.per_outcome_returns ??= {};
+            this.analyzeBundle.per_outcome_returns[outcome] = d.data;
+          }
+        } finally {
+          delete this._outcomesInFlight[outcome];
+        }
+      })();
+      return this._outcomesInFlight[outcome];
+    },
+
+    // Wrap a set of deferred-fetch promises with the loading-overlay flag.
+    // Idempotent — safe to call with zero needs (immediate return).
+    async _runDeferred(promises) {
+      const needs = promises.filter(Boolean);
+      if (!needs.length) return;
+      this._deferredLoading = true;
+      try { await Promise.all(needs); }
+      finally { this._deferredLoading = false; }
     },
 
     async refreshAnalyzeBundle() {
