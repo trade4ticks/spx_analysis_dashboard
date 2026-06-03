@@ -219,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=176"></script>
+  <script src="/static/js/oi_analysis.js?v=177"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1896,16 +1896,15 @@
 
           <div style="flex:1"></div>
 
-          <!-- Load button: always visible; enabled (blue) when primary bins are
-               pending; grey/disabled when nothing is pending. -->
+          <!-- Load button: always visible; full opacity when bins are pending,
+               half opacity + disabled when nothing is pending. -->
           <span x-show="primaryPending"
-                style="font-size:11px;color:#e8a033;font-style:italic;margin-right:2px">● pending</span>
+                style="font-size:11px;color:#e8a033;font-style:italic">● pending</span>
           <button @click="loadPrimary()"
                   :disabled="!primaryPending"
-                  :style="primaryPending
-                    ? 'background:rgba(52,152,219,.2);border:1px solid #3498db;color:#3498db;cursor:pointer'
-                    : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);opacity:.45;cursor:not-allowed'"
-                  style="font-size:11px;padding:3px 12px;border-radius:3px;font-weight:600">
+                  :style="{ opacity: primaryPending ? 1 : 0.45, cursor: primaryPending ? 'pointer' : 'not-allowed' }"
+                  style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                         color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:600">
             Load
           </button>
         </div>
@@ -2523,15 +2522,15 @@
                 </template>
               </template>
               <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
-              <!-- Secondary Load button: always visible; enabled (pink) when bins are pending -->
+              <!-- Secondary Load button: always visible; full opacity when pending,
+                   half opacity + disabled when nothing is pending. -->
               <span x-show="secPending"
-                    style="font-size:11px;color:#e8a033;font-style:italic;margin-left:4px">● pending</span>
+                    style="font-size:11px;color:#e8a033;font-style:italic">● pending</span>
               <button @click="loadSecondary()"
                       :disabled="!secPending"
-                      :style="secPending
-                        ? 'background:rgba(232,67,147,.2);border:1px solid #e84393;color:#e84393;cursor:pointer'
-                        : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);opacity:.45;cursor:not-allowed'"
-                      style="font-size:11px;padding:3px 12px;border-radius:3px;font-weight:600">
+                      :style="{ opacity: secPending ? 1 : 0.45, cursor: secPending ? 'pointer' : 'not-allowed' }"
+                      style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                             color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:600">
                 Load
               </button>
               <template x-if="secDetail?.error">

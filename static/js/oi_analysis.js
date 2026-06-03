@@ -4677,7 +4677,9 @@ document.addEventListener('alpine:init', () => {
       } else {
         this.secSelectedSecBins = [...this.secSelectedSecBins, bin];
       }
-      // Gated behind Load — mark pending instead of immediately re-drilling.
+      // Update bar highlight immediately (same pattern as primary _onDecileChangeLight);
+      // full re-drill (equity/n-counts) is gated behind secondary Load.
+      if (this.secDetail) this._renderSecBinsChart();
       this.secPending = true;
     },
 
