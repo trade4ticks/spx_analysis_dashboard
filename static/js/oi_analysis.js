@@ -1533,6 +1533,25 @@ document.addEventListener('alpine:init', () => {
       return `Single mode · ${this.decileActiveOutcome}`;
     },
 
+    // Analyze-section breadcrumb. Same "last: YYYY-MM-DD HH:MM:SS · <Mode>"
+    // shape used by the 6 lower-section panes (smBreadcrumb / surveyBreadcrumb
+    // / cs2fBreadcrumb / topBinsBreadcrumb / tdBreadcrumb). Reads
+    // analyzeBundle.computed_at (set inside _compute_analyze_bundle_sync,
+    // always present on a loaded bundle) and analyzeBundle.mode (the mode
+    // the bundle was COMPUTED under — may differ from this.pageMode if the
+    // user changed the mode pill since the last Analyze click).
+    analyzeBreadcrumb() {
+      const b = this.analyzeBundle;
+      if (!b || !b.computed_at) return 'no data yet';
+      const ts = String(b.computed_at).slice(0, 19).replace('T', ' ');
+      const mode = b.mode || 'unknown';
+      const label = mode === 'walk_forward' ? 'Walk-fwd'
+                  : mode === 'in_sample'    ? 'In-sample'
+                  : mode === 'train_test'   ? 'Train-test'
+                  : mode;
+      return `last: ${ts} · ${label}`;
+    },
+
     // Relative cache-age string ("just now" / "3 min ago" / "2 days ago").
     // Reads analyzeBundle.computed_at when the bundle is the source. Falls
     // back to nothing while only this.data is loaded (no bundle yet).
