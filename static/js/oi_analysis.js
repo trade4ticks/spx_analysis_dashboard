@@ -417,12 +417,21 @@ document.addEventListener('alpine:init', () => {
       this._deferredLoading   = false;
       this._tradeMetaInFlight = null;
       this._outcomesInFlight  = {};
-      // Preserve decileBins and selectedBins20 across re-analyze.
-      // decileBinsData is recomputed below once new data arrives.
-      // P3: legacy lazy-fetch cache is gone. All non-Single modes read
-      // from analyzeBundle.per_bin / analyzeBundle.per_outcome_returns,
-      // which is populated by loadAnalyzeBundle() below.
-      this.decileActiveOutcome = 'ret_5d_fwd_oc';   // reset active outcome on new analyze
+      // User directive: every Analyze click resets the lower-section
+      // view to Single mode at the default outcome (ret_5d_fwd_oc),
+      // regardless of what mode/outcome was active when clicked.
+      // Analyze is a "start fresh from the top" action and Single +
+      // default is the natural landing spot. This also eliminates the
+      // fragile cross-Analyze mode-restoration logic — the path that
+      // caused the Gap-bars-don't-render bug and the null-deref wedge.
+      // If the user wants Gap mode (or a promoted outcome, or Entry /
+      // Horizon mode) for the newly-analyzed metric, they click into
+      // it AFTER Analyze. decileEntryHorizon / decileHorizonAnchor /
+      // decileBins / selectedBins20 stay preserved — those are sub-
+      // control state, not the active view itself.
+      this.decileMode          = 'single';
+      this.outcome             = 'ret_5d_fwd_oc';
+      this.decileActiveOutcome = 'ret_5d_fwd_oc';
       this.heatmapData = null;
       this.hmXData = null;
       this.hmYData = null;
