@@ -51,6 +51,11 @@ document.addEventListener('alpine:init', () => {
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
     equityXMode: 'calendar',   // 'calendar' | 'sequential'
     decileBins: 10,                 // P3: always 10 (5/10/20 toggle removed)
+    // Load-button pending flags. Bin-click / granularity changes mark pending;
+    // Load button (or mode/outcome switch for primary) clears and re-renders.
+    primaryPending: false,
+    secPending: false,
+    _secBinCountChanged: false,  // secondary Load needs secScan when bin count changed
     decileBinsData: null,
     // P3: lower section mode. Renamed from decileCompareMode for clarity —
     // the new names describe the *dimension* being analyzed, not chart shape:
@@ -606,7 +611,7 @@ document.addEventListener('alpine:init', () => {
         this.selectedBins20.add(lo); this.selectedBins20.add(hi);
       }
       this.selectedBins20 = new Set(this.selectedBins20);
-      this._onDecileChange();
+      this._onDecileChangeLight();
     },
 
     // isDecileSelected: used by D1–D10 buttons and the decile stats table row highlight.
@@ -616,18 +621,18 @@ document.addEventListener('alpine:init', () => {
 
     selectAllDeciles() {
       this.selectedBins20 = new Set(Array.from({length: 20}, (_, i) => i + 1));
-      this._onDecileChange();
+      this._onDecileChangeLight();
     },
     selectExtremes() {
       const g = 20 / this.decileBins;
       const lo = Array.from({length: g}, (_, i) => i + 1);
       const hi = Array.from({length: g}, (_, i) => 21 - g + i);
       this.selectedBins20 = new Set([...lo, ...hi]);
-      this._onDecileChange();
+      this._onDecileChangeLight();
     },
     selectNone() {
       this.selectedBins20 = new Set();
-      this._onDecileChange();
+      this._onDecileChangeLight();
     },
 
     _onDecileChange() {
@@ -647,6 +652,37 @@ document.addEventListener('alpine:init', () => {
         this.secDrillMetric(this.secSelectedMetric, false);
       }
       this._computeSelectedStats();
+    },
+
+    // ── Load-button helpers ───────────────────────────────────────────────
+    // loadPrimary(): called by the primary Load button (and by mode/outcome
+    // switches that should re-render immediately and clear any pending state).
+    loadPrimary() {
+      this.primaryPending = false;
+      this._onDecileChange();
+    },
+
+    // _onDecileChangeLight(): called by bin-click / granularity-change paths
+    // that are now gated behind the Load button. Only updates the bar
+    // highlight and stats line; marks primaryPending so the Load button
+    // becomes enabled.
+    _onDecileChangeLight() {
+      this._renderDecileBar();
+      this._computeSelectedStats();
+      if (this.secStatus.loaded) this.secScannerStale = true;
+      this.primaryPending = true;
+    },
+
+    // loadSecondary(): called by the secondary Load button. Runs secScan
+    // (only when bin count changed) and re-drills the selected metric.
+    async loadSecondary() {
+      this.secPending = false;
+      if (this._secBinCountChanged) {
+        this._secBinCountChanged = false;
+        await this.secScan();
+        if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
+      }
+      if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
     },
 
 
@@ -1144,8 +1180,7 @@ document.addEventListener('alpine:init', () => {
         for (const b of members) next.add(b);
       }
       this.selectedBins20 = next;
-      this._onDecileChange();
-      this._renderDecileBar();
+      this._onDecileChangeLight();   // visual highlight only; Load button triggers full render
     },
 
     // Replace the selection with a single display bucket (used after a
@@ -1157,8 +1192,7 @@ document.addEventListener('alpine:init', () => {
       const next = new Set();
       for (let b = lo; b < lo + g; b++) next.add(b);
       this.selectedBins20 = next;
-      this._onDecileChange();
-      this._renderDecileBar();
+      this._onDecileChangeLight();   // visual highlight only; Load button triggers full render
     },
 
     // Promote the active outcome (Entry/Horizon cross-subset click, or the
@@ -1568,7 +1602,8 @@ document.addEventListener('alpine:init', () => {
       if (gapBefore !== gapAfter) {
         await this._swapDataForActiveOutcome();
       }
-      this._onDecileChange();
+      // Mode switch re-renders immediately and clears any pending bin selection.
+      this.loadPrimary();
       this._renderDecileBar();
     },
 
@@ -1588,7 +1623,7 @@ document.addEventListener('alpine:init', () => {
           await this._swapDataForActiveOutcome();
         }
       }
-      this._onDecileChange();
+      this.loadPrimary();
       if (this.decileMode === 'horizon') this._renderDecileBar();
     },
 
@@ -1606,7 +1641,7 @@ document.addEventListener('alpine:init', () => {
           await this._swapDataForActiveOutcome();
         }
       }
-      this._onDecileChange();
+      this.loadPrimary();
       if (this.decileMode === 'entry') this._renderDecileBar();
     },
 
@@ -1619,7 +1654,7 @@ document.addEventListener('alpine:init', () => {
       // when outcome = the /analyze default).
       this.outcome = outcome;
       await this._swapDataForActiveOutcome();
-      this._onDecileChange();
+      this.loadPrimary();
     },
 
     decileChartTitle() {
@@ -1716,18 +1751,9 @@ document.addEventListener('alpine:init', () => {
       // when the bundle hasn't loaded yet AND the active outcome is
       // ret_5d_fwd_oc. Other modes/outcomes wait for the bundle.
       this.decileBinsData = null;
-      // Recompute the primary stats bar (selectedStats) for the new
-      // granularity's selectedBins20 mapping. Without this, switching
-      // 20→10 (or any other count) updates the visuals but leaves the
-      // stats bar showing the prior-selection's values. Mirrors what
-      // _onDecileChange does on every other bin-selection-changing
-      // path; the bin-count switch was the only one missing the call.
-      this._computeSelectedStats();
-      this._renderDecileBar();
-      this._renderEquity();
-      this._renderYearly();
-      this._renderDOW();
-      this._renderActivity();
+      // Granularity switch is gated behind Load — update bar highlight +
+      // stats only; full re-render fires when user clicks Load.
+      this._onDecileChangeLight();
     },
 
     // Core equity curve builder from any trade_calendar subset.
@@ -4642,7 +4668,7 @@ document.addEventListener('alpine:init', () => {
       } finally { this.secDetailLoading = false; }
     },
 
-    async secToggleSecBin(bin) {
+    secToggleSecBin(bin) {
       const idx = this.secSelectedSecBins.indexOf(bin);
       if (idx >= 0) {
         if (this.secSelectedSecBins.length > 1) {
@@ -4651,19 +4677,20 @@ document.addEventListener('alpine:init', () => {
       } else {
         this.secSelectedSecBins = [...this.secSelectedSecBins, bin];
       }
-      if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
+      // Gated behind Load — mark pending instead of immediately re-drilling.
+      this.secPending = true;
     },
 
-    async secSetBinCount(n) {
+    secSetBinCount(n) {
       this.secBinCount = n;
       this.secSelectedSecBins = [n];  // reset to top bin
       this.corrMiniData = null;       // n_bins changed — invalidate minis
       this.corrMiniComputedBins = null;
       this.corrSelections = {};
       this.corrResult = null;
-      await this.secScan();           // re-rank leaderboard with new bin count
-      if (this.secSelectedMetric) await this.secDrillMetric(this.secSelectedMetric, false);
-      if (this.corrPanelOpen && this.secCacheKey) await this.corrLoadMiniData();
+      // Gated behind Load — secScan + drill fire when user clicks Load.
+      this._secBinCountChanged = true;
+      this.secPending = true;
     },
 
     _renderSecBar() {

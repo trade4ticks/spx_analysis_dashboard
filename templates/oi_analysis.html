@@ -1895,6 +1895,19 @@
                 x-text="decileBreadcrumb()"></span>
 
           <div style="flex:1"></div>
+
+          <!-- Load button: always visible; enabled (blue) when primary bins are
+               pending; grey/disabled when nothing is pending. -->
+          <span x-show="primaryPending"
+                style="font-size:11px;color:#e8a033;font-style:italic;margin-right:2px">● pending</span>
+          <button @click="loadPrimary()"
+                  :disabled="!primaryPending"
+                  :style="primaryPending
+                    ? 'background:rgba(52,152,219,.2);border:1px solid #3498db;color:#3498db;cursor:pointer'
+                    : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);opacity:.45;cursor:not-allowed'"
+                  style="font-size:11px;padding:3px 12px;border-radius:3px;font-weight:600">
+            Load
+          </button>
         </div>
 
         <!-- Charts -->
@@ -2510,6 +2523,17 @@
                 </template>
               </template>
               <span x-show="secDetailLoading" style="font-size:11px;color:var(--dim)">Loading…</span>
+              <!-- Secondary Load button: always visible; enabled (pink) when bins are pending -->
+              <span x-show="secPending"
+                    style="font-size:11px;color:#e8a033;font-style:italic;margin-left:4px">● pending</span>
+              <button @click="loadSecondary()"
+                      :disabled="!secPending"
+                      :style="secPending
+                        ? 'background:rgba(232,67,147,.2);border:1px solid #e84393;color:#e84393;cursor:pointer'
+                        : 'background:var(--raised);border:1px solid var(--border);color:var(--dim);opacity:.45;cursor:not-allowed'"
+                      style="font-size:11px;padding:3px 12px;border-radius:3px;font-weight:600">
+                Load
+              </button>
               <template x-if="secDetail?.error">
                 <span style="font-size:11px;color:#e84393;margin-left:auto;font-style:italic"
                       x-text="secDetail.error"></span>
