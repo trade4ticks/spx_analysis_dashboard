@@ -723,6 +723,43 @@ def assign_secondary_bin_stats(
         (test-window-only rows from filter_by_assignments).
     """
     if spec.kind == "in_sample":
+        # v9 fix: when `all_rows` is provided, fit on the full population
+        # and slot rows_chrono into fixed bins. Uneven bin_ns by design —
+        # matches the heatmap's row sums when the same secondary metric
+        # is used as the Y-axis. Tickers with < n_bins observations in
+        # the full population are excluded from the fit; their filtered
+        # rows drop silently.
+        if all_rows is not None:
+            bin_map = _in_sample_bin_map(
+                all_rows, metric, n_bins, is_all, outcome_col=outcome_col,
+            )
+            buckets: list = [[] for _ in range(n_bins)]
+            for r in rows_chrono:
+                v = r.get(metric)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv = float(v); fo = float(o)
+                    if math.isnan(fv) or math.isnan(fo):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                tkr = str(r.get("ticker", ""))
+                td = r.get("trade_date", "")
+                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+                bin_1idx = bin_map.get((tkr, d_key))
+                if bin_1idx is None:
+                    continue
+                buckets[bin_1idx - 1].append(fo)
+            if all(len(b) == 0 for b in buckets):
+                return None
+            return {
+                "name":   metric,
+                "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+                "bin_ns": [len(b) for b in buckets],
+            }
+        # Legacy: re-rank on filtered subset.
         return _compute_bins_for_metric(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "walk_forward":
         return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
@@ -753,6 +790,95 @@ def assign_secondary_bin_stats(
             "bin_ns": [len(b) for b in buckets],
         }
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
+
+
+def _in_sample_bin_map(
+    rows: list,
+    metric: str,
+    n_bins: int,
+    is_all: bool,
+    *,
+    outcome_col: Optional[str] = None,
+) -> dict:
+    """Build `(ticker, trade_date_str) → 1-indexed bin` lookup using the
+    in-sample bin algorithm on the FULL population of `rows`.
+
+    Per-ticker rank-normalize (ALL mode) or flat rank (single-ticker),
+    matching `_bin_membership` / `_bucket_pairs_per_ticker` semantics:
+
+        bin = min(int(rank / n_t * n_bins) + 1, n_bins)
+
+    Tickers with fewer than `n_bins` observations in ALL mode are
+    EXCLUDED entirely — their rows do not appear in the map. This
+    matches the heatmap's `if len(items) < bins: continue` gate, so a
+    primary-filtered row whose ticker was dropped from the secondary
+    fit simply drops from the returned buckets.
+
+    `outcome_col`: if provided, rows missing the outcome value are also
+    excluded from the fit (mirrors the heatmap's all-three-columns-valid
+    gate for two-axis cell membership). Pass `None` when only the
+    metric matters — for example `secondary_membership`, whose
+    `_bin_membership` baseline doesn't gate on outcome either.
+
+    Used by the in_sample branches of `assign_secondary_buckets`,
+    `assign_secondary_bin_stats`, and `secondary_membership` to
+    implement the fixed-threshold fit-on-full / slot-on-filtered
+    pattern. v9 fix for the re-ranking-on-filtered-subset bug — see
+    those callers' inline docstrings.
+    """
+    n_bins = max(2, min(20, n_bins))
+
+    def _valid(r):
+        v = r.get(metric)
+        if v is None: return None
+        try:
+            fv = float(v)
+            if math.isnan(fv): return None
+        except (TypeError, ValueError):
+            return None
+        if outcome_col is not None:
+            o = r.get(outcome_col)
+            if o is None: return None
+            try:
+                fo = float(o)
+                if math.isnan(fo): return None
+            except (TypeError, ValueError):
+                return None
+        return fv
+
+    out: dict = {}
+    if is_all:
+        by_tkr: dict = defaultdict(list)
+        for r in rows:
+            fv = _valid(r)
+            if fv is None: continue
+            tkr = str(r.get("ticker", ""))
+            td = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            by_tkr[tkr].append((fv, tkr, d_key))
+        for tkr_vals in by_tkr.values():
+            if len(tkr_vals) < n_bins:
+                continue
+            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
+            n_t = len(sorted_t)
+            for rank, (_, tkr, d_key) in enumerate(sorted_t):
+                out[(tkr, d_key)] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    else:
+        valid_rows: list = []
+        for r in rows:
+            fv = _valid(r)
+            if fv is None: continue
+            tkr = str(r.get("ticker", ""))
+            td = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            valid_rows.append((fv, tkr, d_key))
+        if len(valid_rows) < n_bins:
+            return out
+        sorted_p = sorted(valid_rows, key=lambda x: x[0])
+        n_t = len(sorted_p)
+        for rank, (_, tkr, d_key) in enumerate(sorted_p):
+            out[(tkr, d_key)] = min(int(rank / n_t * n_bins) + 1, n_bins)
+    return out
 
 
 def assign_secondary_buckets(
@@ -791,6 +917,54 @@ def assign_secondary_buckets(
         available); buckets filled from `rows_chrono` (test-window rows).
     """
     if spec.kind == "in_sample":
+        # v9 fix: when `all_rows` is provided, fit secondary bins on the
+        # full population and slot the (primary-filtered) rows_chrono
+        # into those fixed bins. Result: uneven n per bucket, no
+        # re-ranking on the filtered subset. Matches the heatmap's
+        # Y-axis assignment exactly — row sums equal the unfiltered
+        # secondary bin n's.
+        #
+        # Tickers with < n_bins observations in the FULL population are
+        # excluded from the bin map; their filtered rows drop silently.
+        # Same as the heatmap.
+        #
+        # When `all_rows` is None, falls through to the legacy in-sample
+        # path below which re-ranks on the filtered subset (equal-n).
+        # That legacy shape is preserved for back-compat with any caller
+        # that intentionally wants it; the dashboard endpoints now all
+        # pass all_rows so they get the fixed behavior.
+        if all_rows is not None:
+            bin_map = _in_sample_bin_map(
+                all_rows, metric, n_bins, is_all, outcome_col=outcome_col,
+            )
+            buckets: list = [[] for _ in range(n_bins)]
+            for r in rows_chrono:
+                v = r.get(metric)
+                o = r.get(outcome_col)
+                if v is None or o is None:
+                    continue
+                try:
+                    fv = float(v); fo = float(o)
+                    if math.isnan(fv) or math.isnan(fo):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                tkr = str(r.get("ticker", ""))
+                td = r.get("trade_date", "")
+                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+                bin_1idx = bin_map.get((tkr, d_key))
+                if bin_1idx is None:
+                    continue   # ticker excluded from fit, or row not in full pop
+                buckets[bin_1idx - 1].append((fv, fo, d_key, tkr))
+            # Match the legacy n_bins*2 gate: refuse the response when
+            # the filtered subset is too small to be meaningful across
+            # all bins. (Heatmap doesn't have this gate, but downstream
+            # /secondary-detail consumers do.)
+            if sum(len(b) for b in buckets) < n_bins * 2:
+                return None
+            return buckets
+
+        # ── Legacy in_sample path (re-rank on filtered subset) ────────────
         if is_all:
             by_tkr: dict = {}
             for r in rows_chrono:
@@ -948,6 +1122,30 @@ def secondary_membership(
     """
     sel = set(selected_bins or [])
     if spec.kind == "in_sample":
+        # v9 fix: when `all_rows` is provided, derive each row's bin from
+        # the FULL population's secondary distribution and emit a 1 only
+        # when that fixed bin is in `sel`. Mirrors the heatmap's two-axis
+        # cell membership: a row's secondary bin is a fixed property of
+        # its metric value against full-history thresholds, not a
+        # function of the primary-filtered subset. `_bin_membership`
+        # baseline doesn't gate on outcome, so we pass outcome_col=None
+        # to the helper for parity.
+        if all_rows is not None:
+            out = np.zeros(len(rows_chrono), dtype=np.float64)
+            if not sel:
+                return out
+            bin_map = _in_sample_bin_map(
+                all_rows, metric, n_bins, is_all, outcome_col=None,
+            )
+            for i, r in enumerate(rows_chrono):
+                tkr = str(r.get("ticker", ""))
+                td = r.get("trade_date", "")
+                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+                bin_1idx = bin_map.get((tkr, d_key))
+                if bin_1idx is not None and bin_1idx in sel:
+                    out[i] = 1.0
+            return out
+        # Legacy: re-rank on filtered subset.
         return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "walk_forward":
         return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
@@ -984,6 +1182,20 @@ def secondary_membership(
 #   in_sample:
 #     - secondary bins computed on the primary-FILTERED subset only,
 #       then expanded back to the full-length vector.
+#
+# TODO(v9-fixed-thresholds): the in_sample branch above has the same
+# re-rank-on-filtered-subset bug that was fixed in the on-screen
+# secondary views (/secondary-detail, /secondary-corr-bins,
+# /secondary-correlation). Fixed-threshold principle: a row's
+# secondary bin should be a fixed property of its metric value against
+# the FULL-population thresholds, not a function of which rows
+# survived the primary filter. The fix mirrors those endpoints: build
+# `(ticker, trade_date) → bin` from the full row set via
+# _in_sample_bin_map and slot the filtered rows into those fixed bins.
+# Deferred to a separate commit because this affects portfolio
+# aggregation (a different surface from the on-screen views the user
+# is currently validating). Don't ship a fix here without re-checking
+# the portfolio test suite.
 #
 # `PortfolioVectorBuilder` encapsulates both the asymmetry and the cache.
 # Callers loop over systems and ask `primary_vector` / `secondary_vector`;

@@ -2559,6 +2559,17 @@ def _sec_score_metrics(
         # Full-universe WF bucket assignment — same bins as drilled chart +
         # heatmap.  all_rows_sorted supplied so assign_secondary_buckets
         # skips the redundant _sort_chrono(all_rows) call on each feature.
+        #
+        # TODO(v9-fixed-thresholds): in_sample mode here still passes
+        # all_rows=None (only WF gets the full universe), which means the
+        # secondary scanner's per-feature scoring still re-ranks on the
+        # primary-filtered subset for in_sample. /secondary-detail,
+        # /secondary-corr-bins, and /secondary-correlation were fixed in
+        # the v9 commit; this scanner-scoring path was deferred because
+        # changing it shifts the feature leaderboard's ranking, which
+        # the user needs to re-validate independently. Fix is identical
+        # in shape: pass all_rows always; the underlying helper handles
+        # the mode-dispatch correctly post-v9.
         buckets_raw = assign_secondary_buckets(
             spec, rows_sorted, feat, n_bins, outcome_col, is_all,
             rows_presorted=True,
@@ -3324,10 +3335,14 @@ async def secondary_detail(req: SecDetailReq):
     # (matches legacy, which always built buckets without a second check).
     buckets = assign_secondary_buckets(
         spec, filtered, req.metric_b, n_bins, outcome_col, is_all,
-        # Pass full row cache for WF and train-test so secondary bins are
-        # derived from the full-universe WF distribution, not the primary-
-        # filtered subset.  Matches the heatmap's Y-axis assignment exactly.
-        all_rows=(all_rows if spec.kind in ("walk_forward", "train_test") else None),
+        # v9: pass full row cache for EVERY mode, including in_sample, so
+        # secondary bins are derived from the full-universe distribution
+        # rather than re-ranked on the primary-filtered subset. Matches
+        # the heatmap's Y-axis assignment exactly — row sums equal the
+        # unfiltered secondary bin n's. Pre-v9 in_sample passed None
+        # here, causing the Quantile-Secondary chart to render equal-n
+        # buckets that disagreed with the heatmap.
+        all_rows=all_rows,
     )
     if buckets is None:
         return {"error": "insufficient_data"}
@@ -3503,7 +3518,12 @@ async def secondary_corr_bins(req: CorrBinsReq):
     for feat in feat_cols:
         r = assign_secondary_bin_stats(
             spec, filtered, feat, n_bins, outcome_col, is_all,
-            all_rows=(all_rows if spec.kind == "train_test" else None),
+            # v9: pass full row cache for in_sample too — same
+            # fixed-threshold principle as /secondary-detail. Each
+            # mini chart's bin_ns now reflect the full-population's
+            # secondary bin n's, intersected with the primary filter,
+            # rather than equal-n re-ranks of the filtered subset.
+            all_rows=all_rows,
         )
         if r:
             results.append(r)
@@ -3582,7 +3602,12 @@ async def secondary_correlation(req: CorrReq):
             continue
         vec = secondary_membership(
             spec, ordered, metric, bins, n_bins, is_all,
-            all_rows=(all_rows if spec.kind == "train_test" else None),
+            # v9: pass full row cache for in_sample too. The phi
+            # correlation matrix's binary membership vectors are now
+            # built against fixed full-population bin thresholds —
+            # same shape as /secondary-detail and /secondary-corr-bins,
+            # consistent with the heatmap.
+            all_rows=all_rows,
         )
         vectors.append(vec)
         metric_names.append(metric)
