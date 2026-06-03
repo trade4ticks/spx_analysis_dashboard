@@ -4569,7 +4569,7 @@ def _compute_analyze_bundle_sync(
     outcomes: list[str],
     n_bins: int = 20,
     _measure: bool = False,
-    _parallel_rolling_ic: bool = True,
+    _parallel_rolling_ic: bool = False,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -4846,11 +4846,16 @@ def _compute_analyze_bundle_sync(
     # Pass 1 (serial, in main process): per_outcome_returns + per_bin.
     #   These feed downstream quantile graphs + the P4 active-outcome swap
     #   and are fast after step-1 vectorization (~3 s total).
-    # Pass 2 (parallel via ProcessPoolExecutor when is_all + len > 1):
-    #   rolling_ic + classify. Each outcome is independent so the work
-    #   parallelizes cleanly across cores. Workers receive only outcome
-    #   indices; the shared Y/ticker/date/metric arrays are inherited via
-    #   fork() copy-on-write, so per-task IPC is kilobytes not megabytes.
+    # Pass 2 (serial by default): rolling_ic + classify. A fork()-based
+    #   ProcessPoolExecutor path exists but is opt-in via
+    #   _parallel_rolling_ic=True (used by scripts/measure_analyze.py for
+    #   benchmarking). Forking while the live asyncpg oi_pool holds open
+    #   Postgres sockets corrupts those connections — subsequent queries
+    #   that pick up an inherited fd time out at command_timeout=30s,
+    #   surfacing as intermittent 500s on later /analyze-bundle polls. The
+    #   live server path stays serial until the parallelization is moved
+    #   off fork (forkserver with a connection-free intermediate, or
+    #   another scheme); the ~24s speedup is not worth a corrupted DB pool.
     per_outcome_returns: dict = {}
     per_bin:             dict = {}
     rolling_ic:          dict = {}
@@ -4931,10 +4936,10 @@ def _compute_analyze_bundle_sync(
               f"=> pass1_total={_tick() - _t_pass1_start:.3f}s")
 
     # ── Pass 2: rolling_ic + classify ────────────────────────────────────
-    # Parallel via ProcessPoolExecutor on ALL mode with >1 outcome;
-    # serial fallback for single-ticker, single-outcome, or explicit
-    # opt-out (_parallel_rolling_ic=False, e.g., the measure-script
-    # --verify path which runs both and diffs).
+    # Serial by default. The parallel ProcessPoolExecutor path runs only
+    # when explicitly opted in via _parallel_rolling_ic=True (measure
+    # script). See the section-4 comment above for why the live path is
+    # serial — fork-after-asyncpg-pool corrupts inherited Postgres sockets.
     horizons_per_outcome = [_horizon_from_outcome(o) for o in outcomes]
     tasks = [(j, outcomes[j], horizons_per_outcome[j]) for j in range(len(outcomes))]
     use_parallel = (
@@ -4985,25 +4990,6 @@ def _compute_analyze_bundle_sync(
                     message=r".*fork.*multi-threaded.*",
                 )
                 mp_ctx = _mp.get_context("fork")
-
-                # DIAG (fork-after-asyncpg corruption suspected): log the
-                # start method actually selected + the asyncpg oi_pool state
-                # at fork time. systemd journal timestamps these prints so
-                # subsequent TimeoutError tracebacks can be correlated to
-                # pool teardown. Removed once parallelization is disabled.
-                try:
-                    from app import db as _db_diag
-                    _oip = _db_diag._oi_pool
-                    _diag_sz  = _oip.get_size()      if _oip else -1
-                    _diag_idl = _oip.get_idle_size() if _oip else -1
-                except Exception:
-                    _diag_sz, _diag_idl = -2, -2
-                print(f"[BUNDLE POOL PRE-FORK] "
-                      f"start_method={mp_ctx.get_start_method()} "
-                      f"oi_pool_size={_diag_sz} oi_pool_idle={_diag_idl} "
-                      f"ticker={ticker} metric={metric} mode={mode}",
-                      flush=True)
-
                 with _cf.ProcessPoolExecutor(
                     max_workers=n_workers,
                     mp_context=mp_ctx,
@@ -5012,22 +4998,6 @@ def _compute_analyze_bundle_sync(
                     # the same order as `outcomes` — dict insertion order
                     # below matches the serial path byte-for-byte.
                     pool_results = list(pool.map(_rolling_ic_worker, tasks))
-
-                # DIAG: pool teardown timestamp + post-fork asyncpg pool
-                # state. If subsequent asyncpg queries hit TimeoutError in
-                # the journal within ~30s of this line, fork-corruption of
-                # the inherited Postgres sockets is confirmed.
-                try:
-                    from app import db as _db_diag2
-                    _oip2 = _db_diag2._oi_pool
-                    _diag_sz2  = _oip2.get_size()      if _oip2 else -1
-                    _diag_idl2 = _oip2.get_idle_size() if _oip2 else -1
-                except Exception:
-                    _diag_sz2, _diag_idl2 = -2, -2
-                print(f"[BUNDLE POOL POST-FORK] "
-                      f"oi_pool_size={_diag_sz2} oi_pool_idle={_diag_idl2} "
-                      f"ticker={ticker} metric={metric} mode={mode}",
-                      flush=True)
             for outcome_idx, classified_list, elapsed in pool_results:
                 rolling_ic[outcomes[outcome_idx]] = classified_list
                 if _measure:
