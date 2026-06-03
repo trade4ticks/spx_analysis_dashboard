@@ -3922,6 +3922,55 @@ async def global_metric_bins_invalidate(pool=Depends(get_oi_pool)):
     return {"ok": True}
 
 
+@router.get("/global-metric-bins/meta")
+async def global_metric_bins_meta(
+    outcome:      str           = Query("ret_5d_fwd_oc"),
+    ticker:       str           = Query("ALL"),
+    n_bins:       int           = Query(20, ge=2, le=20),
+    date_from:    Optional[str] = Query(None),
+    date_to:      Optional[str] = Query(None),
+    walk_forward: bool          = Query(False),
+    cutoff_date:  Optional[str] = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """Cheap metadata-only check for global_bins_cache.
+
+    Returns `{exists, cached_at}` for the given selector tuple. The
+    SELECT pulls only `cached_at` — never the ~MB payload column — so
+    this is sub-millisecond regardless of cache state. Powers the
+    collapsed-pane breadcrumb so the All-Ticker Metric Bins pane shows
+    its last-computed timestamp on page load without re-fetching the
+    full bins.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    n_bins = max(2, min(20, n_bins))
+    if cutoff_date:
+        mode_tag = f"tt:{cutoff_date}"
+    elif walk_forward:
+        mode_tag = "wf"
+    else:
+        mode_tag = "is"
+    cache_key = (f"{ticker}|{outcome}|{n_bins}|"
+                 f"{date_from or ''}|{date_to or ''}|{mode_tag}")
+    try:
+        await _ensure_bins_table(pool)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT cached_at FROM global_bins_cache WHERE cache_key = $1",
+                cache_key,
+            )
+    except Exception:
+        return {"exists": False, "cached_at": None}
+    if row is None:
+        return {"exists": False, "cached_at": None}
+    ca = row["cached_at"]
+    return {
+        "exists":    True,
+        "cached_at": ca.isoformat() if ca else None,
+    }
+
+
 # ── IC stability batch (IC.4) ────────────────────────────────────────────
 # Per-metric long-run IC + sign-stability across all ~123 daily_features
 # columns. Powers the IC.5 leaderboard and strength-vs-stability scatter.
@@ -5742,6 +5791,12 @@ async def ic_decomp(
 # computation formula automatically invalidate stale cached responses.
 _THRESHOLD_DRIFT_CACHE_VERSION = "v3-canonical-month-end"
 _THRESHOLD_DRIFT_CACHE: dict = {}
+# Parallel dict tracking the wall-clock load time per cache_key. Surfaced by
+# /threshold-drift/meta so the pane's collapsed-header breadcrumb can show
+# "last: …" on page load without fetching the full payload. Cleared
+# alongside _THRESHOLD_DRIFT_CACHE on /threshold-drift/invalidate and on
+# server restart (in-memory only — matches the cache's own lifetime).
+_THRESHOLD_DRIFT_LOADED_AT: dict = {}
 
 
 @router.get("/threshold-drift")
@@ -5899,7 +5954,11 @@ async def threshold_drift(
             "per_ticker":       per_ticker_series,
             "per_ticker_full":  full_per_ticker_out,
         }
+        from datetime import datetime as _dt
         _THRESHOLD_DRIFT_CACHE[cache_key] = out
+        _THRESHOLD_DRIFT_LOADED_AT[cache_key] = (
+            _dt.utcnow().isoformat() + "Z"
+        )
         return out
     except Exception as exc:
         return {
@@ -5919,7 +5978,49 @@ async def threshold_drift(
 @router.post("/threshold-drift/invalidate")
 async def threshold_drift_invalidate():
     _THRESHOLD_DRIFT_CACHE.clear()
+    _THRESHOLD_DRIFT_LOADED_AT.clear()
     return {"ok": True}
+
+
+@router.get("/threshold-drift/meta")
+async def threshold_drift_meta(
+    metric:    str           = Query(...),
+    outcome:   str           = Query("ret_5d_fwd_oc"),
+    ticker:    str           = Query("ALL"),
+    n_bins:    int           = Query(20, ge=2, le=20),
+    bins:      str           = Query("1,5,10,15,20"),
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
+):
+    """Cheap metadata-only check for the threshold-drift in-memory cache.
+
+    Returns `{exists, cached_at}` for the given selector tuple without
+    running the threshold-drift compute. Powers the collapsed-pane
+    breadcrumb so the pane can show its last-computed timestamp on page
+    load without firing the full payload-bearing /threshold-drift call.
+
+    Since the threshold-drift cache is in-memory only (no DB persistence),
+    `cached_at` is the in-process load timestamp and resets on server
+    restart. `exists` will be False after a restart even if the same
+    params previously had cached data — frontend renders "no data yet"
+    in that case until the user expands the pane and the cache rewarms.
+    """
+    try:
+        bins_to_track = sorted({int(b.strip()) for b in bins.split(",") if b.strip()})
+        bins_to_track = [b for b in bins_to_track if 1 <= b <= n_bins]
+    except ValueError:
+        return {"exists": False, "cached_at": None,
+                "error": "bins must be comma-separated integers"}
+    if not bins_to_track:
+        bins_to_track = [n_bins]
+    cache_key = (f"{_THRESHOLD_DRIFT_CACHE_VERSION}|"
+                 f"{ticker}|{metric}|{outcome}|{n_bins}|"
+                 f"{','.join(str(b) for b in bins_to_track)}|"
+                 f"{date_from or ''}|{date_to or ''}")
+    return {
+        "exists":    cache_key in _THRESHOLD_DRIFT_CACHE,
+        "cached_at": _THRESHOLD_DRIFT_LOADED_AT.get(cache_key),
+    }
 
 
 # ── Corner Scan endpoints ─────────────────────────────────────────────────────

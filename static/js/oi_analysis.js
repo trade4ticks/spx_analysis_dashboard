@@ -153,6 +153,11 @@ document.addEventListener('alpine:init', () => {
       walk_forward: 'empty',
       train_test:   'empty',
     },
+    // Init-time metadata: {exists, cached_at} from /global-metric-bins/meta
+    // for the default selectors. Lets the collapsed-pane breadcrumb show
+    // "last: …" before the pane is ever expanded. Cleared and replaced
+    // by a per-mode slot's own cached_at once the user expands + loads.
+    topBinsMeta: null,
 
     // P1: 12-outcome analyze bundle (drives P3+ mode views).
     // Two-stage render: /analyze fires first for ret_5d_fwd_oc immediately;
@@ -190,6 +195,12 @@ document.addEventListener('alpine:init', () => {
       in_sample:    null,
       train_test:   null,
     },
+    // Init-time metadata: {exists, cached_at} from /threshold-drift/meta
+    // for the default selectors (set after the columns fetch). Lets the
+    // collapsed-pane breadcrumb show "last: …" before the pane is
+    // expanded. Cached_at is the in-process load timestamp — clears on
+    // server restart since the threshold-drift cache is in-memory only.
+    tdMeta: null,
 
     // IC.5 — Signal Stability (universe-wide IC leaderboard + scatter)
     // Lazy-loaded on first expand (user-initiated, same as All-Ticker Metric
@@ -328,6 +339,54 @@ document.addEventListener('alpine:init', () => {
         if (val) this._renderTradeTable();
       });
       this.loadIcBatch();
+      // Init-time breadcrumb metadata for the 4 panes that don't
+      // auto-load on init (Corner Scan 2F/1F, All-Ticker Metric Bins,
+      // Threshold Drift). Cheap metadata-only endpoints — no payload
+      // transferred. Lets the collapsed-pane headers show "last: …"
+      // immediately on page load instead of "no data yet".
+      // Score Matrix + Signal Survey already do this (smInit /
+      // loadIcBatch); this brings the other 4 into parity.
+      this._loadInitMetadata();
+    },
+
+    async _loadInitMetadata() {
+      // Defaults map to the same query string each pane uses on its
+      // first ⟳ Refresh — see loadCs2f / loadTopBins / loadTd. If the
+      // user reloads with non-default selections persisted in
+      // localStorage (Signal Survey only today), those panes already
+      // own their own metadata path.
+      try {
+        // Corner Scan 2F + 1F. The /corner-scan/meta response carries
+        // BOTH 2F and 1F stats, so one fetch populates both breadcrumbs
+        // (cs2fBreadcrumb + cs1fBreadcrumb both read this.cs2fMeta /
+        // this.cs1fMeta respectively, and both default to walk_forward
+        // mode at init).
+        fetch('/api/factor-analysis/corner-scan/meta?mode=walk_forward')
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d) { this.cs2fMeta = d; this.cs1fMeta = d; } })
+          .catch(() => {});
+        // All-Ticker Metric Bins. Default selectors mirror the first
+        // ⟳ Refresh: ALL ticker, ret_5d_fwd_oc, 20 bins, walk_forward.
+        fetch('/api/factor-analysis/global-metric-bins/meta'
+              + '?ticker=ALL&outcome=ret_5d_fwd_oc&n_bins=20&walk_forward=1')
+          .then(r => r.ok ? r.json() : null)
+          .then(d => { if (d) this.topBinsMeta = d; })
+          .catch(() => {});
+        // Threshold Drift. Needs the default tdMetric (set after the
+        // columns fetch above). Skip if columns aren't loaded yet or
+        // tdMetric is empty — the breadcrumb will fall through to "no
+        // data yet" in that case, same as before this commit.
+        if (this.tdMetric) {
+          const url = '/api/factor-analysis/threshold-drift/meta'
+            + `?metric=${encodeURIComponent(this.tdMetric)}`
+            + `&outcome=${encodeURIComponent(this.tdOutcome || 'ret_5d_fwd_oc')}`
+            + `&ticker=ALL&n_bins=20&bins=1%2C20`;
+          fetch(url)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d) this.tdMeta = d; })
+            .catch(() => {});
+        }
+      } catch (_) { /* non-fatal — breadcrumbs just stay "no data yet" */ }
     },
 
     async loadAnalysis() {
@@ -4774,13 +4833,24 @@ document.addEventListener('alpine:init', () => {
     tdBreadcrumb() {
       const label = this._tdModeLabel(this.tdBinMode);
       const slot = this.tdDataByMode[this.tdBinMode];
-      if (!slot || !slot.tdData || slot.tdData.error) {
-        return `no data yet · ${label}`;
+      // Authoritative: this-session slot loaded by the user expanding +
+      // refreshing the pane.
+      if (slot && slot.tdData && !slot.tdData.error) {
+        const ts = slot.loaded_at
+          ? new Date(slot.loaded_at).toISOString().slice(0, 19).replace('T', ' ')
+          : 'unknown';
+        return `last: ${ts} · ${label}`;
       }
-      const ts = slot.loaded_at
-        ? new Date(slot.loaded_at).toISOString().slice(0, 19).replace('T', ' ')
-        : 'unknown';
-      return `last: ${ts} · ${label}`;
+      // Fallback: init-time meta for default selectors. Threshold-drift
+      // cache is in-memory only; cached_at clears on server restart,
+      // and the meta call only fired for walk_forward defaults.
+      if (this.tdBinMode === 'walk_forward'
+          && this.tdMeta?.exists
+          && this.tdMeta?.cached_at) {
+        const ts = String(this.tdMeta.cached_at).slice(0, 19).replace('T', ' ');
+        return `last: ${ts} · ${label}`;
+      }
+      return `no data yet · ${label}`;
     },
 
     // Refresh is only meaningful for walk_forward today. IS / TT are
@@ -5077,11 +5147,21 @@ document.addEventListener('alpine:init', () => {
     topBinsBreadcrumb() {
       const slot = this.topBinsDataByMode[this.topBinsMode];
       const label = this._topBinsModeLabel(this.topBinsMode);
-      if (!slot || slot.error || !(slot.metrics?.length)) {
-        return `no data yet · ${label}`;
+      // Authoritative: per-mode slot once the user has expanded + loaded.
+      if (slot && !slot.error && slot.metrics?.length) {
+        const ts = slot.cached_at ? String(slot.cached_at).slice(0, 19) : 'unknown';
+        return `last: ${ts} · ${label}`;
       }
-      const ts = slot.cached_at ? String(slot.cached_at).slice(0, 19) : 'unknown';
-      return `last: ${ts} · ${label}`;
+      // Fallback: init-time meta for the default selectors. The meta
+      // call only fired for walk_forward defaults, so it's only
+      // meaningful when the current mode is walk_forward.
+      if (this.topBinsMode === 'walk_forward'
+          && this.topBinsMeta?.exists
+          && this.topBinsMeta?.cached_at) {
+        const ts = String(this.topBinsMeta.cached_at).slice(0, 19);
+        return `last: ${ts} · ${label}`;
+      }
+      return `no data yet · ${label}`;
     },
 
     // Mode-pill / cutoff / outcome setters — all in-memory only.
