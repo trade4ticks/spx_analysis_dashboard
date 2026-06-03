@@ -1621,23 +1621,6 @@
                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                       font-size:12px;padding:5px 6px;border-radius:4px">
       </div>
-      <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
-           (via the existing /analyze fast path); the 12-outcome bundle
-           computes in the background and unlocks P3+ mode views when
-           ready. This indicator is invisible while idle/ready. -->
-      <div style="padding-top:14px;display:flex;align-items:center"
-           x-show="analyzeBundleStatus === 'computing' || analyzeBundleStatus === 'failed'">
-        <span x-show="analyzeBundleStatus === 'computing'"
-              style="font-size:11px;color:var(--dim);font-style:italic">
-          <span x-show="ticker === 'ALL'">Computing other outcomes… (~5 min background)</span>
-          <span x-show="ticker !== 'ALL'">Computing other outcomes…</span>
-        </span>
-        <span x-show="analyzeBundleStatus === 'failed'"
-              :title="analyzeBundleError"
-              style="font-size:11px;color:#e84393;font-style:italic">
-          Other-outcome bundle failed — see console (analyzeBundleError)
-        </span>
-      </div>
       <div title="Page-wide bin mode. Drives every binning analysis on the page. In-sample uses the entire history. Walk-forward computes per-ticker bins via bisect_left against a running sorted list with a 252-day warmup. Train-test freezes bin thresholds on data BEFORE the cutoff and ranks all rows against that frozen training history — out-of-sample test rows can pile into the extreme bins.">
         <label>Mode</label><br>
         <div class="mode-seg">
@@ -1662,6 +1645,24 @@
         <button class="go-btn" @click="loadAnalysis()">Analyze</button>
       </div>
       <div x-show="loading" style="color:var(--dim);font-size:12px;padding-top:14px">Loading…</div>
+      <!-- P1: two-stage render status. ret_5d_fwd_oc renders immediately
+           (via /analyze); the 12-outcome bundle computes in the background
+           and unlocks P3+ mode views when ready. Sits AFTER the Analyze
+           button + Loading… indicator so toggling between idle / computing
+           / failed doesn't push the mode pills or the button around. -->
+      <div style="padding-top:14px;display:flex;align-items:center"
+           x-show="analyzeBundleStatus === 'computing' || analyzeBundleStatus === 'failed'">
+        <span x-show="analyzeBundleStatus === 'computing'"
+              style="font-size:11px;color:var(--dim);font-style:italic">
+          <span x-show="ticker === 'ALL'">Computing other outcomes… (~5 min background)</span>
+          <span x-show="ticker !== 'ALL'">Computing other outcomes…</span>
+        </span>
+        <span x-show="analyzeBundleStatus === 'failed'"
+              :title="analyzeBundleError"
+              style="font-size:11px;color:#e84393;font-style:italic">
+          Other-outcome bundle failed — see console (analyzeBundleError)
+        </span>
+      </div>
     </div>
 
     <div x-show="error" style="color:var(--danger);padding:12px;font-size:13px" x-text="error"></div>
