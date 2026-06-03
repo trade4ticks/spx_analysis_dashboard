@@ -1716,6 +1716,13 @@ document.addEventListener('alpine:init', () => {
       // when the bundle hasn't loaded yet AND the active outcome is
       // ret_5d_fwd_oc. Other modes/outcomes wait for the bundle.
       this.decileBinsData = null;
+      // Recompute the primary stats bar (selectedStats) for the new
+      // granularity's selectedBins20 mapping. Without this, switching
+      // 20→10 (or any other count) updates the visuals but leaves the
+      // stats bar showing the prior-selection's values. Mirrors what
+      // _onDecileChange does on every other bin-selection-changing
+      // path; the bin-count switch was the only one missing the call.
+      this._computeSelectedStats();
       this._renderDecileBar();
       this._renderEquity();
       this._renderYearly();
