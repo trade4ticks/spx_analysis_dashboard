@@ -2697,7 +2697,7 @@
                Auto-fires via loadHeatmap() at end of secDrillMetric() success path.
                Grid-size toggle and manual ⟳ reload button retained; standalone
                Y-metric dropdown removed (Y is now locked to secSelectedMetric). -->
-          <div class="chart-box" style="margin-top:12px">
+          <div class="chart-box" style="margin-top:12px" x-init="_hmInitWatchers()">
             <div class="chart-title">
               2-D Heatmap
               <span style="font-weight:400;font-size:10px;color:var(--dim)"
@@ -2707,6 +2707,19 @@
                 <span :class="{on: heatmapBins===5}"  @click="setHeatmapBins(5)">5×5</span>
                 <span :class="{on: heatmapBins===10}" @click="setHeatmapBins(10)">10×10</span>
                 <span :class="{on: heatmapBins===20}" @click="setHeatmapBins(20)">20×20</span>
+              </div>
+              <!-- Gate F replacement: n-threshold slider. Drives BOTH cell
+                   hatching and gradient-scale inclusion. Default 50; user
+                   drags to retune. Re-gradient happens client-side via
+                   the $watch on hmMinSampleN — no refetch. -->
+              <div style="margin-left:12px;display:flex;gap:8px;align-items:center">
+                <span style="font-size:10px;color:var(--dim)">HIDE n &lt;</span>
+                <input type="range" min="0" max="200" step="1"
+                       x-model.number="hmMinSampleN"
+                       style="width:120px;accent-color:#3498db"
+                       title="Cells with n below this threshold render as hatched gray (no gradient) and are excluded from the gradient scale's min/max">
+                <span style="min-width:28px;color:#3498db;font-weight:700;font-family:monospace;font-size:12px"
+                      x-text="hmMinSampleN"></span>
               </div>
               <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
                 <button @click="loadHeatmap()"

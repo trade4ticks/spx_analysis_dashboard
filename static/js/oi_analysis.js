@@ -2210,6 +2210,11 @@ document.addEventListener('alpine:init', () => {
     hmBins1d: 10,
     hmXData: null,
     hmYData: null,
+    // Gate F replacement: n-slider for the heatmap. Cells with n below
+    // `hmMinSampleN` render as hatched gray (no gradient color), AND are
+    // excluded from the gradient scale's min/max computation. Same
+    // threshold drives both — see `_hmRange` getter below.
+    hmMinSampleN: 50,
     _hmRange: null,
 
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
@@ -2269,17 +2274,12 @@ document.addEventListener('alpine:init', () => {
           + wf);
         if (r.ok) {
           const d = await r.json();
-          // Compute color scale from all grids combined so train and test
-          // heatmaps share the same intensity reference.
-          let max = 0;
-          const _allGrids = [...(d.grid || []), ...(d.train_grid || []), ...(d.test_grid || [])];
-          for (const row of _allGrids) {
-            for (const c of row) {
-              if (c && c.n) max = Math.max(max, Math.abs(c.avg_ret || 0));
-            }
-          }
-          this._hmRange = max || 0.01;
+          // Gate F replacement: `_hmRange` is no longer set here. It's
+          // computed by `_hmComputeRange()` from cells whose n meets
+          // `hmMinSampleN`, so dragging the slider re-scopes the scale
+          // without a refetch. Just store the data.
           this.heatmapData = d;
+          this._hmRecomputeRange();
         }
         await this.loadHmBins1d();
       } catch (_) {}
@@ -2428,10 +2428,60 @@ document.addEventListener('alpine:init', () => {
     },
 
     hmCellBg(cell) {
-      if (!cell || !cell.n) return 'rgba(40,40,40,0.5)';
+      // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
+      // same number determines hatching AND gradient inclusion. Critical
+      // invariant: a cell rendered with a gradient color is also in the
+      // population whose min/max defined that gradient. If a low-n cell
+      // with a wild return stayed in the scale, every real cell would
+      // collapse to near-uniform shade by relativity — the user-stated
+      // reason for keeping hatch and scale on the same threshold.
+      if (!cell || !cell.n) return 'rgba(40,40,40,0.5)';   // n=0: empty
+      const n = cell.n;
+      const minN = this.hmMinSampleN || 0;
+      // Tier 2: 0 < n < threshold — hatched gray, no gradient color.
+      // Pattern matches the Regime Heatmap style for visual consistency.
+      if (n < minN) {
+        return 'repeating-linear-gradient(45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + 'repeating-linear-gradient(-45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+             + '#1c1c1c';
+      }
+      // Tier 3: n >= threshold — gradient, scaled across visible cells only.
       const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (this._hmRange || 0.01)));
       if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
       return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
+    },
+
+    // Recompute `_hmRange` from cells whose n meets `hmMinSampleN`. Called
+    // when heatmap data arrives AND from the `hmMinSampleN` watcher so
+    // dragging the slider rescopes the gradient. Cells below threshold
+    // drop out of the max-abs computation; the gradient stretches across
+    // the survivors. This is the difference from a hatch-only n-slider.
+    _hmRecomputeRange() {
+      if (!this.heatmapData) { this._hmRange = null; return; }
+      const minN = this.hmMinSampleN || 0;
+      const grids = [
+        ...(this.heatmapData.grid || []),
+        ...(this.heatmapData.train_grid || []),
+        ...(this.heatmapData.test_grid || []),
+      ];
+      let max = 0;
+      for (const row of grids) {
+        for (const c of row) {
+          if (c && (c.n || 0) >= minN) {
+            max = Math.max(max, Math.abs(c.avg_ret || 0));
+          }
+        }
+      }
+      this._hmRange = max || 0.01;
+    },
+
+    // Wire the slider's reactivity. Called from x-init in the heatmap
+    // template (see template). Cheap idempotent setup — re-running is
+    // harmless because Alpine deduplicates identical watchers.
+    _hmInitWatchers() {
+      if (this._hmWatchersInit) return;
+      this._hmWatchersInit = true;
+      this.$watch('hmMinSampleN', () => this._hmRecomputeRange());
     },
 
     // Tooltip for a heatmap cell. In train-test mode, appends the frozen
