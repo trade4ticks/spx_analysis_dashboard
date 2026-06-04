@@ -1950,6 +1950,98 @@ async def metric_bins_1d(
     outcome_cols    = _outcome_select_cols(outcome)
     outcome_sql_sel = ", ".join(outcome_cols)
     outcome_sql_nn  = _outcome_where_clause(outcome)
+
+    # ── v10 Group 2 — ALL+IS reads bin from is_bins ──────────────────────
+    # Short-circuited BEFORE the daily_features fetch below so the IS+ALL
+    # path skips that round-trip entirely. Narrow read: SELECT only the
+    # one bin column needed (bin20_<metric>) plus the metric value and
+    # outcome via JOIN. JOIN preserves outcome-validity — Group 1
+    # verification noted is_bins contains recent rows that have a bin
+    # but no forward return yet, so the outcome NOT NULL filter is
+    # mandatory or counts inflate.
+    #
+    # WF / TT / single-ticker flow through the existing Assigner path
+    # below. Same mode boundary as Group 1 (/heatmap).
+    #
+    # Display granularity: is_bins stores bin20. Aggregate to user's
+    # `bins` via `((bin20 - 1) * bins) // 20`. Divisor bins (2/4/5/10/20)
+    # are mathematically exact; non-divisor bins shift slightly. Default
+    # bins=10 (the heatmap-sidebar caller's request) is exact.
+    if is_all and not walk_forward and not cutoff_date:
+        join_sql = (
+            f"SELECT df.{metric} AS metric_val, "
+            f"ib.bin20_{metric} AS bin_20, "
+            f"{outcome_sql_sel} "
+            f"FROM daily_features df "
+            f"JOIN is_bins ib USING (ticker, trade_date) "
+            f"WHERE ib.bin20_{metric} > 0 "
+            f"AND {outcome_sql_nn}"
+            f"{date_conditions}"
+        )
+        async with pool.acquire() as conn:
+            ib_rows = await conn.fetch(join_sql, *params)
+
+        # Slot each row into its display bin (bin20 → bins via the
+        # canonical aggregation formula). Per-bucket lists carry (metric
+        # value, outcome) so std_dev / sharpe / min_val / max_val match
+        # the on-the-fly response shape.
+        buckets_data: list = [[] for _ in range(bins)]
+        total_n = 0
+        for r in ib_rows:
+            ov = _outcome_value(r, outcome)
+            if ov is None:
+                continue
+            try:
+                fov = float(ov)
+                if math.isnan(fov):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            try:
+                fv = float(r["metric_val"])
+                if math.isnan(fv):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            bv20 = r["bin_20"]
+            bin_disp = ((bv20 - 1) * bins) // 20
+            buckets_data[bin_disp].append((fv, fov))
+            total_n += 1
+
+        if total_n < 20:
+            return {"error": f"Insufficient data after is_bins filter: {total_n} rows"}
+
+        result = []
+        for i in range(bins):
+            bucket = buckets_data[i]
+            if not bucket:
+                result.append(None)
+                continue
+            ys = np.array([p[1] for p in bucket])
+            xs = [p[0] for p in bucket]
+            result.append({
+                "bucket":   i + 1,
+                "n":        len(bucket),
+                "avg_ret":  round(float(ys.mean()), 6),
+                "win_rate": round(float((ys > 0).mean()), 4),
+                "std_dev":  round(float(ys.std()), 6),
+                "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
+                "min_val":  round(float(min(xs)), 6),
+                "max_val":  round(float(max(xs)), 6),
+            })
+        return {
+            "metric":         metric,
+            "outcome":        outcome,
+            "bins":           bins,
+            "canonical_bins": 20,
+            "n":              total_n,
+            "buckets":        result,
+            "per_ticker":     True,
+            "mode":           "in_sample",
+            "source":         "is_bins",
+        }
+
+    # ── WF / TT / single-ticker: existing Assigner path (unchanged) ──────
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"SELECT ticker, trade_date, {metric}, {outcome_sql_sel} FROM daily_features "
