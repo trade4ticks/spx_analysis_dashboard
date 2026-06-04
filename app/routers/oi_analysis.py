@@ -1594,6 +1594,113 @@ async def heatmap_2d(
         # in-sample / walk-forward / train-test.
         from app.routers.row_compute import ASSIGNERS, make_spec
         spec = make_spec(walk_forward, cutoff_date)
+
+        # ── v10 Group 1 — ALL+IS reads bins from is_bins ─────────────────
+        # is_bins stores per-(ticker, trade_date) the canonical 20-bin
+        # assignment for each metric: per-ticker rank-normalize over the
+        # FULL history of that metric. Reading from it makes every
+        # dashboard view consistent BY CONSTRUCTION — same stored bin →
+        # same answer everywhere.
+        #
+        # WF and TT still compute on the fly via the Assigner path below.
+        # Single-ticker mode (handled outside this `if is_all` block) is
+        # unchanged — it uses absolute np.percentile edges, not rank bins.
+        #
+        # Notes on this read path:
+        # • SELECT only the two needed bin columns. is_bins is ~288
+        #   columns wide; SELECT * pessimizes badly.
+        # • bin 0 sentinel = unbinnable (source metric null). Dropped at
+        #   the SQL layer via `bin20_<metric> > 0`.
+        # • Display granularity: is_bins stores bin20 (1..20). Aggregate
+        #   to user-requested `bins` via `((bin20 - 1) * bins) // 20`.
+        #   Divisor bins (5/10/20) are mathematically exact; non-divisor
+        #   bins (3/6/7/11/…) shift slightly because 20 doesn't divide
+        #   evenly into those.
+        # • Pre-v10 the IS path computed per-ticker rank on rows_clean
+        #   (rows where metric_x AND metric_y AND outcome all valid).
+        #   is_bins computes per-ticker rank on each metric's full
+        #   ticker history independently. Bin assignments will differ
+        #   for rows whose ticker has sparse metric_y or outcome —
+        #   that's the cross-view inconsistency this migration fixes.
+        if spec.kind == "in_sample":
+            join_sql = (
+                f"SELECT df.ticker, "
+                f"ib.bin20_{metric_x} AS bin_x_20, "
+                f"ib.bin20_{metric_y} AS bin_y_20, "
+                f"{outcome_sql_sel} "
+                f"FROM daily_features df "
+                f"JOIN is_bins ib USING (ticker, trade_date) "
+                f"WHERE ib.bin20_{metric_x} > 0 "
+                f"AND ib.bin20_{metric_y} > 0 "
+                f"AND {outcome_sql_nn}"
+                f"{date_conditions} "
+                f"ORDER BY df.trade_date"
+            )
+            async with pool.acquire() as conn:
+                ib_rows = await conn.fetch(join_sql, *params)
+
+            cell_rets_is: list = [[[] for _ in range(bins)] for _ in range(bins)]
+            n_tickers_with_bins_is: set = set()
+            total_n_is = 0
+            for r in ib_rows:
+                ov = _outcome_value(r, outcome)
+                if ov is None:
+                    continue
+                try:
+                    fov = float(ov)
+                    if math.isnan(fov):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                bx20 = r["bin_x_20"]
+                by20 = r["bin_y_20"]
+                if bins == 20:
+                    ix = bx20 - 1
+                    iy = by20 - 1
+                else:
+                    ix = ((bx20 - 1) * bins) // 20
+                    iy = ((by20 - 1) * bins) // 20
+                cell_rets_is[iy][ix].append(fov)
+                total_n_is += 1
+                n_tickers_with_bins_is.add(r["ticker"])
+            n_tickers_used_is = len(n_tickers_with_bins_is)
+
+            if total_n_is < 50:
+                return {"error": f"Insufficient data after is_bins filter: {total_n_is} rows"}
+
+            def _build_grid_is(cell_data):
+                g = []
+                for iy_ in range(bins):
+                    row_out = []
+                    for ix_ in range(bins):
+                        rets = cell_data[iy_][ix_]
+                        if len(rets) >= 5:
+                            a = np.array(rets)
+                            row_out.append({
+                                "avg_ret":  round(float(a.mean()), 6),
+                                "win_rate": round(float((a > 0).mean()), 4),
+                                "n":        int(len(rets)),
+                            })
+                        else:
+                            row_out.append(None)
+                    g.append(row_out)
+                return g
+
+            grid_is = _build_grid_is(cell_rets_is)
+            x_labels_is = [f"B{i+1}" for i in range(bins)]
+            y_labels_is = [f"B{j+1}" for j in range(bins)]
+            return {
+                "metric_x":   metric_x, "metric_y": metric_y, "outcome": outcome,
+                "bins":       bins, "n": total_n_is,
+                "x_labels":   x_labels_is, "y_labels": y_labels_is,
+                "grid":       grid_is,
+                "per_ticker": True,
+                "n_tickers":  n_tickers_used_is,
+                "mode":       "in_sample",
+                "source":     "is_bins",
+            }
+
+        # ── WF / TT: existing Assigner path (unchanged) ──────────────────
         assigner = ASSIGNERS[spec.kind](spec)
 
         # Pre-filter to rows with all three fields valid + numeric. This
