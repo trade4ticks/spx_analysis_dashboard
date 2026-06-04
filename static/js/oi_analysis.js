@@ -104,6 +104,7 @@ document.addEventListener('alpine:init', () => {
     _secDrillVersion: 0,    // P1: version counter — discards stale secDrillMetric responses
     secScannerStale: false,  // M1: scanner results stale due to primary-context change
     _secCacheParams: null,   // M2: {ticker,metric,outcome,dateFrom,dateTo} at cache build time
+    _lastHeatmapKey: null,   // loadHeatmapIfChanged guard — tracks last rendered heatmap inputs
     secAdvisoryOpen: true,   // M1: advisory block (scanner+minis) expand/collapse — visual only
 
     // Multi-Metric Correlation Explorer
@@ -2219,9 +2220,30 @@ document.addEventListener('alpine:init', () => {
       return this.decileMode === 'overnight_gap' ? 'overnight_gap' : this.outcome;
     },
 
+    // Returns a string key of every parameter that drives the heatmap grid.
+    // loadHeatmapIfChanged() skips the fetch when none of these change.
+    _heatmapKey() {
+      return JSON.stringify([
+        this.ticker, this.metric, this.secSelectedMetric,
+        this.pageMode, this.cutoffDate, this.heatmapBins,
+        this._heatmapOutcome(), this.dateFrom, this.dateTo,
+      ]);
+    },
+
+    // Called from secDrillMetric() instead of loadHeatmap() directly.
+    // Skips the fetch when only bin selection changed (grid is invariant to
+    // which bins are selected; it always shows all bins).
+    async loadHeatmapIfChanged() {
+      if (!this.secSelectedMetric || !this.data) return;
+      if (this._heatmapKey() === this._lastHeatmapKey) return;
+      await this.loadHeatmap();
+    },
+
     async loadHeatmap() {
       // M3: Y-axis is now the selected secondary metric; no standalone dropdown.
       if (!this.secSelectedMetric || !this.data) return;
+      // Stamp the key so loadHeatmapIfChanged() won't re-fire for the same inputs.
+      this._lastHeatmapKey = this._heatmapKey();
       this.heatmapLoading = true;
       this.heatmapData = null;
       this.hmXData = null;
@@ -4655,10 +4677,10 @@ document.addEventListener('alpine:init', () => {
         await this.$nextTick();
         setTimeout(() => this._renderSecDetail(), 60);
         // M3: heatmap X-axis = primary metric, Y-axis = secSelectedMetric.
-        // Fires here so it triggers on both secondary-change AND primary-metric-change
-        // paths (_prepareSecRowsThenDrill awaits secDrillMetric, so heatmap fires
-        // exactly once per trigger via the chain — no double-fire).
-        this.loadHeatmap();
+        // Uses loadHeatmapIfChanged() — skips the fetch when only bin selection
+        // changed (bin selection never affects the heatmap grid; all cells are
+        // always shown). Rebuilds when metric, mode, granularity, or outcome change.
+        this.loadHeatmapIfChanged();
       } catch (e) {
         if (version !== this._secDrillVersion) return;
         const msg = e.message === 'insufficient_data'

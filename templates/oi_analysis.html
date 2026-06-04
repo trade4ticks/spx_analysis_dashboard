@@ -219,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=177"></script>
+  <script src="/static/js/oi_analysis.js?v=178"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1894,10 +1894,8 @@
           <span style="font-size:11px;color:var(--dim);font-style:italic"
                 x-text="decileBreadcrumb()"></span>
 
-          <div style="flex:1"></div>
-
-          <!-- Load button: always visible; full opacity when bins are pending,
-               half opacity + disabled when nothing is pending. -->
+          <!-- Load button sits left of the spacer, mirroring the secondary
+               section's layout (content → pending → Load → spacer → …). -->
           <span x-show="primaryPending"
                 style="font-size:11px;color:#e8a033;font-style:italic">● pending</span>
           <button @click="loadPrimary()"
@@ -1907,6 +1905,8 @@
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:600">
             Load
           </button>
+
+          <div style="flex:1"></div>
         </div>
 
         <!-- Charts -->
