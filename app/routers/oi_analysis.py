@@ -4460,7 +4460,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 8  # bumped from 7: gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path. v7's precompute only covered the chart/swap path; the trade-table render in Gap mode kept firing the old fetches, which made v7 ~24s (worse than v6's 17s) and was the source of the wedge when clicking Analyze in Gap mode. v8 extends per_outcome_returns["overnight_gap"] with entry_dates_cc + entry_spots_cc + entry_spots_oc + metric_vals so the precomputed gap row (~12-13 MB) covers EVERY Gap-mode view including the flat trade table — no trade_meta dependency anywhere. v7 cache_keys are unreachable on read (different salt). One-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 9  # v9 (Group 3b): for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5048,6 +5048,68 @@ def _rolling_ic_worker(task):
     return outcome_idx, result, _time.perf_counter() - _t0
 
 
+def _assignments_from_is_bins(
+    rows: list[dict], metric: str, anchor_outcome: str,
+    n_bins: int, bin20_lookup: dict,
+):
+    """v9 (Group 3b): build the bundle's bin assignments from is_bins
+    instead of running InSampleAssigner. Mirrors the legacy assigner's
+    IS+ALL semantics:
+
+      - Outcome-anchor null/NaN filter (matches `_parse_rows`)
+      - Metric null/NaN filter (matches `_parse_rows`)
+      - bin20 looked up by (ticker, trade_date) — rows absent from
+        is_bins are dropped (rare; only the most recent rows where
+        the bin table hasn't been rebuilt yet)
+      - Per-ticker thinning at n_t >= n_bins (matches
+        `_bucket_pairs_per_ticker` exclusion)
+      - Row order preserved from `rows` (= (ticker, trade_date) per the
+        bundle SQL ORDER BY), so trade_id assignment in the downstream
+        trade_meta build is stable.
+    """
+    from app.routers.row_compute import RowAssignment as _RA
+
+    # Pass 1: filter + lookup, collect candidates and per-ticker counts.
+    candidates: list = []
+    tkr_counts: dict = defaultdict(int)
+    for r in rows:
+        tkr = r.get("ticker")
+        d = r.get("trade_date")
+        d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        xv = r.get(metric)
+        yv = r.get(anchor_outcome)
+        if xv is None or yv is None:
+            continue
+        try:
+            xf, yf = float(xv), float(yv)
+        except (ValueError, TypeError):
+            continue
+        if math.isnan(xf) or math.isnan(yf):
+            continue
+        b20 = bin20_lookup.get((tkr, d_str))
+        if b20 is None or b20 <= 0:
+            continue
+        candidates.append((tkr, d_str, xf, yf, int(b20)))
+        tkr_counts[tkr] += 1
+
+    # Pass 2: emit assignments only for tickers meeting the thinning
+    # threshold. Insufficient-history rows are simply skipped — the
+    # downstream loop already filters on `a.bin is not None`, so omitting
+    # them is equivalent to emitting RowAssignments with bin=None and
+    # cheaper.
+    out: list = []
+    for (tkr, d_str, xf, yf, b20) in candidates:
+        if tkr_counts[tkr] < n_bins:
+            continue
+        out.append(_RA(
+            ticker=tkr, trade_date=d_str, metric_name=metric,
+            metric_value=xf, n_bins=n_bins, bin=b20,
+            outcome_col=anchor_outcome, forward_return=yf,
+            dropped_reason=None,
+        ))
+    return out
+
+
 def _compute_analyze_bundle_sync(
     rows: list[dict],
     metric: str,
@@ -5058,6 +5120,7 @@ def _compute_analyze_bundle_sync(
     n_bins: int = 20,
     _measure: bool = False,
     _parallel_rolling_ic: bool = False,
+    bin20_lookup: Optional[dict] = None,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -5143,22 +5206,35 @@ def _compute_analyze_bundle_sync(
               f"(rows={len(rows)}, tickers={len(by_tkr_dates)}, "
               f"close_lookup_entries={len(close_by_tkr_date)})")
 
-    # ── 2. Run Assigner once (anchor selected above) ──────────────────────
-    spec = make_spec(
-        walk_forward=(mode == "walk_forward"),
-        cutoff_date=cutoff_date if mode == "train_test" else None,
-    )
-    assigner = ASSIGNERS[spec.kind](spec)
-    if _measure: _t_fit = _tick()
-    state = assigner.fit(rows, metric, n_bins, is_all)
-    if _measure:
-        _t_assign_start = _tick()
-        print(f"[SHARED] assigner_fit={_t_assign_start - _t_fit:.3f}s  "
-              f"(spec.kind={spec.kind})")
-    assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
-    if _measure:
-        print(f"[SHARED] assigner_assign={_tick() - _t_assign_start:.3f}s  "
-              f"(assignments={len(assignments)})")
+    # ── 2. Resolve bin assignments ────────────────────────────────────────
+    # v9 (Group 3b): IS+ALL reads bin20 from is_bins via the bin20_lookup
+    # threaded in by the async caller. WF/TT still call the on-the-fly
+    # Assigner — same mode boundary as Group 3a. Single-ticker bundles
+    # also use the Assigner (bin20_lookup is None on that path).
+    if is_all and mode == "in_sample" and bin20_lookup is not None:
+        if _measure: _t_assign_start = _tick()
+        assignments = _assignments_from_is_bins(
+            rows, metric, anchor_outcome, n_bins, bin20_lookup,
+        )
+        if _measure:
+            print(f"[SHARED] assignments_from_is_bins={_tick() - _t_assign_start:.3f}s  "
+                  f"(assignments={len(assignments)})")
+    else:
+        spec = make_spec(
+            walk_forward=(mode == "walk_forward"),
+            cutoff_date=cutoff_date if mode == "train_test" else None,
+        )
+        assigner = ASSIGNERS[spec.kind](spec)
+        if _measure: _t_fit = _tick()
+        state = assigner.fit(rows, metric, n_bins, is_all)
+        if _measure:
+            _t_assign_start = _tick()
+            print(f"[SHARED] assigner_fit={_t_assign_start - _t_fit:.3f}s  "
+                  f"(spec.kind={spec.kind})")
+        assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
+        if _measure:
+            print(f"[SHARED] assigner_assign={_tick() - _t_assign_start:.3f}s  "
+                  f"(assignments={len(assignments)})")
 
     # ── 3. Build trade_meta from valid assignments ────────────────────────
     # v5: entry fields are anchored. OC outcomes enter at open of T;
@@ -5661,9 +5737,26 @@ async def _compute_analyze_bundle_bg(
                 "error":  "no_data_for_ticker_metric",
             }
             return
+        # v9 (Group 3b): for IS+ALL prefetch bin20 from is_bins so the
+        # sync compute uses stored bins instead of computing on the fly.
+        # WF/TT fall through to the Assigner (bin20_lookup stays None).
+        bin20_lookup: Optional[dict] = None
+        if mode == "in_sample":
+            bin_sql = (
+                f'SELECT ticker, trade_date, bin20_{metric} AS bin_20 '
+                f'FROM is_bins WHERE bin20_{metric} > 0'
+            )
+            async with pool.acquire() as conn:
+                bin_rows = await conn.fetch(bin_sql, timeout=60)
+            bin20_lookup = {}
+            for r in bin_rows:
+                d = r['trade_date']
+                d_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
+                bin20_lookup[(r['ticker'], d_str)] = r['bin_20']
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
+            bin20_lookup=bin20_lookup,
         )
 
         # Split the bundle into the 3 storage layers. trade_meta and
