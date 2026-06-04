@@ -525,7 +525,162 @@ async def analyze(
     _max_trade_date: str = ""   # set after each branch's DB fetch; stored in cache for staleness
 
     # ── Data fetch & bucketing ────────────────────────────────────────────
-    if is_all:
+    # ── v10 Group 3a — ALL+IS reads bin from is_bins ─────────────────────
+    # JOIN preserves outcome-validity (Group 1 verified +512 inflation
+    # without this filter). Combined fetch: data fields + bin20 in ONE
+    # round-trip, no separate is_bins query.
+    #
+    # Display granularity: legacy /analyze emits BOTH 10-bin (decile_stats,
+    # buckets) and 20-bin (decile_stats_20, trade_calendar.decile20). The
+    # 10-bin is derived from bin20 via `((bin20 - 1) // 2) + 1`, which is
+    # mathematically identical to a direct 10-bin per-ticker rank for every
+    # rank/n_t (verified in Group 1's aggregation math). The 20-bin is
+    # is_bins's bin20 directly.
+    #
+    # Per-ticker thinning matches legacy exactly:
+    #   - 10-bin: tickers with < 10 valid rows excluded entirely
+    #     (`_bucket_pairs_per_ticker` excludes tickers below the threshold).
+    #   - 20-bin: tickers with 10..19 rows get `decile20 = 0` sentinel
+    #     (legacy semantic; downstream consumers check for the 0 sentinel).
+    #
+    # WF and TT use the existing Assigner path below — same mode boundary
+    # as Groups 1 and 2.
+    if is_all and spec.kind == "in_sample":
+        join_sql = (
+            f"SELECT df.ticker, df.trade_date, "
+            f"  df.{metric}, df.{outcome}, "
+            f"  df.spot_co, df.spot_pc, "
+            f"  ib.bin20_{metric} AS bin_20 "
+            f"FROM daily_features df "
+            f"JOIN is_bins ib USING (ticker, trade_date) "
+            f"WHERE ib.bin20_{metric} > 0 "
+            f"  AND df.{outcome} IS NOT NULL"
+            f"{date_conditions} "
+            f"ORDER BY df.ticker, df.trade_date"
+        )
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(join_sql, *params)
+        row_dicts = [dict(r) for r in rows]
+        if row_dicts:
+            _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
+        _tlog(f'ALL+IS is_bins JOIN fetch ({len(row_dicts)} rows)')
+
+        # Build by_ticker + spot lookup + bin20 lookup in one pass.
+        # Same null/NaN guards as the legacy ALL path.
+        by_ticker: dict = defaultdict(list)
+        all_open_by_tkr_date: dict = {}
+        bin20_lookup: dict = {}
+        for r in row_dicts:
+            xv, yv = r.get(metric), r.get(outcome)
+            if xv is None or yv is None:
+                continue
+            try:
+                xf, yf = float(xv), float(yv)
+            except (ValueError, TypeError):
+                continue
+            if math.isnan(xf) or math.isnan(yf):
+                continue
+            by_ticker[r['ticker']].append((xf, yf, r['trade_date'], r['ticker']))
+            bin20_lookup[(r['ticker'], r['trade_date'])] = r['bin_20']
+            if r.get('spot_co') is not None:
+                try:
+                    all_open_by_tkr_date[(r['ticker'], str(r['trade_date']))] = round(float(r['spot_co']), 2)
+                except (ValueError, TypeError):
+                    pass
+
+        # Per-ticker thinning + bin derivation. Mirrors the legacy
+        # `_bucket_pairs_per_ticker` exclusion semantics:
+        #   n_t < 10 → ticker excluded entirely (no rows emitted).
+        #   10 ≤ n_t < 20 → rows emitted with bin10 set, bin20 = 0 sentinel.
+        #   n_t ≥ 20 → both bin10 and bin20 set from is_bins.
+        valid_a10: list = []
+        for tkr, ps in by_ticker.items():
+            n_t = len(ps)
+            if n_t < 10:
+                continue
+            bin20_sentinel = (n_t < 20)
+            for xf, yf, td, _ in ps:
+                bin20 = bin20_lookup.get((tkr, td))
+                if bin20 is None:
+                    continue
+                bin10 = ((bin20 - 1) // 2) + 1
+                valid_a10.append({
+                    "ticker":         tkr,
+                    "trade_date":     td,
+                    "metric_value":   xf,
+                    "forward_return": yf,
+                    "bin10":          bin10,
+                    "bin20":          0 if bin20_sentinel else bin20,
+                })
+
+        # Legacy in_sample ALL pairs iteration order:
+        # sort by (trade_date, bin10, ticker, metric_value).
+        valid_a10.sort(key=lambda a: (a['trade_date'], a['bin10'], a['ticker'], a['metric_value']))
+
+        pairs          = []
+        pairs_decile   = []
+        pairs_decile20 = []
+        buckets        = [[] for _ in range(10)]
+        buckets_20_all = [[] for _ in range(20)]
+        for a in valid_a10:
+            pair = (a['metric_value'], a['forward_return'], a['trade_date'], a['ticker'])
+            b10 = a['bin10']
+            b20 = a['bin20']
+            pairs.append(pair)
+            pairs_decile.append(b10)
+            pairs_decile20.append(b20)
+            buckets[b10 - 1].append(pair)
+            if b20 > 0:
+                buckets_20_all[b20 - 1].append(pair)
+
+        # Legacy in_sample bucket ordering: each bucket sorted by (ticker, x).
+        sort_key = lambda p: (p[3], p[0])
+        for b in range(10):
+            buckets[b].sort(key=sort_key)
+        for b in range(20):
+            buckets_20_all[b].sort(key=sort_key)
+
+        wf_dropped = 0  # in_sample has no warmup gate
+        decile_stats_20 = _compute_bucket_stats(buckets_20_all)
+        _tlog('ALL+IS bucket_setup + decile_stats_20')
+        n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
+
+        # ── Spot calendar (same logic as the legacy ALL path) ──────────────
+        spot_series = []
+        all_spot_dates = []
+        open_by_date = {}
+        close_by_date = {}
+        tickers_in_data = list(by_ticker.keys())
+        async with pool.acquire() as conn:
+            all_spot_rows = await conn.fetch(
+                "SELECT ticker, trade_date, spot_pc FROM daily_features "
+                "WHERE ticker = ANY($1) AND spot_co IS NOT NULL "
+                "ORDER BY ticker, trade_date", tickers_in_data)
+        _all_dates_by_tkr: dict = defaultdict(list)
+        _pc_by_tkr_date: dict = {}
+        for r in all_spot_rows:
+            tkr = r['ticker']; d = str(r['trade_date'])
+            _all_dates_by_tkr[tkr].append(d)
+            if r['spot_pc'] is not None:
+                try:
+                    _pc_by_tkr_date[(tkr, d)] = round(float(r['spot_pc']), 2)
+                except (ValueError, TypeError):
+                    pass
+        all_dates_list_by_tkr: dict = dict(_all_dates_by_tkr)
+        all_date_idx_by_tkr: dict = {tkr: {d: i for i, d in enumerate(dates)}
+                                      for tkr, dates in _all_dates_by_tkr.items()}
+        all_close_by_tkr: dict = {}
+        for tkr, dates in _all_dates_by_tkr.items():
+            closes = {}
+            for i in range(len(dates) - 1):
+                npc = _pc_by_tkr_date.get((tkr, dates[i + 1]))
+                if npc is not None:
+                    closes[dates[i]] = npc
+            all_close_by_tkr[tkr] = closes
+        _tlog('ALL+IS spot calendar')
+
+    elif is_all:
+        # ── WF / TT: existing ALL Assigner path (unchanged) ──────────────
         # Per-ticker normalization: fetch all tickers, decile each independently
         async with pool.acquire() as conn:
             rows = await conn.fetch(
