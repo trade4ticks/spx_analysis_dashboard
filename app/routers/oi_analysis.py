@@ -588,17 +588,13 @@ async def analyze(
                 except (ValueError, TypeError):
                     pass
 
-        # Per-ticker thinning + bin derivation. Mirrors the legacy
-        # `_bucket_pairs_per_ticker` exclusion semantics:
-        #   n_t < 10 → ticker excluded entirely (no rows emitted).
-        #   10 ≤ n_t < 20 → rows emitted with bin10 set, bin20 = 0 sentinel.
-        #   n_t ≥ 20 → both bin10 and bin20 set from is_bins.
+        # No per-ticker thinning. The only row filter is the stored
+        # `bin20 > 0` (already applied at the SQL JOIN's WHERE clause,
+        # which excludes null-metric rows). Every ticker that has rows
+        # surviving the JOIN gets its stored bin20 emitted as-is —
+        # the dashboard does no `n_t < N` exclusion of its own.
         valid_a10: list = []
         for tkr, ps in by_ticker.items():
-            n_t = len(ps)
-            if n_t < 10:
-                continue
-            bin20_sentinel = (n_t < 20)
             for xf, yf, td, _ in ps:
                 bin20 = bin20_lookup.get((tkr, td))
                 if bin20 is None:
@@ -610,7 +606,7 @@ async def analyze(
                     "metric_value":   xf,
                     "forward_return": yf,
                     "bin10":          bin10,
-                    "bin20":          0 if bin20_sentinel else bin20,
+                    "bin20":          bin20,
                 })
 
         # Legacy in_sample ALL pairs iteration order:
@@ -630,8 +626,10 @@ async def analyze(
             pairs_decile.append(b10)
             pairs_decile20.append(b20)
             buckets[b10 - 1].append(pair)
-            if b20 > 0:
-                buckets_20_all[b20 - 1].append(pair)
+            # No more bin20=0 sentinel — every row from valid_a10 carries a
+            # real stored bin20, so the legacy `if b20 > 0` guard is vacuous
+            # and removed along with the sentinel.
+            buckets_20_all[b20 - 1].append(pair)
 
         # Legacy in_sample bucket ordering: each bucket sorted by (ticker, x).
         sort_key = lambda p: (p[3], p[0])
@@ -643,7 +641,9 @@ async def analyze(
         wf_dropped = 0  # in_sample has no warmup gate
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         _tlog('ALL+IS bucket_setup + decile_stats_20')
-        n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
+        # No per-ticker thinning — count every ticker that contributed any
+        # valid rows. The legacy `if len(ps) >= 10` filter is removed.
+        n_tickers_used = len(by_ticker)
 
         # ── Spot calendar (same logic as the legacy ALL path) ──────────────
         spot_series = []
@@ -4460,7 +4460,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 9  # v9 (Group 3b): for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 10  # v10 (thinning removal): /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5069,9 +5069,10 @@ def _assignments_from_is_bins(
     """
     from app.routers.row_compute import RowAssignment as _RA
 
-    # Pass 1: filter + lookup, collect candidates and per-ticker counts.
+    # Filter + bin20 lookup. No per-ticker thinning, so no count
+    # tracking — every row that passes the metric/outcome/NaN
+    # guards AND has a stored `bin20 > 0` becomes a candidate.
     candidates: list = []
-    tkr_counts: dict = defaultdict(int)
     for r in rows:
         tkr = r.get("ticker")
         d = r.get("trade_date")
@@ -5090,17 +5091,14 @@ def _assignments_from_is_bins(
         if b20 is None or b20 <= 0:
             continue
         candidates.append((tkr, d_str, xf, yf, int(b20)))
-        tkr_counts[tkr] += 1
 
-    # Pass 2: emit assignments only for tickers meeting the thinning
-    # threshold. Insufficient-history rows are simply skipped — the
-    # downstream loop already filters on `a.bin is not None`, so omitting
-    # them is equivalent to emitting RowAssignments with bin=None and
-    # cheaper.
+    # No per-ticker thinning. The only row filter is the stored
+    # `bin20 > 0` (applied above). Every candidate becomes an emitted
+    # assignment with its stored bin. The legacy `tkr_counts[tkr] <
+    # n_bins` gate is removed — the dashboard does no `n_t < N`
+    # exclusion of its own.
     out: list = []
     for (tkr, d_str, xf, yf, b20) in candidates:
-        if tkr_counts[tkr] < n_bins:
-            continue
         out.append(_RA(
             ticker=tkr, trade_date=d_str, metric_name=metric,
             metric_value=xf, n_bins=n_bins, bin=b20,

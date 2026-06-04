@@ -1768,26 +1768,32 @@ def _compute_all_bins_fast(rows: list, feature_cols: list, outcome_col: str,
         all_ranks: list = []
         all_outs:  list = []
         if is_all:
+            # No per-ticker thinning. Every ticker that has at least
+            # one (metric, outcome) pair contributes its full per-ticker
+            # rank vector. The legacy `if m.sum() < n_bins: continue`
+            # gate is removed.
             for idxs in ticker_indices:
                 vals = col[idxs]
                 outs = outcomes[idxs]
                 m = ~np.isnan(vals) & ~np.isnan(outs)
-                if m.sum() < n_bins:
-                    continue
+                n_t = int(m.sum())
+                if n_t == 0:
+                    continue   # nothing to rank — same as legacy when all-NaN
                 v_clean = vals[m]
                 o_clean = outs[m]
                 order = np.argsort(v_clean)
-                n_t = len(v_clean)
                 all_ranks.append(np.arange(n_t) / n_t)
                 all_outs.append(o_clean[order])
         else:
+            # Single ticker: same "no thinning" rule. Only the all-NaN
+            # case is skipped (nothing to rank).
             m = ~np.isnan(col) & ~np.isnan(outcomes)
-            if m.sum() < n_bins:
+            n_t = int(m.sum())
+            if n_t == 0:
                 continue
             v_clean = col[m]
             o_clean = outcomes[m]
             order = np.argsort(v_clean)
-            n_t = len(v_clean)
             all_ranks.append(np.arange(n_t) / n_t)
             all_outs.append(o_clean[order])
 
