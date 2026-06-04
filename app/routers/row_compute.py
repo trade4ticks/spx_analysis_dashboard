@@ -774,7 +774,11 @@ def assign_secondary_bin_stats(
     if spec.kind == "train_test":
         # Fit on the full row cache so the assigner sees pre-cutoff training
         # history; assign only the test-window rows (rows_chrono).
-        import numpy as np
+        # NOTE: do NOT re-import numpy here — a local `import ... as np`
+        # makes Python treat `np` as a local for the entire function body
+        # and shadows the module-level `import numpy as np` (line 57),
+        # which makes `np.mean(...)` in the in_sample branch above raise
+        # UnboundLocalError. Use the module-level alias.
         fit_rows = all_rows if all_rows is not None else rows_chrono
         assigner = TrainTestAssigner(spec)
         state = assigner.fit(fit_rows, metric, n_bins, is_all)
@@ -851,54 +855,21 @@ def _in_sample_bin_map(
     of which downstream cares about outcome.
     """
     if bin20_by_key is not None and is_all:
-        import sys as _sys_g4
-        _g4_log = (metric.startswith(("oi_", "iv_")) or metric in {})  # log only first few to control volume
-        # Always log for the first metric we see in this process — enough
-        # to catch a global key-format drift without spamming 108 lines.
-        global _G4_BIN_MAP_LOGGED
-        try:
-            _G4_BIN_MAP_LOGGED
-        except NameError:
-            _G4_BIN_MAP_LOGGED = 0
-        if _G4_BIN_MAP_LOGGED < 3:
-            print(f"[G4][bin_map] metric={metric} n_bins={n_bins} is_all={is_all} "
-                  f"rows={len(rows)} bin20_by_key_size={len(bin20_by_key)}",
-                  file=_sys_g4.stderr, flush=True)
-            if bin20_by_key:
-                sample_bk = list(bin20_by_key.items())[:3]
-                print(f"[G4][bin_map]   sample bin20_by_key keys: "
-                      f"{[(k, type(k[0]).__name__, type(k[1]).__name__, v) for k, v in sample_bk]}",
-                      file=_sys_g4.stderr, flush=True)
-            if rows:
-                r0 = rows[0]
-                tkr0 = str(r0.get("ticker", ""))
-                td0  = r0.get("trade_date", "")
-                dk0  = td0.isoformat() if hasattr(td0, "isoformat") else str(td0)
-                print(f"[G4][bin_map]   sample row[0] computed key: "
-                      f"({tkr0!r}, {dk0!r}) tkr_type={type(tkr0).__name__} "
-                      f"dkey_type={type(dk0).__name__}",
-                      file=_sys_g4.stderr, flush=True)
-                # Direct hit/miss test
-                hit_test = bin20_by_key.get((tkr0, dk0))
-                print(f"[G4][bin_map]   row[0] lookup: {'HIT b20=' + str(hit_test) if hit_test is not None else 'MISS'}",
-                      file=_sys_g4.stderr, flush=True)
-        out: dict = {}
-        hits = 0
-        for r in rows:
-            tkr = str(r.get("ticker", ""))
-            td  = r.get("trade_date", "")
-            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-            b20 = bin20_by_key.get((tkr, d_key))
-            if b20 is None or b20 <= 0:
-                continue
-            hits += 1
-            out[(tkr, d_key)] = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
-        if _G4_BIN_MAP_LOGGED < 3:
-            print(f"[G4][bin_map]   FINAL hits={hits} out_size={len(out)} "
-                  f"(of {len(rows)} rows, {len(bin20_by_key)} stored bins)",
-                  file=_sys_g4.stderr, flush=True)
-            _G4_BIN_MAP_LOGGED += 1
-        return out
+        # Iterate the FILTERED bin20 dict, not all_rows. `bin20_by_key`
+        # was built upstream from the filter-set rows in is_bins and
+        # already has only the entries where bin20 > 0. So no nested
+        # row scan, no hash lookups against the full universe: this
+        # call's work is O(filter_size), not O(len(rows)). For a narrow
+        # primary selection (~20K), this is ~10× cheaper than iterating
+        # all_rows (~220K). For the no-selection case the two are equal
+        # in count, but the dict-comp is still measurably faster than
+        # the row-loop because there's no per-iteration `.get("ticker")`
+        # / `hasattr(..., "isoformat")` / hash-into-a-dict-from-a-tuple
+        # work — the keys are already tuples in the right format.
+        return {
+            key: min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+            for key, b20 in bin20_by_key.items()
+        }
     n_bins = max(2, min(20, n_bins))
 
     def _valid(r):

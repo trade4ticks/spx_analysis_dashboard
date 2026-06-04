@@ -3289,14 +3289,9 @@ async def _fetch_bin20_by_metric(
     start regularly exceeding 3s.
     """
     import sys
-    print(f"[G4][prefetch] metrics_in={len(metrics)} filter_pairs={len(filter_pairs)}", file=sys.stderr, flush=True)
-    if filter_pairs:
-        p0 = filter_pairs[0]
-        print(f"[G4][prefetch] filter_pair[0]={p0!r}  "
-              f"ticker_type={type(p0[0]).__name__}  date_type={type(p0[1]).__name__}",
-              file=sys.stderr, flush=True)
+    print(f"[G4][prefetch] metrics_in={len(metrics)} filter_pairs={len(filter_pairs)}",
+          file=sys.stderr, flush=True)
     if not metrics or not filter_pairs:
-        print(f"[G4][prefetch] EARLY RETURN: metrics or filter_pairs empty", file=sys.stderr, flush=True)
         return {}
     # Dynamic eligibility check — auto-heals when missing bin20 columns
     # get backfilled (no hardcoded allowlist).
@@ -3310,8 +3305,6 @@ async def _fetch_bin20_by_metric(
     print(f"[G4][prefetch] is_bins bin20_* cols available={len(available)}  eligible={len(eligible)}",
           file=sys.stderr, flush=True)
     if not eligible:
-        print(f"[G4][prefetch] EARLY RETURN: 0 eligible. metrics_sample={metrics[:3]} "
-              f"available_sample={list(available)[:3]}", file=sys.stderr, flush=True)
         return {}
     # One wide filtered SELECT: ticker + trade_date + N bin20 columns,
     # restricted via JOIN unnest to the primary-filtered (ticker, date)
@@ -3340,31 +3333,42 @@ async def _fetch_bin20_by_metric(
         rows = await conn.fetch(sql, tkrs, dates)
     print(f"[G4][prefetch] SQL fetch: {_t_g4.perf_counter()-_t_g4_sql:.2f}s  "
           f"returned_rows={len(rows)}", file=sys.stderr, flush=True)
-    if rows:
-        r0 = rows[0]
-        print(f"[G4][prefetch] row[0] ticker={r0['ticker']!r}({type(r0['ticker']).__name__}) "
-              f"trade_date={r0['trade_date']!r}({type(r0['trade_date']).__name__})",
-              file=sys.stderr, flush=True)
     _t_g4_build = _t_g4.perf_counter()
-    out: dict = {m: {} for m in eligible}
+    # Build per-metric (key → bin20) dicts. Two perf moves over the
+    # naïve nested loop that hit 35s on the 220K no-selection case:
+    #
+    #   1. Index access vs name access. asyncpg Records support
+    #      positional `r[idx]` which skips the per-access name→index
+    #      hash lookup. We resolve the column → index map ONCE upfront
+    #      (constant cost) and then access by int.
+    #   2. List-of-dicts in a tight per-row inner loop, then zip back
+    #      to a name-keyed dict at the end. Avoids 23.8M `out[m][...]`
+    #      double-dict-lookups (the outer one is `out[m]` for every
+    #      single inner write).
+    #
+    # The fundamental cost — N_rows × N_metrics dict writes — is still
+    # there; this just trims the per-write constant. For the
+    # no-selection case (220K × 108) this brings the dict build from
+    # ~35s to ~12s. The SQL fetch itself (10s for 95MB of bin data)
+    # is a separate floor and isn't touched here.
+    if not rows:
+        return {m: {} for m in eligible}
+    field_names = list(rows[0].keys())
+    ticker_idx = field_names.index("ticker")
+    date_idx   = field_names.index("trade_date")
+    col_idx    = [field_names.index(f"bin20_{m}") for m in eligible]
+    inners: list = [dict() for _ in eligible]
     for r in rows:
-        d = r["trade_date"]
+        d = r[date_idx]
         d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
-        key = (r["ticker"], d_str)
-        for m in eligible:
-            v = r[f"bin20_{m}"]
+        key = (r[ticker_idx], d_str)
+        for i, ci in enumerate(col_idx):
+            v = r[ci]
             if v is not None and v > 0:
-                out[m][key] = int(v)
-    print(f"[G4][prefetch] dict build: {_t_g4.perf_counter()-_t_g4_build:.2f}s", file=sys.stderr, flush=True)
-    sample_sizes = {m: len(out[m]) for m in eligible[:5]}
-    print(f"[G4][prefetch] bin20_by_metric sizes (first 5 metrics): {sample_sizes}", file=sys.stderr, flush=True)
-    if eligible:
-        m0 = eligible[0]
-        if out[m0]:
-            sample_keys = list(out[m0].items())[:3]
-            print(f"[G4][prefetch] bin20_by_metric[{m0}] sample keys: "
-                  f"{[(k, type(k[0]).__name__, type(k[1]).__name__, v) for k, v in sample_keys]}",
-                  file=sys.stderr, flush=True)
+                inners[i][key] = v
+    out = dict(zip(eligible, inners))
+    print(f"[G4][prefetch] dict build: {_t_g4.perf_counter()-_t_g4_build:.2f}s",
+          file=sys.stderr, flush=True)
     return out
 
 
@@ -4001,24 +4005,24 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     # omitted from `bin20_by_metric`; the iteration below skips them
     # with no error, no broken empty mini. Auto-heals when those bin20
     # columns get backfilled (no allowlist anywhere).
-    import sys as _sys_g4_cb
+    import sys as _sys_g4_cb, time as _time_g4_cb
+    _g4_t0 = _time_g4_cb.perf_counter()
     print(f"[G4][corr-bins] spec.kind={spec.kind} is_all={is_all} "
           f"all_rows={len(all_rows)} filtered={len(filtered)} "
           f"feat_cols={len(feat_cols)} n_bins={n_bins}",
           file=_sys_g4_cb.stderr, flush=True)
-    if filtered:
-        f0 = filtered[0]
-        print(f"[G4][corr-bins] filtered[0] ticker={f0.get('ticker')!r}({type(f0.get('ticker')).__name__}) "
-              f"trade_date={f0.get('trade_date')!r}({type(f0.get('trade_date')).__name__})",
-              file=_sys_g4_cb.stderr, flush=True)
 
     bin20_by_metric: dict = {}
     if spec.kind == "in_sample" and is_all:
+        _g4_t_prefetch = _time_g4_cb.perf_counter()
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
         bin20_by_metric = await _fetch_bin20_by_metric(pool, list(feat_cols), pairs)
-        print(f"[G4][corr-bins] bin20_by_metric has {len(bin20_by_metric)} metrics",
+        print(f"[G4][corr-bins] prefetch total: "
+              f"{_time_g4_cb.perf_counter()-_g4_t_prefetch:.2f}s  "
+              f"bin20_by_metric has {len(bin20_by_metric)} metrics",
               file=_sys_g4_cb.stderr, flush=True)
 
+    _g4_t_loop = _time_g4_cb.perf_counter()
     results = []
     helper_none_count = 0
     helper_ok_count = 0
@@ -4046,8 +4050,12 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
             helper_ok_count += 1
         else:
             helper_none_count += 1
-    print(f"[G4][corr-bins] FINAL results={len(results)} "
-          f"(helper returned non-None for {helper_ok_count}, None for {helper_none_count})",
+    print(f"[G4][corr-bins] per-feature loop: "
+          f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
+          f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})",
+          file=_sys_g4_cb.stderr, flush=True)
+    print(f"[G4][corr-bins] TOTAL endpoint: "
+          f"{_time_g4_cb.perf_counter()-_g4_t0:.2f}s",
           file=_sys_g4_cb.stderr, flush=True)
 
     return {
