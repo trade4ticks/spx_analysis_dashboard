@@ -994,10 +994,11 @@ async def analyze(
     # ── Correlations ─────────────────────────────────────────────────────
     if is_all and by_ticker:
         # Average per-ticker Spearman/Pearson (cross-ticker pooling is misleading)
+        # No per-ticker `len(tkr_pairs) < 20` floor — every ticker that has
+        # variance on both axes contributes to the average. The std > 0
+        # check below still skips degenerate constant series.
         ticker_corrs = []
         for tkr_pairs in by_ticker.values():
-            if len(tkr_pairs) < 20:
-                continue
             tx = np.array([p[0] for p in tkr_pairs])
             ty = np.array([p[1] for p in tkr_pairs])
             if tx.std() > 0 and ty.std() > 0:
@@ -1123,8 +1124,10 @@ async def analyze(
             yr_buckets = _bucket_pairs_per_ticker(yr_by_ticker, 10)
             top_ys = [p[1] for p in yr_buckets[9]]
             bot_ys = [p[1] for p in yr_buckets[0]]
-            if len(top_ys) + len(bot_ys) < 20:
-                continue
+            # No `len(top_ys)+len(bot_ys) < 20` floor — every year that
+            # produced any top-or-bottom-decile rows contributes a bar.
+            # If a year is sparse the bar's `top_n`/`bot_n` show that
+            # directly in the tooltip; the user judges from the raw n.
             t_avg = float(np.mean(top_ys)) if top_ys else 0.0
             b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
             top_beats = t_avg > b_avg
@@ -1138,8 +1141,9 @@ async def analyze(
         for yr in sorted(by_year):
             yr_pairs = [(x, y, d) for x, y, d in pairs
                         if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
-            if len(yr_pairs) < 30:
-                continue
+            # No single-ticker `len(yr_pairs) < 30` floor — same principle
+            # as the ALL-mode branch above. The bar shows the year's actual
+            # top/bottom n; user reads it directly.
             yr_buckets = _bucket_pairs(yr_pairs, 10)
             top_ys = [p[1] for p in yr_buckets[9]] if yr_buckets[9] else []
             bot_ys = [p[1] for p in yr_buckets[0]] if yr_buckets[0] else []
@@ -1159,10 +1163,12 @@ async def analyze(
 
     # ── Half-sample stability ─────────────────────────────────────────────
     if is_all and by_ticker:
+        # No per-ticker `len(tkr_pairs) < 20` floor — every ticker
+        # contributes a stability vote. Tickers with very few rows give
+        # noisy individual votes, but the population average over a curated
+        # universe is the right number to look at and the user can decide.
         ticker_stable = []
         for tkr_pairs in by_ticker.values():
-            if len(tkr_pairs) < 20:
-                continue
             tkr_sorted = sorted(tkr_pairs, key=lambda p: p[2])
             mid_t = len(tkr_sorted) // 2
             h1 = _bucket_pairs(tkr_sorted[:mid_t], 10)
@@ -1824,12 +1830,18 @@ async def heatmap_2d(
                 return {"error": f"Insufficient data after is_bins filter: {total_n_is} rows"}
 
             def _build_grid_is(cell_data):
+                # No `len(rets) >= 5` cell suppression. Every cell with at
+                # least one row emits its avg_ret + win_rate + n. The
+                # frontend renders a hatched-gray background for cells
+                # below a user-controlled n-threshold (default 50, via
+                # slider) AND excludes them from the gradient-scale
+                # computation. Cells with n=0 stay as None — truly empty.
                 g = []
                 for iy_ in range(bins):
                     row_out = []
                     for ix_ in range(bins):
                         rets = cell_data[iy_][ix_]
-                        if len(rets) >= 5:
+                        if rets:
                             a = np.array(rets)
                             row_out.append({
                                 "avg_ret":  round(float(a.mean()), 6),
@@ -1921,12 +1933,15 @@ async def heatmap_2d(
             return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
 
         def _build_grid(cell_data):
+            # Same change as `_build_grid_is` above: no `len(rets) >= 5`
+            # cell suppression. Frontend handles the visibility threshold
+            # via the n-slider (default 50).
             g = []
             for iy in range(bins):
                 r = []
                 for ix in range(bins):
                     rets = cell_data[iy][ix]
-                    if len(rets) >= 5:
+                    if rets:
                         a = np.array(rets)
                         r.append({
                             "avg_ret":  round(float(a.mean()), 6),
@@ -2163,8 +2178,10 @@ async def metric_bins_1d(
             buckets_data[bin_disp].append((fv, fov))
             total_n += 1
 
-        if total_n < 20:
-            return {"error": f"Insufficient data after is_bins filter: {total_n} rows"}
+        # No `total_n < 20` panel-block. The All-Ticker Metric Bins chart
+        # renders against whatever survives the is_bins filter; empty
+        # buckets show as None and the populated ones show their stats.
+        # User reads the n directly off the bars.
 
         result = []
         for i in range(bins):
@@ -2247,10 +2264,10 @@ async def metric_bins_1d(
         buckets_data[a.bin - 1].append((a.metric_value, a.forward_return))
         total_n += 1
 
-    if total_n < 20:
-        if is_all:
-            return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
-        return {"error": f"Insufficient data: {total_n} rows"}
+    # Gate H also applies to this WF/TT / single-ticker legacy on-the-fly
+    # path: no `total_n < 20` panel-block. Whatever bins populated render
+    # their stats; empty bins show as None and the user reads `n` off the
+    # populated bars directly.
 
     # Aggregate canonical buckets to display granularity. Each display bin
     # i collects trades from canonical sub-bins [i*g .. (i+1)*g - 1].
@@ -2956,13 +2973,14 @@ def _sec_score_metrics(
         weighted_spread = raw_spread * w
 
         # Breadth: per-ticker top-third vs bottom-third direction agreement.
+        # No per-ticker `len(tkr_vals) < 10` floor (never fires on dense
+        # data). The `n_qualifying < 3` cross-section guard below stays —
+        # you can't compute a cross-section on fewer than 3 tickers.
         if is_all and by_tkr:
             sign_global  = 1 if weighted_spread >= 0 else -1
             n_qualifying = 0
             n_agreeing   = 0
             for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < 10:
-                    continue
                 n_qualifying += 1
                 sorted_tkr = sorted(tkr_vals, key=lambda x: x[0])
                 t     = len(sorted_tkr)
@@ -3793,8 +3811,10 @@ async def secondary_detail(req: SecDetailReq, pool=Depends(get_oi_pool)):
         req.selected_primary_bins, is_all, req.filtered_dates,
     )
 
-    if len(filtered) < n_bins * 2:
-        return {"error": "insufficient_data"}
+    # No `len(filtered) < n_bins * 2` panel-block. The drill-in renders
+    # against whatever the primary filter passes through; if a bucket is
+    # empty its `n` is 0 in the response and the chart shows it that way.
+    # Better than a brick-wall error message.
 
     # Group 4: for IS+ALL prefetch the secondary metric's stored bin20
     # over the primary-filtered (ticker, trade_date) set. Returns empty

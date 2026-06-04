@@ -206,12 +206,18 @@ async def get_firing(
             except (ValueError, TypeError):
                 continue
 
-        if len(valid) < 20:
+        # No `len(valid) < 20` row-block. The trigger row computes against
+        # whatever rows are available; if a bin has no rows it's reported
+        # as n=0 in the bins array. Sparse triggers still surface their
+        # firing decision instead of getting hidden behind an error.
+        if not valid:
+            # Truly no data — can't even compute a bin assignment. Keep the
+            # error row so the trigger doesn't silently vanish.
             results.append({
                 "trigger": dict(t),
-                "error": f"insufficient data (n={len(valid)})",
-                "firing": False,
-                "bins": [],
+                "error":   "no data",
+                "firing":  False,
+                "bins":    [],
             })
             continue
 
