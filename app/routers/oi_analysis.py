@@ -3288,7 +3288,15 @@ async def _fetch_bin20_by_metric(
     index now. Revisit if is_bins crosses ~1M rows or wide selections
     start regularly exceeding 3s.
     """
+    import sys
+    print(f"[G4][prefetch] metrics_in={len(metrics)} filter_pairs={len(filter_pairs)}", file=sys.stderr, flush=True)
+    if filter_pairs:
+        p0 = filter_pairs[0]
+        print(f"[G4][prefetch] filter_pair[0]={p0!r}  "
+              f"ticker_type={type(p0[0]).__name__}  date_type={type(p0[1]).__name__}",
+              file=sys.stderr, flush=True)
     if not metrics or not filter_pairs:
+        print(f"[G4][prefetch] EARLY RETURN: metrics or filter_pairs empty", file=sys.stderr, flush=True)
         return {}
     # Dynamic eligibility check — auto-heals when missing bin20 columns
     # get backfilled (no hardcoded allowlist).
@@ -3299,7 +3307,11 @@ async def _fetch_bin20_by_metric(
                  AND column_name LIKE 'bin20_%'""")
     available = {r["column_name"] for r in col_rows}
     eligible = [m for m in metrics if f"bin20_{m}" in available]
+    print(f"[G4][prefetch] is_bins bin20_* cols available={len(available)}  eligible={len(eligible)}",
+          file=sys.stderr, flush=True)
     if not eligible:
+        print(f"[G4][prefetch] EARLY RETURN: 0 eligible. metrics_sample={metrics[:3]} "
+              f"available_sample={list(available)[:3]}", file=sys.stderr, flush=True)
         return {}
     # One wide filtered SELECT: ticker + trade_date + N bin20 columns,
     # restricted via JOIN unnest to the primary-filtered (ticker, date)
@@ -3322,8 +3334,18 @@ async def _fetch_bin20_by_metric(
             dates.append(d)
         else:
             dates.append(_date_cls.fromisoformat(str(d)))
+    import time as _t_g4
+    _t_g4_sql = _t_g4.perf_counter()
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, tkrs, dates)
+    print(f"[G4][prefetch] SQL fetch: {_t_g4.perf_counter()-_t_g4_sql:.2f}s  "
+          f"returned_rows={len(rows)}", file=sys.stderr, flush=True)
+    if rows:
+        r0 = rows[0]
+        print(f"[G4][prefetch] row[0] ticker={r0['ticker']!r}({type(r0['ticker']).__name__}) "
+              f"trade_date={r0['trade_date']!r}({type(r0['trade_date']).__name__})",
+              file=sys.stderr, flush=True)
+    _t_g4_build = _t_g4.perf_counter()
     out: dict = {m: {} for m in eligible}
     for r in rows:
         d = r["trade_date"]
@@ -3333,6 +3355,16 @@ async def _fetch_bin20_by_metric(
             v = r[f"bin20_{m}"]
             if v is not None and v > 0:
                 out[m][key] = int(v)
+    print(f"[G4][prefetch] dict build: {_t_g4.perf_counter()-_t_g4_build:.2f}s", file=sys.stderr, flush=True)
+    sample_sizes = {m: len(out[m]) for m in eligible[:5]}
+    print(f"[G4][prefetch] bin20_by_metric sizes (first 5 metrics): {sample_sizes}", file=sys.stderr, flush=True)
+    if eligible:
+        m0 = eligible[0]
+        if out[m0]:
+            sample_keys = list(out[m0].items())[:3]
+            print(f"[G4][prefetch] bin20_by_metric[{m0}] sample keys: "
+                  f"{[(k, type(k[0]).__name__, type(k[1]).__name__, v) for k, v in sample_keys]}",
+                  file=sys.stderr, flush=True)
     return out
 
 
@@ -3969,12 +4001,27 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     # omitted from `bin20_by_metric`; the iteration below skips them
     # with no error, no broken empty mini. Auto-heals when those bin20
     # columns get backfilled (no allowlist anywhere).
+    import sys as _sys_g4_cb
+    print(f"[G4][corr-bins] spec.kind={spec.kind} is_all={is_all} "
+          f"all_rows={len(all_rows)} filtered={len(filtered)} "
+          f"feat_cols={len(feat_cols)} n_bins={n_bins}",
+          file=_sys_g4_cb.stderr, flush=True)
+    if filtered:
+        f0 = filtered[0]
+        print(f"[G4][corr-bins] filtered[0] ticker={f0.get('ticker')!r}({type(f0.get('ticker')).__name__}) "
+              f"trade_date={f0.get('trade_date')!r}({type(f0.get('trade_date')).__name__})",
+              file=_sys_g4_cb.stderr, flush=True)
+
     bin20_by_metric: dict = {}
     if spec.kind == "in_sample" and is_all:
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
         bin20_by_metric = await _fetch_bin20_by_metric(pool, list(feat_cols), pairs)
+        print(f"[G4][corr-bins] bin20_by_metric has {len(bin20_by_metric)} metrics",
+              file=_sys_g4_cb.stderr, flush=True)
 
     results = []
+    helper_none_count = 0
+    helper_ok_count = 0
     for feat in feat_cols:
         # Group 4: skip features without a stored bin20 column. The 7
         # not-yet-populated features (iv_25d_call_30d et al.) fall into
@@ -3996,6 +4043,12 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
         )
         if r:
             results.append(r)
+            helper_ok_count += 1
+        else:
+            helper_none_count += 1
+    print(f"[G4][corr-bins] FINAL results={len(results)} "
+          f"(helper returned non-None for {helper_ok_count}, None for {helper_none_count})",
+          file=_sys_g4_cb.stderr, flush=True)
 
     return {
         "metrics":          results,

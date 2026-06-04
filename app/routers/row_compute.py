@@ -851,7 +851,39 @@ def _in_sample_bin_map(
     of which downstream cares about outcome.
     """
     if bin20_by_key is not None and is_all:
+        import sys as _sys_g4
+        _g4_log = (metric.startswith(("oi_", "iv_")) or metric in {})  # log only first few to control volume
+        # Always log for the first metric we see in this process — enough
+        # to catch a global key-format drift without spamming 108 lines.
+        global _G4_BIN_MAP_LOGGED
+        try:
+            _G4_BIN_MAP_LOGGED
+        except NameError:
+            _G4_BIN_MAP_LOGGED = 0
+        if _G4_BIN_MAP_LOGGED < 3:
+            print(f"[G4][bin_map] metric={metric} n_bins={n_bins} is_all={is_all} "
+                  f"rows={len(rows)} bin20_by_key_size={len(bin20_by_key)}",
+                  file=_sys_g4.stderr, flush=True)
+            if bin20_by_key:
+                sample_bk = list(bin20_by_key.items())[:3]
+                print(f"[G4][bin_map]   sample bin20_by_key keys: "
+                      f"{[(k, type(k[0]).__name__, type(k[1]).__name__, v) for k, v in sample_bk]}",
+                      file=_sys_g4.stderr, flush=True)
+            if rows:
+                r0 = rows[0]
+                tkr0 = str(r0.get("ticker", ""))
+                td0  = r0.get("trade_date", "")
+                dk0  = td0.isoformat() if hasattr(td0, "isoformat") else str(td0)
+                print(f"[G4][bin_map]   sample row[0] computed key: "
+                      f"({tkr0!r}, {dk0!r}) tkr_type={type(tkr0).__name__} "
+                      f"dkey_type={type(dk0).__name__}",
+                      file=_sys_g4.stderr, flush=True)
+                # Direct hit/miss test
+                hit_test = bin20_by_key.get((tkr0, dk0))
+                print(f"[G4][bin_map]   row[0] lookup: {'HIT b20=' + str(hit_test) if hit_test is not None else 'MISS'}",
+                      file=_sys_g4.stderr, flush=True)
         out: dict = {}
+        hits = 0
         for r in rows:
             tkr = str(r.get("ticker", ""))
             td  = r.get("trade_date", "")
@@ -859,7 +891,13 @@ def _in_sample_bin_map(
             b20 = bin20_by_key.get((tkr, d_key))
             if b20 is None or b20 <= 0:
                 continue
+            hits += 1
             out[(tkr, d_key)] = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+        if _G4_BIN_MAP_LOGGED < 3:
+            print(f"[G4][bin_map]   FINAL hits={hits} out_size={len(out)} "
+                  f"(of {len(rows)} rows, {len(bin20_by_key)} stored bins)",
+                  file=_sys_g4.stderr, flush=True)
+            _G4_BIN_MAP_LOGGED += 1
         return out
     n_bins = max(2, min(20, n_bins))
 
