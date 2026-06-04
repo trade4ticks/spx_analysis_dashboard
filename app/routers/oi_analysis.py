@@ -3958,6 +3958,13 @@ class CorrBinsReq(BaseModel):
     walk_forward: bool = False
     cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
     selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward / train_test mode)
+    # Fix A diff aid: when True, force the IS+ALL path through the legacy
+    # per-feature `assign_secondary_bin_stats` loop instead of the one-pass
+    # inversion. Lets a curl with `"debug_legacy_loop": true` produce the
+    # legacy output side-by-side with the default one-pass for the same
+    # request, so any per-bin n drift can be localized to the loop rewrite
+    # vs the historical off-by-124 BEFORE the node-for-node tie-out runs.
+    debug_legacy_loop: bool = False
 
 
 @router.post("/secondary-corr-bins")
@@ -4022,38 +4029,141 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
               f"bin20_by_metric has {len(bin20_by_metric)} metrics",
               file=_sys_g4_cb.stderr, flush=True)
 
+    # Fix A: loop inversion for the IS+ALL path. The legacy per-feature
+    # loop is preserved (still used for WF/TT, and runnable via
+    # `debug_legacy_loop: true` for diffing the one-pass output against
+    # the legacy output on the same request).
+    use_one_pass = (
+        spec.kind == "in_sample" and is_all and not req.debug_legacy_loop
+    )
+
     _g4_t_loop = _time_g4_cb.perf_counter()
     results = []
     helper_none_count = 0
     helper_ok_count = 0
-    for feat in feat_cols:
-        # Group 4: skip features without a stored bin20 column. The 7
-        # not-yet-populated features (iv_25d_call_30d et al.) fall into
-        # this branch today; they'll auto-light when backfilled.
-        if spec.kind == "in_sample" and is_all and feat not in bin20_by_metric:
-            continue
-        r = assign_secondary_bin_stats(
-            spec, filtered, feat, n_bins, outcome_col, is_all,
-            # v9: pass full row cache for in_sample too — same
-            # fixed-threshold principle as /secondary-detail. Each
-            # mini chart's bin_ns now reflect the full-population's
-            # secondary bin n's, intersected with the primary filter,
-            # rather than equal-n re-ranks of the filtered subset.
-            all_rows=all_rows,
-            # Group 4: stored bin20 takes precedence over all_rows for
-            # IS+ALL. None for WF/TT — those still use the on-the-fly
-            # Assigner via the existing all_rows path.
-            bin20_by_key=bin20_by_metric.get(feat),
-        )
-        if r:
-            results.append(r)
+
+    if use_one_pass:
+        # ── ONE-PASS over filtered rows ────────────────────────────────────
+        # Bin math is byte-equivalent to the legacy helper. Legacy emits
+        # a 1-indexed bin in [1, n_bins]:
+        #
+        #     bin_1idx = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+        #
+        # then converts to a 0-indexed bucket index via `bin_1idx - 1`
+        # to append into `buckets[bin_1idx - 1]`. The combined form
+        # straight to 0-indexed is:
+        #
+        #     bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+        #
+        # Verified for the supported n_bins ∈ {5, 10, 20} (divisors of 20):
+        #   b20 = 1,  n_bins = 10 → bn = 0  (= bin 1)
+        #   b20 = 2,  n_bins = 10 → bn = 0  (= bin 1)
+        #   b20 = 20, n_bins = 10 → bn = 9  (= bin 10)
+        #   b20 = 20, n_bins = 5  → bn = 4  (= bin 5)
+        #   b20 = 20, n_bins = 20 → bn = 19 (= bin 20)
+        # The `min(..., n_bins-1)` clamp is a safety belt; for valid
+        # b20 ∈ [1, 20] it's never triggered (max is exactly n_bins-1).
+        #
+        # Per-row validity: outcome must be present + a finite float.
+        # Metric validity is implied by `bin20_by_metric[feat].get(key)`
+        # returning a non-None value — is_bins's build only assigns a
+        # positive bin20 when the metric value was valid at build time,
+        # and the prefetch SQL filters `WHERE bin20_<m> > 0`. So
+        # checking the metric per-feature per-row (as the legacy did)
+        # is redundant under the Group-4 stored-bin invariant.
+
+        # Preserve feat_cols order for the response — eligible_feats is
+        # feat_cols filtered for dict membership without reordering.
+        eligible_feats = [f for f in feat_cols if f in bin20_by_metric]
+        n_features     = len(eligible_feats)
+        # Parallel list of per-feature dicts: lets the inner loop do an
+        # int-indexed `bin20_dicts[i].get(key)` instead of a
+        # `bin20_by_metric[feat].get(key)` dict-of-dicts lookup.
+        bin20_dicts = [bin20_by_metric[f] for f in eligible_feats]
+        bin_sums    = [[0.0] * n_bins for _ in range(n_features)]
+        bin_counts  = [[0]   * n_bins for _ in range(n_features)]
+
+        for r in filtered:
+            o = r.get(outcome_col)
+            if o is None:
+                continue
+            try:
+                fo = float(o)
+                if math.isnan(fo):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            tkr = r.get("ticker", "")
+            td  = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            key = (tkr, d_key)
+            for i in range(n_features):
+                b20 = bin20_dicts[i].get(key)
+                if b20 is None or b20 <= 0:
+                    # Matches `if b20 is None or b20 <= 0: continue` in
+                    # _in_sample_bin_map. Defensive: `if not b20` would
+                    # also pass through negative values via Python's
+                    # falsiness (and a negative `bn` would silently
+                    # index `bin_sums[i][bn]` from the end).
+                    continue
+                bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+                bin_sums[i][bn] += fo
+                bin_counts[i][bn] += 1
+
+        for i, feat in enumerate(eligible_feats):
+            if not any(bin_counts[i]):
+                # Matches legacy: helper returns None when every bucket
+                # is empty; the endpoint then drops the feature.
+                helper_none_count += 1
+                continue
+            bins_avg = [
+                round(bin_sums[i][j] / bin_counts[i][j], 6)
+                if bin_counts[i][j] else 0.0
+                for j in range(n_bins)
+            ]
+            results.append({
+                "name":   feat,
+                "bins":   bins_avg,
+                "bin_ns": list(bin_counts[i]),
+            })
             helper_ok_count += 1
-        else:
-            helper_none_count += 1
-    print(f"[G4][corr-bins] per-feature loop: "
-          f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
-          f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})",
-          file=_sys_g4_cb.stderr, flush=True)
+
+        print(f"[G4][corr-bins] one-pass loop: "
+              f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
+              f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})  "
+              f"n_features={n_features} filter_size={len(filtered)}",
+              file=_sys_g4_cb.stderr, flush=True)
+    else:
+        # ── LEGACY per-feature loop (WF/TT, debug_legacy_loop=True) ────────
+        for feat in feat_cols:
+            # Group 4: skip features without a stored bin20 column. The 7
+            # not-yet-populated features (iv_25d_call_30d et al.) fall into
+            # this branch today; they'll auto-light when backfilled.
+            if spec.kind == "in_sample" and is_all and feat not in bin20_by_metric:
+                continue
+            r = assign_secondary_bin_stats(
+                spec, filtered, feat, n_bins, outcome_col, is_all,
+                # v9: pass full row cache for in_sample too — same
+                # fixed-threshold principle as /secondary-detail. Each
+                # mini chart's bin_ns now reflect the full-population's
+                # secondary bin n's, intersected with the primary filter,
+                # rather than equal-n re-ranks of the filtered subset.
+                all_rows=all_rows,
+                # Group 4: stored bin20 takes precedence over all_rows for
+                # IS+ALL. None for WF/TT — those still use the on-the-fly
+                # Assigner via the existing all_rows path.
+                bin20_by_key=bin20_by_metric.get(feat),
+            )
+            if r:
+                results.append(r)
+                helper_ok_count += 1
+            else:
+                helper_none_count += 1
+        print(f"[G4][corr-bins] per-feature loop (legacy): "
+              f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
+              f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})",
+              file=_sys_g4_cb.stderr, flush=True)
+
     print(f"[G4][corr-bins] TOTAL endpoint: "
           f"{_time_g4_cb.perf_counter()-_g4_t0:.2f}s",
           file=_sys_g4_cb.stderr, flush=True)
