@@ -707,6 +707,7 @@ def assign_secondary_bin_stats(
     is_all: bool,
     *,
     all_rows=None,
+    bin20_by_key: Optional[dict] = None,
 ) -> Optional[dict]:
     """Per-bin avg-return for ONE secondary metric inside an already-
     primary-filtered chronological subset. Returns {name, bins, bin_ns}
@@ -729,9 +730,16 @@ def assign_secondary_bin_stats(
         # is used as the Y-axis. Tickers with < n_bins observations in
         # the full population are excluded from the fit; their filtered
         # rows drop silently.
-        if all_rows is not None:
+        if all_rows is not None or bin20_by_key is not None:
+            # Group 4: `bin20_by_key` (when present + is_all) makes
+            # _in_sample_bin_map derive bins from stored is_bins.bin20.
+            # `all_rows` is still passed for the legacy on-the-fly path
+            # (single-ticker, or until Group-4-bin20 is wired everywhere).
             bin_map = _in_sample_bin_map(
-                all_rows, metric, n_bins, is_all, outcome_col=outcome_col,
+                all_rows if all_rows is not None else rows_chrono,
+                metric, n_bins, is_all,
+                outcome_col=outcome_col,
+                bin20_by_key=bin20_by_key,
             )
             buckets: list = [[] for _ in range(n_bins)]
             for r in rows_chrono:
@@ -799,6 +807,7 @@ def _in_sample_bin_map(
     is_all: bool,
     *,
     outcome_col: Optional[str] = None,
+    bin20_by_key: Optional[dict] = None,
 ) -> dict:
     """Build `(ticker, trade_date_str) → 1-indexed bin` lookup using the
     in-sample bin algorithm on the FULL population of `rows`.
@@ -825,7 +834,33 @@ def _in_sample_bin_map(
     implement the fixed-threshold fit-on-full / slot-on-filtered
     pattern. v9 fix for the re-ranking-on-filtered-subset bug — see
     those callers' inline docstrings.
+
+    Group 4 — `bin20_by_key`: when provided AND `is_all` is True, the
+    map is built from the stored is_bins bin20 (passed in by the async
+    caller) instead of an on-the-fly per-ticker rank. The display
+    granularity is derived from bin20 via the divisor formula
+    `min(((bin20 - 1) * n_bins) // 20 + 1, n_bins)`, which is
+    mathematically a direct per-ticker rank for every `n_bins` that
+    divides 20 — and the secondary-panel UI only exposes
+    `n_bins ∈ {5, 10, 20}`, all divisors. Stored-bin path is the
+    consistency keystone: same `(ticker, trade_date)` → same bin in
+    the heatmap, /analyze, the bundle, and these secondary views.
+    `outcome_col` validity is irrelevant in this branch because
+    upstream `_SEC_CACHE.rows` already enforces metric+outcome
+    non-null at the SQL level; the stored bin20 is the bin regardless
+    of which downstream cares about outcome.
     """
+    if bin20_by_key is not None and is_all:
+        out: dict = {}
+        for r in rows:
+            tkr = str(r.get("ticker", ""))
+            td  = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            b20 = bin20_by_key.get((tkr, d_key))
+            if b20 is None or b20 <= 0:
+                continue
+            out[(tkr, d_key)] = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+        return out
     n_bins = max(2, min(20, n_bins))
 
     def _valid(r):
@@ -892,6 +927,7 @@ def assign_secondary_buckets(
     all_rows=None,
     all_rows_sorted=None,
     rows_presorted: bool = False,
+    bin20_by_key: Optional[dict] = None,
 ):
     """Per-bin row tuples for ONE secondary metric, used by /secondary-detail.
 
@@ -933,9 +969,15 @@ def assign_secondary_buckets(
         # That legacy shape is preserved for back-compat with any caller
         # that intentionally wants it; the dashboard endpoints now all
         # pass all_rows so they get the fixed behavior.
-        if all_rows is not None:
+        if all_rows is not None or bin20_by_key is not None:
+            # Group 4: bin20_by_key (when present + is_all) → derive from
+            # stored is_bins.bin20. all_rows path still active for
+            # single-ticker / non-Group-4 callers.
             bin_map = _in_sample_bin_map(
-                all_rows, metric, n_bins, is_all, outcome_col=outcome_col,
+                all_rows if all_rows is not None else rows_chrono,
+                metric, n_bins, is_all,
+                outcome_col=outcome_col,
+                bin20_by_key=bin20_by_key,
             )
             buckets: list = [[] for _ in range(n_bins)]
             for r in rows_chrono:
@@ -1110,6 +1152,7 @@ def secondary_membership(
     is_all: bool,
     *,
     all_rows=None,
+    bin20_by_key: Optional[dict] = None,
 ):
     """Binary 0/1 membership vector for ONE secondary metric inside an
     already-primary-filtered chronological subset. Returns a numpy float64
@@ -1130,12 +1173,17 @@ def secondary_membership(
         # function of the primary-filtered subset. `_bin_membership`
         # baseline doesn't gate on outcome, so we pass outcome_col=None
         # to the helper for parity.
-        if all_rows is not None:
+        if all_rows is not None or bin20_by_key is not None:
+            # Group 4: bin20_by_key (when present + is_all) → derive from
+            # stored is_bins.bin20. all_rows path remains for legacy callers.
             out = np.zeros(len(rows_chrono), dtype=np.float64)
             if not sel:
                 return out
             bin_map = _in_sample_bin_map(
-                all_rows, metric, n_bins, is_all, outcome_col=None,
+                all_rows if all_rows is not None else rows_chrono,
+                metric, n_bins, is_all,
+                outcome_col=None,
+                bin20_by_key=bin20_by_key,
             )
             for i, r in enumerate(rows_chrono):
                 tkr = str(r.get("ticker", ""))

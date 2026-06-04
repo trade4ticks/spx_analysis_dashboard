@@ -3257,6 +3257,85 @@ def _walk_forward_thresholds(rows_chrono: list, metric: str, n_bins: int,
     return samples, full_per_ticker, full_thresholds
 
 
+async def _fetch_bin20_by_metric(
+    pool,
+    metrics: list,
+    filter_pairs: list,
+) -> dict:
+    """Group 4 (Secondary endpoints): prefetch bin20 from is_bins for a
+    set of metrics, restricted to a primary-filtered (ticker, trade_date)
+    set. Returns ``{metric: {(ticker, date_str): bin20}}``.
+
+    DYNAMIC column detection. We probe `information_schema` for which
+    `bin20_<metric>` columns actually exist in is_bins — NOT a hardcoded
+    list. When the 7 currently-empty features (iv_25d_call_30d et al.)
+    get backfilled, their bin20 columns appear and the next request
+    picks them up automatically; no code change needed. Metrics that
+    don't have a column yet are silently omitted from the returned dict,
+    and callers skip them in the same loop they already use to iterate
+    metrics.
+
+    SCALING NOTE (logged so it isn't a surprise later): for narrow
+    filters (~20K rows on the current 221K-row is_bins) the planner
+    picks an index nested-loop on the (ticker, trade_date) PK and
+    runs in ~0.4s. As the filter set grows past roughly 25–30% of the
+    table, the planner flips to a hash-join + seq-scan over is_bins
+    (~1.8s today on a ~55K filter, still well under the 1–3s budget).
+    The seq-scan cost scales with TOTAL is_bins size, not filter size,
+    so very wide primary selections — or future growth of is_bins as
+    history/tickers accumulate — will land closer to the wide-case
+    cost. Not a blocker; the table's too small to justify a covering
+    index now. Revisit if is_bins crosses ~1M rows or wide selections
+    start regularly exceeding 3s.
+    """
+    if not metrics or not filter_pairs:
+        return {}
+    # Dynamic eligibility check — auto-heals when missing bin20 columns
+    # get backfilled (no hardcoded allowlist).
+    async with pool.acquire() as conn:
+        col_rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'is_bins' AND table_schema = 'public'
+                 AND column_name LIKE 'bin20_%'""")
+    available = {r["column_name"] for r in col_rows}
+    eligible = [m for m in metrics if f"bin20_{m}" in available]
+    if not eligible:
+        return {}
+    # One wide filtered SELECT: ticker + trade_date + N bin20 columns,
+    # restricted via JOIN unnest to the primary-filtered (ticker, date)
+    # pairs. The planner's choice (index NL vs hash-join + seq-scan) is
+    # filter-size-dependent — see the SCALING NOTE in this function's
+    # docstring.
+    bin20_select = ", ".join(f"ib.bin20_{m}" for m in eligible)
+    sql = (
+        f"SELECT ib.ticker, ib.trade_date, {bin20_select} "
+        f"FROM is_bins ib "
+        f"JOIN unnest($1::text[], $2::date[]) AS f(ticker, trade_date) "
+        f"  ON ib.ticker = f.ticker AND ib.trade_date = f.trade_date"
+    )
+    tkrs = [t for (t, _) in filter_pairs]
+    # Accept date-as-string or date-as-date; asyncpg needs date objects.
+    from datetime import date as _date_cls
+    dates = []
+    for (_, d) in filter_pairs:
+        if isinstance(d, _date_cls):
+            dates.append(d)
+        else:
+            dates.append(_date_cls.fromisoformat(str(d)))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, tkrs, dates)
+    out: dict = {m: {} for m in eligible}
+    for r in rows:
+        d = r["trade_date"]
+        d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        key = (r["ticker"], d_str)
+        for m in eligible:
+            v = r[f"bin20_{m}"]
+            if v is not None and v > 0:
+                out[m][key] = int(v)
+    return out
+
+
 async def _ensure_sec_cache(pool, ticker: str, metric: str, outcome: str,
                             date_from: str = "", date_to: str = "") -> str:
     """Ensure _SEC_CACHE has rows for (ticker, metric, outcome, dates).
@@ -3650,7 +3729,7 @@ async def secondary_scan_invalidate(pool=Depends(get_oi_pool)):
 
 
 @router.post("/secondary-detail")
-async def secondary_detail(req: SecDetailReq):
+async def secondary_detail(req: SecDetailReq, pool=Depends(get_oi_pool)):
     """2-factor deep dive: bins, equity curves, yearly for a selected secondary metric."""
     cached = _SEC_CACHE.get(req.cache_key)
     if not cached:
@@ -3681,6 +3760,18 @@ async def secondary_detail(req: SecDetailReq):
     if len(filtered) < n_bins * 2:
         return {"error": "insufficient_data"}
 
+    # Group 4: for IS+ALL prefetch the secondary metric's stored bin20
+    # over the primary-filtered (ticker, trade_date) set. Returns empty
+    # if req.metric_b doesn't have a bin20_<m> column yet (the 7 not-
+    # populated features); downstream falls through to the all_rows
+    # path and returns "insufficient_data", which is the right shape
+    # for a metric the user shouldn't have been able to click into.
+    bin20_by_key = None
+    if spec.kind == "in_sample" and is_all:
+        pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
+        by_metric = await _fetch_bin20_by_metric(pool, [req.metric_b], pairs)
+        bin20_by_key = by_metric.get(req.metric_b)
+
     # ── Secondary binning ───────────────────────────────────────────────────
     # Spec-dispatched. The in-sample branch may return None when there
     # are too few rows with valid (metric_b, outcome) pairs after the
@@ -3697,6 +3788,10 @@ async def secondary_detail(req: SecDetailReq):
         # here, causing the Quantile-Secondary chart to render equal-n
         # buckets that disagreed with the heatmap.
         all_rows=all_rows,
+        # Group 4: when bin20_by_key is set, the in_sample branch reads
+        # bin20 from is_bins instead of computing on the fly — same stored
+        # bin as the heatmap and /analyze.
+        bin20_by_key=bin20_by_key,
     )
     if buckets is None:
         return {"error": "insufficient_data"}
@@ -3830,7 +3925,7 @@ class CorrBinsReq(BaseModel):
 
 
 @router.post("/secondary-corr-bins")
-async def secondary_corr_bins(req: CorrBinsReq):
+async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     """Per-bin avg return for every secondary metric — drives the correlation explorer mini charts.
 
     walk_forward mode: primary bins for `primary_metric` and secondary
@@ -3868,8 +3963,24 @@ async def secondary_corr_bins(req: CorrBinsReq):
         return {"error": "no_data",
                 **mode_envelope(spec, dropped=dropped, universe=universe)}
 
+    # Group 4: for IS+ALL, prefetch bin20 from is_bins for every feature
+    # column the panel iterates. Dynamic eligibility — features without
+    # a bin20_<feat> column (the 7 currently-empty ones) are silently
+    # omitted from `bin20_by_metric`; the iteration below skips them
+    # with no error, no broken empty mini. Auto-heals when those bin20
+    # columns get backfilled (no allowlist anywhere).
+    bin20_by_metric: dict = {}
+    if spec.kind == "in_sample" and is_all:
+        pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
+        bin20_by_metric = await _fetch_bin20_by_metric(pool, list(feat_cols), pairs)
+
     results = []
     for feat in feat_cols:
+        # Group 4: skip features without a stored bin20 column. The 7
+        # not-yet-populated features (iv_25d_call_30d et al.) fall into
+        # this branch today; they'll auto-light when backfilled.
+        if spec.kind == "in_sample" and is_all and feat not in bin20_by_metric:
+            continue
         r = assign_secondary_bin_stats(
             spec, filtered, feat, n_bins, outcome_col, is_all,
             # v9: pass full row cache for in_sample too — same
@@ -3878,6 +3989,10 @@ async def secondary_corr_bins(req: CorrBinsReq):
             # secondary bin n's, intersected with the primary filter,
             # rather than equal-n re-ranks of the filtered subset.
             all_rows=all_rows,
+            # Group 4: stored bin20 takes precedence over all_rows for
+            # IS+ALL. None for WF/TT — those still use the on-the-fly
+            # Assigner via the existing all_rows path.
+            bin20_by_key=bin20_by_metric.get(feat),
         )
         if r:
             results.append(r)
@@ -3903,7 +4018,7 @@ class CorrReq(BaseModel):
 
 
 @router.post("/secondary-correlation")
-async def secondary_correlation(req: CorrReq):
+async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
     """Phi correlation matrix between selected secondary metrics' binary bin-membership vectors.
 
     walk_forward mode: both the primary filter (which rows are in the
@@ -3948,11 +4063,29 @@ async def secondary_correlation(req: CorrReq):
         ordered = sorted(filtered, key=lambda r: (r.get("trade_date", ""), r.get("ticker", "")))
         universe = len(ordered)
 
+    # Group 4: for IS+ALL, prefetch bin20 for every metric in the user's
+    # selections. Selections naming a metric without a bin20_<m> column
+    # (the 7 not-populated features) are silently dropped from the phi
+    # matrix — no error envelope; matches the user-facing "skip the
+    # missing minis" semantics.
+    bin20_by_metric: dict = {}
+    if spec.kind == "in_sample" and is_all:
+        sel_metrics = [sel.get("metric", "") for sel in req.selections
+                       if sel.get("metric")]
+        if sel_metrics:
+            pairs = [(r.get("ticker", ""), r.get("trade_date", ""))
+                     for r in ordered]
+            bin20_by_metric = await _fetch_bin20_by_metric(
+                pool, sel_metrics, pairs)
+
     vectors, metric_names, n_each = [], [], []
     for sel in req.selections:
         metric = sel.get("metric", "")
         bins   = set(sel.get("bins", []))
         if not metric or not bins:
+            continue
+        # Group 4: skip metrics without stored bin20 (auto-heals).
+        if spec.kind == "in_sample" and is_all and metric not in bin20_by_metric:
             continue
         vec = secondary_membership(
             spec, ordered, metric, bins, n_bins, is_all,
@@ -3962,6 +4095,8 @@ async def secondary_correlation(req: CorrReq):
             # same shape as /secondary-detail and /secondary-corr-bins,
             # consistent with the heatmap.
             all_rows=all_rows,
+            # Group 4: stored bin20 wins over all_rows for IS+ALL.
+            bin20_by_key=bin20_by_metric.get(metric),
         )
         vectors.append(vec)
         metric_names.append(metric)
