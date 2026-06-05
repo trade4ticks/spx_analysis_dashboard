@@ -3324,9 +3324,6 @@ async def _fetch_bin20_by_metric(
     index now. Revisit if is_bins crosses ~1M rows or wide selections
     start regularly exceeding 3s.
     """
-    import sys
-    print(f"[G4][prefetch] metrics_in={len(metrics)} filter_pairs={len(filter_pairs)}",
-          file=sys.stderr, flush=True)
     if not metrics or not filter_pairs:
         return {}
     # Dynamic eligibility check — auto-heals when missing bin20 columns
@@ -3338,8 +3335,6 @@ async def _fetch_bin20_by_metric(
                  AND column_name LIKE 'bin20_%'""")
     available = {r["column_name"] for r in col_rows}
     eligible = [m for m in metrics if f"bin20_{m}" in available]
-    print(f"[G4][prefetch] is_bins bin20_* cols available={len(available)}  eligible={len(eligible)}",
-          file=sys.stderr, flush=True)
     if not eligible:
         return {}
     # One wide filtered SELECT: ticker + trade_date + N bin20 columns,
@@ -3363,13 +3358,8 @@ async def _fetch_bin20_by_metric(
             dates.append(d)
         else:
             dates.append(_date_cls.fromisoformat(str(d)))
-    import time as _t_g4
-    _t_g4_sql = _t_g4.perf_counter()
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, tkrs, dates)
-    print(f"[G4][prefetch] SQL fetch: {_t_g4.perf_counter()-_t_g4_sql:.2f}s  "
-          f"returned_rows={len(rows)}", file=sys.stderr, flush=True)
-    _t_g4_build = _t_g4.perf_counter()
     # Build per-metric (key → bin20) dicts. Two perf moves over the
     # naïve nested loop that hit 35s on the 220K no-selection case:
     #
@@ -3403,8 +3393,6 @@ async def _fetch_bin20_by_metric(
             if v is not None and v > 0:
                 inners[i][key] = v
     out = dict(zip(eligible, inners))
-    print(f"[G4][prefetch] dict build: {_t_g4.perf_counter()-_t_g4_build:.2f}s",
-          file=sys.stderr, flush=True)
     return out
 
 
@@ -3996,13 +3984,6 @@ class CorrBinsReq(BaseModel):
     walk_forward: bool = False
     cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
     selected_primary_bins: Optional[List[int]] = None  # 1..20 primary bin ids (walk_forward / train_test mode)
-    # Fix A diff aid: when True, force the IS+ALL path through the legacy
-    # per-feature `assign_secondary_bin_stats` loop instead of the one-pass
-    # inversion. Lets a curl with `"debug_legacy_loop": true` produce the
-    # legacy output side-by-side with the default one-pass for the same
-    # request, so any per-bin n drift can be localized to the loop rewrite
-    # vs the historical off-by-124 BEFORE the node-for-node tie-out runs.
-    debug_legacy_loop: bool = False
 
 
 @router.post("/secondary-corr-bins")
@@ -4050,35 +4031,17 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     # omitted from `bin20_by_metric`; the iteration below skips them
     # with no error, no broken empty mini. Auto-heals when those bin20
     # columns get backfilled (no allowlist anywhere).
-    import sys as _sys_g4_cb, time as _time_g4_cb
-    _g4_t0 = _time_g4_cb.perf_counter()
-    print(f"[G4][corr-bins] spec.kind={spec.kind} is_all={is_all} "
-          f"all_rows={len(all_rows)} filtered={len(filtered)} "
-          f"feat_cols={len(feat_cols)} n_bins={n_bins}",
-          file=_sys_g4_cb.stderr, flush=True)
-
     bin20_by_metric: dict = {}
     if spec.kind == "in_sample" and is_all:
-        _g4_t_prefetch = _time_g4_cb.perf_counter()
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
         bin20_by_metric = await _fetch_bin20_by_metric(pool, list(feat_cols), pairs)
-        print(f"[G4][corr-bins] prefetch total: "
-              f"{_time_g4_cb.perf_counter()-_g4_t_prefetch:.2f}s  "
-              f"bin20_by_metric has {len(bin20_by_metric)} metrics",
-              file=_sys_g4_cb.stderr, flush=True)
 
     # Fix A: loop inversion for the IS+ALL path. The legacy per-feature
-    # loop is preserved (still used for WF/TT, and runnable via
-    # `debug_legacy_loop: true` for diffing the one-pass output against
-    # the legacy output on the same request).
-    use_one_pass = (
-        spec.kind == "in_sample" and is_all and not req.debug_legacy_loop
-    )
+    # loop is preserved — it's still the implementation for WF/TT and
+    # single-ticker modes (those don't go through the stored-bin path).
+    use_one_pass = spec.kind == "in_sample" and is_all
 
-    _g4_t_loop = _time_g4_cb.perf_counter()
     results = []
-    helper_none_count = 0
-    helper_ok_count = 0
 
     if use_one_pass:
         # ── ONE-PASS over filtered rows ────────────────────────────────────
@@ -4152,7 +4115,6 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
             if not any(bin_counts[i]):
                 # Matches legacy: helper returns None when every bucket
                 # is empty; the endpoint then drops the feature.
-                helper_none_count += 1
                 continue
             bins_avg = [
                 round(bin_sums[i][j] / bin_counts[i][j], 6)
@@ -4164,15 +4126,8 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
                 "bins":   bins_avg,
                 "bin_ns": list(bin_counts[i]),
             })
-            helper_ok_count += 1
-
-        print(f"[G4][corr-bins] one-pass loop: "
-              f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
-              f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})  "
-              f"n_features={n_features} filter_size={len(filtered)}",
-              file=_sys_g4_cb.stderr, flush=True)
     else:
-        # ── LEGACY per-feature loop (WF/TT, debug_legacy_loop=True) ────────
+        # ── LEGACY per-feature loop (WF/TT and single-ticker) ──────────────
         for feat in feat_cols:
             # Group 4: skip features without a stored bin20 column. The 7
             # not-yet-populated features (iv_25d_call_30d et al.) fall into
@@ -4194,17 +4149,6 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
             )
             if r:
                 results.append(r)
-                helper_ok_count += 1
-            else:
-                helper_none_count += 1
-        print(f"[G4][corr-bins] per-feature loop (legacy): "
-              f"{_time_g4_cb.perf_counter()-_g4_t_loop:.2f}s  "
-              f"results={len(results)} (ok={helper_ok_count} none={helper_none_count})",
-              file=_sys_g4_cb.stderr, flush=True)
-
-    print(f"[G4][corr-bins] TOTAL endpoint: "
-          f"{_time_g4_cb.perf_counter()-_g4_t0:.2f}s",
-          file=_sys_g4_cb.stderr, flush=True)
 
     return {
         "metrics":          results,
