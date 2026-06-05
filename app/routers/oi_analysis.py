@@ -123,7 +123,25 @@ _ANALYZE_CACHE_MAX = 20
 # 7 dimensions that distinguish a result: ticker, metric, outcome, mode,
 # cutoff_date, date_from, date_to.  Bump _ANALYZE_PRIMARY_SCHEMA_VERSION to
 # auto-invalidate stale entries after a payload-shape change.
-_ANALYZE_PRIMARY_SCHEMA_VERSION = 1
+#
+# DISCIPLINE — bump this whenever the response shape OR the bin assignment
+# math changes. The cache_key salt is the only thing that distinguishes a
+# stale cached payload from a fresh one; if the salt doesn't move and the
+# math does, every deploy serves the old payload until someone manually
+# truncates the table. (That's exactly what bit us between the Part-1
+# thinning removal and the v1 salt — the on-disk payloads had the legacy
+# `decile20 = 0` sentinel for thin tickers; the heatmap reads is_bins
+# live; secondary's filter reads trade_calendar.decile20 from the cached
+# /analyze; gap = the thin-ticker rows. Manual truncate cleared one DB;
+# the bump below makes the next deploy self-invalidate.)
+#
+# v2 (Part 1 thinning removal): /analyze's IS+ALL branch no longer applies
+# the n_t<10 ticker drop or the n_t<20 → decile20=0 sentinel rewrite.
+# Every row in valid_a10 now carries its real stored is_bins.bin20 in
+# trade_calendar.decile20. v1 cache_keys are unreachable on read (key
+# prefix mismatch); first hit per (ticker, metric, outcome, mode, cutoff,
+# date_from, date_to) recomputes.
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 2
 _ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
 _ANALYZE_PRIMARY_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS analyze_primary_cache (
@@ -4395,6 +4413,20 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
 
 
 # ── Global Metric Bins (standalone top-of-page browser) ───────────────────
+#
+# DISCIPLINE — same rule as _ANALYZE_PRIMARY_SCHEMA_VERSION: bump
+# _GLOBAL_BINS_SCHEMA_VERSION on every change to the bin assignment math
+# (most live in _compute_all_bins_fast) or to the response shape. Pre-v1
+# cache_keys had no version at all, so any deploy that changed binning
+# math silently kept serving the pre-change payload until the table was
+# manually truncated — the same landmine that bit analyze_primary_cache.
+#
+# v1: introducing the salt. The Part-1 thinning removal in
+# _compute_all_bins_fast (per-ticker `m.sum() < n_bins` gate removed)
+# means rows from tickers with <n_bins observations now contribute to
+# the rank pool. Pre-v1 entries are unreachable on read (key prefix
+# mismatch); the table-ensure DELETE below reclaims their disk.
+_GLOBAL_BINS_SCHEMA_VERSION = 1
 
 _GLOBAL_BINS_CACHE: dict = {}
 _GLOBAL_BINS_TABLE_DDL = """\
@@ -4417,6 +4449,15 @@ async def _ensure_bins_table(pool) -> None:
         return
     async with pool.acquire() as conn:
         await conn.execute(_GLOBAL_BINS_TABLE_DDL)
+        # Sweep entries from any prior schema version. The salt makes them
+        # unreachable on read; this DELETE reclaims their disk. No-op once
+        # the table only holds current-version entries. Same pattern as
+        # _ensure_analyze_primary_table.
+        prefix = f"gb:v{_GLOBAL_BINS_SCHEMA_VERSION}:"
+        await conn.execute(
+            "DELETE FROM global_bins_cache WHERE cache_key NOT LIKE $1",
+            f"{prefix}%",
+        )
     _bins_table_ensured = True
 
 
@@ -4444,14 +4485,20 @@ async def global_metric_bins(
     n_bins = max(2, min(20, n_bins))
     # Cache key includes the mode tag so in-sample / walk-forward / train-test
     # results don't collide. Train-test also includes the cutoff date —
-    # different cutoffs produce different bin assignments.
+    # different cutoffs produce different bin assignments. The `gb:vN:`
+    # prefix is the schema-version salt (see _GLOBAL_BINS_SCHEMA_VERSION
+    # at the top of this section); bumping the constant auto-invalidates
+    # every stale cached payload on next read.
     if cutoff_date:
         mode_tag = f"tt:{cutoff_date}"
     elif walk_forward:
         mode_tag = "wf"
     else:
         mode_tag = "is"
-    cache_key = f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
+    cache_key = (
+        f"gb:v{_GLOBAL_BINS_SCHEMA_VERSION}:"
+        f"{ticker}|{outcome}|{n_bins}|{date_from or ''}|{date_to or ''}|{mode_tag}"
+    )
     if not force and cache_key in _GLOBAL_BINS_CACHE:
         return _GLOBAL_BINS_CACHE[cache_key]
 
