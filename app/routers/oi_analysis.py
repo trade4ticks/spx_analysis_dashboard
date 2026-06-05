@@ -20,6 +20,21 @@ _SEC_SCORE_CACHE_MAX = 50      # evict oldest entry when exceeded (in-memory onl
 _sec_scan_running: bool = False  # one background job at a time
 
 # ── Secondary Scanner DB persistence ──────────────────────────────────────────
+#
+# DISCIPLINE — same rule as _ANALYZE_PRIMARY_SCHEMA_VERSION and
+# _GLOBAL_BINS_SCHEMA_VERSION: bump _SEC_SCAN_SCHEMA_VERSION on every
+# change to scoring math (_sec_score_metrics), to the WF bin-assignment
+# path (_compute_walk_forward_bin_stats), or to the result payload
+# shape. Pre-v1 cache_keys had no version at all — same latent bug that
+# bit analyze_primary_cache and global_bins_cache. The structural_key
+# below carries the salt; the sweep in _ensure_sec_scan_table reclaims
+# pre-bump rows on startup.
+#
+# v1: introducing the salt. Pre-v1 entries are unreachable on read
+# (key prefix mismatch); the table-ensure DELETE below reclaims their
+# disk. See MIGRATION_PRINCIPLES.md for the rule.
+_SEC_SCAN_SCHEMA_VERSION = 1
+
 _SEC_SCAN_CACHE_MAX_ROWS = 50   # FIFO eviction when table reaches this count
 _sec_scan_table_ensured: bool = False
 
@@ -48,6 +63,15 @@ async def _ensure_sec_scan_table(pool) -> None:
         return
     async with pool.acquire() as conn:
         await conn.execute(_SEC_SCAN_TABLE_DDL)
+        # Sweep entries from any prior schema version. The salt makes them
+        # unreachable on read; this DELETE reclaims their disk. No-op once
+        # the table only holds current-version entries. Same pattern as
+        # _ensure_analyze_primary_table and _ensure_bins_table.
+        prefix = f"sv:v{_SEC_SCAN_SCHEMA_VERSION}:"
+        await conn.execute(
+            "DELETE FROM sec_scan_cache WHERE structural_key NOT LIKE $1",
+            f"{prefix}%",
+        )
     _sec_scan_table_ensured = True
 
 
@@ -56,13 +80,18 @@ def _sec_structural_key(
     cutoff: str, n_bins: int, selected_bins,
 ) -> str:
     """Stable DB lookup key — no date, no filtered_dates.  The key encodes every
-    parameter that can change the result; data_as_of lives separately in the row."""
+    parameter that can change the result; data_as_of lives separately in the row.
+    Salted with _SEC_SCAN_SCHEMA_VERSION so a bin-math or payload-shape change
+    auto-invalidates every stale entry on next read."""
     bins_sorted = sorted(selected_bins) if selected_bins else []
     bins_hash = hashlib.sha256(
         json.dumps(bins_sorted, separators=(",", ":")).encode()
     ).hexdigest()[:12]
     cutoff_str = cutoff or "null"
-    return f"sec:{ticker}:{metric}:{outcome}:{mode}:{cutoff_str}:{n_bins}:{bins_hash}"
+    return (
+        f"sv:v{_SEC_SCAN_SCHEMA_VERSION}:"
+        f"sec:{ticker}:{metric}:{outcome}:{mode}:{cutoff_str}:{n_bins}:{bins_hash}"
+    )
 
 
 async def _write_sec_scan_cache(
@@ -276,7 +305,24 @@ def _run_sec_score(
 ) -> None:
     """Synchronous secondary score computation — runs in thread-pool executor.
     Sets _sec_scan_running True at entry, False in finally.
-    When db_write_params is provided, persists result to sec_scan_cache on success."""
+    When db_write_params is provided, persists result to sec_scan_cache on success.
+
+    Walk-forward is DELIBERATELY hardcoded here, regardless of the user's
+    page-mode toggle. The Signal Scanner ranks features by their
+    out-of-sample predictive lift; ranking on in-sample bins would
+    score signals against the same data they were fit on — the exact
+    lookahead the dashboard avoids everywhere else. The user's page
+    mode is intentionally ignored for this one endpoint.
+
+    Consequence for the migration plan: the Group-4 stored-bin pattern
+    (is_bins.bin20 prefetch + bin20_by_key) doesn't apply to the
+    scanner. is_bins holds full-history in-sample ranks; the scanner
+    needs walk-forward ranks. The scanner's full migration is gated on
+    Group 7 (wf_bins becoming a stored table), at which point a
+    parallel `_fetch_wfbin20_by_metric` would mirror the IS prefetch.
+    Until then, scoring runs on-the-fly via
+    `_compute_walk_forward_bin_stats`. Do not "fix" this hardcode into
+    a methodological hole by making it follow the page mode."""
     global _sec_scan_running
     _sec_scan_running = True
     try:
