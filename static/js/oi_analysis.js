@@ -4447,7 +4447,6 @@ document.addEventListener('alpine:init', () => {
       this.secMaxAbsScore = Math.max(0.0001, ...this.secMetrics.map(m => Math.abs(m.score)));
       this.secScanMeta = {
         mode:             d.mode || 'walk_forward',
-        dropped_warmup_n: d.dropped_warmup_n,
         universe_n:       d.universe_n,
         start_date:       d.start_date,
         data_as_of:       d.data_as_of || null,

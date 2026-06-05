@@ -524,11 +524,14 @@ async def portfolio_aggregate(pid: int,
     # WF/TT and single-ticker paths get an empty lookup and fall
     # through to the existing on-the-fly bin maps.
     bin20_by_metric: dict = {}
-    if spec.kind == "in_sample" and is_all:
-        from app.routers.oi_analysis import _fetch_bin20_by_metric
+    if is_all and spec.kind in {"in_sample", "walk_forward"}:
+        # Group 7: dispatch the prefetch by mode — IS reads is_bins,
+        # WF reads wf_bins. PortfolioVectorBuilder's hoisted stored-bin
+        # path uses the lookup identically for either mode.
+        from app.routers.oi_analysis import _fetch_stored_bin20_by_metric
         filter_pairs = [(r["ticker"], r["trade_date"]) for r in rows]
-        bin20_by_metric = await _fetch_bin20_by_metric(
-            oi_pool, sorted(needed_metrics), filter_pairs)
+        bin20_by_metric = await _fetch_stored_bin20_by_metric(
+            oi_pool, spec.kind, sorted(needed_metrics), filter_pairs)
 
     builder = PortfolioVectorBuilder(
         spec, rows, is_all, bin20_by_metric=bin20_by_metric)
@@ -785,16 +788,14 @@ async def portfolio_aggregate(pid: int,
     phi_sys,   overlap_sys   = _phi_restricted(system_vectors)
     phi_pairs, overlap_pairs = _phi_restricted(pair_vectors)
 
-    # `cleared_any` is empty in in_sample mode (PortfolioVectorBuilder
-    # returns an empty set there to keep wf_dropped=0 / wf_start=first
-    # row) and populated in walk_forward / train_test mode.
+    # Group 7 removed the per-request warmup count. `wf_start` still
+    # surfaces as the earliest date with any cleared bins (informational);
+    # for in_sample it stays as rows[0].date for legacy compatibility.
     if spec.kind == "in_sample":
-        wf_dropped = 0
-        wf_start   = rows[0]["trade_date"] if rows else None
+        wf_start = rows[0]["trade_date"] if rows else None
     else:
-        wf_dropped = len(rows) - len(cleared_any)
-        wf_start   = (min(rows[i]["trade_date"] for i in cleared_any)
-                      if cleared_any else None)
+        wf_start = (min(rows[i]["trade_date"] for i in cleared_any)
+                    if cleared_any else None)
     resp_mode = spec.kind
 
     # Fields named to mirror the corr explorer's /secondary-correlation
@@ -807,7 +808,6 @@ async def portfolio_aggregate(pid: int,
         "mode":              resp_mode,
         "warmup":            spec.warmup if spec.kind == "walk_forward" else None,
         "cutoff_date":       spec.cutoff.isoformat() if spec.kind == "train_test" else None,
-        "dropped_warmup_n":  wf_dropped,
         "start_date":        wf_start,
         "baseline_n": int(universe_mask.sum()),
         "combined_n": int(union_n),

@@ -1067,7 +1067,7 @@
                that the breadcrumb format doesn't carry. -->
           <span x-show="topBinsData?.mode === 'walk_forward' && !topBinsData?.error"
                 style="font-size:10px;color:#b3aae6;font-family:monospace"
-                x-text="topBinsData ? ('(' + (topBinsData.total_rows - (topBinsData.dropped_warmup_n||0)).toLocaleString() + ' rows used · ' + (topBinsData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup ' + (topBinsData.warmup||252) + 'd)') : ''"></span>
+                x-text="topBinsData ? ('(' + (topBinsData.total_rows||0).toLocaleString() + ' rows · Excludes walk-forward warm-up period (first 252 trading days per ticker))') : ''"></span>
           <span x-show="topBinsData?.mode === 'in_sample' && !topBinsData?.error"
                 style="font-size:10px;color:#8fd3ac;font-family:monospace"
                 x-text="topBinsData ? ('(' + (topBinsData.total_rows||0).toLocaleString() + ' rows)') : ''"></span>
@@ -1708,7 +1708,7 @@
         <!-- Walk-forward subtitle (only when this analyze was walk-forward) -->
         <template x-if="data.mode === 'walk_forward'">
           <div style="font-size:11px;color:#e6a23c;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
-               x-text="'WALK-FORWARD · ' + (data.n||0).toLocaleString() + ' trades since ' + (data.start_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (data.warmup||252) + 'd)'"></div>
+               x-text="'WALK-FORWARD · ' + (data.n||0).toLocaleString() + ' trades since ' + (data.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></div>
         </template>
 
         <!-- Train-test subtitle: bins defined by training data (rows with
@@ -1716,7 +1716,7 @@
              TEST-window rows only. -->
         <template x-if="data.mode === 'train_test'">
           <div style="font-size:11px;color:#9b59b6;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
-               x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · bins frozen at cutoff ' + (data.cutoff_date||'?') + ' · ' + (data.dropped_warmup_n||0).toLocaleString() + ' rows excluded (insufficient training history)'"></div>
+               x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · bins frozen at cutoff ' + (data.cutoff_date||'?')"></div>
         </template>
 
         <!-- Compact stats bar (bin-filtered, outcome-aware) -->
@@ -2133,7 +2133,7 @@
           · <span x-text="secMetrics.length + ' metrics ranked'"></span>
           <template x-if="secScanMeta && secScanMeta.mode === 'walk_forward'">
             <span style="color:#e6a23c;font-family:monospace;letter-spacing:.5px"
-                  x-text="'WF · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · ' + (secScanMeta.dropped_warmup_n||0).toLocaleString() + ' dropped (252d warmup)'"></span>
+                  x-text="'WF · ' + (secScanMeta.universe_n||0).toLocaleString() + ' trades since ' + (secScanMeta.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></span>
           </template>
           <template x-if="secScanMeta && secScanMeta.data_as_of">
             <span x-text="'data through ' + secScanMeta.data_as_of"></span>
@@ -2227,7 +2227,7 @@
             <!-- Walk-forward subtitle -->
             <template x-if="!corrMiniLoading && corrMiniData?.mode === 'walk_forward'">
               <div style="font-size:11px;color:#e6a23c;margin:2px 0 8px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' in primary-bin filter / ' + (corrMiniData.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrMiniData.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrMiniData.warmup||252) + 'd) · since ' + (corrMiniData.start_date||'?')"></div>
+                   x-text="'WALK-FORWARD · ' + (corrMiniData.combined_n||0).toLocaleString() + ' in primary-bin filter / ' + (corrMiniData.universe_n||0).toLocaleString() + ' post-warmup universe · since ' + (corrMiniData.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></div>
             </template>
 
             <!-- P4: Out-of-sync warning — primary bins changed since minis were last computed -->
@@ -2304,7 +2304,7 @@
             <!-- Walk-forward subtitle (result pane) -->
             <template x-if="corrResult?.mode === 'walk_forward' && !corrResult.error">
               <div style="font-size:11px;color:#e6a23c;margin:6px 0 6px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows in primary-bin filter / ' + (corrResult.universe_n||0).toLocaleString() + ' post-warmup universe · ' + (corrResult.dropped_warmup_n||0).toLocaleString() + ' dropped to warmup (' + (corrResult.warmup||252) + 'd) · since ' + (corrResult.start_date||'?')"></div>
+                   x-text="'WALK-FORWARD · ' + (corrResult.combined_n||0).toLocaleString() + ' union trades · baseline ' + (corrResult.baseline_n||0).toLocaleString() + ' rows in primary-bin filter / ' + (corrResult.universe_n||0).toLocaleString() + ' post-warmup universe · since ' + (corrResult.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></div>
             </template>
 
             <!-- Stats pane -->
@@ -2945,7 +2945,7 @@
             </div>
             <template x-if="portAggregate && portAggregate.mode === 'walk_forward'">
               <div style="font-size:11px;color:#e6a23c;margin-bottom:6px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (portAggregate.combined_n||0).toLocaleString() + ' trades since ' + (portAggregate.start_date||'?') + ' · ' + (portAggregate.dropped_warmup_n||0).toLocaleString() + ' rows dropped to warmup (' + (portAggregate.warmup||252) + 'd)'"></div>
+                   x-text="'WALK-FORWARD · ' + (portAggregate.combined_n||0).toLocaleString() + ' trades since ' + (portAggregate.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></div>
             </template>
             <!-- Edit-mode banner -->
             <template x-if="editingSystemId">

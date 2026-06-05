@@ -33,7 +33,14 @@ _sec_scan_running: bool = False  # one background job at a time
 # v1: introducing the salt. Pre-v1 entries are unreachable on read
 # (key prefix mismatch); the table-ensure DELETE below reclaims their
 # disk. See MIGRATION_PRINCIPLES.md for the rule.
-_SEC_SCAN_SCHEMA_VERSION = 1
+#
+# v2 (Group 7): scanner scoring now reads bin20 from wf_bins (stored)
+# instead of running _compute_walk_forward_bin_stats on the fly via
+# _sec_score_metrics. Every cached scan row carries pre-Group-7 bins;
+# the bump invalidates them. The IC-discipline hardcode at
+# _run_sec_score:330 (WalkForwardSpec()) is unchanged — scanner is
+# still always WF; only the bin source changes.
+_SEC_SCAN_SCHEMA_VERSION = 2
 
 _SEC_SCAN_CACHE_MAX_ROWS = 50   # FIFO eviction when table reaches this count
 _sec_scan_table_ensured: bool = False
@@ -170,7 +177,15 @@ _ANALYZE_CACHE_MAX = 20
 # trade_calendar.decile20. v1 cache_keys are unreachable on read (key
 # prefix mismatch); first hit per (ticker, metric, outcome, mode, cutoff,
 # date_from, date_to) recomputes.
-_ANALYZE_PRIMARY_SCHEMA_VERSION = 2
+#
+# v3 (Group 7): /analyze's WF+ALL branch now reads bin20 from wf_bins
+# (stored) instead of the on-the-fly _walk_forward_bucket_* path. All
+# WF-mode cached responses carry the on-the-fly bin assignments under
+# v2 and stay byte-different from the stored-bin results (boundary-edge
+# accumulation across the ticker universe — ~99 rows on the test
+# baseline). Bump invalidates them; first hit per request recomputes
+# against wf_bins.
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 3
 _ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
 _ANALYZE_PRIMARY_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS analyze_primary_cache (
@@ -302,6 +317,7 @@ def _run_sec_score(
     selected_primary_bins,
     filtered_dates: list,
     db_write_params=None,   # dict with loop/pool/structural_key/etc.; None = no DB write
+    bin20_by_metric: Optional[dict] = None,
 ) -> None:
     """Synchronous secondary score computation — runs in thread-pool executor.
     Sets _sec_scan_running True at entry, False in finally.
@@ -314,26 +330,31 @@ def _run_sec_score(
     lookahead the dashboard avoids everywhere else. The user's page
     mode is intentionally ignored for this one endpoint.
 
-    Consequence for the migration plan: the Group-4 stored-bin pattern
-    (is_bins.bin20 prefetch + bin20_by_key) doesn't apply to the
-    scanner. is_bins holds full-history in-sample ranks; the scanner
-    needs walk-forward ranks. The scanner's full migration is gated on
-    Group 7 (wf_bins becoming a stored table), at which point a
-    parallel `_fetch_wfbin20_by_metric` would mirror the IS prefetch.
-    Until then, scoring runs on-the-fly via
-    `_compute_walk_forward_bin_stats`. Do not "fix" this hardcode into
-    a methodological hole by making it follow the page mode."""
+    Group 7: scoring now reads bin20 from wf_bins (stored) via
+    `bin20_by_metric` — same shape Group 4 established. The IC
+    discipline above is unchanged; only the bin source moved from
+    on-the-fly _walk_forward_bucket_* to wf_bins. The async caller
+    prefetches and threads the lookup in. For features absent from
+    wf_bins (the 7-missing pattern) the per-feature loop falls back
+    to the on-the-fly path via the helper's fallback branches."""
     global _sec_scan_running
     _sec_scan_running = True
     try:
         from app.routers.row_compute import WalkForwardSpec, filter_by_assignments
         spec = WalkForwardSpec()
+        # Group 7: extract the primary metric's wf_bin20 lookup for the
+        # filter step. None means "use the on-the-fly fallback".
+        primary_bin20_by_key = None
+        if bin20_by_metric:
+            primary_bin20_by_key = bin20_by_metric.get(primary_metric)
         filtered, dropped, universe = filter_by_assignments(
             rows, spec, primary_metric, selected_primary_bins, is_all, filtered_dates,
+            primary_bin20_by_key=primary_bin20_by_key,
         )
         metrics = _sec_score_metrics(
             filtered, outcome_col, feature_cols, is_all, n_bins, spec,
             all_rows=rows,   # full cache → secondary binned on full-universe WF
+            bin20_by_metric=bin20_by_metric,
         )
         baseline_rets = [float(r[outcome_col]) for r in filtered
                          if r.get(outcome_col) is not None]
@@ -351,7 +372,6 @@ def _run_sec_score(
             "mode":             "walk_forward",
             "warmup":           spec.warmup,
             "cutoff_date":      None,
-            "dropped_warmup_n": dropped,
             "universe_n":       universe,
             "start_date":       start_date,
             "data_as_of":       db_write_params["data_as_of"] if db_write_params else None,
@@ -609,15 +629,22 @@ async def analyze(
     #
     # WF and TT use the existing Assigner path below — same mode boundary
     # as Groups 1 and 2.
-    if is_all and spec.kind == "in_sample":
+    # Group 7 extension: WF+ALL also takes the stored-bin path, JOINing
+    # wf_bins instead of is_bins. The whole stored-bin code block is
+    # mode-agnostic once the source table is parameterized — the math
+    # is identical, only the JOIN target differs. Encoding A means
+    # `WHERE bin20 > 0` cleanly drops both warm-up and null rows in WF.
+    if is_all and spec.kind in {"in_sample", "walk_forward"}:
+        # Source table: is_bins (IS) vs wf_bins (WF, Group 7).
+        bin_table = "is_bins" if spec.kind == "in_sample" else "wf_bins"
         join_sql = (
             f"SELECT df.ticker, df.trade_date, "
             f"  df.{metric}, df.{outcome}, "
             f"  df.spot_co, df.spot_pc, "
-            f"  ib.bin20_{metric} AS bin_20 "
+            f"  bt.bin20_{metric} AS bin_20 "
             f"FROM daily_features df "
-            f"JOIN is_bins ib USING (ticker, trade_date) "
-            f"WHERE ib.bin20_{metric} > 0 "
+            f"JOIN {bin_table} bt USING (ticker, trade_date) "
+            f"WHERE bt.bin20_{metric} > 0 "
             f"  AND df.{outcome} IS NOT NULL"
             f"{date_conditions} "
             f"ORDER BY df.ticker, df.trade_date"
@@ -627,7 +654,7 @@ async def analyze(
         row_dicts = [dict(r) for r in rows]
         if row_dicts:
             _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
-        _tlog(f'ALL+IS is_bins JOIN fetch ({len(row_dicts)} rows)')
+        _tlog(f'ALL+{spec.kind} {bin_table} JOIN fetch ({len(row_dicts)} rows)')
 
         # Build by_ticker + spot lookup + bin20 lookup in one pass.
         # Same null/NaN guards as the legacy ALL path.
@@ -695,14 +722,19 @@ async def analyze(
             # and removed along with the sentinel.
             buckets_20_all[b20 - 1].append(pair)
 
-        # Legacy in_sample bucket ordering: each bucket sorted by (ticker, x).
-        sort_key = lambda p: (p[3], p[0])
+        # Bucket ordering: IS uses (ticker, metric_value); WF uses
+        # (ticker, trade_date). Matches the existing legacy ALL branch's
+        # spec-dispatched sort_key below.
+        if spec.kind == "walk_forward":
+            sort_key = lambda p: (p[3], p[2])
+        else:
+            sort_key = lambda p: (p[3], p[0])
         for b in range(10):
             buckets[b].sort(key=sort_key)
         for b in range(20):
             buckets_20_all[b].sort(key=sort_key)
 
-        wf_dropped = 0  # in_sample has no warmup gate
+        wf_dropped = 0  # Group 7 removed the per-request warm-up count
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         _tlog('ALL+IS bucket_setup + decile_stats_20')
         # No per-ticker thinning — count every ticker that contributed any
@@ -1555,7 +1587,6 @@ async def analyze(
         "mode":             spec.kind,
         "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
         "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
-        "dropped_warmup_n": wf_dropped,
         "start_date":       str(pairs[0][2]) if pairs else None,
 
         # Diagnostic: handler elapsed time (ms) measured at the return statement.
@@ -1847,16 +1878,20 @@ async def heatmap_2d(
         #   ticker history independently. Bin assignments will differ
         #   for rows whose ticker has sparse metric_y or outcome —
         #   that's the cross-view inconsistency this migration fixes.
-        if spec.kind == "in_sample":
+        if spec.kind in {"in_sample", "walk_forward"}:
+            # Group 7: WF+ALL joins wf_bins instead of is_bins. Encoding A
+            # means `bin20 > 0` on both axes drops warm-up + null in one
+            # rule, identical to the IS path's filter shape.
+            bin_table = "is_bins" if spec.kind == "in_sample" else "wf_bins"
             join_sql = (
                 f"SELECT df.ticker, "
-                f"ib.bin20_{metric_x} AS bin_x_20, "
-                f"ib.bin20_{metric_y} AS bin_y_20, "
+                f"bt.bin20_{metric_x} AS bin_x_20, "
+                f"bt.bin20_{metric_y} AS bin_y_20, "
                 f"{outcome_sql_sel} "
                 f"FROM daily_features df "
-                f"JOIN is_bins ib USING (ticker, trade_date) "
-                f"WHERE ib.bin20_{metric_x} > 0 "
-                f"AND ib.bin20_{metric_y} > 0 "
+                f"JOIN {bin_table} bt USING (ticker, trade_date) "
+                f"WHERE bt.bin20_{metric_x} > 0 "
+                f"AND bt.bin20_{metric_y} > 0 "
                 f"AND {outcome_sql_nn}"
                 f"{date_conditions} "
                 f"ORDER BY df.trade_date"
@@ -2050,13 +2085,10 @@ async def heatmap_2d(
             "n_tickers": n_tickers_used,
             "mode":      spec.kind,
         }
-        from app.routers.row_compute import dropped_count_for_mode
         if spec.kind == "walk_forward":
             out["warmup"]           = spec.warmup
-            out["dropped_warmup_n"] = dropped_count_for_mode(spec, a_x)
         elif spec.kind == "train_test":
             out["cutoff_date"]      = spec.cutoff.isoformat()
-            out["dropped_warmup_n"] = dropped_count_for_mode(spec, a_x)
             # Side-by-side train/test grids + frozen thresholds for tooltips.
             # `grid` (= test data) is kept for backward compat; train_grid and
             # test_grid are the canonical split keys the frontend uses in TT mode.
@@ -2201,14 +2233,18 @@ async def metric_bins_1d(
     # `bins` via `((bin20 - 1) * bins) // 20`. Divisor bins (2/4/5/10/20)
     # are mathematically exact; non-divisor bins shift slightly. Default
     # bins=10 (the heatmap-sidebar caller's request) is exact.
-    if is_all and not walk_forward and not cutoff_date:
+    if is_all and not cutoff_date:
+        # Group 7: WF+ALL takes the same stored-bin path, joining wf_bins
+        # instead of is_bins. The math, the aggregation formula, and the
+        # response shape are identical — only the source table differs.
+        bin_table = "wf_bins" if walk_forward else "is_bins"
         join_sql = (
             f"SELECT df.{metric} AS metric_val, "
-            f"ib.bin20_{metric} AS bin_20, "
+            f"bt.bin20_{metric} AS bin_20, "
             f"{outcome_sql_sel} "
             f"FROM daily_features df "
-            f"JOIN is_bins ib USING (ticker, trade_date) "
-            f"WHERE ib.bin20_{metric} > 0 "
+            f"JOIN {bin_table} bt USING (ticker, trade_date) "
+            f"WHERE bt.bin20_{metric} > 0 "
             f"AND {outcome_sql_nn}"
             f"{date_conditions}"
         )
@@ -2370,13 +2406,10 @@ async def metric_bins_1d(
         "per_ticker":      is_all,
         "mode":            spec.kind,
     }
-    from app.routers.row_compute import dropped_count_for_mode
     if spec.kind == "walk_forward":
         out["warmup"]           = spec.warmup
-        out["dropped_warmup_n"] = dropped_count_for_mode(spec, assignments)
     elif spec.kind == "train_test":
         out["cutoff_date"]      = spec.cutoff.isoformat()
-        out["dropped_warmup_n"] = dropped_count_for_mode(spec, assignments)
     return out
 
 
@@ -2906,6 +2939,7 @@ def _sec_score_metrics(
     n_bins: int = 10,
     spec=None,
     all_rows=None,
+    bin20_by_metric: Optional[dict] = None,
 ) -> list:
     """Score each secondary feature by weighted_spread × breadth.
 
@@ -3005,11 +3039,17 @@ def _sec_score_metrics(
         # the user needs to re-validate independently. Fix is identical
         # in shape: pass all_rows always; the underlying helper handles
         # the mode-dispatch correctly post-v9.
+        # Group 7: per-feature wf_bin20 lookup (if available) takes the
+        # stored-bin path in the helper. Mode-agnostic — the same kwarg
+        # carries IS or WF lookups; the helper's hoisted stored-bin
+        # check fires for either.
+        feat_bin20_by_key = (bin20_by_metric or {}).get(feat)
         buckets_raw = assign_secondary_buckets(
             spec, rows_sorted, feat, n_bins, outcome_col, is_all,
             rows_presorted=True,
             all_rows=(all_rows if _all_sorted is not None else None),
             all_rows_sorted=_all_sorted,
+            bin20_by_key=feat_bin20_by_key,
         )
         if buckets_raw is None:
             continue
@@ -3442,6 +3482,88 @@ async def _fetch_bin20_by_metric(
     return out
 
 
+async def _fetch_wfbin20_by_metric(
+    pool,
+    metrics: list,
+    filter_pairs: list,
+) -> dict:
+    """Group 7 (WF migration): prefetch bin20 from wf_bins for a set of
+    metrics, restricted to a primary-filtered (ticker, trade_date) set.
+    Returns ``{metric: {(ticker, date_str): bin20}}``.
+
+    Mirror of `_fetch_bin20_by_metric` against `wf_bins` instead of
+    `is_bins`. Encoding A applies — `wf_bins.bin20_<metric> = 0`
+    collapses null-metric AND walk-forward warm-up exclusion into the
+    same sentinel, so the same `if v is not None and v > 0` guard in
+    the dict-build drops both classes of row in one pass. Dashboard
+    code that consumes the returned lookup applies `WHERE bin20 > 0`
+    as its only filter, identical to the IS path.
+
+    Same dynamic column probe as the IS helper (auto-heals when the
+    other project backfills new metrics).
+    """
+    if not metrics or not filter_pairs:
+        return {}
+    async with pool.acquire() as conn:
+        col_rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = 'wf_bins' AND table_schema = 'public'
+                 AND column_name LIKE 'bin20_%'""")
+    available = {r["column_name"] for r in col_rows}
+    eligible = [m for m in metrics if f"bin20_{m}" in available]
+    if not eligible:
+        return {}
+    bin20_select = ", ".join(f"wb.bin20_{m}" for m in eligible)
+    sql = (
+        f"SELECT wb.ticker, wb.trade_date, {bin20_select} "
+        f"FROM wf_bins wb "
+        f"JOIN unnest($1::text[], $2::date[]) AS f(ticker, trade_date) "
+        f"  ON wb.ticker = f.ticker AND wb.trade_date = f.trade_date"
+    )
+    tkrs = [t for (t, _) in filter_pairs]
+    from datetime import date as _date_cls
+    dates = []
+    for (_, d) in filter_pairs:
+        if isinstance(d, _date_cls):
+            dates.append(d)
+        else:
+            dates.append(_date_cls.fromisoformat(str(d)))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, tkrs, dates)
+    if not rows:
+        return {m: {} for m in eligible}
+    field_names = list(rows[0].keys())
+    ticker_idx = field_names.index("ticker")
+    date_idx   = field_names.index("trade_date")
+    col_idx    = [field_names.index(f"bin20_{m}") for m in eligible]
+    inners: list = [dict() for _ in eligible]
+    for r in rows:
+        d = r[date_idx]
+        d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        key = (r[ticker_idx], d_str)
+        for i, ci in enumerate(col_idx):
+            v = r[ci]
+            if v is not None and v > 0:
+                inners[i][key] = v
+    out = dict(zip(eligible, inners))
+    return out
+
+
+async def _fetch_stored_bin20_by_metric(
+    pool, mode: str, metrics: list, filter_pairs: list,
+) -> dict:
+    """Dispatcher — returns the right stored-bin lookup for the given
+    spec mode. `mode` is the spec.kind string (`"in_sample"` or
+    `"walk_forward"`). For `"train_test"` returns empty (Group 8 will
+    add tt_thresholds support). For unknown modes returns empty.
+    """
+    if mode == "in_sample":
+        return await _fetch_bin20_by_metric(pool, metrics, filter_pairs)
+    if mode == "walk_forward":
+        return await _fetch_wfbin20_by_metric(pool, metrics, filter_pairs)
+    return {}
+
+
 async def _ensure_sec_cache(pool, ticker: str, metric: str, outcome: str,
                             date_from: str = "", date_to: str = "") -> str:
     """Ensure _SEC_CACHE has rows for (ticker, metric, outcome, dates).
@@ -3668,11 +3790,24 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
                 "data_as_of":     data_as_of,
                 "n_input_rows":   len(rows),
             }
+            # Group 7: prefetch wf_bins for the primary metric AND every
+            # feature, so the sync scoring run uses stored bins instead
+            # of computing on the fly. Primary's lookup feeds
+            # filter_by_assignments via _walk_forward_primary_filter's
+            # stored-bin replacement; per-feature lookups feed
+            # assign_secondary_buckets. Scanner is always WF; ALL-mode
+            # only does this prefetch (single-ticker stays on legacy).
+            bin20_by_metric: dict = {}
+            if is_all:
+                pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in rows]
+                all_metrics = [cached["primary_metric"]] + list(feature_cols)
+                bin20_by_metric = await _fetch_wfbin20_by_metric(
+                    pool, all_metrics, pairs)
             loop.run_in_executor(
                 None, _run_sec_score,
                 scan_key, rows, cached["outcome"], feature_cols,
                 is_all, n_bins, cached["primary_metric"], req.selected_primary_bins, req.filtered_dates,
-                db_write_params,
+                db_write_params, bin20_by_metric,
             )
 
     entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
@@ -3747,11 +3882,18 @@ async def secondary_scan(req: SecScanReq, pool=Depends(get_oi_pool)):
                 "data_as_of":     data_as_of,
                 "n_input_rows":   len(rows),
             } if pool else None
+            # Group 7: prefetch wf_bins (same shape as /secondary-load).
+            bin20_by_metric: dict = {}
+            if is_all and pool:
+                pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in rows]
+                all_metrics = [primary_metric] + list(feature_cols)
+                bin20_by_metric = await _fetch_wfbin20_by_metric(
+                    pool, all_metrics, pairs)
             loop.run_in_executor(
                 None, _run_sec_score,
                 scan_key, rows, outcome_col, feature_cols,
                 is_all, n_bins, primary_metric, req.selected_primary_bins, req.filtered_dates,
-                db_write_params,
+                db_write_params, bin20_by_metric,
             )
 
     entry = _SEC_SCORE_CACHE.get(scan_key, {"status": "computing"})
@@ -3874,10 +4016,13 @@ async def secondary_detail(req: SecDetailReq, pool=Depends(get_oi_pool)):
     # populated features); downstream falls through to the all_rows
     # path and returns "insufficient_data", which is the right shape
     # for a metric the user shouldn't have been able to click into.
+    # Group 7: prefetch dispatches by mode — IS → is_bins, WF → wf_bins.
+    # Builder doesn't know which; same lookup shape feeds the helper.
     bin20_by_key = None
-    if spec.kind == "in_sample" and is_all:
+    if is_all and spec.kind in {"in_sample", "walk_forward"}:
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
-        by_metric = await _fetch_bin20_by_metric(pool, [req.metric_b], pairs)
+        by_metric = await _fetch_stored_bin20_by_metric(
+            pool, spec.kind, [req.metric_b], pairs)
         bin20_by_key = by_metric.get(req.metric_b)
 
     # ── Secondary binning ───────────────────────────────────────────────────
@@ -4078,14 +4223,15 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     # with no error, no broken empty mini. Auto-heals when those bin20
     # columns get backfilled (no allowlist anywhere).
     bin20_by_metric: dict = {}
-    if spec.kind == "in_sample" and is_all:
+    if is_all and spec.kind in {"in_sample", "walk_forward"}:
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
-        bin20_by_metric = await _fetch_bin20_by_metric(pool, list(feat_cols), pairs)
+        bin20_by_metric = await _fetch_stored_bin20_by_metric(
+            pool, spec.kind, list(feat_cols), pairs)
 
     # Fix A: loop inversion for the IS+ALL path. The legacy per-feature
     # loop is preserved — it's still the implementation for WF/TT and
     # single-ticker modes (those don't go through the stored-bin path).
-    use_one_pass = spec.kind == "in_sample" and is_all
+    use_one_pass = is_all and spec.kind in {"in_sample", "walk_forward"}
 
     results = []
 
@@ -4178,7 +4324,7 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
             # Group 4: skip features without a stored bin20 column. The 7
             # not-yet-populated features (iv_25d_call_30d et al.) fall into
             # this branch today; they'll auto-light when backfilled.
-            if spec.kind == "in_sample" and is_all and feat not in bin20_by_metric:
+            if is_all and spec.kind in {"in_sample", "walk_forward"} and feat not in bin20_by_metric:
                 continue
             r = assign_secondary_bin_stats(
                 spec, filtered, feat, n_bins, outcome_col, is_all,
@@ -4268,14 +4414,14 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
     # matrix — no error envelope; matches the user-facing "skip the
     # missing minis" semantics.
     bin20_by_metric: dict = {}
-    if spec.kind == "in_sample" and is_all:
+    if is_all and spec.kind in {"in_sample", "walk_forward"}:
         sel_metrics = [sel.get("metric", "") for sel in req.selections
                        if sel.get("metric")]
         if sel_metrics:
             pairs = [(r.get("ticker", ""), r.get("trade_date", ""))
                      for r in ordered]
-            bin20_by_metric = await _fetch_bin20_by_metric(
-                pool, sel_metrics, pairs)
+            bin20_by_metric = await _fetch_stored_bin20_by_metric(
+                pool, spec.kind, sel_metrics, pairs)
 
     vectors, metric_names, n_each = [], [], []
     for sel in req.selections:
@@ -4284,7 +4430,7 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
         if not metric or not bins:
             continue
         # Group 4: skip metrics without stored bin20 (auto-heals).
-        if spec.kind == "in_sample" and is_all and metric not in bin20_by_metric:
+        if is_all and spec.kind in {"in_sample", "walk_forward"} and metric not in bin20_by_metric:
             continue
         vec = secondary_membership(
             spec, ordered, metric, bins, n_bins, is_all,
@@ -4416,7 +4562,12 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
 # means rows from tickers with <n_bins observations now contribute to
 # the rank pool. Pre-v1 entries are unreachable on read (key prefix
 # mismatch); the table-ensure DELETE below reclaims their disk.
-_GLOBAL_BINS_SCHEMA_VERSION = 1
+#
+# v2 (Group 7): WF mode now reads bin20 from wf_bins (stored) instead
+# of running _compute_all_bins_walk_forward on the fly. Per-bin counts
+# shift by the boundary-edge accumulation (~99 rows on the test
+# baseline). v1 entries are unreachable on read.
+_GLOBAL_BINS_SCHEMA_VERSION = 2
 
 _GLOBAL_BINS_CACHE: dict = {}
 _GLOBAL_BINS_TABLE_DDL = """\
@@ -4595,11 +4746,9 @@ async def global_metric_bins(
         }
         if spec.kind == "walk_forward":
             out["warmup"]           = spec.warmup
-            out["dropped_warmup_n"] = dropped_n
             out["start_date"]       = wf_start
         elif spec.kind == "train_test":
             out["cutoff_date"]      = spec.cutoff.isoformat()
-            out["dropped_warmup_n"] = dropped_n
             out["start_date"]       = wf_start
 
         # Persist to DB so next server restart loads instantly.
@@ -4823,7 +4972,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 10  # v10 (thinning removal): /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 11  # v11 (Group 7): WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5572,7 +5721,7 @@ def _compute_analyze_bundle_sync(
     # threaded in by the async caller. WF/TT still call the on-the-fly
     # Assigner — same mode boundary as Group 3a. Single-ticker bundles
     # also use the Assigner (bin20_lookup is None on that path).
-    if is_all and mode == "in_sample" and bin20_lookup is not None:
+    if is_all and mode in {"in_sample", "walk_forward"} and bin20_lookup is not None:
         if _measure: _t_assign_start = _tick()
         assignments = _assignments_from_is_bins(
             rows, metric, anchor_outcome, n_bins, bin20_lookup,
@@ -6098,14 +6247,17 @@ async def _compute_analyze_bundle_bg(
                 "error":  "no_data_for_ticker_metric",
             }
             return
-        # v9 (Group 3b): for IS+ALL prefetch bin20 from is_bins so the
-        # sync compute uses stored bins instead of computing on the fly.
-        # WF/TT fall through to the Assigner (bin20_lookup stays None).
+        # v9 (Group 3b): IS+ALL prefetches bin20 from is_bins.
+        # v11 (Group 7): WF+ALL extends the same shape — prefetch from
+        # wf_bins instead. Sync compute consumes the lookup identically;
+        # the encoding is the same (Encoding A: 0 = warm-up or null).
+        # TT still falls through to the Assigner (bin20_lookup stays None).
         bin20_lookup: Optional[dict] = None
-        if mode == "in_sample":
+        if mode in {"in_sample", "walk_forward"}:
+            bin_table = "is_bins" if mode == "in_sample" else "wf_bins"
             bin_sql = (
                 f'SELECT ticker, trade_date, bin20_{metric} AS bin_20 '
-                f'FROM is_bins WHERE bin20_{metric} > 0'
+                f'FROM {bin_table} WHERE bin20_{metric} > 0'
             )
             async with pool.acquire() as conn:
                 bin_rows = await conn.fetch(bin_sql, timeout=60)

@@ -325,20 +325,80 @@ class WalkForwardAssigner:
     def fit(self, rows, metric, n_bins, is_all):
         return None  # walk-forward is computed inline in assign
 
-    def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all):
-        """Delegate to `_compute_all_bins_walk_forward` — the
-        numpy-vectorized walk-forward batch helper. Returns
-        (metrics, dropped_warmup_n, start_date).
+    def assign_batch(self, rows, feature_cols, outcome_col, n_bins, is_all,
+                     *, bin20_by_metric: Optional[dict] = None):
+        """Numpy-vectorized walk-forward batch helper. Returns
+        (metrics, dropped_warmup_n, start_date) — `dropped_warmup_n` is
+        always 0 under the Group 7 stored-bin path (Encoding A collapses
+        warm-up + null into one sentinel; the dashboard surfaces the
+        exclusion via the "Excludes warm-up period" tagline instead).
+
+        Group 7: when `bin20_by_metric` is supplied, per-feature stats
+        are built by collapsing the stored bin20 with the canonical
+        20→N formula and aggregating outcomes per bin. Mirrors what
+        `_compute_all_bins_walk_forward` does on the fly, but with
+        bin assignments coming from `wf_bins` instead of bisect_left.
+        For features absent from `wf_bins` (the 7-missing pattern), the
+        legacy on-the-fly batch helper is invoked as a fallback for
+        that subset of features only.
         """
+        if bin20_by_metric is not None:
+            metrics_out, missing = _batch_metrics_from_stored_bin20(
+                rows, feature_cols, outcome_col, n_bins, is_all,
+                bin20_by_metric,
+            )
+            if missing:
+                # Fallback for features not in wf_bins. Compute on the fly
+                # for the missing subset and merge.
+                m_fallback, _, _ = _compute_all_bins_walk_forward(
+                    rows, missing, outcome_col, n_bins, is_all,
+                    warmup=self.spec.warmup,
+                )
+                metrics_out.extend(m_fallback)
+            return metrics_out, 0, None
+        # Legacy on-the-fly path.
         metrics, dropped, start_date = _compute_all_bins_walk_forward(
             rows, feature_cols, outcome_col, n_bins, is_all, warmup=self.spec.warmup,
         )
         return metrics, dropped, start_date
 
-    def assign(self, rows, metric, n_bins, is_all, state, outcome_col):
+    def assign(self, rows, metric, n_bins, is_all, state, outcome_col,
+               *, bin20_by_key: Optional[dict] = None):
+        """Group 7: when `bin20_by_key` is supplied, build RowAssignments
+        directly from the stored lookup. Rows whose key is absent from
+        the lookup (or whose stored `bin20 = 0`) are surfaced as
+        `bin=None, dropped_reason="warmup"` — preserves the existing
+        downstream contract that consumers check `a.bin is not None`.
+        """
         valid_pairs, dropped = _parse_rows(rows, metric, outcome_col, n_bins)
-        warm = self.spec.warmup
 
+        if bin20_by_key is not None:
+            # Stored-bin path
+            out: list[RowAssignment] = []
+            for (xf, yf, date_s, tkr, ri) in valid_pairs:
+                d_key = (date_s.isoformat() if hasattr(date_s, "isoformat")
+                         else str(date_s))
+                b20 = bin20_by_key.get((tkr, d_key))
+                if b20 is None or b20 <= 0:
+                    out.append(RowAssignment(
+                        ticker=tkr, trade_date=date_s, metric_name=metric,
+                        metric_value=xf, n_bins=n_bins, bin=None,
+                        outcome_col=outcome_col, forward_return=yf,
+                        dropped_reason="warmup",
+                    ))
+                    continue
+                b = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+                out.append(RowAssignment(
+                    ticker=tkr, trade_date=date_s, metric_name=metric,
+                    metric_value=xf, n_bins=n_bins, bin=b,
+                    outcome_col=outcome_col, forward_return=yf,
+                    dropped_reason=None,
+                ))
+            out.extend(dropped)
+            return out
+
+        # Legacy on-the-fly path.
+        warm = self.spec.warmup
         if is_all:
             by_tkr: dict = {}
             for p in valid_pairs:
@@ -595,26 +655,27 @@ def mode_envelope(spec, *, dropped: int = 0, universe: int = 0,
         }
 
     Six fields, uniform across modes:
-      mode             — "in_sample" / "walk_forward" / "train_test"
-      warmup           — int for walk_forward, None otherwise
-      cutoff_date      — ISO string for train_test, None otherwise
-      dropped_warmup_n — caller-supplied; rows excluded by the spec's gate
-                         (warmup for walk_forward, insufficient_train_history
-                         for train_test, 0 for in_sample)
-      universe_n       — caller-supplied; rows with a defined bin
-      start_date       — caller-supplied; first date in the universe
+      mode        — "in_sample" / "walk_forward" / "train_test"
+      warmup      — int for walk_forward (250-day window), None otherwise
+      cutoff_date — ISO string for train_test, None otherwise
+      universe_n  — caller-supplied; rows with a defined bin
+      start_date  — caller-supplied; first date in the universe
 
-    Pre-existing JS only reads `mode` (and `warmup`/`cutoff_date` for the
-    primary chart's WALK-FORWARD / TEST PERIOD subtitle). Returning all
-    six fields uniformly is inert for consumers that don't read them.
+    Group 7 removed `dropped_warmup_n`. Under Encoding A (`wf_bins`'s
+    `bin20 = 0` collapses warm-up + null into one sentinel), the count
+    isn't computable from the stored bin alone. The frontend surfaces
+    the exclusion with a static "Excludes walk-forward warm-up period"
+    tagline instead (gated on pageMode === 'walk_forward'). Endpoints
+    that previously called this with `dropped=` may keep doing so —
+    the kwarg is accepted and ignored for back-compat — but new code
+    should drop it.
     """
     return {
-        "mode":             spec.kind,
-        "warmup":           spec.warmup if spec.kind == "walk_forward" else None,
-        "cutoff_date":      spec.cutoff.isoformat() if spec.kind == "train_test" else None,
-        "dropped_warmup_n": dropped,
-        "universe_n":       universe,
-        "start_date":       start_date,
+        "mode":        spec.kind,
+        "warmup":      spec.warmup if spec.kind == "walk_forward" else None,
+        "cutoff_date": spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+        "universe_n":  universe,
+        "start_date":  start_date,
     }
 
 
@@ -637,26 +698,62 @@ def filter_by_assignments(
     selected_primary_bins,
     is_all: bool,
     filtered_dates: Optional[list] = None,
+    *,
+    primary_bin20_by_key: Optional[dict] = None,
 ) -> tuple[list, int, int]:
     """Primary filter for the secondary-endpoint family.
 
-    Returns (filtered_rows, dropped_warmup_n, universe_n).
+    Returns (filtered_rows, dropped_warmup_n, universe_n). Group 7
+    drops the meaningful semantics of `dropped_warmup_n` — under
+    Encoding A, warm-up exclusion is collapsed into the same sentinel
+    as null-metric, so a separate count isn't computable from the
+    stored bin alone. The field is kept in the tuple shape for caller
+    bit-compatibility but always returned as 0 from the stored-bin
+    path. The "Excludes walk-forward warm-up period" tagline (frontend)
+    is what surfaces the exclusion to the user.
 
       in_sample: uses the frontend's `filtered_dates` (a list of
         "ticker|date" strings already narrowed by /analyze's in-sample
-        primary bins). `dropped_warmup_n` is 0; `universe_n` is the full
-        cached row count. Output is in cached-row iteration order
+        primary bins). Output is in cached-row iteration order
         (NOT chronologically resorted) to preserve legacy bit-equivalence
         — downstream `_compute_bins_for_metric` is order-insensitive.
 
-      walk_forward: delegates to `_walk_forward_primary_filter`. Computes
-        walk-forward primary bins backend-side (20-bin universe, 252-day
-        warmup) and keeps rows whose bin ∈ `selected_primary_bins`.
-        Output is chronologically sorted.
+      walk_forward (Group 7): when `primary_bin20_by_key` is supplied
+        (the primary metric's bin20 lookup from `wf_bins`), filters rows
+        whose stored `bin20 > 0 AND bin20 ∈ selected_primary_bins`.
+        Output is chronologically sorted. The Encoding A `bin20 > 0`
+        gate drops both warm-up and null-metric rows in one rule —
+        same single-rule discipline as the IS surfaces.
+
+      walk_forward (fallback): delegates to `_walk_forward_primary_filter`
+        when no lookup is supplied. Computes WF primary bins on the fly.
 
       train_test: (Step 6) frozen training-set bins.
     """
     from app.routers.oi_analysis import _filter_by_tkr_date, _parse_tkr_date_set
+    # Group 7: stored-bin primary filter — mode-agnostic (works for any
+    # mode that supplies a stored bin lookup, today WF). The IS path
+    # below stays on filtered_dates because /analyze's trade_calendar
+    # has already done the bin assignment + filter at the front end.
+    if (primary_bin20_by_key is not None and is_all
+            and spec.kind == "walk_forward"):
+        sel = set(int(b) for b in (selected_primary_bins or []))
+        kept: list = []
+        for r in rows:
+            tkr = str(r.get("ticker", ""))
+            td  = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            b20 = primary_bin20_by_key.get((tkr, d_key))
+            if b20 is None or b20 <= 0:
+                continue   # Encoding A: warm-up or null-metric
+            if sel and b20 not in sel:
+                continue
+            kept.append(r)
+        # Chronological sort for downstream consumers that need it
+        # (matches _walk_forward_primary_filter's output ordering).
+        kept = _sort_chrono(kept)
+        return kept, 0, len(rows)
+
     if spec.kind == "in_sample":
         filtered = _filter_by_tkr_date(rows, _parse_tkr_date_set(filtered_dates or []))
         return filtered, 0, len(rows)
@@ -723,53 +820,54 @@ def assign_secondary_bin_stats(
         pre-cutoff training data); aggregation uses `rows_chrono`
         (test-window-only rows from filter_by_assignments).
     """
+    # Group 7: stored-bin path hoisted above the spec dispatch — mode-
+    # agnostic, runs for both IS (is_bins, Group 4) and WF (wf_bins,
+    # Group 7). Also reached by the legacy v9 IS fixed-thresholds path
+    # when `all_rows` is supplied but `bin20_by_key` isn't (the on-the-fly
+    # per-ticker rank inside _bin_map_from_stored_bin20 fires when
+    # bin20_by_key is None).
+    if (bin20_by_key is not None and is_all) or (
+            spec.kind == "in_sample" and all_rows is not None):
+        bin_map = _bin_map_from_stored_bin20(
+            all_rows if all_rows is not None else rows_chrono,
+            metric, n_bins, is_all,
+            outcome_col=outcome_col,
+            bin20_by_key=bin20_by_key,
+        )
+        buckets: list = [[] for _ in range(n_bins)]
+        for r in rows_chrono:
+            v = r.get(metric)
+            o = r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv = float(v); fo = float(o)
+                if math.isnan(fv) or math.isnan(fo):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            tkr = str(r.get("ticker", ""))
+            td = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            bin_1idx = bin_map.get((tkr, d_key))
+            if bin_1idx is None:
+                continue
+            buckets[bin_1idx - 1].append(fo)
+        if all(len(b) == 0 for b in buckets):
+            return None
+        return {
+            "name":   metric,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+            "bin_ns": [len(b) for b in buckets],
+        }
     if spec.kind == "in_sample":
-        # v9 fix: when `all_rows` is provided, fit on the full population
-        # and slot rows_chrono into fixed bins. Uneven bin_ns by design —
-        # matches the heatmap's row sums when the same secondary metric
-        # is used as the Y-axis. Tickers with < n_bins observations in
-        # the full population are excluded from the fit; their filtered
-        # rows drop silently.
-        if all_rows is not None or bin20_by_key is not None:
-            # Group 4: `bin20_by_key` (when present + is_all) makes
-            # _in_sample_bin_map derive bins from stored is_bins.bin20.
-            # `all_rows` is still passed for the legacy on-the-fly path
-            # (single-ticker, or until Group-4-bin20 is wired everywhere).
-            bin_map = _in_sample_bin_map(
-                all_rows if all_rows is not None else rows_chrono,
-                metric, n_bins, is_all,
-                outcome_col=outcome_col,
-                bin20_by_key=bin20_by_key,
-            )
-            buckets: list = [[] for _ in range(n_bins)]
-            for r in rows_chrono:
-                v = r.get(metric)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv = float(v); fo = float(o)
-                    if math.isnan(fv) or math.isnan(fo):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                tkr = str(r.get("ticker", ""))
-                td = r.get("trade_date", "")
-                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-                bin_1idx = bin_map.get((tkr, d_key))
-                if bin_1idx is None:
-                    continue
-                buckets[bin_1idx - 1].append(fo)
-            if all(len(b) == 0 for b in buckets):
-                return None
-            return {
-                "name":   metric,
-                "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
-                "bin_ns": [len(b) for b in buckets],
-            }
-        # Legacy: re-rank on filtered subset.
+        # Legacy IS fallback: re-rank on filtered subset. Reached when
+        # neither bin20_by_key nor all_rows is supplied.
         return _compute_bins_for_metric(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "walk_forward":
+        # WF on-the-fly fallback: reached when wf_bins lacks bin20_<m>
+        # for this metric (the 7-missing pattern) or no lookup was
+        # supplied. Computes the walk-forward rank live.
         return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
     if spec.kind == "train_test":
         # Fit on the full row cache so the assigner sees pre-cutoff training
@@ -804,7 +902,7 @@ def assign_secondary_bin_stats(
     raise ValueError(f"unknown spec kind: {spec.kind!r}")
 
 
-def _in_sample_bin_map(
+def _bin_map_from_stored_bin20(
     rows: list,
     metric: str,
     n_bins: int,
@@ -813,46 +911,38 @@ def _in_sample_bin_map(
     outcome_col: Optional[str] = None,
     bin20_by_key: Optional[dict] = None,
 ) -> dict:
-    """Build `(ticker, trade_date_str) → 1-indexed bin` lookup using the
-    in-sample bin algorithm on the FULL population of `rows`.
+    """Build `(ticker, trade_date_str) → 1-indexed bin` lookup.
 
-    Per-ticker rank-normalize (ALL mode) or flat rank (single-ticker),
-    matching `_bin_membership` / `_bucket_pairs_per_ticker` semantics:
+    Two paths share this entry point. Group 7 hoists the stored-bin
+    check above the on-the-fly fallback because the math is identical
+    whether the bin came from `is_bins` (IS) or `wf_bins` (WF); only
+    the prefetch source differs upstream. Was named `_in_sample_bin_map`
+    pre-Group-7 but the name was misleading — the stored-bin path is
+    mode-agnostic.
+
+    Stored-bin path (Group 4, IS) / (Group 7, WF): when `bin20_by_key`
+    is provided AND `is_all` is True, the map is built directly from
+    the stored bin20 lookup. Display granularity comes from the divisor
+    formula `min(((bin20 - 1) * n_bins) // 20 + 1, n_bins)`, which is
+    mathematically a direct per-ticker rank for every `n_bins` that
+    divides 20 — and the secondary-panel UI only exposes
+    `n_bins ∈ {5, 10, 20}`, all divisors. `outcome_col` validity is
+    irrelevant in this branch because the upstream caller has already
+    applied any outcome filter (cache filter for /sec endpoints; SQL
+    filter for /analyze and /heatmap).
+
+    On-the-fly fallback (legacy, IS): when `bin20_by_key` is None, runs
+    the original in-sample bin algorithm — per-ticker rank-normalize
+    (ALL mode) or flat rank (single-ticker), matching `_bin_membership`
+    / `_bucket_pairs_per_ticker` semantics:
 
         bin = min(int(rank / n_t * n_bins) + 1, n_bins)
 
-    Tickers with fewer than `n_bins` observations in ALL mode are
-    EXCLUDED entirely — their rows do not appear in the map. This
-    matches the heatmap's `if len(items) < bins: continue` gate, so a
-    primary-filtered row whose ticker was dropped from the secondary
-    fit simply drops from the returned buckets.
-
-    `outcome_col`: if provided, rows missing the outcome value are also
-    excluded from the fit (mirrors the heatmap's all-three-columns-valid
-    gate for two-axis cell membership). Pass `None` when only the
-    metric matters — for example `secondary_membership`, whose
-    `_bin_membership` baseline doesn't gate on outcome either.
-
-    Used by the in_sample branches of `assign_secondary_buckets`,
-    `assign_secondary_bin_stats`, and `secondary_membership` to
-    implement the fixed-threshold fit-on-full / slot-on-filtered
-    pattern. v9 fix for the re-ranking-on-filtered-subset bug — see
-    those callers' inline docstrings.
-
-    Group 4 — `bin20_by_key`: when provided AND `is_all` is True, the
-    map is built from the stored is_bins bin20 (passed in by the async
-    caller) instead of an on-the-fly per-ticker rank. The display
-    granularity is derived from bin20 via the divisor formula
-    `min(((bin20 - 1) * n_bins) // 20 + 1, n_bins)`, which is
-    mathematically a direct per-ticker rank for every `n_bins` that
-    divides 20 — and the secondary-panel UI only exposes
-    `n_bins ∈ {5, 10, 20}`, all divisors. Stored-bin path is the
-    consistency keystone: same `(ticker, trade_date)` → same bin in
-    the heatmap, /analyze, the bundle, and these secondary views.
-    `outcome_col` validity is irrelevant in this branch because
-    upstream `_SEC_CACHE.rows` already enforces metric+outcome
-    non-null at the SQL level; the stored bin20 is the bin regardless
-    of which downstream cares about outcome.
+    Reached only for IS callers that didn't supply a lookup (legacy
+    callers, plus the 7 features absent from `is_bins`). WF callers
+    that don't supply a `wf_bins` lookup do NOT fall through here —
+    they go to `_walk_forward_bins` / `_walk_forward_membership` via
+    the spec dispatchers above.
     """
     if bin20_by_key is not None and is_all:
         # Iterate the FILTERED bin20 dict, not all_rows. `bin20_by_key`
@@ -961,60 +1051,46 @@ def assign_secondary_buckets(
       train_test: bins fit on `all_rows` (full cache, pre-cutoff history
         available); buckets filled from `rows_chrono` (test-window rows).
     """
-    if spec.kind == "in_sample":
-        # v9 fix: when `all_rows` is provided, fit secondary bins on the
-        # full population and slot the (primary-filtered) rows_chrono
-        # into those fixed bins. Result: uneven n per bucket, no
-        # re-ranking on the filtered subset. Matches the heatmap's
-        # Y-axis assignment exactly — row sums equal the unfiltered
-        # secondary bin n's.
-        #
-        # Tickers with < n_bins observations in the FULL population are
-        # excluded from the bin map; their filtered rows drop silently.
-        # Same as the heatmap.
-        #
-        # When `all_rows` is None, falls through to the legacy in-sample
-        # path below which re-ranks on the filtered subset (equal-n).
-        # That legacy shape is preserved for back-compat with any caller
-        # that intentionally wants it; the dashboard endpoints now all
-        # pass all_rows so they get the fixed behavior.
-        if all_rows is not None or bin20_by_key is not None:
-            # Group 4: bin20_by_key (when present + is_all) → derive from
-            # stored is_bins.bin20. all_rows path still active for
-            # single-ticker / non-Group-4 callers.
-            bin_map = _in_sample_bin_map(
-                all_rows if all_rows is not None else rows_chrono,
-                metric, n_bins, is_all,
-                outcome_col=outcome_col,
-                bin20_by_key=bin20_by_key,
-            )
-            buckets: list = [[] for _ in range(n_bins)]
-            for r in rows_chrono:
-                v = r.get(metric)
-                o = r.get(outcome_col)
-                if v is None or o is None:
+    # Group 7: stored-bin path hoisted above the spec dispatch — same
+    # mode-agnostic trigger as assign_secondary_bin_stats. Also catches
+    # the v9 IS fixed-thresholds path when `all_rows` is supplied
+    # without a lookup (the helper's internal dispatch handles that).
+    if (bin20_by_key is not None and is_all) or (
+            spec.kind == "in_sample" and all_rows is not None):
+        bin_map = _bin_map_from_stored_bin20(
+            all_rows if all_rows is not None else rows_chrono,
+            metric, n_bins, is_all,
+            outcome_col=outcome_col,
+            bin20_by_key=bin20_by_key,
+        )
+        buckets: list = [[] for _ in range(n_bins)]
+        for r in rows_chrono:
+            v = r.get(metric)
+            o = r.get(outcome_col)
+            if v is None or o is None:
+                continue
+            try:
+                fv = float(v); fo = float(o)
+                if math.isnan(fv) or math.isnan(fo):
                     continue
-                try:
-                    fv = float(v); fo = float(o)
-                    if math.isnan(fv) or math.isnan(fo):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                tkr = str(r.get("ticker", ""))
-                td = r.get("trade_date", "")
-                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-                bin_1idx = bin_map.get((tkr, d_key))
-                if bin_1idx is None:
-                    continue   # ticker excluded from fit, or row not in full pop
-                buckets[bin_1idx - 1].append((fv, fo, d_key, tkr))
-            # Match the legacy n_bins*2 gate: refuse the response when
-            # the filtered subset is too small to be meaningful across
-            # all bins. (Heatmap doesn't have this gate, but downstream
-            # /secondary-detail consumers do.)
-            if sum(len(b) for b in buckets) < n_bins * 2:
-                return None
-            return buckets
+            except (TypeError, ValueError):
+                continue
+            tkr = str(r.get("ticker", ""))
+            td = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            bin_1idx = bin_map.get((tkr, d_key))
+            if bin_1idx is None:
+                continue   # ticker excluded from fit, or row not in full pop
+            buckets[bin_1idx - 1].append((fv, fo, d_key, tkr))
+        # Match the legacy n_bins*2 gate: refuse the response when
+        # the filtered subset is too small to be meaningful across
+        # all bins. (Heatmap doesn't have this gate, but downstream
+        # /secondary-detail consumers do.)
+        if sum(len(b) for b in buckets) < n_bins * 2:
+            return None
+        return buckets
 
+    if spec.kind == "in_sample":
         # ── Legacy in_sample path (re-rank on filtered subset) ────────────
         if is_all:
             by_tkr: dict = {}
@@ -1173,36 +1249,31 @@ def secondary_membership(
         `rows_chrono` (test-window rows only).
     """
     sel = set(selected_bins or [])
-    if spec.kind == "in_sample":
-        # v9 fix: when `all_rows` is provided, derive each row's bin from
-        # the FULL population's secondary distribution and emit a 1 only
-        # when that fixed bin is in `sel`. Mirrors the heatmap's two-axis
-        # cell membership: a row's secondary bin is a fixed property of
-        # its metric value against full-history thresholds, not a
-        # function of the primary-filtered subset. `_bin_membership`
-        # baseline doesn't gate on outcome, so we pass outcome_col=None
-        # to the helper for parity.
-        if all_rows is not None or bin20_by_key is not None:
-            # Group 4: bin20_by_key (when present + is_all) → derive from
-            # stored is_bins.bin20. all_rows path remains for legacy callers.
-            out = np.zeros(len(rows_chrono), dtype=np.float64)
-            if not sel:
-                return out
-            bin_map = _in_sample_bin_map(
-                all_rows if all_rows is not None else rows_chrono,
-                metric, n_bins, is_all,
-                outcome_col=None,
-                bin20_by_key=bin20_by_key,
-            )
-            for i, r in enumerate(rows_chrono):
-                tkr = str(r.get("ticker", ""))
-                td = r.get("trade_date", "")
-                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-                bin_1idx = bin_map.get((tkr, d_key))
-                if bin_1idx is not None and bin_1idx in sel:
-                    out[i] = 1.0
+    # Group 7: stored-bin path hoisted above the spec dispatch — mode-
+    # agnostic, identical math for IS (is_bins, Group 4) and WF
+    # (wf_bins, Group 7). The v9 IS fixed-thresholds path still fires
+    # when `all_rows` is supplied without a lookup.
+    if (bin20_by_key is not None and is_all) or (
+            spec.kind == "in_sample" and all_rows is not None):
+        out = np.zeros(len(rows_chrono), dtype=np.float64)
+        if not sel:
             return out
-        # Legacy: re-rank on filtered subset.
+        bin_map = _bin_map_from_stored_bin20(
+            all_rows if all_rows is not None else rows_chrono,
+            metric, n_bins, is_all,
+            outcome_col=None,
+            bin20_by_key=bin20_by_key,
+        )
+        for i, r in enumerate(rows_chrono):
+            tkr = str(r.get("ticker", ""))
+            td = r.get("trade_date", "")
+            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+            bin_1idx = bin_map.get((tkr, d_key))
+            if bin_1idx is not None and bin_1idx in sel:
+                out[i] = 1.0
+        return out
+    if spec.kind == "in_sample":
+        # Legacy IS fallback: re-rank on filtered subset.
         return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
     if spec.kind == "walk_forward":
         return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
@@ -1350,17 +1421,41 @@ class PortfolioVectorBuilder:
         return {i for i, b in bmap.items() if b is not None}
 
     def _full_vector(self, metric: str, selected_bins, n_bins: int):
-        """0/1 vector over self.rows by spec.kind.
+        """0/1 vector over self.rows.
 
-        Group 6 path: when `spec.kind == "in_sample"` AND a stored bin20
-        lookup exists for this metric, derive each row's bin from the
-        stored is_bins.bin20 instead of computing per-ticker ranks on
-        the fly. Display granularity from `((b20-1)*n_bins)//20 + 1` —
-        same canonical 20→N formula every other migrated endpoint uses.
-        Rows whose key isn't in the lookup, or whose stored bin20 is
-        the null-metric sentinel (0), don't contribute.
+        Group 7: stored-bin path hoisted above the spec dispatch. When
+        `_bin20_by_metric[metric]` exists, derive each row's bin from
+        the stored bin20 — the math is identical for IS (Group 4, from
+        is_bins) and WF (Group 7, from wf_bins). For WF this replaces
+        the on-the-fly `_walk_forward_bins` path; under Encoding A the
+        stored `bin20 > 0` rule drops warm-up + null rows uniformly.
+
+        Fallbacks below by spec.kind run when no stored lookup is
+        supplied (legacy IS callers, WF/TT for metrics absent from the
+        stored table, etc.).
         """
         sel = set(selected_bins or [])
+        # Group 7: mode-agnostic stored-bin shortcut.
+        bin20_by_key = self._bin20_by_metric.get(metric)
+        if bin20_by_key is not None:
+            v = np.zeros(len(self.rows))
+            if not sel:
+                return v
+            for i, r in enumerate(self.rows):
+                tkr = str(r.get("ticker", ""))
+                td  = r.get("trade_date", "")
+                d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+                b20 = bin20_by_key.get((tkr, d_key))
+                if b20 is None or b20 <= 0:
+                    continue   # Encoding A: warm-up + null sentinel
+                # Same canonical 20→N collapse as Group 4 / heatmap /
+                # /metric-bins / /analyze. For divisors of 20 this is
+                # a direct per-ticker rank; UI exposes n_bins ∈ {5,10,20}.
+                bin_n = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+                if bin_n in sel:
+                    v[i] = 1.0
+            return v
+        # Fallbacks by spec.kind
         if self.spec.kind == "walk_forward" or self.spec.kind == "train_test":
             bmap = self._bin_map(metric, n_bins)
             v = np.zeros(len(self.rows))
@@ -1369,35 +1464,8 @@ class PortfolioVectorBuilder:
                     v[i] = 1.0
             return v
         if self.spec.kind == "in_sample":
-            # Group 6: stored-bin path. When the metric's bin20 lookup is
-            # present, every row's bin is its stored is_bins.bin20 →
-            # collapsed to display granularity. Reaches both
-            # primary_vector and secondary_vector (the latter via the
-            # WF/TT-shaped path in secondary_vector above).
-            bin20_by_key = self._bin20_by_metric.get(metric)
-            if bin20_by_key is not None:
-                v = np.zeros(len(self.rows))
-                if not sel:
-                    return v
-                for i, r in enumerate(self.rows):
-                    tkr = str(r.get("ticker", ""))
-                    td  = r.get("trade_date", "")
-                    d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-                    b20 = bin20_by_key.get((tkr, d_key))
-                    if b20 is None or b20 <= 0:
-                        continue
-                    # Same canonical 20→N collapse as Group 4 / heatmap /
-                    # /metric-bins / /analyze. For divisors of 20 this is
-                    # a direct per-ticker rank; the secondary panel UI
-                    # exposes only n_bins ∈ {5, 10, 20}, all divisors.
-                    bin_n = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
-                    if bin_n in sel:
-                        v[i] = 1.0
-                return v
-            # Legacy IS fallback (re-rank on filtered subset or full set
-            # depending on context). Preserved bit-for-bit for callers
-            # that don't supply bin20_by_metric (and for the 7 features
-            # whose bin20 columns don't exist yet).
+            # Legacy IS fallback (re-rank on filtered subset). Preserved
+            # bit-for-bit for callers that don't supply bin20_by_metric.
             return _bin_membership(self.rows, metric, sel, n_bins, self.is_all)
         raise ValueError(f"unknown spec kind: {self.spec.kind!r}")
 
@@ -2056,6 +2124,80 @@ def _compute_all_bins_walk_forward(rows: list, feature_cols: list,
         })
 
     return results, dropped_total, start_date
+
+
+def _batch_metrics_from_stored_bin20(
+    rows: list,
+    feature_cols: list,
+    outcome_col: str,
+    n_bins: int,
+    is_all: bool,
+    bin20_by_metric: dict,
+) -> tuple:
+    """Group 7: build per-feature {name, bins, bin_ns} stats by
+    consulting the stored bin20 lookups directly. Replaces the per-feature
+    on-the-fly walk-forward rank for features present in the lookup.
+
+    For each feature, iterate `rows`, look up `bin20_by_metric[feat][key]`,
+    derive the display bin via the canonical 20→N collapse, and accumulate
+    the outcome value into the corresponding bucket. Features absent from
+    `bin20_by_metric` (the 7-missing pattern) are returned via the
+    `missing` list so the caller can fall back to on-the-fly for them.
+
+    Returns (results, missing):
+      results: list of {"name", "bins", "bin_ns"} — same format as
+               `_compute_all_bins_walk_forward` (and `_compute_all_bins_fast`).
+      missing: list of feature names absent from bin20_by_metric.
+    """
+    n_bins = max(2, min(20, int(n_bins)))
+    missing: list = [m for m in feature_cols if m not in bin20_by_metric]
+    eligible = [m for m in feature_cols if m in bin20_by_metric]
+    if not eligible:
+        return [], missing
+
+    # Precompute per-row outcome float + key (independent of feature)
+    n_rows = len(rows)
+    outcomes = [None] * n_rows
+    keys     = [None] * n_rows
+    for i, r in enumerate(rows):
+        o = r.get(outcome_col)
+        if o is None:
+            continue
+        try:
+            fo = float(o)
+            if math.isnan(fo):
+                continue
+        except (TypeError, ValueError):
+            continue
+        tkr = str(r.get("ticker", ""))
+        td  = r.get("trade_date", "")
+        d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+        outcomes[i] = fo
+        keys[i]     = (tkr, d_key)
+
+    results: list = []
+    for feat in eligible:
+        feat_lookup = bin20_by_metric[feat]
+        buckets = [[] for _ in range(n_bins)]
+        for i in range(n_rows):
+            fo = outcomes[i]
+            if fo is None:
+                continue
+            key = keys[i]
+            b20 = feat_lookup.get(key)
+            if b20 is None or b20 <= 0:
+                continue
+            bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+            buckets[bn].append(fo)
+        total = sum(len(b) for b in buckets)
+        if total < n_bins * 2:
+            continue
+        results.append({
+            "name":   feat,
+            "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
+            "bin_ns": [len(b) for b in buckets],
+        })
+    return results, missing
 
 
 def train_test_bin_matrix_per_ticker(
