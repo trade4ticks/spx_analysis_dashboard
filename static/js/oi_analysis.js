@@ -43,8 +43,10 @@ document.addEventListener('alpine:init', () => {
     //   'in_sample'    — full-history bin thresholds
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
     pageMode: 'walk_forward',
-    // Only used when pageMode === 'train_test'. Defaults to 2024-01-01 so
-    // users get a meaningful default test window without typing a date.
+    // Group 8: cutoffDate is no longer user-selectable. Auto-discovered
+    // from tt_bins via GET /tt-cutoff on page load. Defaulting to a
+    // sane string so the initial render before the fetch resolves doesn't
+    // emit `undefined` in URLs; gets overwritten by the actual value.
     cutoffDate: '2024-01-01',
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
@@ -279,10 +281,22 @@ document.addEventListener('alpine:init', () => {
       // Using window avoids duplicate document listeners if init fires again.
       window._oiTradeSort = (key) => this._tradeSort(key);
 
-      const [tkRes, colRes] = await Promise.all([
+      const [tkRes, colRes, ttRes] = await Promise.all([
         fetch('/api/factor-analysis/tickers'),
         fetch('/api/factor-analysis/columns'),
+        // Group 8: discover the TT cutoff frozen in tt_bins. User no
+        // longer picks it; backend reads it once and the frontend uses
+        // whatever the table holds. If the fetch fails, the existing
+        // 2024-01-01 default stays — TT mode still works against
+        // whatever the build froze.
+        fetch('/api/factor-analysis/tt-cutoff'),
       ]);
+      if (ttRes && ttRes.ok) {
+        try {
+          const tt = await ttRes.json();
+          if (tt && tt.cutoff_date) this.cutoffDate = tt.cutoff_date;
+        } catch (_) {}
+      }
       if (tkRes.ok) {
         this.tickers = ['ALL', ...(await tkRes.json())];
         this.ticker = 'ALL';

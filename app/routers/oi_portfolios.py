@@ -524,7 +524,7 @@ async def portfolio_aggregate(pid: int,
     # WF/TT and single-ticker paths get an empty lookup and fall
     # through to the existing on-the-fly bin maps.
     bin20_by_metric: dict = {}
-    if is_all and spec.kind in {"in_sample", "walk_forward"}:
+    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
         # Group 7: dispatch the prefetch by mode — IS reads is_bins,
         # WF reads wf_bins. PortfolioVectorBuilder's hoisted stored-bin
         # path uses the lookup identically for either mode.

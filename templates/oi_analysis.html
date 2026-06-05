@@ -1636,13 +1636,16 @@
           <span :class="{on: pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
         </div>
       </div>
+      <!-- Group 8: cutoff is frozen at build time. Read-only label;
+           the picker was removed because tt_bins holds one frozen
+           cutoff and the dashboard reads it (no user selection). -->
       <div x-show="pageMode === 'train_test'"
-           title="Bins are computed using rows with trade_date < this date (the 'training' window). Rows at or after the cutoff (the 'test' window) are ranked against those frozen training thresholds — they can land in B1 or B(n_bins) when they exceed the training range.">
+           title="The TT cutoff is frozen at tt_bins build time. To change it, rebuild tt_bins with a different cutoff and redeploy.">
         <label>Cutoff</label><br>
-        <input type="date" x-model="cutoffDate"
-               @change="setPageMode('train_test')"
-               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                      font-size:12px;padding:5px 6px;border-radius:4px">
+        <span x-text="cutoffDate"
+              style="display:inline-block;background:var(--raised);border:1px solid var(--border);
+                     color:var(--dim);font-size:12px;padding:5px 8px;border-radius:4px;
+                     font-family:monospace"></span>
       </div>
       <!-- Analyze button — far right so it visually owns every control to
            its left (Ticker, Metric, From, To, Mode, Cutoff). Pre-Bucket-A
@@ -1716,7 +1719,7 @@
              TEST-window rows only. -->
         <template x-if="data.mode === 'train_test'">
           <div style="font-size:11px;color:#9b59b6;margin:4px 0 8px;font-family:monospace;letter-spacing:.5px"
-               x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · bins frozen at cutoff ' + (data.cutoff_date||'?')"></div>
+               x-text="'TEST PERIOD · ' + (data.n||0).toLocaleString() + ' test trades · Train/Test split at ' + (data.cutoff_date||cutoffDate) + ' (frozen at build time)'"></div>
         </template>
 
         <!-- Compact stats bar (bin-filtered, outcome-aware) -->
