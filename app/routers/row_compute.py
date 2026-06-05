@@ -1227,8 +1227,8 @@ def secondary_membership(
 # ── Portfolio-aggregator vector builder (Step 5) ─────────────────────────
 # /portfolios/{pid}/aggregate computes 0/1 bin-membership vectors over a
 # fixed row set for every (system, primary_metric) + (system, secondary)
-# pair. The legacy implementation forked on `walk_forward` three times
-# inside the per-system loop because the modes have asymmetric semantics:
+# pair. The original implementation forked on `walk_forward` three times
+# inside the per-system loop because the modes had asymmetric semantics:
 #
 #   walk_forward / train_test:
 #     - bin maps cached per (metric, n_bins) — multiple systems sharing a
@@ -1236,27 +1236,28 @@ def secondary_membership(
 #     - secondary bins computed on the FULL row set, then ANDed with the
 #       primary mask.
 #
-#   in_sample:
+#   in_sample (legacy, pre-Group 6):
 #     - secondary bins computed on the primary-FILTERED subset only,
-#       then expanded back to the full-length vector.
+#       then expanded back to the full-length vector — the re-rank-on-
+#       filtered-subset shape that was fixed in /secondary-detail,
+#       /secondary-corr-bins, and /secondary-correlation in v9 / Group 4.
 #
-# TODO(v9-fixed-thresholds): the in_sample branch above has the same
-# re-rank-on-filtered-subset bug that was fixed in the on-screen
-# secondary views (/secondary-detail, /secondary-corr-bins,
-# /secondary-correlation). Fixed-threshold principle: a row's
-# secondary bin should be a fixed property of its metric value against
-# the FULL-population thresholds, not a function of which rows
-# survived the primary filter. The fix mirrors those endpoints: build
-# `(ticker, trade_date) → bin` from the full row set via
-# _in_sample_bin_map and slot the filtered rows into those fixed bins.
-# Deferred to a separate commit because this affects portfolio
-# aggregation (a different surface from the on-screen views the user
-# is currently validating). Don't ship a fix here without re-checking
-# the portfolio test suite.
+# Group 6 closes the asymmetry for IS+ALL by accepting a pre-fetched
+# `bin20_by_metric: {metric: {(ticker, date_str): bin20}}` lookup at
+# construction. When the lookup has an entry for a metric, BOTH
+# primary_vector and secondary_vector use the stored is_bins.bin20 over
+# the FULL row set (same shape as WF/TT — full bin map, then AND with
+# primary mask). Result: a row's secondary bin is a fixed property of
+# its metric value against full-history thresholds, not a function of
+# which rows survived the primary filter, AND the same stored bin
+# reaches the heatmap, /analyze, /metric-bins, the corr explorer, and
+# now portfolios. The legacy re-rank IS path is preserved as a fallback
+# (and stays the only path for WF/TT or for callers that don't supply
+# bin20_by_metric).
 #
-# `PortfolioVectorBuilder` encapsulates both the asymmetry and the cache.
+# `PortfolioVectorBuilder` encapsulates the path selection and the cache.
 # Callers loop over systems and ask `primary_vector` / `secondary_vector`;
-# the builder picks the right path by spec.kind.
+# the builder picks the right path by spec.kind + bin20_by_metric coverage.
 
 class PortfolioVectorBuilder:
     """Per-portfolio 0/1 membership vector builder.
@@ -1266,13 +1267,29 @@ class PortfolioVectorBuilder:
     vector of length `len(rows)`. Walk-forward and train-test mode cache
     the per-(metric, n_bins) bin map across calls so multiple systems that
     share a primary or secondary metric only pay the bisect_left cost once.
+
+    `bin20_by_metric` is the Group 6 stored-bin lookup, populated by the
+    caller via `_fetch_bin20_by_metric` over the portfolio's row set.
+    When a metric appears as a key here, both primary and secondary
+    vectors for that metric derive bins from the stored is_bins.bin20
+    instead of computing per-ticker ranks on the fly. The display
+    granularity comes from the canonical 20→N collapse formula
+    `min(((b20-1)*n_bins)//20 + 1, n_bins)` — same one Group 4 used.
+    Metrics absent from the dict (e.g. the 7 not-yet-populated features,
+    or any WF/TT call since stored bins are IS-only) fall through to
+    their existing on-the-fly paths.
     """
 
-    def __init__(self, spec, rows: list, is_all: bool):
+    def __init__(self, spec, rows: list, is_all: bool,
+                 bin20_by_metric: Optional[dict] = None):
         self.spec = spec
         self.rows = rows
         self.is_all = is_all
         self._cache: dict = {}  # (metric, n_bins) -> bin map (wf / tt only)
+        # Group 6: pre-fetched stored-bin lookup, scoped to this request.
+        # Empty dict = no stored-bin path; metrics absent from the dict
+        # fall through to their existing on-the-fly path.
+        self._bin20_by_metric: dict = bin20_by_metric or {}
 
     def primary_vector(self, metric: str, selected_bins, n_bins: int):
         """0/1 vector over self.rows for one primary metric."""
@@ -1284,13 +1301,26 @@ class PortfolioVectorBuilder:
         the primary scope. `primary_indices` is the list of indices into
         self.rows where the primary's vector is 1.
 
-        in_sample: bins computed on rows[primary_indices], result
-          expanded back to a full-length vector at those indices.
-        walk_forward / train_test: bins computed on the full row set,
-          result ANDed with a primary mask.
+        in_sample (legacy fallback): bins computed on rows[primary_indices],
+          result expanded back to a full-length vector at those indices.
+        in_sample (Group 6, stored bin available): same shape as WF/TT —
+          full-set bin map then AND with primary mask.
+        walk_forward / train_test: full-set bin map then AND with
+          primary mask.
         """
         sel = set(selected_bins or [])
-        if self.spec.kind == "in_sample":
+        # Group 6: when stored bin20 is available for this metric, the
+        # IS path takes the same shape as WF/TT — full-set bin map, then
+        # AND with primary mask. Closes the legacy re-rank-on-filtered-
+        # subset asymmetry that the TODO above documented.
+        if (self.spec.kind == "in_sample"
+                and metric not in self._bin20_by_metric):
+            # Legacy IS fallback (re-rank on filtered subset). Reached
+            # only when bin20_by_metric is missing this metric — either
+            # because no lookup was supplied OR the metric has no
+            # bin20_<m> column in is_bins yet (the 7 not-populated
+            # features). Behavior matches the pre-Group-6 implementation
+            # bit-for-bit so any caller relying on it sees no shift.
             subset = [self.rows[i] for i in primary_indices]
             v_sub = _bin_membership(subset, metric, sel, n_bins, self.is_all)
             v_full = np.zeros(len(self.rows))
@@ -1320,7 +1350,16 @@ class PortfolioVectorBuilder:
         return {i for i, b in bmap.items() if b is not None}
 
     def _full_vector(self, metric: str, selected_bins, n_bins: int):
-        """0/1 vector over self.rows by spec.kind."""
+        """0/1 vector over self.rows by spec.kind.
+
+        Group 6 path: when `spec.kind == "in_sample"` AND a stored bin20
+        lookup exists for this metric, derive each row's bin from the
+        stored is_bins.bin20 instead of computing per-ticker ranks on
+        the fly. Display granularity from `((b20-1)*n_bins)//20 + 1` —
+        same canonical 20→N formula every other migrated endpoint uses.
+        Rows whose key isn't in the lookup, or whose stored bin20 is
+        the null-metric sentinel (0), don't contribute.
+        """
         sel = set(selected_bins or [])
         if self.spec.kind == "walk_forward" or self.spec.kind == "train_test":
             bmap = self._bin_map(metric, n_bins)
@@ -1330,6 +1369,35 @@ class PortfolioVectorBuilder:
                     v[i] = 1.0
             return v
         if self.spec.kind == "in_sample":
+            # Group 6: stored-bin path. When the metric's bin20 lookup is
+            # present, every row's bin is its stored is_bins.bin20 →
+            # collapsed to display granularity. Reaches both
+            # primary_vector and secondary_vector (the latter via the
+            # WF/TT-shaped path in secondary_vector above).
+            bin20_by_key = self._bin20_by_metric.get(metric)
+            if bin20_by_key is not None:
+                v = np.zeros(len(self.rows))
+                if not sel:
+                    return v
+                for i, r in enumerate(self.rows):
+                    tkr = str(r.get("ticker", ""))
+                    td  = r.get("trade_date", "")
+                    d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
+                    b20 = bin20_by_key.get((tkr, d_key))
+                    if b20 is None or b20 <= 0:
+                        continue
+                    # Same canonical 20→N collapse as Group 4 / heatmap /
+                    # /metric-bins / /analyze. For divisors of 20 this is
+                    # a direct per-ticker rank; the secondary panel UI
+                    # exposes only n_bins ∈ {5, 10, 20}, all divisors.
+                    bin_n = min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
+                    if bin_n in sel:
+                        v[i] = 1.0
+                return v
+            # Legacy IS fallback (re-rank on filtered subset or full set
+            # depending on context). Preserved bit-for-bit for callers
+            # that don't supply bin20_by_metric (and for the 7 features
+            # whose bin20 columns don't exist yet).
             return _bin_membership(self.rows, metric, sel, n_bins, self.is_all)
         raise ValueError(f"unknown spec kind: {self.spec.kind!r}")
 

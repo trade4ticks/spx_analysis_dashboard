@@ -508,13 +508,30 @@ async def portfolio_aggregate(pid: int,
     primary_vectors = []     # per-system V_primary (for the trade-eligible universe)
 
     # Spec-dispatched per-system loop via PortfolioVectorBuilder. The
-    # builder encapsulates both the in-sample-vs-walk-forward asymmetry
-    # (secondary bins on subset vs full rows ANDed with primary) and the
+    # builder encapsulates the spec-by-spec path selection plus the
     # per-(metric, n_bins) caching that the legacy `wf_cache` provided.
     # Single path; no `if req.walk_forward` inside this loop.
     from app.routers.row_compute import make_spec, PortfolioVectorBuilder
     spec = make_spec(req.walk_forward, req.cutoff_date)
-    builder = PortfolioVectorBuilder(spec, rows, is_all)
+
+    # Group 6: for IS+ALL, prefetch bin20 from is_bins for every metric
+    # referenced by any system (primary + secondaries). The builder uses
+    # this lookup to derive both primary and secondary bins from the
+    # stored is_bins.bin20 instead of computing per-ticker ranks live —
+    # closes the re-rank-on-filtered-subset asymmetry that the legacy
+    # IS path had on secondaries, and matches the bin assignments every
+    # other on-screen view shows (heatmap, /analyze, corr explorer).
+    # WF/TT and single-ticker paths get an empty lookup and fall
+    # through to the existing on-the-fly bin maps.
+    bin20_by_metric: dict = {}
+    if spec.kind == "in_sample" and is_all:
+        from app.routers.oi_analysis import _fetch_bin20_by_metric
+        filter_pairs = [(r["ticker"], r["trade_date"]) for r in rows]
+        bin20_by_metric = await _fetch_bin20_by_metric(
+            oi_pool, sorted(needed_metrics), filter_pairs)
+
+    builder = PortfolioVectorBuilder(
+        spec, rows, is_all, bin20_by_metric=bin20_by_metric)
     cleared_any: set = set()  # rows cleared by ANY system's primary metric
 
     for s in enabled_systems:
