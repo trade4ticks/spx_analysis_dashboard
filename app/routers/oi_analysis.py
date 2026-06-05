@@ -197,7 +197,13 @@ _ANALYZE_CACHE_MAX = 20
 # frozen to IS-frozen at the build side, so cached v3 TT payloads
 # carry a different rank entirely (not just boundary edges). Bump
 # invalidates them; first hit per request recomputes against tt_bins.
-_ANALYZE_PRIMARY_SCHEMA_VERSION = 4
+#
+# v5 (Group 8 follow-up): TT primary quantile now applies the
+# test-window filter (`trade_date >= cutoff`) at the SQL JOIN. Pre-fix
+# v4 emitted full-series counts in trade_calendar / decile_stats_20
+# under a "TEST PERIOD" subtitle. Per-bin n's shift by ~67% on the
+# ALL TT case (~218k full → ~70k test). Bump invalidates v4 entries.
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 5
 _ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
 _ANALYZE_PRIMARY_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS analyze_primary_cache (
@@ -654,6 +660,22 @@ async def analyze(
             "walk_forward": "wf_bins",
             "train_test":  "tt_bins",
         }[spec.kind]
+        # Group 8 fix: TT mode is test-window-only — primary quantile,
+        # decile_stats, trade_calendar all report on rows where
+        # trade_date >= cutoff. The training window (< cutoff) is shown
+        # only on the heatmap (left grid) for visual validation; every
+        # other surface in TT mode is test-only. Pre-fix this branch
+        # emitted the full series and the "TEST PERIOD" subtitle
+        # disagreed with the bar sum.
+        tt_extra_where = ""
+        tt_extra_params: list = []
+        if spec.kind == "train_test":
+            from datetime import date as _date_cls_tt
+            tt_extra_where = f" AND df.trade_date >= ${len(params) + 1}"
+            cutoff_obj = (spec.cutoff
+                          if hasattr(spec.cutoff, "isoformat")
+                          else _date_cls_tt.fromisoformat(str(spec.cutoff)))
+            tt_extra_params = [cutoff_obj]
         join_sql = (
             f"SELECT df.ticker, df.trade_date, "
             f"  df.{metric}, df.{outcome}, "
@@ -663,11 +685,11 @@ async def analyze(
             f"JOIN {bin_table} bt USING (ticker, trade_date) "
             f"WHERE bt.bin20_{metric} > 0 "
             f"  AND df.{outcome} IS NOT NULL"
-            f"{date_conditions} "
+            f"{date_conditions}{tt_extra_where} "
             f"ORDER BY df.ticker, df.trade_date"
         )
         async with pool.acquire() as conn:
-            rows = await conn.fetch(join_sql, *params)
+            rows = await conn.fetch(join_sql, *params, *tt_extra_params)
         row_dicts = [dict(r) for r in rows]
         if row_dicts:
             _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
@@ -2299,6 +2321,16 @@ async def metric_bins_1d(
             bin_table = "wf_bins"
         else:
             bin_table = "is_bins"
+        # Group 8 fix: TT is test-window-only — filter rows to
+        # trade_date >= cutoff. Same fix that's applied to /analyze's
+        # primary quantile in TT mode. Without this the bars sum to
+        # the full universe while the subtitle says "TEST PERIOD".
+        tt_extra_where = ""
+        tt_extra_params: list = []
+        if cutoff_date:
+            from datetime import date as _date_cls_tt
+            tt_extra_where = f" AND df.trade_date >= ${len(params) + 1}"
+            tt_extra_params = [_date_cls_tt.fromisoformat(cutoff_date)]
         join_sql = (
             f"SELECT df.{metric} AS metric_val, "
             f"bt.bin20_{metric} AS bin_20, "
@@ -2307,10 +2339,10 @@ async def metric_bins_1d(
             f"JOIN {bin_table} bt USING (ticker, trade_date) "
             f"WHERE bt.bin20_{metric} > 0 "
             f"AND {outcome_sql_nn}"
-            f"{date_conditions}"
+            f"{date_conditions}{tt_extra_where}"
         )
         async with pool.acquire() as conn:
-            ib_rows = await conn.fetch(join_sql, *params)
+            ib_rows = await conn.fetch(join_sql, *params, *tt_extra_params)
 
         # Slot each row into its display bin (bin20 → bins via the
         # canonical aggregation formula). Per-bucket lists carry (metric
@@ -5159,7 +5191,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 12  # v12 (Group 8): TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 13  # v13 (Group 8 follow-up): bundle's _assignments_from_is_bins now skips pre-cutoff rows when mode == "train_test". Pre-fix v12 TT bundles included full-series rows in trade_meta + per_outcome_returns, which the primary chart consumed verbatim under a "TEST PERIOD" label. Bump invalidates v12. v12 history: TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5750,6 +5782,7 @@ def _rolling_ic_worker(task):
 def _assignments_from_is_bins(
     rows: list[dict], metric: str, anchor_outcome: str,
     n_bins: int, bin20_lookup: dict,
+    tt_cutoff: Optional[str] = None,
 ):
     """v9 (Group 3b): build the bundle's bin assignments from is_bins
     instead of running InSampleAssigner. Mirrors the legacy assigner's
@@ -5771,11 +5804,20 @@ def _assignments_from_is_bins(
     # Filter + bin20 lookup. No per-ticker thinning, so no count
     # tracking — every row that passes the metric/outcome/NaN
     # guards AND has a stored `bin20 > 0` becomes a candidate.
+    # Group 8 fix: for TT mode, additionally skip pre-cutoff rows
+    # (`trade_date < tt_cutoff`). Mirrors the test-window-only
+    # semantic that /analyze, /metric-bins, and the secondary
+    # endpoints apply in TT mode — pre-fix the bundle's per_bin and
+    # trade_meta included full-series rows, which propagated to the
+    # primary quantile via _buildOutcomeDataSlice.
     candidates: list = []
     for r in rows:
         tkr = r.get("ticker")
         d = r.get("trade_date")
         d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        # Test-window-only gate for TT.
+        if tt_cutoff is not None and d_str < tt_cutoff:
+            continue
         xv = r.get(metric)
         yv = r.get(anchor_outcome)
         if xv is None or yv is None:
@@ -5910,8 +5952,19 @@ def _compute_analyze_bundle_sync(
     # also use the Assigner (bin20_lookup is None on that path).
     if is_all and mode in {"in_sample", "walk_forward", "train_test"} and bin20_lookup is not None:
         if _measure: _t_assign_start = _tick()
+        # Group 8: thread the TT cutoff so the bundle's per_bin and
+        # trade_meta only include test-window rows in TT mode. Pre-fix,
+        # the bundle filtered pre-cutoff rows only via the legacy
+        # TrainTestAssigner's dropped_reason="pre_cutoff" mechanism; the
+        # stored-bin path didn't carry that, so when /analyze's primary
+        # chart consumed the bundle's per_bin it showed full-series
+        # counts under a "TEST PERIOD" subtitle.
+        tt_cutoff_iso = (
+            cutoff_date if mode == "train_test" and cutoff_date else None
+        )
         assignments = _assignments_from_is_bins(
             rows, metric, anchor_outcome, n_bins, bin20_lookup,
+            tt_cutoff=tt_cutoff_iso,
         )
         if _measure:
             print(f"[SHARED] assignments_from_is_bins={_tick() - _t_assign_start:.3f}s  "
