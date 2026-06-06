@@ -1902,104 +1902,18 @@ async def metric_bins_1d(
             "source":         "is_bins",
         }
 
-    # ── WF / TT / single-ticker: existing Assigner path (unchanged) ──────
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT ticker, trade_date, {metric}, {outcome_sql_sel} FROM daily_features "
-            f"WHERE {metric} IS NOT NULL AND {outcome_sql_nn} {date_conditions} "
-            f"ORDER BY trade_date", *params)
-
-    # Spec-dispatched binning. Both ALL and single-ticker flow through
-    # the Assigner with the same shape — the legacy fork on `is_all`
-    # collapses to a single path inside the Assigner.
-    from app.routers.row_compute import ASSIGNERS, make_spec
-    spec = make_spec(walk_forward, cutoff_date)
-    assigner = ASSIGNERS[spec.kind](spec)
-
-    # For synthetic outcomes, populate the synthetic key on each row so
-    # the Assigner's r.get(outcome_col) lookup just works. For real
-    # outcomes, the row already carries the column directly.
-    rows_for_assigner: list = []
-    for r in rows:
-        d = dict(r)
-        if outcome == _OVERNIGHT_GAP_OUTCOME:
-            v = _outcome_value(d, outcome)
-            if v is None:
-                continue
-            d[_OVERNIGHT_GAP_OUTCOME] = v
-        if not is_all:
-            d.setdefault("ticker", ticker)
-        rows_for_assigner.append(d)
-
-    # Canonical 20-bin internal when the requested display bins evenly
-    # divides 20 ({2, 4, 5, 10, 20}). Otherwise direct-bin at the
-    # requested granularity (legacy path, kept for non-divisor callers).
-    canonicalize = (_METRIC_BINS_CANONICAL % bins == 0)
-    n_internal = _METRIC_BINS_CANONICAL if canonicalize else bins
-    g = n_internal // bins  # # of canonical sub-bins merged per display bin
-
-    state = assigner.fit(rows_for_assigner, metric, n_internal, is_all)
-    assignments = assigner.assign(rows_for_assigner, metric, n_internal, is_all, state, outcome)
-
-    # Build buckets_data: list of (xf, yf) tuples per canonical bin
-    # (1-indexed → 0-indexed list position). Drops bin=None rows (warmup,
-    # missing_value, insufficient_history) AND train-test pre_cutoff rows
-    # (training-window rows excluded from test-period aggregation).
-    buckets_data: list = [[] for _ in range(n_internal)]
-    total_n = 0
-    for a in assignments:
-        if a.bin is None or a.dropped_reason is not None:
-            continue
-        buckets_data[a.bin - 1].append((a.metric_value, a.forward_return))
-        total_n += 1
-
-    # Gate H also applies to this WF/TT / single-ticker legacy on-the-fly
-    # path: no `total_n < 20` panel-block. Whatever bins populated render
-    # their stats; empty bins show as None and the user reads `n` off the
-    # populated bars directly.
-
-    # Aggregate canonical buckets to display granularity. Each display bin
-    # i collects trades from canonical sub-bins [i*g .. (i+1)*g - 1].
-    # Stats are recomputed on the merged per-trade arrays (NOT a weighted
-    # average of sub-bin stats) so std_dev/sharpe stay correct.
-    result = []
-    for i in range(bins):
-        merged: list = []
-        for sub in range(g):
-            merged.extend(buckets_data[i * g + sub])
-        if not merged:
-            result.append(None)
-            continue
-        ys = np.array([p[1] for p in merged])
-        xs = [p[0] for p in merged]
-        result.append({
-            "bucket":   i + 1,
-            "n":        len(merged),
-            "avg_ret":  round(float(ys.mean()), 6),
-            "win_rate": round(float((ys > 0).mean()), 4),
-            "std_dev":  round(float(ys.std()), 6),
-            "sharpe":   round(float(ys.mean() / ys.std()), 4) if ys.std() > 0 else 0,
-            # In ALL mode these are the cross-ticker min/max of observed
-            # values that landed in this display bin — informational only,
-            # since each ticker's bin boundary is independent.
-            "min_val":  round(float(min(xs)), 6),
-            "max_val":  round(float(max(xs)), 6),
-        })
-    out: dict = {
-        "metric":          metric,
+    # Metric absent from is_bins (null-by-design): return empty buckets.
+    return {
+        "metric":         metric,
         "outcome":         outcome,
         "bins":            bins,
-        "canonical_bins":  n_internal,    # 20 for divisor display bins; bins otherwise
-        "n":               total_n,
-        "buckets":         result,
-        "per_ticker":      is_all,
-        "mode":            spec.kind,
+        "canonical_bins":  20,
+        "n":               0,
+        "buckets":         [None] * bins,
+        "per_ticker":      True,
+        "mode":            "in_sample",
+        "source":          "is_bins",
     }
-    if spec.kind == "walk_forward":
-        out["warmup"]           = spec.warmup
-    elif spec.kind == "train_test":
-        out["cutoff_date"]      = spec.cutoff.isoformat()
-    return out
 
 
 @router.get("/ai-summary")
@@ -3939,13 +3853,9 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
         bin20_by_metric = await _fetch_stored_bin20_by_metric(
             pool, spec.kind, list(feat_cols), pairs)
 
-    # Fix A: loop inversion — all tickers now go through the one-pass stored-bin
-    # path; the legacy per-feature loop below is dead code preserved for reference.
-    use_one_pass = spec.kind in {"in_sample", "walk_forward", "train_test"}
-
     results = []
 
-    if use_one_pass:
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
         # ── ONE-PASS over filtered rows ────────────────────────────────────
         # Bin math is byte-equivalent to the legacy helper. Legacy emits
         # a 1-indexed bin in [1, n_bins]:
@@ -4028,30 +3938,6 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
                 "bins":   bins_avg,
                 "bin_ns": list(bin_counts[i]),
             })
-    else:
-        # ── LEGACY per-feature loop (WF/TT and single-ticker) ──────────────
-        for feat in feat_cols:
-            # Group 4: skip features without a stored bin20 column. The 7
-            # not-yet-populated features (iv_25d_call_30d et al.) fall into
-            # this branch today; they'll auto-light when backfilled.
-            if feat not in bin20_by_metric:
-                continue
-            r = assign_secondary_bin_stats(
-                spec, filtered, feat, n_bins, outcome_col, is_all,
-                # v9: pass full row cache for in_sample too — same
-                # fixed-threshold principle as /secondary-detail. Each
-                # mini chart's bin_ns now reflect the full-population's
-                # secondary bin n's, intersected with the primary filter,
-                # rather than equal-n re-ranks of the filtered subset.
-                all_rows=all_rows,
-                # Group 4: stored bin20 takes precedence over all_rows for
-                # IS+ALL. None for WF/TT — those still use the on-the-fly
-                # Assigner via the existing all_rows path.
-                bin20_by_key=bin20_by_metric.get(feat),
-            )
-            if r:
-                results.append(r)
-
     return {
         "metrics":          results,
         "n_bins":           n_bins,

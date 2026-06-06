@@ -860,46 +860,8 @@ def assign_secondary_bin_stats(
             "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
             "bin_ns": [len(b) for b in buckets],
         }
-    if spec.kind == "in_sample":
-        # Legacy IS fallback: re-rank on filtered subset. Reached when
-        # neither bin20_by_key nor all_rows is supplied.
-        return _compute_bins_for_metric(rows_chrono, metric, outcome_col, n_bins, is_all)
-    if spec.kind == "walk_forward":
-        # WF on-the-fly fallback: reached when wf_bins lacks bin20_<m>
-        # for this metric (the 7-missing pattern) or no lookup was
-        # supplied. Computes the walk-forward rank live.
-        return _compute_walk_forward_bin_stats(rows_chrono, metric, outcome_col, n_bins, is_all)
-    if spec.kind == "train_test":
-        # Fit on the full row cache so the assigner sees pre-cutoff training
-        # history; assign only the test-window rows (rows_chrono).
-        # NOTE: do NOT re-import numpy here — a local `import ... as np`
-        # makes Python treat `np` as a local for the entire function body
-        # and shadows the module-level `import numpy as np` (line 57),
-        # which makes `np.mean(...)` in the in_sample branch above raise
-        # UnboundLocalError. Use the module-level alias.
-        fit_rows = all_rows if all_rows is not None else rows_chrono
-        assigner = TrainTestAssigner(spec)
-        state = assigner.fit(fit_rows, metric, n_bins, is_all)
-        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
-                                       state, outcome_col)
-        buckets: list = [[] for _ in range(n_bins)]
-        for a in assignments:
-            # `dropped_reason is None` catches both warmup/missing/insufficient
-            # (bin is None) AND pre_cutoff training rows (bin set but excluded
-            # from test-period aggregation).
-            if a.bin is None or a.dropped_reason is not None:
-                continue
-            if a.forward_return is None:
-                continue
-            buckets[a.bin - 1].append(a.forward_return)
-        if all(len(b) == 0 for b in buckets):
-            return None
-        return {
-            "name":   metric,
-            "bins":   [round(float(np.mean(b)), 6) if b else 0.0 for b in buckets],
-            "bin_ns": [len(b) for b in buckets],
-        }
-    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+    # Metric absent from stored bins (null-by-design): no fallback.
+    return None
 
 
 def _bin_map_from_stored_bin20(
@@ -960,59 +922,8 @@ def _bin_map_from_stored_bin20(
             key: min(((b20 - 1) * n_bins) // 20 + 1, n_bins)
             for key, b20 in bin20_by_key.items()
         }
-    n_bins = max(2, min(20, n_bins))
-
-    def _valid(r):
-        v = r.get(metric)
-        if v is None: return None
-        try:
-            fv = float(v)
-            if math.isnan(fv): return None
-        except (TypeError, ValueError):
-            return None
-        if outcome_col is not None:
-            o = r.get(outcome_col)
-            if o is None: return None
-            try:
-                fo = float(o)
-                if math.isnan(fo): return None
-            except (TypeError, ValueError):
-                return None
-        return fv
-
-    out: dict = {}
-    if is_all:
-        by_tkr: dict = defaultdict(list)
-        for r in rows:
-            fv = _valid(r)
-            if fv is None: continue
-            tkr = str(r.get("ticker", ""))
-            td = r.get("trade_date", "")
-            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-            by_tkr[tkr].append((fv, tkr, d_key))
-        for tkr_vals in by_tkr.values():
-            if len(tkr_vals) < n_bins:
-                continue
-            sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-            n_t = len(sorted_t)
-            for rank, (_, tkr, d_key) in enumerate(sorted_t):
-                out[(tkr, d_key)] = min(int(rank / n_t * n_bins) + 1, n_bins)
-    else:
-        valid_rows: list = []
-        for r in rows:
-            fv = _valid(r)
-            if fv is None: continue
-            tkr = str(r.get("ticker", ""))
-            td = r.get("trade_date", "")
-            d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
-            valid_rows.append((fv, tkr, d_key))
-        if len(valid_rows) < n_bins:
-            return out
-        sorted_p = sorted(valid_rows, key=lambda x: x[0])
-        n_t = len(sorted_p)
-        for rank, (_, tkr, d_key) in enumerate(sorted_p):
-            out[(tkr, d_key)] = min(int(rank / n_t * n_bins) + 1, n_bins)
-    return out
+    # Metric absent from stored bins (null-by-design): empty map.
+    return {}
 
 
 def assign_secondary_buckets(
@@ -1090,142 +1001,8 @@ def assign_secondary_buckets(
             return None
         return buckets
 
-    if spec.kind == "in_sample":
-        # ── Legacy in_sample path (re-rank on filtered subset) ────────────
-        if is_all:
-            by_tkr: dict = {}
-            for r in rows_chrono:
-                v = r.get(metric)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv = float(v); fo = float(o)
-                    if math.isnan(fv) or math.isnan(fo):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                by_tkr.setdefault(r.get("ticker", "_"), []).append(
-                    (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
-                )
-            norm_rows = []
-            for tkr_vals in by_tkr.values():
-                if len(tkr_vals) < n_bins:
-                    continue
-                sorted_t = sorted(tkr_vals, key=lambda x: x[0])
-                n_t = len(sorted_t)
-                for rank, (_, y, d, tkr) in enumerate(sorted_t):
-                    norm_rows.append((rank / n_t, y, d, tkr))
-        else:
-            norm_rows = []
-            for r in rows_chrono:
-                v = r.get(metric)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv = float(v); fo = float(o)
-                    if math.isnan(fv) or math.isnan(fo):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                norm_rows.append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
-        if len(norm_rows) < n_bins * 2:
-            return None
-        sorted_norm = sorted(norm_rows, key=lambda x: x[0])
-        n = len(sorted_norm)
-        buckets: list = [[] for _ in range(n_bins)]
-        for i, row_t in enumerate(sorted_norm):
-            b = min(int(i / n * n_bins), n_bins - 1)
-            buckets[b].append(row_t)
-        return buckets
-
-    if spec.kind == "walk_forward":
-        if all_rows is not None:
-            # Full-universe WF: assign secondary bins on the complete row
-            # population (same as the heatmap's Y-axis — 252-day warmup, per-
-            # ticker bisect_left expanding window, full population).  Then
-            # select only the already-primary-filtered rows for aggregation.
-            # all_rows_sorted: caller may supply a pre-sorted version to avoid
-            # redundant O(N log N) sort when this is called in a feature loop.
-            full_sorted = (
-                all_rows_sorted if all_rows_sorted is not None
-                else _sort_chrono(all_rows)
-            )
-            wf_full = _walk_forward_bins(
-                full_sorted, metric, n_bins, is_all, warmup=DEFAULT_WALKFWD_WARMUP
-            )
-            # (ticker, trade_date) → 1-indexed bin from the full-universe WF.
-            tkr_date_bin: dict = {}
-            for i, r in enumerate(full_sorted):
-                b = wf_full.get(i)
-                if b is not None:
-                    tkr_date_bin[(r.get("ticker"), r.get("trade_date"))] = b
-            filtered_chrono = rows_chrono if rows_presorted else _sort_chrono(rows_chrono)
-            buckets = [[] for _ in range(n_bins)]
-            for r in filtered_chrono:
-                b = tkr_date_bin.get((r.get("ticker"), r.get("trade_date")))
-                if b is None:
-                    continue
-                v = r.get(metric)
-                o = r.get(outcome_col)
-                if v is None or o is None:
-                    continue
-                try:
-                    fv = float(v); fo = float(o)
-                    if math.isnan(fv) or math.isnan(fo):
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                buckets[b - 1].append(
-                    (fv, fo, r.get("trade_date", ""), r.get("ticker", ""))
-                )
-            return buckets
-        # Legacy path (all_rows not provided): WF within the primary-filtered
-        # subset, tiny warmup=n_bins so even small subsets produce assignments.
-        # rows_presorted=True: caller already sorted; skip redundant O(N log N).
-        filtered_chrono = rows_chrono if rows_presorted else _sort_chrono(rows_chrono)
-        wf_sec = _walk_forward_bins(filtered_chrono, metric, n_bins, is_all, warmup=n_bins)
-        buckets = [[] for _ in range(n_bins)]
-        for i, r in enumerate(filtered_chrono):
-            b = wf_sec.get(i)
-            if b is None:
-                continue
-            v = r.get(metric); o = r.get(outcome_col)
-            if v is None or o is None:
-                continue
-            try:
-                fv = float(v); fo = float(o)
-                if math.isnan(fv) or math.isnan(fo):
-                    continue
-            except (TypeError, ValueError):
-                continue
-            buckets[b - 1].append((fv, fo, r.get("trade_date", ""), r.get("ticker", "")))
-        return buckets
-
-    if spec.kind == "train_test":
-        # Fit on full row cache so training history is available; assign
-        # the test-window-only rows (rows_chrono from filter_by_assignments).
-        fit_rows = all_rows if all_rows is not None else rows_chrono
-        assigner = TrainTestAssigner(spec)
-        state = assigner.fit(fit_rows, metric, n_bins, is_all)
-        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
-                                       state, outcome_col)
-        buckets = [[] for _ in range(n_bins)]
-        for i, a in enumerate(assignments):
-            if a.bin is None or a.dropped_reason is not None:
-                continue
-            if a.forward_return is None:
-                continue
-            row = rows_chrono[i] if i < len(rows_chrono) else None
-            if row is None:
-                continue
-            buckets[a.bin - 1].append((
-                a.metric_value, a.forward_return,
-                row.get("trade_date", ""), row.get("ticker", ""),
-            ))
-        return buckets
-    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+    # Metric absent from stored bins (null-by-design): no fallback.
+    return None
 
 
 def secondary_membership(
@@ -1272,27 +1049,8 @@ def secondary_membership(
             if bin_1idx is not None and bin_1idx in sel:
                 out[i] = 1.0
         return out
-    if spec.kind == "in_sample":
-        # Legacy IS fallback: re-rank on filtered subset.
-        return _bin_membership(rows_chrono, metric, sel, n_bins, is_all)
-    if spec.kind == "walk_forward":
-        return _walk_forward_membership(rows_chrono, metric, sel, n_bins, is_all)
-    if spec.kind == "train_test":
-        # Fit on full row cache; membership vector over test-window rows only.
-        # Training-window rows (dropped_reason="pre_cutoff") stay 0.
-        out = np.zeros(len(rows_chrono), dtype=np.float64)
-        if not sel:
-            return out
-        fit_rows = all_rows if all_rows is not None else rows_chrono
-        assigner = TrainTestAssigner(spec)
-        state = assigner.fit(fit_rows, metric, n_bins, is_all)
-        assignments = assigner.assign(rows_chrono, metric, n_bins, is_all,
-                                       state, outcome_col=None)
-        for i, a in enumerate(assignments):
-            if a.bin is not None and a.dropped_reason is None and a.bin in sel:
-                out[i] = 1.0
-        return out
-    raise ValueError(f"unknown spec kind: {spec.kind!r}")
+    # Metric absent from stored bins (null-by-design): zero membership vector.
+    return np.zeros(len(rows_chrono), dtype=np.float64)
 
 
 # ── Portfolio-aggregator vector builder (Step 5) ─────────────────────────
