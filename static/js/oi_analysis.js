@@ -2268,15 +2268,11 @@ document.addEventListener('alpine:init', () => {
       this.hmXData = null;
       this.hmYData = null;
       this._hmRange = null;
-      // walk_forward / train_test heatmap are only supported in ALL mode
-      // (single-ticker /heatmap uses absolute np.percentile edges by design).
-      // For single-ticker + non-in-sample pageMode, leave the mode flags off
-      // so the heatmap silently runs in-sample rather than 422'ing.
+      // walk_forward / train_test heatmap: all tickers now use stored-bin
+      // rank bins (B1..BN) for all three modes — pass mode flags unconditionally.
       let wf = '';
-      if (this.ticker === 'ALL') {
-        if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
-        else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
-      }
+      if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
+      else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
       try {
         const r = await fetch(
           `/api/factor-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`

@@ -621,6 +621,8 @@ async def analyze(
     if date_to:
         from datetime import date as _date
         date_conditions += f" AND trade_date <= ${p}"; params.append(_date.fromisoformat(date_to)); p += 1
+    if not is_all:
+        date_conditions += f" AND ticker = ${p}"; params.append(ticker); p += 1
 
     horizon = _parse_horizon(outcome)
 
@@ -652,7 +654,7 @@ async def analyze(
     # mode-agnostic once the source table is parameterized — the math
     # is identical, only the JOIN target differs. Encoding A means
     # `WHERE bin20 > 0` cleanly drops both warm-up and null rows in WF.
-    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
         # Source table dispatched by mode. Group 8: TT joins tt_bins,
         # which encodes IS-frozen-at-cutoff bins (not WF-frozen).
         bin_table = {
@@ -814,288 +816,13 @@ async def analyze(
             all_close_by_tkr[tkr] = closes
         _tlog('ALL+IS spot calendar')
 
-    elif is_all:
-        # ── WF / TT: existing ALL Assigner path (unchanged) ──────────────
-        # Per-ticker normalization: fetch all tickers, decile each independently
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT ticker, trade_date, {metric}, {outcome}, spot_co, spot_pc "
-                f"FROM daily_features "
-                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {date_conditions} "
-                f"ORDER BY ticker, trade_date", *params)
-        row_dicts = [dict(r) for r in rows]
-        if row_dicts:
-            _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
-        _tlog(f'ALL db_fetch1 ({len(row_dicts)} rows)')
-
-        by_ticker: dict = defaultdict(list)
-        all_open_by_tkr_date: dict = {}
-        for r in row_dicts:
-            xv, yv = r.get(metric), r.get(outcome)
-            if xv is None or yv is None:
-                continue
-            try:
-                xf, yf = float(xv), float(yv)
-            except (ValueError, TypeError):
-                continue
-            if math.isnan(xf) or math.isnan(yf):
-                continue
-            by_ticker[r['ticker']].append((xf, yf, r['trade_date'], r['ticker']))
-            if r.get('spot_co') is not None:
-                try:
-                    all_open_by_tkr_date[(r['ticker'], str(r['trade_date']))] = round(float(r['spot_co']), 2)
-                except (ValueError, TypeError):
-                    pass
-
-        # Route bucketing through the row_compute layer. Both in-sample
-        # and walk-forward branches now flow through one path; the
-        # method choice picks the Assigner. Downstream of this block
-        # (decile_stats_20, equity_by_decile, trade_calendar, etc.) is
-        # unchanged.
-        from app.routers.row_compute import ASSIGNERS, _validate_assignments
-        # `spec` was constructed at the top of the function.
-        assigner = ASSIGNERS[spec.kind](spec)
-        state10 = assigner.fit(row_dicts, metric, 10, True)
-        a10 = assigner.assign(row_dicts, metric, 10, True, state10, outcome)
-        _validate_assignments(a10, 10)
-        state20 = assigner.fit(row_dicts, metric, 20, True)
-        a20 = assigner.assign(row_dicts, metric, 20, True, state20, outcome)
-        _validate_assignments(a20, 20)
-        _tlog('ALL bin_assign (10-bin + 20-bin)')
-
-        # Cross-reference 10-bin and 20-bin assignments by (ticker, date).
-        # A ticker with 10..19 rows clears the 10-bin threshold but not
-        # the 20-bin one (`_bucket_pairs_per_ticker` excludes tickers
-        # with < n rows). Legacy emits those rows with `decile20 = 0`
-        # and does NOT add them to any 20-bin bucket; preserve that
-        # exact semantics here for bit-equivalence on the regression
-        # check.
-        # `dropped_reason is None` excludes train-test pre_cutoff rows
-        # (where bin IS set but the row is training-window — included on
-        # the assignment for a future side-by-side view, excluded from
-        # the standard test-period aggregation). For in_sample and
-        # walk_forward this is a no-op since dropped_reason is always
-        # None when bin is not None.
-        key_b20: dict = {(a.ticker, a.trade_date): a.bin
-                         for a in a20
-                         if a.bin is not None and a.dropped_reason is None}
-        valid_a10 = [a for a in a10
-                     if a.bin is not None and a.dropped_reason is None]
-        # Chronological across tickers, with legacy within-date tie-break:
-        #   in-sample: legacy iterates buckets sequentially then stable-sorts
-        #     by date, so same-date rows come out in (bin, ticker, x) order.
-        #   walk-forward: legacy has no bucket-iteration step; same-date rows
-        #     come out in alphabetical-ticker order (matches mine without
-        #     extra tie-break).
-        # Pairs iteration order is chronological (walk_forward) or
-        # (date, bin, ticker, x) (in_sample/train_test) — matching legacy ordering.
-        if walk_forward:
-            valid_a10.sort(key=lambda a: a.trade_date)
-        else:
-            valid_a10.sort(key=lambda a: (a.trade_date, a.bin, a.ticker, a.metric_value))
-
-        pairs          = []
-        pairs_decile   = []
-        pairs_decile20 = []
-        buckets        = [[] for _ in range(10)]
-        buckets_20_all = [[] for _ in range(20)]
-        for a in valid_a10:
-            pair = (a.metric_value, a.forward_return, a.trade_date, a.ticker)
-            b10 = a.bin
-            b20 = key_b20.get((a.ticker, a.trade_date), 0)
-            pairs.append(pair)
-            pairs_decile.append(b10)
-            pairs_decile20.append(b20)
-            buckets[b10 - 1].append(pair)
-            if b20 > 0:
-                buckets_20_all[b20 - 1].append(pair)
-
-        # Match legacy bucket ordering so `decile_stats[i].returns` is
-        # bit-equivalent. Legacy populated each bucket by iterating
-        # tickers in by_ticker order (alphabetical from SQL) and then:
-        #   in-sample:    pairs sorted by x within each ticker
-        #   walk-forward: pairs in per-ticker chronological order
-        # My loop above filled buckets in cross-ticker chronological
-        # order; sort each bucket here to restore legacy iteration order.
-        # Walk-forward populates buckets in per-ticker-chrono order (legacy);
-        # in-sample and train-test (rank-based math against frozen training
-        # history) both populate in (ticker, sorted-by-x) order.
-        sort_key = (lambda p: (p[3], p[2])) if spec.kind == "walk_forward" else (lambda p: (p[3], p[0]))
-        for b in range(10):
-            buckets[b].sort(key=sort_key)
-        for b in range(20):
-            buckets_20_all[b].sort(key=sort_key)
-
-        # Mode-aware "dropped" count for the response subtitle:
-        #   in_sample    -> 0 (no method-specific gate)
-        #   walk_forward -> rows that didn't clear the 252-day warmup
-        #   train_test   -> rows whose ticker had < n_bins training samples
-        from app.routers.row_compute import dropped_count_for_mode
-        wf_dropped = dropped_count_for_mode(spec, a10)
-
-        decile_stats_20 = _compute_bucket_stats(buckets_20_all)
-        _tlog('ALL bucket_setup + decile_stats_20')
-        n_tickers_used = sum(1 for ps in by_ticker.values() if len(ps) >= 10)
-        spot_series = []
-        all_spot_dates = []
-        open_by_date = {}
-        close_by_date = {}
-
-        # Fetch complete per-ticker date lists for accurate exit_date/exit_close
-        tickers_in_data = list(by_ticker.keys())
-        async with pool.acquire() as conn:
-            all_spot_rows = await conn.fetch(
-                "SELECT ticker, trade_date, spot_pc FROM daily_features "
-                "WHERE ticker = ANY($1) AND spot_co IS NOT NULL "
-                "ORDER BY ticker, trade_date", tickers_in_data)
-        _all_dates_by_tkr: dict = defaultdict(list)
-        _pc_by_tkr_date: dict = {}
-        for r in all_spot_rows:
-            tkr = r['ticker']; d = str(r['trade_date'])
-            _all_dates_by_tkr[tkr].append(d)
-            if r['spot_pc'] is not None:
-                try:
-                    _pc_by_tkr_date[(tkr, d)] = round(float(r['spot_pc']), 2)
-                except (ValueError, TypeError):
-                    pass
-        all_dates_list_by_tkr: dict = dict(_all_dates_by_tkr)  # tkr → [sorted dates]
-        all_date_idx_by_tkr: dict = {tkr: {d: i for i, d in enumerate(dates)}
-                                      for tkr, dates in _all_dates_by_tkr.items()}
-        all_close_by_tkr: dict = {}
-        for tkr, dates in _all_dates_by_tkr.items():
-            closes = {}
-            for i in range(len(dates) - 1):
-                npc = _pc_by_tkr_date.get((tkr, dates[i + 1]))
-                if npc is not None:
-                    closes[dates[i]] = npc
-            all_close_by_tkr[tkr] = closes
-        _tlog('ALL db_fetch2 + close_calendar')
-
-    else:
-        # Single-ticker mode
-        single_ticker_cond = f" AND ticker = ${p}"
-        params_single = params + [ticker]
-        # spot_co = current open (entry price); spot_pc = prior close (not needed)
-        spot_col = "spot_co"
-        spot_select = f", {spot_col}"
-
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT trade_date, {metric}, {outcome}{spot_select} FROM daily_features "
-                f"WHERE {metric} IS NOT NULL AND {outcome} IS NOT NULL {single_ticker_cond}"
-                f"{date_conditions} ORDER BY trade_date", *params_single)
-        row_dicts = [dict(r) for r in rows]
-        if row_dicts:
-            _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
-        _tlog(f'single db_fetch1 ({len(row_dicts)} rows)')
-        # Single-ticker rows don't carry a "ticker" column in the SQL
-        # SELECT; inject it so the row_compute Assigners can group
-        # consistently (they look up r["ticker"]).
-        for r in row_dicts:
-            r.setdefault("ticker", ticker)
-
-        # Route bucketing through the row_compute layer. Both in-sample
-        # and walk-forward branches flow through one path.
-        from app.routers.row_compute import ASSIGNERS, _validate_assignments
-        # `spec` was constructed at the top of the function.
-        assigner = ASSIGNERS[spec.kind](spec)
-        state10 = assigner.fit(row_dicts, metric, 10, False)
-        a10 = assigner.assign(row_dicts, metric, 10, False, state10, outcome)
-        _validate_assignments(a10, 10)
-        state20 = assigner.fit(row_dicts, metric, 20, False)
-        a20 = assigner.assign(row_dicts, metric, 20, False, state20, outcome)
-        _validate_assignments(a20, 20)
-        _tlog('single bin_assign (10-bin + 20-bin)')
-
-        key_b20: dict = {(a.ticker, a.trade_date): a.bin
-                         for a in a20 if a.bin is not None}
-        valid_a10 = [a for a in a10
-                     if a.bin is not None
-                     and (a.ticker, a.trade_date) in key_b20]
-        # Single-ticker mode: assignments already chronological per
-        # input row order (SQL ORDER BY trade_date); sort again to be
-        # explicit and tolerate any reordering the Assigner might do.
-        valid_a10.sort(key=lambda a: a.trade_date)
-
-        pairs          = []
-        pairs_decile   = []
-        pairs_decile20 = []
-        buckets        = [[] for _ in range(10)]
-        buckets_20     = [[] for _ in range(20)]
-        for a in valid_a10:
-            # Single-ticker `pairs` are 3-tuples (no ticker column —
-            # legacy shape; downstream `_clean_pairs` consumers also
-            # treat them as 3-tuples).
-            pair = (a.metric_value, a.forward_return, a.trade_date)
-            b10 = a.bin
-            b20 = key_b20[(a.ticker, a.trade_date)]
-            pairs.append(pair)
-            pairs_decile.append(b10)
-            pairs_decile20.append(b20)
-            buckets[b10 - 1].append(pair)
-            buckets_20[b20 - 1].append(pair)
-
-        # Match legacy bucket ordering. Single-ticker in-sample legacy
-        # used `_bucket_pairs(pairs, n)` which sorts by x then
-        # distributes — bucket[i] is in sorted-by-x order. Walk-forward
-        # legacy bucket[i] is already in chronological order (only one
-        # ticker, so per-ticker-chrono == cross-ticker-chrono), which
-        # matches my output; no sort needed.
-        # Single-ticker: legacy in-sample sorted each bucket by x. Train-test
-        # uses the same rank-based math as in-sample (just against a frozen
-        # training history) so its bucket ordering is also sort-by-x. Only
-        # walk-forward leaves buckets in chronological order.
-        if spec.kind != "walk_forward":
-            for b in range(10):
-                buckets[b].sort(key=lambda p: p[0])
-            for b in range(20):
-                buckets_20[b].sort(key=lambda p: p[0])
-
-        from app.routers.row_compute import dropped_count_for_mode
-        wf_dropped = dropped_count_for_mode(spec, a10)
-
-        decile_stats_20 = _compute_bucket_stats(buckets_20)
-        _tlog('single bucket_setup + decile_stats_20')
-        by_ticker = None  # not needed in single-ticker mode
-        n_tickers_used = 1
-        all_open_by_tkr_date = {}
-        all_date_idx_by_tkr = {}
-        all_dates_list_by_tkr = {}
-        all_close_by_tkr = {}
-
-        # spot_co = current open; used for entry_spot and chart overlay
-        spot_series = []
-        all_spot_dates: list = []
-        open_by_date: dict = {}
-        for r in row_dicts:
-            date_s = str(r["trade_date"])
-            sv = r.get(spot_col)
-            if sv is not None:
-                try:
-                    fv = round(float(sv), 2)
-                    open_by_date[date_s] = fv
-                    spot_series.append({"date": date_s, "value": fv})
-                except (ValueError, TypeError):
-                    pass
-        # Complete date list + spot_pc for exit close lookup (unfiltered by metric/outcome nulls)
-        # close of day T = spot_pc of day T+1 in the trading day sequence
-        async with pool.acquire() as conn:
-            all_dates_rows = await conn.fetch(
-                f"SELECT trade_date, spot_pc FROM daily_features "
-                f"WHERE ticker = $1 AND {spot_col} IS NOT NULL "
-                f"ORDER BY trade_date", ticker)
-        all_spot_dates = [str(r["trade_date"]) for r in all_dates_rows]
-        # close_by_date[d] = spot_pc of the next trading day = close price of day d
-        _pc_map = {str(r["trade_date"]): r["spot_pc"] for r in all_dates_rows}
-        close_by_date: dict = {}
-        for i in range(len(all_spot_dates) - 1):
-            next_pc = _pc_map.get(all_spot_dates[i + 1])
-            if next_pc is not None:
-                try:
-                    close_by_date[all_spot_dates[i]] = round(float(next_pc), 2)
-                except (ValueError, TypeError):
-                    pass
-        _tlog('single db_fetch2 + close_calendar')
+    # Single-ticker: bridge the trade-calendar variables from the stored-bin
+    # path's per-ticker dicts to the flat dicts the downstream else-branch uses.
+    if not is_all:
+        open_by_date   = {d: v for (_, d), v in all_open_by_tkr_date.items()}
+        all_spot_dates = all_dates_list_by_tkr.get(ticker, [])
+        close_by_date  = all_close_by_tkr.get(ticker, {})
+        spot_series    = [{"date": d, "value": v} for d, v in sorted(open_by_date.items())]
 
     n = len(pairs)
     if n < 30:
@@ -1274,7 +1001,7 @@ async def analyze(
             })
     else:
         for yr in sorted(by_year):
-            yr_pairs = [(x, y, d) for x, y, d in pairs
+            yr_pairs = [(x, y, d) for x, y, d, *_ in pairs
                         if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
             # No single-ticker `len(yr_pairs) < 30` floor — same principle
             # as the ALL-mode branch above. The bar shows the year's actual
@@ -1835,24 +1562,13 @@ async def heatmap_2d(
     Assigner layer, so `walk_forward=true` and (in Step 6) train-test
     are first-class modes.
 
-    Single-ticker mode uses absolute `np.percentile` bin edges (a
-    deliberately different algorithm — the response carries the literal
-    edge values as labels, e.g. "0.05–0.10", which the frontend renders).
-    `walk_forward` is rejected for single-ticker because the absolute-edge
-    semantic doesn't translate to a running-history view; if/when
-    single-ticker /heatmap needs walk-forward, it gets its own design
-    (rank-based bucketing with B1..BN labels, separate UI path).
+    All tickers (ALL and single) use stored-bin rank bins (B1..BN labels)
+    for all three modes (in_sample, walk_forward, train_test).
     """
     if not pool:
         return {"error": "OI database not configured"}
 
     is_all = (ticker == "ALL")
-    # Walk-forward and train-test heatmap modes both require ALL — single-
-    # ticker /heatmap uses absolute np.percentile edges, not rank bins.
-    if (walk_forward or cutoff_date) and not is_all:
-        return {"error": "walk_forward / train_test not supported for "
-                         "single-ticker /heatmap (uses absolute-percentile "
-                         "edges, not rank bins)"}
 
     date_conditions = ""
     params: list = []
@@ -1882,42 +1598,11 @@ async def heatmap_2d(
             f"{date_conditions} ORDER BY trade_date",
             *params)
 
-    if is_all:
-        # ALL mode: route x-axis and y-axis bucketing through the
-        # row_compute Assigner. Two parallel calls — same per-ticker rank
-        # math as the legacy inline loop, but the dispatch now picks
-        # in-sample / walk-forward / train-test.
-        from app.routers.row_compute import ASSIGNERS, make_spec
-        spec = make_spec(walk_forward, cutoff_date)
-
-        # ── v10 Group 1 — ALL+IS reads bins from is_bins ─────────────────
-        # is_bins stores per-(ticker, trade_date) the canonical 20-bin
-        # assignment for each metric: per-ticker rank-normalize over the
-        # FULL history of that metric. Reading from it makes every
-        # dashboard view consistent BY CONSTRUCTION — same stored bin →
-        # same answer everywhere.
-        #
-        # WF and TT still compute on the fly via the Assigner path below.
-        # Single-ticker mode (handled outside this `if is_all` block) is
-        # unchanged — it uses absolute np.percentile edges, not rank bins.
-        #
-        # Notes on this read path:
-        # • SELECT only the two needed bin columns. is_bins is ~288
-        #   columns wide; SELECT * pessimizes badly.
-        # • bin 0 sentinel = unbinnable (source metric null). Dropped at
-        #   the SQL layer via `bin20_<metric> > 0`.
-        # • Display granularity: is_bins stores bin20 (1..20). Aggregate
-        #   to user-requested `bins` via `((bin20 - 1) * bins) // 20`.
-        #   Divisor bins (5/10/20) are mathematically exact; non-divisor
-        #   bins (3/6/7/11/…) shift slightly because 20 doesn't divide
-        #   evenly into those.
-        # • Pre-v10 the IS path computed per-ticker rank on rows_clean
-        #   (rows where metric_x AND metric_y AND outcome all valid).
-        #   is_bins computes per-ticker rank on each metric's full
-        #   ticker history independently. Bin assignments will differ
-        #   for rows whose ticker has sparse metric_y or outcome —
-        #   that's the cross-view inconsistency this migration fixes.
-        if spec.kind in {"in_sample", "walk_forward", "train_test"}:
+    from app.routers.row_compute import ASSIGNERS, make_spec
+    spec = make_spec(walk_forward, cutoff_date)
+    # Stored-bin path: all tickers (ALL and single) use the appropriate
+    # bin table (is_bins / wf_bins / tt_bins) for all three modes.
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
             # Group 7: WF+ALL joins wf_bins. Group 8: TT+ALL joins
             # tt_bins. Encoding A is uniform across all three: bin20 > 0
             # on both axes drops the appropriate sentinel rows.
@@ -2041,194 +1726,7 @@ async def heatmap_2d(
                 resp["cutoff_date"] = spec.cutoff.isoformat()
             return resp
 
-        # ── WF / TT: existing Assigner path (unchanged) ──────────────────
-        assigner = ASSIGNERS[spec.kind](spec)
 
-        # Pre-filter to rows with all three fields valid + numeric. This
-        # mirrors the legacy validity gate exactly so the per-ticker
-        # row counts the Assigner sees match the legacy by_ticker.values()
-        # iteration. Synthetic outcomes go through _outcome_value (computes
-        # cc - oc per row) so the rest of the pipeline sees a single float.
-        rows_clean: list = []
-        for r in rows:
-            try:
-                xv, yv = float(r[metric_x]), float(r[metric_y])
-            except (TypeError, ValueError):
-                continue
-            ov = _outcome_value(r, outcome)
-            if ov is None:
-                continue
-            if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
-                continue
-            rows_clean.append({
-                "ticker":     r["ticker"],
-                "trade_date": r.get("trade_date"),
-                metric_x:     xv,
-                metric_y:     yv,
-                outcome:      ov,
-            })
-
-        # Two parallel Assigner calls — one per axis. Each row appears
-        # in both result lists in the same input order.
-        state_x = assigner.fit(rows_clean, metric_x, bins, True)
-        a_x = assigner.assign(rows_clean, metric_x, bins, True, state_x, outcome)
-        state_y = assigner.fit(rows_clean, metric_y, bins, True)
-        a_y = assigner.assign(rows_clean, metric_y, bins, True, state_y, outcome)
-
-        # cell_rets[y_bin][x_bin] — outer index is y so the returned grid
-        # matches the frontend's grid[iy][ix] convention (rows=y, cols=x).
-        # train_cell_rets accumulates pre-cutoff rows (TT mode only) so we
-        # can return both a train and test heatmap for side-by-side display.
-        cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
-        train_cell_rets: list = [[[] for _ in range(bins)] for _ in range(bins)]
-        n_tickers_with_bins: set = set()
-        total_n = 0
-        for ax, ay, row in zip(a_x, a_y, rows_clean):
-            # Rows from tickers with < bins observations have bin=None
-            # under both Assigners (`_bucket_pairs_per_ticker` excludes
-            # tickers below the threshold). Skip them — matches legacy
-            # `if len(items) < bins: continue`.
-            if ax.bin is None or ay.bin is None:
-                continue
-            is_pre = (ax.dropped_reason == "pre_cutoff" or
-                      ay.dropped_reason == "pre_cutoff")
-            if is_pre:
-                # Train rows: bins were assigned against their own history;
-                # accumulate separately for the train heatmap.
-                train_cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
-            else:
-                # Test rows (or non-TT rows): the main aggregation.
-                cell_rets[ay.bin - 1][ax.bin - 1].append(row[outcome])
-                total_n += 1
-                n_tickers_with_bins.add(ax.ticker)
-        n_tickers_used = len(n_tickers_with_bins)
-
-        if total_n < 50:
-            return {"error": f"Insufficient data after per-ticker filter: {total_n} rows"}
-
-        def _build_grid(cell_data):
-            # Same change as `_build_grid_is` above: no `len(rets) >= 5`
-            # cell suppression. Frontend handles the visibility threshold
-            # via the n-slider (default 50).
-            g = []
-            for iy in range(bins):
-                r = []
-                for ix in range(bins):
-                    rets = cell_data[iy][ix]
-                    if rets:
-                        a = np.array(rets)
-                        r.append({
-                            "avg_ret":  round(float(a.mean()), 6),
-                            "win_rate": round(float((a > 0).mean()), 4),
-                            "n":        int(len(rets)),
-                        })
-                    else:
-                        r.append(None)
-                g.append(r)
-            return g
-
-        def _bin_thresholds(train_history, n_bins):
-            """Median bin-boundary values across tickers (n_bins+1 values).
-            Used in train-test mode so tooltips can show the frozen threshold
-            range for each axis bin. Returns None when history is empty."""
-            per_ticker = []
-            for hist in train_history.values():
-                if len(hist) < n_bins:
-                    continue
-                N = len(hist)
-                edges = [hist[0]]
-                for k in range(1, n_bins):
-                    edges.append(hist[min(int(k * N / n_bins), N - 1)])
-                edges.append(hist[-1])
-                per_ticker.append(edges)
-            if not per_ticker:
-                return None
-            arr = np.array(per_ticker, dtype=float)
-            return [round(float(v), 4) for v in np.median(arr, axis=0).tolist()]
-
-        grid = _build_grid(cell_rets)
-        # Bin labels — absolute ranges don't make sense in ALL mode since
-        # each ticker has its own boundaries. Use B1..BN.
-        x_labels = [f"B{i+1}" for i in range(bins)]
-        y_labels = [f"B{j+1}" for j in range(bins)]
-        out: dict = {
-            "metric_x":  metric_x, "metric_y": metric_y, "outcome": outcome,
-            "bins":      bins, "n": total_n,
-            "x_labels":  x_labels, "y_labels": y_labels,
-            "grid":      grid,
-            "per_ticker": True,
-            "n_tickers": n_tickers_used,
-            "mode":      spec.kind,
-        }
-        if spec.kind == "walk_forward":
-            out["warmup"]           = spec.warmup
-        elif spec.kind == "train_test":
-            out["cutoff_date"]      = spec.cutoff.isoformat()
-            # Side-by-side train/test grids + frozen thresholds for tooltips.
-            # `grid` (= test data) is kept for backward compat; train_grid and
-            # test_grid are the canonical split keys the frontend uses in TT mode.
-            out["test_grid"]     = grid
-            out["train_grid"]    = _build_grid(train_cell_rets)
-            out["x_thresholds"] = _bin_thresholds(state_x, bins)
-            out["y_thresholds"] = _bin_thresholds(state_y, bins)
-        return out
-
-    # Single-ticker mode — original absolute-percentile binning.
-    # Synthetic outcomes (overnight_gap) compute the per-row gap via
-    # _outcome_value before the validity check.
-    valid = []
-    for r in rows:
-        try:
-            xv, yv = float(r[metric_x]), float(r[metric_y])
-        except (ValueError, TypeError):
-            continue
-        ov = _outcome_value(r, outcome)
-        if ov is None:
-            continue
-        if math.isnan(xv) or math.isnan(yv) or math.isnan(ov):
-            continue
-        valid.append((xv, yv, ov))
-
-    if len(valid) < 50:
-        return {"error": f"Insufficient data: {len(valid)} rows"}
-
-    xs = np.array([v[0] for v in valid])
-    ys = np.array([v[1] for v in valid])
-    os_ = np.array([v[2] for v in valid])
-
-    x_edges = np.percentile(xs, np.linspace(0, 100, bins + 1))
-    y_edges = np.percentile(ys, np.linspace(0, 100, bins + 1))
-    x_edges[-1] += 1e-9
-    y_edges[-1] += 1e-9
-
-    # grid[iy][ix] so rows match the y-axis (matches frontend convention).
-    grid = []
-    for iy in range(bins):
-        row = []
-        for ix in range(bins):
-            mask = ((xs >= x_edges[ix]) & (xs < x_edges[ix+1]) &
-                    (ys >= y_edges[iy]) & (ys < y_edges[iy+1]))
-            crets = os_[mask]
-            if len(crets) >= 5:
-                row.append({
-                    "avg_ret":  round(float(crets.mean()), 6),
-                    "win_rate": round(float((crets > 0).mean()), 4),
-                    "n":        int(len(crets)),
-                })
-            else:
-                row.append(None)
-        grid.append(row)
-
-    x_labels = [f"{x_edges[i]:.2f}–{x_edges[i+1]:.2f}" for i in range(bins)]
-    y_labels = [f"{y_edges[j]:.2f}–{y_edges[j+1]:.2f}" for j in range(bins)]
-
-    return {
-        "metric_x":  metric_x, "metric_y": metric_y, "outcome": outcome,
-        "bins":      bins, "n": len(valid),
-        "x_labels":  x_labels, "y_labels": y_labels,
-        "grid":      grid,
-        "per_ticker": False,
-    }
 
 
 _METRIC_BINS_CANONICAL = 20
@@ -2308,13 +1806,11 @@ async def metric_bins_1d(
     # `bins` via `((bin20 - 1) * bins) // 20`. Divisor bins (2/4/5/10/20)
     # are mathematically exact; non-divisor bins shift slightly. Default
     # bins=10 (the heatmap-sidebar caller's request) is exact.
-    if is_all:
-        # Group 7: WF+ALL → wf_bins. Group 8: TT+ALL → tt_bins.
-        # The math, the aggregation formula, and the response shape are
-        # identical across modes — only the source table differs.
-        # cutoff_date is no longer user-supplied for TT mode (Group 8
-        # auto-discovers from tt_bins via /tt-cutoff); the param still
-        # arrives in the request but only as the mode discriminator.
+    # Stored-bin path — all tickers (ALL and single) for all modes.
+    if True:
+        # WF → wf_bins, TT → tt_bins, IS → is_bins. Same math and response
+        # shape regardless of ticker; date_conditions already includes the
+        # per-ticker filter for single-ticker requests.
         if cutoff_date:
             bin_table = "tt_bins"
         elif walk_forward:
@@ -4234,7 +3730,7 @@ async def secondary_detail(req: SecDetailReq, pool=Depends(get_oi_pool)):
     # Group 7: prefetch dispatches by mode — IS → is_bins, WF → wf_bins.
     # Builder doesn't know which; same lookup shape feeds the helper.
     bin20_by_key = None
-    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
         by_metric = await _fetch_stored_bin20_by_metric(
             pool, spec.kind, [req.metric_b], pairs)
@@ -4438,15 +3934,14 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     # with no error, no broken empty mini. Auto-heals when those bin20
     # columns get backfilled (no allowlist anywhere).
     bin20_by_metric: dict = {}
-    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
         pairs = [(r.get("ticker", ""), r.get("trade_date", "")) for r in filtered]
         bin20_by_metric = await _fetch_stored_bin20_by_metric(
             pool, spec.kind, list(feat_cols), pairs)
 
-    # Fix A: loop inversion for the IS+ALL path. The legacy per-feature
-    # loop is preserved — it's still the implementation for WF/TT and
-    # single-ticker modes (those don't go through the stored-bin path).
-    use_one_pass = is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}
+    # Fix A: loop inversion — all tickers now go through the one-pass stored-bin
+    # path; the legacy per-feature loop below is dead code preserved for reference.
+    use_one_pass = spec.kind in {"in_sample", "walk_forward", "train_test"}
 
     results = []
 
@@ -4539,7 +4034,7 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
             # Group 4: skip features without a stored bin20 column. The 7
             # not-yet-populated features (iv_25d_call_30d et al.) fall into
             # this branch today; they'll auto-light when backfilled.
-            if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"} and feat not in bin20_by_metric:
+            if feat not in bin20_by_metric:
                 continue
             r = assign_secondary_bin_stats(
                 spec, filtered, feat, n_bins, outcome_col, is_all,
@@ -4629,7 +4124,7 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
     # matrix — no error envelope; matches the user-facing "skip the
     # missing minis" semantics.
     bin20_by_metric: dict = {}
-    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
+    if spec.kind in {"in_sample", "walk_forward", "train_test"}:
         sel_metrics = [sel.get("metric", "") for sel in req.selections
                        if sel.get("metric")]
         if sel_metrics:
@@ -4645,7 +4140,7 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
         if not metric or not bins:
             continue
         # Group 4: skip metrics without stored bin20 (auto-heals).
-        if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"} and metric not in bin20_by_metric:
+        if spec.kind in {"in_sample", "walk_forward", "train_test"} and metric not in bin20_by_metric:
             continue
         vec = secondary_membership(
             spec, ordered, metric, bins, n_bins, is_all,
@@ -5950,7 +5445,7 @@ def _compute_analyze_bundle_sync(
     # threaded in by the async caller. WF/TT still call the on-the-fly
     # Assigner — same mode boundary as Group 3a. Single-ticker bundles
     # also use the Assigner (bin20_lookup is None on that path).
-    if is_all and mode in {"in_sample", "walk_forward", "train_test"} and bin20_lookup is not None:
+    if mode in {"in_sample", "walk_forward", "train_test"} and bin20_lookup is not None:
         if _measure: _t_assign_start = _tick()
         # Group 8: thread the TT cutoff so the bundle's per_bin and
         # trade_meta only include test-window rows in TT mode. Pre-fix,

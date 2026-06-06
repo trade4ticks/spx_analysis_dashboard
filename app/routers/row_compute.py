@@ -944,7 +944,7 @@ def _bin_map_from_stored_bin20(
     they go to `_walk_forward_bins` / `_walk_forward_membership` via
     the spec dispatchers above.
     """
-    if bin20_by_key is not None and is_all:
+    if bin20_by_key is not None:
         # Iterate the FILTERED bin20 dict, not all_rows. `bin20_by_key`
         # was built upstream from the filter-set rows in is_bins and
         # already has only the entries where bin20 > 0. So no nested
@@ -1055,7 +1055,7 @@ def assign_secondary_buckets(
     # mode-agnostic trigger as assign_secondary_bin_stats. Also catches
     # the v9 IS fixed-thresholds path when `all_rows` is supplied
     # without a lookup (the helper's internal dispatch handles that).
-    if (bin20_by_key is not None and is_all) or (
+    if bin20_by_key is not None or (
             spec.kind == "in_sample" and all_rows is not None):
         bin_map = _bin_map_from_stored_bin20(
             all_rows if all_rows is not None else rows_chrono,
@@ -1253,7 +1253,7 @@ def secondary_membership(
     # agnostic, identical math for IS (is_bins, Group 4) and WF
     # (wf_bins, Group 7). The v9 IS fixed-thresholds path still fires
     # when `all_rows` is supplied without a lookup.
-    if (bin20_by_key is not None and is_all) or (
+    if bin20_by_key is not None or (
             spec.kind == "in_sample" and all_rows is not None):
         out = np.zeros(len(rows_chrono), dtype=np.float64)
         if not sel:
