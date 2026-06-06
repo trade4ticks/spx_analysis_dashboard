@@ -5888,11 +5888,22 @@ async def _compute_analyze_bundle_bg(
                 "walk_forward": "wf_bins",
                 "train_test":  "tt_bins",
             }[mode]
-            bin_sql = (
-                f'SELECT ticker, trade_date, bin20_{metric} AS bin_20 '
-                f'FROM {bin_table} WHERE bin20_{metric} > 0'
-            )
-            try:
+            # Probe information_schema before querying: avoids a bare
+            # except that could silently swallow connection errors and
+            # fall back to Assigner for a valid metric.  Null-by-design
+            # metrics have no bin20_* column → returns False → stays None.
+            async with pool.acquire() as conn:
+                _col_exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = $1 AND table_schema = 'public' "
+                    "AND column_name = $2)",
+                    bin_table, f"bin20_{metric}"
+                )
+            if _col_exists:
+                bin_sql = (
+                    f'SELECT ticker, trade_date, bin20_{metric} AS bin_20 '
+                    f'FROM {bin_table} WHERE bin20_{metric} > 0'
+                )
                 async with pool.acquire() as conn:
                     bin_rows = await conn.fetch(bin_sql, timeout=60)
                 bin20_lookup = {}
@@ -5900,8 +5911,6 @@ async def _compute_analyze_bundle_bg(
                     d = r['trade_date']
                     d_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
                     bin20_lookup[(r['ticker'], d_str)] = r['bin_20']
-            except Exception:
-                pass   # column bin20_{metric} absent (null-by-design metric) → stays None
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
@@ -6054,28 +6063,30 @@ async def analyze_bundle_get(
         # and the per_bin distribution is flat rather than reflecting is_bins ranks.
         bin20_lookup: Optional[dict] = None
         if mode in {"in_sample", "walk_forward", "train_test"}:
-            _bin_tbl = {
-                "in_sample":   "is_bins",
-                "walk_forward": "wf_bins",
-                "train_test":  "tt_bins",
-            }[mode]
-            try:
-                _bin_sql = (
-                    f"SELECT trade_date, bin20_{metric} AS bin_20 "
-                    f"FROM {_bin_tbl} "
-                    f"WHERE ticker = $1 AND bin20_{metric} > 0"
-                )
-                async with pool.acquire() as conn:
-                    _bin_rows = await conn.fetch(_bin_sql, ticker, timeout=30)
-                _lk: dict = {}
-                for _r in _bin_rows:
-                    _d = _r["trade_date"]
-                    _ds = _d.isoformat() if hasattr(_d, "isoformat") else str(_d)
-                    _lk[(ticker, _ds)] = _r["bin_20"]
-                if _lk:
-                    bin20_lookup = _lk
-            except Exception:
-                pass   # column absent (null-by-design metric) → Assigner fallback
+            # Use the information_schema-probed helper (same as secondary
+            # endpoints) instead of a bare except Exception: pass.  The bare
+            # except silently swallowed ANY connection error — not just
+            # "column absent" — so a connection-state issue left by a prior
+            # null-metric SQL error could cause the valid-metric bin20 fetch
+            # to fail silently, leaving bin20_lookup=None → Assigner → flat
+            # bins on the next Analyze (the deterministic step-1→2→3
+            # regression).  _fetch_stored_bin20_by_metric probes
+            # information_schema first: null-by-design metrics (no bin20_*
+            # column) return {} cleanly; connection errors propagate instead
+            # of being swallowed.
+            _filter_pairs = [
+                (ticker,
+                 _r["trade_date"].isoformat()
+                 if hasattr(_r["trade_date"], "isoformat")
+                 else str(_r["trade_date"]))
+                for _r in rows
+            ]
+            _by_metric = await _fetch_stored_bin20_by_metric(
+                pool, mode, [metric], _filter_pairs
+            )
+            _lk = _by_metric.get(metric, {})
+            if _lk:
+                bin20_lookup = _lk
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,

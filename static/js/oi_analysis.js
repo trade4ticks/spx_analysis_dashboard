@@ -510,7 +510,18 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.data = await r.json();
         const _ct2 = performance.now();
-        if (this.data.error) { this.error = this.data.error; return; }
+        if (this.data.error) {
+          this.error = this.data.error;
+          // Clear stale bundle from the previous metric so it can't leak
+          // into the next Analyze call. Without this, the prior good
+          // metric's bundle lingers in memory when /analyze returns an
+          // error (e.g. null-by-design metric → "Insufficient data"), and
+          // a subsequent switch back to the good metric briefly shows stale
+          // data before the fresh bundle arrives.
+          this.analyzeBundle    = null;
+          this.analyzeBundleKey = null;
+          return;
+        }
         // P4: snapshot the outcome-tied fields of the /analyze response (always
         // ret_5d_fwd_oc) so we can restore them when the user picks
         // ret_5d_fwd_oc as active again after a bundle-driven swap. We keep
