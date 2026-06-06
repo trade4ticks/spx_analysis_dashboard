@@ -7165,6 +7165,13 @@ async def corner_scan_meta(
                     FROM corner_scan_2f WHERE mode = $1)                          AS n_metrics""",
             mode,
         )
+        # Sorted distinct metric list for filter dropdowns — sourced from
+        # corner_scan_1f (has every eligible metric as its 'metric' column).
+        metric_rows = await conn.fetch(
+            "SELECT DISTINCT metric FROM corner_scan_1f WHERE mode = $1 ORDER BY metric",
+            mode,
+        )
+        metrics_list = [r["metric"] for r in metric_rows]
     def _iso(v):
         return v.isoformat() if v is not None else None
     return {
@@ -7176,6 +7183,7 @@ async def corner_scan_meta(
         "as_of_1f":      _iso(row["as_of_1f"]),
         "scanned_at_1f": _iso(row["scanned_at_1f"]),
         "n_metrics":     int(row["n_metrics"]),
+        "metrics":       metrics_list,
     }
 
 

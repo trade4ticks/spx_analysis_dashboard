@@ -792,14 +792,22 @@
                  :value="cs2fCutoffDate"
                  @change="setCs2fCutoffDate($event.target.value)"
                  class="bucketA-cutoff-input">
-          <input type="text" x-model="cs2fFilterP" placeholder="P metric…"
-                 style="width:110px;font-size:11px;padding:3px 6px;
-                        background:var(--raised);border:1px solid var(--border);
-                        border-radius:4px;color:var(--text)">
-          <input type="text" x-model="cs2fFilterS" placeholder="S metric…"
-                 style="width:110px;font-size:11px;padding:3px 6px;
-                        background:var(--raised);border:1px solid var(--border);
-                        border-radius:4px;color:var(--text)">
+          <select x-model="cs2fFilterP"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
+            <option value="">All P metrics</option>
+            <template x-for="m in csMetrics" :key="'p-'+m">
+              <option :value="m" x-text="m"></option>
+            </template>
+          </select>
+          <select x-model="cs2fFilterS"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
+            <option value="">All S metrics</option>
+            <template x-for="m in csMetrics" :key="'s-'+m">
+              <option :value="m" x-text="m"></option>
+            </template>
+          </select>
           <select x-model="cs2fFilterDir"
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text)">
@@ -813,19 +821,19 @@
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text)">
             <option value="">All outcomes</option>
-            <option value="ret_1d_fwd_oc">1d OC</option>
-            <option value="ret_3d_fwd_oc">3d OC</option>
-            <option value="ret_5d_fwd_oc">5d OC</option>
-            <option value="ret_7d_fwd_oc">7d OC</option>
-            <option value="ret_10d_fwd_oc">10d OC</option>
-            <option value="ret_20d_fwd_oc">20d OC</option>
-            <option value="ret_1d_fwd_cc">1d CC</option>
-            <option value="ret_3d_fwd_cc">3d CC</option>
-            <option value="ret_5d_fwd_cc">5d CC</option>
-            <option value="ret_7d_fwd_cc">7d CC</option>
-            <option value="ret_10d_fwd_cc">10d CC</option>
-            <option value="ret_20d_fwd_cc">20d CC</option>
-            <option value="overnight_gap">overnight gap</option>
+            <option value="ret_1d_fwd_oc">ret_1d_fwd_oc</option>
+            <option value="ret_3d_fwd_oc">ret_3d_fwd_oc</option>
+            <option value="ret_5d_fwd_oc">ret_5d_fwd_oc</option>
+            <option value="ret_7d_fwd_oc">ret_7d_fwd_oc</option>
+            <option value="ret_10d_fwd_oc">ret_10d_fwd_oc</option>
+            <option value="ret_20d_fwd_oc">ret_20d_fwd_oc</option>
+            <option value="ret_1d_fwd_cc">ret_1d_fwd_cc</option>
+            <option value="ret_3d_fwd_cc">ret_3d_fwd_cc</option>
+            <option value="ret_5d_fwd_cc">ret_5d_fwd_cc</option>
+            <option value="ret_7d_fwd_cc">ret_7d_fwd_cc</option>
+            <option value="ret_10d_fwd_cc">ret_10d_fwd_cc</option>
+            <option value="ret_20d_fwd_cc">ret_20d_fwd_cc</option>
+            <option value="overnight_gap">overnight_gap</option>
           </select>
           <span style="font-size:11px;color:var(--dim)">min n:</span>
           <input type="number" x-model.number="cs2fMinN" min="0" step="50"
@@ -938,10 +946,14 @@
                  :value="cs1fCutoffDate"
                  @change="setCs1fCutoffDate($event.target.value)"
                  class="bucketA-cutoff-input">
-          <input type="text" x-model="cs1fFilterMetric" placeholder="Metric…"
-                 style="width:140px;font-size:11px;padding:3px 6px;
-                        background:var(--raised);border:1px solid var(--border);
-                        border-radius:4px;color:var(--text)">
+          <select x-model="cs1fFilterMetric"
+                  style="font-size:11px;padding:3px 6px;background:var(--raised);
+                         border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
+            <option value="">All metrics</option>
+            <template x-for="m in csMetrics" :key="'1f-'+m">
+              <option :value="m" x-text="m"></option>
+            </template>
+          </select>
           <select x-model="cs1fFilterExtreme"
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text)">
@@ -953,19 +965,19 @@
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text)">
             <option value="">All outcomes</option>
-            <option value="ret_1d_fwd_oc">1d OC</option>
-            <option value="ret_3d_fwd_oc">3d OC</option>
-            <option value="ret_5d_fwd_oc">5d OC</option>
-            <option value="ret_7d_fwd_oc">7d OC</option>
-            <option value="ret_10d_fwd_oc">10d OC</option>
-            <option value="ret_20d_fwd_oc">20d OC</option>
-            <option value="ret_1d_fwd_cc">1d CC</option>
-            <option value="ret_3d_fwd_cc">3d CC</option>
-            <option value="ret_5d_fwd_cc">5d CC</option>
-            <option value="ret_7d_fwd_cc">7d CC</option>
-            <option value="ret_10d_fwd_cc">10d CC</option>
-            <option value="ret_20d_fwd_cc">20d CC</option>
-            <option value="overnight_gap">overnight gap</option>
+            <option value="ret_1d_fwd_oc">ret_1d_fwd_oc</option>
+            <option value="ret_3d_fwd_oc">ret_3d_fwd_oc</option>
+            <option value="ret_5d_fwd_oc">ret_5d_fwd_oc</option>
+            <option value="ret_7d_fwd_oc">ret_7d_fwd_oc</option>
+            <option value="ret_10d_fwd_oc">ret_10d_fwd_oc</option>
+            <option value="ret_20d_fwd_oc">ret_20d_fwd_oc</option>
+            <option value="ret_1d_fwd_cc">ret_1d_fwd_cc</option>
+            <option value="ret_3d_fwd_cc">ret_3d_fwd_cc</option>
+            <option value="ret_5d_fwd_cc">ret_5d_fwd_cc</option>
+            <option value="ret_7d_fwd_cc">ret_7d_fwd_cc</option>
+            <option value="ret_10d_fwd_cc">ret_10d_fwd_cc</option>
+            <option value="ret_20d_fwd_cc">ret_20d_fwd_cc</option>
+            <option value="overnight_gap">overnight_gap</option>
           </select>
           <span style="font-size:11px;color:var(--dim)">min n:</span>
           <input type="number" x-model.number="cs1fMinN" min="0" step="50"

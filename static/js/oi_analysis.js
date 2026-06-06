@@ -394,7 +394,7 @@ document.addEventListener('alpine:init', () => {
         // mode at init).
         fetch('/api/factor-analysis/corner-scan/meta?mode=walk_forward')
           .then(r => r.ok ? r.json() : null)
-          .then(d => { if (d) { this.cs2fMeta = d; this.cs1fMeta = d; } })
+          .then(d => { if (d) { this.cs2fMeta = d; this.cs1fMeta = d; if (d.metrics?.length) this.csMetrics = d.metrics; } })
           .catch(() => {});
         // All-Ticker Metric Bins. Default selectors mirror the first
         // ⟳ Refresh: ALL ticker, ret_5d_fwd_oc, 20 bins, walk_forward.
@@ -3557,6 +3557,7 @@ document.addEventListener('alpine:init', () => {
     // only. Refresh fetches for the active local mode and writes the
     // slot. Refresh is DISABLED for IS/TT until the in-sample / train-
     // test corner-scan batch job exists (a future task).
+    csMetrics: [],   // sorted distinct eligible metrics — populated from /corner-scan/meta; shared by cs2f + cs1f dropdowns
     cs2fExpanded: false, cs2fLoading: false, cs2fMeta: null, cs2fRows: [], cs2fTotal: 0,
     cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
@@ -3954,7 +3955,7 @@ document.addEventListener('alpine:init', () => {
       let meta = null;
       try {
         const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs2fMode}${cutoffQ}`);
-        if (r.ok) meta = await r.json();
+        if (r.ok) { meta = await r.json(); if (meta?.metrics?.length) this.csMetrics = meta.metrics; }
       } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs2fSortKey, sort_dir: this.cs2fSortDir,
@@ -4002,7 +4003,7 @@ document.addEventListener('alpine:init', () => {
       let meta = null;
       try {
         const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs1fMode}${cutoffQ}`);
-        if (r.ok) meta = await r.json();
+        if (r.ok) { meta = await r.json(); if (meta?.metrics?.length) this.csMetrics = meta.metrics; }
       } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs1fSortKey, sort_dir: this.cs1fSortDir,
