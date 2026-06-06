@@ -433,8 +433,7 @@ def _signed_row(row: dict, sign: int, outcome_col: str) -> dict:
 
 
 class AggregateRequest(BaseModel):
-    walk_forward: bool = False
-    cutoff_date: Optional[str] = None  # train-test mode when set (takes precedence over walk_forward)
+    pass  # body fields removed — portfolio aggregate is always IS-only
 
 
 @router.post("/portfolios/{pid}/aggregate")
@@ -512,26 +511,22 @@ async def portfolio_aggregate(pid: int,
     # per-(metric, n_bins) caching that the legacy `wf_cache` provided.
     # Single path; no `if req.walk_forward` inside this loop.
     from app.routers.row_compute import make_spec, PortfolioVectorBuilder
-    spec = make_spec(req.walk_forward, req.cutoff_date)
+    # Commit C: portfolio aggregate is always IS — never inherits page mode.
+    # Pinning here eliminates the mode-staleness problem (aggregate was
+    # previously computed with whatever walk_forward/cutoff_date the frontend
+    # happened to send, causing results to silently change when users toggled
+    # the page mode while a portfolio was loaded).
+    spec = make_spec(False, None)
 
-    # Group 6: for IS+ALL, prefetch bin20 from is_bins for every metric
-    # referenced by any system (primary + secondaries). The builder uses
-    # this lookup to derive both primary and secondary bins from the
-    # stored is_bins.bin20 instead of computing per-ticker ranks live —
-    # closes the re-rank-on-filtered-subset asymmetry that the legacy
-    # IS path had on secondaries, and matches the bin assignments every
-    # other on-screen view shows (heatmap, /analyze, corr explorer).
-    # WF/TT and single-ticker paths get an empty lookup and fall
-    # through to the existing on-the-fly bin maps.
+    # Always prefetch IS stored bins for ALL-ticker portfolios so bin
+    # assignments match every other IS view (heatmap, /analyze, corr explorer).
+    # Single-ticker portfolios keep an empty lookup (small-N on-the-fly IS rank).
     bin20_by_metric: dict = {}
-    if is_all and spec.kind in {"in_sample", "walk_forward", "train_test"}:
-        # Group 7: dispatch the prefetch by mode — IS reads is_bins,
-        # WF reads wf_bins. PortfolioVectorBuilder's hoisted stored-bin
-        # path uses the lookup identically for either mode.
+    if is_all:
         from app.routers.oi_analysis import _fetch_stored_bin20_by_metric
         filter_pairs = [(r["ticker"], r["trade_date"]) for r in rows]
         bin20_by_metric = await _fetch_stored_bin20_by_metric(
-            oi_pool, spec.kind, sorted(needed_metrics), filter_pairs)
+            oi_pool, "in_sample", sorted(needed_metrics), filter_pairs)
 
     builder = PortfolioVectorBuilder(
         spec, rows, is_all, bin20_by_metric=bin20_by_metric)
@@ -788,15 +783,8 @@ async def portfolio_aggregate(pid: int,
     phi_sys,   overlap_sys   = _phi_restricted(system_vectors)
     phi_pairs, overlap_pairs = _phi_restricted(pair_vectors)
 
-    # Group 7 removed the per-request warmup count. `wf_start` still
-    # surfaces as the earliest date with any cleared bins (informational);
-    # for in_sample it stays as rows[0].date for legacy compatibility.
-    if spec.kind == "in_sample":
-        wf_start = rows[0]["trade_date"] if rows else None
-    else:
-        wf_start = (min(rows[i]["trade_date"] for i in cleared_any)
-                    if cleared_any else None)
-    resp_mode = spec.kind
+    # Always IS — no walk-forward start offset.
+    wf_start = rows[0]["trade_date"] if rows else None
 
     # Fields named to mirror the corr explorer's /secondary-correlation
     # response — the frontend reuses corrStats() and the corr render
@@ -805,9 +793,9 @@ async def portfolio_aggregate(pid: int,
         "portfolio": portfolio,
         "systems":   sys_stats,
         "horizon":   horizon,
-        "mode":              resp_mode,
-        "warmup":            spec.warmup if spec.kind == "walk_forward" else None,
-        "cutoff_date":       spec.cutoff.isoformat() if spec.kind == "train_test" else None,
+        "mode":              "in_sample",
+        "warmup":            None,
+        "cutoff_date":       None,
         "start_date":        wf_start,
         "baseline_n": int(universe_mask.sum()),
         "combined_n": int(union_n),

@@ -6521,12 +6521,10 @@ document.addEventListener('alpine:init', () => {
       if (!this.portfolioId) return;
       this.portLoading = true;
       try {
+        // Portfolio aggregate is always IS — no mode params sent.
         const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/aggregate`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            walk_forward: this.pageMode === 'walk_forward',
-            cutoff_date:  this.pageMode === 'train_test' ? this.cutoffDate : null,
-          }),
+          body: JSON.stringify({}),
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();

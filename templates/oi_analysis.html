@@ -2946,9 +2946,13 @@
               <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.outcome"></span> ·
               <span x-text="(portfolio.portfolio?.date_from || 'earliest') + ' → ' + (portfolio.portfolio?.date_to || 'today')"></span>
             </div>
-            <template x-if="portAggregate && portAggregate.mode === 'walk_forward'">
-              <div style="font-size:11px;color:#b3aae6;margin-bottom:6px;font-family:monospace;letter-spacing:.5px"
-                   x-text="'WALK-FORWARD · ' + (portAggregate.combined_n||0).toLocaleString() + ' trades since ' + (portAggregate.start_date||'?') + ' · Excludes walk-forward warm-up period (first 252 trading days per ticker)'"></div>
+            <template x-if="portAggregate">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:6px">
+                <span style="background:#234032;color:#8fd3ac;border:1px solid #2f5a44;
+                             border-radius:3px;padding:1px 6px;font-family:monospace;
+                             letter-spacing:.5px;font-size:10px">IN-SAMPLE</span>
+                <span style="margin-left:6px">Bin assignments always use full-range in-sample data — independent of the page mode toggle</span>
+              </div>
             </template>
             <!-- Edit-mode banner -->
             <template x-if="editingSystemId">
