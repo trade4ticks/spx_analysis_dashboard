@@ -690,8 +690,11 @@ async def analyze(
             f"{date_conditions}{tt_extra_where} "
             f"ORDER BY df.ticker, df.trade_date"
         )
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(join_sql, *params, *tt_extra_params)
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(join_sql, *params, *tt_extra_params)
+        except Exception:
+            rows = []   # column bin20_{metric} absent (null-by-design metric)
         row_dicts = [dict(r) for r in rows]
         if row_dicts:
             _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
@@ -1837,8 +1840,11 @@ async def metric_bins_1d(
             f"AND {outcome_sql_nn}"
             f"{date_conditions}{tt_extra_where}"
         )
-        async with pool.acquire() as conn:
-            ib_rows = await conn.fetch(join_sql, *params, *tt_extra_params)
+        try:
+            async with pool.acquire() as conn:
+                ib_rows = await conn.fetch(join_sql, *params, *tt_extra_params)
+        except Exception:
+            ib_rows = []   # column bin20_{metric} absent (null-by-design metric)
 
         # Slot each row into its display bin (bin20 → bins via the
         # canonical aggregation formula). Per-bucket lists carry (metric
@@ -5886,13 +5892,16 @@ async def _compute_analyze_bundle_bg(
                 f'SELECT ticker, trade_date, bin20_{metric} AS bin_20 '
                 f'FROM {bin_table} WHERE bin20_{metric} > 0'
             )
-            async with pool.acquire() as conn:
-                bin_rows = await conn.fetch(bin_sql, timeout=60)
-            bin20_lookup = {}
-            for r in bin_rows:
-                d = r['trade_date']
-                d_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
-                bin20_lookup[(r['ticker'], d_str)] = r['bin_20']
+            try:
+                async with pool.acquire() as conn:
+                    bin_rows = await conn.fetch(bin_sql, timeout=60)
+                bin20_lookup = {}
+                for r in bin_rows:
+                    d = r['trade_date']
+                    d_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
+                    bin20_lookup[(r['ticker'], d_str)] = r['bin_20']
+            except Exception:
+                pass   # column bin20_{metric} absent (null-by-design metric) → stays None
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
