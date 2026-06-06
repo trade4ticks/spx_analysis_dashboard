@@ -6153,9 +6153,38 @@ async def analyze_bundle_get(
                     "error": f"db_fetch_failed: {type(e).__name__}: {e}"}
         if not rows:
             return {"status": "ready", "bundle": None, "error": "no_data"}
+        # Fetch stored bin20 for this ticker so _compute_analyze_bundle_sync
+        # takes the _assignments_from_is_bins path (same as ALL background job).
+        # Without this, single-ticker falls to the Assigner (equal-count bins)
+        # and the per_bin distribution is flat rather than reflecting is_bins ranks.
+        bin20_lookup: Optional[dict] = None
+        if mode in {"in_sample", "walk_forward", "train_test"}:
+            _bin_tbl = {
+                "in_sample":   "is_bins",
+                "walk_forward": "wf_bins",
+                "train_test":  "tt_bins",
+            }[mode]
+            try:
+                _bin_sql = (
+                    f"SELECT trade_date, bin20_{metric} AS bin_20 "
+                    f"FROM {_bin_tbl} "
+                    f"WHERE ticker = $1 AND bin20_{metric} > 0"
+                )
+                async with pool.acquire() as conn:
+                    _bin_rows = await conn.fetch(_bin_sql, ticker, timeout=30)
+                _lk: dict = {}
+                for _r in _bin_rows:
+                    _d = _r["trade_date"]
+                    _ds = _d.isoformat() if hasattr(_d, "isoformat") else str(_d)
+                    _lk[(ticker, _ds)] = _r["bin_20"]
+                if _lk:
+                    bin20_lookup = _lk
+            except Exception:
+                pass   # column absent (null-by-design metric) → Assigner fallback
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
+            bin20_lookup=bin20_lookup,
         )
         return {"status": "ready", "bundle": bundle}
 
