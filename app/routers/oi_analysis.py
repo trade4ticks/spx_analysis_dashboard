@@ -7226,9 +7226,9 @@ async def corner_scan_2f_endpoint(
     p = 3
 
     if primary_metric:
-        conds.append(f"primary_metric   ILIKE ${p}"); params.append(f"%{primary_metric}%");   p += 1
+        conds.append(f"primary_metric   = ${p}"); params.append(primary_metric);   p += 1
     if secondary_metric:
-        conds.append(f"secondary_metric ILIKE ${p}"); params.append(f"%{secondary_metric}%"); p += 1
+        conds.append(f"secondary_metric = ${p}"); params.append(secondary_metric); p += 1
     if corner_direction:
         conds.append(f"corner_direction = ${p}");     params.append(corner_direction);        p += 1
     if outcome:
@@ -7291,7 +7291,7 @@ async def corner_scan_1f_endpoint(
     p = 3
 
     if metric:
-        conds.append(f"metric ILIKE ${p}"); params.append(f"%{metric}%"); p += 1
+        conds.append(f"metric = ${p}"); params.append(metric); p += 1
     if extreme:
         conds.append(f"extreme = ${p}");   params.append(extreme);        p += 1
     if outcome:
