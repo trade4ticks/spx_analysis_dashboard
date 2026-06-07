@@ -4202,28 +4202,20 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
 
 # ── Global Metric Bins (standalone top-of-page browser) ───────────────────
 #
-# DISCIPLINE — same rule as _ANALYZE_PRIMARY_SCHEMA_VERSION: bump
-# _GLOBAL_BINS_SCHEMA_VERSION on every change to the bin assignment math
-# (most live in _compute_all_bins_fast) or to the response shape. Pre-v1
-# cache_keys had no version at all, so any deploy that changed binning
-# math silently kept serving the pre-change payload until the table was
-# manually truncated — the same landmine that bit analyze_primary_cache.
+# DISCIPLINE: bump _GLOBAL_BINS_SCHEMA_VERSION on every change to the
+# bin methodology or response shape so stale cache entries are
+# automatically invalidated on next read.
 #
-# v1: introducing the salt. The Part-1 thinning removal in
-# _compute_all_bins_fast (per-ticker `m.sum() < n_bins` gate removed)
-# means rows from tickers with <n_bins observations now contribute to
-# the rank pool. Pre-v1 entries are unreachable on read (key prefix
-# mismatch); the table-ensure DELETE below reclaims their disk.
-#
-# v2 (Group 7): WF mode now reads bin20 from wf_bins (stored) instead
-# of running _compute_all_bins_walk_forward on the fly. Per-bin counts
-# shift by the boundary-edge accumulation (~99 rows on the test
-# baseline). v1 entries are unreachable on read.
-#
-# v3 (Group 8): TT mode now reads bin20 from tt_bins. Methodology
-# shifted from WF-frozen to IS-frozen at the build side; v2 TT
-# entries carry the old method. Bump invalidates them.
-_GLOBAL_BINS_SCHEMA_VERSION = 3
+# v1: introducing the salt.
+# v2 (Group 7): WF mode claimed to read wf_bins — comment was wrong,
+#   assign_batch still computed on-the-fly.
+# v3 (Group 8): TT mode claimed to read tt_bins — same bug.
+# v4: Full migration to stored bins for ALL modes.  assign_batch
+#   eliminated.  IS reads is_bins, WF reads wf_bins, TT reads tt_bins.
+#   Date filters now apply to OUTCOME ROWS only; bin assignments are
+#   full-history stored values unaffected by the date window.  Metrics
+#   with no bin20_{metric} column produce no entry (no fallback).
+_GLOBAL_BINS_SCHEMA_VERSION = 4
 
 _GLOBAL_BINS_CACHE: dict = {}
 _GLOBAL_BINS_TABLE_DDL = """\
@@ -4329,92 +4321,148 @@ async def global_metric_bins(
             import logging
             logging.warning("global_bins_cache DB read failed for %s: %r", cache_key, e)
 
-    # Build date filter
-    where = [f"{outcome} IS NOT NULL"]
+    # ── Mode and bin table dispatch ─────────────────────────────────────
+    # assign_batch eliminated.  Source table determined by mode alone;
+    # stored bin20 is the full-history rank for every row.
+    if cutoff_date:
+        mode = "train_test"
+        bin_table = "tt_bins"
+    elif walk_forward:
+        mode = "walk_forward"
+        bin_table = "wf_bins"
+    else:
+        mode = "in_sample"
+        bin_table = "is_bins"
+
+    # ── Discover metrics present in the bin table ────────────────────────
+    # Metrics without a bin20_{metric} column produce no output entry.
+    # No fallback computation — missing bin column means show nothing.
+    try:
+        async with pool.acquire() as conn:
+            bin_col_rows = await conn.fetch(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_name = $1 AND table_schema = 'public'
+                     AND column_name LIKE 'bin20_%'
+                   ORDER BY ordinal_position""",
+                bin_table)
+    except Exception as _col_exc:
+        import logging
+        logging.warning("global_metric_bins: can't read %s columns: %r", bin_table, _col_exc)
+        return {
+            "error":   f"Bin table {bin_table} not accessible: {_col_exc}",
+            "outcome": outcome, "ticker": ticker, "n_bins": n_bins,
+            "metrics": [], "total_rows": 0,
+        }
+
+    available_metrics = [r["column_name"][6:] for r in bin_col_rows]  # strip "bin20_"
+    if not available_metrics:
+        out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
+               "metrics": [], "total_rows": 0, "metrics_attempted": 0, "mode": mode}
+        _GLOBAL_BINS_CACHE[cache_key] = out
+        return out
+
+    bin20_select = ", ".join(f"bt.bin20_{m}" for m in available_metrics)
+
+    # ── Single JOIN query ────────────────────────────────────────────────
+    # Date filters restrict outcome rows only — stored bin assignments
+    # are full-history values unaffected by the date window.  No outer
+    # WHERE bin20 > 0: warmup/NaN sentinels are filtered per-metric in
+    # the aggregation loop, so a row with bin20_A=0 can still contribute
+    # an outcome to metric B.
+    where: list = [f"df.{outcome} IS NOT NULL"]
     params: list = []
     p = 1
     if ticker and ticker != "ALL":
-        where.append(f"ticker = ${p}"); params.append(ticker); p += 1
+        where.append(f"df.ticker = ${p}"); params.append(ticker); p += 1
     if date_from:
-        where.append(f"trade_date >= ${p}")
+        where.append(f"df.trade_date >= ${p}")
         params.append(_date.fromisoformat(date_from)); p += 1
     if date_to:
-        where.append(f"trade_date <= ${p}")
+        where.append(f"df.trade_date <= ${p}")
         params.append(_date.fromisoformat(date_to)); p += 1
+    if cutoff_date:
+        # TT: aggregate outcomes from the test window only
+        where.append(f"df.trade_date >= ${p}")
+        params.append(_date.fromisoformat(cutoff_date)); p += 1
 
     try:
         async with pool.acquire() as conn:
-            col_rows = await conn.fetch(
-                """SELECT column_name FROM information_schema.columns
-                   WHERE table_name = 'daily_features' AND table_schema = 'public'
-                   AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
-                   AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
-                   ORDER BY ordinal_position""")
-        all_num_cols = [r["column_name"] for r in col_rows]
-        outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
-        feature_cols = [c for c in all_num_cols
-                        if c not in outcome_cols_all
-                        and not c.startswith("spot") and not c.endswith("_pc")]
-
-        select_cols = ", ".join(["ticker", "trade_date", outcome] + feature_cols)
-        async with pool.acquire() as conn:
-            # Override the pool's 30 s command_timeout — pulling every feature
-            # column for every row across 80+ tickers can easily exceed it.
             db_rows = await conn.fetch(
-                f"SELECT {select_cols} FROM daily_features "
-                f"WHERE {' AND '.join(where)} ORDER BY ticker, trade_date",
+                f"SELECT df.ticker, df.trade_date, df.{outcome}, "
+                f"  {bin20_select} "
+                f"FROM daily_features df "
+                f"JOIN {bin_table} bt USING (ticker, trade_date) "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY df.ticker, df.trade_date",
                 *params, timeout=240)
         rows = [dict(r) for r in db_rows]
         if not rows:
             out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
                    "metrics": [], "total_rows": 0,
-                   "metrics_attempted": 0}
+                   "metrics_attempted": len(available_metrics), "mode": mode}
             _GLOBAL_BINS_CACHE[cache_key] = out
             return out
 
-        is_all = (ticker == "ALL")
+        # ── Per-metric aggregation ────────────────────────────────────
+        # Canonical bin20 → n_bins collapse (0-indexed, same formula as
+        # _batch_metrics_from_stored_bin20 and every other stored-bin
+        # surface in this file):
+        #   bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+        #
+        # No thinning gate.  Sparse metrics appear with low bin_ns counts;
+        # the user can see that directly.  Every metric with any stored
+        # bin20 rows is included.
+        metrics_out: list = []
+        for metric in available_metrics:
+            col = f"bin20_{metric}"
+            buckets: list = [[] for _ in range(n_bins)]
+            for r in rows:
+                b20 = r.get(col)
+                if not b20 or b20 <= 0:      # warmup / NaN sentinel
+                    continue
+                bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+                buckets[bn].append(float(r[outcome]))
+            metrics_out.append({
+                "name":   metric,
+                "bins":   [round(float(np.mean(b)), 6) if b else 0.0
+                           for b in buckets],
+                "bin_ns": [len(b) for b in buckets],
+            })
 
-        # Route through the row_compute layer. Both branches delegate to
-        # the same numpy-vectorized helpers as before; the if/else here
-        # is now a one-line spec selection instead of duplicated call
-        # sites with diverging return shapes.
-        from app.routers.row_compute import ASSIGNERS, make_spec
-        spec = make_spec(walk_forward, cutoff_date)
-        assigner = ASSIGNERS[spec.kind](spec)
-        metrics_out, dropped_n, wf_start = assigner.assign_batch(
-            rows, feature_cols, outcome, n_bins, is_all,
-        )
-
-        # Sort by lift (max - min avg ret) so most-interesting metrics appear first.
+        # Sort by lift over populated buckets only (empty buckets are 0.0
+        # by convention and excluded so they don't inflate or deflate lift).
         def _lift(m):
-            bs = m.get("bins") or []
-            return (max(bs) - min(bs)) if bs else 0
+            nonempty = [v for v, n in zip(m.get("bins") or [],
+                                          m.get("bin_ns") or []) if n > 0]
+            return (max(nonempty) - min(nonempty)) if len(nonempty) >= 2 else 0
         metrics_out.sort(key=_lift, reverse=True)
+
+        # First row's trade_date = first non-warmup date (informational)
+        start_date_str: Optional[str] = None
+        sd = rows[0].get("trade_date")
+        if sd is not None:
+            start_date_str = sd.isoformat() if hasattr(sd, "isoformat") else str(sd)
 
         out: dict = {
             "outcome":           outcome,
             "ticker":            ticker,
             "n_bins":            n_bins,
             "total_rows":        len(rows),
-            "metrics_attempted": len(feature_cols),
+            "metrics_attempted": len(available_metrics),
             "metrics":           metrics_out,
-            "mode":              spec.kind,
+            "mode":              mode,
         }
-        if spec.kind == "walk_forward":
-            out["warmup"]           = spec.warmup
-            out["start_date"]       = wf_start
-        elif spec.kind == "train_test":
-            out["cutoff_date"]      = spec.cutoff.isoformat()
-            out["start_date"]       = wf_start
+        if mode == "walk_forward":
+            out["warmup"]     = 252           # wf_bins warmup period
+            out["start_date"] = start_date_str
+        elif mode == "train_test":
+            out["cutoff_date"] = cutoff_date
+            out["start_date"]  = start_date_str
 
-        # Persist to DB so next server restart loads instantly.
-        # _ensure_bins_table is called again here (not just before the read)
-        # because the table may have been dropped and recreated between the
-        # initial check and this write — _bins_table_ensured would still be
-        # True from the earlier call so the DDL would be skipped otherwise.
+        # ── Persist to DB cache ─────────────────────────────────────────
         try:
             global _bins_table_ensured
-            _bins_table_ensured = False          # force re-check on every write
+            _bins_table_ensured = False
             await _ensure_bins_table(pool)
             async with pool.acquire() as conn:
                 await conn.execute(
@@ -4423,9 +4471,7 @@ async def global_metric_bins(
                     "VALUES ($1,$2,$3,$4,$5,$6::jsonb) "
                     "ON CONFLICT (cache_key) DO UPDATE "
                     "    SET payload=$6::jsonb, cached_at=NOW()",
-                    cache_key, outcome, ticker, n_bins,
-                    spec.kind,
-                    json.dumps(out),
+                    cache_key, outcome, ticker, n_bins, mode, json.dumps(out),
                 )
                 row_ca = await conn.fetchrow(
                     "SELECT cached_at FROM global_bins_cache WHERE cache_key = $1",
@@ -4433,15 +4479,13 @@ async def global_metric_bins(
             out["cached_at"] = row_ca["cached_at"].isoformat() if row_ca else None
         except Exception as _write_exc:
             import logging
-            logging.warning("global_bins_cache DB write failed for %s: %r", cache_key, _write_exc)
+            logging.warning("global_bins_cache DB write failed for %s: %r",
+                            cache_key, _write_exc)
             out["cached_at"] = None
 
         _GLOBAL_BINS_CACHE[cache_key] = out
         return out
     except Exception as exc:
-        # Surface failures to the frontend instead of returning a generic 500
-        # that the UI swallows into "no data". Most likely cause is a query
-        # timeout when daily_features has grown a lot.
         return {
             "error":      f"{type(exc).__name__}: {exc}",
             "outcome":    outcome,
