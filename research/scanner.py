@@ -329,127 +329,153 @@ def _classify_pattern(avgs: list[float], pearson: float, spearman: float,
 
 def _robustness_diagnostics(pairs, x_col: str, y_col: str,
                             n_buckets: int = 10) -> dict:
-    """Temporal stability and concentration tests."""
+    """Temporal stability and concentration tests.
+
+    Uses GLOBAL bucket assignments (computed once over the full corpus)
+    for all subperiod comparisons.  Per-year or per-half sub-bucketing
+    (re-ranking within the subperiod) is intentionally avoided: a row's
+    decile must not change based on which time window we filter to.
+    D10 = globally-highest-ranked rows; they remain D10 in every year
+    and every half-period we slice to.
+    """
     n = len(pairs)
 
-    # Group by year (keep 3-tuples so _bucket can unpack them)
+    # ── Global bucket assignment (computed ONCE over full corpus) ────────
+    # Pairs are (x, y, date).  Sort by x, assign bucket 0..n_buckets-1.
+    # For IS mode x = raw metric value → equivalent to is_bins full-history
+    # per-ticker rank.  For WF mode x = WF bin value (1..10) → same result
+    # as the stored wf_bins assignment.
+    sorted_idx = sorted(range(n), key=lambda i: pairs[i][0])
+    global_bucket: list = [0] * n
+    for rank, idx in enumerate(sorted_idx):
+        global_bucket[idx] = min(int(rank / n * n_buckets), n_buckets - 1)
+
+    # Top-2 and bottom-2 global-bucket thresholds
+    top2_floor = n_buckets - 2    # indices {n_buckets-2, n_buckets-1}
+    bot2_ceil  = 1                 # indices {0, 1}
+
+    # Full-corpus direction: used to orient yearly / LOYO comparisons
+    full_top_ys = [pairs[i][1] for i in range(n) if global_bucket[i] >= top2_floor]
+    full_bot_ys = [pairs[i][1] for i in range(n) if global_bucket[i] <= bot2_ceil]
+    full_buckets_valid = bool(full_top_ys and full_bot_ys)
+    full_direction = 0
+    full_top_avg = full_bot_avg = 0.0
+    if full_buckets_valid:
+        full_top_avg = float(np.mean(full_top_ys))
+        full_bot_avg = float(np.mean(full_bot_ys))
+        full_direction = 1 if full_top_avg > full_bot_avg else -1
+
+    # ── Group by year (store index into pairs / global_bucket) ──────────
     by_year: dict[int, list] = defaultdict(list)
-    for x, y, d in pairs:
+    for i, (x, y, d) in enumerate(pairs):
         yr = _year_from_date(d)
         if yr:
-            by_year[yr].append((x, y, d))
+            by_year[yr].append(i)
 
-    # Yearly consistency: does the "best zone" direction hold each year?
-    # Use top-2 vs bottom-2 pooled as the signal direction
+    # ── Yearly consistency ───────────────────────────────────────────────
+    # For each year: collect the returns of globally-defined top-2 and
+    # bottom-2 bucket rows, compare directions.  No per-year re-ranking.
     years_checked = 0
     years_consistent = 0
-    full_buckets = _bucket(pairs, n_buckets)
-    if len(full_buckets) >= 4:
-        full_top = np.mean(full_buckets[-2] + full_buckets[-1]) if full_buckets[-2] + full_buckets[-1] else 0
-        full_bot = np.mean(full_buckets[0] + full_buckets[1]) if full_buckets[0] + full_buckets[1] else 0
-        full_direction = 1 if full_top > full_bot else -1
+    yearly_data: list = []
+    yearly_spreads: dict = {}
 
-        yearly_data = []
-        for yr, yr_pairs in sorted(by_year.items()):
-            if len(yr_pairs) < n_buckets * 2:
+    if full_buckets_valid:
+        for yr, yr_idxs in sorted(by_year.items()):
+            if len(yr_idxs) < n_buckets * 2:
                 continue
             years_checked += 1
-            yr_buckets = _bucket(yr_pairs, n_buckets)
-            if len(yr_buckets) >= 4:
-                top_pool = yr_buckets[-2] + yr_buckets[-1]
-                bot_pool = yr_buckets[0] + yr_buckets[1]
-                yr_top = float(np.mean(top_pool)) if top_pool else 0.0
-                yr_bot = float(np.mean(bot_pool)) if bot_pool else 0.0
-                yr_dir = 1 if yr_top > yr_bot else -1
-                if yr_dir == full_direction:
-                    years_consistent += 1
-                yr_n = sum(len(b) for b in yr_buckets if b)
-                yearly_data.append({
-                    "year": int(yr),
-                    "top_avg": round(yr_top, 6),
-                    "bot_avg": round(yr_bot, 6),
-                    "n": yr_n,
-                    "top_beats": yr_top > yr_bot,
-                })
-    else:
-        yearly_data = []
+            yr_top_ys = [pairs[i][1] for i in yr_idxs if global_bucket[i] >= top2_floor]
+            yr_bot_ys = [pairs[i][1] for i in yr_idxs if global_bucket[i] <= bot2_ceil]
+            yr_top = float(np.mean(yr_top_ys)) if yr_top_ys else 0.0
+            yr_bot = float(np.mean(yr_bot_ys)) if yr_bot_ys else 0.0
+            yr_dir = 1 if yr_top > yr_bot else -1
+            if yr_dir == full_direction:
+                years_consistent += 1
+            yearly_spreads[yr] = yr_top - yr_bot
+            yearly_data.append({
+                "year":      int(yr),
+                "top_avg":   round(yr_top, 6),
+                "bot_avg":   round(yr_bot, 6),
+                "n":         len(yr_idxs),
+                "top_beats": yr_top > yr_bot,
+            })
 
     consistency_pct = round(years_consistent / years_checked * 100, 1) if years_checked else None
 
-    # Concentration risk: what fraction of total return comes from the best single year
-    yearly_spreads = {}
-    for yr, yr_pairs in by_year.items():
-        if len(yr_pairs) < n_buckets * 2:
-            continue
-        yr_buckets = _bucket(yr_pairs, n_buckets)
-        if len(yr_buckets) >= 4:
-            t = float(np.mean(yr_buckets[-2] + yr_buckets[-1])) if yr_buckets[-2] + yr_buckets[-1] else 0
-            b = float(np.mean(yr_buckets[0] + yr_buckets[1])) if yr_buckets[0] + yr_buckets[1] else 0
-            yearly_spreads[yr] = t - b
-
+    # ── Concentration risk ───────────────────────────────────────────────
     total_abs_spread = sum(abs(v) for v in yearly_spreads.values())
     if total_abs_spread > 0 and yearly_spreads:
-        max_yr_contrib = max(abs(v) for v in yearly_spreads.values())
-        concentration = round(max_yr_contrib / total_abs_spread, 4)
+        concentration = round(max(abs(v) for v in yearly_spreads.values()) / total_abs_spread, 4)
     else:
         concentration = 1.0
 
-    # Half-sample stability: split by time, check if signal direction is same in both halves
-    sorted_pairs = sorted(pairs, key=lambda p: p[2] if p[2] else "")
-    mid = len(sorted_pairs) // 2
-    first_half = sorted_pairs[:mid]
-    second_half = sorted_pairs[mid:]
+    # ── Half-sample stability ────────────────────────────────────────────
+    # Chronologically split; within each half use the global bucket label —
+    # no re-ranking within the half.
+    sorted_pairs_idx = sorted(range(n), key=lambda i: pairs[i][2] if pairs[i][2] else "")
+    mid = n // 2
+    h1_idxs = sorted_pairs_idx[:mid]
+    h2_idxs = sorted_pairs_idx[mid:]
     half_stable = False
 
-    if len(first_half) >= n_buckets * 3 and len(second_half) >= n_buckets * 3:
-        b1 = _bucket(first_half, n_buckets)
-        b2 = _bucket(second_half, n_buckets)
-        if len(b1) >= 4 and len(b2) >= 4:
-            dir1 = np.mean(b1[-2] + b1[-1]) - np.mean(b1[0] + b1[1]) if (b1[-2] + b1[-1]) and (b1[0] + b1[1]) else 0
-            dir2 = np.mean(b2[-2] + b2[-1]) - np.mean(b2[0] + b2[1]) if (b2[-2] + b2[-1]) and (b2[0] + b2[1]) else 0
+    if len(h1_idxs) >= n_buckets * 3 and len(h2_idxs) >= n_buckets * 3:
+        h1_top = [pairs[i][1] for i in h1_idxs if global_bucket[i] >= top2_floor]
+        h1_bot = [pairs[i][1] for i in h1_idxs if global_bucket[i] <= bot2_ceil]
+        h2_top = [pairs[i][1] for i in h2_idxs if global_bucket[i] >= top2_floor]
+        h2_bot = [pairs[i][1] for i in h2_idxs if global_bucket[i] <= bot2_ceil]
+        if h1_top and h1_bot and h2_top and h2_bot:
+            dir1 = float(np.mean(h1_top)) - float(np.mean(h1_bot))
+            dir2 = float(np.mean(h2_top)) - float(np.mean(h2_bot))
             half_stable = (dir1 > 0 and dir2 > 0) or (dir1 < 0 and dir2 < 0)
 
-    # Leave-one-year-out: does removing any single year flip the overall direction?
+    # ── Leave-one-year-out ───────────────────────────────────────────────
+    # Ask: if we drop year Y, do the globally-defined top-2 / bottom-2
+    # buckets still point the same direction?  Global buckets are frozen —
+    # removing a year changes which rows are present but not their labels.
     loyo_fragile = False
-    if len(full_buckets) >= 4 and yearly_spreads:
-        full_spread = full_top - full_bot if len(full_buckets) >= 4 else 0
+    if full_buckets_valid and yearly_spreads:
+        full_spread = full_top_avg - full_bot_avg
         for yr in yearly_spreads:
-            remaining = [(x, y, d) for x, y, d in pairs if _year_from_date(d) != yr]
-            if len(remaining) < n_buckets * 3:
+            rem_idxs = [i for i in range(n) if _year_from_date(pairs[i][2]) != yr]
+            if len(rem_idxs) < n_buckets * 3:
                 continue
-            rb = _bucket(remaining, n_buckets)
-            if len(rb) >= 4:
-                rt = np.mean(rb[-2] + rb[-1]) if (rb[-2] + rb[-1]) else 0
-                rbot = np.mean(rb[0] + rb[1]) if (rb[0] + rb[1]) else 0
-                if (full_spread > 0 and (rt - rbot) < 0) or (full_spread < 0 and (rt - rbot) > 0):
-                    loyo_fragile = True
-                    break
+            rt_ys  = [pairs[i][1] for i in rem_idxs if global_bucket[i] >= top2_floor]
+            rb_ys  = [pairs[i][1] for i in rem_idxs if global_bucket[i] <= bot2_ceil]
+            if not rt_ys or not rb_ys:
+                continue
+            rt   = float(np.mean(rt_ys))
+            rbot = float(np.mean(rb_ys))
+            if (full_spread > 0 and (rt - rbot) < 0) or (full_spread < 0 and (rt - rbot) > 0):
+                loyo_fragile = True
+                break
 
-    # Min bucket size
-    bucket_sizes = [len(b) for b in full_buckets if b]
+    # ── Min bucket size (over full-corpus global buckets) ────────────────
+    bucket_y_by_gb: list = [[] for _ in range(n_buckets)]
+    for i in range(n):
+        bucket_y_by_gb[global_bucket[i]].append(pairs[i][1])
+    bucket_sizes = [len(b) for b in bucket_y_by_gb if b]
     min_bucket_n = min(bucket_sizes) if bucket_sizes else 0
 
-    # Temporal coverage for extreme deciles (D1 and D10)
-    # Check what fraction of years each extreme bucket has data in
+    # ── Extreme decile temporal coverage ────────────────────────────────
+    # Fraction of qualifying years where globally-defined D1 and D10 have
+    # at least one observation in that year.
     total_years = len(by_year)
     extreme_coverage = 1.0
-    if total_years >= 3 and len(full_buckets) >= 4:
-        # Re-bucket per year and check if D1/D10 have data each year
+    if total_years >= 3 and full_buckets_valid:
         d1_years = 0
         d10_years = 0
-        for yr, yr_pairs in by_year.items():
-            if len(yr_pairs) < n_buckets * 2:
+        for yr, yr_idxs in by_year.items():
+            if len(yr_idxs) < n_buckets * 2:
                 continue
-            yr_buckets = _bucket(yr_pairs, n_buckets)
-            if len(yr_buckets) >= n_buckets:
-                if yr_buckets[0]:  # D1 has data this year
-                    d1_years += 1
-                if yr_buckets[-1]:  # D10 has data this year
-                    d10_years += 1
+            if any(global_bucket[i] == 0 for i in yr_idxs):
+                d1_years += 1
+            if any(global_bucket[i] == n_buckets - 1 for i in yr_idxs):
+                d10_years += 1
         checked = max(years_checked, 1)
-        d1_cov = d1_years / checked if checked else 0
-        d10_cov = d10_years / checked if checked else 0
-        extreme_coverage = min(d1_cov, d10_cov)  # worst of the two
+        d1_cov  = d1_years  / checked
+        d10_cov = d10_years / checked
+        extreme_coverage = min(d1_cov, d10_cov)
 
     return {
         "yearly_consistency_pct":  consistency_pct,

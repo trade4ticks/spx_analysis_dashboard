@@ -974,80 +974,93 @@ async def analyze(
     _tlog(f'common decile_stats + equity_by_decile ({n} pairs)')
 
     # ── Yearly consistency ────────────────────────────────────────────────
+    # Fixed: use STORED bin10 from bin20_lookup to identify D10/D1 rows
+    # within each year.  No within-year re-ranking of the raw metric value.
+    # A row in stored D10 stays D10 regardless of which year we filter to —
+    # that is the entire point of stability analysis.  Both ALL and
+    # single-ticker modes populate bin20_lookup via the same stored-bin JOIN,
+    # so the logic is unified here.
     yearly_consistency = []
     years_top_wins = 0
 
-    if is_all and by_ticker:
-        all_years = sorted(by_year.keys())
-        for yr in all_years:
-            yr_by_ticker: dict = defaultdict(list)
-            for tkr, tkr_pairs in by_ticker.items():
-                yr_ps = [p for p in tkr_pairs
-                         if ((p[2].year if hasattr(p[2], 'year') else int(str(p[2])[:4])) == yr)]
-                if yr_ps:
-                    yr_by_ticker[tkr] = yr_ps
-            yr_buckets = _bucket_pairs_per_ticker(yr_by_ticker, 10)
-            top_ys = [p[1] for p in yr_buckets[9]]
-            bot_ys = [p[1] for p in yr_buckets[0]]
-            # No `len(top_ys)+len(bot_ys) < 20` floor — every year that
-            # produced any top-or-bottom-decile rows contributes a bar.
-            # If a year is sparse the bar's `top_n`/`bot_n` show that
-            # directly in the tooltip; the user judges from the raw n.
-            t_avg = float(np.mean(top_ys)) if top_ys else 0.0
-            b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
-            top_beats = t_avg > b_avg
-            if top_beats:
-                years_top_wins += 1
-            yearly_consistency.append({
-                "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
-                "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
-            })
-    else:
-        for yr in sorted(by_year):
-            yr_pairs = [(x, y, d) for x, y, d, *_ in pairs
-                        if (d.year if hasattr(d, 'year') else int(str(d)[:4])) == yr]
-            # No single-ticker `len(yr_pairs) < 30` floor — same principle
-            # as the ALL-mode branch above. The bar shows the year's actual
-            # top/bottom n; user reads it directly.
-            yr_buckets = _bucket_pairs(yr_pairs, 10)
-            top_ys = [p[1] for p in yr_buckets[9]] if yr_buckets[9] else []
-            bot_ys = [p[1] for p in yr_buckets[0]] if yr_buckets[0] else []
-            t_avg = float(np.mean(top_ys)) if top_ys else 0.0
-            b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
-            top_beats = t_avg > b_avg
-            if top_beats:
-                years_top_wins += 1
-            yearly_consistency.append({
-                "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
-                "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
-            })
+    all_years = sorted(by_year.keys())
+    for yr in all_years:
+        top_ys: list = []
+        bot_ys: list = []
+        for tkr, tkr_pairs in by_ticker.items():
+            for p in tkr_pairs:
+                yr_p = p[2].year if hasattr(p[2], 'year') else int(str(p[2])[:4])
+                if yr_p != yr:
+                    continue
+                b20 = bin20_lookup.get((tkr, p[2]))
+                if not b20 or b20 <= 0:
+                    continue
+                b10 = ((b20 - 1) // 2) + 1
+                if b10 == 10:
+                    top_ys.append(p[1])
+                elif b10 == 1:
+                    bot_ys.append(p[1])
+        t_avg = float(np.mean(top_ys)) if top_ys else 0.0
+        b_avg = float(np.mean(bot_ys)) if bot_ys else 0.0
+        top_beats = t_avg > b_avg
+        if top_beats:
+            years_top_wins += 1
+        yearly_consistency.append({
+            "year": yr, "top_avg": round(t_avg, 6), "bot_avg": round(b_avg, 6),
+            "top_n": len(top_ys), "bot_n": len(bot_ys), "top_beats": top_beats,
+        })
 
     n_years = len(yearly_consistency)
     consistency_pct = round(years_top_wins / n_years * 100, 1) if n_years else None
     _tlog('common yearly_consistency')
 
     # ── Half-sample stability ─────────────────────────────────────────────
+    # Fixed: use STORED bin10 to identify D10/D1 rows in each chronological
+    # half.  No within-half re-ranking of the raw metric value.
     if is_all and by_ticker:
-        # No per-ticker `len(tkr_pairs) < 20` floor — every ticker
-        # contributes a stability vote. Tickers with very few rows give
-        # noisy individual votes, but the population average over a curated
-        # universe is the right number to look at and the user can decide.
+        # Per-ticker: split each ticker's rows at the chronological midpoint,
+        # then check whether stored-D10 avg_ret > stored-D1 avg_ret in BOTH
+        # halves (or both negative).  Majority vote across tickers.
         ticker_stable = []
-        for tkr_pairs in by_ticker.values():
+        for tkr, tkr_pairs in by_ticker.items():
             tkr_sorted = sorted(tkr_pairs, key=lambda p: p[2])
             mid_t = len(tkr_sorted) // 2
-            h1 = _bucket_pairs(tkr_sorted[:mid_t], 10)
-            h2 = _bucket_pairs(tkr_sorted[mid_t:], 10)
-            h1_s = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
-            h2_s = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
+            h1_top: list = []; h1_bot: list = []
+            h2_top: list = []; h2_bot: list = []
+            for i, p in enumerate(tkr_sorted):
+                b20 = bin20_lookup.get((tkr, p[2]))
+                if not b20 or b20 <= 0:
+                    continue
+                b10 = ((b20 - 1) // 2) + 1
+                if i < mid_t:
+                    if b10 == 10: h1_top.append(p[1])
+                    elif b10 == 1: h1_bot.append(p[1])
+                else:
+                    if b10 == 10: h2_top.append(p[1])
+                    elif b10 == 1: h2_bot.append(p[1])
+            h1_s = (float(np.mean(h1_top)) - float(np.mean(h1_bot))) if h1_top and h1_bot else 0
+            h2_s = (float(np.mean(h2_top)) - float(np.mean(h2_bot))) if h2_top and h2_bot else 0
             ticker_stable.append((h1_s > 0 and h2_s > 0) or (h1_s < 0 and h2_s < 0))
         half_stable = (sum(ticker_stable) / len(ticker_stable) >= 0.5) if ticker_stable else False
     else:
+        # Single-ticker: split the full pair list at the chronological midpoint.
+        single_sorted = sorted(pairs, key=lambda p: p[2])
         mid = n // 2
-        h1 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[:mid], 10)
-        h2 = _bucket_pairs(sorted(pairs, key=lambda p: p[2])[mid:], 10)
-        h1_spread = (np.mean([p[1] for p in h1[9]]) - np.mean([p[1] for p in h1[0]])) if h1[0] and h1[9] else 0
-        h2_spread = (np.mean([p[1] for p in h2[9]]) - np.mean([p[1] for p in h2[0]])) if h2[0] and h2[9] else 0
+        h1_top: list = []; h1_bot: list = []
+        h2_top: list = []; h2_bot: list = []
+        for i, p in enumerate(single_sorted):
+            b20 = bin20_lookup.get((p[3], p[2]))   # p[3] = ticker
+            if not b20 or b20 <= 0:
+                continue
+            b10 = ((b20 - 1) // 2) + 1
+            if i < mid:
+                if b10 == 10: h1_top.append(p[1])
+                elif b10 == 1: h1_bot.append(p[1])
+            else:
+                if b10 == 10: h2_top.append(p[1])
+                elif b10 == 1: h2_bot.append(p[1])
+        h1_spread = (float(np.mean(h1_top)) - float(np.mean(h1_bot))) if h1_top and h1_bot else 0
+        h2_spread = (float(np.mean(h2_top)) - float(np.mean(h2_bot))) if h2_top and h2_bot else 0
         half_stable = (h1_spread > 0 and h2_spread > 0) or (h1_spread < 0 and h2_spread < 0)
 
     # ── Concentration risk ────────────────────────────────────────────────

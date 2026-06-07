@@ -2027,36 +2027,6 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _renderYearlyConsistency() {
-      const el = document.getElementById('chart-consistency');
-      if (!el || !this.data?.yearly_consistency?.length) return;
-      if (this._charts['consistency']) this._charts['consistency'].destroy();
-
-      const yc = this.data.yearly_consistency;
-      this._charts['consistency'] = new Chart(el, {
-        type: 'bar',
-        data: {
-          labels: yc.map(y => y.year),
-          datasets: [
-            { label: 'D10 (top)', data: yc.map(y => y.top_avg*100), backgroundColor: '#3498db' },
-            { label: 'D1 (bottom)', data: yc.map(y => y.bot_avg*100), backgroundColor: '#e84393' },
-          ],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { labels:{color:'#aaa',font:{size:10}} },
-            tooltip: { backgroundColor:'rgba(20,20,20,0.95)', borderColor:'#444', borderWidth:1 },
-          },
-          scales: {
-            ...this._darkScales(),
-            y: { ...this._darkScales().y, ticks: { ...this._darkScales().y.ticks,
-                  callback: v => v.toFixed(2) + '%' } },
-          },
-        },
-      });
-    },
-
     // ── Return Distribution (histogram: selected bins vs all) ─────────────
     // Uses /analyze's per-trade decile_stats[].returns array (only present
     // for the /analyze default outcome; after a P4 bundle-driven swap the
