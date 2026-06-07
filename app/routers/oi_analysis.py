@@ -1614,7 +1614,7 @@ async def heatmap_2d(
             f"{date_conditions} ORDER BY trade_date",
             *params)
 
-    from app.routers.row_compute import ASSIGNERS, make_spec
+    from app.routers.row_compute import make_spec
     spec = make_spec(walk_forward, cutoff_date)
     # Stored-bin path: all tickers (ALL and single) use the appropriate
     # bin table (is_bins / wf_bins / tt_bins) for all three modes.
@@ -5367,7 +5367,6 @@ def _compute_analyze_bundle_sync(
     shape (see _ANALYZE_BUNDLE_SCHEMA_VERSION for the contract).
     """
     from datetime import datetime
-    from app.routers.row_compute import ASSIGNERS, make_spec
     from app.routers.ic_compute import (
         rolling_ic_single_ticker, rolling_ic_cross_sectional,
         classified_rolling_ic, noise_floor_epsilon, _horizon_from_outcome,
@@ -5427,10 +5426,10 @@ def _compute_analyze_bundle_sync(
               f"close_lookup_entries={len(close_by_tkr_date)})")
 
     # ── 2. Resolve bin assignments ────────────────────────────────────────
-    # v9 (Group 3b): IS+ALL reads bin20 from is_bins via the bin20_lookup
-    # threaded in by the async caller. WF/TT still call the on-the-fly
-    # Assigner — same mode boundary as Group 3a. Single-ticker bundles
-    # also use the Assigner (bin20_lookup is None on that path).
+    # All modes read stored bins via bin20_lookup (is_bins / wf_bins /
+    # tt_bins depending on mode). When bin20_lookup is None the metric
+    # has no bin column (null-by-design) — return empty assignments and
+    # let the bundle surface no data rather than computing on the fly.
     if mode in {"in_sample", "walk_forward", "train_test"} and bin20_lookup is not None:
         if _measure: _t_assign_start = _tick()
         # Group 8: thread the TT cutoff so the bundle's per_bin and
@@ -5451,21 +5450,9 @@ def _compute_analyze_bundle_sync(
             print(f"[SHARED] assignments_from_is_bins={_tick() - _t_assign_start:.3f}s  "
                   f"(assignments={len(assignments)})")
     else:
-        spec = make_spec(
-            walk_forward=(mode == "walk_forward"),
-            cutoff_date=cutoff_date if mode == "train_test" else None,
-        )
-        assigner = ASSIGNERS[spec.kind](spec)
-        if _measure: _t_fit = _tick()
-        state = assigner.fit(rows, metric, n_bins, is_all)
-        if _measure:
-            _t_assign_start = _tick()
-            print(f"[SHARED] assigner_fit={_t_assign_start - _t_fit:.3f}s  "
-                  f"(spec.kind={spec.kind})")
-        assignments = assigner.assign(rows, metric, n_bins, is_all, state, anchor_outcome)
-        if _measure:
-            print(f"[SHARED] assigner_assign={_tick() - _t_assign_start:.3f}s  "
-                  f"(assignments={len(assignments)})")
+        # Metric absent from stored bins (null-by-design or no bin column).
+        # Never compute on the fly — surface empty bundle instead.
+        assignments = []
 
     # ── 3. Build trade_meta from valid assignments ────────────────────────
     # v5: entry fields are anchored. OC outcomes enter at open of T;
