@@ -7247,11 +7247,29 @@ async def corner_scan_meta(
             mode,
         )
         # Sorted distinct metric list for filter dropdowns — sourced from
-        # corner_scan_1f (has every eligible metric as its 'metric' column).
-        metric_rows = await conn.fetch(
-            "SELECT DISTINCT metric FROM corner_scan_1f WHERE mode = $1 ORDER BY metric",
-            mode,
+        # corner_scan_1f. Apply the same display-only exclusion as 1f/2f
+        # endpoints: drop Family 2 entirely, drop _pc variants in Family 4/5.
+        mc_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables"
+            "  WHERE table_name = 'metric_classification')"
         )
+        if mc_exists:
+            metric_rows = await conn.fetch(
+                """SELECT DISTINCT metric FROM corner_scan_1f
+                   WHERE mode = $1
+                     AND metric NOT IN (
+                         SELECT metric FROM metric_classification
+                         WHERE family_num = 2
+                            OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')
+                     )
+                   ORDER BY metric""",
+                mode,
+            )
+        else:
+            metric_rows = await conn.fetch(
+                "SELECT DISTINCT metric FROM corner_scan_1f WHERE mode = $1 ORDER BY metric",
+                mode,
+            )
         metrics_list = [r["metric"] for r in metric_rows]
     def _iso(v):
         return v.isoformat() if v is not None else None

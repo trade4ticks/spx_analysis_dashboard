@@ -219,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=181"></script>
+  <script src="/static/js/oi_analysis.js?v=182"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -860,17 +860,17 @@
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid var(--border);font-size:11px;font-weight:600">
-                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">P Metric <span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">S Metric <span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Dir <span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs2fSortKey==='d_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs2fSortKey==='d_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs2fSortKey==='d_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                <tr style="border-bottom:1px solid var(--border)">
+                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">P Metric<span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">S Metric<span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Dir<span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Outcome<span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='d_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D avg%</th>
+                  <th @click="cs2fSort('d_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='d_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D %/day</th>
+                  <th @click="cs2fSort('d_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='d_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D n</th>
+                  <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q avg%</th>
+                  <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q %/day</th>
+                  <th @click="cs2fSort('q_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q n</th>
                 </tr>
               </thead>
               <tbody>
@@ -1029,16 +1029,16 @@
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid var(--border);font-size:11px;font-weight:600">
-                  <th @click="cs1fSort('metric')"        style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Metric <span x-text="cs1fSortKey==='metric'        ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('extreme')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Extreme <span x-text="cs1fSortKey==='extreme'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('outcome')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs1fSortKey==='outcome'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs1fSortKey==='d_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs1fSortKey==='d_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs1fSortKey==='d_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs1fSortKey==='q_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs1fSortKey==='q_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs1fSortKey==='q_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                <tr style="border-bottom:1px solid var(--border)">
+                  <th @click="cs1fSort('metric')"        style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Metric<span x-text="cs1fSortKey==='metric'        ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('extreme')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Extreme<span x-text="cs1fSortKey==='extreme'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('outcome')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Outcome<span x-text="cs1fSortKey==='outcome'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='d_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>D avg%</th>
+                  <th @click="cs1fSort('d_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='d_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>D %/day</th>
+                  <th @click="cs1fSort('d_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='d_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>D n</th>
+                  <th @click="cs1fSort('q_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='q_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>Q avg%</th>
+                  <th @click="cs1fSort('q_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='q_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>Q %/day</th>
+                  <th @click="cs1fSort('q_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs1fSortKey==='q_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span>Q n</th>
                 </tr>
               </thead>
               <tbody>
