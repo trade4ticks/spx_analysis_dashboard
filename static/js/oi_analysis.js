@@ -4517,6 +4517,7 @@ document.addEventListener('alpine:init', () => {
         console.log(`[secPrepare] /secondary-prepare-rows responded in ${((_t1-_t0)/1000).toFixed(2)}s`);
         const d = await r.json();
         if (d.error || !d.cache_key) {
+          this._clearSecDetailCharts();
           this.secDetail = { error: d.error || 'Could not prepare secondary data for new primary.' };
           return;
         }
@@ -4534,6 +4535,7 @@ document.addEventListener('alpine:init', () => {
         const _t2 = performance.now();
         console.log(`[secPrepare] full prepare+drill done in ${((_t2-_t0)/1000).toFixed(2)}s total`);
       } catch (e) {
+        this._clearSecDetailCharts();
         this.secDetail = { error: e.message };
       } finally {
         this.secDetailLoading = false;
@@ -4710,6 +4712,7 @@ document.addEventListener('alpine:init', () => {
           const msg = d.error === 'insufficient_data'
             ? 'Insufficient data for this metric in the selected primary bins.'
             : d.error;
+          this._clearSecDetailCharts();
           this.secDetail = { error: msg };
           return;
         }
@@ -4727,6 +4730,7 @@ document.addEventListener('alpine:init', () => {
         const msg = e.message === 'insufficient_data'
           ? 'Insufficient data for this metric in the selected primary bins.'
           : e.message;
+        this._clearSecDetailCharts();
         this.secDetail = { error: msg };
       } finally { this.secDetailLoading = false; }
     },
@@ -4843,6 +4847,18 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+    },
+
+    // Destroy all secondary canvas charts without re-drawing them.
+    // Called on the error / insufficient-data path so stale charts from
+    // the previously-loaded secondary don't bleed through.
+    // sec-equity-canvas is auto-torn-down by Alpine's x-if guard
+    // (secDetail && !secDetail.error), but the other four are always
+    // in the DOM and must be explicitly destroyed here.
+    _clearSecDetailCharts() {
+      for (const key of ['sec-bins', 'sec-equity', 'sec-yearly', 'sec-activity', 'sec-bubble']) {
+        if (this._charts[key]) { this._charts[key].destroy(); delete this._charts[key]; }
+      }
     },
 
     _renderSecDetail() {
