@@ -219,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=182"></script>
+  <script src="/static/js/oi_analysis.js?v=183"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -895,17 +895,17 @@
                     <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
                     <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.d_avg_ret != null ? (row.d_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.d_avg_ret != null ? (row.d_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_avg_ret != null ? (row.d_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.q_avg_ret != null ? (row.q_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.q_avg_ret != null ? (row.q_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
                   </tr>
@@ -1062,17 +1062,17 @@
                     <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.extreme"></td>
                     <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.d_avg_ret != null ? (row.d_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.d_avg_ret != null ? (row.d_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_avg_ret != null ? (row.d_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.q_avg_ret != null ? (row.q_avg_ret > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.q_avg_ret != null ? (row.q_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
-                        :style="row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? 'color:#3498db' : 'color:#e84393') : 'color:var(--dim)'"
+                        :style="{ color: row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
                   </tr>
