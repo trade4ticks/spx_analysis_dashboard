@@ -4215,7 +4215,7 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
 #   Date filters now apply to OUTCOME ROWS only; bin assignments are
 #   full-history stored values unaffected by the date window.  Metrics
 #   with no bin20_{metric} column produce no entry (no fallback).
-_GLOBAL_BINS_SCHEMA_VERSION = 4
+_GLOBAL_BINS_SCHEMA_VERSION = 5  # bumped: family-filter exclusion applied to available_metrics
 
 _GLOBAL_BINS_CACHE: dict = {}
 _GLOBAL_BINS_TABLE_DDL = """\
@@ -4355,6 +4355,26 @@ async def global_metric_bins(
         }
 
     available_metrics = [r["column_name"][6:] for r in bin_col_rows]  # strip "bin20_"
+
+    # Display-only filter: exclude Family-2 metrics (spot_pc / spot_co) and
+    # _pc-suffixed metrics in Family 4 or 5 (OI-by-strike / OI-change families).
+    # Family-12 _pc metrics (option volume) are kept — exclusion is family-scoped.
+    # Matches the same filter applied in /corner-scan/1f, /corner-scan/2f, and
+    # /corner-scan/meta.  Graceful degradation: if metric_classification is absent
+    # the set is empty and no metrics are filtered.
+    try:
+        async with pool.acquire() as conn:
+            excl_rows = await conn.fetch(
+                """SELECT metric FROM metric_classification
+                   WHERE family_num = 2
+                      OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')"""
+            )
+        _excl_set = {r["metric"] for r in excl_rows}
+    except Exception:
+        _excl_set = set()
+    if _excl_set:
+        available_metrics = [m for m in available_metrics if m not in _excl_set]
+
     if not available_metrics:
         out = {"outcome": outcome, "ticker": ticker, "n_bins": n_bins,
                "metrics": [], "total_rows": 0, "metrics_attempted": 0, "mode": mode}
