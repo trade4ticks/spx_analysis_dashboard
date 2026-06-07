@@ -511,9 +511,35 @@ async def list_columns(pool=Depends(get_oi_pool)):
                AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
                AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
                ORDER BY ordinal_position""")
+        # Family-scoped exclusion (same rule as corner-scan and All-Ticker
+        # Metric Bins):
+        #   Family 2 entirely     — spot_pc / spot_co, never valid metrics
+        #   Family 4 + 5 _pc only — OI-by-strike / OI-change; _pc variants
+        #                           unavailable at morning analysis time
+        #   Family 12 _pc kept    — vol_weighted + option volume; EVENING-tier,
+        #                           valid. Old blanket suffix filter wrongly
+        #                           blocked these.
+        # Graceful fallback to the old blanket _pc filter when
+        # metric_classification is absent (e.g. fresh environment).
+        try:
+            excl_rows = await conn.fetch(
+                """SELECT metric FROM metric_classification
+                   WHERE family_num = 2
+                      OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')"""
+            )
+            excl_set = {r["metric"] for r in excl_rows}
+            use_family_filter = True
+        except Exception:
+            excl_set = set()
+            use_family_filter = False
+
     all_cols = [r["column_name"] for r in rows]
     outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
-    features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+    if use_family_filter:
+        features = [c for c in all_cols if c not in outcomes and c not in excl_set]
+    else:
+        # Fallback: old behaviour — at least keeps the endpoint functional.
+        features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
     return {"features": features, "outcomes": outcomes}
 
 
