@@ -7278,16 +7278,21 @@ async def corner_scan_2f_endpoint(
     min_d_n:          int           = Query(300, ge=0),
     sort_key:         str           = Query("d_ret_per_day"),
     sort_dir:         str           = Query("desc"),
-    limit:            int           = Query(200, ge=1, le=2000),
+    limit:            int           = Query(50, ge=1, le=2000),
+    offset:           int           = Query(0, ge=0),
     pool=Depends(get_oi_pool),
 ):
     """Filtered + sorted 2-factor corner rows for a single binning mode.
 
     Filters applied in SQL; sort key is whitelisted against _CS_2F_SORT_WHITELIST.
-    d_n >= min_d_n is the primary quality gate (default 300). `mode` defaults
-    to walk_forward (the only mode populated in Bucket A's pre-IS-batch
-    state); requesting a mode with no rows returns an empty list cleanly
-    (status="no_data"), and the frontend renders a placeholder.
+    d_n >= min_d_n is the primary quality gate (default 300). Supports
+    server-side pagination via limit + offset.
+
+    Display filter (not a build filter): excludes Family-2 metrics (spot_pc,
+    spot_co — never valid metrics) and _pc-suffixed metrics in Family 4 and 5
+    (OI-by-strike and OI-change families; _pc variants are unavailable at
+    morning analysis time). Family-12 _pc metrics (option volume) are kept.
+    Uses metric_classification table; if the table is absent, no filter applied.
 
     Response includes per-row `mode` and `scanned_at` so the frontend can
     display the "last: YYYY-MM-DD HH:MM:SS · <Mode>" breadcrumb without a
@@ -7311,14 +7316,32 @@ async def corner_scan_2f_endpoint(
     if secondary_metric:
         conds.append(f"secondary_metric = ${p}"); params.append(secondary_metric); p += 1
     if corner_direction:
-        conds.append(f"corner_direction = ${p}");     params.append(corner_direction);        p += 1
+        conds.append(f"corner_direction = ${p}"); params.append(corner_direction); p += 1
     if outcome:
-        conds.append(f"outcome = ${p}");              params.append(outcome);                 p += 1
+        conds.append(f"outcome = ${p}");          params.append(outcome);          p += 1
 
-    where = " AND ".join(conds)
-    order = f"{sort_key} {dir_sql} {nulls_sql}"
-
+    # Display-only metric exclusion: Family 2 always; Family 4+5 _pc only.
+    # Wrapped in a try/except so a missing metric_classification table degrades
+    # gracefully (no filter applied) rather than erroring the endpoint.
+    _EXCL = (
+        "NOT IN ("
+        "  SELECT metric FROM metric_classification"
+        "  WHERE family_num = 2"
+        "  OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')"
+        ")"
+    )
     async with pool.acquire() as conn:
+        mc_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables"
+            "  WHERE table_name = 'metric_classification')"
+        )
+        if mc_exists:
+            conds.append(f"primary_metric   {_EXCL}")
+            conds.append(f"secondary_metric {_EXCL}")
+
+        where = " AND ".join(conds)
+        order = f"{sort_key} {dir_sql} {nulls_sql}"
+
         total = await conn.fetchval(
             f"SELECT COUNT(*) FROM corner_scan_2f WHERE {where}", *params
         )
@@ -7328,7 +7351,7 @@ async def corner_scan_2f_endpoint(
                        q_avg_ret, q_ret_per_day, q_n,
                        as_of, scanned_at, mode
                 FROM corner_scan_2f WHERE {where}
-                ORDER BY {order} LIMIT {limit}""",
+                ORDER BY {order} LIMIT {limit} OFFSET {offset}""",
             *params,
         )
     return {
@@ -7348,15 +7371,16 @@ async def corner_scan_1f_endpoint(
     min_d_n:  int           = Query(300, ge=0),
     sort_key: str           = Query("d_ret_per_day"),
     sort_dir: str           = Query("desc"),
-    limit:    int           = Query(200, ge=1, le=2000),
+    limit:    int           = Query(50, ge=1, le=2000),
+    offset:   int           = Query(0, ge=0),
     pool=Depends(get_oi_pool),
 ):
     """Filtered + sorted 1-factor extreme-bin rows for a single binning mode.
 
     `mode` defaults to walk_forward; requesting a mode with no rows returns
-    an empty list cleanly (status="no_data") so the frontend can render the
-    "pending in-sample build" placeholder without an error path. Response
-    includes per-row `mode` and `scanned_at` for the breadcrumb.
+    an empty list cleanly (status="no_data"). Supports server-side pagination
+    via limit + offset. Same display-only metric exclusion as /corner-scan/2f
+    (Family 2 always; Family 4+5 _pc only).
     """
     if not pool:
         return {"rows": [], "total": 0, "mode": mode, "status": "no_db"}
@@ -7372,16 +7396,30 @@ async def corner_scan_1f_endpoint(
     p = 3
 
     if metric:
-        conds.append(f"metric = ${p}"); params.append(metric); p += 1
+        conds.append(f"metric = ${p}");   params.append(metric);   p += 1
     if extreme:
-        conds.append(f"extreme = ${p}");   params.append(extreme);        p += 1
+        conds.append(f"extreme = ${p}");  params.append(extreme);  p += 1
     if outcome:
-        conds.append(f"outcome = ${p}");   params.append(outcome);        p += 1
+        conds.append(f"outcome = ${p}");  params.append(outcome);  p += 1
 
-    where = " AND ".join(conds)
-    order = f"{sort_key} {dir_sql} {nulls_sql}"
-
+    _EXCL_1F = (
+        "metric NOT IN ("
+        "  SELECT metric FROM metric_classification"
+        "  WHERE family_num = 2"
+        "  OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')"
+        ")"
+    )
     async with pool.acquire() as conn:
+        mc_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables"
+            "  WHERE table_name = 'metric_classification')"
+        )
+        if mc_exists:
+            conds.append(_EXCL_1F)
+
+        where = " AND ".join(conds)
+        order = f"{sort_key} {dir_sql} {nulls_sql}"
+
         total = await conn.fetchval(
             f"SELECT COUNT(*) FROM corner_scan_1f WHERE {where}", *params
         )
@@ -7391,7 +7429,7 @@ async def corner_scan_1f_endpoint(
                        q_avg_ret, q_ret_per_day, q_n,
                        as_of, scanned_at, mode
                 FROM corner_scan_1f WHERE {where}
-                ORDER BY {order} LIMIT {limit}""",
+                ORDER BY {order} LIMIT {limit} OFFSET {offset}""",
             *params,
         )
     return {

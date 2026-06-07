@@ -219,7 +219,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=180"></script>
+  <script src="/static/js/oi_analysis.js?v=181"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -860,17 +860,17 @@
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid var(--border)">
-                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">P Metric <span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">S Metric <span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Dir <span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_avg_ret')"        style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs2fSortKey==='d_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_ret_per_day')"    style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs2fSortKey==='d_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('d_n')"              style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs2fSortKey==='d_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs2fSort('q_n')"              style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                <tr style="border-bottom:1px solid var(--border);font-size:11px;font-weight:600">
+                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">P Metric <span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">S Metric <span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Dir <span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs2fSortKey==='d_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs2fSortKey==='d_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs2fSortKey==='d_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('q_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
                 </tr>
               </thead>
               <tbody>
@@ -912,6 +912,31 @@
                 </template>
               </tbody>
             </table>
+          </div>
+          <!-- ── 2f pagination ── -->
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 0 0;flex-wrap:wrap">
+            <button @click="cs2fPrevPage()"
+                    :disabled="cs2fPage <= 1 || cs2fLoading"
+                    :style="{opacity: cs2fPage > 1 && !cs2fLoading ? 1 : 0.4,
+                             cursor:  cs2fPage > 1 && !cs2fLoading ? 'pointer' : 'not-allowed'}"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           border-radius:4px;padding:3px 10px;font-size:12px">← Prev</button>
+            <span style="font-size:12px;color:var(--dim)">
+              Page
+              <input type="number" :value="cs2fPage" @change="cs2fGoToPage($event.target.value)"
+                     :min="1" :max="cs2fTotalPages()"
+                     style="width:48px;text-align:center;background:var(--raised);border:1px solid var(--border);
+                            color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px">
+              of <span x-text="cs2fTotalPages()"></span>
+            </span>
+            <button @click="cs2fNextPage()"
+                    :disabled="cs2fPage >= cs2fTotalPages() || cs2fLoading"
+                    :style="{opacity: cs2fPage < cs2fTotalPages() && !cs2fLoading ? 1 : 0.4,
+                             cursor:  cs2fPage < cs2fTotalPages() && !cs2fLoading ? 'pointer' : 'not-allowed'}"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           border-radius:4px;padding:3px 10px;font-size:12px">Next →</button>
+            <span style="font-size:11px;color:var(--dim)"
+                  x-text="cs2fTotal > 0 ? ('rows ' + ((cs2fPage-1)*50+1).toLocaleString() + '–' + Math.min(cs2fPage*50, cs2fTotal).toLocaleString() + ' of ' + cs2fTotal.toLocaleString()) : ''"></span>
           </div>
         </div>
       </template>
@@ -1004,16 +1029,16 @@
           <div style="overflow-x:auto">
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid var(--border)">
-                  <th @click="cs1fSort('metric')"        style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Metric <span x-text="cs1fSortKey==='metric'        ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('extreme')"       style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Extreme <span x-text="cs1fSortKey==='extreme'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('outcome')"       style="text-align:left;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs1fSortKey==='outcome'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_avg_ret')"     style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs1fSortKey==='d_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_ret_per_day')" style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs1fSortKey==='d_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('d_n')"           style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs1fSortKey==='d_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_avg_ret')"     style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs1fSortKey==='q_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_ret_per_day')" style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs1fSortKey==='q_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
-                  <th @click="cs1fSort('q_n')"           style="text-align:right;padding:4px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs1fSortKey==='q_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                <tr style="border-bottom:1px solid var(--border);font-size:11px;font-weight:600">
+                  <th @click="cs1fSort('metric')"        style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Metric <span x-text="cs1fSortKey==='metric'        ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('extreme')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Extreme <span x-text="cs1fSortKey==='extreme'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('outcome')"       style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Outcome <span x-text="cs1fSortKey==='outcome'       ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D avg% <span x-text="cs1fSortKey==='d_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D %/day <span x-text="cs1fSortKey==='d_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('d_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">D n <span x-text="cs1fSortKey==='d_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_avg_ret')"     style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q avg% <span x-text="cs1fSortKey==='q_avg_ret'     ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_ret_per_day')" style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q %/day <span x-text="cs1fSortKey==='q_ret_per_day' ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs1fSort('q_n')"           style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim)">Q n <span x-text="cs1fSortKey==='q_n'           ? (cs1fSortDir==='desc'?'▾':'▴') : ''"></span></th>
                 </tr>
               </thead>
               <tbody>
@@ -1054,6 +1079,31 @@
                 </template>
               </tbody>
             </table>
+          </div>
+          <!-- ── 1f pagination ── -->
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 0 0;flex-wrap:wrap">
+            <button @click="cs1fPrevPage()"
+                    :disabled="cs1fPage <= 1 || cs1fLoading"
+                    :style="{opacity: cs1fPage > 1 && !cs1fLoading ? 1 : 0.4,
+                             cursor:  cs1fPage > 1 && !cs1fLoading ? 'pointer' : 'not-allowed'}"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           border-radius:4px;padding:3px 10px;font-size:12px">← Prev</button>
+            <span style="font-size:12px;color:var(--dim)">
+              Page
+              <input type="number" :value="cs1fPage" @change="cs1fGoToPage($event.target.value)"
+                     :min="1" :max="cs1fTotalPages()"
+                     style="width:48px;text-align:center;background:var(--raised);border:1px solid var(--border);
+                            color:var(--text);border-radius:4px;padding:2px 4px;font-size:12px">
+              of <span x-text="cs1fTotalPages()"></span>
+            </span>
+            <button @click="cs1fNextPage()"
+                    :disabled="cs1fPage >= cs1fTotalPages() || cs1fLoading"
+                    :style="{opacity: cs1fPage < cs1fTotalPages() && !cs1fLoading ? 1 : 0.4,
+                             cursor:  cs1fPage < cs1fTotalPages() && !cs1fLoading ? 'pointer' : 'not-allowed'}"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           border-radius:4px;padding:3px 10px;font-size:12px">Next →</button>
+            <span style="font-size:11px;color:var(--dim)"
+                  x-text="cs1fTotal > 0 ? ('rows ' + ((cs1fPage-1)*50+1).toLocaleString() + '–' + Math.min(cs1fPage*50, cs1fTotal).toLocaleString() + ' of ' + cs1fTotal.toLocaleString()) : ''"></span>
           </div>
         </div>
       </template>

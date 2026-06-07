@@ -3529,17 +3529,19 @@ document.addEventListener('alpine:init', () => {
     // test corner-scan batch job exists (a future task).
     csMetrics: [],   // sorted distinct eligible metrics — populated from /corner-scan/meta; shared by cs2f + cs1f dropdowns
     cs2fExpanded: false, cs2fLoading: false, cs2fMeta: null, cs2fRows: [], cs2fTotal: 0,
+    cs2fPage: 1,  // current page (50 rows/page, server-side)
     cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
     cs2fMode:       'walk_forward',
     cs2fCutoffDate: '2024-01-01',
     cs2fDataByMode: {
-      walk_forward: null,  // { meta, rows, total }
+      walk_forward: null,  // { meta, rows, total, page }
       in_sample:    null,
       train_test:   null,
     },
 
     cs1fExpanded: false, cs1fLoading: false, cs1fRows: [], cs1fTotal: 0,
+    cs1fPage: 1,  // current page (50 rows/page, server-side)
     cs1fSortKey: 'd_ret_per_day', cs1fSortDir: 'desc',
     cs1fFilterMetric: '', cs1fFilterExtreme: '', cs1fFilterOutcome: '', cs1fMinN: 300,
     cs1fMeta:       null,  // pane-local meta (previously read from cs2fMeta — decoupled in step 6)
@@ -3872,10 +3874,12 @@ document.addEventListener('alpine:init', () => {
         this.cs2fMeta  = slot.meta;
         this.cs2fRows  = slot.rows  || [];
         this.cs2fTotal = slot.total || 0;
+        this.cs2fPage  = slot.page  || 1;  // restore the page that was last fetched for this mode
       } else {
         this.cs2fMeta  = null;
         this.cs2fRows  = [];
         this.cs2fTotal = 0;
+        this.cs2fPage  = 1;
       }
     },
     _cs1fSwapDisplayFromSlot() {
@@ -3884,19 +3888,21 @@ document.addEventListener('alpine:init', () => {
         this.cs1fMeta  = slot.meta;
         this.cs1fRows  = slot.rows  || [];
         this.cs1fTotal = slot.total || 0;
+        this.cs1fPage  = slot.page  || 1;
       } else {
         this.cs1fMeta  = null;
         this.cs1fRows  = [];
         this.cs1fTotal = 0;
+        this.cs1fPage  = 1;
       }
     },
 
     _cs2fStoreSlot(meta, rows, total) {
-      this.cs2fDataByMode[this.cs2fMode] = { meta, rows: rows || [], total: total || 0 };
+      this.cs2fDataByMode[this.cs2fMode] = { meta, rows: rows || [], total: total || 0, page: this.cs2fPage };
       this._cs2fSwapDisplayFromSlot();
     },
     _cs1fStoreSlot(meta, rows, total) {
-      this.cs1fDataByMode[this.cs1fMode] = { meta, rows: rows || [], total: total || 0 };
+      this.cs1fDataByMode[this.cs1fMode] = { meta, rows: rows || [], total: total || 0, page: this.cs1fPage };
       this._cs1fSwapDisplayFromSlot();
     },
 
@@ -3910,9 +3916,11 @@ document.addEventListener('alpine:init', () => {
         await this.loadCs2f();
       }
     },
-    async loadCs2f() {
-      // Refresh is gated on modes with built data (WF + IS); TT blocked.
+    // resetPage=true (default): resets to page 1 — use for Refresh, sort, filter changes.
+    // resetPage=false: keeps current page — use for prev/next/goto navigation.
+    async loadCs2f(resetPage = true) {
       if (!this.cs2fCanRefresh()) return;
+      if (resetPage) this.cs2fPage = 1;
       this.cs2fLoading = true;
       const cutoffQ = this.cs2fMode === 'train_test'
         ? `&cutoff_date=${encodeURIComponent(this.cs2fCutoffDate)}` : '';
@@ -3925,7 +3933,8 @@ document.addEventListener('alpine:init', () => {
       } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs2fSortKey, sort_dir: this.cs2fSortDir,
-        min_d_n:  this.cs2fMinN,   limit:    200,
+        min_d_n:  this.cs2fMinN,   limit:    50,
+        offset:   (this.cs2fPage - 1) * 50,
         mode:     this.cs2fMode,
       });
       if (this.cs2fMode === 'train_test') p.set('cutoff_date', this.cs2fCutoffDate);
@@ -3948,9 +3957,15 @@ document.addEventListener('alpine:init', () => {
         this.cs2fSortKey = key;
         this.cs2fSortDir = 'desc';
       }
-      // Sort change re-fetches with the new sort_key. Gated on the
-      // current pane's mode supporting a fetch.
+      // Sort change resets to page 1 and re-fetches.
       if (this.cs2fCanRefresh()) this.loadCs2f();
+    },
+    cs2fTotalPages() { return Math.max(1, Math.ceil(this.cs2fTotal / 50)); },
+    cs2fPrevPage()   { if (this.cs2fPage > 1) { this.cs2fPage--; this.loadCs2f(false); } },
+    cs2fNextPage()   { if (this.cs2fPage < this.cs2fTotalPages()) { this.cs2fPage++; this.loadCs2f(false); } },
+    cs2fGoToPage(n)  {
+      const pg = Math.max(1, Math.min(this.cs2fTotalPages(), parseInt(n) || 1));
+      if (pg !== this.cs2fPage) { this.cs2fPage = pg; this.loadCs2f(false); }
     },
 
     async toggleCs1f() {
@@ -3961,8 +3976,9 @@ document.addEventListener('alpine:init', () => {
         await this.loadCs1f();
       }
     },
-    async loadCs1f() {
+    async loadCs1f(resetPage = true) {
       if (!this.cs1fCanRefresh()) return;
+      if (resetPage) this.cs1fPage = 1;
       this.cs1fLoading = true;
       const cutoffQ = this.cs1fMode === 'train_test'
         ? `&cutoff_date=${encodeURIComponent(this.cs1fCutoffDate)}` : '';
@@ -3973,7 +3989,8 @@ document.addEventListener('alpine:init', () => {
       } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs1fSortKey, sort_dir: this.cs1fSortDir,
-        min_d_n:  this.cs1fMinN,   limit:    200,
+        min_d_n:  this.cs1fMinN,   limit:    50,
+        offset:   (this.cs1fPage - 1) * 50,
         mode:     this.cs1fMode,
       });
       if (this.cs1fMode === 'train_test') p.set('cutoff_date', this.cs1fCutoffDate);
@@ -3996,6 +4013,13 @@ document.addEventListener('alpine:init', () => {
         this.cs1fSortDir = 'desc';
       }
       if (this.cs1fCanRefresh()) this.loadCs1f();
+    },
+    cs1fTotalPages() { return Math.max(1, Math.ceil(this.cs1fTotal / 50)); },
+    cs1fPrevPage()   { if (this.cs1fPage > 1) { this.cs1fPage--; this.loadCs1f(false); } },
+    cs1fNextPage()   { if (this.cs1fPage < this.cs1fTotalPages()) { this.cs1fPage++; this.loadCs1f(false); } },
+    cs1fGoToPage(n)  {
+      const pg = Math.max(1, Math.min(this.cs1fTotalPages(), parseInt(n) || 1));
+      if (pg !== this.cs1fPage) { this.cs1fPage = pg; this.loadCs1f(false); }
     },
 
     async runBatchScore() {
