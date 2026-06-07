@@ -4854,11 +4854,22 @@ document.addEventListener('alpine:init', () => {
     // the previously-loaded secondary don't bleed through.
     // sec-equity-canvas is auto-torn-down by Alpine's x-if guard
     // (secDetail && !secDetail.error), but the other four are always
-    // in the DOM and must be explicitly destroyed here.
+    // in the DOM and must be explicitly cleared here.
+    // Chart.js destroy() removes the instance but NOT the canvas pixels —
+    // ctx.clearRect() is required to blank the visuals.
     _clearSecDetailCharts() {
       for (const key of ['sec-bins', 'sec-equity', 'sec-yearly', 'sec-activity', 'sec-bubble']) {
         if (this._charts[key]) { this._charts[key].destroy(); delete this._charts[key]; }
       }
+      // Explicitly clear pixel data on the always-in-DOM canvases.
+      for (const id of ['sec-bins-canvas', 'sec-yearly-canvas', 'sec-activity-canvas', 'sec-bubble-canvas']) {
+        const canvas = document.getElementById(id);
+        if (canvas) { const ctx = canvas.getContext('2d'); if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height); }
+      }
+      // Clear the 2-D heatmap (Alpine reactive — nulling the data collapses x-if blocks).
+      // Also reset the guard key so loadHeatmapIfChanged() re-arms for the next valid metric.
+      this.heatmapData = null;
+      this._lastHeatmapKey = null;
     },
 
     _renderSecDetail() {
