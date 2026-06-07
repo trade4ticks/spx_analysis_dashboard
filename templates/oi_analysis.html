@@ -66,6 +66,12 @@
     }
     .bucketA-mode-seg span:hover { color:var(--text); }
     .bucketA-mode-seg span.on { background:var(--surface); color:var(--text); font-weight:600; }
+    /* Mode-specific active colors — IS=green, WF=purple, TT=amber.
+       Shared by .bucketA-mode-seg (top-6 panes) and .mode-seg (analyze bar).
+       Mirrors .bucketA-mode-tag.is / .wf / .tt badge palette. */
+    .bucketA-mode-seg span.on-is, .mode-seg span.on-is { background:#234032; color:#8fd3ac; font-weight:600; }
+    .bucketA-mode-seg span.on-wf, .mode-seg span.on-wf { background:#332c52; color:#b3aae6; font-weight:600; }
+    .bucketA-mode-seg span.on-tt, .mode-seg span.on-tt { background:#4a3a1c; color:#e0b066; font-weight:600; }
     .bucketA-cutoff-input {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:11px; padding:2px 5px; border-radius:3px;
@@ -219,7 +225,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=183"></script>
+  <script src="/static/js/oi_analysis.js?v=184"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -288,9 +294,9 @@
           <!-- Bucket A mode selector: 3 pills + cutoff input. In-memory
                swap only — never auto-fetches. User clicks Refresh to load. -->
           <div class="bucketA-mode-seg">
-            <span :class="{on: smMode==='walk_forward'}" @click="setSmMode('walk_forward')">WF</span>
-            <span :class="{on: smMode==='in_sample'}"    @click="setSmMode('in_sample')">IS</span>
-            <span :class="{on: smMode==='train_test'}"   @click="setSmMode('train_test')">TT</span>
+            <span :class="{'on-is': smMode==='in_sample'}"    @click="setSmMode('in_sample')">IS</span>
+            <span :class="{'on-wf': smMode==='walk_forward'}" @click="setSmMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': smMode==='train_test'}"   @click="setSmMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="smMode==='train_test'"
                  :value="smCutoffDate"
@@ -784,9 +790,9 @@
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
           <!-- Bucket A mode selector: in-memory swap only -->
           <div class="bucketA-mode-seg">
-            <span :class="{on: cs2fMode==='walk_forward'}" @click="setCs2fMode('walk_forward')">WF</span>
-            <span :class="{on: cs2fMode==='in_sample'}"    @click="setCs2fMode('in_sample')">IS</span>
-            <span :class="{on: cs2fMode==='train_test'}"   @click="setCs2fMode('train_test')">TT</span>
+            <span :class="{'on-is': cs2fMode==='in_sample'}"    @click="setCs2fMode('in_sample')">IS</span>
+            <span :class="{'on-wf': cs2fMode==='walk_forward'}" @click="setCs2fMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': cs2fMode==='train_test'}"   @click="setCs2fMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="cs2fMode==='train_test'"
                  :value="cs2fCutoffDate"
@@ -963,9 +969,9 @@
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" @click.stop>
           <div class="bucketA-mode-seg">
-            <span :class="{on: cs1fMode==='walk_forward'}" @click="setCs1fMode('walk_forward')">WF</span>
-            <span :class="{on: cs1fMode==='in_sample'}"    @click="setCs1fMode('in_sample')">IS</span>
-            <span :class="{on: cs1fMode==='train_test'}"   @click="setCs1fMode('train_test')">TT</span>
+            <span :class="{'on-is': cs1fMode==='in_sample'}"    @click="setCs1fMode('in_sample')">IS</span>
+            <span :class="{'on-wf': cs1fMode==='walk_forward'}" @click="setCs1fMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': cs1fMode==='train_test'}"   @click="setCs1fMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="cs1fMode==='train_test'"
                  :value="cs1fCutoffDate"
@@ -1145,9 +1151,9 @@
              trigger a fetch — user clicks ⟳ Refresh to dispatch one. -->
         <div style="display:flex;gap:8px;align-items:center" @click.stop>
           <div class="bucketA-mode-seg">
-            <span :class="{on: topBinsMode==='walk_forward'}" @click="setTopBinsMode('walk_forward')">WF</span>
-            <span :class="{on: topBinsMode==='in_sample'}"    @click="setTopBinsMode('in_sample')">IS</span>
-            <span :class="{on: topBinsMode==='train_test'}"   @click="setTopBinsMode('train_test')">TT</span>
+            <span :class="{'on-is': topBinsMode==='in_sample'}"    @click="setTopBinsMode('in_sample')">IS</span>
+            <span :class="{'on-wf': topBinsMode==='walk_forward'}" @click="setTopBinsMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': topBinsMode==='train_test'}"   @click="setTopBinsMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="topBinsMode==='train_test'"
                  :value="topBinsCutoffDate"
@@ -1249,9 +1255,9 @@
           <!-- Bucket A mode selector + cutoff. In-memory swap only —
                never auto-fetches. User clicks ⟳ Refresh to load. -->
           <div class="bucketA-mode-seg">
-            <span :class="{on: surveyMode==='walk_forward'}" @click="setSurveyMode('walk_forward')">WF</span>
-            <span :class="{on: surveyMode==='in_sample'}"    @click="setSurveyMode('in_sample')">IS</span>
-            <span :class="{on: surveyMode==='train_test'}"   @click="setSurveyMode('train_test')">TT</span>
+            <span :class="{'on-is': surveyMode==='in_sample'}"    @click="setSurveyMode('in_sample')">IS</span>
+            <span :class="{'on-wf': surveyMode==='walk_forward'}" @click="setSurveyMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': surveyMode==='train_test'}"   @click="setSurveyMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="surveyMode==='train_test'"
                  :value="surveyCutoffDate"
@@ -1556,9 +1562,9 @@
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" @click.stop>
           <!-- Bucket A binning-mode selector: in-memory swap only -->
           <div class="bucketA-mode-seg">
-            <span :class="{on: tdBinMode==='walk_forward'}" @click="setTdBinMode('walk_forward')">WF</span>
-            <span :class="{on: tdBinMode==='in_sample'}"    @click="setTdBinMode('in_sample')">IS</span>
-            <span :class="{on: tdBinMode==='train_test'}"   @click="setTdBinMode('train_test')">TT</span>
+            <span :class="{'on-is': tdBinMode==='in_sample'}"    @click="setTdBinMode('in_sample')">IS</span>
+            <span :class="{'on-wf': tdBinMode==='walk_forward'}" @click="setTdBinMode('walk_forward')">WF</span>
+            <span :class="{'on-tt': tdBinMode==='train_test'}"   @click="setTdBinMode('train_test')">TT</span>
           </div>
           <input type="date" x-show="tdBinMode==='train_test'"
                  :value="tdCutoffDate"
@@ -1693,9 +1699,9 @@
       <div title="Page-wide bin mode. Drives every binning analysis on the page. In-sample uses the entire history. Walk-forward computes per-ticker bins via bisect_left against a running sorted list with a 252-day warmup. Train-test freezes bin thresholds on data BEFORE the cutoff and ranks all rows against that frozen training history — out-of-sample test rows can pile into the extreme bins.">
         <label>Mode</label><br>
         <div class="mode-seg">
-          <span :class="{on: pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
-          <span :class="{on: pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
-          <span :class="{on: pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
+          <span :class="{'on-is': pageMode==='in_sample'}"    @click="setPageMode('in_sample')">In-sample</span>
+          <span :class="{'on-wf': pageMode==='walk_forward'}" @click="setPageMode('walk_forward')">Walk-fwd</span>
+          <span :class="{'on-tt': pageMode==='train_test'}"   @click="setPageMode('train_test')">Train-test</span>
         </div>
       </div>
       <!-- Group 8: cutoff is frozen at build time. Read-only label;

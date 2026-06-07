@@ -42,7 +42,7 @@ document.addEventListener('alpine:init', () => {
     // primary / corr explorer / portfolio aggregate all use the same flavor.
     //   'in_sample'    — full-history bin thresholds
     //   'walk_forward' — per-ticker bisect_left against running history, 252d warmup
-    pageMode: 'walk_forward',
+    pageMode: 'in_sample',
     // Group 8: cutoffDate is no longer user-selectable. Auto-discovered
     // from tt_bins via GET /tt-cutoff on page load. Defaulting to a
     // sane string so the initial render before the fetch resolves doesn't
@@ -149,7 +149,7 @@ document.addEventListener('alpine:init', () => {
     topBinsLoading:  false,
     topBinsData:     null,
     topBinsOutcome:  'ret_5d_fwd_oc',
-    topBinsMode:        'walk_forward',
+    topBinsMode:        'in_sample',
     topBinsCutoffDate:  '2024-01-01',
     topBinsDataByMode: {
       in_sample:    null,  // most-recent topBinsData dict for this mode; null = never loaded
@@ -207,7 +207,7 @@ document.addEventListener('alpine:init', () => {
     tdBinsToShow:   [1, 20],
     tdScope:        'ratio',   // 'ratio' (all tickers, dimensionless) | 'native_single' — RENAMED from tdMode
     tdSingleTicker: '',
-    tdBinMode:       'walk_forward',     // local binning mode for this pane
+    tdBinMode:       'in_sample',         // local binning mode for this pane
     tdCutoffDate:    '2024-01-01',
     tdDataByMode: {
       walk_forward: null,                // { tdData, loaded_at }
@@ -231,7 +231,7 @@ document.addEventListener('alpine:init', () => {
     // mode-pill swap is in-memory only. Outcome dropdown and cutoff
     // input changes also do NOT auto-fetch — only the ⟳ Refresh button
     // dispatches a network round trip.
-    surveyMode:          'walk_forward',
+    surveyMode:          'in_sample',
     surveyCutoffDate:    '2024-01-01',
     // Per-(slot bucket, slot key) cache. Two buckets, not three:
     //   "default"     ← shared by IS and WF (rolling IC is rank-correlation
@@ -3492,7 +3492,7 @@ document.addEventListener('alpine:init', () => {
     // is displayed (in-memory only — never auto-fetches). The Refresh
     // button (and Run Scan, and Apply) fetches for the active smMode
     // and writes into the matching slot.
-    smMode: 'walk_forward',
+    smMode: 'in_sample',
     smCutoffDate: '2024-01-01',
     smDataByMode: {
       in_sample:    null,  // { meta, rows, summary } once loaded; null = never loaded
@@ -3532,7 +3532,7 @@ document.addEventListener('alpine:init', () => {
     cs2fPage: 1,  // current page (50 rows/page, server-side)
     cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
-    cs2fMode:       'walk_forward',
+    cs2fMode:       'in_sample',
     cs2fCutoffDate: '2024-01-01',
     cs2fDataByMode: {
       walk_forward: null,  // { meta, rows, total, page }
@@ -3545,7 +3545,7 @@ document.addEventListener('alpine:init', () => {
     cs1fSortKey: 'd_ret_per_day', cs1fSortDir: 'desc',
     cs1fFilterMetric: '', cs1fFilterExtreme: '', cs1fFilterOutcome: '', cs1fMinN: 300,
     cs1fMeta:       null,  // pane-local meta (previously read from cs2fMeta — decoupled in step 6)
-    cs1fMode:       'walk_forward',
+    cs1fMode:       'in_sample',
     cs1fCutoffDate: '2024-01-01',
     cs1fDataByMode: {
       walk_forward: null,
