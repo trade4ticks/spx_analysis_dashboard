@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
+from app.metric_filter import get_excluded_metrics, build_feature_cols
 
 # ── Secondary Signal Scanner cache ────────────────────────────────────────────
 _SEC_CACHE: dict = {}          # cache_key -> {rows, features, outcome, data_as_of, ...}
@@ -511,35 +512,11 @@ async def list_columns(pool=Depends(get_oi_pool)):
                AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
                AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
                ORDER BY ordinal_position""")
-        # Family-scoped exclusion (same rule as corner-scan and All-Ticker
-        # Metric Bins):
-        #   Family 2 entirely     — spot_pc / spot_co, never valid metrics
-        #   Family 4 + 5 _pc only — OI-by-strike / OI-change; _pc variants
-        #                           unavailable at morning analysis time
-        #   Family 12 _pc kept    — vol_weighted + option volume; EVENING-tier,
-        #                           valid. Old blanket suffix filter wrongly
-        #                           blocked these.
-        # Graceful fallback to the old blanket _pc filter when
-        # metric_classification is absent (e.g. fresh environment).
-        try:
-            excl_rows = await conn.fetch(
-                """SELECT metric FROM metric_classification
-                   WHERE family_num = 2
-                      OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')"""
-            )
-            excl_set = {r["metric"] for r in excl_rows}
-            use_family_filter = True
-        except Exception:
-            excl_set = set()
-            use_family_filter = False
+        excl_set = await get_excluded_metrics(conn)
 
     all_cols = [r["column_name"] for r in rows]
     outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
-    if use_family_filter:
-        features = [c for c in all_cols if c not in outcomes and c not in excl_set]
-    else:
-        # Fallback: old behaviour — at least keeps the endpoint functional.
-        features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+    features = build_feature_cols(all_cols, outcomes, excl_set)
     return {"features": features, "outcomes": outcomes}
 
 
@@ -3266,11 +3243,11 @@ async def _ensure_sec_cache(pool, ticker: str, metric: str, outcome: str,
                AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
                AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
                ORDER BY ordinal_position""")
+        excl_set = await get_excluded_metrics(conn)
     all_num_cols = [r["column_name"] for r in col_rows]
     outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
-    feature_cols = [c for c in all_num_cols
-                    if c not in outcome_cols_all and c != metric
-                    and not c.startswith("spot") and not c.endswith("_pc")]
+    feature_cols = build_feature_cols(all_num_cols, outcome_cols_all, excl_set,
+                                      also_exclude={metric})
 
     select_cols = ", ".join(
         ["ticker", "trade_date", outcome, metric, "spot_co", "spot_pc"]
@@ -3372,11 +3349,11 @@ async def secondary_load(req: SecLoadReq, pool=Depends(get_oi_pool)):
                    AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
                    AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
                    ORDER BY ordinal_position""")
+            excl_set = await get_excluded_metrics(conn)
         all_num_cols = [r["column_name"] for r in col_rows]
         outcome_cols_all = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
-        feature_cols = [c for c in all_num_cols
-                        if c not in outcome_cols_all and c != req.metric
-                        and not c.startswith("spot") and not c.endswith("_pc")]
+        feature_cols = build_feature_cols(all_num_cols, outcome_cols_all, excl_set,
+                                          also_exclude={req.metric})
 
         # Pull req.metric, spot_co, spot_pc alongside the features so the CSV /
         # trade-record builders can populate primary_val + spot_entry + spot_exit.
@@ -4801,7 +4778,7 @@ async def _evict_analyze_cache_lru(pool) -> int:
 
 
 async def _fetch_ic_feature_columns(pool) -> list[str]:
-    """Mirror /columns: numeric daily_features columns excluding outcomes."""
+    """Numeric daily_features columns, family-filtered (single source of truth)."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT column_name FROM information_schema.columns
@@ -4811,9 +4788,10 @@ async def _fetch_ic_feature_columns(pool) -> list[str]:
                AND column_name NOT IN ('id','ticker','trade_date',
                                        'created_at','updated_at')
                ORDER BY ordinal_position""")
+        excl_set = await get_excluded_metrics(conn)
     all_cols = [r["column_name"] for r in rows]
     outcomes = {c for c in all_cols if "ret_" in c and "fwd" in c}
-    return [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+    return build_feature_cols(all_cols, outcomes, excl_set)
 
 
 def _compute_ic_batch_sync(

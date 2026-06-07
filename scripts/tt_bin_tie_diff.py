@@ -22,11 +22,18 @@ Run on the VPS where OI_DATABASE_URL points at the local Postgres instance:
 import asyncio
 import math
 import os
+import sys
+from pathlib import Path
 
 import asyncpg
 import numpy as np
 from dotenv import load_dotenv
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from app.metric_filter import get_excluded_metrics, build_feature_cols  # noqa: E402
 
 load_dotenv()
 
@@ -83,7 +90,8 @@ async def main():
     """)
     all_cols = [r["column_name"] for r in col_rows]
     outcomes = {c for c in all_cols if "ret_" in c and "fwd" in c}
-    features = [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+    excl_set = await get_excluded_metrics(conn)
+    features = build_feature_cols(all_cols, outcomes, excl_set)
 
     print(f"Cutoff: {CUTOFF}   n_bins: {N_BINS}")
     print(f"Tickers: {TICKERS}")

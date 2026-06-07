@@ -8,10 +8,17 @@ in the oi_score_matrix table. Run via API endpoint or CLI:
 """
 import asyncio
 import math
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from app.metric_filter import get_excluded_metrics, build_feature_cols  # noqa: E402
 from research import scanner
 
 _EXCLUDE_COLS = {"id", "ticker", "trade_date", "created_at", "updated_at"}
@@ -349,13 +356,14 @@ async def run_batch_score(oi_pool, main_pool, walk_forward: bool = False,
                   AND data_type IN ('double precision','numeric','real','integer','bigint','smallint')
                   AND column_name NOT IN ('id','ticker','trade_date','created_at','updated_at')
             """)
+            excl_set = await get_excluded_metrics(conn)
         all_cols = [r["column_name"] for r in col_rows]
 
-        features = [c for c in all_cols
-                    if not (c.startswith("ret_") and "fwd" in c)
-                    and c not in _EXCLUDE_FEATURES
-                    and not c.endswith("_pc")]
         outcomes = [c for c in all_cols if c.startswith("ret_") and "fwd" in c]
+        # Family-scoped filter (app.metric_filter) replaces the old blanket _pc ban.
+        # _EXCLUDE_FEATURES kept for legacy hardcoded spot variants not in the dict.
+        features = build_feature_cols(all_cols, outcomes, excl_set,
+                                      also_exclude=_EXCLUDE_FEATURES)
 
         total_combos = len(tickers) * len(features) * len(outcomes)
         log(f"Scanning: {len(tickers)} tickers × {len(features)} features × "

@@ -52,6 +52,7 @@ load_dotenv(_ROOT / ".env")
 
 import asyncpg  # noqa: E402
 
+from app.metric_filter import get_excluded_metrics, build_feature_cols  # noqa: E402
 from app.routers.ic_compute import (  # noqa: E402
     finite_or_none,
     noise_floor_epsilon,
@@ -82,7 +83,8 @@ def _parse_horizon(col_name: str) -> int:
 
 
 async def _fetch_feature_cols(conn) -> list:
-    """Mirror _fetch_ic_feature_columns in oi_analysis.py."""
+    """Numeric daily_features feature columns, family-filtered.
+    Uses app.metric_filter — same rule as /columns and /secondary-load."""
     rows = await conn.fetch(
         """SELECT column_name FROM information_schema.columns
            WHERE table_name = 'daily_features' AND table_schema = 'public'
@@ -92,9 +94,10 @@ async def _fetch_feature_cols(conn) -> list:
                                    'created_at','updated_at')
            ORDER BY ordinal_position"""
     )
+    excl_set = await get_excluded_metrics(conn)
     all_cols = [r["column_name"] for r in rows]
     outcomes = {c for c in all_cols if "ret_" in c and "fwd" in c}
-    return [c for c in all_cols if c not in outcomes and not c.endswith("_pc")]
+    return build_feature_cols(all_cols, outcomes, excl_set)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

@@ -27,9 +27,17 @@ Or via the project's run-python wrapper if one exists.
 import asyncio
 import os
 import statistics
+import sys
 import time
+from pathlib import Path
 
 import asyncpg
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from app.metric_filter import get_excluded_metrics, build_feature_cols  # noqa: E402
 
 
 # Standard test case — same metric/outcome we've been using for tie-outs.
@@ -85,10 +93,9 @@ async def _run(conn) -> None:
         ORDER BY ordinal_position""")
     all_num_cols = [r["column_name"] for r in col_rows]
     outcome_cols = [c for c in all_num_cols if "ret_" in c and "fwd" in c]
-    feature_cols = [c for c in all_num_cols
-                    if c not in outcome_cols and c != PRIMARY_METRIC
-                    and not c.startswith("spot")
-                    and not c.endswith("_pc")]
+    excl_set     = await get_excluded_metrics(conn)
+    feature_cols = build_feature_cols(all_num_cols, outcome_cols, excl_set,
+                                      also_exclude={PRIMARY_METRIC})
 
     is_bins_cols_rows = await conn.fetch("""
         SELECT column_name FROM information_schema.columns
