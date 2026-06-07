@@ -504,7 +504,7 @@ async def list_tickers(pool=Depends(get_oi_pool)):
 @router.get("/columns")
 async def list_columns(pool=Depends(get_oi_pool)):
     if not pool:
-        return {"features": [], "outcomes": []}
+        return {"features": [], "outcomes": [], "feature_families": []}
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT column_name FROM information_schema.columns
@@ -517,7 +517,29 @@ async def list_columns(pool=Depends(get_oi_pool)):
     all_cols = [r["column_name"] for r in rows]
     outcomes = [c for c in all_cols if "ret_" in c and "fwd" in c]
     features = build_feature_cols(all_cols, outcomes, excl_set)
-    return {"features": features, "outcomes": outcomes}
+
+    # Build family-grouped structure for <optgroup> rendering in all metric dropdowns.
+    # Only possible when metric_classification exists (excl_set is not None).
+    feature_families: list = []
+    if excl_set is not None and features:
+        async with pool.acquire() as conn:
+            fam_rows = await conn.fetch(
+                """SELECT family_num, family_name, metric
+                   FROM metric_classification
+                   WHERE metric = ANY($1::text[])
+                   ORDER BY family_num, metric""",
+                features)
+        _groups: dict = {}
+        _order: list = []
+        for r in fam_rows:
+            fn = int(r["family_num"])
+            if fn not in _groups:
+                _groups[fn] = {"family_num": fn, "family_name": r["family_name"], "metrics": []}
+                _order.append(fn)
+            _groups[fn]["metrics"].append(r["metric"])
+        feature_families = [_groups[fn] for fn in _order]
+
+    return {"features": features, "outcomes": outcomes, "feature_families": feature_families}
 
 
 @router.get("/analyze")

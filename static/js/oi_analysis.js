@@ -27,6 +27,9 @@ document.addEventListener('alpine:init', () => {
   Alpine.data('oiAnalysis', () => ({
     // Selectors
     tickers: [], features: [], outcomes: [],
+    // Metric family groupings — built from /columns feature_families.
+    // Drives <optgroup> rendering in all metric dropdowns via groupMetricsByFamily().
+    metricFamilyLookup: {},  // metric_name -> {family_num, family_name}
     ticker: '', metric: '', outcome: '',
     // P2: Signal Survey has its own outcome (separate from the main chart's
     // `outcome`). Persisted across page reloads via localStorage.
@@ -305,6 +308,16 @@ document.addEventListener('alpine:init', () => {
         const cols = await colRes.json();
         this.features = cols.features || [];
         this.outcomes = cols.outcomes || [];
+        // Build metric→family lookup for <optgroup> rendering across all dropdowns.
+        if (cols.feature_families?.length) {
+          const lut = {};
+          for (const grp of cols.feature_families) {
+            for (const m of grp.metrics) {
+              lut[m] = { family_num: grp.family_num, family_name: grp.family_name };
+            }
+          }
+          this.metricFamilyLookup = lut;
+        }
         if (this.features.length) this.metric = this.features[0];
         if (this.outcomes.length) this.outcome = this.outcomes[0];
         // Pre-fill Threshold Drift's metric picker with the first feature.
@@ -4466,6 +4479,45 @@ document.addEventListener('alpine:init', () => {
       this.secStatus = { loaded: true, loading: false, error: null };
       this.secScannerStale = false;  // M1: fresh scan results clear stale flag
       this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
+    },
+
+    // Group a flat metric list by family using metricFamilyLookup.
+    // Works for any array of metric-name strings (features, csMetrics, smMeta.metrics, …).
+    // keepOrder=false  → groups sorted by family_num (default; use for static lists).
+    // keepOrder=true   → groups appear in first-occurrence order from `list`
+    //                    (use for score-sorted lists so hottest family appears first).
+    groupMetricsByFamily(list, keepOrder = false) {
+      const groups = new Map();  // family_num → {family_num, family_name, metrics:[]}
+      for (const m of (list || [])) {
+        const fam = this.metricFamilyLookup[m];
+        const key = fam ? fam.family_num : 999;
+        const label = fam ? fam.family_name : 'Other';
+        if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
+        groups.get(key).metrics.push(m);
+      }
+      const result = [...groups.values()];
+      if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
+      return result;
+    },
+
+    // Returns secMetricsForBar() regrouped by family for <optgroup> rendering.
+    // Preserves score-sort order: families appear in order of their highest-ranked
+    // metric; within each family metrics keep their score rank.
+    // Falls back to family_num sort when scanner is not loaded.
+    secMetricsGrouped() {
+      const flat = this.secMetricsForBar();  // [{name, score}, …] already sorted
+      const groups = new Map();
+      for (const m of flat) {
+        const fam = this.metricFamilyLookup[m.name];
+        const key = fam ? fam.family_num : 999;
+        const label = fam ? fam.family_name : 'Other';
+        if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
+        groups.get(key).metrics.push(m);
+      }
+      const result = [...groups.values()];
+      // When scanner is not loaded, sort groups by family_num for consistency.
+      if (!this.secMetrics.length) result.sort((a, b) => a.family_num - b.family_num);
+      return result;
     },
 
     // M1/M3: returns the full static feature list for the control-bar <select>.

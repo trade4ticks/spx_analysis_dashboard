@@ -225,7 +225,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=184"></script>
+  <script src="/static/js/oi_analysis.js?v=185"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -344,8 +344,12 @@
                 style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                        font-size:12px;padding:3px 6px;border-radius:3px">
           <option value="">All Metrics</option>
-          <template x-for="m in smMeta.metrics" :key="'smm-'+m">
-            <option :value="m" x-text="m"></option>
+          <template x-for="grp in groupMetricsByFamily(smMeta.metrics || [])" :key="'smg-'+grp.family_num">
+            <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+              <template x-for="m in grp.metrics" :key="'smm-'+m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </optgroup>
           </template>
         </select>
         <select x-model="smFilterFwd"
@@ -802,16 +806,24 @@
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
             <option value="">All P metrics</option>
-            <template x-for="m in csMetrics" :key="'p-'+m">
-              <option :value="m" x-text="m"></option>
+            <template x-for="grp in groupMetricsByFamily(csMetrics)" :key="'pg-'+grp.family_num">
+              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                <template x-for="m in grp.metrics" :key="'p-'+m">
+                  <option :value="m" x-text="m"></option>
+                </template>
+              </optgroup>
             </template>
           </select>
           <select x-model="cs2fFilterS"
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
             <option value="">All S metrics</option>
-            <template x-for="m in csMetrics" :key="'s-'+m">
-              <option :value="m" x-text="m"></option>
+            <template x-for="grp in groupMetricsByFamily(csMetrics)" :key="'sg-'+grp.family_num">
+              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                <template x-for="m in grp.metrics" :key="'s-'+m">
+                  <option :value="m" x-text="m"></option>
+                </template>
+              </optgroup>
             </template>
           </select>
           <select x-model="cs2fFilterDir"
@@ -981,8 +993,12 @@
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
             <option value="">All metrics</option>
-            <template x-for="m in csMetrics" :key="'1f-'+m">
-              <option :value="m" x-text="m"></option>
+            <template x-for="grp in groupMetricsByFamily(csMetrics)" :key="'1fg-'+grp.family_num">
+              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                <template x-for="m in grp.metrics" :key="'1f-'+m">
+                  <option :value="m" x-text="m"></option>
+                </template>
+              </optgroup>
             </template>
           </select>
           <select x-model="cs1fFilterExtreme"
@@ -1576,8 +1592,12 @@
                   @change="setTdMetric($event.target.value)"
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 6px;border-radius:3px;max-width:240px">
-            <template x-for="f in features" :key="'tdf-'+f">
-              <option :value="f" x-text="f"></option>
+            <template x-for="grp in groupMetricsByFamily(features)" :key="'tdg-'+grp.family_num">
+              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                <template x-for="f in grp.metrics" :key="'tdf-'+f">
+                  <option :value="f" x-text="f"></option>
+                </template>
+              </optgroup>
             </template>
           </select>
           <span style="font-size:11px;color:var(--dim)">Outcome:</span>
@@ -1671,8 +1691,12 @@
       <div>
         <label>Metric (X)</label><br>
         <select x-model="metric">
-          <template x-for="f in features" :key="f">
-            <option :value="f" x-text="f"></option>
+          <template x-for="grp in groupMetricsByFamily(features)" :key="'mg-'+grp.family_num">
+            <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+              <template x-for="f in grp.metrics" :key="f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </optgroup>
           </template>
         </select>
       </div>
@@ -2174,8 +2198,12 @@
                   style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                          font-size:12px;padding:3px 8px;border-radius:3px;min-width:180px">
             <option value="">— select metric —</option>
-            <template x-for="m in secMetricsForBar()" :key="m.name">
-              <option :value="m.name" x-text="m.name"></option>
+            <template x-for="grp in secMetricsGrouped()" :key="'secg-'+grp.family_num">
+              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                <template x-for="m in grp.metrics" :key="m.name">
+                  <option :value="m.name" x-text="m.name"></option>
+                </template>
+              </optgroup>
             </template>
           </select>
           <button x-show="secSelectedMetric" @click="secSelectedMetric=null;secDetail=null"
