@@ -3631,9 +3631,21 @@ async def secondary_detail(req: SecDetailReq, pool=Depends(get_oi_pool)):
     # scan was first loaded. _SEC_CACHE is keyed without mode, so reading
     # cached["mode"] would always return the mode at scan-load time.
     spec = make_spec(req.walk_forward, req.cutoff_date)
+
+    # Prefetch stored primary-metric bin20 for WF/TT — same fix as
+    # /secondary-corr-bins.  IS uses filtered_dates (already correct).
+    primary_bin20_by_key: Optional[dict] = None
+    if spec.kind in {"walk_forward", "train_test"} and primary_metric and is_all:
+        _prim_pairs = [(r.get("ticker", ""), r.get("trade_date", ""))
+                       for r in all_rows]
+        _prim_by_m  = await _fetch_stored_bin20_by_metric(
+            pool, spec.kind, [primary_metric], _prim_pairs)
+        primary_bin20_by_key = _prim_by_m.get(primary_metric)
+
     filtered, dropped, _universe = filter_by_assignments(
         all_rows, spec, primary_metric or "",
         req.selected_primary_bins, is_all, req.filtered_dates,
+        primary_bin20_by_key=primary_bin20_by_key,
     )
 
     # No `len(filtered) < n_bins * 2` panel-block. The drill-in renders
@@ -3839,9 +3851,23 @@ async def secondary_corr_bins(req: CorrBinsReq, pool=Depends(get_oi_pool)):
     if req.walk_forward and not primary_metric:
         return {"error": "no_primary_metric"}
 
+    # Prefetch stored primary-metric bin20 for WF/TT so Group 7 in
+    # filter_by_assignments reads the same stored bin as the heatmap —
+    # not the on-the-fly _walk_forward_bins recompute.  IS is already
+    # correct: filtered_dates from the frontend carries the pre-binned
+    # (ticker, date) set for the selected IS primary bins.
+    primary_bin20_by_key: Optional[dict] = None
+    if spec.kind in {"walk_forward", "train_test"} and primary_metric and is_all:
+        _prim_pairs = [(r.get("ticker", ""), r.get("trade_date", ""))
+                       for r in all_rows]
+        _prim_by_m  = await _fetch_stored_bin20_by_metric(
+            pool, spec.kind, [primary_metric], _prim_pairs)
+        primary_bin20_by_key = _prim_by_m.get(primary_metric)
+
     filtered, dropped, universe = filter_by_assignments(
         all_rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
+        primary_bin20_by_key=primary_bin20_by_key,
     )
     if not filtered:
         return {"error": "no_data",
@@ -3993,9 +4019,20 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
     if req.walk_forward and not primary_metric:
         return {"error": "no_primary_metric"}
 
+    # Prefetch stored primary-metric bin20 for WF/TT — same fix as
+    # /secondary-corr-bins and /secondary-detail.
+    primary_bin20_by_key: Optional[dict] = None
+    if spec.kind in {"walk_forward", "train_test"} and primary_metric and is_all:
+        _prim_pairs = [(r.get("ticker", ""), r.get("trade_date", ""))
+                       for r in all_rows]
+        _prim_by_m  = await _fetch_stored_bin20_by_metric(
+            pool, spec.kind, [primary_metric], _prim_pairs)
+        primary_bin20_by_key = _prim_by_m.get(primary_metric)
+
     filtered, dropped, universe = filter_by_assignments(
         all_rows, spec, primary_metric,
         req.selected_primary_bins, is_all, req.filtered_dates,
+        primary_bin20_by_key=primary_bin20_by_key,
     )
     if not filtered:
         return {"error": "no_data",

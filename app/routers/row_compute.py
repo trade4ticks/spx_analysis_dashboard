@@ -731,26 +731,33 @@ def filter_by_assignments(
       train_test: (Step 6) frozen training-set bins.
     """
     from app.routers.oi_analysis import _filter_by_tkr_date, _parse_tkr_date_set
-    # Group 7: stored-bin primary filter — mode-agnostic (works for any
-    # mode that supplies a stored bin lookup, today WF). The IS path
-    # below stays on filtered_dates because /analyze's trade_calendar
-    # has already done the bin assignment + filter at the front end.
+    # Group 7: stored-bin primary filter — fires for WF and TT when
+    # the caller supplies a bin20 lookup.  IS stays on filtered_dates
+    # because /analyze's trade_calendar has already done the bin
+    # assignment + filter at the front end, so no lookup is needed.
     if (primary_bin20_by_key is not None and is_all
-            and spec.kind == "walk_forward"):
+            and spec.kind in {"walk_forward", "train_test"}):
         sel = set(int(b) for b in (selected_primary_bins or []))
         kept: list = []
+        # TT: skip training-window rows (trade_date < cutoff) — mirrors
+        # the on-the-fly TT path's "pre_cutoff" exclusion so only
+        # test-period rows reach the secondary panes.
+        cutoff = getattr(spec, "cutoff", None)
         for r in rows:
             tkr = str(r.get("ticker", ""))
             td  = r.get("trade_date", "")
+            if cutoff is not None:
+                td_val = td if isinstance(td, _date) else _date.fromisoformat(str(td))
+                if td_val < cutoff:
+                    continue
             d_key = td.isoformat() if hasattr(td, "isoformat") else str(td)
             b20 = primary_bin20_by_key.get((tkr, d_key))
             if b20 is None or b20 <= 0:
-                continue   # Encoding A: warm-up or null-metric
+                continue   # Encoding A: warm-up / null-metric
             if sel and b20 not in sel:
                 continue
             kept.append(r)
-        # Chronological sort for downstream consumers that need it
-        # (matches _walk_forward_primary_filter's output ordering).
+        # Chronological sort matches _walk_forward_primary_filter output.
         kept = _sort_chrono(kept)
         return kept, 0, len(rows)
 
