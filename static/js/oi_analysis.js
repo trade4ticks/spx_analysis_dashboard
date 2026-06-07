@@ -3858,11 +3858,10 @@ document.addEventListener('alpine:init', () => {
       this.cs1fCutoffDate = d;
     },
 
-    // Refresh button is only meaningful for walk_forward today — the
-    // in-sample and train-test corner-scan batch jobs don't exist yet.
-    // Both the disabled state and the placeholder copy gate on this.
-    cs2fCanRefresh() { return this.cs2fMode === 'walk_forward'; },
-    cs1fCanRefresh() { return this.cs1fMode === 'walk_forward'; },
+    // Refresh is supported for walk_forward and in_sample (both built).
+    // train_test corner-scan batch does not exist yet — kept disabled.
+    cs2fCanRefresh() { return this.cs2fMode !== 'train_test'; },
+    cs1fCanRefresh() { return this.cs1fMode !== 'train_test'; },
 
     // Pull the active mode's slot into the top-level rows/meta/total
     // fields the template binds to. Empty slot → empty state +
@@ -3903,19 +3902,16 @@ document.addEventListener('alpine:init', () => {
 
     async toggleCs2f() {
       this.cs2fExpanded = !this.cs2fExpanded;
-      // First-expand auto-load only for walk_forward (the only mode with
-      // data today). IS / TT just display the placeholder until their
-      // batch jobs land.
+      // First-expand auto-load for any mode with data (WF + IS).
+      // TT skips because cs2fCanRefresh() returns false for it.
       if (this.cs2fExpanded
           && !this.cs2fDataByMode[this.cs2fMode]
-          && this.cs2fMode === 'walk_forward') {
+          && this.cs2fCanRefresh()) {
         await this.loadCs2f();
       }
     },
     async loadCs2f() {
-      // Refresh is gated on walk_forward; IS / TT just shouldn't fire.
-      // The endpoint would return status="no_data" cleanly even if we
-      // did fire — but skipping the call saves a round-trip.
+      // Refresh is gated on modes with built data (WF + IS); TT blocked.
       if (!this.cs2fCanRefresh()) return;
       this.cs2fLoading = true;
       const cutoffQ = this.cs2fMode === 'train_test'
@@ -3961,7 +3957,7 @@ document.addEventListener('alpine:init', () => {
       this.cs1fExpanded = !this.cs1fExpanded;
       if (this.cs1fExpanded
           && !this.cs1fDataByMode[this.cs1fMode]
-          && this.cs1fMode === 'walk_forward') {
+          && this.cs1fCanRefresh()) {
         await this.loadCs1f();
       }
     },

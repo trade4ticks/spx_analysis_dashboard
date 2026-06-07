@@ -876,14 +876,14 @@
               <tbody>
                 <template x-if="cs2fRows.length === 0 && !cs2fLoading">
                   <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
-                    <template x-if="cs2fMode === 'walk_forward'">
+                    <template x-if="cs2fMode !== 'train_test'">
                       <span>No rows — try lowering min n or clearing filters.</span>
                     </template>
-                    <template x-if="cs2fMode !== 'walk_forward'">
+                    <template x-if="cs2fMode === 'train_test'">
                       <span>
                         Corner Scan 2-Factor not yet available for
                         <strong x-text="_cornerScanModeLabel(cs2fMode)"></strong>
-                        — pending in-sample build.
+                        — pending train-test build.
                       </span>
                     </template>
                   </td></tr>
@@ -1019,14 +1019,14 @@
               <tbody>
                 <template x-if="cs1fRows.length === 0 && !cs1fLoading">
                   <tr><td colspan="9" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
-                    <template x-if="cs1fMode === 'walk_forward'">
+                    <template x-if="cs1fMode !== 'train_test'">
                       <span>No rows — try lowering min n or clearing filters.</span>
                     </template>
-                    <template x-if="cs1fMode !== 'walk_forward'">
+                    <template x-if="cs1fMode === 'train_test'">
                       <span>
                         Corner Scan 1-Factor not yet available for
                         <strong x-text="_cornerScanModeLabel(cs1fMode)"></strong>
-                        — pending in-sample build.
+                        — pending train-test build.
                       </span>
                     </template>
                   </td></tr>
