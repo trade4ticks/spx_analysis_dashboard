@@ -72,6 +72,9 @@
     .bucketA-mode-seg span.on-is, .mode-seg span.on-is { background:#234032; color:#8fd3ac; font-weight:600; }
     .bucketA-mode-seg span.on-wf, .mode-seg span.on-wf { background:#332c52; color:#b3aae6; font-weight:600; }
     .bucketA-mode-seg span.on-tt, .mode-seg span.on-tt { background:#4a3a1c; color:#e0b066; font-weight:600; }
+    /* Heatmap cell selection — IS mode only */
+    .hm-cell-selected { outline:2px solid #00d2ff !important; outline-offset:-2px; z-index:1; position:relative; }
+    .hm-cell-selectable { cursor:crosshair; }
     .bucketA-cutoff-input {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:11px; padding:2px 5px; border-radius:3px;
@@ -225,7 +228,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=185"></script>
+  <script src="/static/js/oi_analysis.js?v=186"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -2936,6 +2939,7 @@
 
             <!-- ── Normal layout (in-sample / walk-forward): table left, bars right ── -->
             <template x-if="heatmapData && heatmapData.grid && !heatmapData.train_grid">
+              <div>
               <div style="display:flex;gap:16px;align-items:flex-start;padding-top:2px">
                 <!-- Left: 2D heatmap table -->
                 <div style="flex:0 0 auto;overflow-x:auto">
@@ -2955,7 +2959,9 @@
                               style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
                           <template x-for="(cell, ix) in row" :key="'hmcell-'+iy+'-'+ix">
                             <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
-                                :title="_hmCellTitle(cell, ix, iy)">
+                                :class="pageMode === 'in_sample' ? ('hm-cell-selectable' + (isHmCellSelected(ix, iy) ? ' hm-cell-selected' : '')) : ''"
+                                :title="_hmCellTitle(cell, ix, iy)"
+                                @click="toggleHmCell(ix, iy)">
                               <template x-if="cell && cell.n > 0">
                                 <div>
                                   <span style="font-size:13px;font-weight:700;display:block;color:#fff"
@@ -2988,6 +2994,178 @@
                   </div>
                 </div>
               </div>
+
+              <!-- ── Zone Analyze — IS-mode only ───────────────────────────────────────
+                   Shows when at least one heatmap cell is selected.
+                   The heatmap cells get @click="toggleHmCell(ix,iy)" to build the set;
+                   this section displays selection state, analysis results, and save-as-signal. -->
+              <template x-if="pageMode === 'in_sample'">
+                <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+
+                  <!-- ── Zone header ───────────────────────────────────────── -->
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                    <span style="font-size:11px;color:var(--dim)">
+                      Zone:
+                      <b x-text="hmSelectedCells.size"></b> cell(s) selected
+                      <template x-if="hmSelectedCells.size > 0">
+                        <span> · X=<b x-text="metric"></b> · Y=<b x-text="secSelectedMetric"></b></span>
+                      </template>
+                    </span>
+                    <button x-show="hmSelectedCells.size > 0"
+                            @click="clearHmSelection()"
+                            style="background:transparent;border:1px solid var(--border);color:var(--dim);
+                                   font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer">
+                      ✕ Clear
+                    </button>
+                    <div style="flex:1"></div>
+
+                    <!-- Outcome selector (independent from main) -->
+                    <template x-if="hmSelectedCells.size > 0">
+                      <div style="display:flex;align-items:center;gap:6px">
+                        <label style="font-size:11px;color:var(--dim)">Outcome:</label>
+                        <select x-model="zoneOutcome"
+                                style="background:var(--raised);border:1px solid var(--border);
+                                       color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                          <template x-for="o in outcomes" :key="'zo-'+o">
+                            <option :value="o" x-text="o"></option>
+                          </template>
+                        </select>
+                        <button @click="analyzeZone()"
+                                :disabled="zoneLoading"
+                                style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.35);
+                                       color:#e84393;font-size:11px;padding:4px 14px;border-radius:4px;
+                                       cursor:pointer;font-weight:600">
+                          <span x-show="!zoneLoading">Analyze Zone</span>
+                          <span x-show="zoneLoading">Loading…</span>
+                        </button>
+                      </div>
+                    </template>
+                    <span x-show="hmSelectedCells.size === 0"
+                          style="font-size:11px;color:var(--dim);font-style:italic">
+                      Click cells on the heatmap to select a zone
+                    </span>
+                  </div>
+
+                  <!-- ── Error state ────────────────────────────────────────── -->
+                  <div x-show="zoneData && zoneData.error"
+                       style="color:#e84393;font-size:12px;padding:6px 0"
+                       x-text="zoneData?.error"></div>
+
+                  <!-- ── Zone results (stats + charts + save) ──────────────── -->
+                  <template x-if="zoneData && !zoneData.error && zoneData.n > 0">
+                    <div>
+
+                      <!-- Stats bar — matches primary stats bar style -->
+                      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">N</div>
+                          <div class="stat-value" x-text="(zoneData.n||0).toLocaleString()"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Ret</div>
+                          <div :class="(zoneData.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.avg_ret||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Win %</div>
+                          <div :class="(zoneData.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.win_rate||0)*100).toFixed(1)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Median</div>
+                          <div :class="(zoneData.median||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.median||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Std Dev</div>
+                          <div class="stat-value" x-text="((zoneData.std||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">P5</div>
+                          <div :class="(zoneData.p5||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.p5||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">P95</div>
+                          <div :class="(zoneData.p95||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.p95||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Tickers</div>
+                          <div class="stat-value" x-text="zoneData.n_tickers"></div>
+                        </div>
+                      </div>
+
+                      <!-- 2×2 chart grid -->
+                      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+
+                        <!-- Equity Curve -->
+                        <div class="chart-box">
+                          <div class="chart-title">Equity Curve</div>
+                          <div class="chart-canvas"><canvas id="chart-zone-equity"></canvas></div>
+                        </div>
+
+                        <!-- Avg Return by Year -->
+                        <div class="chart-box">
+                          <div class="chart-title">Avg Return by Year</div>
+                          <div class="chart-canvas"><canvas id="chart-zone-yearly"></canvas></div>
+                        </div>
+
+                        <!-- Trade Activity -->
+                        <div class="chart-box">
+                          <div class="chart-title">Trade Activity</div>
+                          <div class="chart-canvas"><canvas id="chart-zone-activity"></canvas></div>
+                        </div>
+
+                        <!-- Ticker Breakdown (bubble) -->
+                        <div class="chart-box">
+                          <div class="chart-title">Ticker Breakdown
+                            <span style="font-weight:400;font-size:10px;color:var(--dim)"> — size=weight · color=win-rate (pink→blue)</span>
+                          </div>
+                          <div class="chart-canvas"><canvas id="chart-zone-bubble"></canvas></div>
+                        </div>
+
+                      </div>
+
+                      <!-- CSV + Save-as-signal row -->
+                      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <button @click="zoneDownloadCSV()"
+                                style="background:rgba(52,152,219,.12);border:1px solid rgba(52,152,219,.25);
+                                       color:#3498db;font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                          ↓ CSV
+                        </button>
+                        <div style="flex:1"></div>
+                        <span style="font-size:11px;color:var(--dim)">Save as signal:</span>
+                        <input x-model="signalName"
+                               placeholder="Signal name…"
+                               style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                      font-size:11px;padding:3px 8px;border-radius:3px;width:160px"
+                               @keyup.enter="saveSignal()">
+                        <button @click="saveSignal()"
+                                :disabled="!signalName.trim() || signalSaving"
+                                style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.35);
+                                       color:#2ecc71;font-size:11px;padding:3px 10px;border-radius:3px;cursor:pointer">
+                          <span x-show="!signalSaving">Save</span>
+                          <span x-show="signalSaving">Saving…</span>
+                        </button>
+                        <span x-show="signalSaveMsg" x-text="signalSaveMsg"
+                              style="font-size:11px;color:var(--dim)"></span>
+                      </div>
+
+                    </div>
+                  </template>
+
+                  <!-- n=0 state -->
+                  <div x-show="zoneData && !zoneData.error && zoneData.n === 0"
+                       style="font-size:12px;color:var(--dim);padding:6px 0">
+                    No rows matched the selected cells for this outcome.
+                  </div>
+
+                </div>
+              </template>
+              <!-- end Zone Analyze -->
+
+              </div><!-- closes outer wrapper div for IS/WF template single-root requirement -->
             </template>
 
             <!-- Empty state — heatmap fires automatically on secondary select -->
@@ -2998,6 +3176,75 @@
               <span x-show="!heatmapLoading">Select a secondary metric above to load the heatmap</span>
             </div>
           </div>
+
+          <!-- ── Saved Signals ─────────────────────────────────────────────────────
+               Collapsible panel listing all signals saved from Zone Analyze.
+               Click a signal row to restore its cell selection on the heatmap. -->
+          <div style="margin-top:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+            <div @click="signalsExpanded=!signalsExpanded; if(signalsExpanded && !signals.length) loadSignals()"
+                 style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;
+                        background:var(--raised)">
+              <span style="font-size:13px;color:var(--dim)"
+                    x-text="signalsExpanded ? '▾' : '▸'"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">Saved Signals</span>
+              <span style="font-size:11px;color:var(--dim)"
+                    x-text="signals.length ? '(' + signals.length + ')' : ''"></span>
+              <button @click.stop="loadSignals()"
+                      style="margin-left:auto;background:transparent;border:1px solid var(--border);
+                             color:var(--dim);font-size:11px;padding:1px 8px;border-radius:3px;cursor:pointer">
+                ⟳
+              </button>
+            </div>
+            <template x-if="signalsExpanded">
+              <div style="padding:8px 12px">
+                <template x-if="signals.length === 0">
+                  <div style="font-size:12px;color:var(--dim);padding:4px 0">
+                    No signals saved yet — use Analyze Zone → Save above.
+                  </div>
+                </template>
+                <template x-if="signals.length > 0">
+                  <div style="overflow-x:auto">
+                    <table style="border-collapse:collapse;font-size:11px;width:100%;font-family:monospace">
+                      <thead>
+                        <tr style="border-bottom:1px solid var(--border)">
+                          <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Name</th>
+                          <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Primary</th>
+                          <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Secondary</th>
+                          <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Outcome</th>
+                          <th style="text-align:right;padding:3px 8px;color:var(--dim);font-weight:600">Bins</th>
+                          <th style="text-align:right;padding:3px 8px;color:var(--dim);font-weight:600">Cells</th>
+                          <th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600">Saved</th>
+                          <th style="padding:3px 8px"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="sig in signals" :key="'sig-'+sig.id">
+                          <tr style="border-bottom:1px solid rgba(255,255,255,.05)"
+                              @mouseenter="$el.style.background='rgba(255,255,255,.03)'"
+                              @mouseleave="$el.style.background=''">
+                            <td style="padding:4px 8px;color:var(--text);font-weight:600" x-text="sig.name"></td>
+                            <td style="padding:4px 8px;color:#3498db" x-text="sig.primary_metric"></td>
+                            <td style="padding:4px 8px;color:#e84393" x-text="sig.secondary_metric"></td>
+                            <td style="padding:4px 8px;color:var(--dim)" x-text="sig.outcome"></td>
+                            <td style="padding:4px 8px;color:var(--dim);text-align:right" x-text="sig.n_bins + '×' + sig.n_bins"></td>
+                            <td style="padding:4px 8px;color:var(--dim);text-align:right" x-text="sig.cell_set.length"></td>
+                            <td style="padding:4px 8px;color:var(--dim)" x-text="sig.created_at.slice(0,10)"></td>
+                            <td style="padding:4px 8px">
+                              <button @click="deleteSignal(sig.id)"
+                                      style="background:transparent;border:none;color:var(--dim);
+                                             font-size:11px;cursor:pointer;padding:0 4px"
+                                      title="Delete signal">✕</button>
+                            </td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <!-- end Saved Signals -->
 
         </template>
         <!-- end confirmation layer -->

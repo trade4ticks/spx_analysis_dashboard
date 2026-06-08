@@ -2225,6 +2225,23 @@ document.addEventListener('alpine:init', () => {
     hmMinSampleN: 50,
     _hmRange: null,
 
+    // ── Zone Analyze (Stage 1) ────────────────────────────────────────────────
+    // Cell selection state — Set of "ix-iy" strings. Alpine's reactivity
+    // requires re-assigning the Set (not mutating in place) to trigger re-renders.
+    // Wrapped in a proxy-friendly plain object. Only active in IS mode.
+    hmSelectedCells: new Set(),   // Set<"ix-iy">
+    zoneOpen:         false,      // zone section expanded
+    zoneLoading:      false,
+    zoneData:         null,       // last /secondary-zone-analyze response
+    zoneOutcome:      'ret_5d_fwd_oc',  // independent outcome for zone analyze
+
+    // Signals — saved named cell-sets
+    signals:          [],
+    signalsExpanded:  false,
+    signalName:       '',
+    signalSaving:     false,
+    signalSaveMsg:    '',
+
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
     // the synthetic outcome `overnight_gap`, which the backend resolves
     // to per-trade (ret_1d_fwd_cc − ret_1d_fwd_oc). Outside Gap mode,
@@ -2291,6 +2308,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     setHeatmapBins(n) {
+      if (n !== this.heatmapBins) {
+        // Grid resolution changed — cell indices are no longer valid; clear selection.
+        this.hmSelectedCells = new Set();
+        this.zoneData = null;
+        this._destroyZoneCharts();
+      }
       this.heatmapBins = n;
       this.loadHeatmap();
     },
@@ -4479,6 +4502,318 @@ document.addEventListener('alpine:init', () => {
       this.secStatus = { loaded: true, loading: false, error: null };
       this.secScannerStale = false;  // M1: fresh scan results clear stale flag
       this.$nextTick(() => this.$nextTick(() => setTimeout(() => this._renderSecBar(), 60)));
+    },
+
+    // ── Zone Analyze methods ──────────────────────────────────────────────────
+
+    toggleHmCell(ix, iy) {
+      // Only active in IS mode; WF/TT cells are view-only.
+      if (this.pageMode !== 'in_sample') return;
+      const key = `${ix}-${iy}`;
+      const next = new Set(this.hmSelectedCells);
+      if (next.has(key)) next.delete(key);
+      else               next.add(key);
+      this.hmSelectedCells = next;
+      // Clear stale zone result when selection changes
+      this.zoneData = null;
+      this._destroyZoneCharts();
+    },
+
+    isHmCellSelected(ix, iy) {
+      return this.hmSelectedCells.has(`${ix}-${iy}`);
+    },
+
+    clearHmSelection() {
+      this.hmSelectedCells = new Set();
+      this.zoneData = null;
+      this.zoneOpen = false;
+      this._destroyZoneCharts();
+    },
+
+    // Returns [[ix, iy], ...] for API calls
+    hmCellSet() {
+      return [...this.hmSelectedCells].map(k => k.split('-').map(Number));
+    },
+
+    async analyzeZone() {
+      if (!this.hmSelectedCells.size) return;
+      if (!this.metric || !this.secSelectedMetric) return;
+      this.zoneLoading = true;
+      this.zoneData = null;
+      this._destroyZoneCharts();
+      this.zoneOpen = true;
+      try {
+        const r = await fetch('/api/factor-analysis/secondary-zone-analyze', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            primary_metric:   this.metric,
+            secondary_metric: this.secSelectedMetric,
+            outcome:          this.zoneOutcome || this.outcome || 'ret_5d_fwd_oc',
+            n_bins:           this.heatmapBins,
+            cell_set:         this.hmCellSet(),
+            ticker:           this.ticker,
+            date_from:        this.dateFrom  || null,
+            date_to:          this.dateTo    || null,
+          }),
+        });
+        if (r.ok) {
+          this.zoneData = await r.json();
+          await this.$nextTick();
+          await this.$nextTick();
+          setTimeout(() => this._renderZoneCharts(), 60);
+        } else {
+          this.zoneData = { error: `HTTP ${r.status}` };
+        }
+      } catch (e) {
+        this.zoneData = { error: e.message };
+      }
+      this.zoneLoading = false;
+    },
+
+    _destroyZoneCharts() {
+      for (const k of ['zone-equity', 'zone-yearly', 'zone-activity', 'zone-bubble']) {
+        if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
+      }
+    },
+
+    _renderZoneCharts() {
+      if (!this.zoneData || this.zoneData.error) return;
+      this._renderZoneEquity();
+      this._renderZoneYearly();
+      this._renderZoneActivity();
+      this._renderZoneBubble();
+    },
+
+    _renderZoneEquity() {
+      const canvas = document.getElementById('chart-zone-equity');
+      if (!canvas || !this.zoneData?.equity?.length) return;
+      if (this._charts['zone-equity']) { this._charts['zone-equity'].destroy(); delete this._charts['zone-equity']; }
+      const eq = this.zoneData.equity;
+      const ctx = canvas.getContext('2d');
+      this._charts['zone-equity'] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels:   eq.map(p => p.date),
+          datasets: [{
+            label:            'Zone equity',
+            data:             eq.map(p => +(p.cum_ret * 100).toFixed(4)),
+            borderColor:      '#e84393',
+            backgroundColor:  'rgba(232,67,147,0.08)',
+            borderWidth:      1.5,
+            pointRadius:      0,
+            fill:             false,
+            tension:          0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { label: ctx => `${(ctx.raw).toFixed(2)}%` } },
+          },
+          scales: {
+            x: { display: false },
+            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(1) + '%' },
+                 grid:  { color: '#222' } },
+          },
+        },
+      });
+    },
+
+    _renderZoneYearly() {
+      const canvas = document.getElementById('chart-zone-yearly');
+      if (!canvas || !this.zoneData?.yearly?.length) return;
+      if (this._charts['zone-yearly']) { this._charts['zone-yearly'].destroy(); delete this._charts['zone-yearly']; }
+      const yearly = this.zoneData.yearly;
+      const ctx = canvas.getContext('2d');
+      this._charts['zone-yearly'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels:   yearly.map(y => y.year),
+          datasets: [{
+            label:           'Avg Ret',
+            data:            yearly.map(y => +(y.avg_ret * 100).toFixed(3)),
+            backgroundColor: yearly.map(y => y.avg_ret >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)'),
+            borderColor:     yearly.map(y => y.avg_ret >= 0 ? '#3498db' : '#e84393'),
+            borderWidth:     1,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const y = yearly[ctx.dataIndex];
+                  return [`Avg: ${(y.avg_ret*100).toFixed(3)}%`, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
+            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+                 grid:  { color: '#222' } },
+          },
+        },
+      });
+    },
+
+    _renderZoneActivity() {
+      const canvas = document.getElementById('chart-zone-activity');
+      if (!canvas || !this.zoneData?.activity?.length) return;
+      if (this._charts['zone-activity']) { this._charts['zone-activity'].destroy(); delete this._charts['zone-activity']; }
+      const acts = this.zoneData.activity;
+      // Aggregate to monthly counts
+      const byMonth = {};
+      for (const { date, n } of acts) {
+        const m = date.slice(0, 7);
+        byMonth[m] = (byMonth[m] || 0) + n;
+      }
+      const months = Object.keys(byMonth).sort();
+      const counts = months.map(m => byMonth[m]);
+      const ctx = canvas.getContext('2d');
+      this._charts['zone-activity'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels:   months,
+          datasets: [{
+            label:           'Entries / month',
+            data:            counts,
+            backgroundColor: 'rgba(52,152,219,0.65)',
+            borderWidth:     0,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => `${ctx.raw} entries` } },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 8 }, maxTicksLimit: 12 }, grid: { color: '#222' } },
+            y: { ticks: { color: '#888', font: { size: 9 }, stepSize: 1 },       grid: { color: '#222' } },
+          },
+        },
+      });
+    },
+
+    _renderZoneBubble() {
+      const canvas = document.getElementById('chart-zone-bubble');
+      if (!canvas || !this.zoneData?.by_ticker?.length) return;
+      if (this._charts['zone-bubble']) { this._charts['zone-bubble'].destroy(); delete this._charts['zone-bubble']; }
+      const tickers = this.zoneData.by_ticker;
+      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
+      const mkColor = (wr, a) => {
+        const rv = Math.round(232 + (52  - 232) * wr);
+        const gv = Math.round(67  + (152 - 67)  * wr);
+        const bv = Math.round(147 + (219 - 147) * wr);
+        return `rgba(${rv},${gv},${bv},${a})`;
+      };
+      const datasets = tickers.map(t => ({
+        label:           t.ticker,
+        data:            [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4),
+                            r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 18) : 2 }],
+        backgroundColor: mkColor(t.win_rate, 0.65),
+        borderColor:     mkColor(t.win_rate, 1),
+        borderWidth:     1,
+      }));
+      const ctx = canvas.getContext('2d');
+      this._charts['zone-bubble'] = new Chart(ctx, {
+        type: 'bubble',
+        data: { datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const t = tickers[ctx.datasetIndex];
+                  return [`${t.ticker}`, `n=${t.n}`, `avg=${(t.avg_ret*100).toFixed(3)}%`, `wr=${(t.win_rate*100).toFixed(1)}%`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' },
+                 title: { display: true, text: 'n', color: '#888', font: { size: 9 } } },
+            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+                 grid:  { color: '#222' },
+                 title: { display: true, text: 'avg ret', color: '#888', font: { size: 9 } } },
+          },
+        },
+      });
+    },
+
+    zoneDownloadCSV() {
+      if (!this.zoneData?.by_ticker?.length) return;
+      const rows = [['ticker', 'n', 'avg_ret', 'win_rate', 'contrib_pct']];
+      for (const t of this.zoneData.by_ticker) {
+        rows.push([t.ticker, t.n, (t.avg_ret*100).toFixed(4)+'%',
+                   (t.win_rate*100).toFixed(2)+'%', t.contrib_pct.toFixed(2)+'%']);
+      }
+      // Also include equity curve
+      const eq = this.zoneData.equity || [];
+      if (eq.length) {
+        rows.push([]);
+        rows.push(['date', 'cum_ret_pct']);
+        for (const p of eq) rows.push([p.date, (p.cum_ret*100).toFixed(4)+'%']);
+      }
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `zone_${this.metric}_${this.secSelectedMetric}_${this.zoneOutcome || this.outcome}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+
+    // ── Signals CRUD ──────────────────────────────────────────────────────────
+
+    async loadSignals() {
+      const r = await fetch('/api/factor-analysis/signals');
+      if (r.ok) this.signals = (await r.json()).signals || [];
+    },
+
+    async saveSignal() {
+      if (!this.signalName.trim() || !this.hmSelectedCells.size) return;
+      if (!this.metric || !this.secSelectedMetric) return;
+      this.signalSaving = true;
+      this.signalSaveMsg = '';
+      try {
+        const r = await fetch('/api/factor-analysis/signals', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            name:             this.signalName.trim(),
+            primary_metric:   this.metric,
+            secondary_metric: this.secSelectedMetric,
+            outcome:          this.zoneOutcome || this.outcome || 'ret_5d_fwd_oc',
+            n_bins:           this.heatmapBins,
+            cell_set:         this.hmCellSet(),
+          }),
+        });
+        if (r.ok) {
+          this.signalSaveMsg = '✓ Saved';
+          this.signalName    = '';
+          await this.loadSignals();
+        } else {
+          this.signalSaveMsg = '✗ Error';
+        }
+      } catch (_) {
+        this.signalSaveMsg = '✗ Error';
+      }
+      this.signalSaving = false;
+      setTimeout(() => { this.signalSaveMsg = ''; }, 3000);
+    },
+
+    async deleteSignal(id) {
+      await fetch(`/api/factor-analysis/signals/${id}`, { method: 'DELETE' });
+      await this.loadSignals();
     },
 
     // Group a flat metric list by family using metricFamilyLookup.

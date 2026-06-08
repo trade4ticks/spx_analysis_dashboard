@@ -7502,3 +7502,311 @@ async def corner_scan_1f_endpoint(
         "mode":   mode,
         "status": "ok" if int(total) > 0 else "no_data",
     }
+
+
+# ── Heatmap Zone Analyze + Signals (Stage 1) ──────────────────────────────────
+#
+# Zone analyze: given a set of (ix, iy) 0-based cell indices on the IS heatmap,
+# query is_bins JOIN daily_features and compute aggregated return stats, a
+# date-compounded equity curve, yearly breakdown, trade activity, and per-ticker
+# breakdown.
+#
+# Signals: a thin JSONB table that persists named cell-set definitions so the
+# user can recall a zone without manually re-selecting heatmap cells.
+
+_SIGNALS_DDL = """\
+CREATE TABLE IF NOT EXISTS signals (
+    id               SERIAL PRIMARY KEY,
+    name             TEXT NOT NULL,
+    primary_metric   TEXT NOT NULL,
+    secondary_metric TEXT NOT NULL,
+    outcome          TEXT NOT NULL,
+    n_bins           INT  NOT NULL DEFAULT 10,
+    cell_set         JSONB NOT NULL,
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+_signals_table_ensured = False
+
+
+async def _ensure_signals_table(pool) -> None:
+    global _signals_table_ensured
+    if _signals_table_ensured:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(_SIGNALS_DDL)
+    _signals_table_ensured = True
+
+
+class ZoneAnalyzeRequest(BaseModel):
+    primary_metric: str
+    secondary_metric: str
+    outcome: str
+    n_bins: int = 10          # heatmap grid resolution: 3 | 5 | 10 | 20
+    cell_set: List[List[int]] # [[ix, iy], ...] — 0-based cell indices
+    ticker: str = "ALL"
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+
+
+@router.post("/secondary-zone-analyze")
+async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_pool)):
+    """Aggregate return stats for a user-selected set of heatmap cells.
+
+    Cells are identified by (ix, iy) 0-based indices into the IS heatmap grid.
+    The mapping from stored bin20 (1..20) to cell index is the integer formula:
+        cell_idx = ((bin20 - 1) * n_bins) // 20
+    which is identical to the JS heatmap renderer.
+
+    Only in-sample (is_bins) supported — cell identity is stable because IS
+    bin thresholds are computed once over full history and never change.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.cell_set:
+        return {"error": "No cells selected"}
+    if req.n_bins not in (3, 5, 10, 20):
+        return {"error": "n_bins must be 3, 5, 10, or 20"}
+
+    pmetric  = req.primary_metric
+    smetric  = req.secondary_metric
+    outcome  = req.outcome
+    n_bins   = req.n_bins
+
+    # Validate metric names: only lowercase letters, digits, underscore
+    _SAFE = set("abcdefghijklmnopqrstuvwxyz_0123456789")
+    if not all(c in _SAFE for c in pmetric) or not all(c in _SAFE for c in smetric):
+        return {"error": "Invalid metric name"}
+
+    # Build cell index arrays for SQL unnest pair-filter
+    cell_xs = [int(c[0]) for c in req.cell_set]
+    cell_ys = [int(c[1]) for c in req.cell_set]
+
+    # Outcome SELECT / WHERE helpers (handles overnight_gap synthetic)
+    outcome_cols = _outcome_select_cols(outcome)
+    out_sel      = ", ".join(f"df.{c}" for c in outcome_cols)
+    out_nn       = " AND ".join(f"df.{c} IS NOT NULL" for c in outcome_cols)
+
+    params: list = [n_bins, cell_xs, cell_ys]
+    p = 4
+    date_sql = ""
+    from datetime import date as _date
+    if req.date_from:
+        date_sql += f" AND df.trade_date >= ${p}"; params.append(_date.fromisoformat(req.date_from)); p += 1
+    if req.date_to:
+        date_sql += f" AND df.trade_date <= ${p}"; params.append(_date.fromisoformat(req.date_to)); p += 1
+
+    ticker_sql = ""
+    if req.ticker != "ALL":
+        ticker_sql = f" AND df.ticker = ${p}"; params.append(req.ticker); p += 1
+
+    query = f"""
+        SELECT df.ticker, df.trade_date::text AS trade_date, {out_sel}
+        FROM daily_features df
+        JOIN is_bins ib USING (ticker, trade_date)
+        WHERE ib.bin20_{pmetric} > 0
+          AND ib.bin20_{smetric} > 0
+          AND {out_nn}
+          AND (
+            ((ib.bin20_{pmetric} - 1) * $1::int) / 20,
+            ((ib.bin20_{smetric} - 1) * $1::int) / 20
+          ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+          {date_sql}{ticker_sql}
+        ORDER BY df.trade_date
+    """
+
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, *params)
+        except Exception as exc:
+            return {"error": f"Query failed: {exc}"}
+
+    if not rows:
+        return {
+            "n": 0, "avg_ret": None, "win_rate": None, "std": None,
+            "p5": None, "p95": None, "median": None, "n_tickers": 0,
+            "yearly": [], "equity": [], "activity": [], "by_ticker": [],
+        }
+
+    # ── Compute per-row outcome values ─────────────────────────────────────────
+    ret_vals: list    = []
+    activity_dates: list = []
+    tickers_seen: set = set()
+    by_ticker_dict: dict = {}
+    by_date_dict:   dict = {}
+    by_year_dict:   dict = {}
+
+    for r in rows:
+        ov = _outcome_value(r, outcome)
+        if ov is None:
+            continue
+        try:
+            fov = float(ov)
+            if math.isnan(fov):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        tkr = r["ticker"]
+        dt  = str(r["trade_date"])
+        yr  = int(dt[:4])
+
+        ret_vals.append(fov)
+        activity_dates.append(dt)
+        tickers_seen.add(tkr)
+        by_ticker_dict.setdefault(tkr, []).append(fov)
+        by_date_dict.setdefault(dt, []).append(fov)
+        by_year_dict.setdefault(yr, []).append(fov)
+
+    n = len(ret_vals)
+    if n == 0:
+        return {
+            "n": 0, "avg_ret": None, "win_rate": None, "std": None,
+            "p5": None, "p95": None, "median": None, "n_tickers": 0,
+            "yearly": [], "equity": [], "activity": [], "by_ticker": [],
+        }
+
+    arr = np.array(ret_vals, dtype=np.float64)
+
+    # ── Overall stats ──────────────────────────────────────────────────────────
+    avg_ret  = float(np.nanmean(arr))
+    win_rate = float(np.sum(arr > 0) / n)
+    std      = float(np.nanstd(arr))
+    p5       = float(np.nanpercentile(arr, 5))
+    p95      = float(np.nanpercentile(arr, 95))
+    median   = float(np.nanmedian(arr))
+
+    # ── Yearly breakdown ───────────────────────────────────────────────────────
+    yearly = []
+    for yr in sorted(by_year_dict.keys()):
+        yv = np.array(by_year_dict[yr])
+        yearly.append({
+            "year":     yr,
+            "n":        len(yv),
+            "avg_ret":  float(np.nanmean(yv)),
+            "win_rate": float(np.sum(yv > 0) / len(yv)),
+        })
+
+    # ── Equity curve: average per date, then compound ──────────────────────────
+    # Design: avg same-date trades → compound chronologically.
+    # One portfolio observation per date regardless of how many tickers fired.
+    cum = 0.0
+    equity = []
+    for dt in sorted(by_date_dict.keys()):
+        dv          = np.array(by_date_dict[dt])
+        avg_on_date = float(np.nanmean(dv))
+        cum         = (1.0 + cum) * (1.0 + avg_on_date) - 1.0
+        equity.append({"date": dt, "cum_ret": round(cum, 6)})
+
+    # ── Activity: per-date entry counts ───────────────────────────────────────
+    activity_dict: dict = {}
+    for dt in activity_dates:
+        activity_dict[dt] = activity_dict.get(dt, 0) + 1
+    activity = [{"date": dt, "n": cnt} for dt, cnt in sorted(activity_dict.items())]
+
+    # ── Ticker breakdown ───────────────────────────────────────────────────────
+    by_ticker = []
+    total_n   = sum(len(v) for v in by_ticker_dict.values())
+    for tkr, tv in by_ticker_dict.items():
+        ta = np.array(tv)
+        by_ticker.append({
+            "ticker":      tkr,
+            "n":           len(ta),
+            "avg_ret":     float(np.nanmean(ta)),
+            "win_rate":    float(np.sum(ta > 0) / len(ta)),
+            "contrib_pct": round(100 * len(ta) / total_n, 2) if total_n else 0,
+        })
+    by_ticker.sort(key=lambda x: -x["n"])
+
+    return {
+        "n":         n,
+        "avg_ret":   avg_ret,
+        "win_rate":  win_rate,
+        "std":       std,
+        "p5":        p5,
+        "p95":       p95,
+        "median":    median,
+        "n_tickers": len(tickers_seen),
+        "yearly":    yearly,
+        "equity":    equity,
+        "activity":  activity,
+        "by_ticker": by_ticker,
+    }
+
+
+# ── Signals CRUD ───────────────────────────────────────────────────────────────
+
+class SaveSignalRequest(BaseModel):
+    name:             str
+    primary_metric:   str
+    secondary_metric: str
+    outcome:          str
+    n_bins:           int = 10
+    cell_set:         List[List[int]]
+
+
+@router.get("/signals")
+async def list_signals(pool=Depends(get_oi_pool)):
+    """Return all saved signals ordered by creation time (newest first)."""
+    if not pool:
+        return {"signals": []}
+    await _ensure_signals_table(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, name, primary_metric, secondary_metric,
+                      outcome, n_bins, cell_set, created_at
+               FROM signals ORDER BY created_at DESC"""
+        )
+    return {
+        "signals": [
+            {
+                "id":               r["id"],
+                "name":             r["name"],
+                "primary_metric":   r["primary_metric"],
+                "secondary_metric": r["secondary_metric"],
+                "outcome":          r["outcome"],
+                "n_bins":           r["n_bins"],
+                "cell_set":         json.loads(r["cell_set"]),
+                "created_at":       str(r["created_at"])[:19],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post("/signals")
+async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
+    """Persist a named cell-set signal."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.name.strip():
+        return {"error": "Signal name required"}
+    if not req.cell_set:
+        return {"error": "cell_set is empty"}
+    await _ensure_signals_table(pool)
+    cell_json = json.dumps(req.cell_set)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO signals
+               (name, primary_metric, secondary_metric, outcome, n_bins, cell_set)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+               RETURNING id, created_at""",
+            req.name.strip(), req.primary_metric, req.secondary_metric,
+            req.outcome, req.n_bins, cell_json,
+        )
+    return {"id": row["id"], "created_at": str(row["created_at"])[:19]}
+
+
+@router.delete("/signals/{signal_id}")
+async def delete_signal(signal_id: int, pool=Depends(get_oi_pool)):
+    """Delete a saved signal by id."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    await _ensure_signals_table(pool)
+    async with pool.acquire() as conn:
+        deleted = await conn.fetchval(
+            "DELETE FROM signals WHERE id = $1 RETURNING id", signal_id
+        )
+    if deleted is None:
+        return {"error": "Signal not found"}
+    return {"deleted": deleted}
