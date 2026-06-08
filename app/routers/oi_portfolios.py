@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS oi_research_portfolios (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL,
     description TEXT,
-    ticker      TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
+    ticker      TEXT,
+    outcome     TEXT,
     date_from   TEXT,
     date_to     TEXT,
     created_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS oi_research_portfolios (
 );
 ALTER TABLE oi_research_portfolios
     ADD COLUMN IF NOT EXISTS monitored BOOLEAN DEFAULT FALSE;
+-- Make ticker/outcome nullable for the signal-derived outcome model
+-- (idempotent: DROP NOT NULL on a nullable column is a no-op in PG).
+ALTER TABLE oi_research_portfolios ALTER COLUMN ticker  DROP NOT NULL;
+ALTER TABLE oi_research_portfolios ALTER COLUMN outcome DROP NOT NULL;
 
 -- oi_research_systems: retained as an EMPTY SHELL so oi_signals.py
 -- calendar / firing-portfolios endpoints continue to function without
