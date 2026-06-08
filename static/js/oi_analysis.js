@@ -123,18 +123,14 @@ document.addEventListener('alpine:init', () => {
     corrLoading: false,
     corrBubbleMinN: 1,
 
-    // System Portfolio (third tier — persisted research portfolios)
-    portfolios: [],          // [{id, name, ticker, outcome, date_from, date_to, system_count}, ...]
+    // Signal Portfolio (third tier — persisted research portfolios)
+    portfolios: [],          // [{id, name, ticker, outcome, date_from, date_to, signal_count}, ...]
     portfolioId: null,       // currently-selected portfolio id (or null)
-    portfolio: null,         // {portfolio: {...}, systems: [...]}
+    portfolio: null,         // {portfolio: {...}, signals: [...]}
     portAggregate: null,     // last /aggregate response
     portLoading: false,
-    editingSystemId: null,   // when set, the "Add" button becomes "Save Changes"
-    portIsShort: false,      // direction toggle for the system being added/edited
+    portSignalPick: '',      // signal_id selected in the "add signal" dropdown
     portBubbleMinN: 1,       // bubble chart min-n filter
-    // System Library — anchor-agnostic system templates reusable across portfolios
-    librarySystems: [],      // [{id, name, primary_metric, primary_bins, secondaries, ...}]
-    libraryExpanded: false,
 
     // Trade Activity dedupe — when on, a new entry for a ticker is skipped
     // while a previous trade of the same ticker is still inside its horizon.
@@ -359,8 +355,6 @@ document.addEventListener('alpine:init', () => {
       this.smInit();
       // Portfolios list (third-tier — research portfolios persisted server-side)
       this.loadPortfolios();
-      // System library (anchor-agnostic reusable system templates)
-      this.loadLibrarySystems();
       // Signal Survey — always-visible; load on init so charts appear without
       // requiring a click. Single-ticker auto-triggers a compute on cache miss;
       // ALL stays idle until explicit ⟳ Refresh (OOM guard).
@@ -5313,7 +5307,7 @@ document.addEventListener('alpine:init', () => {
       if (key === 'primary') this._renderActivity();
       else if (key === 'sec')  this._renderSecActivity();
       else if (key === 'corr') this._renderCorrActivity();
-      else if (key === 'port') this._renderPortActivity();
+      else if (key === 'port') this._renderSecActivity('chart-port-activity', this.portAggregate);
     },
 
     // Threshold Drift (walk-forward bin boundaries over time)
@@ -6484,7 +6478,9 @@ document.addEventListener('alpine:init', () => {
         ? spotSeries.map(s => s.date)
         : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
 
-      const kept = this.dedupeConc.sec
+      // Derive dedupeConc key from canvasId: chart-port-activity → 'port', else 'sec'
+      const _dedupeKey = canvasId.includes('port') ? 'port' : 'sec';
+      const kept = this.dedupeConc[_dedupeKey]
         ? this._dedupeConcurrent(trades, tradingDays, horizon)
         : trades;
       const entriesByDate = {};
@@ -6555,63 +6551,25 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // ── System Portfolio (third tier) ──────────────────────────────────────
+    // ── Signal Portfolio (third tier) ──────────────────────────────────────
 
-    get canAddSystem() {
-      // Need: a portfolio loaded, a primary analysis loaded with a metric,
-      // at least one primary bin selected, and at least one secondary in the
-      // corr explorer. The Portfolio section can be browsed without an
-      // Analyze, but adding/editing requires one.
-      if (!this.portfolioId || !this.portfolio) return false;
-      if (!this.data || !this.metric) return false;
-      if (!this.selectedBins20 || this.selectedBins20.size === 0) return false;
-      const sels = this.corrSelections || {};
-      return Object.values(sels).some(b => Array.isArray(b) && b.length > 0);
-    },
-
-    get portAggSysMap() {
-      const m = {};
-      for (const s of (this.portAggregate?.systems || [])) m[s.id] = s;
-      return m;
-    },
-
-    get editingSystemName() {
-      if (!this.editingSystemId || !this.portfolio?.systems) return '';
-      const s = this.portfolio.systems.find(x => x.id === this.editingSystemId);
-      return s ? s.name : '';
-    },
-
-    // Mirrors corrStats() — same shape so the stats card template can render.
+    // Compute derived stats not in the flat response: best/worst year + cum return.
     portStats() {
       const r = this.portAggregate;
-      if (!r) return null;
+      if (!r || !r.n) return null;
       const yearly = r.yearly || [];
-      if (!yearly.length) return null;
-      const totalN  = yearly.reduce((s, y) => s + (y.combined_n  || 0), 0);
-      if (!totalN) return null;
-      const avgRet  = yearly.reduce((s, y) => s + (y.combined_avg || 0) * (y.combined_n || 0), 0) / totalN;
-      const winRate = yearly.reduce((s, y) => s + (y.combined_wr  || 0) * (y.combined_n || 0), 0) / totalN;
-      const winners = Math.round(winRate * totalN);
-      const best  = yearly.reduce((b, y) => y.combined_avg > b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg: -Infinity });
-      const worst = yearly.reduce((b, y) => y.combined_avg < b.avg ? { yr: y.year, avg: y.combined_avg } : b, { yr: null, avg:  Infinity });
-      const eq  = r.equity_combined || [];
+      const best  = yearly.reduce((b, y) => y.avg_ret > b.avg ? { yr: y.year, avg: y.avg_ret } : b,
+                                  { yr: null, avg: -Infinity });
+      const worst = yearly.reduce((b, y) => y.avg_ret < b.avg ? { yr: y.year, avg: y.avg_ret } : b,
+                                  { yr: null, avg:  Infinity });
+      const eq  = r.equity_primary || [];
       const cum = eq.length ? +(eq[eq.length - 1].value * 100).toFixed(2) : null;
-      // Trade utilization across pair firings (matches corr explorer).
-      const nEach = r.n_each || [];
-      const sumN  = nEach.reduce((s, n) => s + n, 0);
-      const minN  = nEach.length ? Math.min(...nEach) : 0;
-      const union = r.combined_n || 0;
-      const util  = sumN > minN ? +((union - minN) / (sumN - minN) * 100).toFixed(1) : 100;
-      return {
-        totalN, avgRet, winRate, winners, losers: totalN - winners, best, worst, cum, util,
-        winnerAvg: r.winner_avg_ret ?? null,
-        loserAvg:  r.loser_avg_ret  ?? null,
-      };
+      return { best: best.yr ? best : null, worst: worst.yr ? worst : null, cum };
     },
 
     portSetBubbleMinN(n) {
       this.portBubbleMinN = +n;
-      this._renderPortBubble();
+      this._renderSecBubble('chart-port-bubble', this.portAggregate);
     },
 
     async loadPortfolios() {
@@ -6676,7 +6634,7 @@ document.addEventListener('alpine:init', () => {
     async deletePortfolio() {
       if (!this.portfolioId) return;
       const name = this.portfolio?.portfolio?.name || '?';
-      if (!confirm(`Delete portfolio "${name}" and all its systems?`)) return;
+      if (!confirm(`Delete portfolio "${name}" and all its signals?`)) return;
       try {
         const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}`, { method: 'DELETE' });
         if (!r.ok) { alert('Delete failed: ' + await r.text()); return; }
@@ -6688,146 +6646,45 @@ document.addEventListener('alpine:init', () => {
       } catch (e) { alert('Delete error: ' + e.message); }
     },
 
-    async addCurrentSystem() {
-      if (!this.canAddSystem) return;
-      const primary_bins = [...this.selectedBins20].sort((a, b) => a - b);
-      const secondaries = [];
-      for (const [metric, bins] of Object.entries(this.corrSelections || {})) {
-        if (Array.isArray(bins) && bins.length) {
-          secondaries.push({
-            metric,
-            bins: [...bins].sort((a, b) => a - b),
-            bin_count: this.secBinCount || 10,
-          });
-        }
-      }
-      const body = {
-        primary_metric:    this.metric,
-        primary_bins,
-        primary_bin_count: 20,
-        secondaries,
-        is_short: this.portIsShort,
-      };
-      const editingId = this.editingSystemId;
-      const url = editingId
-        ? `/api/factor-analysis/portfolios/${this.portfolioId}/systems/${editingId}`
-        : `/api/factor-analysis/portfolios/${this.portfolioId}/systems`;
-      const method = editingId ? 'PUT' : 'POST';
+    async addSignalToPortfolio() {
+      const signalId = parseInt(this.portSignalPick);
+      if (!signalId || !this.portfolioId) return;
       try {
-        const r = await fetch(url, {
-          method, headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+        const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/signals`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ signal_id: signalId }),
         });
-        if (!r.ok) {
-          alert((editingId ? 'Save changes' : 'Add system') + ' failed: ' + await r.text());
-          return;
-        }
-        // Clear edit mode on success
-        this.editingSystemId = null;
-        this.portIsShort = false;
+        if (!r.ok) { alert('Add signal failed: ' + await r.text()); return; }
+        this.portSignalPick = '';
         await this.selectPortfolio(this.portfolioId);
         await this.loadPortfolios();
-      } catch (e) { alert((editingId ? 'Save changes' : 'Add system') + ' error: ' + e.message); }
+      } catch (e) { alert('Add signal error: ' + e.message); }
     },
 
-    cancelEditSystem() {
-      this.editingSystemId = null;
-      this.portIsShort = false;
-    },
-
-    async toggleSystem(sid, enabled) {
+    async removeSignalFromPortfolio(psId) {
+      const sig = this.portfolio?.signals?.find(s => s.id === psId);
+      if (!confirm(`Remove "${sig?.name || 'signal'}" from this portfolio?`)) return;
       try {
-        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
+        const r = await fetch(
+          `/api/factor-analysis/portfolios/${this.portfolioId}/signals/${psId}`,
+          { method: 'DELETE' });
+        if (!r.ok) { alert('Remove failed: ' + await r.text()); return; }
+        await this.selectPortfolio(this.portfolioId);
+        await this.loadPortfolios();
+      } catch (_) {}
+    },
+
+    async togglePortfolioSignal(psId, enabled) {
+      try {
+        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/signals/${psId}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled }),
         });
         // Optimistic update
-        const sys = this.portfolio?.systems?.find(s => s.id === sid);
-        if (sys) sys.enabled = enabled;
+        const sig = this.portfolio?.signals?.find(s => s.id === psId);
+        if (sig) sig.enabled = enabled;
         await this.loadPortfolioAggregate();
       } catch (_) {}
-    },
-
-    async renameSystem(sid, currentName) {
-      const name = prompt('Rename system:', currentName);
-      if (!name || name.trim() === currentName) return;
-      try {
-        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim() }),
-        });
-        const sys = this.portfolio?.systems?.find(s => s.id === sid);
-        if (sys) sys.name = name.trim();
-        // Re-render aggregate labels
-        await this.loadPortfolioAggregate();
-      } catch (_) {}
-    },
-
-    async deleteSystem(sid) {
-      const sys = this.portfolio?.systems?.find(s => s.id === sid);
-      if (!confirm(`Remove "${sys?.name || 'system'}" from this portfolio?\n\n` +
-                   `This does not delete it from the Library — saved copies stay available for other portfolios.`)) return;
-      try {
-        await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/systems/${sid}`, { method: 'DELETE' });
-        await this.selectPortfolio(this.portfolioId);
-        await this.loadPortfolios();
-      } catch (_) {}
-    },
-
-    async editSystem(sys) {
-      this.portIsShort = sys.is_short || false;
-      // Mark the system as the one being edited. The "+ Add Current Setup
-      // as System" button will become "Save Changes to <name>" and will
-      // PUT instead of POST.
-      this.editingSystemId = sys.id;
-
-      const anchor = this.portfolio?.portfolio;
-      if (!anchor) return;
-
-      // Decide whether we need to re-run /analyze. Skip it when the page
-      // is already on the same anchor + primary metric — only the primary
-      // bin selection and corr selections need adjusting in that case.
-      const anchorMatches =
-        this.ticker   === anchor.ticker &&
-        this.outcome  === anchor.outcome &&
-        (this.dateFrom || '') === (anchor.date_from || '') &&
-        (this.dateTo   || '') === (anchor.date_to   || '');
-      const metricMatches = this.metric === sys.primary_metric;
-
-      if (!anchorMatches || !metricMatches) {
-        // Full reload path — only when something material changed.
-        this.ticker   = anchor.ticker;
-        this.outcome  = anchor.outcome;
-        this.dateFrom = anchor.date_from || '';
-        this.dateTo   = anchor.date_to   || '';
-        this.metric   = sys.primary_metric;
-        this.selectedBins20 = new Set(sys.primary_bins || []);
-        await this.loadAnalysis();
-        if (this.error) return;
-      } else {
-        // Fast path — page already on the right anchor + metric. Just
-        // swap the primary bin selection and re-prime the corr cache.
-        this.selectedBins20 = new Set(sys.primary_bins || []);
-        // Scanner re-scores on next explicit Load click.
-      }
-
-      // Restore the corr explorer state.
-      this.corrPanelOpen = true;
-      this.secBinCount   = (sys.secondaries?.[0]?.bin_count) || 10;
-      this.corrMiniData  = null;
-      await this.corrLoadMiniData();
-      const sels = {};
-      for (const sec of (sys.secondaries || [])) {
-        sels[sec.metric] = [...(sec.bins || [])];
-      }
-      this.corrSelections = sels;
-
-      // Scroll the corr explorer into view so the user sees the restored state.
-      this.$nextTick(() => {
-        const el = document.getElementById('corr-equity-canvas')
-                || document.querySelector('.if-pill');
-        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
     },
 
     async loadPortfolioAggregate() {
@@ -6855,87 +6712,49 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderPortCharts() {
-      if (!this.portAggregate || !(this.portAggregate.combined_n > 0)) {
+      if (!this.portAggregate || !(this.portAggregate.n > 0)) {
         this._destroyPortCharts();
         return;
       }
       this._destroyPortCharts();
-      this._renderPortEquity();
+      // Equity + activity + bubble delegate to the parameterized _renderSec* methods
+      // (singleSeries=true → one pink curve, no primary-universe blue line).
+      this._renderSecEquity('chart-port-equity', this.portAggregate, true);
       this._renderPortYearly();
-      this._renderPortActivity();
-      this._renderPortBubble();
-    },
-
-    _renderPortEquity() {
-      // Mirrors _renderCorrEquity: dual line (primary universe vs portfolio
-      // union), tooltip title is the full date (daily), labels are YYYY-MM
-      // for legibility on the axis.
-      const canvas = document.getElementById('chart-port-equity');
-      if (!canvas || !this.portAggregate) return;
-      if (this._charts['port-equity']) { this._charts['port-equity'].destroy(); delete this._charts['port-equity']; }
-      const eqP = this.portAggregate.equity_primary  || [];
-      const eqC = this.portAggregate.equity_combined || [];
-      if (!eqP.length) return;
-      const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
-      let lastC = 0;
-      const combinedAligned = eqP.map(p => {
-        if (cMap[p.date] !== undefined) lastC = cMap[p.date];
-        return lastC;
-      });
-      this._charts['port-equity'] = new Chart(canvas.getContext('2d'), {
-        type: 'line',
-        data: {
-          labels: eqP.map(p => p.date.slice(0, 7)),
-          datasets: [
-            { label: 'Primary', data: eqP.map(p => +(p.value * 100).toFixed(4)),
-              borderColor: '#3498db', backgroundColor: 'rgba(52,152,219,0.06)',
-              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true },
-            { label: 'Union', data: combinedAligned,
-              borderColor: '#e84393', backgroundColor: 'rgba(232,67,147,0.06)',
-              borderWidth: 1.5, pointRadius: 0, tension: 0.2, fill: true, spanGaps: true },
-          ],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { labels: { color: '#aaa', font: { size: 10 } } },
-            tooltip: { mode: 'index', intersect: false,
-              callbacks: { title: ctx => eqP[ctx[0]?.dataIndex]?.date || '' } },
-          },
-          scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 10 } },
-            y: { ...this._darkScales().y, title: { display: true, text: 'Cum Return %', color: '#888', font: { size: 9 } } },
-          },
-        },
-      });
+      this._renderSecActivity('chart-port-activity', this.portAggregate);
+      this._renderSecBubble('chart-port-bubble', this.portAggregate);
     },
 
     _renderPortYearly() {
-      // Mirrors _renderCorrYearly: two bar series (primary vs union) per year
-      // with n + WR in the tooltip.
+      // Single-series yearly bars with n-count gradient (same pattern as _renderZoneYearly).
       const canvas = document.getElementById('chart-port-yearly');
       if (!canvas || !this.portAggregate?.yearly?.length) return;
       if (this._charts['port-yearly']) { this._charts['port-yearly'].destroy(); delete this._charts['port-yearly']; }
       const yearly = this.portAggregate.yearly;
+      const ns = yearly.map(y => y.n);
+      const minN = Math.min(...ns), maxN = Math.max(...ns);
+      const nPct  = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
+      const alpha = y => (0.2 + nPct(y) * 0.6).toFixed(2);
+      const bgColor = y => y.avg_ret >= 0
+        ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
       this._charts['port-yearly'] = new Chart(canvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels: yearly.map(y => y.year),
-          datasets: [
-            { label: 'Primary',  data: yearly.map(y => +(y.primary_avg  * 100).toFixed(3)),
-              backgroundColor: 'rgba(52,152,219,0.65)', borderColor: '#3498db', borderWidth: 1 },
-            { label: 'Union', data: yearly.map(y => +(y.combined_avg * 100).toFixed(3)),
-              backgroundColor: 'rgba(232,67,147,0.65)', borderColor: '#e84393', borderWidth: 1 },
-          ],
+          datasets: [{
+            label: 'Union Avg Ret',
+            data: yearly.map(y => +(y.avg_ret * 100).toFixed(3)),
+            backgroundColor: yearly.map(bgColor),
+            borderColor: yearly.map(y => y.avg_ret >= 0 ? '#3498db' : '#e84393'),
+            borderWidth: 1,
+          }],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
+          plugins: { legend: { display: false },
             tooltip: { callbacks: { label: ctx => {
               const y = yearly[ctx.dataIndex];
-              if (ctx.datasetIndex === 0) return [`Avg: ${(y.primary_avg*100).toFixed(3)}%`, `WR: ${(y.primary_wr*100).toFixed(1)}%`, `n: ${y.primary_n}`];
-              return [`Avg: ${(y.combined_avg*100).toFixed(3)}%`, `WR: ${(y.combined_wr*100).toFixed(1)}%`, `n: ${y.combined_n}`];
+              return [`Avg: ${(y.avg_ret*100).toFixed(3)}%`, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
             } } } },
           scales: {
             ...this._darkScales(),
@@ -6945,114 +6764,7 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _renderPortActivity() {
-      // Mirrors _renderCorrActivity: daily granularity with entered bars +
-      // open trades line. Trading days come from the backend's primary
-      // universe (every trade-eligible date in the anchor date range).
-      const canvas = document.getElementById('chart-port-activity');
-      if (!canvas || !this.portAggregate) return;
-      if (this._charts['port-activity']) { this._charts['port-activity'].destroy(); delete this._charts['port-activity']; }
-      const trades = this.portAggregate.combined_trades
-        || (this.portAggregate.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
-      if (!trades.length) return;
-      const horizon = this.portAggregate.horizon || 1;
-      // Trading days: prefer equity_primary's date spine, fall back to union dates.
-      const spine = this.portAggregate.equity_primary || [];
-      const dates = trades.map(t => t.trade_date || t.date);
-      const tradingDays = spine.length
-        ? [...new Set(spine.map(p => p.date))].sort()
-        : [...new Set(dates)].sort();
-      const kept = this.dedupeConc.port
-        ? this._dedupeConcurrent(trades, tradingDays, horizon)
-        : trades;
-      const entriesByDate = {};
-      for (const t of kept) {
-        const d = t.trade_date || t.date;
-        entriesByDate[d] = (entriesByDate[d] || 0) + 1;
-      }
-      const entered = tradingDays.map(d => entriesByDate[d] || 0);
-      const open    = tradingDays.map((_, i) => {
-        let count = 0;
-        for (let j = Math.max(0, i - horizon + 1); j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
-        return count;
-      });
-      this._charts['port-activity'] = new Chart(canvas.getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels: tradingDays.map(d => d.slice(0, 7)),
-          datasets: [
-            { type: 'line', label: 'Open Trades', data: open,
-              borderColor: 'rgba(46,204,113,0.6)', backgroundColor: 'rgba(46,204,113,0.08)',
-              fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5, order: 1 },
-            { type: 'bar',  label: 'Entered', data: entered,
-              backgroundColor: 'rgba(52,152,219,0.7)', barThickness: 2, order: 2 },
-          ],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } },
-            tooltip: { mode: 'index', intersect: false,
-              callbacks: { title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
-                           label: ctx => `${ctx.dataset.label}: ${ctx.raw}` } } },
-          scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
-            y: { ...this._darkScales().y, title: { display: true, text: 'Count', color: '#888', font: { size: 9 } } },
-          },
-        },
-      });
-    },
-
-    _renderPortBubble() {
-      // Mirrors _renderCorrBubble: x = trade count, y = avg ret %, bubble
-      // size = contribution to total P&L, color = win rate (pink→blue).
-      const canvas = document.getElementById('chart-port-bubble');
-      if (!canvas || !this.portAggregate?.tickers?.length) return;
-      if (this._charts['port-bubble']) { this._charts['port-bubble'].destroy(); delete this._charts['port-bubble']; }
-      const minN = this.portBubbleMinN || 1;
-      const tickers = this.portAggregate.tickers.filter(t => t.n >= minN);
-      if (!tickers.length) return;
-      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
-      const mkColor = (wr, a) => {
-        const r = Math.round(232 + (52  - 232) * wr);
-        const g = Math.round(67  + (152 - 67)  * wr);
-        const b = Math.round(147 + (219 - 147) * wr);
-        return `rgba(${r},${g},${b},${a})`;
-      };
-      const datasets = tickers.map(t => ({
-        label: t.ticker,
-        data: [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4),
-                 r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 20) : 2 }],
-        backgroundColor: mkColor(t.win_rate, 0.65),
-        borderColor:     mkColor(t.win_rate, 1),
-        borderWidth: 1,
-      }));
-      const totalN = tickers.reduce((s, t) => s + (t.n || 0), 0);
-      const avgPct = totalN > 0
-        ? tickers.reduce((s, t) => s + (t.avg_ret || 0) * (t.n || 0), 0) / totalN * 100
-        : 0;
-      this._charts['port-bubble'] = new Chart(canvas.getContext('2d'), {
-        type: 'bubble',
-        data: { datasets },
-        plugins: [this._avgRetLinePlugin(avgPct, 'avg')],
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false },
-            tooltip: { backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: { label: ctx => {
-                const t = tickers[ctx.datasetIndex];
-                return [`${t.ticker}  n:${t.n}  avg:${(t.avg_ret*100).toFixed(3)}%  WR:${(t.win_rate*100).toFixed(1)}%  contrib:${t.contrib_pct.toFixed(1)}%`];
-              } } } },
-          scales: {
-            ...this._darkScales(),
-            x: { ...this._darkScales().x, title: { display: true, text: 'Trade Count', color: '#888', font: { size: 9 } } },
-            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
-          },
-        },
-      });
-    },
-
-    portSysCellTitle(i, j) {
+    portSigCellTitle(i, j) {
       if (!this.portAggregate) return '';
       const labs = this.portAggregate.system_labels || [];
       const ov = this.portAggregate.overlap_systems || [];
@@ -7061,23 +6773,11 @@ document.addEventListener('alpine:init', () => {
       return `${labs[i]} × ${labs[j]}\nφ = ${(phi[i]?.[j] ?? 0).toFixed(3)}\nOverlap: ${ov[i]?.[j] ?? 0} trades`;
     },
 
-    portPairCellTitle(i, j) {
-      if (!this.portAggregate) return '';
-      const labs = this.portAggregate.pair_labels || [];
-      const ov = this.portAggregate.overlap_pairs || [];
-      const phi = this.portAggregate.phi_pairs || [];
-      if (i === j) return `${labs[i]}  n=${ov[i]?.[i] ?? 0}`;
-      return `${labs[i]} × ${labs[j]}\nφ = ${(phi[i]?.[j] ?? 0).toFixed(3)}\nOverlap: ${ov[i]?.[j] ?? 0} trades`;
-    },
-
     async portCsvDownload() {
       if (!this.portAggregate) return;
       const trades = this.portAggregate.combined_trades || [];
       if (!trades.length) return;
-      const header = [
-        'ticker', 'trade_date', 'spot_entry', 'exit_date', 'spot_exit',
-        'ret_pct', 'fired_systems',
-      ].join(',');
+      const header = ['ticker', 'trade_date', 'spot_entry', 'exit_date', 'spot_exit', 'ret_pct'].join(',');
       const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
       const rows = trades.map(t => [
         t.ticker || '',
@@ -7086,82 +6786,9 @@ document.addEventListener('alpine:init', () => {
         t.exit_date || '',
         fmt(t.spot_exit, 2),
         t.ret != null ? (t.ret * 100).toFixed(6) : '',
-        // Quote the fired_systems list since it can contain commas
-        '"' + (t.fired_systems || []).join(' | ') + '"',
       ].join(','));
       this._downloadCsv([header, ...rows].join('\n'),
         `portfolio_${this.portfolioId}_union_${new Date().toISOString().slice(0,10)}.csv`);
-    },
-
-    // ── System Library ────────────────────────────────────────────────────
-
-    async loadLibrarySystems() {
-      try {
-        const r = await fetch('/api/factor-analysis/library/systems');
-        if (r.ok) this.librarySystems = await r.json();
-      } catch (_) {}
-    },
-
-    async saveSystemToLibrary(sys) {
-      // POST a copy of the portfolio system into the library. Default name
-      // is the system's current name; user can rename in the library
-      // section after.
-      const proposed = prompt('Save to Library as:', sys.name || 'System');
-      if (!proposed) return;
-      const body = {
-        name:              proposed.trim(),
-        primary_metric:    sys.primary_metric,
-        primary_bins:      sys.primary_bins || [],
-        primary_bin_count: sys.primary_bin_count || 20,
-        secondaries:       (sys.secondaries || []).map(s => ({
-          metric: s.metric, bins: s.bins || [], bin_count: s.bin_count || 10,
-        })),
-        is_short: sys.is_short || false,
-      };
-      try {
-        const r = await fetch('/api/factor-analysis/library/systems', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) { alert('Save to Library failed: ' + await r.text()); return; }
-        await this.loadLibrarySystems();
-      } catch (e) { alert('Save to Library error: ' + e.message); }
-    },
-
-    async addLibrarySystemToPortfolio(lid) {
-      if (!this.portfolioId) {
-        alert('Select or create a portfolio first.');
-        return;
-      }
-      try {
-        const r = await fetch(
-          `/api/factor-analysis/portfolios/${this.portfolioId}/systems/from-library/${lid}`,
-          { method: 'POST' });
-        if (!r.ok) { alert('Add from library failed: ' + await r.text()); return; }
-        await this.selectPortfolio(this.portfolioId);
-        await this.loadPortfolios();
-      } catch (e) { alert('Add from library error: ' + e.message); }
-    },
-
-    async renameLibrarySystem(lid, currentName) {
-      const name = prompt('Rename library system:', currentName);
-      if (!name || name.trim() === currentName) return;
-      try {
-        await fetch(`/api/factor-analysis/library/systems/${lid}`, {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: name.trim() }),
-        });
-        await this.loadLibrarySystems();
-      } catch (_) {}
-    },
-
-    async deleteLibrarySystem(lid) {
-      const item = this.librarySystems.find(x => x.id === lid);
-      if (!confirm(`Delete library system "${item?.name || '?'}"? (Existing portfolio copies are untouched.)`)) return;
-      try {
-        await fetch(`/api/factor-analysis/library/systems/${lid}`, { method: 'DELETE' });
-        await this.loadLibrarySystems();
-      } catch (_) {}
     },
 
     // ── P1: analyze_cache 12-outcome bundle ───────────────────────────────
