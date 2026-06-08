@@ -3349,11 +3349,11 @@
           </div>
         </template>
 
-        <!-- Signal cards — iterate portSignalList which prefers portAggregate.signals
-             (real per-signal stats from Phase 5) over portfolio.signals (always zeroed). -->
-        <template x-if="portfolio && portSignalList.length">
+        <!-- Signal cards — iterate portfolio.signals (Alpine reactive property).
+             Stats (n_trades etc.) are merged in from portAggregate after aggregate loads. -->
+        <template x-if="portfolio && portfolio.signals && portfolio.signals.length">
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-bottom:14px;margin-top:10px">
-            <template x-for="sig in portSignalList" :key="'psig-'+sig.id">
+            <template x-for="sig in portfolio.signals" :key="'psig-'+sig.id">
               <div :style="(sig.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:10px'">
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
                   <input type="checkbox" :checked="sig.enabled"

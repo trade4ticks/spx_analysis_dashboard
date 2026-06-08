@@ -6555,16 +6555,6 @@ document.addEventListener('alpine:init', () => {
 
     // ── Signal Portfolio (third tier) ──────────────────────────────────────
 
-    // Returns the best available signal list for the card display.
-    // portAggregate.signals has real per-signal stats (n_trades, win_rate, avg_ret,
-    // contrib_pct) computed in Phase 5 of the aggregate.  portfolio.signals (from
-    // GET /portfolios/{id}) always has zeroed stats — it is only used before the
-    // aggregate has loaded.
-    get portSignalList() {
-      if (this.portAggregate?.signals?.length) return this.portAggregate.signals;
-      return this.portfolio?.signals || [];
-    },
-
     portSetBubbleMinN(n) {
       this.portBubbleMinN = +n;
       this._renderSecBubble('chart-port-bubble', this.portAggregate);
@@ -6690,6 +6680,24 @@ document.addEventListener('alpine:init', () => {
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();
+        // Merge per-signal stats from aggregate into portfolio.signals so the
+        // cards (which iterate portfolio.signals for Alpine reactivity) show
+        // real n_trades/win_rate/avg_ret/contrib_pct instead of zeroed values.
+        if (this.portfolio?.signals && this.portAggregate?.signals) {
+          const aggMap = Object.fromEntries(
+            this.portAggregate.signals.map(s => [s.id, s])
+          );
+          this.portfolio = {
+            ...this.portfolio,
+            signals: this.portfolio.signals.map(s => ({
+              ...s,
+              n_trades:    aggMap[s.id]?.n_trades    ?? 0,
+              win_rate:    aggMap[s.id]?.win_rate     ?? 0,
+              avg_ret:     aggMap[s.id]?.avg_ret      ?? 0,
+              contrib_pct: aggMap[s.id]?.contrib_pct  ?? 0,
+            })),
+          };
+        }
         await this.$nextTick();
         this._renderPortCharts();
       } catch (e) {
