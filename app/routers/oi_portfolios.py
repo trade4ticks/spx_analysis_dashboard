@@ -17,6 +17,7 @@ It will be dropped when those endpoints are rewired.
 from collections import defaultdict
 from datetime import date as _date
 from typing import List, Optional
+import json
 import math
 
 import numpy as np
@@ -504,7 +505,8 @@ async def portfolio_aggregate(
         for entry in enabled_signals:
             sig    = entry["sig"]
             n_bins = int(sig["n_bins"])
-            cells  = sig["cell_set"] or []
+            raw_cs = sig["cell_set"] or "[]"
+            cells  = json.loads(raw_cs) if isinstance(raw_cs, str) else raw_cs
             xs = [int(c[0]) for c in cells]
             ys = [int(c[1]) for c in cells]
             prim   = sig["primary_metric"]
