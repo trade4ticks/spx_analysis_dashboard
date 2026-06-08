@@ -228,7 +228,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=186"></script>
+  <script src="/static/js/oi_analysis.js?v=187"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3055,44 +3055,74 @@
                   <template x-if="zoneData && !zoneData.error && zoneData.n > 0">
                     <div>
 
-                      <!-- Stats bar — matches primary stats bar style -->
-                      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                      <!-- Stats bar — exact 12-field layout matching primary stats bar -->
+                      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
+                        <!-- Tickers -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Tickers</div>
+                          <div class="stat-value" x-text="zoneData.n_tickers"></div>
+                        </div>
+                        <!-- N -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">N</div>
                           <div class="stat-value" x-text="(zoneData.n||0).toLocaleString()"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                        <!-- Avg Ret -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">Avg Ret</div>
                           <div :class="(zoneData.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
                                x-text="((zoneData.avg_ret||0)*100).toFixed(3)+'%'"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
-                          <div class="stat-label">Win %</div>
-                          <div :class="(zoneData.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
-                               x-text="((zoneData.win_rate||0)*100).toFixed(1)+'%'"></div>
-                        </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                        <!-- Median -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">Median</div>
                           <div :class="(zoneData.median||0)>=0?'stat-value pos':'stat-value neg'"
                                x-text="((zoneData.median||0)*100).toFixed(3)+'%'"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                        <!-- Std Dev -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">Std Dev</div>
                           <div class="stat-value" x-text="((zoneData.std||0)*100).toFixed(3)+'%'"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                        <!-- P5 -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">P5</div>
                           <div :class="(zoneData.p5||0)>=0?'stat-value pos':'stat-value neg'"
                                x-text="((zoneData.p5||0)*100).toFixed(3)+'%'"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
+                        <!-- P95 -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
                           <div class="stat-label">P95</div>
                           <div :class="(zoneData.p95||0)>=0?'stat-value pos':'stat-value neg'"
                                x-text="((zoneData.p95||0)*100).toFixed(3)+'%'"></div>
                         </div>
-                        <div class="stat-item" style="flex:1;min-width:72px;text-align:center;border:1px solid var(--border);border-radius:4px">
-                          <div class="stat-label">Tickers</div>
-                          <div class="stat-value" x-text="zoneData.n_tickers"></div>
+                        <!-- Win % -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Win %</div>
+                          <div :class="(zoneData.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
+                               x-text="((zoneData.win_rate||0)*100).toFixed(1)+'%'"></div>
+                        </div>
+                        <!-- # Win -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label"># Win</div>
+                          <div class="stat-value" x-text="(zoneData.n_winners||0).toLocaleString()"></div>
+                        </div>
+                        <!-- Avg Win -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Win</div>
+                          <div class="stat-value pos"
+                               x-text="((zoneData.avg_winners||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <!-- Avg Loss -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Loss</div>
+                          <div class="stat-value neg"
+                               x-text="((zoneData.avg_losers||0)*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <!-- Trd/Yr -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Trd/Yr</div>
+                          <div class="stat-value" x-text="(zoneData.trades_per_year||0).toFixed(1)"></div>
                         </div>
                       </div>
 

@@ -4579,47 +4579,10 @@ document.addEventListener('alpine:init', () => {
 
     _renderZoneCharts() {
       if (!this.zoneData || this.zoneData.error) return;
-      this._renderZoneEquity();
+      this._renderSecEquity('chart-zone-equity', this.zoneData, true);
       this._renderZoneYearly();
-      this._renderZoneActivity();
-      this._renderZoneBubble();
-    },
-
-    _renderZoneEquity() {
-      const canvas = document.getElementById('chart-zone-equity');
-      if (!canvas || !this.zoneData?.equity?.length) return;
-      if (this._charts['zone-equity']) { this._charts['zone-equity'].destroy(); delete this._charts['zone-equity']; }
-      const eq = this.zoneData.equity;
-      const ctx = canvas.getContext('2d');
-      this._charts['zone-equity'] = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels:   eq.map(p => p.date),
-          datasets: [{
-            label:            'Zone equity',
-            data:             eq.map(p => +(p.cum_ret * 100).toFixed(4)),
-            borderColor:      '#e84393',
-            backgroundColor:  'rgba(232,67,147,0.08)',
-            borderWidth:      1.5,
-            pointRadius:      0,
-            fill:             false,
-            tension:          0,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: { mode: 'index', intersect: false,
-              callbacks: { label: ctx => `${(ctx.raw).toFixed(2)}%` } },
-          },
-          scales: {
-            x: { display: false },
-            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(1) + '%' },
-                 grid:  { color: '#222' } },
-          },
-        },
-      });
+      this._renderSecActivity('chart-zone-activity', this.zoneData);
+      this._renderSecBubble('chart-zone-bubble', this.zoneData);
     },
 
     _renderZoneYearly() {
@@ -4627,6 +4590,14 @@ document.addEventListener('alpine:init', () => {
       if (!canvas || !this.zoneData?.yearly?.length) return;
       if (this._charts['zone-yearly']) { this._charts['zone-yearly'].destroy(); delete this._charts['zone-yearly']; }
       const yearly = this.zoneData.yearly;
+      // n-count gradient: dim bars for thin years, vivid for well-populated ones
+      const ns = yearly.map(y => y.n);
+      const minN = Math.min(...ns), maxN = Math.max(...ns);
+      const nPct = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
+      const alpha = y => (0.2 + nPct(y) * 0.6).toFixed(2);
+      const bgColor = y => y.avg_ret >= 0
+        ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
+      const borderColor = y => y.avg_ret >= 0 ? '#3498db' : '#e84393';
       const ctx = canvas.getContext('2d');
       this._charts['zone-yearly'] = new Chart(ctx, {
         type: 'bar',
@@ -4635,8 +4606,8 @@ document.addEventListener('alpine:init', () => {
           datasets: [{
             label:           'Avg Ret',
             data:            yearly.map(y => +(y.avg_ret * 100).toFixed(3)),
-            backgroundColor: yearly.map(y => y.avg_ret >= 0 ? 'rgba(52,152,219,0.55)' : 'rgba(232,67,147,0.55)'),
-            borderColor:     yearly.map(y => y.avg_ret >= 0 ? '#3498db' : '#e84393'),
+            backgroundColor: yearly.map(bgColor),
+            borderColor:     yearly.map(borderColor),
             borderWidth:     1,
           }],
         },
@@ -4645,6 +4616,7 @@ document.addEventListener('alpine:init', () => {
           plugins: {
             legend: { display: false },
             tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
               callbacks: {
                 label: ctx => {
                   const y = yearly[ctx.dataIndex];
@@ -4662,106 +4634,23 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _renderZoneActivity() {
-      const canvas = document.getElementById('chart-zone-activity');
-      if (!canvas || !this.zoneData?.activity?.length) return;
-      if (this._charts['zone-activity']) { this._charts['zone-activity'].destroy(); delete this._charts['zone-activity']; }
-      const acts = this.zoneData.activity;
-      // Aggregate to monthly counts
-      const byMonth = {};
-      for (const { date, n } of acts) {
-        const m = date.slice(0, 7);
-        byMonth[m] = (byMonth[m] || 0) + n;
-      }
-      const months = Object.keys(byMonth).sort();
-      const counts = months.map(m => byMonth[m]);
-      const ctx = canvas.getContext('2d');
-      this._charts['zone-activity'] = new Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels:   months,
-          datasets: [{
-            label:           'Entries / month',
-            data:            counts,
-            backgroundColor: 'rgba(52,152,219,0.65)',
-            borderWidth:     0,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: { callbacks: { label: ctx => `${ctx.raw} entries` } },
-          },
-          scales: {
-            x: { ticks: { color: '#888', font: { size: 8 }, maxTicksLimit: 12 }, grid: { color: '#222' } },
-            y: { ticks: { color: '#888', font: { size: 9 }, stepSize: 1 },       grid: { color: '#222' } },
-          },
-        },
-      });
-    },
-
-    _renderZoneBubble() {
-      const canvas = document.getElementById('chart-zone-bubble');
-      if (!canvas || !this.zoneData?.by_ticker?.length) return;
-      if (this._charts['zone-bubble']) { this._charts['zone-bubble'].destroy(); delete this._charts['zone-bubble']; }
-      const tickers = this.zoneData.by_ticker;
-      const maxContrib = Math.max(1, ...tickers.filter(t => t.contrib_pct > 0).map(t => t.contrib_pct));
-      const mkColor = (wr, a) => {
-        const rv = Math.round(232 + (52  - 232) * wr);
-        const gv = Math.round(67  + (152 - 67)  * wr);
-        const bv = Math.round(147 + (219 - 147) * wr);
-        return `rgba(${rv},${gv},${bv},${a})`;
-      };
-      const datasets = tickers.map(t => ({
-        label:           t.ticker,
-        data:            [{ x: t.n, y: +(t.avg_ret * 100).toFixed(4),
-                            r: t.contrib_pct > 0 ? Math.max(3, (t.contrib_pct / maxContrib) * 18) : 2 }],
-        backgroundColor: mkColor(t.win_rate, 0.65),
-        borderColor:     mkColor(t.win_rate, 1),
-        borderWidth:     1,
-      }));
-      const ctx = canvas.getContext('2d');
-      this._charts['zone-bubble'] = new Chart(ctx, {
-        type: 'bubble',
-        data: { datasets },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const t = tickers[ctx.datasetIndex];
-                  return [`${t.ticker}`, `n=${t.n}`, `avg=${(t.avg_ret*100).toFixed(3)}%`, `wr=${(t.win_rate*100).toFixed(1)}%`];
-                },
-              },
-            },
-          },
-          scales: {
-            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' },
-                 title: { display: true, text: 'n', color: '#888', font: { size: 9 } } },
-            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
-                 grid:  { color: '#222' },
-                 title: { display: true, text: 'avg ret', color: '#888', font: { size: 9 } } },
-          },
-        },
-      });
-    },
+    // _renderZoneEquity, _renderZoneActivity, _renderZoneBubble removed —
+    // zone charts now delegate to the parameterized _renderSecEquity /
+    // _renderSecActivity / _renderSecBubble (identical visuals, zone data source).
 
     zoneDownloadCSV() {
-      if (!this.zoneData?.by_ticker?.length) return;
+      if (!this.zoneData?.tickers?.length) return;
       const rows = [['ticker', 'n', 'avg_ret', 'win_rate', 'contrib_pct']];
-      for (const t of this.zoneData.by_ticker) {
+      for (const t of this.zoneData.tickers) {
         rows.push([t.ticker, t.n, (t.avg_ret*100).toFixed(4)+'%',
                    (t.win_rate*100).toFixed(2)+'%', t.contrib_pct.toFixed(2)+'%']);
       }
       // Also include equity curve
-      const eq = this.zoneData.equity || [];
+      const eq = this.zoneData.equity_primary || [];
       if (eq.length) {
         rows.push([]);
         rows.push(['date', 'cum_ret_pct']);
-        for (const p of eq) rows.push([p.date, (p.cum_ret*100).toFixed(4)+'%']);
+        for (const p of eq) rows.push([p.date, (p.value*100).toFixed(4)+'%']);
       }
       const csv = rows.map(r => r.join(',')).join('\n');
       const blob = new Blob([csv], { type: 'text/csv' });
@@ -5288,13 +5177,15 @@ document.addEventListener('alpine:init', () => {
       this._renderSecBubble();
     },
 
-    _renderSecBubble() {
-      const canvas = document.getElementById('sec-bubble-canvas');
-      if (!canvas || !this.secDetail?.tickers?.length) return;
-      if (this._charts['sec-bubble']) { this._charts['sec-bubble'].destroy(); delete this._charts['sec-bubble']; }
+    _renderSecBubble(canvasId = 'sec-bubble-canvas', detail = null) {
+      detail = detail || this.secDetail;
+      const _key = canvasId.replace(/-canvas$/, '').replace(/^chart-/, '');
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !detail?.tickers?.length) return;
+      if (this._charts[_key]) { this._charts[_key].destroy(); delete this._charts[_key]; }
 
       const minN = this.secBubbleMinN || 1;
-      const tickers = this.secDetail.tickers.filter(t => t.n >= minN);
+      const tickers = detail.tickers.filter(t => t.n >= minN);
       if (!tickers.length) return;
 
       // Radius: positive contrib scaled 3–20; negative → 2
@@ -5321,7 +5212,7 @@ document.addEventListener('alpine:init', () => {
         ? tickers.reduce((s, t) => s + (t.avg_ret || 0) * (t.n || 0), 0) / totalN * 100
         : 0;
 
-      this._charts['sec-bubble'] = new Chart(canvas.getContext('2d'), {
+      this._charts[_key] = new Chart(canvas.getContext('2d'), {
         type: 'bubble',
         data: { datasets },
         plugins: [this._avgRetLinePlugin(avgPct, 'avg')],
@@ -6436,56 +6327,71 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _renderSecEquity() {
-      const canvas = document.getElementById('sec-equity-canvas');
-      if (!canvas || !this.secDetail) return;
-      if (this._charts['sec-equity']) { this._charts['sec-equity'].destroy(); delete this._charts['sec-equity']; }
-      const eqP = this.secDetail.equity_primary || [];
-      const eqC = this.secDetail.equity_combined || [];
+    _renderSecEquity(canvasId = 'sec-equity-canvas', detail = null, singleSeries = false) {
+      detail = detail || this.secDetail;
+      const _key = canvasId.replace(/-canvas$/, '').replace(/^chart-/, '');
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !detail) return;
+      if (this._charts[_key]) { this._charts[_key].destroy(); delete this._charts[_key]; }
+      const eqP = detail.equity_primary || [];
+      const eqC = detail.equity_combined || [];
       if (!eqP.length) return;
       const ctx = canvas.getContext('2d');
 
-      // Align combined curve to primary date axis: hold last value on non-combined dates
-      const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
-      let lastCombined = 0;
-      const combinedAligned = eqP.map(p => {
-        if (cMap[p.date] !== undefined) lastCombined = cMap[p.date];
-        return lastCombined;
-      });
+      let datasets;
+      if (singleSeries) {
+        // Zone mode: single curve — equity_primary is the zone curve
+        datasets = [{
+          label: 'Zone equity',
+          data: eqP.map(p => +(p.value * 100).toFixed(4)),
+          borderColor: '#e84393',
+          backgroundColor: 'rgba(232,67,147,0.08)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        }];
+      } else {
+        // Sec-detail mode: primary + combined curves
+        const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
+        let lastCombined = 0;
+        const combinedAligned = eqP.map(p => {
+          if (cMap[p.date] !== undefined) lastCombined = cMap[p.date];
+          return lastCombined;
+        });
+        datasets = [
+          {
+            label: 'Primary filter',
+            data: eqP.map(p => +(p.value * 100).toFixed(4)),
+            borderColor: '#3498db',
+            backgroundColor: 'rgba(52,152,219,0.08)',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            tension: 0,
+          },
+          {
+            label: '+ Secondary filter',
+            data: combinedAligned,
+            borderColor: '#e84393',
+            backgroundColor: 'transparent',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            tension: 0,
+            spanGaps: true,
+          },
+        ];
+      }
 
-      this._charts['sec-equity'] = new Chart(ctx, {
+      this._charts[_key] = new Chart(ctx, {
         type: 'line',
-        data: {
-          labels: eqP.map(p => p.date),
-          datasets: [
-            {
-              label: 'Primary filter',
-              data: eqP.map(p => +(p.value * 100).toFixed(4)),
-              borderColor: '#3498db',
-              backgroundColor: 'rgba(52,152,219,0.08)',
-              borderWidth: 1.5,
-              pointRadius: 0,
-              fill: false,
-              tension: 0,
-            },
-            {
-              label: '+ Secondary filter',
-              data: combinedAligned,
-              borderColor: '#e84393',
-              backgroundColor: 'transparent',
-              borderWidth: 1.5,
-              pointRadius: 0,
-              fill: false,
-              tension: 0,
-              spanGaps: true,
-            },
-          ],
-        },
+        data: { labels: eqP.map(p => p.date), datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: {
-              display: true,
+              display: !singleSeries,
               labels: { color: '#888', font: { size: 9 }, boxWidth: 12 },
             },
             tooltip: { mode: 'index', intersect: false },
@@ -6556,18 +6462,20 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    _renderSecActivity() {
-      const canvas = document.getElementById('sec-activity-canvas');
-      if (!canvas || !this.secDetail) return;
-      if (this._charts['sec-activity']) { this._charts['sec-activity'].destroy(); delete this._charts['sec-activity']; }
+    _renderSecActivity(canvasId = 'sec-activity-canvas', detail = null) {
+      detail = detail || this.secDetail;
+      const _key = canvasId.replace(/-canvas$/, '').replace(/^chart-/, '');
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !detail) return;
+      if (this._charts[_key]) { this._charts[_key].destroy(); delete this._charts[_key]; }
 
       // Prefer the enriched combined_trades (has ticker per entry) so the
       // dedupe-concurrent toggle can work per ticker. Fall back to plain
       // combined_trade_dates for older payloads.
-      const trades = this.secDetail.combined_trades
-        || (this.secDetail.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
+      const trades = detail.combined_trades
+        || (detail.combined_trade_dates || []).map(d => ({ ticker: '?', trade_date: d }));
       if (!trades.length) return;
-      const horizon = this.secDetail.horizon || 1;
+      const horizon = detail.horizon || 1;
 
       const spotSeries = this.data?.spot_series || [];
       const cal = this.data?.trade_calendar || [];
@@ -6597,7 +6505,7 @@ document.addEventListener('alpine:init', () => {
       });
 
       const ctx = canvas.getContext('2d');
-      this._charts['sec-activity'] = new Chart(ctx, {
+      this._charts[_key] = new Chart(ctx, {
         type: 'bar',
         data: {
           labels: tradingDays.map(d => d.slice(0, 7)),

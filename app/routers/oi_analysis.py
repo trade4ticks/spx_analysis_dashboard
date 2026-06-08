@@ -7558,8 +7558,9 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         cell_idx = ((bin20 - 1) * n_bins) // 20
     which is identical to the JS heatmap renderer.
 
-    Only in-sample (is_bins) supported — cell identity is stable because IS
-    bin thresholds are computed once over full history and never change.
+    Returns data in the same shape as /secondary-detail so the same JS chart
+    components can be reused verbatim.  Equity curve uses _sec_equity_curve's
+    cumulative-SUM formula (cum += float(y)), not compounding.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -7578,11 +7579,9 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     if not all(c in _SAFE for c in pmetric) or not all(c in _SAFE for c in smetric):
         return {"error": "Invalid metric name"}
 
-    # Build cell index arrays for SQL unnest pair-filter
     cell_xs = [int(c[0]) for c in req.cell_set]
     cell_ys = [int(c[1]) for c in req.cell_set]
 
-    # Outcome SELECT / WHERE helpers (handles overnight_gap synthetic)
     outcome_cols = _outcome_select_cols(outcome)
     out_sel      = ", ".join(f"df.{c}" for c in outcome_cols)
     out_nn       = " AND ".join(f"df.{c} IS NOT NULL" for c in outcome_cols)
@@ -7612,31 +7611,34 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             ((ib.bin20_{smetric} - 1) * $1::int) / 20
           ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
           {date_sql}{ticker_sql}
-        ORDER BY df.trade_date
+        ORDER BY df.trade_date, df.ticker
     """
 
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, *params)
+            raw_rows = await conn.fetch(query, *params)
         except Exception as exc:
             return {"error": f"Query failed: {exc}"}
 
-    if not rows:
-        return {
+    if not raw_rows:
+        _empty_stats = {
             "n": 0, "avg_ret": None, "win_rate": None, "std": None,
             "p5": None, "p95": None, "median": None, "n_tickers": 0,
-            "yearly": [], "equity": [], "activity": [], "by_ticker": [],
+            "n_winners": 0, "avg_winners": None, "avg_losers": None,
+            "trades_per_year": None,
+        }
+        return {
+            **_empty_stats,
+            "equity_primary": [], "equity_combined": [],
+            "combined_trades": [], "horizon": _parse_horizon(outcome),
+            "tickers": [], "yearly": [],
         }
 
-    # ── Compute per-row outcome values ─────────────────────────────────────────
-    ret_vals: list    = []
-    activity_dates: list = []
-    tickers_seen: set = set()
-    by_ticker_dict: dict = {}
-    by_date_dict:   dict = {}
-    by_year_dict:   dict = {}
-
-    for r in rows:
+    # ── Filter valid rows and compute per-row outcome ──────────────────────────
+    # Keep rows as dict-like objects sorted (date, ticker) — same ordering
+    # as /secondary-detail's primary_sorted / combined_sorted lists.
+    valid_rows: list = []
+    for r in raw_rows:
         ov = _outcome_value(r, outcome)
         if ov is None:
             continue
@@ -7646,91 +7648,130 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
                 continue
         except (TypeError, ValueError):
             continue
+        # Store as a plain dict so helpers like _sec_equity_curve can use .get()
+        valid_rows.append({
+            "ticker":     r["ticker"],
+            "trade_date": str(r["trade_date"]),
+            outcome:      fov,   # keyed by outcome name — what _sec_equity_curve reads
+        })
 
-        tkr = r["ticker"]
-        dt  = str(r["trade_date"])
-        yr  = int(dt[:4])
-
-        ret_vals.append(fov)
-        activity_dates.append(dt)
-        tickers_seen.add(tkr)
-        by_ticker_dict.setdefault(tkr, []).append(fov)
-        by_date_dict.setdefault(dt, []).append(fov)
-        by_year_dict.setdefault(yr, []).append(fov)
-
-    n = len(ret_vals)
+    n = len(valid_rows)
     if n == 0:
-        return {
+        _empty_stats = {
             "n": 0, "avg_ret": None, "win_rate": None, "std": None,
             "p5": None, "p95": None, "median": None, "n_tickers": 0,
-            "yearly": [], "equity": [], "activity": [], "by_ticker": [],
+            "n_winners": 0, "avg_winners": None, "avg_losers": None,
+            "trades_per_year": None,
+        }
+        return {
+            **_empty_stats,
+            "equity_primary": [], "equity_combined": [],
+            "combined_trades": [], "horizon": _parse_horizon(outcome),
+            "tickers": [], "yearly": [],
         }
 
-    arr = np.array(ret_vals, dtype=np.float64)
+    arr = np.array([r[outcome] for r in valid_rows], dtype=np.float64)
 
-    # ── Overall stats ──────────────────────────────────────────────────────────
-    avg_ret  = float(np.nanmean(arr))
-    win_rate = float(np.sum(arr > 0) / n)
-    std      = float(np.nanstd(arr))
-    p5       = float(np.nanpercentile(arr, 5))
-    p95      = float(np.nanpercentile(arr, 95))
-    median   = float(np.nanmedian(arr))
+    # ── Overall stats — same fields + order as the primary _computeSelectedStats ──
+    wins   = arr[arr > 0]
+    losses = arr[arr < 0]
+    avg_ret  = float(np.mean(arr))
+    win_rate = float(len(wins) / n)
+    std      = float(np.std(arr))
+    p5       = float(np.percentile(arr, 5))
+    p95      = float(np.percentile(arr, 95))
+    median   = float(np.median(arr))
+    n_winners   = int(len(wins))
+    avg_winners = float(np.mean(wins))   if n_winners else 0.0
+    avg_losers  = float(np.mean(losses)) if len(losses) else 0.0
+
+    # trades_per_year: n / elapsed years of the zone's date range
+    dates_all = [r["trade_date"] for r in valid_rows]
+    trd_yr: float = n   # fallback
+    if dates_all:
+        try:
+            d0 = _date.fromisoformat(min(dates_all))
+            d1 = _date.fromisoformat(max(dates_all))
+            years = (d1 - d0).days / 365.25
+            trd_yr = round(n / years, 1) if years > 0.1 else float(n)
+        except Exception:
+            pass
+
+    n_tickers = len({r["ticker"] for r in valid_rows})
+
+    # ── Equity curve — cumulative SUM, same as _sec_equity_curve ──────────────
+    # "cum += float(y)" for each row in date order.  No per-date averaging,
+    # no compounding — this is the formula the secondary-detail component uses.
+    eq_zone = _sec_equity_curve(valid_rows, outcome)
+    # equity_combined mirrors primary (single zone curve; same line rendered twice
+    # but the JS aligns combined to primary's date axis so they overlap cleanly).
+    eq_combined = eq_zone
 
     # ── Yearly breakdown ───────────────────────────────────────────────────────
+    by_year: dict = {}
+    for r in valid_rows:
+        yr = int(r["trade_date"][:4])
+        by_year.setdefault(yr, []).append(r[outcome])
+
     yearly = []
-    for yr in sorted(by_year_dict.keys()):
-        yv = np.array(by_year_dict[yr])
+    for yr in sorted(by_year.keys()):
+        yv = np.array(by_year[yr])
         yearly.append({
             "year":     yr,
             "n":        len(yv),
-            "avg_ret":  float(np.nanmean(yv)),
+            "avg_ret":  float(np.mean(yv)),
             "win_rate": float(np.sum(yv > 0) / len(yv)),
         })
 
-    # ── Equity curve: average per date, then compound ──────────────────────────
-    # Design: avg same-date trades → compound chronologically.
-    # One portfolio observation per date regardless of how many tickers fired.
-    cum = 0.0
-    equity = []
-    for dt in sorted(by_date_dict.keys()):
-        dv          = np.array(by_date_dict[dt])
-        avg_on_date = float(np.nanmean(dv))
-        cum         = (1.0 + cum) * (1.0 + avg_on_date) - 1.0
-        equity.append({"date": dt, "cum_ret": round(cum, 6)})
+    # ── combined_trades — same format as /secondary-detail ────────────────────
+    # Activity chart reads t.trade_date (or t.date) and t.ticker.
+    combined_trades = [
+        {"ticker": r["ticker"], "trade_date": r["trade_date"]}
+        for r in valid_rows
+    ]
 
-    # ── Activity: per-date entry counts ───────────────────────────────────────
-    activity_dict: dict = {}
-    for dt in activity_dates:
-        activity_dict[dt] = activity_dict.get(dt, 0) + 1
-    activity = [{"date": dt, "n": cnt} for dt, cnt in sorted(activity_dict.items())]
+    # ── Ticker breakdown — same format as /secondary-detail ───────────────────
+    by_ticker_dict: dict = {}
+    for r in valid_rows:
+        by_ticker_dict.setdefault(r["ticker"], []).append(r[outcome])
 
-    # ── Ticker breakdown ───────────────────────────────────────────────────────
-    by_ticker = []
-    total_n   = sum(len(v) for v in by_ticker_dict.values())
+    total_pnl = sum(sum(v) for v in by_ticker_dict.values())
+    tickers_out = []
     for tkr, tv in by_ticker_dict.items():
-        ta = np.array(tv)
-        by_ticker.append({
+        ta  = np.array(tv)
+        wr  = float(np.mean(ta > 0))
+        avg = float(np.mean(ta))
+        pnl = float(np.sum(ta))
+        tickers_out.append({
             "ticker":      tkr,
             "n":           len(ta),
-            "avg_ret":     float(np.nanmean(ta)),
-            "win_rate":    float(np.sum(ta > 0) / len(ta)),
-            "contrib_pct": round(100 * len(ta) / total_n, 2) if total_n else 0,
+            "avg_ret":     round(avg, 6),
+            "win_rate":    round(wr, 4),
+            "contrib_pct": round(pnl / total_pnl * 100, 2) if total_pnl != 0 else 0.0,
         })
-    by_ticker.sort(key=lambda x: -x["n"])
+    tickers_out.sort(key=lambda x: -x["n"])
 
     return {
-        "n":         n,
-        "avg_ret":   avg_ret,
-        "win_rate":  win_rate,
-        "std":       std,
-        "p5":        p5,
-        "p95":       p95,
-        "median":    median,
-        "n_tickers": len(tickers_seen),
-        "yearly":    yearly,
-        "equity":    equity,
-        "activity":  activity,
-        "by_ticker": by_ticker,
+        # Stats fields — identical names and order as _computeSelectedStats in JS
+        "n":              n,
+        "avg_ret":        avg_ret,
+        "win_rate":       win_rate,
+        "std":            std,
+        "p5":             p5,
+        "p95":            p95,
+        "median":         median,
+        "n_tickers":      n_tickers,
+        "n_winners":      n_winners,
+        "avg_winners":    avg_winners,
+        "avg_losers":     avg_losers,
+        "trades_per_year": trd_yr,
+        # Chart data — same field names as /secondary-detail so JS can reuse components
+        "equity_primary":  eq_zone,
+        "equity_combined": eq_combined,
+        "combined_trades": combined_trades,
+        "horizon":         _parse_horizon(outcome),
+        "tickers":         tickers_out,
+        "yearly":          yearly,
     }
 
 
