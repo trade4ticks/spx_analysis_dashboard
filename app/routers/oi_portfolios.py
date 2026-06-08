@@ -98,8 +98,8 @@ async def _ensure_tables(pool):
 class PortfolioIn(BaseModel):
     name: str
     description: Optional[str] = None
-    ticker: str
-    outcome: str
+    ticker: Optional[str] = "ALL"     # retained for optional trade filtering
+    outcome: Optional[str] = None     # NULL until first signal is added
     date_from: Optional[str] = None
     date_to: Optional[str] = None
 
@@ -320,20 +320,29 @@ async def add_portfolio_signal(pid: int, body: SignalLinkIn,
     if not oi_pool:
         raise HTTPException(503, "OI database not configured")
 
-    # Load portfolio outcome (main DB)
+    # Load portfolio (main DB)
     async with pool.acquire() as conn:
         port = await conn.fetchrow(
             "SELECT id, outcome FROM oi_research_portfolios WHERE id = $1", pid)
     if not port:
         raise HTTPException(404, "portfolio not found")
 
-    # Verify signal exists and outcome matches (OI DB)
+    # Verify signal exists (OI DB)
     async with oi_pool.acquire() as conn:
         sig = await conn.fetchrow(
             "SELECT id, name, outcome FROM signals WHERE id = $1", body.signal_id)
     if not sig:
         raise HTTPException(404, f"Signal {body.signal_id} not found")
-    if sig["outcome"] != port["outcome"]:
+
+    # Outcome handling:
+    # - First signal (portfolio.outcome is NULL) → auto-set portfolio outcome
+    # - Subsequent signals → must match existing portfolio outcome
+    if port["outcome"] is None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE oi_research_portfolios SET outcome=$1, updated_at=NOW() WHERE id=$2",
+                sig["outcome"], pid)
+    elif sig["outcome"] != port["outcome"]:
         raise HTTPException(400,
             f"Signal outcome '{sig['outcome']}' does not match "
             f"portfolio outcome '{port['outcome']}'. "

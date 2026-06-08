@@ -355,6 +355,8 @@ document.addEventListener('alpine:init', () => {
       this.smInit();
       // Portfolios list (third-tier — research portfolios persisted server-side)
       this.loadPortfolios();
+      // Signals list — needed by the portfolio signal-picker dropdown
+      this.loadSignals();
       // Signal Survey — always-visible; load on init so charts appear without
       // requiring a click. Single-ticker auto-triggers a compute on cache miss;
       // ALL stays idle until explicit ⟳ Refresh (OOM guard).
@@ -6553,20 +6555,6 @@ document.addEventListener('alpine:init', () => {
 
     // ── Signal Portfolio (third tier) ──────────────────────────────────────
 
-    // Compute derived stats not in the flat response: best/worst year + cum return.
-    portStats() {
-      const r = this.portAggregate;
-      if (!r || !r.n) return null;
-      const yearly = r.yearly || [];
-      const best  = yearly.reduce((b, y) => y.avg_ret > b.avg ? { yr: y.year, avg: y.avg_ret } : b,
-                                  { yr: null, avg: -Infinity });
-      const worst = yearly.reduce((b, y) => y.avg_ret < b.avg ? { yr: y.year, avg: y.avg_ret } : b,
-                                  { yr: null, avg:  Infinity });
-      const eq  = r.equity_primary || [];
-      const cum = eq.length ? +(eq[eq.length - 1].value * 100).toFixed(2) : null;
-      return { best: best.yr ? best : null, worst: worst.yr ? worst : null, cum };
-    },
-
     portSetBubbleMinN(n) {
       this.portBubbleMinN = +n;
       this._renderSecBubble('chart-port-bubble', this.portAggregate);
@@ -6595,17 +6583,11 @@ document.addEventListener('alpine:init', () => {
     async createPortfolio() {
       const name = prompt('Portfolio name:', `Research ${new Date().toISOString().slice(0, 10)}`);
       if (!name) return;
-      const body = {
-        name: name.trim(),
-        ticker:    this.ticker,
-        outcome:   this.outcome,
-        date_from: this.dateFrom || null,
-        date_to:   this.dateTo   || null,
-      };
+      // Outcome is NOT set at creation — it is derived from the first signal added.
       try {
         const r = await fetch('/api/factor-analysis/portfolios', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ name: name.trim() }),
         });
         if (!r.ok) { alert('Create failed: ' + await r.text()); return; }
         const p = await r.json();

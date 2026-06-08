@@ -3296,7 +3296,7 @@
             <option :value="null">— Select portfolio —</option>
             <template x-for="p in portfolios" :key="p.id">
               <option :value="p.id"
-                      x-text="p.name + '  (' + (p.signal_count || 0) + ' signals · ' + p.ticker + ' · ' + p.outcome + ')'"></option>
+                      x-text="p.name + '  (' + (p.signal_count || 0) + ' signals' + (p.outcome ? ' · ' + p.outcome : '') + ')'"></option>
             </template>
           </select>
 
@@ -3312,10 +3312,12 @@
         <template x-if="portfolio">
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
             <div style="font-size:11px;color:var(--dim);margin-bottom:6px">
-              Anchor:
-              <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.ticker"></span> ·
-              <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.outcome"></span> ·
-              <span x-text="(portfolio.portfolio?.date_from || 'earliest') + ' → ' + (portfolio.portfolio?.date_to || 'today')"></span>
+              <template x-if="portfolio.portfolio?.outcome">
+                <span>Outcome: <span style="color:var(--text);font-weight:600" x-text="portfolio.portfolio?.outcome"></span></span>
+              </template>
+              <template x-if="!portfolio.portfolio?.outcome">
+                <span style="color:var(--dim)">No outcome set — add the first signal to establish it.</span>
+              </template>
             </div>
             <template x-if="portAggregate">
               <div style="font-size:11px;color:var(--dim);margin-bottom:6px">
@@ -3375,74 +3377,59 @@
           </div>
         </template>
 
-        <!-- Aggregate stats card — 12-field layout matching zone/sec-detail -->
+        <!-- Aggregate stats bar — 12 fields, flex-1 single row (same sizing as primary stats bar) -->
         <template x-if="portAggregate && portAggregate.n > 0">
-          <div class="stats-card" style="margin-bottom:12px">
-            <div class="stat-item">
+          <div style="display:flex;gap:4px;margin-bottom:12px">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Tickers</div>
               <div class="stat-value" x-text="portAggregate.n_tickers"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">N</div>
               <div class="stat-value" x-text="(portAggregate.n || 0).toLocaleString()"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Avg Ret</div>
-              <div class="stat-value" :class="(portAggregate.avg_ret || 0) >= 0 ? 'pos' : 'neg'"
-                   x-text="((portAggregate.avg_ret || 0)*100).toFixed(3)+'%'"></div>
+              <div :class="(portAggregate.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
+                   x-text="((portAggregate.avg_ret||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Median</div>
-              <div class="stat-value" :class="(portAggregate.median || 0) >= 0 ? 'pos' : 'neg'"
-                   x-text="((portAggregate.median || 0)*100).toFixed(3)+'%'"></div>
+              <div :class="(portAggregate.median||0)>=0?'stat-value pos':'stat-value neg'"
+                   x-text="((portAggregate.median||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Std Dev</div>
-              <div class="stat-value" x-text="((portAggregate.std || 0)*100).toFixed(3)+'%'"></div>
+              <div class="stat-value" x-text="((portAggregate.std||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">P5</div>
-              <div class="stat-value neg" x-text="((portAggregate.p5 || 0)*100).toFixed(3)+'%'"></div>
+              <div class="stat-value neg" x-text="((portAggregate.p5||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">P95</div>
-              <div class="stat-value pos" x-text="((portAggregate.p95 || 0)*100).toFixed(3)+'%'"></div>
+              <div class="stat-value pos" x-text="((portAggregate.p95||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Win %</div>
-              <div class="stat-value" :class="(portAggregate.win_rate || 0) >= 0.5 ? 'pos' : 'neg'"
-                   x-text="((portAggregate.win_rate || 0)*100).toFixed(1)+'%'"></div>
+              <div :class="(portAggregate.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
+                   x-text="((portAggregate.win_rate||0)*100).toFixed(1)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label"># Win</div>
-              <div class="stat-value" x-text="(portAggregate.n_winners || 0).toLocaleString()"></div>
+              <div class="stat-value" x-text="(portAggregate.n_winners||0).toLocaleString()"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Avg Win</div>
-              <div class="stat-value pos" x-text="((portAggregate.avg_winners || 0)*100).toFixed(3)+'%'"></div>
+              <div class="stat-value pos" x-text="((portAggregate.avg_winners||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Avg Loss</div>
-              <div class="stat-value neg" x-text="((portAggregate.avg_losers || 0)*100).toFixed(3)+'%'"></div>
+              <div class="stat-value neg" x-text="((portAggregate.avg_losers||0)*100).toFixed(3)+'%'"></div>
             </div>
-            <div class="stat-item">
+            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
               <div class="stat-label">Trd/Yr</div>
-              <div class="stat-value" x-text="(portAggregate.trades_per_year || 0).toFixed(1)"></div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-label">Cum Return</div>
-              <div class="stat-value" :class="(portStats()?.cum ?? 0) >= 0 ? 'pos' : 'neg'"
-                   x-text="portStats()?.cum != null ? portStats().cum.toFixed(2)+'%' : '—'"></div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-label">Best Yr</div>
-              <div class="stat-value pos"
-                   x-text="portStats()?.best?.yr ? portStats().best.yr+' ('+(portStats().best.avg*100).toFixed(2)+'%)' : '—'"></div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-label">Worst Yr</div>
-              <div class="stat-value neg"
-                   x-text="portStats()?.worst?.yr ? portStats().worst.yr+' ('+(portStats().worst.avg*100).toFixed(2)+'%)' : '—'"></div>
+              <div class="stat-value" x-text="(portAggregate.trades_per_year||0).toFixed(1)"></div>
             </div>
           </div>
         </template>
