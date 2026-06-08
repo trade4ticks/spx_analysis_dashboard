@@ -6555,6 +6555,16 @@ document.addEventListener('alpine:init', () => {
 
     // ── Signal Portfolio (third tier) ──────────────────────────────────────
 
+    // Returns the best available signal list for the card display.
+    // portAggregate.signals has real per-signal stats (n_trades, win_rate, avg_ret,
+    // contrib_pct) computed in Phase 5 of the aggregate.  portfolio.signals (from
+    // GET /portfolios/{id}) always has zeroed stats — it is only used before the
+    // aggregate has loaded.
+    get portSignalList() {
+      if (this.portAggregate?.signals?.length) return this.portAggregate.signals;
+      return this.portfolio?.signals || [];
+    },
+
     portSetBubbleMinN(n) {
       this.portBubbleMinN = +n;
       this._renderSecBubble('chart-port-bubble', this.portAggregate);
