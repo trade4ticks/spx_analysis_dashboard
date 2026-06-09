@@ -48,6 +48,14 @@ body {
   flex-shrink: 0;
 }
 .brand { font-size: 15px; font-weight: 800; letter-spacing: .3px; }
+/* PinkBlueLabs wordmark. Pink = canonical theme pink (#e84393, same
+   hex used for .neg). Blue = canonical theme accent (var(--accent),
+   same hex used for .pos / nav-link.on). Labs = default text. */
+.brand-pink { color: #e84393; }
+.brand-blue { color: var(--accent); }
+.brand-labs { color: var(--text); }
+/* Legacy SPX <em>IV</em> rule kept for safety in case any template
+   still has the old markup until it's swept. */
 .brand em { color: var(--accent); font-style: normal; }
 .topbar-div { width: 1px; height: 22px; background: var(--border); }
 .price-block { display: flex; align-items: baseline; gap: 7px; }
