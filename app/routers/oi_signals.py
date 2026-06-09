@@ -51,72 +51,87 @@ _SAFE_METRIC = set("abcdefghijklmnopqrstuvwxyz_0123456789")
 _CV_MEAN_EPSILON = 0.001
 
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS oi_signal_calendar (
-    id          SERIAL PRIMARY KEY,
-    entry_date  DATE NOT NULL,
-    added_at    TIMESTAMPTZ DEFAULT NOW()
-);
+# Schema migration broken into independent, idempotent steps. Each step
+# is executed in its own conn.execute() call so a stumble on one statement
+# can't silently skip the rest (which the prior single-mega-block
+# approach did — the partial unique index never got created on at least
+# one VPS instance, leaving the table without the constraint that the
+# INSERT's ON CONFLICT clause infers against).
+#
+# Each step's own internal guard (IF EXISTS / IF NOT EXISTS / DO block
+# check) decides what to do given the CURRENT real schema state, so a
+# half-migrated table heals on the next restart without any one outer
+# gate skipping the whole repair.
+_DDL_STEPS = [
+    # 1. Make sure the tables exist.
+    """CREATE TABLE IF NOT EXISTS oi_signal_calendar (
+        id          SERIAL PRIMARY KEY,
+        entry_date  DATE NOT NULL,
+        added_at    TIMESTAMPTZ DEFAULT NOW()
+    )""",
+    """CREATE TABLE IF NOT EXISTS tracked_signals (
+        signal_id   INTEGER PRIMARY KEY,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    )""",
 
-CREATE TABLE IF NOT EXISTS tracked_signals (
-    signal_id   INTEGER PRIMARY KEY,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
-);
+    # 2. Add the columns we use today. IF NOT EXISTS so re-runs are no-ops.
+    "ALTER TABLE oi_signal_calendar ADD COLUMN IF NOT EXISTS ticker  TEXT",
+    "ALTER TABLE oi_signal_calendar ADD COLUMN IF NOT EXISTS outcome TEXT",
 
--- Stage 1 legacy-schema teardown. The DO block is idempotent: it only
--- runs when the pre-Stage-1 column trigger_id still exists (i.e. on an
--- existing install). After Stage 1 has deployed once, the column is gone
--- and the block is a no-op on every subsequent startup. Fresh installs
--- skip the block entirely.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'oi_signal_calendar'
-          AND column_name = 'trigger_id'
-    ) THEN
-        TRUNCATE oi_signal_calendar;
-        ALTER TABLE oi_signal_calendar
-            DROP COLUMN IF EXISTS trigger_id,
-            DROP COLUMN IF EXISTS system_id,
-            DROP COLUMN IF EXISTS portfolio_id;
-    END IF;
-END $$;
+    # 3. Drop any legacy columns one at a time. Each check is independent
+    #    so a half-migrated state (some legacy cols dropped, others not)
+    #    heals cleanly. TRUNCATE wipes legacy rows whose identity is
+    #    being removed — the user re-adds via the new flow.
+    """DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='oi_signal_calendar' AND column_name='trigger_id') THEN
+            TRUNCATE oi_signal_calendar;
+            ALTER TABLE oi_signal_calendar DROP COLUMN trigger_id;
+        END IF;
+    END $$""",
+    """DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='oi_signal_calendar' AND column_name='system_id') THEN
+            TRUNCATE oi_signal_calendar;
+            ALTER TABLE oi_signal_calendar DROP COLUMN system_id;
+        END IF;
+    END $$""",
+    """DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='oi_signal_calendar' AND column_name='portfolio_id') THEN
+            TRUNCATE oi_signal_calendar;
+            ALTER TABLE oi_signal_calendar DROP COLUMN portfolio_id;
+        END IF;
+    END $$""",
+    """DO $$ BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name='oi_signal_calendar' AND column_name='signal_id') THEN
+            TRUNCATE oi_signal_calendar;
+            ALTER TABLE oi_signal_calendar DROP COLUMN signal_id;
+        END IF;
+    END $$""",
 
-ALTER TABLE oi_signal_calendar
-    ADD COLUMN IF NOT EXISTS ticker  TEXT,
-    ADD COLUMN IF NOT EXISTS outcome TEXT;
+    # 4. Drop legacy indexes — independent IF EXISTS so each is a clean
+    #    no-op when missing.
+    "DROP INDEX IF EXISTS oi_signal_calendar_trigger_uniq",
+    "DROP INDEX IF EXISTS oi_signal_calendar_system_uniq",
+    "DROP INDEX IF EXISTS oi_signal_calendar_signal_uniq",
 
--- Stage 3.1 migration: calendar entry identity changes from
--- (signal_id, ticker, entry_date) to (ticker, outcome, entry_date).
--- The calendar is signal-agnostic now — a lightweight "what's on"
--- visual. If the same ticker is on a 5d horizon AND a 3d horizon
--- on the same day, that's two separate entries (different exit
--- dates). Old signal-keyed entries get TRUNCATEd; the user re-adds
--- whatever they want via the new + Cal flow on the firing rows.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'oi_signal_calendar'
-          AND column_name = 'signal_id'
-    ) THEN
-        TRUNCATE oi_signal_calendar;
-        ALTER TABLE oi_signal_calendar DROP COLUMN IF EXISTS signal_id;
-    END IF;
-END $$;
+    # 5. Create the partial unique index that the INSERT's ON CONFLICT
+    #    (ticker, outcome, entry_date) WHERE outcome IS NOT NULL clause
+    #    infers against. IF NOT EXISTS so it's safe on every restart.
+    #    This is the step that was previously silently skipped on at
+    #    least one DB; isolating it in its own execute() guarantees it
+    #    runs independent of any other step's success.
+    """CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_outcome_uniq
+        ON oi_signal_calendar (ticker, outcome, entry_date)
+        WHERE outcome IS NOT NULL""",
 
-DROP INDEX IF EXISTS oi_signal_calendar_trigger_uniq;
-DROP INDEX IF EXISTS oi_signal_calendar_system_uniq;
-DROP INDEX IF EXISTS oi_signal_calendar_signal_uniq;
-CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_outcome_uniq
-    ON oi_signal_calendar (ticker, outcome, entry_date)
-    WHERE outcome IS NOT NULL;
-
-DROP TABLE IF EXISTS oi_signal_triggers         CASCADE;
-DROP TABLE IF EXISTS oi_research_systems        CASCADE;
-DROP TABLE IF EXISTS oi_research_system_library CASCADE;
-"""
+    # 6. Drop legacy tables — independent and idempotent.
+    "DROP TABLE IF EXISTS oi_signal_triggers         CASCADE",
+    "DROP TABLE IF EXISTS oi_research_systems        CASCADE",
+    "DROP TABLE IF EXISTS oi_research_system_library CASCADE",
+]
 
 _ensured = False
 
@@ -126,7 +141,8 @@ async def _ensure_tables(pool):
     if _ensured:
         return
     async with pool.acquire() as conn:
-        await conn.execute(_DDL)
+        for sql in _DDL_STEPS:
+            await conn.execute(sql)
     _ensured = True
 
 
@@ -730,10 +746,16 @@ async def add_calendar(body: CalendarAddIn, pool=Depends(get_pool)):
     if not body.ticker or not body.outcome:
         raise HTTPException(400, "ticker and outcome are required")
     async with pool.acquire() as conn:
+        # ON CONFLICT must specify the partial index's WHERE predicate
+        # — postgres only infers a partial unique index when the
+        # conflict_target's predicate matches the index's predicate.
+        # Without the WHERE clause here, postgres won't find an arbiter
+        # even when the index exists, and throws InvalidColumnReferenceError.
         await conn.execute(
             """INSERT INTO oi_signal_calendar (ticker, outcome, entry_date)
                VALUES ($1, $2, $3)
-               ON CONFLICT (ticker, outcome, entry_date) DO NOTHING""",
+               ON CONFLICT (ticker, outcome, entry_date)
+               WHERE outcome IS NOT NULL DO NOTHING""",
             body.ticker, body.outcome, entry)
         row = await conn.fetchrow(
             """SELECT id FROM oi_signal_calendar
