@@ -12,14 +12,20 @@
     .sig-section { display: flex; flex-direction: column; gap: 10px; }
     .sig-section-hdr {
       display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-      border-bottom: 1px solid var(--border); padding-bottom: 8px;
+      /* Section divider in canonical project blue (var(--accent) = #3498db).
+         Same hex used by the Factor Analysis stat bar's .stat-value.pos,
+         the topbar brand accent, the active nav link, etc. */
+      border-bottom: 1px solid var(--accent); padding-bottom: 8px;
     }
     .sig-section-title { font-size: 13px; font-weight: 700; color: var(--text); }
     .sig-section-sub   { font-size: 11px; color: var(--dim); }
 
     /* ── Header strip ── */
     .as-of-label {
-      font-size: 13px; font-weight: 700; color: var(--text);
+      font-size: 13px; font-weight: 700;
+      /* Canonical project blue — matches the as-of TEXT to every other
+         blue accent on the page. */
+      color: var(--accent);
       background: rgba(52,152,219,.10); border: 1px solid rgba(52,152,219,.25);
       padding: 3px 10px; border-radius: 4px; font-family: monospace;
     }
@@ -57,7 +63,7 @@
       font-size: 11px;
       /* GLOBAL convention: blue = good/positive, pink = bad/negative.
          Add-confirmation is positive feedback, so blue. */
-      color: #3498db;
+      color: var(--accent);
       background: rgba(52,152,219,.10); border: 1px solid rgba(52,152,219,.25);
       padding: 4px 10px; border-radius: 4px;
     }
@@ -78,14 +84,21 @@
     .ticker-table-grid thead th {
       background: var(--raised); color: var(--dim);
       font-weight: 700; text-transform: uppercase; letter-spacing: .4px;
+      /* Headers must never be smaller than the values they label. Value
+         cells render at 14px (.head-row td); headers match. */
+      font-size: 14px;
       padding: 6px 8px; border-bottom: 1px solid var(--border);
       white-space: nowrap; text-align: right;
     }
-    .ticker-table-grid thead th.grp-hdr  { font-size: 11px; color: var(--text); text-align: center; padding: 5px 8px; }
-    .ticker-table-grid thead th.col-hdr  { font-size: 11px; padding: 5px 8px; }
+    .ticker-table-grid thead th.grp-hdr  { font-size: 14px; color: var(--text); text-align: center; padding: 5px 8px; }
+    .ticker-table-grid thead th.col-hdr  { font-size: 14px; padding: 5px 8px; }
     .ticker-table-grid thead th.th-left  { text-align: left; }
+    /* Group-banner underlines:
+         UNION     → canonical blue
+         STABILITY → canonical pink (matches the negative-value pink)
+         SLICE     → neutral gray (dim, deliberately) */
     .ticker-table-grid thead th.grp-union     { border-bottom: 2px solid rgba(52,152,219,.45); }
-    .ticker-table-grid thead th.grp-stability { border-bottom: 2px solid rgba(243,156,18,.45); }
+    .ticker-table-grid thead th.grp-stability { border-bottom: 2px solid rgba(232,67,147,.45); }
     .ticker-table-grid thead th.grp-slice     { border-bottom: 2px solid rgba(155,155,155,.45); }
 
     .th-sort { cursor: pointer; user-select: none; transition: background .12s; }
@@ -93,7 +106,7 @@
     .th-sort.sort-active { color: var(--text); background: rgba(52,152,219,.12); }
     .sort-arrow {
       display: inline-block; min-width: 10px;
-      font-size: 10px; margin-left: 4px; color: #3498db;
+      font-size: 10px; margin-left: 4px; color: var(--accent);
     }
 
     /* One tbody per ticker → contains head row + (hidden) detail row */
@@ -121,20 +134,24 @@
     .ticker-table-grid td.col-slice   { opacity: 0.75; }
 
     /* Positive / Negative coloring — GLOBAL convention.
-         blue (#3498db) = positive / good
-         pink (#e84393) = negative / loss
+         blue (var(--accent) = #3498db) = positive / good
+         pink (#e84393)                 = negative / loss
        Applied everywhere avg-style stats render: collapsed rows, expanded
        per-signal rows, the Stage 3 roster (when built). One set of class
-       names so the convention propagates without per-section overrides. */
-    .ticker-table-grid td.pos { color: #3498db; }
-    .ticker-table-grid td.neg { color: #e84393; }
-    .ticker-table-grid td.small-n { color: var(--dim); }
+       names so the convention propagates without per-section overrides.
+       Selector specificity note: the base .head-row td rule below sets
+       color: var(--text) with specificity 0-2-2, which would outrank
+       a flat .ticker-table-grid td.pos (0-2-1) and silently kill the
+       coloring. Scope these to tr.head-row td so they tie/beat that. */
+    .ticker-table-grid tr.head-row td.pos     { color: var(--accent); }
+    .ticker-table-grid tr.head-row td.neg     { color: #e84393; }
+    .ticker-table-grid tr.head-row td.small-n { color: var(--dim); }
 
     .caret { font-size: 11px; color: var(--dim); margin-right: 6px; width: 12px; display: inline-block; }
     .ticker-sym { font-size: 18px; font-weight: 800; color: var(--text); font-family: monospace; }
     .sig-count-chip {
       font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 3px;
-      background: rgba(52,152,219,.18); color: #3498db;
+      background: rgba(52,152,219,.18); color: var(--accent);
     }
 
     /* ── Per-signal detail (expanded view, nested table) ─────────────── */
@@ -161,8 +178,10 @@
     .sig-detail-table td.sig-name-cell { text-align: left; font-family: inherit; }
     .sig-detail-table td.col-slice     { opacity: 0.75; }
     .sig-detail-table td.col-divider   { border-left: 1px solid rgba(255,255,255,.08); }
-    /* Same global convention applied to per-signal cells. */
-    .sig-detail-table td.pos { color: #3498db; }
+    /* Same global convention applied to per-signal cells — using the
+       same var(--accent) source so both views render the IDENTICAL
+       canonical blue, not two different hexes that happened to match. */
+    .sig-detail-table td.pos { color: var(--accent); }
     .sig-detail-table td.neg { color: #e84393; }
     .sig-detail-table td.small-n { color: var(--dim); }
     .sig-detail-table tr:hover td { background: rgba(255,255,255,.03); }
@@ -217,7 +236,7 @@
     .loading-hint { color: var(--dim); font-size: 12px; }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=10"></script>
+  <script src="/static/js/oi_signals.js?v=11"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
