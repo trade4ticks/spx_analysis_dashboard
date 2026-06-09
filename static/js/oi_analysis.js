@@ -6691,8 +6691,12 @@ document.addEventListener('alpine:init', () => {
     // Called directly in the template so Alpine v3 tracks portAggregate reactively
     // and re-evaluates on every change — no merge into portfolio.signals needed.
     portSigStat(psId, field) {
+      console.log('[portSigStat] called psId=', psId, 'field=', field,
+                  'portAggregate.signals=', this.portAggregate?.signals ? this.portAggregate.signals.length + ' entries' : 'null/undefined',
+                  'first-id=', this.portAggregate?.signals?.[0]?.id);
       if (!this.portAggregate?.signals) return 0;
       const s = this.portAggregate.signals.find(x => x.id === psId);
+      console.log('[portSigStat] find result for psId', psId, ':', s ? JSON.stringify(s) : 'NOT FOUND');
       return s ? (s[field] ?? 0) : 0;
     },
 
