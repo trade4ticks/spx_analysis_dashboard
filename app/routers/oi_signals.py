@@ -1,4 +1,4 @@
-"""OI Signals — tracked watchlist + firing engine for the Factor Signals page.
+"""OI Signals — tracked watchlist + firing engine + Open Positions Calendar.
 
 A signal fires for a ticker when the ticker's stored bin assignments (in
 is_bins) for the signal's primary AND secondary metrics fall inside the
@@ -19,15 +19,17 @@ ONCE per request (signal_trade_cache) and every per-ticker aggregation
 reads from the cache. A signal firing on N tickers does not produce N
 history queries.
 
-Stage 1 also tears down the legacy model: oi_signal_triggers,
-oi_research_systems, oi_research_system_library are dropped, and legacy
-oi_signal_calendar rows (trigger_id/system_id based) are wiped so the
-table can be re-used in Stage 3 for signal-based entries.
+Stage 3 adds the Open Positions Calendar back, keyed on the new
+(signal_id, ticker, entry_date) shape. The Gantt's +add source now lives
+on the per-signal rows in the expanded ticker view (frontend). exit_date
+is computed server-side by walking forward `horizon` trading days in the
+ticker's daily_features calendar.
 """
 import json
 import math
+import re
 from collections import defaultdict
-from datetime import date as _date
+from datetime import date as _date, timedelta
 from typing import Optional
 
 import numpy as np
@@ -117,6 +119,12 @@ class TrackedSignalIn(BaseModel):
 
 class TrackedFromPortfolioIn(BaseModel):
     portfolio_id: int
+
+
+class CalendarAddIn(BaseModel):
+    signal_id:  int
+    ticker:     str
+    entry_date: str   # ISO YYYY-MM-DD
 
 
 # ── Tracked-signals CRUD ────────────────────────────────────────────────────
@@ -598,3 +606,134 @@ async def get_roster(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
             "stability":        _stability_stats(trades),
         })
     return {"tracked": out, "n_tracked": len(out)}
+
+
+# ── Open Positions Calendar ─────────────────────────────────────────────────
+
+
+def _parse_horizon(outcome: str) -> int:
+    """Extract the integer day count from an outcome column name like
+    ret_5d_fwd_oc → 5. Falls back to 1 on unparseable names."""
+    m = re.search(r"(\d+)d", outcome or "")
+    return int(m.group(1)) if m else 1
+
+
+async def _ticker_calendars(oi_pool, tickers: list) -> dict:
+    """{ticker: [sorted distinct trade_date,...]} for exit_date walks.
+    One query covers every ticker referenced by the calendar entries."""
+    if not tickers or not oi_pool:
+        return {}
+    async with oi_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT ticker, trade_date FROM daily_features "
+            "WHERE ticker = ANY($1) ORDER BY ticker, trade_date",
+            tickers)
+    by_t: dict = defaultdict(list)
+    for r in rows:
+        by_t[r["ticker"]].append(r["trade_date"])
+    return by_t
+
+
+def _exit_date_for(td_list: list, entry: _date, horizon: int) -> Optional[str]:
+    """Walk horizon trading days forward from entry_date in the ticker's
+    sorted calendar. Returns ISO date string or None on no-data."""
+    if not td_list or horizon <= 0:
+        return None
+    idx = next((i for i, x in enumerate(td_list) if x >= entry), None)
+    if idx is None:
+        return None
+    exit_idx = idx + max(horizon - 1, 0)
+    if exit_idx < len(td_list):
+        return td_list[exit_idx].isoformat()
+    # Past the calendar's end (rare — only for very recent entries before
+    # the next OHLC ingest). Extrapolate at ~1.4 cal days per trading day.
+    extra = exit_idx - len(td_list) + 1
+    return (td_list[-1] + timedelta(days=int(extra * 1.4))).isoformat()
+
+
+@router.get("/calendar")
+async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """Calendar entries with computed exit_date. Each row carries the
+    signal_id and the ticker but NOT the color — color is derived
+    frontend-side from a hash of the ticker symbol so the same ticker
+    paints the same color across every entry on the Gantt."""
+    await _ensure_tables(pool)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, signal_id, ticker, entry_date, added_at
+               FROM oi_signal_calendar
+               WHERE signal_id IS NOT NULL
+               ORDER BY entry_date""")
+    if not rows:
+        return []
+    sids = list({r["signal_id"] for r in rows})
+    sig_by_id: dict = {}
+    if oi_pool:
+        async with oi_pool.acquire() as conn:
+            sig_rows = await conn.fetch(
+                """SELECT id, name, outcome
+                   FROM signals WHERE id = ANY($1)""", sids)
+        sig_by_id = {r["id"]: r for r in sig_rows}
+    tickers   = list({r["ticker"] for r in rows if r["ticker"]})
+    calendars = await _ticker_calendars(oi_pool, tickers)
+
+    out = []
+    for r in rows:
+        sig = sig_by_id.get(r["signal_id"])
+        name    = sig["name"]    if sig else "(deleted signal)"
+        outcome = sig["outcome"] if sig else None
+        horizon = _parse_horizon(outcome) if outcome else 1
+        td      = calendars.get(r["ticker"], [])
+        exit_d  = _exit_date_for(td, r["entry_date"], horizon)
+        out.append({
+            "id":         r["id"],
+            "signal_id":  r["signal_id"],
+            "name":       name,
+            "ticker":     r["ticker"],
+            "outcome":    outcome,
+            "entry_date": r["entry_date"].isoformat(),
+            "exit_date":  exit_d,
+        })
+    return out
+
+
+@router.post("/calendar")
+async def add_calendar(body: CalendarAddIn,
+                       pool=Depends(get_pool),
+                       oi_pool=Depends(get_oi_pool)):
+    """Add a position to the Gantt. Keyed on (signal_id, ticker, entry_date)
+    — duplicate adds are no-ops via the partial unique index. Idempotent."""
+    await _ensure_tables(pool)
+    try:
+        entry = _date.fromisoformat(body.entry_date)
+    except ValueError:
+        raise HTTPException(400, "entry_date must be ISO YYYY-MM-DD")
+    # Cross-DB signal existence check so we fail fast on a stale signal_id.
+    if oi_pool:
+        async with oi_pool.acquire() as conn:
+            ok = await conn.fetchval(
+                "SELECT 1 FROM signals WHERE id = $1", body.signal_id)
+        if not ok:
+            raise HTTPException(404, f"signal_id {body.signal_id} not found")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO oi_signal_calendar (signal_id, ticker, entry_date)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (signal_id, ticker, entry_date) DO NOTHING""",
+            body.signal_id, body.ticker, entry)
+        row = await conn.fetchrow(
+            """SELECT id FROM oi_signal_calendar
+               WHERE signal_id = $1 AND ticker = $2 AND entry_date = $3""",
+            body.signal_id, body.ticker, entry)
+    return {"id": row["id"], "signal_id": body.signal_id,
+            "ticker": body.ticker, "entry_date": body.entry_date}
+
+
+@router.delete("/calendar/{cid}")
+async def delete_calendar(cid: int, pool=Depends(get_pool)):
+    """Remove one calendar entry by id."""
+    await _ensure_tables(pool)
+    async with pool.acquire() as conn:
+        deleted = await conn.fetchval(
+            "DELETE FROM oi_signal_calendar WHERE id = $1 RETURNING id", cid)
+    return {"ok": deleted is not None}

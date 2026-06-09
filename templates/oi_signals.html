@@ -240,11 +240,46 @@
     }
     .btn-remove:hover { color: #e84393; background: rgba(232,67,147,.12); }
 
+    /* ── + Cal button (per-signal action in expanded firing rows) ─── */
+    .btn-cal {
+      font-size: 11px; font-weight: 700;
+      padding: 3px 9px; border-radius: 3px;
+      background: rgba(52,152,219,.14);
+      border: 1px solid rgba(52,152,219,.45);
+      color: var(--accent); cursor: pointer; white-space: nowrap;
+      font-family: inherit;
+    }
+    .btn-cal:hover { background: rgba(52,152,219,.28); }
+    .sig-detail-table td.td-action { text-align: right; padding-right: 6px; }
+
+    /* ── Roster — collapsible header + table-level styling ───────────── */
+    .roster-hdr { cursor: pointer; user-select: none; }
+    .roster-hdr:hover .sig-section-title { color: var(--accent); }
+    .ticker-table-grid td.td-tracked {
+      text-align: left; padding-left: 14px;
+      font-family: monospace; color: var(--dim); font-weight: 600;
+      font-size: 12px;
+    }
+    .ticker-table-grid td.sig-name-cell {
+      text-align: left;
+      font-family: inherit; font-weight: 600;
+    }
+    .ticker-table-grid td.td-action { text-align: right; padding-right: 14px; }
+    .btn-untrack {
+      font-size: 11px; font-weight: 700;
+      padding: 3px 9px; border-radius: 3px;
+      background: transparent;
+      border: 1px solid rgba(232,67,147,.4);
+      color: #e84393; cursor: pointer; white-space: nowrap;
+      font-family: inherit;
+    }
+    .btn-untrack:hover { background: rgba(232,67,147,.15); }
+
     .empty-hint   { color: var(--dim); font-size: 12px; padding: 20px 0; }
     .loading-hint { color: var(--dim); font-size: 12px; }
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_signals.js?v=12"></script>
+  <script src="/static/js/oi_signals.js?v=13"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -308,7 +343,7 @@
         </div>
         <span class="tracked-toast" x-show="toast" x-text="toast" x-transition></span>
         <div class="tracked-summary">
-          <b x-text="firingData.n_tracked ?? 0"></b> signals tracked · untrack from the roster (coming in Stage 3)
+          <b x-text="firingData.n_tracked ?? 0"></b> signals tracked · untrack from the roster at the bottom of the page
         </div>
       </div>
 
@@ -396,6 +431,7 @@
                         <th class="hdr-sig" rowspan="2">Signal</th>
                         <th class="hdr-overall" colspan="9">OVERALL — across all tickers</th>
                         <th class="hdr-slice"   colspan="3" x-text="row.ticker + ' slice'"></th>
+                        <th rowspan="2"></th>
                       </tr>
                       <tr>
                         <th>n</th><th>avg</th><th>med</th><th>std</th>
@@ -421,9 +457,15 @@
                           <td x-text="pctOf1(sig.overall.win_rate)"></td>
                           <td class="pos" x-text="pct(sig.overall.avg_win)"></td>
                           <td class="neg" x-text="pct(sig.overall.avg_loss)"></td>
-                          <td class="col-divider col-slice" :class="smallN(sig.ticker_slice.n)" x-text="sig.ticker_slice.n.toLocaleString()"></td>
-                          <td class="col-slice" :class="posneg(sig.ticker_slice.avg_ret)" x-text="pct(sig.ticker_slice.avg_ret)"></td>
-                          <td class="col-slice" x-text="pctOf1(sig.ticker_slice.win_rate)"></td>
+                          <td class="col-divider" :class="smallN(sig.ticker_slice.n)" x-text="sig.ticker_slice.n.toLocaleString()"></td>
+                          <td :class="posneg(sig.ticker_slice.avg_ret)" x-text="pct(sig.ticker_slice.avg_ret)"></td>
+                          <td x-text="pctOf1(sig.ticker_slice.win_rate)"></td>
+                          <td class="td-action">
+                            <button class="btn-cal" @click.stop="addToCalendar(sig.signal_id, row.ticker, firingData.as_of, sig.name)"
+                                    :title="'Add ' + row.ticker + ' · ' + sig.name + ' to the Open Positions Calendar'">
+                              + Cal
+                            </button>
+                          </td>
                         </tr>
                       </template>
                     </tbody>
@@ -437,14 +479,16 @@
     </div><!-- /section 1 -->
 
 
-    <!-- ══ SECTION 3 (kept): Open Positions Calendar ════════════════════ -->
+    <!-- ══ SECTION 2: Open Positions Calendar ═══════════════════════════ -->
     <div class="sig-section">
       <div class="sig-section-hdr">
         <span class="sig-section-title">Open Positions Calendar</span>
         <span class="sig-section-sub" x-text="calEntries.length ? calEntries.length + ' trades' : 'No trades added'"></span>
+        <span class="loading-hint" x-show="calLoading" style="margin-left:8px">Loading…</span>
       </div>
-      <div class="empty-hint" x-show="!calEntries.length">
-        Calendar wiring lands in Stage 3 — for now, this section is inert.
+      <div class="empty-hint" x-show="!calLoading && !calEntries.length">
+        Click <strong>+ Cal</strong> on a firing signal above to add a position to this calendar.
+        Color follows the ticker, so the same ticker stays the same color across days.
       </div>
       <div class="gantt-outer" x-show="calEntries.length > 0">
         <div class="gantt-hdr-row">
@@ -460,8 +504,10 @@
             <div class="gantt-row">
               <div class="gantt-label">
                 <span class="gantt-label-name"
-                      :title="entry.ticker + ' · ' + entry.name"
-                      x-text="entry.ticker + ' · ' + entry.name"></span>
+                      :title="entry.ticker + ' · ' + entry.name">
+                  <span class="color-dot" :style="'background:' + tickerColor(entry.ticker)"></span>
+                  <span x-text="entry.ticker + ' · ' + entry.name"></span>
+                </span>
                 <button class="btn-remove" @click="removeFromCalendar(entry.id)" title="Remove">×</button>
               </div>
               <div class="gantt-bar-area">
@@ -473,6 +519,108 @@
             <div class="gantt-row-sep"></div>
           </div>
         </template>
+      </div>
+    </div>
+
+
+    <!-- ══ SECTION 3: Roster (every tracked signal, firing or not) ══════ -->
+    <!-- Watchlist-with-performance lens. Same sortable-header pattern as
+         the firing table at the top, but flat — one row per tracked
+         signal, no per-ticker breakdown. Untrack lives ONLY here. -->
+    <div class="sig-section">
+      <div class="sig-section-hdr roster-hdr" @click="toggleRoster()">
+        <span class="caret" x-text="rosterCollapsed ? '▶' : '▼'"></span>
+        <span class="sig-section-title">All Tracked Signals</span>
+        <span class="sig-section-sub">
+          <b x-text="roster.length"></b> tracked
+        </span>
+        <span class="loading-hint" x-show="rosterLoading" style="margin-left:8px">Loading…</span>
+      </div>
+      <div x-show="!rosterCollapsed && !rosterLoading && !roster.length" class="empty-hint">
+        No signals tracked yet. Add one in the panel at the top of the page.
+      </div>
+      <div class="ticker-table-wrap" x-show="!rosterCollapsed && roster.length > 0">
+        <table class="ticker-table-grid">
+          <thead>
+            <tr>
+              <th class="th-sort th-left" rowspan="2"
+                  :class="rosterSortClass('tracked_at')" @click="sortRosterBy('tracked_at')">
+                Tracked <span class="sort-arrow" x-text="rosterSortArrow('tracked_at')"></span>
+              </th>
+              <th class="th-sort th-left" rowspan="2"
+                  :class="rosterSortClass('name')" @click="sortRosterBy('name')">
+                Signal <span class="sort-arrow" x-text="rosterSortArrow('name')"></span>
+              </th>
+              <th class="grp-hdr grp-union"     colspan="9">OVERALL — across all tickers</th>
+              <th class="grp-hdr grp-stability" colspan="3">STABILITY (by year)</th>
+              <th rowspan="2"></th>
+            </tr>
+            <tr>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_n')"    @click="sortRosterBy('o_n')">n     <span class="sort-arrow" x-text="rosterSortArrow('o_n')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_avg')"  @click="sortRosterBy('o_avg')">avg <span class="sort-arrow" x-text="rosterSortArrow('o_avg')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_med')"  @click="sortRosterBy('o_med')">med <span class="sort-arrow" x-text="rosterSortArrow('o_med')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_std')"  @click="sortRosterBy('o_std')">std <span class="sort-arrow" x-text="rosterSortArrow('o_std')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_p5')"   @click="sortRosterBy('o_p5')">p5   <span class="sort-arrow" x-text="rosterSortArrow('o_p5')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_p95')"  @click="sortRosterBy('o_p95')">p95 <span class="sort-arrow" x-text="rosterSortArrow('o_p95')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_win')"  @click="sortRosterBy('o_win')">win% <span class="sort-arrow" x-text="rosterSortArrow('o_win')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_avgw')" @click="sortRosterBy('o_avgw')">avg+ <span class="sort-arrow" x-text="rosterSortArrow('o_avgw')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('o_avgl')" @click="sortRosterBy('o_avgl')">avg− <span class="sort-arrow" x-text="rosterSortArrow('o_avgl')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('s_pyr')"  @click="sortRosterBy('s_pyr')">+yrs <span class="sort-arrow" x-text="rosterSortArrow('s_pyr')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('s_cva')"  @click="sortRosterBy('s_cva')">CV avg <span class="sort-arrow" x-text="rosterSortArrow('s_cva')"></span></th>
+              <th class="th-sort col-hdr" :class="rosterSortClass('s_dn')"   @click="sortRosterBy('s_dn')">CV n  <span class="sort-arrow" x-text="rosterSortArrow('s_dn')"></span></th>
+            </tr>
+          </thead>
+          <template x-for="r in sortedRoster" :key="'rost-'+r.signal_id">
+            <tbody class="tk-body">
+              <!-- Normal row — signal still exists in /signals. -->
+              <template x-if="!r.missing">
+                <tr class="head-row">
+                  <td class="td-tracked" x-text="(r.tracked_at || '').slice(0,10)"></td>
+                  <td class="sig-name-cell">
+                    <div class="sig-name" x-text="r.name"></div>
+                    <div class="sig-sub"
+                         x-text="r.primary_metric + ' × ' + r.secondary_metric
+                                 + ' · ' + r.outcome + ' · ' + (r.cell_set ? r.cell_set.length : 0) + ' cells @ ' + r.n_bins"></div>
+                  </td>
+                  <td :class="smallN(r.overall.n)"          x-text="r.overall.n.toLocaleString()"></td>
+                  <td :class="posneg(r.overall.avg_ret)"    x-text="pct(r.overall.avg_ret)"></td>
+                  <td x-text="pct(r.overall.median)"></td>
+                  <td x-text="pct(r.overall.std_dev)"></td>
+                  <td x-text="pct(r.overall.p5)"></td>
+                  <td x-text="pct(r.overall.p95)"></td>
+                  <td x-text="pctOf1(r.overall.win_rate)"></td>
+                  <td class="pos" x-text="pct(r.overall.avg_win)"></td>
+                  <td class="neg" x-text="pct(r.overall.avg_loss)"></td>
+                  <td class="col-divider"
+                      x-text="r.stability.positive_years + ' / ' + r.stability.total_years"></td>
+                  <td x-text="cvOrDash(r.stability.cv_yearly_avg_ret)"></td>
+                  <td x-text="cvOrDash(r.stability.dispersion_yearly_n)"></td>
+                  <td class="td-action">
+                    <button class="btn-untrack" @click="untrackSignal(r.signal_id, r.name)"
+                            title="Untrack this signal">× untrack</button>
+                  </td>
+                </tr>
+              </template>
+              <!-- Orphan row — tracked_signals row references a signal
+                   that was deleted from /signals. Single colspan'd cell
+                   so the column grid stays aligned. -->
+              <template x-if="r.missing">
+                <tr class="head-row">
+                  <td class="td-tracked" x-text="(r.tracked_at || '').slice(0,10)"></td>
+                  <td class="sig-name-cell">
+                    <div class="sig-name">(deleted signal)</div>
+                    <div class="sig-sub" x-text="'signal_id ' + r.signal_id + ' is no longer in /signals'"></div>
+                  </td>
+                  <td colspan="12" style="text-align:center;color:var(--dim)">—</td>
+                  <td class="td-action">
+                    <button class="btn-untrack" @click="untrackSignal(r.signal_id, 'signal ' + r.signal_id)"
+                            title="Untrack this signal">× untrack</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </template>
+        </table>
       </div>
     </div>
 

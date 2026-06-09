@@ -32,21 +32,31 @@ document.addEventListener('alpine:init', () => {
     toast:           '',
     _toastTimer:     null,
 
-    // ── Calendar (kept inert for Stage 3 rewire) ────────────────────────
+    // ── Calendar (wired in Stage 3) ─────────────────────────────────────
     calEntries:  [],
+    calLoading:  false,
     _ganttRange: { start: new Date(), end: new Date(), totalDays: 60 },
+
+    // ── Roster (watchlist-with-performance, every tracked signal) ───────
+    roster:           [],
+    rosterLoading:    false,
+    rosterCollapsed:  true,         // collapsed by default — firing view is primary
+    rosterSortKey:    'tracked_at',
+    rosterSortDir:    'desc',       // newest first
 
     // ─────────────────────────────────────────────────────────────────────
 
     async init() {
-      // Three independent fetches in parallel: signals list + portfolios list
-      // + firing payload. Tracked signals are reflected in the firing payload
-      // (n_tracked + tickers), so no separate /tracked call here.
+      // Five independent fetches in parallel. Tracked-signals state is
+      // reflected in the firing + roster payloads (n_tracked, tickers,
+      // roster items), so no separate /tracked call here.
       this._updateGanttRange();
       await Promise.all([
         this._loadSignals(),
         this._loadPortfolios(),
         this.loadFiring(),
+        this.loadCalendar(),
+        this.loadRoster(),
       ]);
     },
 
@@ -305,15 +315,161 @@ document.addEventListener('alpine:init', () => {
       return (typeof n === 'number' && n < 30) ? 'small-n' : '';
     },
 
-    // ── Gantt helpers (kept from pre-rebuild for Stage 3 rewire) ────────
+    // ── Calendar (Open Positions Gantt) ──────────────────────────────────
+
+    async loadCalendar() {
+      this.calLoading = true;
+      try {
+        const r = await fetch('/api/factor-signals/calendar');
+        if (r.ok) {
+          this.calEntries = await r.json();
+          this._updateGanttRange();
+        }
+      } catch (_) {}
+      this.calLoading = false;
+    },
+
+    async addToCalendar(signalId, ticker, entryDate, signalName) {
+      try {
+        const r = await fetch('/api/factor-signals/calendar', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            signal_id:  signalId,
+            ticker:     ticker,
+            entry_date: entryDate,
+          }),
+        });
+        if (r.ok) {
+          this._showToast(`Added to calendar: ${ticker} · ${signalName}`);
+          await this.loadCalendar();
+        } else {
+          const detail = (await r.json().catch(() => ({}))).detail || 'add failed';
+          this._showToast(`Calendar add failed: ${detail}`, true);
+        }
+      } catch (_) {
+        this._showToast('Calendar add failed — network error', true);
+      }
+    },
 
     async removeFromCalendar(id) {
-      // Stage 3 will POST a real signal-keyed delete; for now this is a
-      // local-only remove so the inert UI doesn't error if a stub row
-      // is injected during testing.
+      try {
+        await fetch(`/api/factor-signals/calendar/${id}`, { method: 'DELETE' });
+      } catch (_) {}
       this.calEntries = this.calEntries.filter(e => e.id !== id);
       this._updateGanttRange();
     },
+
+    // Deterministic per-ticker color — HSL hue stepped over a wide range
+    // so AAPL is always blue-ish and ZM is always orange-ish across days.
+    // Two large coprime multipliers spread visually-close hashes apart,
+    // so JPM/JNJ/JCI don't all land within 10° of each other.
+    tickerColor(ticker) {
+      const s = String(ticker || '').toUpperCase();
+      let h = 0;
+      for (let i = 0; i < s.length; i++) {
+        h = (h * 131 + s.charCodeAt(i) * 977) >>> 0;
+      }
+      const hue = h % 360;
+      return `hsl(${hue}, 65%, 55%)`;
+    },
+
+    // ── Roster (every tracked signal, firing or not) ────────────────────
+
+    async loadRoster() {
+      this.rosterLoading = true;
+      try {
+        const r = await fetch('/api/factor-signals/roster');
+        if (r.ok) {
+          const j = await r.json();
+          this.roster = j.tracked || [];
+        }
+      } catch (_) {}
+      this.rosterLoading = false;
+    },
+
+    toggleRoster() {
+      this.rosterCollapsed = !this.rosterCollapsed;
+    },
+
+    async untrackSignal(signalId, signalName) {
+      // Removes from tracked_signals → drops from BOTH the firing view
+      // (top) and the roster (bottom). Both reloaded after delete so the
+      // page reflects the change immediately.
+      if (!confirm(`Untrack "${signalName}"?`)) return;
+      try {
+        await fetch(`/api/factor-signals/tracked/${signalId}`, { method: 'DELETE' });
+        this._showToast(`Untracked '${signalName}'`);
+        await Promise.all([this.loadFiring(), this.loadRoster()]);
+      } catch (_) {
+        this._showToast('Untrack failed — network error', true);
+      }
+    },
+
+    // Roster sort dispatcher — separate state from firing sort so each
+    // table remembers its own column independently.
+    sortRosterBy(key) {
+      if (this.rosterSortKey === key) {
+        this.rosterSortDir = this.rosterSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.rosterSortKey = key;
+        // tracked_at default DESC (newest first); name default ASC; other
+        // numeric columns default DESC (largest first).
+        this.rosterSortDir = key === 'name' ? 'asc' : 'desc';
+      }
+    },
+    rosterSortClass(key) {
+      return this.rosterSortKey === key ? 'sort-active' : '';
+    },
+    rosterSortArrow(key) {
+      if (this.rosterSortKey !== key) return '';
+      return this.rosterSortDir === 'asc' ? '▲' : '▼';
+    },
+    _rosterValueFor(row, key) {
+      const o = row.overall   || {};
+      const s = row.stability || {};
+      switch (key) {
+        case 'tracked_at': return row.tracked_at;
+        case 'name':       return (row.name || '').toLowerCase();
+        case 'outcome':    return row.outcome;
+        case 'o_n':    return o.n;
+        case 'o_avg':  return o.avg_ret;
+        case 'o_med':  return o.median;
+        case 'o_std':  return o.std_dev;
+        case 'o_p5':   return o.p5;
+        case 'o_p95':  return o.p95;
+        case 'o_win':  return o.win_rate;
+        case 'o_avgw': return o.avg_win;
+        case 'o_avgl': return o.avg_loss;
+        case 's_pyr':  return s.total_years > 0 ? s.positive_years / s.total_years : null;
+        case 's_cva':  return s.cv_yearly_avg_ret;
+        case 's_dn':   return s.dispersion_yearly_n;
+        default:       return 0;
+      }
+    },
+    get sortedRoster() {
+      const arr = (this.roster || []).slice();
+      const key = this.rosterSortKey;
+      const dir = this.rosterSortDir === 'asc' ? 1 : -1;
+      const isMissing = (v) =>
+        v === null || v === undefined ||
+        (typeof v === 'number' && !isFinite(v));
+      arr.sort((rowA, rowB) => {
+        const va = this._rosterValueFor(rowA, key);
+        const vb = this._rosterValueFor(rowB, key);
+        const ma = isMissing(va), mb = isMissing(vb);
+        if (ma && mb) return 0;
+        if (ma) return 1;
+        if (mb) return -1;
+        if (typeof va === 'string' || typeof vb === 'string') {
+          return String(va).localeCompare(String(vb)) * dir;
+        }
+        return (va - vb) * dir;
+      });
+      return arr;
+    },
+
+    // ── Gantt helpers (preserved verbatim — math unchanged from Stage 2) ─
 
     _updateGanttRange() {
       const today = new Date();
@@ -346,7 +502,10 @@ document.addEventListener('alpine:init', () => {
       const endOff   = Math.min(totalDays, (e - start) / 86400000 + 1);
       const leftPct  = (startOff / totalDays) * 100;
       const widthPct = Math.max(0.8, (endOff - startOff) / totalDays * 100);
-      const col = entry.color || '#3498db';
+      // Color is derived from the TICKER, not the signal — a ticker
+      // entered on different days with overlapping holds renders in the
+      // same color across the Gantt.
+      const col = this.tickerColor(entry.ticker);
       return `left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%;background:${col}`;
     },
 
