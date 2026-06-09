@@ -16,6 +16,14 @@ document.addEventListener('alpine:init', () => {
     firingLoading: false,
     expandedTickers: {},       // ticker -> bool
 
+    // ── Sort state ──────────────────────────────────────────────────────
+    // Default: most-confirmed tickers at the top (#sigs desc). Click a
+    // header to switch column; click the same header again to flip the
+    // direction. Sort only reorders the head rows — each tbody owns its
+    // own detail row, so expansions ride along through every reorder.
+    sortKey: 'n_signals_firing',
+    sortDir: 'desc',           // 'asc' | 'desc'
+
     // ── Tracked-signals add controls ────────────────────────────────────
     availSignals:    [],       // GET /api/factor-analysis/signals
     portfolios:      [],       // GET /api/factor-analysis/portfolios
@@ -93,6 +101,88 @@ document.addEventListener('alpine:init', () => {
 
     hasFirings() {
       return (this.firingData.tickers || []).length > 0;
+    },
+
+    // ── Sorting ─────────────────────────────────────────────────────────
+    // sortBy: first click on a new column uses a column-appropriate
+    // default direction (alpha for ticker, descending for everything
+    // numeric — biggest at the top is what you usually want); repeat
+    // clicks flip. Active-column arrow + highlight live in sortArrow /
+    // sortClass below, read by the thead template.
+    sortBy(key) {
+      if (this.sortKey === key) {
+        this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sortKey = key;
+        this.sortDir = key === 'ticker' ? 'asc' : 'desc';
+      }
+    },
+    sortClass(key) {
+      return this.sortKey === key ? 'sort-active' : '';
+    },
+    sortArrow(key) {
+      if (this.sortKey !== key) return '';
+      return this.sortDir === 'asc' ? '▲' : '▼';
+    },
+
+    // Sort-key dispatcher — maps the column code from the template's
+    // @click to the actual field on a ticker row. Kept in one place so
+    // adding a sortable column = one line here + one <th> in the template.
+    _sortValueFor(row, key) {
+      const a = row.scope_a || {};
+      const s = row.scope_a_stability || {};
+      const b = row.scope_b || {};
+      switch (key) {
+        case 'ticker':           return row.ticker;
+        case 'n_signals_firing': return row.n_signals_firing;
+        case 'a_n':    return a.n;
+        case 'a_avg':  return a.avg_ret;
+        case 'a_med':  return a.median;
+        case 'a_std':  return a.std_dev;
+        case 'a_p5':   return a.p5;
+        case 'a_p95':  return a.p95;
+        case 'a_win':  return a.win_rate;
+        case 'a_avgw': return a.avg_win;
+        case 'a_avgl': return a.avg_loss;
+        // Stability — positive-years column sorts by RATIO (9/9 ranks
+        // above 8/10). Returns null on no-data so it sinks under the
+        // null-handler rule below.
+        case 's_pyr':
+          return s.total_years > 0
+            ? s.positive_years / s.total_years
+            : null;
+        case 's_cva':  return s.cv_yearly_avg_ret;       // may be null near zero
+        case 's_dn':   return s.dispersion_yearly_n;
+        case 'b_n':    return b.n;
+        case 'b_avg':  return b.avg_ret;
+        case 'b_win':  return b.win_rate;
+        default:       return 0;
+      }
+    },
+
+    get sortedTickers() {
+      const arr = (this.firingData.tickers || []).slice();
+      const key = this.sortKey;
+      const dir = this.sortDir === 'asc' ? 1 : -1;
+      // Nulls / NaN / undefined always sink to the bottom regardless of
+      // direction — a missing CV is "no data," not a tiny number. Same
+      // convention as a standard spreadsheet sort.
+      const isMissing = (v) =>
+        v === null || v === undefined ||
+        (typeof v === 'number' && !isFinite(v));
+      arr.sort((rowA, rowB) => {
+        const va = this._sortValueFor(rowA, key);
+        const vb = this._sortValueFor(rowB, key);
+        const ma = isMissing(va), mb = isMissing(vb);
+        if (ma && mb) return 0;
+        if (ma) return 1;
+        if (mb) return -1;
+        if (typeof va === 'string' || typeof vb === 'string') {
+          return String(va).localeCompare(String(vb)) * dir;
+        }
+        return (va - vb) * dir;
+      });
+      return arr;
     },
 
     // ── Ticker row expand/collapse ──────────────────────────────────────
