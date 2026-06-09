@@ -3366,12 +3366,12 @@
                         title="Remove from this portfolio">×</span>
                 </div>
                 <div style="display:flex;gap:10px;font-size:11px;color:var(--muted)">
-                  <span><b x-text="portSigStat(sig.id,'n_trades').toLocaleString()"></b> trades</span>
-                  <span>win <b x-text="(portSigStat(sig.id,'win_rate')*100).toFixed(1)+'%'"></b></span>
-                  <span>avg <b :class="portSigStat(sig.id,'avg_ret')>=0?'pos':'neg'"
-                               x-text="(portSigStat(sig.id,'avg_ret')*100).toFixed(3)+'%'"></b></span>
+                  <span><b x-text="(portAggregate?.signals?.find(s=>s.id===sig.id)?.n_trades??0).toLocaleString()"></b> trades</span>
+                  <span>win <b x-text="((portAggregate?.signals?.find(s=>s.id===sig.id)?.win_rate??0)*100).toFixed(1)+'%'"></b></span>
+                  <span>avg <b :class="(portAggregate?.signals?.find(s=>s.id===sig.id)?.avg_ret??0)>=0?'pos':'neg'"
+                               x-text="((portAggregate?.signals?.find(s=>s.id===sig.id)?.avg_ret??0)*100).toFixed(3)+'%'"></b></span>
                   <span style="color:var(--dim)" title="Contribution to union P&L"
-                        x-text="portSigStat(sig.id,'contrib_pct').toFixed(1)+'%'"></span>
+                        x-text="(portAggregate?.signals?.find(s=>s.id===sig.id)?.contrib_pct??0).toFixed(1)+'%'"></span>
                 </div>
               </div>
             </template>
