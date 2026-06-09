@@ -383,18 +383,39 @@ document.addEventListener('alpine:init', () => {
       this._updateGanttRange();
     },
 
-    // Deterministic per-ticker color — HSL hue stepped over a wide range
-    // so AAPL is always blue-ish and ZM is always orange-ish across days.
-    // Two large coprime multipliers spread visually-close hashes apart,
-    // so JPM/JNJ/JCI don't all land within 10° of each other.
-    tickerColor(ticker) {
+    // Deterministic per-ticker bar color. The HUE comes from a hash of
+    // the ticker symbol (two large coprime multipliers spread visually
+    // close hashes apart, so JPM/JNJ/JCI don't all land within 10° of
+    // each other) — so ADBE is always the same color FAMILY across days
+    // and across horizons. The LIGHTNESS varies by outcome horizon so a
+    // ticker on simultaneous positions at different horizons renders as
+    // distinguishable shades of the same hue family — ADBE-1d lighter,
+    // ADBE-5d darker, both still recognizably "ADBE".
+    tickerColor(ticker, outcome) {
       const s = String(ticker || '').toUpperCase();
       let h = 0;
       for (let i = 0; i < s.length; i++) {
         h = (h * 131 + s.charCodeAt(i) * 977) >>> 0;
       }
       const hue = h % 360;
-      return `hsl(${hue}, 65%, 55%)`;
+
+      // Parse horizon from outcome (e.g. ret_5d_fwd_oc → 5). Map to a
+      // lightness ladder that puts visible distance between the common
+      // horizons (1d / 3d / 5d / 10d) without losing the ticker hue.
+      let lightness = 55;
+      if (outcome) {
+        const m = String(outcome).match(/(\d+)d/);
+        if (m) {
+          const h_days = parseInt(m[1], 10);
+          if      (h_days <= 1)  lightness = 68;
+          else if (h_days <= 2)  lightness = 62;
+          else if (h_days <= 3)  lightness = 56;
+          else if (h_days <= 5)  lightness = 46;
+          else if (h_days <= 10) lightness = 36;
+          else                   lightness = 28;
+        }
+      }
+      return `hsl(${hue}, 65%, ${lightness}%)`;
     },
 
     // ── Roster (every tracked signal, firing or not) ────────────────────
@@ -525,10 +546,11 @@ document.addEventListener('alpine:init', () => {
       const endOff   = Math.min(totalDays, (e - start) / 86400000 + 1);
       const leftPct  = (startOff / totalDays) * 100;
       const widthPct = Math.max(0.8, (endOff - startOff) / totalDays * 100);
-      // Color is derived from the TICKER, not the signal — a ticker
-      // entered on different days with overlapping holds renders in the
-      // same color across the Gantt.
-      const col = this.tickerColor(entry.ticker);
+      // Color is derived from the (ticker, outcome) — the hue is the
+      // ticker's family, lightness varies by outcome horizon so
+      // simultaneous positions on the same ticker at different
+      // horizons are visibly distinguishable.
+      const col = this.tickerColor(entry.ticker, entry.outcome);
       return `left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%;background:${col}`;
     },
 

@@ -683,21 +683,66 @@ async def _ticker_calendars(oi_pool, tickers: list) -> dict:
     return by_t
 
 
+def _next_business_day(d: _date) -> _date:
+    """Add one calendar day, then skip Saturdays and Sundays. Doesn't
+    know about market holidays, so the projection past the end of the
+    daily_features calendar can land on a holiday for long horizons —
+    acceptable for the bleeding-edge case where we have a few trade
+    dates to project past the end. Inside the known calendar we use the
+    actual trade_date list and skip all holidays correctly."""
+    d = d + timedelta(days=1)
+    while d.weekday() >= 5:   # 5 = Saturday, 6 = Sunday
+        d = d + timedelta(days=1)
+    return d
+
+
 def _exit_date_for(td_list: list, entry: _date, horizon: int) -> Optional[str]:
-    """Walk horizon trading days forward from entry_date in the ticker's
-    sorted calendar. Returns ISO date string or None on no-data."""
-    if not td_list or horizon <= 0:
+    """Exit date = the Nth trade_date INCLUSIVE OF entry, where N = horizon.
+    Entry day is day 1. A 1d outcome (held open-to-close same session)
+    exits on the entry day itself; a 5d outcome entered Mon exits Fri
+    of the same week (assuming no holiday).
+
+    The walk uses the real trade_date list from daily_features, so
+    weekends and holidays are skipped automatically — those dates
+    simply aren't in the list. When entry is at or past the last known
+    trade_date (no future rows yet), we project by adding CALENDAR days
+    and skipping Sat/Sun; this misses holidays in the projection but
+    only affects entries within the last few days at the bleeding edge,
+    where the user re-checks anyway after the next data ingest."""
+    if horizon <= 0:
         return None
+    # 1d (entry day only) always returns the entry date itself, even if
+    # entry isn't yet in daily_features (today before ingest).
+    if horizon == 1:
+        return entry.isoformat()
+
+    if not td_list:
+        d = entry
+        for _ in range(horizon - 1):
+            d = _next_business_day(d)
+        return d.isoformat()
+
+    # Find the first index in td_list at or after entry. If entry is
+    # past the end of the calendar, walk from entry directly.
     idx = next((i for i, x in enumerate(td_list) if x >= entry), None)
     if idx is None:
-        return None
-    exit_idx = idx + max(horizon - 1, 0)
+        d = entry
+        for _ in range(horizon - 1):
+            d = _next_business_day(d)
+        return d.isoformat()
+
+    # Step forward (horizon - 1) trading days from idx (entry counts as
+    # day 1, so we need horizon - 1 more steps).
+    exit_idx = idx + (horizon - 1)
     if exit_idx < len(td_list):
         return td_list[exit_idx].isoformat()
-    # Past the calendar's end (rare — only for very recent entries before
-    # the next OHLC ingest). Extrapolate at ~1.4 cal days per trading day.
-    extra = exit_idx - len(td_list) + 1
-    return (td_list[-1] + timedelta(days=int(extra * 1.4))).isoformat()
+    # Need to walk past the end of the calendar by (exit_idx - last_idx)
+    # business days.
+    d = td_list[-1]
+    steps_past_end = exit_idx - (len(td_list) - 1)
+    for _ in range(steps_past_end):
+        d = _next_business_day(d)
+    return d.isoformat()
 
 
 @router.get("/calendar")
