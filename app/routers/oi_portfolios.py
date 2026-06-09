@@ -9,10 +9,6 @@ signals is counted ONCE in the portfolio stats and equity curve.
 Portfolio metadata (CRUD) lives in the main app DB (via get_pool).
 Signal definitions live in the OI DB (via get_oi_pool).
 The aggregate endpoint queries is_bins + daily_features (via get_oi_pool).
-
-Stage 3 note: oi_research_systems is retained as an empty shell so
-oi_signals.py calendar/firing-portfolios endpoints do not error.
-It will be dropped when those endpoints are rewired.
 """
 from collections import defaultdict
 from datetime import date as _date
@@ -55,25 +51,6 @@ ALTER TABLE oi_research_portfolios
 -- (idempotent: DROP NOT NULL on a nullable column is a no-op in PG).
 ALTER TABLE oi_research_portfolios ALTER COLUMN ticker  DROP NOT NULL;
 ALTER TABLE oi_research_portfolios ALTER COLUMN outcome DROP NOT NULL;
-
--- oi_research_systems: retained as an EMPTY SHELL so oi_signals.py
--- calendar / firing-portfolios endpoints continue to function without
--- errors. No new rows are written here. Stage 3 will rewire those
--- endpoints and then DROP this table.
-CREATE TABLE IF NOT EXISTS oi_research_systems (
-    id                SERIAL PRIMARY KEY,
-    portfolio_id      INTEGER REFERENCES oi_research_portfolios(id) ON DELETE CASCADE,
-    name              TEXT NOT NULL,
-    enabled           BOOLEAN DEFAULT TRUE,
-    position          INTEGER DEFAULT 0,
-    primary_metric    TEXT NOT NULL,
-    primary_bins      INTEGER[] NOT NULL,
-    primary_bin_count INTEGER NOT NULL DEFAULT 20,
-    secondaries       JSONB NOT NULL,
-    created_at        TIMESTAMPTZ DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ DEFAULT NOW()
-);
-ALTER TABLE oi_research_systems ADD COLUMN IF NOT EXISTS is_short BOOLEAN DEFAULT FALSE;
 
 -- portfolio_signals: join table linking portfolios → cell-set signals.
 -- signal_id is a plain INTEGER (no FK constraint — signals lives in the

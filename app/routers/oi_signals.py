@@ -1,7 +1,33 @@
-"""OI Signals — trigger definitions, firing status, and position calendar."""
+"""OI Signals — tracked watchlist + firing engine for the Factor Signals page.
+
+A signal fires for a ticker when the ticker's stored bin assignments (in
+is_bins) for the signal's primary AND secondary metrics fall inside the
+signal's cell-set. Firing is evaluated at MAX(trade_date) in is_bins —
+the page is anchored to data, not to the calendar clock.
+
+Tracked signals are persisted across sessions in tracked_signals. Two
+views over the same set:
+  - GET /firing — ticker-centric, one row per ticker with >=1 firing signal
+                  on the as_of date. SCOPE A (deduped union across firings
+                  for the ticker) + SCOPE A stability (positive years etc.)
+                  + SCOPE B (ticker slice) + per-signal expanded breakdown.
+  - GET /roster — every tracked signal with overall stats + stability,
+                  regardless of today's firing. Watchlist-with-performance.
+
+Performance discipline: every tracked signal's history is fetched exactly
+ONCE per request (signal_trade_cache) and every per-ticker aggregation
+reads from the cache. A signal firing on N tickers does not produce N
+history queries.
+
+Stage 1 also tears down the legacy model: oi_signal_triggers,
+oi_research_systems, oi_research_system_library are dropped, and legacy
+oi_signal_calendar rows (trigger_id/system_id based) are wiped so the
+table can be re-used in Stage 3 for signal-based entries.
+"""
+import json
 import math
-import re
-from datetime import date as _date, timedelta
+from collections import defaultdict
+from datetime import date as _date
 from typing import Optional
 
 import numpy as np
@@ -12,128 +38,378 @@ from app.db import get_pool, get_oi_pool
 
 router = APIRouter(tags=["oi_signals"])
 
+# Metric-name allowlist (lowercase ascii + digits + underscore). Used to
+# refuse injection via f-string-built SQL on the cell-set query.
+_SAFE_METRIC = set("abcdefghijklmnopqrstuvwxyz_0123456789")
+
+# CV(yearly_avg_ret) becomes undefined when |mean| approaches zero. Below
+# this threshold (10 bps) the metric explodes to a number that LOOKS real
+# but isn't. The endpoint emits None and the frontend renders 'n/a'. Not
+# a gate — every other stat still appears for the signal.
+_CV_MEAN_EPSILON = 0.001
+
+
 _DDL = """
-CREATE TABLE IF NOT EXISTS oi_signal_triggers (
-    id          SERIAL PRIMARY KEY,
-    name        TEXT NOT NULL,
-    ticker      TEXT NOT NULL,
-    metric      TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
-    min_val     DOUBLE PRECISION,
-    max_val     DOUBLE PRECISION,
-    color       TEXT DEFAULT '#3498db',
-    created_at  TIMESTAMPTZ DEFAULT NOW()
-);
--- Migrate REAL → DOUBLE PRECISION for any pre-existing tables. REAL stores
--- only ~7 decimal digits, so values like 1.08 get round-tripped to
--- 1.0800000429153442 on display. Widening the type is idempotent and
--- preserves existing values; rows already affected by REAL precision loss
--- need to be re-entered to fully recover, but new writes will be exact.
-ALTER TABLE oi_signal_triggers
-    ALTER COLUMN min_val TYPE DOUBLE PRECISION,
-    ALTER COLUMN max_val TYPE DOUBLE PRECISION;
 CREATE TABLE IF NOT EXISTS oi_signal_calendar (
     id          SERIAL PRIMARY KEY,
-    trigger_id  INTEGER REFERENCES oi_signal_triggers(id) ON DELETE CASCADE,
     entry_date  DATE NOT NULL,
-    added_at    TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(trigger_id, entry_date)
+    added_at    TIMESTAMPTZ DEFAULT NOW()
 );
--- Portfolio/system calendar entries piggyback on the same table so the
--- Gantt view stays unified. trigger_id is now optional; system entries
--- carry (portfolio_id, system_id, ticker) instead. Partial unique indexes
--- enforce no-duplicates per-source-type. The original UNIQUE(trigger_id,
--- entry_date) constraint stays as a partial too.
+
+CREATE TABLE IF NOT EXISTS tracked_signals (
+    signal_id   INTEGER PRIMARY KEY,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Stage 1 legacy-schema teardown. The DO block is idempotent: it only
+-- runs when the pre-Stage-1 column trigger_id still exists (i.e. on an
+-- existing install). After Stage 1 has deployed once, the column is gone
+-- and the block is a no-op on every subsequent startup. Fresh installs
+-- skip the block entirely.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'oi_signal_calendar'
+          AND column_name = 'trigger_id'
+    ) THEN
+        TRUNCATE oi_signal_calendar;
+        ALTER TABLE oi_signal_calendar
+            DROP COLUMN IF EXISTS trigger_id,
+            DROP COLUMN IF EXISTS system_id,
+            DROP COLUMN IF EXISTS portfolio_id;
+    END IF;
+END $$;
+
 ALTER TABLE oi_signal_calendar
-    ADD COLUMN IF NOT EXISTS portfolio_id INTEGER
-        REFERENCES oi_research_portfolios(id) ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS system_id    INTEGER
-        REFERENCES oi_research_systems(id)    ON DELETE CASCADE,
-    ADD COLUMN IF NOT EXISTS ticker       TEXT;
--- Allow system entries (trigger_id NULL) by relaxing the old UNIQUE.
--- Old constraint name was auto-generated; drop both possible names.
-ALTER TABLE oi_signal_calendar DROP CONSTRAINT IF EXISTS oi_signal_calendar_trigger_id_entry_date_key;
-CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_trigger_uniq
-    ON oi_signal_calendar (trigger_id, entry_date)
-    WHERE trigger_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_system_uniq
-    ON oi_signal_calendar (system_id, ticker, entry_date)
-    WHERE system_id IS NOT NULL;
+    ADD COLUMN IF NOT EXISTS signal_id INTEGER,
+    ADD COLUMN IF NOT EXISTS ticker    TEXT;
+
+DROP INDEX IF EXISTS oi_signal_calendar_trigger_uniq;
+DROP INDEX IF EXISTS oi_signal_calendar_system_uniq;
+CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_signal_uniq
+    ON oi_signal_calendar (signal_id, ticker, entry_date)
+    WHERE signal_id IS NOT NULL;
+
+DROP TABLE IF EXISTS oi_signal_triggers         CASCADE;
+DROP TABLE IF EXISTS oi_research_systems        CASCADE;
+DROP TABLE IF EXISTS oi_research_system_library CASCADE;
 """
 
-
-def _parse_horizon(outcome: str) -> int:
-    m = re.search(r'(\d+)', outcome)
-    return int(m.group(1)) if m else 1
+_ensured = False
 
 
 async def _ensure_tables(pool):
+    global _ensured
+    if _ensured:
+        return
     async with pool.acquire() as conn:
         await conn.execute(_DDL)
+    _ensured = True
 
 
-class TriggerIn(BaseModel):
-    name: str
-    ticker: str
-    metric: str
-    outcome: str
-    min_val: Optional[float] = None
-    max_val: Optional[float] = None
-    color: str = '#3498db'
+# ── Pydantic models ─────────────────────────────────────────────────────────
 
 
-class CalendarIn(BaseModel):
-    # Either a single-metric trigger entry…
-    trigger_id:   Optional[int] = None
-    # …or a portfolio system entry (provide all three).
-    portfolio_id: Optional[int] = None
-    system_id:    Optional[int] = None
-    ticker:       Optional[str] = None
-    entry_date:   str
+class TrackedSignalIn(BaseModel):
+    signal_id: int
 
 
-@router.get("/triggers")
-async def list_triggers(pool=Depends(get_pool)):
+class TrackedFromPortfolioIn(BaseModel):
+    portfolio_id: int
+
+
+# ── Tracked-signals CRUD ────────────────────────────────────────────────────
+
+
+@router.get("/tracked")
+async def list_tracked(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """List every tracked signal, enriched with metadata from `signals`."""
+    await _ensure_tables(pool)
+    async with pool.acquire() as conn:
+        tracked_rows = await conn.fetch(
+            "SELECT signal_id, created_at FROM tracked_signals "
+            "ORDER BY created_at")
+    if not tracked_rows:
+        return {"tracked": []}
+    sids = [r["signal_id"] for r in tracked_rows]
+    tracked_at_by_id = {r["signal_id"]: str(r["created_at"])[:19]
+                        for r in tracked_rows}
+
+    sig_by_id: dict = {}
+    if oi_pool:
+        async with oi_pool.acquire() as conn:
+            sig_rows = await conn.fetch(
+                """SELECT id, name, primary_metric, secondary_metric, outcome,
+                          n_bins, cell_set, created_at
+                   FROM signals WHERE id = ANY($1)""", sids)
+        sig_by_id = {r["id"]: r for r in sig_rows}
+
+    out = []
+    for sid in sids:
+        s = sig_by_id.get(sid)
+        if not s:
+            out.append({
+                "signal_id":  sid,
+                "tracked_at": tracked_at_by_id[sid],
+                "missing":    True,
+            })
+            continue
+        cell_set = s["cell_set"]
+        if isinstance(cell_set, str):
+            cell_set = json.loads(cell_set)
+        out.append({
+            "signal_id":        s["id"],
+            "name":             s["name"],
+            "primary_metric":   s["primary_metric"],
+            "secondary_metric": s["secondary_metric"],
+            "outcome":          s["outcome"],
+            "n_bins":           s["n_bins"],
+            "cell_set":         cell_set,
+            "tracked_at":       tracked_at_by_id[sid],
+            "created_at":       str(s["created_at"])[:19],
+        })
+    return {"tracked": out}
+
+
+@router.post("/tracked")
+async def add_tracked(body: TrackedSignalIn,
+                      pool=Depends(get_pool),
+                      oi_pool=Depends(get_oi_pool)):
+    """Add one signal to the tracked watchlist. Idempotent — already-tracked
+    signal returns ok without inserting a duplicate."""
+    await _ensure_tables(pool)
+    if oi_pool:
+        async with oi_pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM signals WHERE id = $1", body.signal_id)
+        if not exists:
+            raise HTTPException(404, f"signal_id {body.signal_id} not found")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tracked_signals (signal_id) VALUES ($1) "
+            "ON CONFLICT (signal_id) DO NOTHING",
+            body.signal_id)
+    return {"ok": True, "signal_id": body.signal_id}
+
+
+@router.post("/tracked/from-portfolio")
+async def add_tracked_from_portfolio(body: TrackedFromPortfolioIn,
+                                     pool=Depends(get_pool)):
+    """Bulk-add: flatten a portfolio into its constituent signals and add
+    each to tracked_signals. Portfolio identity does NOT persist — only the
+    signal_ids land in tracked_signals. Dedupe by signal_id (a signal
+    already tracked is counted as 'already_present', not 're-added')."""
     await _ensure_tables(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, ticker, metric, outcome, min_val, max_val, color "
-            "FROM oi_signal_triggers ORDER BY created_at")
-    return [dict(r) for r in rows]
+            "SELECT signal_id FROM portfolio_signals "
+            "WHERE portfolio_id = $1", body.portfolio_id)
+        if not rows:
+            raise HTTPException(
+                404, f"portfolio_id {body.portfolio_id} not found or has no signals")
+        sids = [r["signal_id"] for r in rows]
+        already_rows = await conn.fetch(
+            "SELECT signal_id FROM tracked_signals WHERE signal_id = ANY($1)",
+            sids)
+        already = {r["signal_id"] for r in already_rows}
+        new_sids = [s for s in sids if s not in already]
+        if new_sids:
+            await conn.executemany(
+                "INSERT INTO tracked_signals (signal_id) VALUES ($1) "
+                "ON CONFLICT (signal_id) DO NOTHING",
+                [(s,) for s in new_sids])
+    return {
+        "total_in_portfolio": len(sids),
+        "added":              len(new_sids),
+        "already_present":    len(sids) - len(new_sids),
+    }
 
 
-@router.post("/triggers")
-async def create_trigger(body: TriggerIn, pool=Depends(get_pool)):
+@router.delete("/tracked/{signal_id}")
+async def remove_tracked(signal_id: int, pool=Depends(get_pool)):
+    """Untrack a signal. Idempotent — returns ok=False if not tracked."""
     await _ensure_tables(pool)
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO oi_signal_triggers (name, ticker, metric, outcome, min_val, max_val, color) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7) "
-            "RETURNING id, name, ticker, metric, outcome, min_val, max_val, color",
-            body.name, body.ticker, body.metric, body.outcome,
-            body.min_val, body.max_val, body.color)
-    return dict(row)
+        deleted = await conn.fetchval(
+            "DELETE FROM tracked_signals WHERE signal_id = $1 "
+            "RETURNING signal_id", signal_id)
+    return {"ok": deleted is not None}
 
 
-@router.put("/triggers/{tid}")
-async def update_trigger(tid: int, body: TriggerIn, pool=Depends(get_pool)):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "UPDATE oi_signal_triggers SET name=$1, ticker=$2, metric=$3, outcome=$4, "
-            "min_val=$5, max_val=$6, color=$7 WHERE id=$8 "
-            "RETURNING id, name, ticker, metric, outcome, min_val, max_val, color",
-            body.name, body.ticker, body.metric, body.outcome,
-            body.min_val, body.max_val, body.color, tid)
-    if not row:
-        raise HTTPException(status_code=404, detail="Trigger not found")
-    return dict(row)
+# ── Stats helpers (reuse the portfolio aggregate stats shape) ───────────────
 
 
-@router.delete("/triggers/{tid}")
-async def delete_trigger(tid: int, pool=Depends(get_pool)):
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM oi_signal_triggers WHERE id=$1", tid)
-    return {"ok": True}
+def _full_stats(rets: list) -> dict:
+    """SCOPE A primary stats over a list of realized return floats. No
+    gates: an empty list returns the schema with zeros. The 9-field block
+    matches what the stats bar on the Factor Analysis page already
+    renders."""
+    n = len(rets)
+    if n == 0:
+        return {"n": 0, "avg_ret": 0.0, "median": 0.0, "std_dev": 0.0,
+                "p5": 0.0, "p95": 0.0, "win_rate": 0.0,
+                "avg_win": 0.0, "avg_loss": 0.0}
+    arr    = np.array(rets, dtype=np.float64)
+    wins   = arr[arr > 0]
+    losses = arr[arr < 0]
+    return {
+        "n":        n,
+        "avg_ret":  round(float(arr.mean()), 6),
+        "median":   round(float(np.median(arr)), 6),
+        "std_dev":  round(float(arr.std()), 6),
+        "p5":       round(float(np.percentile(arr, 5)), 6),
+        "p95":      round(float(np.percentile(arr, 95)), 6),
+        "win_rate": round(float((arr > 0).mean()), 4),
+        "avg_win":  round(float(wins.mean()),   6) if len(wins)   else 0.0,
+        "avg_loss": round(float(losses.mean()), 6) if len(losses) else 0.0,
+    }
+
+
+def _compact_stats(rets: list) -> dict:
+    """SCOPE B — three fields. Same no-gate rule."""
+    n = len(rets)
+    if n == 0:
+        return {"n": 0, "avg_ret": 0.0, "win_rate": 0.0}
+    arr = np.array(rets, dtype=np.float64)
+    return {
+        "n":        n,
+        "avg_ret":  round(float(arr.mean()), 6),
+        "win_rate": round(float((arr > 0).mean()), 4),
+    }
+
+
+def _stability_stats(trades: list) -> dict:
+    """Group fixed-trade-set by calendar year. No within-year re-ranking —
+    the trades are already fixed by cell-set membership. Returns:
+        positive_years      : count of years where the year's avg_ret > 0
+        total_years         : distinct years with realized trades
+        cv_yearly_avg_ret   : CV of per-year avg_ret. None when |mean| is
+                              within epsilon of zero (the zero-boundary
+                              blowup case — see _CV_MEAN_EPSILON).
+        dispersion_yearly_n : CV of per-year trade count.
+        yearly              : [{year, n, avg_ret}, ...] raw breakdown."""
+    by_year: dict = defaultdict(list)
+    for t in trades:
+        ov = t.get("outcome_val")
+        if ov is None:
+            continue
+        try:
+            yr = int(t["trade_date"][:4])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        by_year[yr].append(float(ov))
+    if not by_year:
+        return {"positive_years": 0, "total_years": 0,
+                "cv_yearly_avg_ret": None, "dispersion_yearly_n": None,
+                "yearly": []}
+    years = sorted(by_year.keys())
+    yearly = []
+    avgs   = []
+    ns     = []
+    positive = 0
+    for yr in years:
+        vals = by_year[yr]
+        a = np.array(vals, dtype=np.float64)
+        yr_avg = float(a.mean())
+        yearly.append({"year": yr, "n": len(vals),
+                       "avg_ret": round(yr_avg, 6)})
+        avgs.append(yr_avg)
+        ns.append(len(vals))
+        if yr_avg > 0:
+            positive += 1
+    avg_arr = np.array(avgs, dtype=np.float64)
+    m       = float(avg_arr.mean())
+    cv_avg  = (None if abs(m) < _CV_MEAN_EPSILON
+               else round(float(avg_arr.std()) / abs(m), 4))
+    n_arr   = np.array(ns, dtype=np.float64)
+    mn      = float(n_arr.mean())
+    disp_n  = round(float(n_arr.std()) / mn, 4) if mn > 0 else None
+    return {
+        "positive_years":      positive,
+        "total_years":         len(years),
+        "cv_yearly_avg_ret":   cv_avg,
+        "dispersion_yearly_n": disp_n,
+        "yearly":              yearly,
+    }
+
+
+# ── Per-signal trade cache ──────────────────────────────────────────────────
+
+
+async def _fetch_signal_trade_cache(oi_pool, signals: list) -> dict:
+    """Per-signal trade history. Run ONCE per request and reuse for every
+    per-ticker aggregation and the roster — a signal firing on N tickers
+    is still queried only once.
+
+    Each cache entry is a list of {ticker, trade_date (str), outcome_val
+    (float|None)}. outcome_val is None on rows where the forward return
+    hasn't realized yet (the as_of row itself); these rows still appear
+    so firing detection at as_of works. Stats code filters None.
+    """
+    cache: dict = {}
+    if not signals:
+        return cache
+    async with oi_pool.acquire() as conn:
+        for sig in signals:
+            sid    = sig["id"]
+            prim   = sig["primary_metric"]
+            sec    = sig["secondary_metric"]
+            out    = sig["outcome"]
+            n_bins = int(sig["n_bins"])
+            cell_set = sig["cell_set"]
+            if isinstance(cell_set, str):
+                cell_set = json.loads(cell_set)
+            if not cell_set:
+                cache[sid] = []
+                continue
+            if (any(c not in _SAFE_METRIC for c in (prim or "")) or
+                any(c not in _SAFE_METRIC for c in (sec  or "")) or
+                any(c not in _SAFE_METRIC for c in (out  or ""))):
+                cache[sid] = []
+                continue
+            xs = [int(c[0]) for c in cell_set]
+            ys = [int(c[1]) for c in cell_set]
+            query = f"""
+                SELECT df.ticker,
+                       df.trade_date::text AS trade_date,
+                       df.{out} AS outcome_val
+                FROM daily_features df
+                JOIN is_bins ib USING (ticker, trade_date)
+                WHERE ib.bin20_{prim} > 0
+                  AND ib.bin20_{sec}  > 0
+                  AND (
+                    ((ib.bin20_{prim} - 1) * $1::int) / 20,
+                    ((ib.bin20_{sec}  - 1) * $1::int) / 20
+                  ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+                ORDER BY df.trade_date, df.ticker
+            """
+            try:
+                rows = await conn.fetch(query, n_bins, xs, ys)
+            except Exception:
+                cache[sid] = []
+                continue
+            trades = []
+            for r in rows:
+                raw = r["outcome_val"]
+                fov: Optional[float] = None
+                if raw is not None:
+                    try:
+                        f = float(raw)
+                        if not math.isnan(f):
+                            fov = f
+                    except (TypeError, ValueError):
+                        pass
+                trades.append({
+                    "ticker":      r["ticker"],
+                    "trade_date":  str(r["trade_date"]),
+                    "outcome_val": fov,
+                })
+            cache[sid] = trades
+    return cache
+
+
+# ── Firing engine ──────────────────────────────────────────────────────────
 
 
 @router.get("/firing")
@@ -142,598 +418,183 @@ async def get_firing(
     pool=Depends(get_pool),
     oi_pool=Depends(get_oi_pool),
 ):
-    """
-    For each trigger: check if it fires on the given date (defaults to latest available).
-    Returns 20-bin distribution + today's bin for mini chart.
+    """Firing engine — anchored to MAX(trade_date) in is_bins by default.
+
+    Per-ticker aggregation reuses the portfolio aggregate dedup pattern:
+    a (ticker, trade_date, outcome) appearing in multiple firing signals
+    counts ONCE in SCOPE A union stats. Stats are computed without gates
+    — even small samples surface; n is reported so the user can judge.
     """
     await _ensure_tables(pool)
     if not oi_pool:
-        return {"error": "OI database not configured", "results": []}
+        return {"error": "OI database not configured",
+                "as_of": None, "tickers": []}
+
+    async with oi_pool.acquire() as conn:
+        if date:
+            try:
+                as_of = _date.fromisoformat(date)
+            except ValueError:
+                raise HTTPException(400, "date must be ISO YYYY-MM-DD")
+        else:
+            as_of = await conn.fetchval(
+                "SELECT MAX(trade_date) FROM is_bins")
+        if as_of is None:
+            return {"error": "is_bins is empty",
+                    "as_of": None, "tickers": []}
+    as_of_str = (as_of.isoformat() if hasattr(as_of, "isoformat")
+                 else str(as_of))
 
     async with pool.acquire() as conn:
-        triggers = await conn.fetch(
-            "SELECT id, name, ticker, metric, outcome, min_val, max_val, color "
-            "FROM oi_signal_triggers ORDER BY created_at")
+        tracked_rows = await conn.fetch(
+            "SELECT signal_id FROM tracked_signals")
+    if not tracked_rows:
+        return {"as_of": as_of_str, "tickers": [],
+                "n_tracked": 0, "n_firing_tickers": 0}
 
-    if not triggers:
-        return {"date": date, "results": []}
+    sids = [r["signal_id"] for r in tracked_rows]
+    async with oi_pool.acquire() as conn:
+        sig_rows = await conn.fetch(
+            """SELECT id, name, primary_metric, secondary_metric, outcome,
+                      n_bins, cell_set
+               FROM signals WHERE id = ANY($1)""", sids)
+    signals   = [dict(r) for r in sig_rows]
+    sig_by_id = {s["id"]: s for s in signals}
 
-    n_bins = 20
-    results = []
+    cache = await _fetch_signal_trade_cache(oi_pool, signals)
 
-    for t in triggers:
-        ticker = t["ticker"]
-        metric = t["metric"]
-        outcome = t["outcome"]
-        min_val = t["min_val"]
-        max_val = t["max_val"]
+    # Detect firings: a cache row with trade_date == as_of means the signal
+    # fires for that ticker on that date. A signal fires at most once per
+    # (ticker, date) since is_bins has a (ticker, trade_date) primary key.
+    firings_by_ticker: dict = defaultdict(list)
+    for sid, trades in cache.items():
+        for t in trades:
+            if t["trade_date"] == as_of_str:
+                firings_by_ticker[t["ticker"]].append(sid)
+                break
 
-        try:
-            async with oi_pool.acquire() as conn:
-                if date:
-                    d = _date.fromisoformat(date)
-                    rows = await conn.fetch(
-                        f"SELECT {metric}, {outcome} FROM daily_features "
-                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
-                        f"AND trade_date <= $2 ORDER BY trade_date",
-                        ticker, d)
-                    cur = await conn.fetchrow(
-                        f"SELECT trade_date, {metric} FROM daily_features "
-                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND trade_date <= $2 "
-                        f"ORDER BY trade_date DESC LIMIT 1",
-                        ticker, d)
-                else:
-                    rows = await conn.fetch(
-                        f"SELECT {metric}, {outcome} FROM daily_features "
-                        f"WHERE ticker=$1 AND {metric} IS NOT NULL AND {outcome} IS NOT NULL "
-                        f"ORDER BY trade_date",
-                        ticker)
-                    cur = await conn.fetchrow(
-                        f"SELECT trade_date, {metric} FROM daily_features "
-                        f"WHERE ticker=$1 AND {metric} IS NOT NULL "
-                        f"ORDER BY trade_date DESC LIMIT 1",
-                        ticker)
-        except Exception as e:
-            results.append({"trigger": dict(t), "error": str(e), "firing": False})
-            continue
+    if not firings_by_ticker:
+        return {"as_of": as_of_str, "tickers": [],
+                "n_tracked": len(sids), "n_firing_tickers": 0}
 
-        valid = []
-        for r in rows:
-            try:
-                mv, ov = float(r[metric]), float(r[outcome])
-                if not (math.isnan(mv) or math.isnan(ov)):
-                    valid.append((mv, ov))
-            except (ValueError, TypeError):
-                continue
+    out_tickers = []
+    for ticker in sorted(firings_by_ticker.keys()):
+        firing_sids = firings_by_ticker[ticker]
 
-        # No `len(valid) < 20` row-block. The trigger row computes against
-        # whatever rows are available; if a bin has no rows it's reported
-        # as n=0 in the bins array. Sparse triggers still surface their
-        # firing decision instead of getting hidden behind an error.
-        if not valid:
-            # Truly no data — can't even compute a bin assignment. Keep the
-            # error row so the trigger doesn't silently vanish.
-            results.append({
-                "trigger": dict(t),
-                "error":   "no data",
-                "firing":  False,
-                "bins":    [],
+        # SCOPE A union. Dedup by (ticker, trade_date, outcome_col):
+        # same outcome on same date is one trade; different outcomes are
+        # different trades (a 5d-fwd bet is not the same as a 1d-fwd bet
+        # on the same date). Same first-wins semantic as portfolio aggregate.
+        seen: dict = {}
+        for sid in firing_sids:
+            out_col = sig_by_id[sid]["outcome"]
+            for t in cache.get(sid, []):
+                if t["outcome_val"] is None:
+                    continue
+                key = (t["ticker"], t["trade_date"], out_col)
+                if key not in seen:
+                    seen[key] = {**t, "outcome": out_col}
+        union_trades = list(seen.values())
+
+        scope_a      = _full_stats([t["outcome_val"] for t in union_trades])
+        scope_a_stab = _stability_stats(union_trades)
+        ticker_trades = [t for t in union_trades if t["ticker"] == ticker]
+        scope_b      = _compact_stats([t["outcome_val"] for t in ticker_trades])
+
+        signals_out = []
+        for sid in firing_sids:
+            sig        = sig_by_id[sid]
+            sig_trades = cache.get(sid, [])
+            overall_rets = [t["outcome_val"] for t in sig_trades
+                            if t["outcome_val"] is not None]
+            ticker_rets  = [t["outcome_val"] for t in sig_trades
+                            if t["ticker"] == ticker
+                            and t["outcome_val"] is not None]
+            signals_out.append({
+                "signal_id":        sid,
+                "name":             sig["name"],
+                "primary_metric":   sig["primary_metric"],
+                "secondary_metric": sig["secondary_metric"],
+                "outcome":          sig["outcome"],
+                "n_bins":           sig["n_bins"],
+                "overall":          _full_stats(overall_rets),
+                "ticker_slice":     _compact_stats(ticker_rets),
             })
-            continue
 
-        sorted_pairs = sorted(valid, key=lambda p: p[0])
-        n = len(sorted_pairs)
-        bins_data = [[] for _ in range(n_bins)]
-        bin_mvals = [[] for _ in range(n_bins)]
-        for i, (mv, ov) in enumerate(sorted_pairs):
-            b = min(int(i / n * n_bins), n_bins - 1)
-            bins_data[b].append(ov)
-            bin_mvals[b].append(mv)
-
-        bin_stats = []
-        for i, (rets, vals) in enumerate(zip(bins_data, bin_mvals)):
-            if rets:
-                a = np.array(rets)
-                bin_stats.append({
-                    "bin": i + 1,
-                    "n": len(rets),
-                    "avg_ret": round(float(a.mean()) * 100, 3),
-                    "win_rate": round(float((a > 0).mean()) * 100, 1),
-                    "min_val": round(float(min(vals)), 6),
-                    "max_val": round(float(max(vals)), 6),
-                })
-            else:
-                bin_stats.append(None)
-
-        current_val = None
-        current_date = None
-        today_bin = None
-        if cur:
-            try:
-                cv = float(cur[metric])
-                if not math.isnan(cv):
-                    current_val = round(cv, 6)
-                    current_date = str(cur["trade_date"])
-                    all_sorted_vals = [p[0] for p in sorted_pairs]
-                    rank = sum(1 for v in all_sorted_vals if v < current_val)
-                    today_bin = min(int(rank / n * n_bins) + 1, n_bins)
-            except (ValueError, TypeError):
-                pass
-
-        firing = False
-        if current_val is not None:
-            above_min = (min_val is None) or (current_val >= min_val)
-            below_max = (max_val is None) or (current_val <= max_val)
-            firing = above_min and below_max
-
-        results.append({
-            "trigger": dict(t),
-            "current_val": current_val,
-            "current_date": current_date,
-            "today_bin": today_bin,
-            "firing": firing,
-            "n": n,
-            "bins": bin_stats,
+        out_tickers.append({
+            "ticker":            ticker,
+            "n_signals_firing":  len(firing_sids),
+            "scope_a":           scope_a,
+            "scope_a_stability": scope_a_stab,
+            "scope_b":           scope_b,
+            "signals_firing":    signals_out,
         })
 
-    return {"date": date, "results": results}
+    return {
+        "as_of":            as_of_str,
+        "n_tracked":        len(sids),
+        "n_firing_tickers": len(out_tickers),
+        "tickers":          out_tickers,
+    }
 
 
-@router.get("/calendar")
-async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
-    """List calendar entries with computed exit dates.
+# ── Roster ──────────────────────────────────────────────────────────────────
 
-    Returns a unified shape regardless of whether the entry came from a
-    legacy trigger or a portfolio system. Each row has:
-      id, type ('trigger' | 'system'), name, ticker, outcome, color,
-      entry_date, exit_date, plus the source fields trigger_id /
-      portfolio_id / system_id (one set, depending on type).
-    """
+
+@router.get("/roster")
+async def get_roster(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
+    """Roster — every tracked signal with overall stats + stability stats,
+    independent of today's firing. Watchlist-with-performance lens. Shares
+    the per-signal trade cache strategy with /firing."""
     await _ensure_tables(pool)
+    if not oi_pool:
+        return {"tracked": [], "n_tracked": 0}
     async with pool.acquire() as conn:
-        trig_rows = await conn.fetch(
-            """SELECT c.id, c.trigger_id, c.entry_date,
-                      t.name, t.ticker, t.outcome, t.color
-               FROM oi_signal_calendar c
-               JOIN oi_signal_triggers t ON t.id = c.trigger_id
-               WHERE c.trigger_id IS NOT NULL
-               ORDER BY c.entry_date""")
-        sys_rows = await conn.fetch(
-            """SELECT c.id, c.entry_date, c.portfolio_id, c.system_id, c.ticker,
-                      s.name AS system_name, p.outcome AS outcome, p.name AS portfolio_name
-               FROM oi_signal_calendar c
-               JOIN oi_research_systems    s ON s.id = c.system_id
-               JOIN oi_research_portfolios p ON p.id = c.portfolio_id
-               WHERE c.system_id IS NOT NULL
-               ORDER BY c.entry_date""")
+        tracked_rows = await conn.fetch(
+            "SELECT signal_id, created_at FROM tracked_signals "
+            "ORDER BY created_at")
+    if not tracked_rows:
+        return {"tracked": [], "n_tracked": 0}
+    sids = [r["signal_id"] for r in tracked_rows]
+    tracked_at_by_id = {r["signal_id"]: str(r["created_at"])[:19]
+                        for r in tracked_rows}
+    async with oi_pool.acquire() as conn:
+        sig_rows = await conn.fetch(
+            """SELECT id, name, primary_metric, secondary_metric, outcome,
+                      n_bins, cell_set, created_at
+               FROM signals WHERE id = ANY($1)""", sids)
+    signals   = [dict(r) for r in sig_rows]
+    sig_by_id = {s["id"]: s for s in signals}
 
-    if not trig_rows and not sys_rows:
-        return []
-
-    # Aggregate trading-day calendars per (ticker) for exit_date lookup.
-    all_tickers = list({r["ticker"] for r in list(trig_rows) + list(sys_rows) if r["ticker"]})
-    td_by_ticker: dict = {}
-    if oi_pool and all_tickers:
-        async with oi_pool.acquire() as conn:
-            for ticker in all_tickers:
-                td_rows = await conn.fetch(
-                    "SELECT DISTINCT trade_date FROM daily_features WHERE ticker=$1 "
-                    "ORDER BY trade_date", ticker)
-                td_by_ticker[ticker] = [r["trade_date"] for r in td_rows]
-
-    def _exit(ticker: str, entry_date, horizon: int):
-        td = td_by_ticker.get(ticker, [])
-        if not td or horizon <= 0:
-            return None
-        try:
-            idx = next((i for i, x in enumerate(td) if x >= entry_date), None)
-            if idx is None:
-                return None
-            exit_idx = idx + max(horizon - 1, 0)
-            if exit_idx < len(td):
-                return str(td[exit_idx])
-            extra = exit_idx - len(td) + 1
-            return str(td[-1] + timedelta(days=int(extra * 1.4)))
-        except Exception:
-            return None
+    cache = await _fetch_signal_trade_cache(oi_pool, signals)
 
     out = []
-    for r in trig_rows:
-        out.append({
-            "id":          r["id"],
-            "type":        "trigger",
-            "trigger_id":  r["trigger_id"],
-            "name":        r["name"],
-            "ticker":      r["ticker"],
-            "outcome":     r["outcome"],
-            "color":       r["color"],
-            "entry_date":  str(r["entry_date"]),
-            "exit_date":   _exit(r["ticker"], r["entry_date"], _parse_horizon(r["outcome"])),
-        })
-    for r in sys_rows:
-        out.append({
-            "id":            r["id"],
-            "type":          "system",
-            "portfolio_id":  r["portfolio_id"],
-            "system_id":     r["system_id"],
-            # Compact "System X · KO" label that fits the existing Gantt label width.
-            "name":          r["system_name"],
-            "portfolio_name": r["portfolio_name"],
-            "ticker":        r["ticker"],
-            "outcome":       r["outcome"],
-            # Systems don't store a colour — distinguish them visually with pink
-            # (the SYSTEM badge colour) so the Gantt legend separates trigger
-            # vs system at a glance.
-            "color":         "#e84393",
-            "entry_date":    str(r["entry_date"]),
-            "exit_date":     _exit(r["ticker"], r["entry_date"], _parse_horizon(r["outcome"])),
-        })
-    out.sort(key=lambda x: x["entry_date"])
-    return out
-
-
-@router.post("/calendar")
-async def add_calendar(body: CalendarIn, pool=Depends(get_pool)):
-    await _ensure_tables(pool)
-    entry = _date.fromisoformat(body.entry_date)
-
-    # Trigger entry path (legacy single-metric)
-    if body.trigger_id is not None:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO oi_signal_calendar (trigger_id, entry_date) "
-                "VALUES ($1,$2) "
-                "ON CONFLICT DO NOTHING",
-                body.trigger_id, entry)
-            row = await conn.fetchrow(
-                "SELECT id, trigger_id, entry_date FROM oi_signal_calendar "
-                "WHERE trigger_id=$1 AND entry_date=$2",
-                body.trigger_id, entry)
-        return {"id": row["id"], "type": "trigger",
-                "trigger_id": row["trigger_id"], "entry_date": str(row["entry_date"])}
-
-    # System entry path (portfolio + system + ticker)
-    if body.system_id is None or body.portfolio_id is None or not body.ticker:
-        raise HTTPException(400, "must supply trigger_id, or portfolio_id+system_id+ticker")
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO oi_signal_calendar (portfolio_id, system_id, ticker, entry_date) "
-            "VALUES ($1,$2,$3,$4) "
-            "ON CONFLICT DO NOTHING",
-            body.portfolio_id, body.system_id, body.ticker, entry)
-        row = await conn.fetchrow(
-            "SELECT id, portfolio_id, system_id, ticker, entry_date "
-            "FROM oi_signal_calendar "
-            "WHERE system_id=$1 AND ticker=$2 AND entry_date=$3",
-            body.system_id, body.ticker, entry)
-    return {"id": row["id"], "type": "system",
-            "portfolio_id": row["portfolio_id"], "system_id": row["system_id"],
-            "ticker": row["ticker"], "entry_date": str(row["entry_date"])}
-
-
-@router.delete("/calendar/{cid}")
-async def delete_calendar(cid: int, pool=Depends(get_pool)):
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM oi_signal_calendar WHERE id=$1", cid)
-    return {"ok": True}
-
-
-# ── Monitored portfolio firings ─────────────────────────────────────────────
-
-
-def _verdict_for(ticker_stats: dict) -> str:
-    """Tiny heuristic so the firing card can flag obvious skips."""
-    n  = ticker_stats.get("n", 0)
-    wr = ticker_stats.get("win_rate", 0.0)
-    ar = ticker_stats.get("avg_ret", 0.0)
-    if n >= 100 and wr >= 0.55 and ar > 0:
-        return "strong"
-    if n < 30 or wr < 0.45 or ar < 0:
-        return "weak"
-    return "mixed"
-
-
-@router.get("/firing-portfolios")
-async def firing_portfolios(
-    date: Optional[str] = Query(None),
-    pool=Depends(get_pool),
-    oi_pool=Depends(get_oi_pool),
-):
-    """For every portfolio with monitored=true, check each enabled system on
-    each ticker against the most recent fully-resolved row (≤ `date`).
-    Returns a flat list of firings with portfolio-context vs per-ticker stats."""
-    if not oi_pool:
-        return {"date": date, "results": []}
-
-    # Late imports to avoid circular and keep this endpoint self-contained.
-    from app.routers.oi_portfolios import _ensure_tables as _ensure_port_tables, _fetch_anchor_rows
-    from app.routers.row_compute import _bin_for_value
-    await _ensure_port_tables(pool)
-
-    # 1) Load monitored portfolios + their enabled systems.
-    async with pool.acquire() as conn:
-        ports = await conn.fetch(
-            """SELECT id, name, ticker, outcome, date_from, date_to
-               FROM oi_research_portfolios
-               WHERE monitored = TRUE
-               ORDER BY name""")
-        if not ports:
-            return {"date": date, "results": []}
-        sys_rows = await conn.fetch(
-            """SELECT id, portfolio_id, name, enabled, position,
-                      primary_metric, primary_bins, primary_bin_count, secondaries
-               FROM oi_research_systems
-               WHERE portfolio_id = ANY($1) AND enabled = TRUE
-               ORDER BY portfolio_id, position, id""",
-            [p["id"] for p in ports])
-
-    # Group systems by portfolio.
-    systems_by_pid: dict = {}
-    import json as _json
-    for r in sys_rows:
-        d = dict(r)
-        if isinstance(d.get("secondaries"), str):
-            d["secondaries"] = _json.loads(d["secondaries"])
-        systems_by_pid.setdefault(d["portfolio_id"], []).append(d)
-
-    date_param = _date.fromisoformat(date) if date else None
-    results = []
-
-    for p in ports:
-        pid     = p["id"]
-        pname   = p["name"]
-        ticker  = p["ticker"]
-        outcome = p["outcome"]
-        sys_list = systems_by_pid.get(pid, [])
-        if not sys_list:
+    for sid in sids:
+        s = sig_by_id.get(sid)
+        if not s:
+            out.append({
+                "signal_id":  sid,
+                "tracked_at": tracked_at_by_id[sid],
+                "missing":    True,
+            })
             continue
-
-        # All metrics referenced anywhere in this portfolio's systems.
-        needed = set()
-        for s in sys_list:
-            needed.add(s["primary_metric"])
-            for sec in (s.get("secondaries") or []):
-                needed.add(sec["metric"])
-
-        # Historical rows for stats + binning (outcome NOT NULL). When the
-        # user picks a past date, truncate the historical universe at that
-        # date so today's bin is computed against the distribution that
-        # existed AS OF that date — not against the future.
-        effective_date_to = p["date_to"]
-        if date_param:
-            d_str = date_param.isoformat()
-            if not effective_date_to or d_str < effective_date_to:
-                effective_date_to = d_str
-        anchor_rows = await _fetch_anchor_rows(
-            oi_pool, ticker, outcome, p["date_from"], effective_date_to, sorted(needed))
-        if not anchor_rows:
-            continue
-
-        # Group historical rows by ticker so per-ticker primary distributions
-        # only see their own data (matches per-ticker rank normalisation).
-        rows_by_tkr: dict = {}
-        for r in anchor_rows:
-            rows_by_tkr.setdefault(r.get("ticker", "_"), []).append(r)
-
-        tickers_to_check = list(rows_by_tkr.keys()) if ticker == "ALL" else [ticker]
-
-        # Latest "today" rows per ticker — most recent row with the primary
-        # metric not null, on/before date_param. Independent of outcome
-        # availability so we can fire even when 5-day forward isn't in yet.
-        async with oi_pool.acquire() as conn:
-            cols_today = ["ticker", "trade_date"] + sorted(needed)
-            params, p_idx = [], 1
-            where = [f"ticker = ANY(${p_idx})"]; params.append(tickers_to_check); p_idx += 1
-            if date_param:
-                where.append(f"trade_date <= ${p_idx}"); params.append(date_param); p_idx += 1
-            today_sql = (
-                f"SELECT DISTINCT ON (ticker) {', '.join(cols_today)} "
-                f"FROM daily_features "
-                f"WHERE {' AND '.join(where)} "
-                f"ORDER BY ticker, trade_date DESC")
-            today_rows = await conn.fetch(today_sql, *params)
-        today_by_tkr = {r["ticker"]: dict(r) for r in today_rows}
-
-        for s in sys_list:
-            prim_metric = s["primary_metric"]
-            prim_bins   = set(int(b) for b in (s["primary_bins"] or []))
-            prim_count  = int(s["primary_bin_count"] or 20)
-            secs        = s.get("secondaries") or []
-            if not prim_bins or not secs:
-                continue
-
-            for tkr in tickers_to_check:
-                hist = rows_by_tkr.get(tkr) or []
-                if len(hist) < prim_count:
-                    continue
-                today = today_by_tkr.get(tkr)
-                if not today:
-                    continue
-
-                # Today's primary bin against ticker history.
-                prim_hist_sorted = sorted(
-                    float(r[prim_metric]) for r in hist
-                    if r.get(prim_metric) is not None)
-                today_prim_val = today.get(prim_metric)
-                today_prim_bin = _bin_for_value(today_prim_val, prim_hist_sorted, prim_count)
-                if today_prim_bin is None or today_prim_bin not in prim_bins:
-                    continue
-
-                # Ticker's primary-filtered subset for secondary binning.
-                hist_prim_subset = []
-                for r in hist:
-                    v = r.get(prim_metric)
-                    if v is None:
-                        continue
-                    try:
-                        fv = float(v)
-                        if math.isnan(fv):
-                            continue
-                    except (TypeError, ValueError):
-                        continue
-                    b = _bin_for_value(fv, prim_hist_sorted, prim_count)
-                    if b in prim_bins:
-                        hist_prim_subset.append(r)
-                if not hist_prim_subset:
-                    continue
-
-                # Walk each secondary; first one that fires marks the system
-                # as firing for this ticker. Record values + bin info for all
-                # so the card can show them.
-                today_secs = []
-                fires = False
-                for sec in secs:
-                    sm   = sec["metric"]
-                    sbins = set(int(b) for b in (sec.get("bins") or []))
-                    scnt  = int(sec.get("bin_count") or 10)
-                    sec_hist_sorted = sorted(
-                        float(r[sm]) for r in hist_prim_subset
-                        if r.get(sm) is not None)
-                    today_sec_val = today.get(sm)
-                    today_sec_bin = _bin_for_value(today_sec_val, sec_hist_sorted, scnt)
-                    in_selected = today_sec_bin is not None and today_sec_bin in sbins
-                    if in_selected:
-                        fires = True
-                    today_secs.append({
-                        "metric":      sm,
-                        "value":       round(float(today_sec_val), 6) if today_sec_val is not None else None,
-                        "bin":         today_sec_bin,
-                        "bin_count":   scnt,
-                        "selected_bins": sorted(list(sbins)),
-                        "in_selected": in_selected,
-                    })
-
-                if not fires:
-                    continue
-
-                # ── Historical stats: this ticker, this system ────────────
-                # Build the system's trade set restricted to this ticker:
-                # primary in primary_bins AND any selected secondary bin
-                # (computed within ticker's primary-filtered subset).
-                rets_ticker = []
-                # Pre-compute each secondary's per-subset bins for hist_prim_subset rows
-                sec_hist_bins = []
-                for sec in secs:
-                    sm    = sec["metric"]
-                    scnt  = int(sec.get("bin_count") or 10)
-                    sbins = set(int(b) for b in (sec.get("bins") or []))
-                    vals_for_bin = sorted(
-                        float(r[sm]) for r in hist_prim_subset
-                        if r.get(sm) is not None)
-                    sec_hist_bins.append({
-                        "metric": sm, "selected": sbins, "count": scnt,
-                        "sorted": vals_for_bin,
-                    })
-                for r in hist_prim_subset:
-                    # Check at least one secondary fires for this row.
-                    any_fires = False
-                    for shb in sec_hist_bins:
-                        v = r.get(shb["metric"])
-                        if v is None:
-                            continue
-                        b = _bin_for_value(v, shb["sorted"], shb["count"])
-                        if b is not None and b in shb["selected"]:
-                            any_fires = True
-                            break
-                    if not any_fires:
-                        continue
-                    yv = r.get(outcome)
-                    if yv is None:
-                        continue
-                    try:
-                        rets_ticker.append(float(yv))
-                    except (TypeError, ValueError):
-                        continue
-                if not rets_ticker:
-                    continue
-                arr = np.array(rets_ticker)
-                ticker_stats = {
-                    "n":        int(len(arr)),
-                    "win_rate": round(float((arr > 0).mean()), 4),
-                    "avg_ret":  round(float(arr.mean()), 6),
-                    "cum_ret":  round(float(arr.sum()), 6),
-                }
-
-                # ── ALL stats: same system across every ticker ─────────────
-                rets_all = []
-                for tkr_other, hist_other in rows_by_tkr.items():
-                    if len(hist_other) < prim_count:
-                        continue
-                    prim_sorted_o = sorted(
-                        float(rr[prim_metric]) for rr in hist_other
-                        if rr.get(prim_metric) is not None)
-                    prim_subset_o = []
-                    for rr in hist_other:
-                        v = rr.get(prim_metric)
-                        if v is None: continue
-                        try:
-                            fv = float(v);
-                            if math.isnan(fv): continue
-                        except (TypeError, ValueError):
-                            continue
-                        b = _bin_for_value(fv, prim_sorted_o, prim_count)
-                        if b in prim_bins:
-                            prim_subset_o.append(rr)
-                    # secondary bin within this ticker's primary subset
-                    sec_o_bins = []
-                    for sec in secs:
-                        sm = sec["metric"]
-                        scnt = int(sec.get("bin_count") or 10)
-                        sbins = set(int(b) for b in (sec.get("bins") or []))
-                        vals = sorted(
-                            float(rr[sm]) for rr in prim_subset_o
-                            if rr.get(sm) is not None)
-                        sec_o_bins.append({"metric": sm, "selected": sbins,
-                                           "count": scnt, "sorted": vals})
-                    for rr in prim_subset_o:
-                        ok = False
-                        for shb in sec_o_bins:
-                            v = rr.get(shb["metric"])
-                            if v is None: continue
-                            b = _bin_for_value(v, shb["sorted"], shb["count"])
-                            if b is not None and b in shb["selected"]:
-                                ok = True
-                                break
-                        if not ok:
-                            continue
-                        yv = rr.get(outcome)
-                        if yv is None: continue
-                        try:
-                            rets_all.append(float(yv))
-                        except (TypeError, ValueError):
-                            continue
-                if rets_all:
-                    arr_all = np.array(rets_all)
-                    all_stats = {
-                        "n":        int(len(arr_all)),
-                        "win_rate": round(float((arr_all > 0).mean()), 4),
-                        "avg_ret":  round(float(arr_all.mean()), 6),
-                        "cum_ret":  round(float(arr_all.sum()), 6),
-                    }
-                else:
-                    all_stats = {"n": 0, "win_rate": 0.0, "avg_ret": 0.0, "cum_ret": 0.0}
-
-                results.append({
-                    "type":         "system",
-                    "portfolio_id":   pid,
-                    "portfolio_name": pname,
-                    "system_id":      s["id"],
-                    "system_name":    s["name"],
-                    "ticker":         tkr,
-                    "outcome":        outcome,
-                    "firing":         True,
-                    "today_date":     str(today.get("trade_date") or ""),
-                    "today_primary": {
-                        "metric":        prim_metric,
-                        "value":         round(float(today_prim_val), 6) if today_prim_val is not None else None,
-                        "bin":           today_prim_bin,
-                        "bin_count":     prim_count,
-                        "selected_bins": sorted(list(prim_bins)),
-                    },
-                    "today_secondaries": today_secs,
-                    "all_stats":         all_stats,
-                    "ticker_stats":      ticker_stats,
-                    "verdict":           _verdict_for(ticker_stats),
-                })
-
-    return {"date": date, "results": results}
+        trades = cache.get(sid, [])
+        rets   = [t["outcome_val"] for t in trades
+                  if t["outcome_val"] is not None]
+        cell_set = s["cell_set"]
+        if isinstance(cell_set, str):
+            cell_set = json.loads(cell_set)
+        out.append({
+            "signal_id":        s["id"],
+            "name":             s["name"],
+            "primary_metric":   s["primary_metric"],
+            "secondary_metric": s["secondary_metric"],
+            "outcome":          s["outcome"],
+            "n_bins":           s["n_bins"],
+            "cell_set":         cell_set,
+            "tracked_at":       tracked_at_by_id[sid],
+            "created_at":       str(s["created_at"])[:19],
+            "overall":          _full_stats(rets),
+            "stability":        _stability_stats(trades),
+        })
+    return {"tracked": out, "n_tracked": len(out)}
