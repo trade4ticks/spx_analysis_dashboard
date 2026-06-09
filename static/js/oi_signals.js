@@ -229,6 +229,8 @@ document.addEventListener('alpine:init', () => {
     // ── Tracked-signals add paths ───────────────────────────────────────
 
     async addTrackedSignal() {
+      // Called by the "Add" button next to the signal dropdown — NOT on
+      // bare selection. The user picks first, then commits.
       const sid = parseInt(this.addSignalId);
       if (!sid) return;
       try {
@@ -241,7 +243,9 @@ document.addEventListener('alpine:init', () => {
         const label = sig ? sig.name : `signal ${sid}`;
         if (r.ok) {
           this._showToast(`Added '${label}'`);
-          await this.loadFiring();
+          // Refresh BOTH firing and roster so the new signal shows up in
+          // the bottom list right away — no manual reload.
+          await Promise.all([this.loadFiring(), this.loadRoster()]);
         } else {
           const detail = (await r.json().catch(() => ({}))).detail || 'add failed';
           this._showToast(`Add failed: ${detail}`, true);
@@ -253,6 +257,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async addTrackedFromPortfolio() {
+      // Called by the "Add" button next to the portfolio dropdown.
       const pid = parseInt(this.addPortfolioId);
       if (!pid) return;
       try {
@@ -267,7 +272,7 @@ document.addEventListener('alpine:init', () => {
             `Added ${added} of ${total_in_portfolio} signals` +
             (already_present ? ` (${already_present} already tracked)` : '')
           );
-          await this.loadFiring();
+          await Promise.all([this.loadFiring(), this.loadRoster()]);
         } else {
           const detail = (await r.json().catch(() => ({}))).detail || 'add failed';
           this._showToast(`Add failed: ${detail}`, true);
@@ -343,19 +348,23 @@ document.addEventListener('alpine:init', () => {
       this.calLoading = false;
     },
 
-    async addToCalendar(signalId, ticker, entryDate, signalName) {
+    async addToCalendar(ticker, outcome, entryDate) {
+      // Calendar identity is (ticker, outcome, entry_date). No signal_id
+      // — the calendar doesn't track which signals fired, just that the
+      // ticker is on for that horizon on that day. Same ticker+outcome
+      // re-added on the same day is a no-op (ON CONFLICT DO NOTHING).
       try {
         const r = await fetch('/api/factor-signals/calendar', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({
-            signal_id:  signalId,
             ticker:     ticker,
+            outcome:    outcome,
             entry_date: entryDate,
           }),
         });
         if (r.ok) {
-          this._showToast(`Added to calendar: ${ticker} · ${signalName}`);
+          this._showToast(`Added to calendar: ${ticker} · ${outcome}`);
           await this.loadCalendar();
         } else {
           const detail = (await r.json().catch(() => ({}))).detail || 'add failed';

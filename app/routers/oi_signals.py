@@ -84,14 +84,34 @@ BEGIN
 END $$;
 
 ALTER TABLE oi_signal_calendar
-    ADD COLUMN IF NOT EXISTS signal_id INTEGER,
-    ADD COLUMN IF NOT EXISTS ticker    TEXT;
+    ADD COLUMN IF NOT EXISTS ticker  TEXT,
+    ADD COLUMN IF NOT EXISTS outcome TEXT;
+
+-- Stage 3.1 migration: calendar entry identity changes from
+-- (signal_id, ticker, entry_date) to (ticker, outcome, entry_date).
+-- The calendar is signal-agnostic now — a lightweight "what's on"
+-- visual. If the same ticker is on a 5d horizon AND a 3d horizon
+-- on the same day, that's two separate entries (different exit
+-- dates). Old signal-keyed entries get TRUNCATEd; the user re-adds
+-- whatever they want via the new + Cal flow on the firing rows.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'oi_signal_calendar'
+          AND column_name = 'signal_id'
+    ) THEN
+        TRUNCATE oi_signal_calendar;
+        ALTER TABLE oi_signal_calendar DROP COLUMN IF EXISTS signal_id;
+    END IF;
+END $$;
 
 DROP INDEX IF EXISTS oi_signal_calendar_trigger_uniq;
 DROP INDEX IF EXISTS oi_signal_calendar_system_uniq;
-CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_signal_uniq
-    ON oi_signal_calendar (signal_id, ticker, entry_date)
-    WHERE signal_id IS NOT NULL;
+DROP INDEX IF EXISTS oi_signal_calendar_signal_uniq;
+CREATE UNIQUE INDEX IF NOT EXISTS oi_signal_calendar_outcome_uniq
+    ON oi_signal_calendar (ticker, outcome, entry_date)
+    WHERE outcome IS NOT NULL;
 
 DROP TABLE IF EXISTS oi_signal_triggers         CASCADE;
 DROP TABLE IF EXISTS oi_research_systems        CASCADE;
@@ -122,8 +142,8 @@ class TrackedFromPortfolioIn(BaseModel):
 
 
 class CalendarAddIn(BaseModel):
-    signal_id:  int
     ticker:     str
+    outcome:    str
     entry_date: str   # ISO YYYY-MM-DD
 
 
@@ -666,44 +686,30 @@ def _exit_date_for(td_list: list, entry: _date, horizon: int) -> Optional[str]:
 
 @router.get("/calendar")
 async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
-    """Calendar entries with computed exit_date. Each row carries the
-    signal_id and the ticker but NOT the color — color is derived
-    frontend-side from a hash of the ticker symbol so the same ticker
-    paints the same color across every entry on the Gantt."""
+    """Calendar entries with computed exit_date. Identity is
+    (ticker, outcome, entry_date) — signal-agnostic. exit_date is
+    derived from the row's OWN outcome horizon (no signal lookup);
+    color is derived frontend-side from a hash of the ticker symbol."""
     await _ensure_tables(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, signal_id, ticker, entry_date, added_at
+            """SELECT id, ticker, outcome, entry_date, added_at
                FROM oi_signal_calendar
-               WHERE signal_id IS NOT NULL
+               WHERE outcome IS NOT NULL
                ORDER BY entry_date""")
     if not rows:
         return []
-    sids = list({r["signal_id"] for r in rows})
-    sig_by_id: dict = {}
-    if oi_pool:
-        async with oi_pool.acquire() as conn:
-            sig_rows = await conn.fetch(
-                """SELECT id, name, outcome
-                   FROM signals WHERE id = ANY($1)""", sids)
-        sig_by_id = {r["id"]: r for r in sig_rows}
     tickers   = list({r["ticker"] for r in rows if r["ticker"]})
     calendars = await _ticker_calendars(oi_pool, tickers)
-
     out = []
     for r in rows:
-        sig = sig_by_id.get(r["signal_id"])
-        name    = sig["name"]    if sig else "(deleted signal)"
-        outcome = sig["outcome"] if sig else None
-        horizon = _parse_horizon(outcome) if outcome else 1
+        horizon = _parse_horizon(r["outcome"])
         td      = calendars.get(r["ticker"], [])
         exit_d  = _exit_date_for(td, r["entry_date"], horizon)
         out.append({
             "id":         r["id"],
-            "signal_id":  r["signal_id"],
-            "name":       name,
             "ticker":     r["ticker"],
-            "outcome":    outcome,
+            "outcome":    r["outcome"],
             "entry_date": r["entry_date"].isoformat(),
             "exit_date":  exit_d,
         })
@@ -711,35 +717,30 @@ async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
 
 
 @router.post("/calendar")
-async def add_calendar(body: CalendarAddIn,
-                       pool=Depends(get_pool),
-                       oi_pool=Depends(get_oi_pool)):
-    """Add a position to the Gantt. Keyed on (signal_id, ticker, entry_date)
-    — duplicate adds are no-ops via the partial unique index. Idempotent."""
+async def add_calendar(body: CalendarAddIn, pool=Depends(get_pool)):
+    """Add a position to the Gantt. Keyed on (ticker, outcome, entry_date).
+    Duplicate adds (same ticker + outcome + day) are no-ops via the
+    partial unique index — adding the same firing twice on the same day
+    doesn't create a second bar."""
     await _ensure_tables(pool)
     try:
         entry = _date.fromisoformat(body.entry_date)
     except ValueError:
         raise HTTPException(400, "entry_date must be ISO YYYY-MM-DD")
-    # Cross-DB signal existence check so we fail fast on a stale signal_id.
-    if oi_pool:
-        async with oi_pool.acquire() as conn:
-            ok = await conn.fetchval(
-                "SELECT 1 FROM signals WHERE id = $1", body.signal_id)
-        if not ok:
-            raise HTTPException(404, f"signal_id {body.signal_id} not found")
+    if not body.ticker or not body.outcome:
+        raise HTTPException(400, "ticker and outcome are required")
     async with pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO oi_signal_calendar (signal_id, ticker, entry_date)
+            """INSERT INTO oi_signal_calendar (ticker, outcome, entry_date)
                VALUES ($1, $2, $3)
-               ON CONFLICT (signal_id, ticker, entry_date) DO NOTHING""",
-            body.signal_id, body.ticker, entry)
+               ON CONFLICT (ticker, outcome, entry_date) DO NOTHING""",
+            body.ticker, body.outcome, entry)
         row = await conn.fetchrow(
             """SELECT id FROM oi_signal_calendar
-               WHERE signal_id = $1 AND ticker = $2 AND entry_date = $3""",
-            body.signal_id, body.ticker, entry)
-    return {"id": row["id"], "signal_id": body.signal_id,
-            "ticker": body.ticker, "entry_date": body.entry_date}
+               WHERE ticker = $1 AND outcome = $2 AND entry_date = $3""",
+            body.ticker, body.outcome, entry)
+    return {"id": row["id"], "ticker": body.ticker,
+            "outcome": body.outcome, "entry_date": body.entry_date}
 
 
 @router.delete("/calendar/{cid}")
