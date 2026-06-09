@@ -11,10 +11,18 @@ document.addEventListener('alpine:init', () => {
   Alpine.data('oiSignals', () => ({
 
     // ── Firing engine state ─────────────────────────────────────────────
-    firingData: { as_of: null, n_tracked: 0, n_firing_tickers: 0, tickers: [] },
+    // Firing payload is now keyed by (ticker, outcome) row — a ticker
+    // firing on multiple outcome horizons (5d AND 20d) produces multiple
+    // rows. avg_ret is only comparable WITHIN one horizon, so pooling
+    // across horizons produces nonsense. Each row is single-outcome by
+    // construction; every downstream stat is comparable.
+    firingData: { as_of: null, n_tracked: 0, n_firing_rows: 0,
+                  n_firing_tickers: 0, rows: [] },
     firingDate: '',           // optional ISO date; '' means "use server MAX(trade_date)"
     firingLoading: false,
-    expandedTickers: {},       // ticker -> bool
+    // Expansion is keyed by `${ticker}|${outcome}` since a ticker can
+    // appear on more than one row now.
+    expandedRows: {},
 
     // ── Sort state ──────────────────────────────────────────────────────
     // Default: most-confirmed tickers at the top (#sigs desc). Click a
@@ -95,12 +103,10 @@ document.addEventListener('alpine:init', () => {
           this.firingData = {
             as_of:            data.as_of            ?? null,
             n_tracked:        data.n_tracked        ?? 0,
+            n_firing_rows:    data.n_firing_rows    ?? 0,
             n_firing_tickers: data.n_firing_tickers ?? 0,
-            tickers:          data.tickers          ?? [],
+            rows:             data.rows             ?? [],
           };
-          // After the first load, anchor the date picker visibly to the as_of
-          // the server resolved. Only sync if the picker is still empty — the
-          // user may have an explicit selection we shouldn't clobber.
           if (!this.firingDate && this.firingData.as_of) {
             this.firingDate = this.firingData.as_of;
           }
@@ -110,7 +116,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     hasFirings() {
-      return (this.firingData.tickers || []).length > 0;
+      return (this.firingData.rows || []).length > 0;
+    },
+
+    // Composite (ticker, outcome) row key. A ticker firing on two
+    // outcome horizons is two rows, and they expand/collapse independently.
+    rowKey(row) {
+      return (row.ticker || '') + '|' + (row.outcome || '');
     },
 
     // ── Sorting ─────────────────────────────────────────────────────────
@@ -124,7 +136,8 @@ document.addEventListener('alpine:init', () => {
         this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
       } else {
         this.sortKey = key;
-        this.sortDir = key === 'ticker' ? 'asc' : 'desc';
+        // String columns default ASC (alphabetical); numeric DESC (largest first).
+        this.sortDir = (key === 'ticker' || key === 'outcome') ? 'asc' : 'desc';
       }
     },
     sortClass(key) {
@@ -144,6 +157,7 @@ document.addEventListener('alpine:init', () => {
       const b = row.scope_b || {};
       switch (key) {
         case 'ticker':           return row.ticker;
+        case 'outcome':          return row.outcome;
         case 'n_signals_firing': return row.n_signals_firing;
         case 'a_n':    return a.n;
         case 'a_avg':  return a.avg_ret;
@@ -171,7 +185,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     get sortedTickers() {
-      const arr = (this.firingData.tickers || []).slice();
+      const arr = (this.firingData.rows || []).slice();
       const key = this.sortKey;
       const dir = this.sortDir === 'asc' ? 1 : -1;
       // Nulls / NaN / undefined always sink to the bottom regardless of
@@ -195,21 +209,21 @@ document.addEventListener('alpine:init', () => {
       return arr;
     },
 
-    // ── Ticker row expand/collapse ──────────────────────────────────────
+    // ── Row expand/collapse — keyed by (ticker, outcome) ────────────────
 
-    toggleTicker(t) {
-      this.expandedTickers = {
-        ...this.expandedTickers,
-        [t]: !this.expandedTickers[t],
+    toggleRow(key) {
+      this.expandedRows = {
+        ...this.expandedRows,
+        [key]: !this.expandedRows[key],
       };
     },
     expandAll() {
       const next = {};
-      for (const r of (this.firingData.tickers || [])) next[r.ticker] = true;
-      this.expandedTickers = next;
+      for (const r of (this.firingData.rows || [])) next[this.rowKey(r)] = true;
+      this.expandedRows = next;
     },
     collapseAll() {
-      this.expandedTickers = {};
+      this.expandedRows = {};
     },
 
     // ── Tracked-signals add paths ───────────────────────────────────────

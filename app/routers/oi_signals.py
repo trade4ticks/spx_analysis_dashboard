@@ -436,7 +436,7 @@ async def get_firing(
     await _ensure_tables(pool)
     if not oi_pool:
         return {"error": "OI database not configured",
-                "as_of": None, "tickers": []}
+                "as_of": None, "rows": []}
 
     async with oi_pool.acquire() as conn:
         if date:
@@ -449,7 +449,7 @@ async def get_firing(
                 "SELECT MAX(trade_date) FROM is_bins")
         if as_of is None:
             return {"error": "is_bins is empty",
-                    "as_of": None, "tickers": []}
+                    "as_of": None, "rows": []}
     as_of_str = (as_of.isoformat() if hasattr(as_of, "isoformat")
                  else str(as_of))
 
@@ -457,8 +457,8 @@ async def get_firing(
         tracked_rows = await conn.fetch(
             "SELECT signal_id FROM tracked_signals")
     if not tracked_rows:
-        return {"as_of": as_of_str, "tickers": [],
-                "n_tracked": 0, "n_firing_tickers": 0}
+        return {"as_of": as_of_str, "rows": [],
+                "n_tracked": 0, "n_firing_rows": 0, "n_firing_tickers": 0}
 
     sids = [r["signal_id"] for r in tracked_rows]
     async with oi_pool.acquire() as conn:
@@ -471,44 +471,53 @@ async def get_firing(
 
     cache = await _fetch_signal_trade_cache(oi_pool, signals)
 
-    # Detect firings: a cache row with trade_date == as_of means the signal
-    # fires for that ticker on that date. A signal fires at most once per
-    # (ticker, date) since is_bins has a (ticker, trade_date) primary key.
-    firings_by_ticker: dict = defaultdict(list)
+    # Detect firings, grouped by (ticker, outcome) — NOT by ticker alone.
+    # avg_ret is only comparable within ONE outcome horizon (a 1d-fwd
+    # return and a 20d-fwd return live on totally different scales —
+    # averaging them produces nonsense). So a ticker firing a 5d signal
+    # AND a 20d signal renders as TWO separate rows. Each row is
+    # single-outcome by construction and every downstream stat is
+    # comparable.
+    firings_by_group: dict = defaultdict(list)   # (ticker, outcome) -> [sid,...]
     for sid, trades in cache.items():
+        outcome = sig_by_id[sid]["outcome"]
         for t in trades:
             if t["trade_date"] == as_of_str:
-                firings_by_ticker[t["ticker"]].append(sid)
+                firings_by_group[(t["ticker"], outcome)].append(sid)
                 break
 
-    if not firings_by_ticker:
-        return {"as_of": as_of_str, "tickers": [],
-                "n_tracked": len(sids), "n_firing_tickers": 0}
+    if not firings_by_group:
+        return {"as_of": as_of_str, "rows": [],
+                "n_tracked": len(sids), "n_firing_rows": 0,
+                "n_firing_tickers": 0}
 
-    out_tickers = []
-    for ticker in sorted(firings_by_ticker.keys()):
-        firing_sids = firings_by_ticker[ticker]
+    out_rows = []
+    for ticker, outcome in sorted(firings_by_group.keys()):
+        firing_sids = firings_by_group[(ticker, outcome)]
 
-        # SCOPE A union. Dedup by (ticker, trade_date, outcome_col):
-        # same outcome on same date is one trade; different outcomes are
-        # different trades (a 5d-fwd bet is not the same as a 1d-fwd bet
-        # on the same date). Same first-wins semantic as portfolio aggregate.
+        # SCOPE A union. All signals in this group share the outcome
+        # (the grouping IS by outcome), so dedup key drops to
+        # (ticker, trade_date) — same first-wins semantic as portfolio
+        # aggregate. avg_ret over this union is comparable because every
+        # trade is on the same horizon.
         seen: dict = {}
         for sid in firing_sids:
-            out_col = sig_by_id[sid]["outcome"]
             for t in cache.get(sid, []):
                 if t["outcome_val"] is None:
                     continue
-                key = (t["ticker"], t["trade_date"], out_col)
+                key = (t["ticker"], t["trade_date"])
                 if key not in seen:
-                    seen[key] = {**t, "outcome": out_col}
+                    seen[key] = t
         union_trades = list(seen.values())
 
-        scope_a      = _full_stats([t["outcome_val"] for t in union_trades])
-        scope_a_stab = _stability_stats(union_trades)
+        scope_a       = _full_stats([t["outcome_val"] for t in union_trades])
+        scope_a_stab  = _stability_stats(union_trades)
         ticker_trades = [t for t in union_trades if t["ticker"] == ticker]
-        scope_b      = _compact_stats([t["outcome_val"] for t in ticker_trades])
+        scope_b       = _compact_stats([t["outcome_val"] for t in ticker_trades])
 
+        # Per-signal detail. Naturally filtered to this row's outcome
+        # since firing_sids only contains sids matching it — no extra
+        # filtering needed.
         signals_out = []
         for sid in firing_sids:
             sig        = sig_by_id[sid]
@@ -529,8 +538,9 @@ async def get_firing(
                 "ticker_slice":     _compact_stats(ticker_rets),
             })
 
-        out_tickers.append({
+        out_rows.append({
             "ticker":            ticker,
+            "outcome":           outcome,
             "n_signals_firing":  len(firing_sids),
             "scope_a":           scope_a,
             "scope_a_stability": scope_a_stab,
@@ -539,10 +549,13 @@ async def get_firing(
         })
 
     return {
-        "as_of":            as_of_str,
-        "n_tracked":        len(sids),
-        "n_firing_tickers": len(out_tickers),
-        "tickers":          out_tickers,
+        "as_of":             as_of_str,
+        "n_tracked":         len(sids),
+        "n_firing_rows":     len(out_rows),
+        # Distinct tickers across all rows (one ticker firing on N
+        # outcomes still counts as one ticker for this metric).
+        "n_firing_tickers":  len({r["ticker"] for r in out_rows}),
+        "rows":              out_rows,
     }
 
 
