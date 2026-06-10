@@ -5245,9 +5245,13 @@ document.addEventListener('alpine:init', () => {
       // whether Alpine's reactivity layer has wrapped the string elements.
       if (!keepOrder) for (const g of groups.values())
         g.metrics.sort((a, b) => String(a).localeCompare(String(b)));
-      // DIAG: log the F3 group after sort so we can see element types + order.
-      const _f3 = groups.get(3);
-      if (_f3) console.log('[DIAG groupMetricsByFamily] F3 after sort — types:', typeof _f3.metrics[0], '— order:', _f3.metrics.slice());
+      // DIAG: unconditional — fires on every call to confirm function is reached
+      // and to expose what keys the Map holds (number vs string) and whether F3
+      // metrics land in key 3 or somewhere else.
+      console.log('[DIAG groupMetricsByFamily] called — list.length:', (list||[]).length,
+        '| keepOrder:', keepOrder,
+        '| groupKeys:', [...groups.keys()],
+        '| F3 metrics:', groups.get(3)?.metrics?.slice(0,5));
       const result = [...groups.values()];
       if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
       return result;
