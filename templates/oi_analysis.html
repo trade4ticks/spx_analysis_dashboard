@@ -301,7 +301,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=189"></script>
+  <script src="/static/js/oi_analysis.js?v=190"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3311,24 +3311,30 @@
                 <template x-if="signals.length > 0">
                   <div>
                     <!-- Batch action toolbar — checkbox column drives both
-                         Refresh Selected and Delete Selected. Buttons stay
+                         Refresh Selected and Delete Selected. Button
+                         styling matches the top-pane Refresh buttons
+                         (rgba 52,152,219 blue at .15 bg / .3 border /
+                         #3498db text; rgba 232,67,147 pink at .15 bg
+                         / .3 border / #e84393 text). Buttons stay
                          disabled until at least one row is checked. -->
                     <div style="display:flex;gap:8px;align-items:center;padding:6px 0;font-size:11px">
                       <button @click="refreshSelectedSignals()"
                               :disabled="sigBatchBusy || sigCheckedCount() === 0"
-                              style="background:rgba(52,152,219,.14);border:1px solid rgba(52,152,219,.45);
-                                     color:#3498db;font-size:11px;font-weight:700;
-                                     padding:3px 10px;border-radius:3px;cursor:pointer;font-family:inherit"
-                              :style="(sigBatchBusy || sigCheckedCount() === 0) ? 'opacity:.5;cursor:not-allowed' : ''">
-                        Refresh Selected
+                              style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
+                                     color:#3498db;font-size:12px;font-weight:700;
+                                     padding:4px 14px;border-radius:4px;cursor:pointer;font-family:inherit"
+                              :style="(sigBatchBusy || sigCheckedCount() === 0)
+                                      ? 'opacity:.5;cursor:not-allowed' : ''">
+                        ⟳ Refresh Selected
                       </button>
                       <button @click="deleteSelectedSignals()"
                               :disabled="sigBatchBusy || sigCheckedCount() === 0"
-                              style="background:transparent;border:1px solid rgba(232,67,147,.4);
-                                     color:#e84393;font-size:11px;font-weight:700;
-                                     padding:3px 10px;border-radius:3px;cursor:pointer;font-family:inherit"
-                              :style="(sigBatchBusy || sigCheckedCount() === 0) ? 'opacity:.5;cursor:not-allowed' : ''">
-                        Delete Selected
+                              style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
+                                     color:#e84393;font-size:12px;font-weight:700;
+                                     padding:4px 14px;border-radius:4px;cursor:pointer;font-family:inherit"
+                              :style="(sigBatchBusy || sigCheckedCount() === 0)
+                                      ? 'opacity:.5;cursor:not-allowed' : ''">
+                        ✕ Delete Selected
                       </button>
                       <span style="color:var(--dim)" x-text="sigCheckedCount() + ' selected'"></span>
                       <span x-show="sigBatchMsg" style="color:#3498db" x-text="sigBatchMsg"></span>
@@ -3415,40 +3421,16 @@
                                   x-text="(sig.agg_n != null) ? sig.agg_n.toLocaleString() : '—'"></td>
                               <td class="sig-td" x-text="(sig.stats_updated_at || '').slice(0,10) || '—'"></td>
                               <td class="sig-td sig-td-thumb">
-                                <!-- 110×110 thumbnail: faint frame + signal's
-                                     own grid resolution + selected cells
-                                     colored on the fixed ±3% scale, dimmed
-                                     by n. Same SVG also reserved as a future
-                                     recall-on-click target. -->
-                                <svg width="110" height="110" viewBox="0 0 20 20"
-                                     style="display:block;background:#1a1a1a;cursor:pointer"
-                                     :title="sig.name + ' (recall coming soon)'">
-                                  <rect x="0" y="0" width="20" height="20" fill="none"
-                                        stroke="rgba(255,255,255,.10)" stroke-width="0.06"/>
-                                  <template x-for="i in (sig.n_bins - 1)"
-                                            :key="'gx-'+sig.id+'-'+i">
-                                    <line :x1="i * 20 / sig.n_bins" y1="0"
-                                          :x2="i * 20 / sig.n_bins" y2="20"
-                                          stroke="rgba(255,255,255,.06)" stroke-width="0.04"/>
-                                  </template>
-                                  <template x-for="i in (sig.n_bins - 1)"
-                                            :key="'gy-'+sig.id+'-'+i">
-                                    <line x1="0" :y1="i * 20 / sig.n_bins"
-                                          x2="20" :y2="i * 20 / sig.n_bins"
-                                          stroke="rgba(255,255,255,.06)" stroke-width="0.04"/>
-                                  </template>
-                                  <template x-for="cell in (sig.per_cell_stats || [])"
-                                            :key="'c-'+sig.id+'-'+cell.ix+'-'+cell.iy">
-                                    <rect :x="cell.ix * (20 / sig.n_bins)"
-                                          :y="(sig.n_bins - 1 - cell.iy) * (20 / sig.n_bins)"
-                                          :width="20 / sig.n_bins"
-                                          :height="20 / sig.n_bins"
-                                          :fill="cellColor(cell.avg_ret)"
-                                          :fill-opacity="cellOpacity(cell.n)"
-                                          stroke="rgba(255,255,255,.25)"
-                                          stroke-width="0.05"/>
-                                  </template>
-                                </svg>
+                                <!-- 110×110 thumbnail rendered via x-html
+                                     because <template x-for> inside <svg>
+                                     emits HTML-namespaced clones that
+                                     never paint as SVG. signalThumbnailSVG
+                                     builds the markup as a string; the
+                                     div's innerHTML setter parses inline
+                                     SVG in the SVG namespace correctly. -->
+                                <div x-html="signalThumbnailSVG(sig)"
+                                     :title="sig.name + ' (recall coming soon)'"
+                                     style="cursor:pointer;line-height:0"></div>
                               </td>
                             </tr>
                             <tr x-show="!!sigExpanded[sig.id]">

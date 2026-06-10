@@ -4914,6 +4914,55 @@ document.addEventListener('alpine:init', () => {
         .sort((a, b) => (b.avg_ret || 0) - (a.avg_ret || 0));
     },
 
+    // Build the thumbnail SVG as a markup string. We can't use Alpine's
+    // <template x-for> inside an <svg> element because the browser parses
+    // <template> content in HTML mode, and the cloned <rect> / <line>
+    // children end up in the HTML namespace, not SVG — they look correct
+    // in the DOM tree but never paint. Building the SVG as a string and
+    // injecting via x-html lets innerHTML's inline-SVG parser place
+    // every node in the SVG namespace correctly.
+    signalThumbnailSVG(sig) {
+      const n     = (sig && sig.n_bins) || 0;
+      const step  = n > 0 ? 20 / n : 20;
+      const cells = (sig && sig.per_cell_stats) || [];
+
+      const parts = [
+        '<svg width="110" height="110" viewBox="0 0 20 20"'
+          + ' style="display:block;background:#1a1a1a;cursor:pointer">',
+        // Frame
+        '<rect x="0" y="0" width="20" height="20" fill="none"'
+          + ' stroke="rgba(255,255,255,.18)" stroke-width="0.08"/>',
+      ];
+      // Gridlines at the signal's own n_bins resolution — viewer can
+      // see whether they're looking at a 3-bin, 5-bin, 10-bin or 20-bin
+      // signal just from the gridline density.
+      for (let i = 1; i < n; i++) {
+        const pos = (i * step).toFixed(4);
+        parts.push(
+          `<line x1="${pos}" y1="0" x2="${pos}" y2="20"`
+            + ' stroke="rgba(255,255,255,.08)" stroke-width="0.05"/>',
+          `<line x1="0" y1="${pos}" x2="20" y2="${pos}"`
+            + ' stroke="rgba(255,255,255,.08)" stroke-width="0.05"/>'
+        );
+      }
+      // Selected cells. Y is flipped so low secondary sits at the bottom
+      // (low→high bottom→top), matching the main heatmap's orientation.
+      for (const cell of cells) {
+        const x       = (cell.ix * step).toFixed(4);
+        const y       = ((n - 1 - cell.iy) * step).toFixed(4);
+        const w       = step.toFixed(4);
+        const fill    = this.cellColor(cell.avg_ret);
+        const opacity = this.cellOpacity(cell.n).toFixed(3);
+        parts.push(
+          `<rect x="${x}" y="${y}" width="${w}" height="${w}"`
+            + ` fill="${fill}" fill-opacity="${opacity}"`
+            + ' stroke="rgba(255,255,255,.30)" stroke-width="0.06"/>'
+        );
+      }
+      parts.push('</svg>');
+      return parts.join('');
+    },
+
     // Group a flat metric list by family using metricFamilyLookup.
     // Works for any array of metric-name strings (features, csMetrics, smMeta.metrics, …).
     // keepOrder=false  → groups sorted by family_num (default; use for static lists).
