@@ -2218,7 +2218,7 @@ document.addEventListener('alpine:init', () => {
     // ── 2D Heatmap ── M3: Y-axis is now secSelectedMetric; no standalone dropdown ──
     heatmapData: null,
     heatmapLoading: false,
-    heatmapBins: 10,
+    heatmapBins: 20,
     hmBins1d: 10,
     hmXData: null,
     hmYData: null,
@@ -2237,7 +2237,13 @@ document.addEventListener('alpine:init', () => {
     zoneOpen:         false,      // zone section expanded
     zoneLoading:      false,
     zoneData:         null,       // last /secondary-zone-analyze response
-    zoneOutcome:      'ret_5d_fwd_oc',  // independent outcome for zone analyze
+    // Empty by default — the Analyze Zone dropdown shows the primary
+    // section's active outcome (`this.outcome`) until the user
+    // explicitly picks a different one. analyzeZone / saveSignal use
+    // `this.zoneOutcome || this.outcome` so the analysis follows the
+    // primary too. Setting any value here means the zone analysis has
+    // diverged from the primary.
+    zoneOutcome:      '',
 
     // Signals — saved named cell-sets
     signals:          [],
