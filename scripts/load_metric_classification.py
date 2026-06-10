@@ -54,17 +54,10 @@ _INELIGIBLE_FAMILIES: set[int] = {
         # exclude them; the family check is the authoritative guard.
 }
 
-# Individual metrics that are NULL by design (EOD OTM IV pending data migration)
-# Identified from the **NULL** annotation in the dictionary's formula column.
-_NULL_BY_DESIGN: frozenset[str] = frozenset({
-    "iv_25d_call_30d",
-    "iv_25d_put_30d",
-    "rr_25d_30d",
-    "bf_25d_30d",
-    "skew_25p_atm_30d",
-    "skew_atm_25c_30d",
-    "zscore_rr_25d_30d",
-})
+# Individual metrics that are NULL by design.
+# All 25-delta skew metrics (30d and 7d tenors) are now active as of the
+# 2026-06 data dictionary update; this set is intentionally empty.
+_NULL_BY_DESIGN: frozenset[str] = frozenset()
 
 # ── Parser ────────────────────────────────────────────────────────────────────
 
@@ -174,7 +167,7 @@ async def verify(conn: asyncpg.Connection) -> None:
         ("put_call_oi_ratio", "MORNING",       True,  "OI metric"),
         ("rv_20d",            "EVENING",        True,  "vol metric"),
         ("ret_5d_fwd_oc",     "EVENING",        False, "Family 7 forward return"),
-        ("iv_25d_call_30d",   "EVENING",        False, "NULL by design"),
+        ("iv_25d_call_30d",   "EVENING",        True,  "30d skew metric (now active)"),
         ("atm_iv_30d",        "EVENING",        True,  "IV metric"),
         ("spot_pc",           "MORNING",        True,  "spot snapshot"),
     ]

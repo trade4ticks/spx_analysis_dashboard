@@ -5240,6 +5240,8 @@ document.addEventListener('alpine:init', () => {
         if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
         groups.get(key).metrics.push(m);
       }
+      // Sort metrics alphabetically within each family group.
+      if (!keepOrder) for (const g of groups.values()) g.metrics.sort();
       const result = [...groups.values()];
       if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
       return result;
