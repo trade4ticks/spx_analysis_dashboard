@@ -319,10 +319,33 @@
     .sig-detail-table td.pos     { color:#3498db; }
     .sig-detail-table td.neg     { color:#e84393; }
     .sig-detail-table td.small-n { color:var(--dim); }
+
+    /* Recall name input — looks like a label until clicked, then
+       bordered + accent-tinted when the name differs from the saved
+       value (the dirty cue). Same blue/pink convention as everywhere
+       else; .dirty maps to the accent so the user sees the unsaved
+       edit at a glance. */
+    .recall-name-input {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-weight: 700;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      width: 200px;
+      font-family: inherit;
+    }
+    .recall-name-input:focus { border-color: var(--accent); outline: none; }
+    .recall-name-input.dirty {
+      border-color: rgba(52,152,219,.55);
+      color: var(--accent);
+      background: rgba(52,152,219,.06);
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=194"></script>
+  <script src="/static/js/oi_analysis.js?v=195"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3511,16 +3534,26 @@
           <span @click="recallExpanded = !recallExpanded"
                 style="font-size:12px;font-weight:600;color:var(--text);cursor:pointer;user-select:none">Recall</span>
           <template x-if="recallSig">
-            <span style="font-size:11px;color:var(--dim)">
-              <b style="color:var(--text)" x-text="recallSig.name"></b>
-              &nbsp;·&nbsp;
-              <span style="color:#3498db;font-family:monospace" x-text="recallSig.primary_metric"></span>
-              &nbsp;×&nbsp;
-              <span style="color:#e84393;font-family:monospace" x-text="recallSig.secondary_metric"></span>
-              &nbsp;·&nbsp;
-              <span x-text="recallSig.outcome"></span>
-              &nbsp;·&nbsp;
-              <span x-text="recallSig.n_bins + 'x' + recallSig.n_bins"></span>
+            <span style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <!-- Editable name. Save commits whatever's in the input.
+                   .dirty class fires when the value differs from
+                   recallSig.name so the user sees the unsaved edit. -->
+              <input type="text"
+                     x-model="recallEditedName"
+                     class="recall-name-input"
+                     :class="(recallEditedName || '').trim() !== (recallSig.name || '').trim() ? 'dirty' : ''"
+                     :title="(recallEditedName || '').trim() !== (recallSig.name || '').trim() ? 'Unsaved name change — click Save to commit' : 'Signal name'"
+                     placeholder="Signal name">
+              <span>
+                &nbsp;·&nbsp;
+                <span style="color:#3498db;font-family:monospace" x-text="recallSig.primary_metric"></span>
+                &nbsp;×&nbsp;
+                <span style="color:#e84393;font-family:monospace" x-text="recallSig.secondary_metric"></span>
+                &nbsp;·&nbsp;
+                <span x-text="recallSig.outcome"></span>
+                &nbsp;·&nbsp;
+                <span x-text="recallSig.n_bins + 'x' + recallSig.n_bins"></span>
+              </span>
             </span>
           </template>
           <span x-show="recallLoading" style="color:#3498db;font-size:11px">Loading…</span>
@@ -3538,8 +3571,8 @@
             </button>
             <button class="btn-batch blue"
                     @click="recallSave()"
-                    :disabled="recallSaving || recallSelectedCells.size === 0"
-                    title="Update this signal's cell_set in place (recomputes stats)">
+                    :disabled="recallSaving || recallSelectedCells.size === 0 || !(recallEditedName || '').trim()"
+                    title="Update this signal's name + cell_set in place (recomputes stats)">
               ✓ Save
             </button>
             <button class="btn-batch pink"

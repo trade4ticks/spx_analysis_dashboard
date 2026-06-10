@@ -2268,6 +2268,11 @@ document.addEventListener('alpine:init', () => {
     recallSelectedCells: new Set(),
     recallSaving:        false,
     recallSaveMsg:       '',
+    // Editable name lives in its own scratch field — we don't mutate
+    // recallSig.name directly because recallSig points at the same
+    // object instance as the row in `signals[]`, and any direct edit
+    // would flash the new name in the list before the save completes.
+    recallEditedName:    '',
 
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
     // the synthetic outcome `overnight_gap`, which the backend resolves
@@ -4964,6 +4969,7 @@ document.addEventListener('alpine:init', () => {
         if (!confirm(msg)) return;
       }
       this.recallSig = sig;
+      this.recallEditedName = sig.name || '';
       this.recallSelectedCells = new Set(
         (sig.cell_set || []).map(c => c[0] + '-' + c[1]));
       this.recallExpanded = true;
@@ -5044,32 +5050,45 @@ document.addEventListener('alpine:init', () => {
 
     async recallSave() {
       if (!this.recallSig || !this.recallSelectedCells.size) return;
+      const trimmedName = (this.recallEditedName || '').trim();
+      if (!trimmedName) {
+        this.recallSaveMsg = '✗ Name required';
+        setTimeout(() => { this.recallSaveMsg = ''; }, 3000);
+        return;
+      }
       this.recallSaving = true;
       this.recallSaveMsg = '';
       try {
+        // Include name in the body whenever it differs from the saved
+        // signal's name (server only writes it when present). Sending
+        // the unchanged name is also fine — backend uses COALESCE.
+        const body = { cell_set: this.recallCellSet() };
+        if (trimmedName !== this.recallSig.name) body.name = trimmedName;
         const r = await fetch(
           `/api/factor-analysis/signals/${this.recallSig.id}`,
           {
             method:  'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ cell_set: this.recallCellSet() }),
+            body:    JSON.stringify(body),
           });
         if (r.ok) {
           const updated = await r.json();
           // Update the in-memory recallSig so subsequent dirty checks
-          // compare against the just-saved cell_set (no false-positive
-          // 'unsaved edits' confirmation right after a save).
+          // compare against the just-saved cell_set + name (no
+          // false-positive 'unsaved edits' confirmation right after).
           this.recallSig = {
             ...this.recallSig,
+            name:             updated.name,
             cell_set:         updated.cell_set,
             agg_avg_ret:      updated.agg_avg_ret,
             agg_n:            updated.agg_n,
             per_cell_stats:   updated.per_cell_stats,
             stats_updated_at: updated.stats_updated_at,
           };
+          this.recallEditedName = updated.name;
           this.recallSaveMsg = '✓ Saved';
-          // Refresh the Saved Signals list so the row's stats and
-          // thumbnail reflect the edit immediately.
+          // Refresh the Saved Signals list so the row's stats,
+          // thumbnail, and name reflect the edit immediately.
           await this.loadSignals();
         } else {
           this.recallSaveMsg = '✗ Save failed';
@@ -5083,6 +5102,7 @@ document.addEventListener('alpine:init', () => {
 
     recallCancel() {
       this.recallSig = null;
+      this.recallEditedName = '';
       this.recallExpanded = false;
       this.recallHeatmapData = null;
       this.recallZoneData = null;
@@ -5110,11 +5130,17 @@ document.addEventListener('alpine:init', () => {
       return [...this.recallSelectedCells].map(k => k.split('-').map(Number));
     },
 
-    // Set-equality dirty check. Order-independent — toggling a cell
+    // Dirty if either the cell set or the name has been edited since
+    // the last save. Cell-set check is order-independent set equality;
+    // name check is whitespace-trimmed string compare. Toggling a cell
     // off then back on, or the same cells in a different array order,
-    // does NOT register as a dirty edit.
+    // or an unchanged name with surrounding whitespace — none of these
+    // register as dirty.
     _recallIsDirty() {
       if (!this.recallSig) return false;
+      const editedName = (this.recallEditedName || '').trim();
+      const savedName  = (this.recallSig.name    || '').trim();
+      if (editedName !== savedName) return true;
       const saved = new Set(
         (this.recallSig.cell_set || []).map(c => c[0] + '-' + c[1]));
       const current = this.recallSelectedCells;

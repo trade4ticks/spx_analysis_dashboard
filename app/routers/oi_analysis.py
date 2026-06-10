@@ -7984,25 +7984,33 @@ async def delete_signal(signal_id: int, pool=Depends(get_oi_pool)):
 
 class SignalUpdateRequest(BaseModel):
     cell_set: List[List[int]]
+    # Optional rename — when present and non-empty, replaces signals.name.
+    # Identity stays anchored on (primary, secondary, outcome) — only the
+    # human-readable label changes. None / empty means no rename.
+    name: Optional[str] = None
 
 
 @router.put("/signals/{signal_id}")
 async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
                                pool=Depends(get_oi_pool)):
-    """Update the cell_set of an existing signal in place. Identity
-    (name, primary_metric, secondary_metric, outcome, n_bins) is
-    preserved — recall/edit only changes WHICH cells the signal
-    refers to. Stats are recomputed inline so the UI never has to
-    issue a separate Refresh after a save."""
+    """Update the cell_set (and optionally the name) of an existing
+    signal in place. Identity (primary_metric, secondary_metric,
+    outcome, n_bins) is preserved — recall/edit only changes WHICH
+    cells the signal refers to plus the display label. Stats are
+    recomputed inline so the UI never has to issue a separate
+    Refresh after a save."""
     if not pool:
         return {"error": "OI database not configured"}
     if not req.cell_set:
         return {"error": "cell_set is empty"}
+    new_name = (req.name or "").strip() if req.name is not None else None
+    if req.name is not None and not new_name:
+        return {"error": "name cannot be empty"}
     await _ensure_signals_table(pool)
 
     async with pool.acquire() as conn:
         sig = await conn.fetchrow(
-            """SELECT id, primary_metric, secondary_metric, outcome, n_bins
+            """SELECT id, name, primary_metric, secondary_metric, outcome, n_bins
                FROM signals WHERE id = $1""", signal_id)
     if not sig:
         raise HTTPException(404, f"signal_id {signal_id} not found")
@@ -8013,21 +8021,24 @@ async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
 
     cell_json     = json.dumps(req.cell_set)
     per_cell_json = json.dumps(stats["per_cell_stats"])
-
+    # COALESCE keeps the existing name when no rename is requested; a
+    # provided non-null new_name overwrites it.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE signals
-               SET cell_set         = $2::jsonb,
+               SET name             = COALESCE($6, name),
+                   cell_set         = $2::jsonb,
                    agg_avg_ret      = $3,
                    agg_n            = $4,
                    per_cell_stats   = $5::jsonb,
                    stats_updated_at = NOW()
                WHERE id = $1
-               RETURNING id, stats_updated_at""",
+               RETURNING id, name, stats_updated_at""",
             signal_id, cell_json, stats["agg_avg_ret"], stats["agg_n"],
-            per_cell_json)
+            per_cell_json, new_name)
     return {
         "id":               row["id"],
+        "name":             row["name"],
         "stats_updated_at": str(row["stats_updated_at"])[:19],
         "agg_avg_ret":      stats["agg_avg_ret"],
         "agg_n":            stats["agg_n"],
