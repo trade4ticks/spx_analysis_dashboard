@@ -4945,11 +4945,13 @@ document.addEventListener('alpine:init', () => {
             + ' stroke="rgba(255,255,255,.08)" stroke-width="0.05"/>'
         );
       }
-      // Selected cells. Y is flipped so low secondary sits at the bottom
-      // (low→high bottom→top), matching the main heatmap's orientation.
+      // Selected cells. No Y flip — the main 2D heatmap renders in
+      // SVG-native orientation (y=0 at top, high secondary-bin rows
+      // at the bottom). High iy goes to high SVG y so a zone in the
+      // thumbnail visually matches the same zone on the heatmap.
       for (const cell of cells) {
         const x       = (cell.ix * step).toFixed(4);
-        const y       = ((n - 1 - cell.iy) * step).toFixed(4);
+        const y       = (cell.iy * step).toFixed(4);
         const w       = step.toFixed(4);
         const fill    = this.cellColor(cell.avg_ret);
         const opacity = this.cellOpacity(cell.n).toFixed(3);

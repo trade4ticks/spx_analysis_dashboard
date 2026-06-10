@@ -226,6 +226,27 @@
     /* Placeholder shown when a pane has no data yet */
     .survey-pane-ph { display:flex; align-items:center; justify-content:center; min-height:340px; color:var(--dim); font-size:12px; text-align:center; padding:0 24px; line-height:1.6; }
 
+    /* Batch action buttons (Saved Signals toolbar). Match the top-pane
+       Refresh buttons exactly (canonical project blue / pink hexes).
+       Disabled state lives in CSS via the :disabled pseudo-class so
+       Alpine's :style binding can't wipe the colors. */
+    .btn-batch {
+      font-size: 12px; font-weight: 700;
+      padding: 4px 14px; border-radius: 4px;
+      cursor: pointer; font-family: inherit;
+    }
+    .btn-batch:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-batch.blue {
+      background: rgba(52,152,219,.15);
+      border: 1px solid rgba(52,152,219,.3);
+      color: #3498db;
+    }
+    .btn-batch.pink {
+      background: rgba(232,67,147,.15);
+      border: 1px solid rgba(232,67,147,.3);
+      color: #e84393;
+    }
+
     /* ── Saved Signals table — per-signal stats + thumbnail grid ── */
     .signals-table { width:100%; border-collapse:separate; border-spacing:0;
                      font-size:11px; font-family:monospace; }
@@ -301,7 +322,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=190"></script>
+  <script src="/static/js/oi_analysis.js?v=191"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3311,29 +3332,18 @@
                 <template x-if="signals.length > 0">
                   <div>
                     <!-- Batch action toolbar — checkbox column drives both
-                         Refresh Selected and Delete Selected. Button
-                         styling matches the top-pane Refresh buttons
-                         (rgba 52,152,219 blue at .15 bg / .3 border /
-                         #3498db text; rgba 232,67,147 pink at .15 bg
-                         / .3 border / #e84393 text). Buttons stay
-                         disabled until at least one row is checked. -->
+                         Refresh Selected and Delete Selected. Styles
+                         live in .btn-batch / .btn-batch.blue / .pink so
+                         the disabled state can't blow away the colors. -->
                     <div style="display:flex;gap:8px;align-items:center;padding:6px 0;font-size:11px">
-                      <button @click="refreshSelectedSignals()"
-                              :disabled="sigBatchBusy || sigCheckedCount() === 0"
-                              style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
-                                     color:#3498db;font-size:12px;font-weight:700;
-                                     padding:4px 14px;border-radius:4px;cursor:pointer;font-family:inherit"
-                              :style="(sigBatchBusy || sigCheckedCount() === 0)
-                                      ? 'opacity:.5;cursor:not-allowed' : ''">
+                      <button class="btn-batch blue"
+                              @click="refreshSelectedSignals()"
+                              :disabled="sigBatchBusy || sigCheckedCount() === 0">
                         ⟳ Refresh Selected
                       </button>
-                      <button @click="deleteSelectedSignals()"
-                              :disabled="sigBatchBusy || sigCheckedCount() === 0"
-                              style="background:rgba(232,67,147,.15);border:1px solid rgba(232,67,147,.3);
-                                     color:#e84393;font-size:12px;font-weight:700;
-                                     padding:4px 14px;border-radius:4px;cursor:pointer;font-family:inherit"
-                              :style="(sigBatchBusy || sigCheckedCount() === 0)
-                                      ? 'opacity:.5;cursor:not-allowed' : ''">
+                      <button class="btn-batch pink"
+                              @click="deleteSelectedSignals()"
+                              :disabled="sigBatchBusy || sigCheckedCount() === 0">
                         ✕ Delete Selected
                       </button>
                       <span style="color:var(--dim)" x-text="sigCheckedCount() + ' selected'"></span>
