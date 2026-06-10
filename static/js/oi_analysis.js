@@ -2237,6 +2237,15 @@ document.addEventListener('alpine:init', () => {
     signalName:       '',
     signalSaving:     false,
     signalSaveMsg:    '',
+    // Saved Signals table — sort, checkbox, expand, batch action state.
+    // sigCheckedIds is keyed by signal_id so sorting doesn't drop checks
+    // and reload re-applies them to whichever rows still exist.
+    sigSortKey:       'agg_avg_ret',
+    sigSortDir:       'desc',
+    sigCheckedIds:    {},
+    sigExpanded:      {},
+    sigBatchBusy:     false,
+    sigBatchMsg:      '',
 
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
     // the synthetic outcome `overnight_gap`, which the backend resolves
@@ -4657,7 +4666,7 @@ document.addEventListener('alpine:init', () => {
       URL.revokeObjectURL(a.href);
     },
 
-    // ── Signals CRUD ──────────────────────────────────────────────────────────
+    // ── Signals CRUD + table helpers ─────────────────────────────────────────
 
     async loadSignals() {
       const r = await fetch('/api/factor-analysis/signals');
@@ -4685,6 +4694,8 @@ document.addEventListener('alpine:init', () => {
         if (r.ok) {
           this.signalSaveMsg = '✓ Saved';
           this.signalName    = '';
+          // POST now computes stats inline, so reloading shows them right
+          // away without an extra Refresh.
           await this.loadSignals();
         } else {
           this.signalSaveMsg = '✗ Error';
@@ -4696,9 +4707,211 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.signalSaveMsg = ''; }, 3000);
     },
 
-    async deleteSignal(id) {
-      await fetch(`/api/factor-analysis/signals/${id}`, { method: 'DELETE' });
-      await this.loadSignals();
+    // ── Sort dispatcher (Saved Signals table) ──────────────────────────
+
+    sigSortBy(key) {
+      if (this.sigSortKey === key) {
+        this.sigSortDir = this.sigSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sigSortKey = key;
+        // String / date columns default asc; numeric defaults desc
+        // (largest first — best avg_ret, biggest n, freshest stats date).
+        const ASC_DEFAULT = new Set([
+          'name', 'primary', 'primary_family',
+          'secondary', 'secondary_family', 'outcome',
+        ]);
+        this.sigSortDir = ASC_DEFAULT.has(key) ? 'asc' : 'desc';
+      }
+    },
+    sigSortClass(key) {
+      return this.sigSortKey === key ? 'sort-active' : '';
+    },
+    sigSortArrow(key) {
+      if (this.sigSortKey !== key) return '';
+      return this.sigSortDir === 'asc' ? '▲' : '▼';
+    },
+    _sigSortValueFor(s, key) {
+      switch (key) {
+        case 'name':             return (s.name             || '').toLowerCase();
+        case 'primary':          return (s.primary_metric   || '').toLowerCase();
+        case 'primary_family':   return (this.signalFamilyName(s.primary_metric)   || '').toLowerCase();
+        case 'secondary':        return (s.secondary_metric || '').toLowerCase();
+        case 'secondary_family': return (this.signalFamilyName(s.secondary_metric) || '').toLowerCase();
+        case 'outcome':          return (s.outcome          || '').toLowerCase();
+        case 'agg_avg_ret':      return s.agg_avg_ret;
+        case 'agg_n':            return s.agg_n;
+        case 'stats_updated_at': return s.stats_updated_at;
+        default:                 return 0;
+      }
+    },
+    get sortedSignals() {
+      const arr = (this.signals || []).slice();
+      const key = this.sigSortKey;
+      const dir = this.sigSortDir === 'asc' ? 1 : -1;
+      // Nulls sink to the bottom regardless of direction — a missing
+      // stat is "no data," not a tiny number.
+      const isMissing = (v) =>
+        v === null || v === undefined ||
+        (typeof v === 'number' && !isFinite(v));
+      arr.sort((a, b) => {
+        const va = this._sigSortValueFor(a, key);
+        const vb = this._sigSortValueFor(b, key);
+        const ma = isMissing(va), mb = isMissing(vb);
+        if (ma && mb) return 0;
+        if (ma) return 1;
+        if (mb) return -1;
+        if (typeof va === 'string' || typeof vb === 'string') {
+          return String(va).localeCompare(String(vb)) * dir;
+        }
+        return (va - vb) * dir;
+      });
+      return arr;
+    },
+
+    // ── Checkbox + batch actions ───────────────────────────────────────
+
+    sigCheckedCount() {
+      let n = 0;
+      for (const k in this.sigCheckedIds) if (this.sigCheckedIds[k]) n++;
+      return n;
+    },
+    sigAllChecked() {
+      return this.signals.length > 0 &&
+             this.signals.every(s => !!this.sigCheckedIds[s.id]);
+    },
+    sigToggle(id) {
+      this.sigCheckedIds = { ...this.sigCheckedIds, [id]: !this.sigCheckedIds[id] };
+    },
+    sigToggleAll(checked) {
+      const next = {};
+      if (checked) for (const s of this.signals) next[s.id] = true;
+      this.sigCheckedIds = next;
+    },
+    sigToggleExpand(id) {
+      this.sigExpanded = { ...this.sigExpanded, [id]: !this.sigExpanded[id] };
+    },
+
+    async refreshSelectedSignals() {
+      const ids = Object.keys(this.sigCheckedIds)
+        .filter(k => this.sigCheckedIds[k]).map(Number);
+      if (!ids.length) return;
+      this.sigBatchBusy = true;
+      this.sigBatchMsg  = 'Refreshing…';
+      try {
+        const r = await fetch('/api/factor-analysis/signals/refresh', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ signal_ids: ids }),
+        });
+        if (r.ok) {
+          const { refreshed, failed } = await r.json();
+          const failN = (failed && failed.length) || 0;
+          this.sigBatchMsg = `Refreshed ${refreshed} signal${refreshed === 1 ? '' : 's'}` +
+                             (failN ? ` · ${failN} failed` : '');
+          await this.loadSignals();
+        } else {
+          this.sigBatchMsg = '✗ Refresh failed';
+        }
+      } catch (_) {
+        this.sigBatchMsg = '✗ Network error';
+      }
+      this.sigBatchBusy = false;
+      setTimeout(() => { this.sigBatchMsg = ''; }, 4000);
+    },
+
+    async deleteSelectedSignals() {
+      const ids = Object.keys(this.sigCheckedIds)
+        .filter(k => this.sigCheckedIds[k]).map(Number);
+      if (!ids.length) return;
+      if (!confirm(`Delete ${ids.length} signal${ids.length === 1 ? '' : 's'}?`)) return;
+      this.sigBatchBusy = true;
+      this.sigBatchMsg  = 'Deleting…';
+      try {
+        const r = await fetch('/api/factor-analysis/signals/delete-batch', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ signal_ids: ids }),
+        });
+        if (r.ok) {
+          const { deleted } = await r.json();
+          this.sigBatchMsg = `Deleted ${deleted} signal${deleted === 1 ? '' : 's'}`;
+          this.sigCheckedIds = {};
+          await this.loadSignals();
+        } else {
+          this.sigBatchMsg = '✗ Delete failed';
+        }
+      } catch (_) {
+        this.sigBatchMsg = '✗ Network error';
+      }
+      this.sigBatchBusy = false;
+      setTimeout(() => { this.sigBatchMsg = ''; }, 4000);
+    },
+
+    // ── Display helpers ─────────────────────────────────────────────────
+
+    signalFamilyName(metric) {
+      const fam = this.metricFamilyLookup[metric];
+      return fam ? fam.family_name : '—';
+    },
+    sigTruncateMetric(name) {
+      // Long metric names like oi_weighted_all_div_spot_co get clipped
+      // for column width; full name shows in the cell's title attr.
+      if (!name) return '';
+      return name.length > 24 ? name.slice(0, 22) + '…' : name;
+    },
+    sigFormatPct(v) {
+      if (v === null || v === undefined) return '—';
+      const x = +v;
+      if (!isFinite(x)) return '—';
+      return (x * 100).toFixed(2) + '%';
+    },
+    sigPosNeg(v) {
+      if (v === null || v === undefined) return '';
+      const x = +v;
+      if (!isFinite(x) || x === 0) return '';
+      return x > 0 ? 'pos' : 'neg';
+    },
+    sigSmallN(n) {
+      return (typeof n === 'number' && n < 30) ? 'small-n' : '';
+    },
+
+    // Per-cell color on a fixed ±3% divergent scale — same canonical
+    // hex anchors as .pos / .neg everywhere else on the page (no
+    // per-signal or per-global max_abs calibration). 4-5% cells
+    // saturate to max intensity; a cell's color means the same return
+    // in every thumbnail.
+    cellColor(avgRet) {
+      if (avgRet === null || avgRet === undefined) return 'rgb(60,60,60)';
+      const r = Math.max(-0.03, Math.min(0.03, +avgRet));
+      const t = r / 0.03;   // -1 → +1
+      // Neutral rgb(60,60,60). Blue end #3498db (52,152,219). Pink end #e84393 (232,67,147).
+      let R, G, B;
+      if (t > 0) {
+        R = Math.round(60 + (52  - 60) * t);
+        G = Math.round(60 + (152 - 60) * t);
+        B = Math.round(60 + (219 - 60) * t);
+      } else if (t < 0) {
+        const u = -t;
+        R = Math.round(60 + (232 - 60) * u);
+        G = Math.round(60 + (67  - 60) * u);
+        B = Math.round(60 + (147 - 60) * u);
+      } else {
+        return 'rgb(60,60,60)';
+      }
+      return `rgb(${R},${G},${B})`;
+    },
+    cellOpacity(n) {
+      // Linear small-n dimming: 0.35 below 10, 1.0 at 100+, smooth
+      // between. Same honesty cue as the firing page's small-n dim.
+      if (n === null || n === undefined || n < 10) return 0.35;
+      if (n >= 100) return 1.0;
+      return 0.35 + 0.65 * (n - 10) / 90;
+    },
+
+    sortedPerCellStats(sig) {
+      return ((sig && sig.per_cell_stats) || [])
+        .slice()
+        .sort((a, b) => (b.avg_ret || 0) - (a.avg_ret || 0));
     },
 
     // Group a flat metric list by family using metricFamilyLookup.

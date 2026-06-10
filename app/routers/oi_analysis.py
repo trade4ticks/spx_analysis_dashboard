@@ -7514,18 +7514,29 @@ async def corner_scan_1f_endpoint(
 # Signals: a thin JSONB table that persists named cell-set definitions so the
 # user can recall a zone without manually re-selecting heatmap cells.
 
-_SIGNALS_DDL = """\
-CREATE TABLE IF NOT EXISTS signals (
-    id               SERIAL PRIMARY KEY,
-    name             TEXT NOT NULL,
-    primary_metric   TEXT NOT NULL,
-    secondary_metric TEXT NOT NULL,
-    outcome          TEXT NOT NULL,
-    n_bins           INT  NOT NULL DEFAULT 10,
-    cell_set         JSONB NOT NULL,
-    created_at       TIMESTAMPTZ DEFAULT NOW()
-);
-"""
+# Schema migration split into independent, idempotent steps. Each
+# ALTER ... ADD COLUMN IF NOT EXISTS is its own statement so a partial
+# apply self-heals on the next restart — the calendar migration's "one
+# big script" approach caused an index to silently never materialize on
+# at least one VPS, so we avoid that pattern here.
+_SIGNALS_DDL_STEPS = [
+    """CREATE TABLE IF NOT EXISTS signals (
+        id               SERIAL PRIMARY KEY,
+        name             TEXT NOT NULL,
+        primary_metric   TEXT NOT NULL,
+        secondary_metric TEXT NOT NULL,
+        outcome          TEXT NOT NULL,
+        n_bins           INT  NOT NULL DEFAULT 10,
+        cell_set         JSONB NOT NULL,
+        created_at       TIMESTAMPTZ DEFAULT NOW()
+    )""",
+    # Per-cell + aggregate stats stored at save time. Each ADD COLUMN
+    # is its own independent statement so a partial migration heals.
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS agg_avg_ret      DOUBLE PRECISION",
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS agg_n            INTEGER",
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS per_cell_stats   JSONB",
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS stats_updated_at TIMESTAMPTZ",
+]
 _signals_table_ensured = False
 
 
@@ -7534,8 +7545,81 @@ async def _ensure_signals_table(pool) -> None:
     if _signals_table_ensured:
         return
     async with pool.acquire() as conn:
-        await conn.execute(_SIGNALS_DDL)
+        for sql in _SIGNALS_DDL_STEPS:
+            await conn.execute(sql)
     _signals_table_ensured = True
+
+
+_SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
+
+
+async def _compute_signal_stats(pool, primary: str, secondary: str,
+                                 outcome: str, n_bins: int,
+                                 cell_set: list) -> dict:
+    """Compute per-cell + aggregate stats for one signal using stored bins.
+
+    Returns {agg_avg_ret, agg_n, per_cell_stats: [{ix, iy, avg_ret, n}, ...]}.
+
+    Each (ticker, trade_date) row has exactly ONE (cell_x, cell_y) at the
+    signal's n_bins resolution, so per-cell sets are disjoint and the
+    aggregate avg_ret = n-weighted mean across per-cell avg_rets.
+    """
+    empty = {"agg_avg_ret": None, "agg_n": 0, "per_cell_stats": []}
+    if not cell_set or n_bins not in (3, 5, 10, 20):
+        return empty
+    if (any(c not in _SAFE_METRIC_NAME for c in (primary   or "")) or
+        any(c not in _SAFE_METRIC_NAME for c in (secondary or "")) or
+        any(c not in _SAFE_METRIC_NAME for c in (outcome   or ""))):
+        return empty
+
+    xs = [int(c[0]) for c in cell_set]
+    ys = [int(c[1]) for c in cell_set]
+
+    # Single-column outcome path. overnight_gap (cc - oc per row) skipped
+    # — it's the only multi-column outcome and isn't expected as a saved
+    # signal outcome in practice; if needed later, add a CASE expression.
+    if outcome == _OVERNIGHT_GAP_OUTCOME:
+        outcome_expr   = "AVG(df.ret_1d_fwd_cc - df.ret_1d_fwd_oc)"
+        outcome_filter = "df.ret_1d_fwd_cc IS NOT NULL AND df.ret_1d_fwd_oc IS NOT NULL"
+    else:
+        outcome_expr   = f"AVG(df.{outcome})"
+        outcome_filter = f"df.{outcome} IS NOT NULL"
+
+    query = f"""
+        SELECT
+            ((ib.bin20_{primary}   - 1) * $1::int) / 20 AS ix,
+            ((ib.bin20_{secondary} - 1) * $1::int) / 20 AS iy,
+            {outcome_expr}::float8 AS avg_ret,
+            COUNT(*) AS n
+        FROM daily_features df
+        JOIN is_bins ib USING (ticker, trade_date)
+        WHERE ib.bin20_{primary}   > 0
+          AND ib.bin20_{secondary} > 0
+          AND {outcome_filter}
+          AND (
+            ((ib.bin20_{primary}   - 1) * $1::int) / 20,
+            ((ib.bin20_{secondary} - 1) * $1::int) / 20
+          ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+        GROUP BY ix, iy
+    """
+    async with pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(query, n_bins, xs, ys)
+        except Exception:
+            return empty
+
+    per_cell = []
+    total_n = 0
+    weighted_sum = 0.0
+    for r in rows:
+        n = int(r["n"])
+        avg = float(r["avg_ret"]) if r["avg_ret"] is not None else 0.0
+        per_cell.append({"ix": int(r["ix"]), "iy": int(r["iy"]),
+                         "avg_ret": round(avg, 6), "n": n})
+        total_n      += n
+        weighted_sum += avg * n
+    agg = round(weighted_sum / total_n, 6) if total_n > 0 else None
+    return {"agg_avg_ret": agg, "agg_n": total_n, "per_cell_stats": per_cell}
 
 
 class ZoneAnalyzeRequest(BaseModel):
@@ -7786,16 +7870,38 @@ class SaveSignalRequest(BaseModel):
     cell_set:         List[List[int]]
 
 
+class SignalsBatchRequest(BaseModel):
+    signal_ids: List[int]
+
+
+def _parse_jsonb(v):
+    """Cell_set / per_cell_stats may come back as already-parsed list
+    (asyncpg JSONB codec) or as a JSON string depending on environment.
+    Handle both."""
+    if v is None:
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    try:
+        return json.loads(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.get("/signals")
 async def list_signals(pool=Depends(get_oi_pool)):
-    """Return all saved signals ordered by creation time (newest first)."""
+    """Return all saved signals ordered by creation time (newest first).
+    Stored stats (agg_avg_ret, agg_n, per_cell_stats, stats_updated_at)
+    are returned as-is — no per-signal SQL on list load. Stats are
+    populated at save time and bumped by POST /signals/refresh."""
     if not pool:
         return {"signals": []}
     await _ensure_signals_table(pool)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric,
-                      outcome, n_bins, cell_set, created_at
+                      outcome, n_bins, cell_set, created_at,
+                      agg_avg_ret, agg_n, per_cell_stats, stats_updated_at
                FROM signals ORDER BY created_at DESC"""
         )
     return {
@@ -7807,8 +7913,14 @@ async def list_signals(pool=Depends(get_oi_pool)):
                 "secondary_metric": r["secondary_metric"],
                 "outcome":          r["outcome"],
                 "n_bins":           r["n_bins"],
-                "cell_set":         json.loads(r["cell_set"]),
+                "cell_set":         _parse_jsonb(r["cell_set"]) or [],
                 "created_at":       str(r["created_at"])[:19],
+                # Stored stats — null on signals that pre-date the stats
+                # columns. UI shows blank until Refresh is run for them.
+                "agg_avg_ret":      float(r["agg_avg_ret"]) if r["agg_avg_ret"] is not None else None,
+                "agg_n":            int(r["agg_n"]) if r["agg_n"] is not None else None,
+                "per_cell_stats":   _parse_jsonb(r["per_cell_stats"]) or [],
+                "stats_updated_at": str(r["stats_updated_at"])[:19] if r["stats_updated_at"] else None,
             }
             for r in rows
         ]
@@ -7817,7 +7929,8 @@ async def list_signals(pool=Depends(get_oi_pool)):
 
 @router.post("/signals")
 async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
-    """Persist a named cell-set signal."""
+    """Persist a named cell-set signal and compute its stats inline so
+    the list never shows blank stats for fresh signals."""
     if not pool:
         return {"error": "OI database not configured"}
     if not req.name.strip():
@@ -7825,29 +7938,108 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
     if not req.cell_set:
         return {"error": "cell_set is empty"}
     await _ensure_signals_table(pool)
-    cell_json = json.dumps(req.cell_set)
+
+    stats = await _compute_signal_stats(
+        pool, req.primary_metric, req.secondary_metric,
+        req.outcome, req.n_bins, req.cell_set)
+
+    cell_json     = json.dumps(req.cell_set)
+    per_cell_json = json.dumps(stats["per_cell_stats"])
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO signals
-               (name, primary_metric, secondary_metric, outcome, n_bins, cell_set)
-               VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-               RETURNING id, created_at""",
+               (name, primary_metric, secondary_metric, outcome, n_bins, cell_set,
+                agg_avg_ret, agg_n, per_cell_stats, stats_updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                       $7, $8, $9::jsonb, NOW())
+               RETURNING id, created_at, stats_updated_at""",
             req.name.strip(), req.primary_metric, req.secondary_metric,
             req.outcome, req.n_bins, cell_json,
+            stats["agg_avg_ret"], stats["agg_n"], per_cell_json,
         )
-    return {"id": row["id"], "created_at": str(row["created_at"])[:19]}
+    return {
+        "id":               row["id"],
+        "created_at":       str(row["created_at"])[:19],
+        "stats_updated_at": str(row["stats_updated_at"])[:19],
+        "agg_avg_ret":      stats["agg_avg_ret"],
+        "agg_n":            stats["agg_n"],
+    }
 
 
 @router.delete("/signals/{signal_id}")
 async def delete_signal(signal_id: int, pool=Depends(get_oi_pool)):
-    """Delete a saved signal by id."""
+    """Delete a single signal by id. Kept for compatibility; the UI
+    uses POST /signals/delete-batch for the checkbox-driven flow."""
     if not pool:
         return {"error": "OI database not configured"}
     await _ensure_signals_table(pool)
     async with pool.acquire() as conn:
         deleted = await conn.fetchval(
-            "DELETE FROM signals WHERE id = $1 RETURNING id", signal_id
-        )
+            "DELETE FROM signals WHERE id = $1 RETURNING id", signal_id)
     if deleted is None:
         return {"error": "Signal not found"}
+    return {"deleted": deleted}
+
+
+@router.post("/signals/refresh")
+async def refresh_signals(req: SignalsBatchRequest, pool=Depends(get_oi_pool)):
+    """Recompute stored stats for one or more saved signals — used by
+    the checkbox-driven 'Refresh Selected' UI flow. Bumps
+    stats_updated_at on each successfully recomputed signal so the
+    'Stats as of' column reflects the staleness of what's displayed."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.signal_ids:
+        return {"refreshed": 0, "failed": []}
+    await _ensure_signals_table(pool)
+
+    async with pool.acquire() as conn:
+        sig_rows = await conn.fetch(
+            """SELECT id, primary_metric, secondary_metric, outcome,
+                      n_bins, cell_set
+               FROM signals WHERE id = ANY($1)""", req.signal_ids)
+
+    refreshed = 0
+    failed:    list = []
+    for r in sig_rows:
+        try:
+            cell_set = _parse_jsonb(r["cell_set"]) or []
+            stats = await _compute_signal_stats(
+                pool, r["primary_metric"], r["secondary_metric"],
+                r["outcome"], r["n_bins"], cell_set)
+            per_cell_json = json.dumps(stats["per_cell_stats"])
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE signals
+                       SET agg_avg_ret      = $2,
+                           agg_n            = $3,
+                           per_cell_stats   = $4::jsonb,
+                           stats_updated_at = NOW()
+                       WHERE id = $1""",
+                    r["id"], stats["agg_avg_ret"], stats["agg_n"], per_cell_json)
+            refreshed += 1
+        except Exception as exc:
+            failed.append({"id": r["id"], "error": str(exc)})
+    return {"refreshed": refreshed, "failed": failed}
+
+
+@router.post("/signals/delete-batch")
+async def delete_signals_batch(req: SignalsBatchRequest,
+                                pool=Depends(get_oi_pool)):
+    """Batch delete by signal_ids — used by the checkbox-driven
+    'Delete Selected' UI flow."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.signal_ids:
+        return {"deleted": 0}
+    await _ensure_signals_table(pool)
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM signals WHERE id = ANY($1)", req.signal_ids)
+    # asyncpg returns a status string like "DELETE 3"
+    try:
+        deleted = int(result.split()[-1])
+    except Exception:
+        deleted = 0
     return {"deleted": deleted}
