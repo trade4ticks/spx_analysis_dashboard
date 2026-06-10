@@ -322,7 +322,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=191"></script>
+  <script src="/static/js/oi_analysis.js?v=192"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3301,186 +3301,10 @@
             </div>
           </div>
 
-          <!-- ── Saved Signals ─────────────────────────────────────────────────
-               Per-signal aggregate stats and a thumbnail mini-grid of the
-               zone's shape + per-cell return distribution. Stats are stored
-               at save time and refreshed in batches via the checkbox /
-               'Refresh Selected' flow — list load is metadata-only, no
-               per-signal SQL on open. -->
-          <div style="margin-top:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
-            <div @click="signalsExpanded=!signalsExpanded; if(signalsExpanded && !signals.length) loadSignals()"
-                 style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;
-                        background:var(--raised)">
-              <span style="font-size:13px;color:var(--dim)"
-                    x-text="signalsExpanded ? '▾' : '▸'"></span>
-              <span style="font-size:12px;font-weight:600;color:var(--text)">Saved Signals</span>
-              <span style="font-size:11px;color:var(--dim)"
-                    x-text="signals.length ? '(' + signals.length + ')' : ''"></span>
-              <button @click.stop="loadSignals()"
-                      style="margin-left:auto;background:transparent;border:1px solid var(--border);
-                             color:var(--dim);font-size:11px;padding:1px 8px;border-radius:3px;cursor:pointer">
-                ⟳
-              </button>
-            </div>
-            <template x-if="signalsExpanded">
-              <div style="padding:8px 12px">
-                <template x-if="signals.length === 0">
-                  <div style="font-size:12px;color:var(--dim);padding:4px 0">
-                    No signals saved yet — use Analyze Zone → Save above.
-                  </div>
-                </template>
-                <template x-if="signals.length > 0">
-                  <div>
-                    <!-- Batch action toolbar — checkbox column drives both
-                         Refresh Selected and Delete Selected. Styles
-                         live in .btn-batch / .btn-batch.blue / .pink so
-                         the disabled state can't blow away the colors. -->
-                    <div style="display:flex;gap:8px;align-items:center;padding:6px 0;font-size:11px">
-                      <button class="btn-batch blue"
-                              @click="refreshSelectedSignals()"
-                              :disabled="sigBatchBusy || sigCheckedCount() === 0">
-                        ⟳ Refresh Selected
-                      </button>
-                      <button class="btn-batch pink"
-                              @click="deleteSelectedSignals()"
-                              :disabled="sigBatchBusy || sigCheckedCount() === 0">
-                        ✕ Delete Selected
-                      </button>
-                      <span style="color:var(--dim)" x-text="sigCheckedCount() + ' selected'"></span>
-                      <span x-show="sigBatchMsg" style="color:#3498db" x-text="sigBatchMsg"></span>
-                    </div>
+          <!-- Saved Signals + Recall View moved to top level (above
+               Signal Portfolio) so they're available regardless of
+               the main analysis flow state. -->
 
-                    <div style="overflow-x:auto">
-                      <table class="signals-table">
-                        <thead>
-                          <tr>
-                            <th class="sig-th-check">
-                              <input type="checkbox" :checked="sigAllChecked()"
-                                     @change="sigToggleAll($event.target.checked)">
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('name')" @click="sigSortBy('name')">
-                              Name <span class="sig-sort-arrow" x-text="sigSortArrow('name')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('primary')" @click="sigSortBy('primary')">
-                              Primary <span class="sig-sort-arrow" x-text="sigSortArrow('primary')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('primary_family')" @click="sigSortBy('primary_family')">
-                              Primary Family <span class="sig-sort-arrow" x-text="sigSortArrow('primary_family')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('secondary')" @click="sigSortBy('secondary')">
-                              Secondary <span class="sig-sort-arrow" x-text="sigSortArrow('secondary')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('secondary_family')" @click="sigSortBy('secondary_family')">
-                              Secondary Family <span class="sig-sort-arrow" x-text="sigSortArrow('secondary_family')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
-                              Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
-                            </th>
-                            <th class="sig-th-sort"
-                                :class="sigSortClass('agg_avg_ret')" @click="sigSortBy('agg_avg_ret')">
-                              avg_ret <span class="sig-sort-arrow" x-text="sigSortArrow('agg_avg_ret')"></span>
-                            </th>
-                            <th class="sig-th-sort"
-                                :class="sigSortClass('agg_n')" @click="sigSortBy('agg_n')">
-                              n <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
-                            </th>
-                            <th class="sig-th-sort sig-th-left"
-                                :class="sigSortClass('stats_updated_at')" @click="sigSortBy('stats_updated_at')">
-                              Stats as of <span class="sig-sort-arrow" x-text="sigSortArrow('stats_updated_at')"></span>
-                            </th>
-                            <th>Thumb</th>
-                          </tr>
-                        </thead>
-                        <template x-for="sig in sortedSignals" :key="'sigrow-'+sig.id">
-                          <tbody class="sig-body">
-                            <tr class="sig-row">
-                              <td class="sig-td sig-td-check">
-                                <input type="checkbox" :checked="!!sigCheckedIds[sig.id]"
-                                       @change="sigToggle(sig.id)">
-                              </td>
-                              <td class="sig-td sig-td-name">
-                                <span class="sig-caret" @click.stop="sigToggleExpand(sig.id)"
-                                      x-text="sigExpanded[sig.id] ? '▾' : '▸'"></span>
-                                <!-- Name is a placeholder click target for the
-                                     coming recall/edit flow — currently inert,
-                                     but the cursor and hover style are set so
-                                     wiring a handler later is one line. -->
-                                <span class="sig-name" :title="sig.name + ' (recall coming soon)'"
-                                      x-text="sig.name"></span>
-                              </td>
-                              <td class="sig-td" :title="sig.primary_metric"
-                                  x-text="sigTruncateMetric(sig.primary_metric)"
-                                  style="color:#3498db"></td>
-                              <td class="sig-td" x-text="signalFamilyName(sig.primary_metric)"></td>
-                              <td class="sig-td" :title="sig.secondary_metric"
-                                  x-text="sigTruncateMetric(sig.secondary_metric)"
-                                  style="color:#e84393"></td>
-                              <td class="sig-td" x-text="signalFamilyName(sig.secondary_metric)"></td>
-                              <td class="sig-td" x-text="sig.outcome"></td>
-                              <td class="sig-td sig-td-num"
-                                  :class="sigPosNeg(sig.agg_avg_ret)"
-                                  x-text="sigFormatPct(sig.agg_avg_ret)"></td>
-                              <td class="sig-td sig-td-num"
-                                  :class="sigSmallN(sig.agg_n)"
-                                  x-text="(sig.agg_n != null) ? sig.agg_n.toLocaleString() : '—'"></td>
-                              <td class="sig-td" x-text="(sig.stats_updated_at || '').slice(0,10) || '—'"></td>
-                              <td class="sig-td sig-td-thumb">
-                                <!-- 110×110 thumbnail rendered via x-html
-                                     because <template x-for> inside <svg>
-                                     emits HTML-namespaced clones that
-                                     never paint as SVG. signalThumbnailSVG
-                                     builds the markup as a string; the
-                                     div's innerHTML setter parses inline
-                                     SVG in the SVG namespace correctly. -->
-                                <div x-html="signalThumbnailSVG(sig)"
-                                     :title="sig.name + ' (recall coming soon)'"
-                                     style="cursor:pointer;line-height:0"></div>
-                              </td>
-                            </tr>
-                            <tr x-show="!!sigExpanded[sig.id]">
-                              <td colspan="11" class="sig-detail-td">
-                                <div class="sig-detail-wrap">
-                                  <div class="sig-detail-title"
-                                       x-text="(sig.per_cell_stats || []).length + ' selected cell' + ((sig.per_cell_stats || []).length === 1 ? '' : 's') + ' · sorted by avg_ret desc'"></div>
-                                  <table class="sig-detail-table">
-                                    <thead>
-                                      <tr>
-                                        <th>cell (ix, iy)</th>
-                                        <th>avg_ret</th>
-                                        <th>n</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      <template x-for="cell in sortedPerCellStats(sig)"
-                                                :key="'pc-'+sig.id+'-'+cell.ix+'-'+cell.iy">
-                                        <tr>
-                                          <td x-text="'(' + cell.ix + ', ' + cell.iy + ')'"></td>
-                                          <td :class="sigPosNeg(cell.avg_ret)"
-                                              x-text="sigFormatPct(cell.avg_ret)"></td>
-                                          <td :class="sigSmallN(cell.n)" x-text="cell.n.toLocaleString()"></td>
-                                        </tr>
-                                      </template>
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </td>
-                            </tr>
-                          </tbody>
-                        </template>
-                      </table>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </template>
-          </div>
-          <!-- end Saved Signals -->
 
         </template>
         <!-- end confirmation layer -->
@@ -3488,6 +3312,323 @@
       </div>
     </template>
     <!-- end secondary section -->
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         Saved Signals + Recall View — standalone, always loaded.
+         Loaded by loadSignals() in init(); no dependency on the main
+         analysis flow. Clicking a signal row opens it in the Recall
+         view below in ~10s (parallel /heatmap + /secondary-zone-analyze,
+         no preamble) — the main flow's heatmap / secondary state is
+         never touched.
+         ══════════════════════════════════════════════════════════════════ -->
+    <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+
+      <!-- ── Saved Signals ──────────────────────────────────────────── -->
+      <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div @click="signalsExpanded=!signalsExpanded; if(signalsExpanded && !signals.length) loadSignals()"
+             style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;
+                    background:var(--raised)">
+          <span style="font-size:13px;color:var(--dim)"
+                x-text="signalsExpanded ? '▾' : '▸'"></span>
+          <span style="font-size:12px;font-weight:600;color:var(--text)">Saved Signals</span>
+          <span style="font-size:11px;color:var(--dim)"
+                x-text="signals.length ? '(' + signals.length + ')' : ''"></span>
+          <span style="font-size:10px;color:var(--dim);font-style:italic;margin-left:4px">
+            click a row to open in Recall (~10s)
+          </span>
+          <button @click.stop="loadSignals()"
+                  style="margin-left:auto;background:transparent;border:1px solid var(--border);
+                         color:var(--dim);font-size:11px;padding:1px 8px;border-radius:3px;cursor:pointer">
+            ⟳
+          </button>
+        </div>
+        <template x-if="signalsExpanded">
+          <div style="padding:8px 12px">
+            <template x-if="signals.length === 0">
+              <div style="font-size:12px;color:var(--dim);padding:4px 0">
+                No signals saved yet — analyze a primary × secondary pair, select a zone, and Save.
+              </div>
+            </template>
+            <template x-if="signals.length > 0">
+              <div>
+                <!-- Batch action toolbar. Styles live in
+                     .btn-batch / .btn-batch.blue / .pink so the disabled
+                     state can't blow away the colors. -->
+                <div style="display:flex;gap:8px;align-items:center;padding:6px 0;font-size:11px">
+                  <button class="btn-batch blue"
+                          @click="refreshSelectedSignals()"
+                          :disabled="sigBatchBusy || sigCheckedCount() === 0">
+                    ⟳ Refresh Selected
+                  </button>
+                  <button class="btn-batch pink"
+                          @click="deleteSelectedSignals()"
+                          :disabled="sigBatchBusy || sigCheckedCount() === 0">
+                    ✕ Delete Selected
+                  </button>
+                  <span style="color:var(--dim)" x-text="sigCheckedCount() + ' selected'"></span>
+                  <span x-show="sigBatchMsg" style="color:#3498db" x-text="sigBatchMsg"></span>
+                </div>
+
+                <div style="overflow-x:auto">
+                  <table class="signals-table">
+                    <thead>
+                      <tr>
+                        <th class="sig-th-check">
+                          <input type="checkbox" :checked="sigAllChecked()"
+                                 @change="sigToggleAll($event.target.checked)">
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('name')" @click="sigSortBy('name')">
+                          Name <span class="sig-sort-arrow" x-text="sigSortArrow('name')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('primary')" @click="sigSortBy('primary')">
+                          Primary <span class="sig-sort-arrow" x-text="sigSortArrow('primary')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('primary_family')" @click="sigSortBy('primary_family')">
+                          Primary Family <span class="sig-sort-arrow" x-text="sigSortArrow('primary_family')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('secondary')" @click="sigSortBy('secondary')">
+                          Secondary <span class="sig-sort-arrow" x-text="sigSortArrow('secondary')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('secondary_family')" @click="sigSortBy('secondary_family')">
+                          Secondary Family <span class="sig-sort-arrow" x-text="sigSortArrow('secondary_family')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
+                          Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
+                        </th>
+                        <th class="sig-th-sort"
+                            :class="sigSortClass('agg_avg_ret')" @click="sigSortBy('agg_avg_ret')">
+                          avg_ret <span class="sig-sort-arrow" x-text="sigSortArrow('agg_avg_ret')"></span>
+                        </th>
+                        <th class="sig-th-sort"
+                            :class="sigSortClass('agg_n')" @click="sigSortBy('agg_n')">
+                          n <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('stats_updated_at')" @click="sigSortBy('stats_updated_at')">
+                          Stats as of <span class="sig-sort-arrow" x-text="sigSortArrow('stats_updated_at')"></span>
+                        </th>
+                        <th>Thumb</th>
+                      </tr>
+                    </thead>
+                    <template x-for="sig in sortedSignals" :key="'sigrow-'+sig.id">
+                      <tbody class="sig-body">
+                        <tr class="sig-row">
+                          <td class="sig-td sig-td-check">
+                            <input type="checkbox" :checked="!!sigCheckedIds[sig.id]"
+                                   @change="sigToggle(sig.id)">
+                          </td>
+                          <td class="sig-td sig-td-name">
+                            <span class="sig-caret" @click.stop="sigToggleExpand(sig.id)"
+                                  x-text="sigExpanded[sig.id] ? '▾' : '▸'"></span>
+                            <span class="sig-name"
+                                  @click.stop="recallSignal(sig)"
+                                  :title="sig.name + ' — click to open in Recall'"
+                                  x-text="sig.name"></span>
+                          </td>
+                          <td class="sig-td" :title="sig.primary_metric"
+                              x-text="sigTruncateMetric(sig.primary_metric)"
+                              style="color:#3498db"></td>
+                          <td class="sig-td" x-text="signalFamilyName(sig.primary_metric)"></td>
+                          <td class="sig-td" :title="sig.secondary_metric"
+                              x-text="sigTruncateMetric(sig.secondary_metric)"
+                              style="color:#e84393"></td>
+                          <td class="sig-td" x-text="signalFamilyName(sig.secondary_metric)"></td>
+                          <td class="sig-td" x-text="sig.outcome"></td>
+                          <td class="sig-td sig-td-num"
+                              :class="sigPosNeg(sig.agg_avg_ret)"
+                              x-text="sigFormatPct(sig.agg_avg_ret)"></td>
+                          <td class="sig-td sig-td-num"
+                              :class="sigSmallN(sig.agg_n)"
+                              x-text="(sig.agg_n != null) ? sig.agg_n.toLocaleString() : '—'"></td>
+                          <td class="sig-td" x-text="(sig.stats_updated_at || '').slice(0,10) || '—'"></td>
+                          <td class="sig-td sig-td-thumb">
+                            <div x-html="signalThumbnailSVG(sig)"
+                                 @click="recallSignal(sig)"
+                                 :title="sig.name + ' — click to open in Recall'"
+                                 style="cursor:pointer;line-height:0"></div>
+                          </td>
+                        </tr>
+                        <tr x-show="!!sigExpanded[sig.id]">
+                          <td colspan="11" class="sig-detail-td">
+                            <div class="sig-detail-wrap">
+                              <div class="sig-detail-title"
+                                   x-text="(sig.per_cell_stats || []).length + ' selected cell' + ((sig.per_cell_stats || []).length === 1 ? '' : 's') + ' · sorted by avg_ret desc'"></div>
+                              <table class="sig-detail-table">
+                                <thead>
+                                  <tr>
+                                    <th>cell (ix, iy)</th>
+                                    <th>avg_ret</th>
+                                    <th>n</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <template x-for="cell in sortedPerCellStats(sig)"
+                                            :key="'pc-'+sig.id+'-'+cell.ix+'-'+cell.iy">
+                                    <tr>
+                                      <td x-text="'(' + cell.ix + ', ' + cell.iy + ')'"></td>
+                                      <td :class="sigPosNeg(cell.avg_ret)"
+                                          x-text="sigFormatPct(cell.avg_ret)"></td>
+                                      <td :class="sigSmallN(cell.n)" x-text="cell.n.toLocaleString()"></td>
+                                    </tr>
+                                  </template>
+                                </tbody>
+                              </table>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </template>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <!-- ── Recall View ────────────────────────────────────────────
+           Independent of the main analysis flow: own heatmap (binds
+           to recallHeatmapData + recallSelectedCells), own four zone
+           visuals (chart-recall-*), own action bar. Cell click handlers
+           use toggleRecallCell so edits never touch hmSelectedCells.
+           Save updates the signal in place via PUT /signals/{id}. -->
+      <div x-show="recallExpanded" x-transition
+           style="margin-top:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div style="padding:8px 12px;display:flex;align-items:center;gap:10px;
+                    background:var(--raised);flex-wrap:wrap">
+          <span style="font-size:13px;color:var(--dim)">▾</span>
+          <span style="font-size:12px;font-weight:600;color:var(--text)">Recall</span>
+          <template x-if="recallSig">
+            <span style="font-size:11px;color:var(--dim)">
+              <b style="color:var(--text)" x-text="recallSig.name"></b>
+              &nbsp;·&nbsp;
+              <span style="color:#3498db;font-family:monospace" x-text="recallSig.primary_metric"></span>
+              &nbsp;×&nbsp;
+              <span style="color:#e84393;font-family:monospace" x-text="recallSig.secondary_metric"></span>
+              &nbsp;·&nbsp;
+              <span x-text="recallSig.outcome"></span>
+              &nbsp;·&nbsp;
+              <span x-text="recallSig.n_bins + 'x' + recallSig.n_bins"></span>
+            </span>
+          </template>
+          <span x-show="recallLoading" style="color:#3498db;font-size:11px">Loading…</span>
+          <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <span x-show="recallSaveMsg" style="font-size:11px;color:#3498db"
+                  x-text="recallSaveMsg"></span>
+            <span style="font-size:11px;color:var(--dim)">
+              <b x-text="recallSelectedCells.size"></b> cell(s) selected
+            </span>
+            <button class="btn-batch blue"
+                    @click="recallReanalyze()"
+                    :disabled="recallLoading || recallSelectedCells.size === 0"
+                    title="Re-run zone-analyze on the current cell selection">
+              ⟳ Re-analyze
+            </button>
+            <button class="btn-batch blue"
+                    @click="recallSave()"
+                    :disabled="recallSaving || recallSelectedCells.size === 0"
+                    title="Update this signal's cell_set in place (recomputes stats)">
+              ✓ Save
+            </button>
+            <button class="btn-batch pink"
+                    @click="recallCancel()"
+                    title="Close the recall view and discard any unsaved edits">
+              Close
+            </button>
+          </span>
+        </div>
+
+        <div style="padding:10px 12px 14px">
+
+          <!-- Recall heatmap. Same markup shape as the main heatmap
+               (lines ~3035 onward), bound to recall* state. No 1D bar
+               charts — those are the discovery quantile graphs the
+               recall path explicitly skips. -->
+          <template x-if="recallHeatmapData && recallHeatmapData.grid">
+            <div style="overflow-x:auto">
+              <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
+                <thead>
+                  <tr>
+                    <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:11px">Y↓ / X→</th>
+                    <template x-for="(la, ix) in recallHeatmapData.x_labels" :key="'rcxh-'+ix">
+                      <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:11px;white-space:nowrap"></th>
+                    </template>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(row, iy) in recallHeatmapData.grid" :key="'rcrow-'+iy">
+                    <tr>
+                      <th x-text="recallHeatmapData.y_labels[iy]"
+                          style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
+                      <template x-for="(cell, ix) in row" :key="'rccell-'+iy+'-'+ix">
+                        <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
+                            :class="'hm-cell-selectable' + (isRecallCellSelected(ix, iy) ? ' hm-cell-selected' : '')"
+                            :title="_hmCellTitle(cell, ix, iy)"
+                            @click="toggleRecallCell(ix, iy)">
+                          <template x-if="cell && cell.n > 0">
+                            <div>
+                              <span style="font-size:13px;font-weight:700;display:block;color:#fff"
+                                    x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
+                              <span style="font-size:11px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+                            </div>
+                          </template>
+                        </td>
+                      </template>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+
+          <!-- Four zone visuals — same chart renderers as the main
+               zone view (_renderSecEquity / _renderZoneYearly /
+               _renderSecActivity / _renderSecBubble), called with
+               chart-recall-* canvas ids and recallZoneData. -->
+          <div x-show="recallZoneData && !recallZoneData.error"
+               style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Equity</div>
+              <div style="height:200px;position:relative">
+                <canvas id="chart-recall-equity"></canvas>
+              </div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Yearly</div>
+              <div style="height:200px;position:relative">
+                <canvas id="chart-recall-yearly"></canvas>
+              </div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Activity</div>
+              <div style="height:200px;position:relative">
+                <canvas id="chart-recall-activity"></canvas>
+              </div>
+            </div>
+            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Ticker breakdown</div>
+              <div style="height:200px;position:relative">
+                <canvas id="chart-recall-bubble"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div x-show="recallZoneData && recallZoneData.error"
+               style="margin-top:14px;padding:10px 14px;font-size:11px;color:#e84393;
+                      background:rgba(232,67,147,.06);border:1px solid rgba(232,67,147,.3);
+                      border-radius:4px">
+            <span x-text="recallZoneData.error"></span>
+          </div>
+
+        </div>
+      </div>
+    </div>
 
     <!-- ── Signal Portfolio (third tier — named collections of saved signals) ──── -->
     <!-- Always visible: portfolios persist server-side; no primary Analyze required to view. -->

@@ -2247,6 +2247,20 @@ document.addEventListener('alpine:init', () => {
     sigBatchBusy:     false,
     sigBatchMsg:      '',
 
+    // Recall view — independent state from the main analysis flow so
+    // opening a saved signal can't clobber a primary/secondary pair
+    // already loaded in the main heatmap. recallSelectedCells matches
+    // hmSelectedCells's "ix-iy" key format so the set-equality dirty
+    // check compares apples to apples.
+    recallSig:           null,
+    recallExpanded:      false,
+    recallLoading:       false,
+    recallHeatmapData:   null,
+    recallZoneData:      null,
+    recallSelectedCells: new Set(),
+    recallSaving:        false,
+    recallSaveMsg:       '',
+
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
     // the synthetic outcome `overnight_gap`, which the backend resolves
     // to per-trade (ret_1d_fwd_cc − ret_1d_fwd_oc). Outside Gap mode,
@@ -4585,16 +4599,24 @@ document.addEventListener('alpine:init', () => {
     _renderZoneCharts() {
       if (!this.zoneData || this.zoneData.error) return;
       this._renderSecEquity('chart-zone-equity', this.zoneData, true);
-      this._renderZoneYearly();
+      this._renderZoneYearly('chart-zone-yearly', this.zoneData);
       this._renderSecActivity('chart-zone-activity', this.zoneData);
       this._renderSecBubble('chart-zone-bubble', this.zoneData);
     },
 
-    _renderZoneYearly() {
-      const canvas = document.getElementById('chart-zone-yearly');
-      if (!canvas || !this.zoneData?.yearly?.length) return;
-      if (this._charts['zone-yearly']) { this._charts['zone-yearly'].destroy(); delete this._charts['zone-yearly']; }
-      const yearly = this.zoneData.yearly;
+    // Parameterized so the Recall view can call with its own canvas ID
+    // and data source without reimplementing the chart. Main flow keeps
+    // the same defaults; nothing else changes.
+    _renderZoneYearly(canvasId, data) {
+      canvasId = canvasId || 'chart-zone-yearly';
+      const src = data || this.zoneData;
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !src || !src.yearly || !src.yearly.length) return;
+      // Chart-key derived from canvasId so main ('zone-yearly') and
+      // recall ('recall-yearly') don't collide in this._charts.
+      const chartKey = canvasId.replace(/^chart-/, '');
+      if (this._charts[chartKey]) { this._charts[chartKey].destroy(); delete this._charts[chartKey]; }
+      const yearly = src.yearly;
       // n-count gradient: dim bars for thin years, vivid for well-populated ones
       const ns = yearly.map(y => y.n);
       const minN = Math.min(...ns), maxN = Math.max(...ns);
@@ -4604,7 +4626,7 @@ document.addEventListener('alpine:init', () => {
         ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
       const borderColor = y => y.avg_ret >= 0 ? '#3498db' : '#e84393';
       const ctx = canvas.getContext('2d');
-      this._charts['zone-yearly'] = new Chart(ctx, {
+      this._charts[chartKey] = new Chart(ctx, {
         type: 'bar',
         data: {
           labels:   yearly.map(y => y.year),
@@ -4912,6 +4934,205 @@ document.addEventListener('alpine:init', () => {
       return ((sig && sig.per_cell_stats) || [])
         .slice()
         .sort((a, b) => (b.avg_ret || 0) - (a.avg_ret || 0));
+    },
+
+    // ── Recall / Edit flow ──────────────────────────────────────────────
+    //
+    // Clicking a saved signal opens it in the dedicated Recall view
+    // (own heatmap + four zone visuals, separate from the main flow).
+    // The recall path skips the slow primary-analyze + secondary-scan
+    // chains; both data calls (/heatmap and /secondary-zone-analyze)
+    // read directly from stored bins and run in parallel — ~10s total.
+    // Editing happens on the recall heatmap; Save updates the signal
+    // in place via PUT /signals/{id}, which recomputes stats inline.
+
+    async recallSignal(sig) {
+      if (!sig) return;
+      // Dirty check uses set-equality (order-independent) so that
+      // toggling a cell off then back on, or the same cells in a
+      // different array order, does NOT register as a dirty edit.
+      if (this.recallSig && this.recallSig.id !== sig.id && this._recallIsDirty()) {
+        const msg = `Discard unsaved edits on "${this.recallSig.name}"?`;
+        if (!confirm(msg)) return;
+      }
+      this.recallSig = sig;
+      this.recallSelectedCells = new Set(
+        (sig.cell_set || []).map(c => c[0] + '-' + c[1]));
+      this.recallExpanded = true;
+      await this._recallFireRequests();
+    },
+
+    async _recallFireRequests() {
+      if (!this.recallSig) return;
+      const sig = this.recallSig;
+      this.recallLoading = true;
+      this.recallHeatmapData = null;
+      this.recallZoneData = null;
+      this._destroyRecallCharts();
+      try {
+        // Two parallel fetches — neither depends on the other or on
+        // the slow main-flow preamble. Heatmap reads is_bins directly,
+        // zone-analyze reads is_bins + daily_features for the
+        // cell-set. Both ~5-10s; parallel = the slower of the two.
+        const heatmapUrl =
+          `/api/factor-analysis/heatmap?ticker=ALL`
+          + `&metric_x=${encodeURIComponent(sig.primary_metric)}`
+          + `&metric_y=${encodeURIComponent(sig.secondary_metric)}`
+          + `&outcome=${encodeURIComponent(sig.outcome)}`
+          + `&bins=${sig.n_bins}`;
+        const [hmResp, zoneResp] = await Promise.all([
+          fetch(heatmapUrl),
+          fetch('/api/factor-analysis/secondary-zone-analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              primary_metric:   sig.primary_metric,
+              secondary_metric: sig.secondary_metric,
+              outcome:          sig.outcome,
+              n_bins:           sig.n_bins,
+              cell_set:         sig.cell_set || [],
+              ticker:           'ALL',
+            }),
+          }),
+        ]);
+        if (hmResp.ok)   this.recallHeatmapData = await hmResp.json();
+        if (zoneResp.ok) this.recallZoneData    = await zoneResp.json();
+      } catch (e) {
+        console.error('Recall fetch failed', e);
+      }
+      this.recallLoading = false;
+      await this.$nextTick();
+      setTimeout(() => this._renderRecallCharts(), 60);
+    },
+
+    async recallReanalyze() {
+      // Re-run zone-analyze on the CURRENT recall cells (after the
+      // user has edited the selection). Doesn't touch the heatmap
+      // grid — the grid is fixed by metric pair.
+      if (!this.recallSig || !this.recallSelectedCells.size) return;
+      const sig = this.recallSig;
+      this.recallLoading = true;
+      this.recallZoneData = null;
+      this._destroyRecallCharts();
+      try {
+        const r = await fetch('/api/factor-analysis/secondary-zone-analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            primary_metric:   sig.primary_metric,
+            secondary_metric: sig.secondary_metric,
+            outcome:          sig.outcome,
+            n_bins:           sig.n_bins,
+            cell_set:         this.recallCellSet(),
+            ticker:           'ALL',
+          }),
+        });
+        if (r.ok) this.recallZoneData = await r.json();
+      } catch (_) {}
+      this.recallLoading = false;
+      await this.$nextTick();
+      setTimeout(() => this._renderRecallCharts(), 60);
+    },
+
+    async recallSave() {
+      if (!this.recallSig || !this.recallSelectedCells.size) return;
+      this.recallSaving = true;
+      this.recallSaveMsg = '';
+      try {
+        const r = await fetch(
+          `/api/factor-analysis/signals/${this.recallSig.id}`,
+          {
+            method:  'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ cell_set: this.recallCellSet() }),
+          });
+        if (r.ok) {
+          const updated = await r.json();
+          // Update the in-memory recallSig so subsequent dirty checks
+          // compare against the just-saved cell_set (no false-positive
+          // 'unsaved edits' confirmation right after a save).
+          this.recallSig = {
+            ...this.recallSig,
+            cell_set:         updated.cell_set,
+            agg_avg_ret:      updated.agg_avg_ret,
+            agg_n:            updated.agg_n,
+            per_cell_stats:   updated.per_cell_stats,
+            stats_updated_at: updated.stats_updated_at,
+          };
+          this.recallSaveMsg = '✓ Saved';
+          // Refresh the Saved Signals list so the row's stats and
+          // thumbnail reflect the edit immediately.
+          await this.loadSignals();
+        } else {
+          this.recallSaveMsg = '✗ Save failed';
+        }
+      } catch (_) {
+        this.recallSaveMsg = '✗ Network error';
+      }
+      this.recallSaving = false;
+      setTimeout(() => { this.recallSaveMsg = ''; }, 4000);
+    },
+
+    recallCancel() {
+      this.recallSig = null;
+      this.recallExpanded = false;
+      this.recallHeatmapData = null;
+      this.recallZoneData = null;
+      this.recallSelectedCells = new Set();
+      this._destroyRecallCharts();
+    },
+
+    // Heatmap cell handlers — recall-namespaced. Same "ix-iy" key
+    // format as hmSelectedCells so the set-equality dirty check
+    // compares apples to apples.
+    toggleRecallCell(ix, iy) {
+      const key = `${ix}-${iy}`;
+      const next = new Set(this.recallSelectedCells);
+      if (next.has(key)) next.delete(key);
+      else               next.add(key);
+      this.recallSelectedCells = next;
+    },
+    isRecallCellSelected(ix, iy) {
+      return this.recallSelectedCells.has(`${ix}-${iy}`);
+    },
+    clearRecallSelection() {
+      this.recallSelectedCells = new Set();
+    },
+    recallCellSet() {
+      return [...this.recallSelectedCells].map(k => k.split('-').map(Number));
+    },
+
+    // Set-equality dirty check. Order-independent — toggling a cell
+    // off then back on, or the same cells in a different array order,
+    // does NOT register as a dirty edit.
+    _recallIsDirty() {
+      if (!this.recallSig) return false;
+      const saved = new Set(
+        (this.recallSig.cell_set || []).map(c => c[0] + '-' + c[1]));
+      const current = this.recallSelectedCells;
+      if (saved.size !== current.size) return true;
+      for (const k of saved) if (!current.has(k)) return true;
+      return false;
+    },
+
+    _destroyRecallCharts() {
+      for (const k of ['recall-equity', 'recall-yearly',
+                       'recall-activity', 'recall-bubble']) {
+        if (this._charts[k]) {
+          this._charts[k].destroy();
+          delete this._charts[k];
+        }
+      }
+    },
+
+    _renderRecallCharts() {
+      // Delegates to the SAME chart renderers the main zone view uses
+      // — different canvas ids and data source, identical visuals.
+      if (!this.recallZoneData || this.recallZoneData.error) return;
+      this._renderSecEquity('chart-recall-equity',   this.recallZoneData, true);
+      this._renderZoneYearly('chart-recall-yearly',  this.recallZoneData);
+      this._renderSecActivity('chart-recall-activity', this.recallZoneData);
+      this._renderSecBubble('chart-recall-bubble',   this.recallZoneData);
     },
 
     // Build the thumbnail SVG as a markup string. We can't use Alpine's

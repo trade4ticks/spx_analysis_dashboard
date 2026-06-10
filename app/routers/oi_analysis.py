@@ -7982,6 +7982,60 @@ async def delete_signal(signal_id: int, pool=Depends(get_oi_pool)):
     return {"deleted": deleted}
 
 
+class SignalUpdateRequest(BaseModel):
+    cell_set: List[List[int]]
+
+
+@router.put("/signals/{signal_id}")
+async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
+                               pool=Depends(get_oi_pool)):
+    """Update the cell_set of an existing signal in place. Identity
+    (name, primary_metric, secondary_metric, outcome, n_bins) is
+    preserved — recall/edit only changes WHICH cells the signal
+    refers to. Stats are recomputed inline so the UI never has to
+    issue a separate Refresh after a save."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.cell_set:
+        return {"error": "cell_set is empty"}
+    await _ensure_signals_table(pool)
+
+    async with pool.acquire() as conn:
+        sig = await conn.fetchrow(
+            """SELECT id, primary_metric, secondary_metric, outcome, n_bins
+               FROM signals WHERE id = $1""", signal_id)
+    if not sig:
+        raise HTTPException(404, f"signal_id {signal_id} not found")
+
+    stats = await _compute_signal_stats(
+        pool, sig["primary_metric"], sig["secondary_metric"],
+        sig["outcome"], sig["n_bins"], req.cell_set)
+
+    cell_json     = json.dumps(req.cell_set)
+    per_cell_json = json.dumps(stats["per_cell_stats"])
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE signals
+               SET cell_set         = $2::jsonb,
+                   agg_avg_ret      = $3,
+                   agg_n            = $4,
+                   per_cell_stats   = $5::jsonb,
+                   stats_updated_at = NOW()
+               WHERE id = $1
+               RETURNING id, stats_updated_at""",
+            signal_id, cell_json, stats["agg_avg_ret"], stats["agg_n"],
+            per_cell_json)
+    return {
+        "id":               row["id"],
+        "stats_updated_at": str(row["stats_updated_at"])[:19],
+        "agg_avg_ret":      stats["agg_avg_ret"],
+        "agg_n":            stats["agg_n"],
+        "per_cell_stats":   stats["per_cell_stats"],
+        "cell_set":         req.cell_set,
+    }
+
+
 @router.post("/signals/refresh")
 async def refresh_signals(req: SignalsBatchRequest, pool=Depends(get_oi_pool)):
     """Recompute stored stats for one or more saved signals — used by
