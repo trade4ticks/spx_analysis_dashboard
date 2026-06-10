@@ -5241,7 +5241,10 @@ document.addEventListener('alpine:init', () => {
         groups.get(key).metrics.push(m);
       }
       // Sort metrics alphabetically within each family group.
-      if (!keepOrder) for (const g of groups.values()) g.metrics.sort();
+      // Use explicit localeCompare so the sort is unambiguous regardless of
+      // whether Alpine's reactivity layer has wrapped the string elements.
+      if (!keepOrder) for (const g of groups.values())
+        g.metrics.sort((a, b) => String(a).localeCompare(String(b)));
       const result = [...groups.values()];
       if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
       return result;
