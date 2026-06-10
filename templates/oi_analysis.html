@@ -249,10 +249,10 @@
 
     /* ── Saved Signals table — per-signal stats + thumbnail grid ── */
     .signals-table { width:100%; border-collapse:separate; border-spacing:0;
-                     font-size:11px; font-family:monospace; }
+                     font-size:12px; font-family:monospace; }
     .signals-table thead th {
       background:var(--raised); color:var(--dim);
-      font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.3px;
+      font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.3px;
       padding:6px 8px; border-bottom:1px solid var(--border);
       white-space:nowrap; text-align:right;
     }
@@ -302,10 +302,10 @@
       font-size:10px; color:var(--dim); font-weight:700;
       text-transform:uppercase; letter-spacing:.3px;
     }
-    .sig-detail-table { border-collapse:collapse; font-size:11px;
+    .sig-detail-table { border-collapse:collapse; font-size:12px;
                         font-family:monospace; }
     .sig-detail-table th {
-      color:var(--dim); font-size:10px; font-weight:700;
+      color:var(--dim); font-size:11px; font-weight:700;
       text-transform:uppercase; letter-spacing:.3px;
       padding:4px 10px; text-align:right;
       border-bottom:1px solid var(--border); white-space:nowrap;
@@ -322,7 +322,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=193"></script>
+  <script src="/static/js/oi_analysis.js?v=194"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3497,13 +3497,19 @@
            to recallHeatmapData + recallSelectedCells), own four zone
            visuals (chart-recall-*), own action bar. Cell click handlers
            use toggleRecallCell so edits never touch hmSelectedCells.
-           Save updates the signal in place via PUT /signals/{id}. -->
-      <div x-show="recallExpanded" x-transition
+           Save updates the signal in place via PUT /signals/{id}.
+           Header (caret + "Recall" + breadcrumb) stays visible whenever
+           a signal is loaded; clicking the caret/label collapses just
+           the body. Close clears recallSig and hides the whole wrap. -->
+      <div x-show="recallSig" x-transition
            style="margin-top:10px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
         <div style="padding:8px 12px;display:flex;align-items:center;gap:10px;
                     background:var(--raised);flex-wrap:wrap">
-          <span style="font-size:13px;color:var(--dim)">▾</span>
-          <span style="font-size:12px;font-weight:600;color:var(--text)">Recall</span>
+          <span @click="recallExpanded = !recallExpanded"
+                style="font-size:13px;color:var(--dim);cursor:pointer;user-select:none"
+                x-text="recallExpanded ? '▾' : '▸'"></span>
+          <span @click="recallExpanded = !recallExpanded"
+                style="font-size:12px;font-weight:600;color:var(--text);cursor:pointer;user-select:none">Recall</span>
           <template x-if="recallSig">
             <span style="font-size:11px;color:var(--dim)">
               <b style="color:var(--text)" x-text="recallSig.name"></b>
@@ -3544,7 +3550,7 @@
           </span>
         </div>
 
-        <div style="padding:10px 12px 14px">
+        <div x-show="recallExpanded" x-transition style="padding:10px 12px 14px">
 
           <!-- Order: stats bar → 4 visuals (2×2) → heatmap at bottom.
                Stats bar markup is a verbatim copy of the main zone-
