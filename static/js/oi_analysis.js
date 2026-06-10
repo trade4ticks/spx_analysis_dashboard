@@ -734,7 +734,15 @@ document.addEventListener('alpine:init', () => {
         // sec-bar is WF-locked and mode-toggle-invariant — preserving it avoids
         // blanking the scanner lift bar on WF↔TT toggles. _applySecResults()
         // recreates it when scanner results actually change.
-        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-') || k === 'sec-bar') continue;
+        // recall-* preserved alongside the other independent-section
+        // charts (sm-*, port-*, ic-*, td, sec-bar). Without this guard
+        // every primary /analyze sweep destroys the Recall view's
+        // four Chart.js instances even though their canvases remain
+        // in the DOM, leaving the recall section "blank" until you
+        // re-click a signal. The recall canvases are managed entirely
+        // by recallSignal / recallReanalyze / recallCancel — they have
+        // no business being torn down by main-flow Analyze.
+        if (k.startsWith('sm-') || k.startsWith('port-') || k === 'td' || k.startsWith('ic-') || k === 'sec-bar' || k.startsWith('recall-')) continue;
         // Null-guard each slot before calling .destroy(). Some render
         // functions explicitly null their slot when the chart has no
         // data — _renderRollingCorr does this at 'rolling' when

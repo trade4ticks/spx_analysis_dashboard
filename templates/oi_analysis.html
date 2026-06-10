@@ -322,7 +322,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=192"></script>
+  <script src="/static/js/oi_analysis.js?v=193"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3546,12 +3546,119 @@
 
         <div style="padding:10px 12px 14px">
 
-          <!-- Recall heatmap. Same markup shape as the main heatmap
-               (lines ~3035 onward), bound to recall* state. No 1D bar
-               charts — those are the discovery quantile graphs the
-               recall path explicitly skips. -->
+          <!-- Order: stats bar → 4 visuals (2×2) → heatmap at bottom.
+               Stats bar markup is a verbatim copy of the main zone-
+               analyze stats bar (lines ~3153 onward) with zoneData
+               swapped for recallZoneData — exact same fields, order,
+               colors, sizing. No new component. -->
+
+          <!-- Stats bar — same 12-field layout as the main zone view -->
+          <template x-if="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
+            <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Tickers</div>
+                <div class="stat-value" x-text="recallZoneData.n_tickers"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">N</div>
+                <div class="stat-value" x-text="(recallZoneData.n||0).toLocaleString()"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Avg Ret</div>
+                <div :class="(recallZoneData.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
+                     x-text="((recallZoneData.avg_ret||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Median</div>
+                <div :class="(recallZoneData.median||0)>=0?'stat-value pos':'stat-value neg'"
+                     x-text="((recallZoneData.median||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Std Dev</div>
+                <div class="stat-value" x-text="((recallZoneData.std||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">P5</div>
+                <div :class="(recallZoneData.p5||0)>=0?'stat-value pos':'stat-value neg'"
+                     x-text="((recallZoneData.p5||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">P95</div>
+                <div :class="(recallZoneData.p95||0)>=0?'stat-value pos':'stat-value neg'"
+                     x-text="((recallZoneData.p95||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Win %</div>
+                <div :class="(recallZoneData.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
+                     x-text="((recallZoneData.win_rate||0)*100).toFixed(1)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label"># Win</div>
+                <div class="stat-value" x-text="(recallZoneData.n_winners||0).toLocaleString()"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Avg Win</div>
+                <div class="stat-value pos"
+                     x-text="((recallZoneData.avg_winners||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Avg Loss</div>
+                <div class="stat-value neg"
+                     x-text="((recallZoneData.avg_losers||0)*100).toFixed(3)+'%'"></div>
+              </div>
+              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                <div class="stat-label">Trd/Yr</div>
+                <div class="stat-value" x-text="(recallZoneData.trades_per_year||0).toFixed(1)"></div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 2×2 chart grid using the same .chart-grid / .chart-box /
+               .chart-canvas / .chart-title classes as the main zone
+               visuals. .chart-grid uses minmax(0,1fr) so wide
+               Chart.js content can't inflate a column and collapse
+               the grid to single-column (the inline grid-template
+               with bare 1fr did that). Layout: row 1 equity + yearly,
+               row 2 activity + ticker breakdown — same order as main. -->
+          <template x-if="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
+            <div class="chart-grid">
+              <div class="chart-box">
+                <div class="chart-title">Equity Curve</div>
+                <div class="chart-canvas"><canvas id="chart-recall-equity"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">Avg Return by Year</div>
+                <div class="chart-canvas"><canvas id="chart-recall-yearly"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">Trade Activity</div>
+                <div class="chart-canvas"><canvas id="chart-recall-activity"></canvas></div>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title">Ticker Breakdown
+                  <span style="font-weight:400;font-size:10px;color:var(--dim)"> — size=weight · color=win-rate (pink→blue)</span>
+                </div>
+                <div class="chart-canvas"><canvas id="chart-recall-bubble"></canvas></div>
+              </div>
+            </div>
+          </template>
+
+          <div x-show="recallZoneData && recallZoneData.error"
+               style="margin-bottom:12px;padding:10px 14px;font-size:11px;color:#e84393;
+                      background:rgba(232,67,147,.06);border:1px solid rgba(232,67,147,.3);
+                      border-radius:4px">
+            <span x-text="recallZoneData.error"></span>
+          </div>
+
+          <!-- Recall heatmap — bottom. Same markup as the main heatmap
+               bound to recall* state. Skips the 1D quantile bar charts
+               that flank the main heatmap (discovery widgets, not part
+               of the recall path). -->
           <template x-if="recallHeatmapData && recallHeatmapData.grid">
             <div style="overflow-x:auto">
+              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">
+                Heatmap — click cells to edit; <b x-text="recallSelectedCells.size"></b> selected
+              </div>
               <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
                 <thead>
                   <tr>
@@ -3586,45 +3693,6 @@
               </table>
             </div>
           </template>
-
-          <!-- Four zone visuals — same chart renderers as the main
-               zone view (_renderSecEquity / _renderZoneYearly /
-               _renderSecActivity / _renderSecBubble), called with
-               chart-recall-* canvas ids and recallZoneData. -->
-          <div x-show="recallZoneData && !recallZoneData.error"
-               style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
-            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
-              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Equity</div>
-              <div style="height:200px;position:relative">
-                <canvas id="chart-recall-equity"></canvas>
-              </div>
-            </div>
-            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
-              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Yearly</div>
-              <div style="height:200px;position:relative">
-                <canvas id="chart-recall-yearly"></canvas>
-              </div>
-            </div>
-            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
-              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Activity</div>
-              <div style="height:200px;position:relative">
-                <canvas id="chart-recall-activity"></canvas>
-              </div>
-            </div>
-            <div style="border:1px solid var(--border);border-radius:6px;padding:8px">
-              <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Ticker breakdown</div>
-              <div style="height:200px;position:relative">
-                <canvas id="chart-recall-bubble"></canvas>
-              </div>
-            </div>
-          </div>
-
-          <div x-show="recallZoneData && recallZoneData.error"
-               style="margin-top:14px;padding:10px 14px;font-size:11px;color:#e84393;
-                      background:rgba(232,67,147,.06);border:1px solid rgba(232,67,147,.3);
-                      border-radius:4px">
-            <span x-text="recallZoneData.error"></span>
-          </div>
 
         </div>
       </div>
