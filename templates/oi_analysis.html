@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=196"></script>
+  <script src="/static/js/oi_analysis.js?v=197"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3136,18 +3136,22 @@
                     </button>
                     <div style="flex:1"></div>
 
-                    <!-- Outcome selector. Defaults to the primary
-                         section's active outcome (`outcome`) so the
-                         displayed value matches what the analysis
-                         actually runs against. The user can pick a
-                         different one — that explicit choice is
-                         stored in zoneOutcome and overrides the
-                         primary follow until cleared. -->
+                    <!-- Outcome selector. x-init mirrors the primary
+                         section's active outcome on first render so
+                         the displayed value matches what the analysis
+                         runs against. x-model handles the
+                         select+x-for option-rendering race (a plain
+                         :value binding sets the value before the
+                         x-for has materialized any <option>s and the
+                         browser falls back to whatever option lands
+                         first). After init the user can pick any
+                         outcome — their explicit choice persists in
+                         zoneOutcome. -->
                     <template x-if="hmSelectedCells.size > 0">
-                      <div style="display:flex;align-items:center;gap:6px">
+                      <div style="display:flex;align-items:center;gap:6px"
+                           x-init="if (!zoneOutcome) zoneOutcome = outcome">
                         <label style="font-size:11px;color:var(--dim)">Outcome:</label>
-                        <select :value="zoneOutcome || outcome"
-                                @change="zoneOutcome = $event.target.value"
+                        <select x-model="zoneOutcome"
                                 style="background:var(--raised);border:1px solid var(--border);
                                        color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
                           <template x-for="o in outcomes" :key="'zo-'+o">
