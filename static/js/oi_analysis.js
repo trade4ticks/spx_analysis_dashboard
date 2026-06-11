@@ -6958,54 +6958,6 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
-    // Build the trading-day timeline the equity curve gets laid out
-    // on. Same source chain _renderSecActivity uses, so equity and
-    // activity share the SAME real-time x-axis:
-    //   spot_series  → full S&P trading-day list (most precise)
-    //   trade_calendar → fallback when spot_series isn't loaded
-    //   eq dates     → last-resort fallback (recall view without
-    //                  this.data loaded; degrades to trade-sequential)
-    // Filtered to first-to-last trade date so the curve spans the
-    // actual operating period without 10 years of leading zeros.
-    _buildEquityTimeline(eqPoints) {
-      if (!eqPoints || !eqPoints.length) return [];
-      const minDate = eqPoints[0].date;
-      const maxDate = eqPoints[eqPoints.length - 1].date;
-      const between = d => d >= minDate && d <= maxDate;
-      const spotSeries = this.data?.spot_series || [];
-      if (spotSeries.length > 0) {
-        return spotSeries.map(s => s.date).filter(between);
-      }
-      const cal = this.data?.trade_calendar || [];
-      if (cal.length > 0) {
-        return [...new Set(cal.map(c => c.date))]
-          .filter(between).sort();
-      }
-      return [...new Set(eqPoints.map(p => p.date))].sort();
-    },
-
-    // Lay an equity series onto the trading-day timeline by
-    // CARRY-FORWARD. Days without a trade hold the last known value
-    // (= no return added that day), so a 3-month gap with no trades
-    // renders as a 3-month-wide flat stretch at the prior cumulative
-    // — true elapsed-time spacing. Days BEFORE the first trade get
-    // value 0 (initial equity). Multiple trades on the same day
-    // collapse to the day's EOD cumulative (the last value assigned
-    // to that date), which is what we want.
-    _equityOnTimeline(eqPoints, timeline) {
-      if (!timeline || !timeline.length) return eqPoints || [];
-      if (!eqPoints || !eqPoints.length) {
-        return timeline.map(d => ({ date: d, value: 0 }));
-      }
-      const eqByDate = {};
-      for (const p of eqPoints) eqByDate[p.date] = p.value;
-      let last = 0;
-      return timeline.map(d => {
-        if (eqByDate[d] !== undefined) last = eqByDate[d];
-        return { date: d, value: last };
-      });
-    },
-
     // Peak-to-trough drawdown from an equity series. Treats equity as
     // (1 + cumulative_return) so the same formula works for both
     // daily-compounded and per-trade-additive inputs — drawdown is a
@@ -7038,115 +6990,136 @@ document.addEventListener('alpine:init', () => {
       // (zone / sec / recall / port) carries its own toggle state.
       const modeKey = this._equityModeKey(canvasId);
       const mode    = (this.equityAggMode && this.equityAggMode[modeKey]) || 'daily';
-      const eqP_raw = this._equityForMode(detail.equity_primary  || [], mode);
-      const eqC_raw = this._equityForMode(detail.equity_combined || [], mode);
-      if (!eqP_raw.length) return;
-      // True real-time x-axis: lay both series onto the full trading-
-      // day timeline so days with no trades occupy real horizontal
-      // space (flat carry-forward) instead of being collapsed into
-      // trade-sequential adjacency. Same approach the activity chart
-      // uses; equity and activity now share the same time axis.
-      const timeline = this._buildEquityTimeline(eqP_raw);
-      const eqP = this._equityOnTimeline(eqP_raw, timeline);
-      const eqC = this._equityOnTimeline(eqC_raw, timeline);
+      const eqP = this._equityForMode(detail.equity_primary  || [], mode);
+      const eqC = this._equityForMode(detail.equity_combined || [], mode);
+      if (!eqP.length) return;
+
+      // Real time x-axis: each point carries its ACTUAL DATE as an
+      // epoch-ms x-value (Chart.js linear scale positions by the
+      // numeric x, so a 16-month gap occupies 16 months of pixels —
+      // not one index slot). stepped:'after' on the line datasets
+      // holds the value flat from each point to the next, then steps
+      // to the new value, so no-trade gaps render as horizontal
+      // segments without a diagonal implying gains accrued. Chart.js
+      // category axis (or auto-skipped categorical) can't do this —
+      // it spaces by index, not by date. (No date adapter is loaded
+      // for type:'time'; epoch-ms on linear gets the same result with
+      // no new dependency.)
+      const toMs    = d => new Date(d).getTime();
+      const eqPxy   = eqP.map(p => ({ x: toMs(p.date), y: +(p.value * 100).toFixed(4) }));
+      const eqCxy   = eqC.map(p => ({ x: toMs(p.date), y: +(p.value * 100).toFixed(4) }));
+      const drawdown = this._drawdownFromEquity(eqP);
+      const ddxy    = drawdown.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(3) }));
+
       const ctx = canvas.getContext('2d');
 
       let datasets;
       if (singleSeries) {
         // Zone / recall / portfolio mode: single curve. Equity in
-        // canonical project blue (#3498db, same hex used everywhere
-        // else for "good / positive"); drawdown overlay below uses
-        // canonical pink for the secondary axis.
+        // canonical project blue (#3498db); drawdown overlay below
+        // uses canonical pink on the secondary y-axis.
         datasets = [{
           label: 'Equity',
-          data: eqP.map(p => +(p.value * 100).toFixed(4)),
+          data: eqPxy,
           borderColor: '#3498db',
           backgroundColor: 'rgba(52,152,219,0.08)',
           borderWidth: 1.5,
           pointRadius: 0,
           fill: false,
           tension: 0,
+          stepped: 'after',
           yAxisID: 'y',
         }];
       } else {
-        // Sec-detail mode: primary + combined curves. Both series
-        // are already laid out on the shared timeline (_equityOnTimeline
-        // above), so they're aligned index-by-index — no more manual
-        // date-map carry-forward.
+        // Sec-detail mode: primary + combined curves. Each carries
+        // its own {x: date, y: pct} so the two lines independently
+        // sit at their real dates on the shared time axis.
         datasets = [
           {
             label: 'Primary filter',
-            data: eqP.map(p => +(p.value * 100).toFixed(4)),
+            data: eqPxy,
             borderColor: '#3498db',
             backgroundColor: 'rgba(52,152,219,0.08)',
             borderWidth: 1.5,
             pointRadius: 0,
             fill: false,
             tension: 0,
+            stepped: 'after',
             yAxisID: 'y',
           },
           {
             label: '+ Secondary filter',
-            data: eqC.map(p => +(p.value * 100).toFixed(4)),
+            data: eqCxy,
             borderColor: '#e84393',
             backgroundColor: 'transparent',
             borderWidth: 1.5,
             pointRadius: 0,
             fill: false,
             tension: 0,
+            stepped: 'after',
             yAxisID: 'y',
           },
         ];
       }
 
-      // Drawdown overlay — faint pink line on a secondary y-axis on
-      // the right. Recomputed peak-to-trough from whichever equity
-      // series the mode toggle just produced, so it follows the
-      // toggle automatically without any separate drawdown state.
-      const drawdown = this._drawdownFromEquity(eqP);
+      // Drawdown overlay — faint pink line on a secondary y-axis.
+      // Recomputed peak-to-trough from whichever equity series the
+      // mode toggle just produced, plotted at real dates with the
+      // same step semantics so it stays flat across no-trade gaps.
       datasets.push({
         label: 'Drawdown',
-        data: drawdown.map(p => +p.value.toFixed(3)),
+        data: ddxy,
         borderColor: 'rgba(232,67,147,.32)',
         backgroundColor: 'transparent',
         borderWidth: 1,
         pointRadius: 0,
         fill: false,
         tension: 0,
+        stepped: 'after',
         yAxisID: 'y1',
       });
 
       this._charts[_key] = new Chart(ctx, {
         type: 'line',
-        data: { labels: eqP.map(p => p.date), datasets },
+        data: { datasets },   // no labels — points carry their own x
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
+          parsing: false,     // data is already {x, y} — skip parsing
           plugins: {
-            // Legend HIDDEN — the chart-title in HTML now carries
-            // inline label chips ("blue: equity · pink: drawdown")
-            // which frees up the vertical space the Chart.js legend
-            // used to consume below the title.
             legend: { display: false },
-            tooltip: { mode: 'index', intersect: false },
+            tooltip: {
+              mode: 'index', intersect: false,
+              callbacks: {
+                title: (items) => {
+                  if (!items.length) return '';
+                  const ms = items[0].parsed.x;
+                  return new Date(ms).toISOString().slice(0, 10);   // YYYY-MM-DD
+                },
+                label: (item) => {
+                  const lab = item.dataset.label || '';
+                  const v   = item.parsed.y;
+                  return `${lab}: ${v.toFixed(2)}%`;
+                },
+              },
+            },
           },
           scales: {
-            // Real time axis — categorical labels are the trading-
-            // day list (one per timeline entry), so positions reflect
-            // actual elapsed time. Chart.js auto-skips ticks down to
-            // ~10 evenly spaced dates so a 25-year span still reads.
-            // Same source as the activity chart's x-axis so equity
-            // and activity line up day-for-day.
+            // LINEAR x-axis on epoch milliseconds — Chart.js positions
+            // each point at its actual numeric x, so a 16-month gap
+            // takes 16 months of horizontal pixels (not 1 slot). No
+            // date adapter needed (which would be required for
+            // type:'time' on Chart.js 4). YYYY-MM tick labels via
+            // formatter.
             x: {
-              type: 'category',
+              type: 'linear',
               ticks: {
                 color: '#888', font: { size: 9 },
                 maxTicksLimit: 10,
                 autoSkip: true,
                 autoSkipPadding: 16,
-                callback: function(_, idx) {
-                  // Show YYYY-MM for cleaner labels
-                  const d = this.getLabelForValue(idx);
-                  return (d || '').slice(0, 7);
+                callback: (val) => {
+                  const d = new Date(val);
+                  return d.toISOString().slice(0, 7);   // YYYY-MM
                 },
               },
               grid: { color: '#222' },
