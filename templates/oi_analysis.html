@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=198"></script>
+  <script src="/static/js/oi_analysis.js?v=199"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -2788,10 +2788,11 @@
                   Equity Curves
                   <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
                   <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: +secondary</span>
+                  <span style="font-weight:400;font-size:10px;color:rgba(232,67,147,.55)"> · faint pink: drawdown</span>
                   <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen">⛶</button>
                   <div class="mode-seg" style="margin-left:auto">
                     <span :class="{on: equityAggMode.sec==='daily'}"
-                          @click="setEquityAggMode('sec','daily')">Daily-compounded</span>
+                          @click="setEquityAggMode('sec','daily')">Daily average</span>
                     <span :class="{on: equityAggMode.sec==='pertrade'}"
                           @click="setEquityAggMode('sec','pertrade')">Per-trade sum</span>
                   </div>
@@ -3263,15 +3264,19 @@
                       <!-- 2×2 chart grid -->
                       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
 
-                        <!-- Equity Curve — toggle is per-pane independent.
+                        <!-- Equity Curve — per-pane independent toggle.
                              Drawdown overlay on secondary y-axis follows
-                             whichever equity series the toggle produces. -->
+                             whichever equity series the toggle produces.
+                             Legend chips live here so Chart.js's legend
+                             row can stay hidden (frees vertical space). -->
                         <div class="chart-box">
                           <div class="chart-title">Equity Curve
+                            <span style="font-weight:400;font-size:10px;color:#3498db">— blue: equity</span>
+                            <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                             <button class="fs-btn" @click="openFullscreen('chart-zone-equity')" title="Fullscreen">⛶</button>
                             <div class="mode-seg" style="margin-left:auto">
                               <span :class="{on: equityAggMode.zone==='daily'}"
-                                    @click="setEquityAggMode('zone','daily')">Daily-compounded</span>
+                                    @click="setEquityAggMode('zone','daily')">Daily average</span>
                               <span :class="{on: equityAggMode.zone==='pertrade'}"
                                     @click="setEquityAggMode('zone','pertrade')">Per-trade sum</span>
                             </div>
@@ -3686,14 +3691,26 @@
                the grid to single-column (the inline grid-template
                with bare 1fr did that). Layout: row 1 equity + yearly,
                row 2 activity + ticker breakdown — same order as main. -->
-          <template x-if="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
+          <!-- Switched from <template x-if> to <div x-show> so the
+               four recall canvases stay in DOM even when the chart-
+               grid is temporarily hidden. The previous template x-if
+               removed canvases from the DOM whenever Alpine batched
+               a reactivity update that briefly evaluated the
+               condition falsy — which is what made openFullscreen's
+               `getElementById(chartId)` return null, the id-swap
+               miss, and the FS canvas render into the wrong node.
+               Portfolio's chart-grid is a plain <div> (no x-if), so
+               it never had this problem. Matching the pattern here. -->
+          <div x-show="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
             <div class="chart-grid">
               <div class="chart-box">
                 <div class="chart-title">Equity Curve
+                  <span style="font-weight:400;font-size:10px;color:#3498db">— blue: equity</span>
+                  <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                   <button class="fs-btn" @click="openFullscreen('chart-recall-equity')" title="Fullscreen">⛶</button>
                   <div class="mode-seg" style="margin-left:auto">
                     <span :class="{on: equityAggMode.recall==='daily'}"
-                          @click="setEquityAggMode('recall','daily')">Daily-compounded</span>
+                          @click="setEquityAggMode('recall','daily')">Daily average</span>
                     <span :class="{on: equityAggMode.recall==='pertrade'}"
                           @click="setEquityAggMode('recall','pertrade')">Per-trade sum</span>
                   </div>
@@ -3720,7 +3737,7 @@
                 <div class="chart-canvas"><canvas id="chart-recall-bubble"></canvas></div>
               </div>
             </div>
-          </template>
+          </div>
 
           <div x-show="recallZoneData && recallZoneData.error"
                style="margin-bottom:12px;padding:10px 14px;font-size:11px;color:#e84393;
@@ -3936,11 +3953,12 @@
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
                   Equity Curve
-                  <span style="font-weight:400;font-size:10px;color:#e84393">— portfolio union cumulative return</span>
+                  <span style="font-weight:400;font-size:10px;color:#3498db">— blue: equity</span>
+                  <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-equity')">⛶</button>
                   <div class="mode-seg" style="margin-left:auto">
                     <span :class="{on: equityAggMode.port==='daily'}"
-                          @click="setEquityAggMode('port','daily')">Daily-compounded</span>
+                          @click="setEquityAggMode('port','daily')">Daily average</span>
                     <span :class="{on: equityAggMode.port==='pertrade'}"
                           @click="setEquityAggMode('port','pertrade')">Per-trade sum</span>
                   </div>

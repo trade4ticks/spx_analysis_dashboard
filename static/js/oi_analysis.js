@@ -6916,7 +6916,7 @@ document.addEventListener('alpine:init', () => {
       return 'sec';
     },
 
-    // Daily-compounded transform. Input: the backend's per-trade
+    // Daily-average ADDITIVE transform. Input: the backend's per-trade
     // additive cumulative series [{date, value}, ...] (each `value`
     // is the running sum of all trade returns through that point —
     // same-date entries appear as consecutive points sharing a date).
@@ -6924,10 +6924,13 @@ document.addEventListener('alpine:init', () => {
     //   - reconstruct per-trade returns from consecutive diffs
     //     (first point's prior is 0, so ret[0] = value[0])
     //   - group by trade_date and equal-weight average within day
-    //   - compound days sequentially: equity *= (1 + daily_avg)
-    //   - emit `equity - 1` so the y-axis stays on the same
-    //     %-return scale as the additive mode
-    // Each day contributes ONE point regardless of trade count.
+    //     → ONE number per day, regardless of trade count that day
+    //   - SUM those daily averages cumulatively (additively): a day
+    //     averaging 2% adds 2 percentage points to the curve. NO
+    //     multiplicative compounding — the user doesn't scale up
+    //     position size as the account grows; each day is a fixed
+    //     unit of daily capital, and the day's return is just
+    //     accumulated as a percentage-point contribution.
     _equityForMode(rawPoints, mode) {
       if (!rawPoints || !rawPoints.length) return [];
       if (mode === 'pertrade') return rawPoints;
@@ -6945,12 +6948,12 @@ document.addEventListener('alpine:init', () => {
         byDate[p.date].n   += 1;
       }
       // Backend already sorts by date, so dates[] is in order; no resort needed.
-      let equity = 1.0;
+      let cum = 0;
       const out = [];
       for (const d of dates) {
         const dailyAvg = byDate[d].sum / byDate[d].n;
-        equity *= (1 + dailyAvg);
-        out.push({ date: d, value: equity - 1 });
+        cum += dailyAvg;
+        out.push({ date: d, value: cum });
       }
       return out;
     },
@@ -6994,12 +6997,15 @@ document.addEventListener('alpine:init', () => {
 
       let datasets;
       if (singleSeries) {
-        // Zone mode: single curve — equity_primary is the zone curve
+        // Zone / recall / portfolio mode: single curve. Equity in
+        // canonical project blue (#3498db, same hex used everywhere
+        // else for "good / positive"); drawdown overlay below uses
+        // canonical pink for the secondary axis.
         datasets = [{
-          label: 'Zone equity',
+          label: 'Equity',
           data: eqP.map(p => +(p.value * 100).toFixed(4)),
-          borderColor: '#e84393',
-          backgroundColor: 'rgba(232,67,147,0.08)',
+          borderColor: '#3498db',
+          backgroundColor: 'rgba(52,152,219,0.08)',
           borderWidth: 1.5,
           pointRadius: 0,
           fill: false,
@@ -7064,14 +7070,11 @@ document.addEventListener('alpine:init', () => {
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: {
-              // Single-series mode previously hid the legend; with the
-              // drawdown overlay we want a small legend so the user
-              // can see what each line is. Keep the existing two-curve
-              // legend behavior for sec-detail.
-              display: true,
-              labels: { color: '#888', font: { size: 9 }, boxWidth: 12 },
-            },
+            // Legend HIDDEN — the chart-title in HTML now carries
+            // inline label chips ("blue: equity · pink: drawdown")
+            // which frees up the vertical space the Chart.js legend
+            // used to consume below the title.
+            legend: { display: false },
             tooltip: { mode: 'index', intersect: false },
           },
           scales: {
