@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=197"></script>
+  <script src="/static/js/oi_analysis.js?v=198"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -2789,6 +2789,12 @@
                   <span style="font-weight:400;font-size:10px;color:#3498db">— blue: primary filter</span>
                   <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: +secondary</span>
                   <button class="fs-btn" @click="openFullscreen('sec-equity-canvas')" title="Fullscreen">⛶</button>
+                  <div class="mode-seg" style="margin-left:auto">
+                    <span :class="{on: equityAggMode.sec==='daily'}"
+                          @click="setEquityAggMode('sec','daily')">Daily-compounded</span>
+                    <span :class="{on: equityAggMode.sec==='pertrade'}"
+                          @click="setEquityAggMode('sec','pertrade')">Per-trade sum</span>
+                  </div>
                 </div>
                 <template x-if="secDetail && !secDetail.error">
                   <div class="chart-canvas"><canvas id="sec-equity-canvas"></canvas></div>
@@ -3257,9 +3263,19 @@
                       <!-- 2×2 chart grid -->
                       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
 
-                        <!-- Equity Curve -->
+                        <!-- Equity Curve — toggle is per-pane independent.
+                             Drawdown overlay on secondary y-axis follows
+                             whichever equity series the toggle produces. -->
                         <div class="chart-box">
-                          <div class="chart-title">Equity Curve</div>
+                          <div class="chart-title">Equity Curve
+                            <button class="fs-btn" @click="openFullscreen('chart-zone-equity')" title="Fullscreen">⛶</button>
+                            <div class="mode-seg" style="margin-left:auto">
+                              <span :class="{on: equityAggMode.zone==='daily'}"
+                                    @click="setEquityAggMode('zone','daily')">Daily-compounded</span>
+                              <span :class="{on: equityAggMode.zone==='pertrade'}"
+                                    @click="setEquityAggMode('zone','pertrade')">Per-trade sum</span>
+                            </div>
+                          </div>
                           <div class="chart-canvas"><canvas id="chart-zone-equity"></canvas></div>
                         </div>
 
@@ -3673,20 +3689,33 @@
           <template x-if="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
             <div class="chart-grid">
               <div class="chart-box">
-                <div class="chart-title">Equity Curve</div>
+                <div class="chart-title">Equity Curve
+                  <button class="fs-btn" @click="openFullscreen('chart-recall-equity')" title="Fullscreen">⛶</button>
+                  <div class="mode-seg" style="margin-left:auto">
+                    <span :class="{on: equityAggMode.recall==='daily'}"
+                          @click="setEquityAggMode('recall','daily')">Daily-compounded</span>
+                    <span :class="{on: equityAggMode.recall==='pertrade'}"
+                          @click="setEquityAggMode('recall','pertrade')">Per-trade sum</span>
+                  </div>
+                </div>
                 <div class="chart-canvas"><canvas id="chart-recall-equity"></canvas></div>
               </div>
               <div class="chart-box">
-                <div class="chart-title">Avg Return by Year</div>
+                <div class="chart-title">Avg Return by Year
+                  <button class="fs-btn" @click="openFullscreen('chart-recall-yearly')" title="Fullscreen">⛶</button>
+                </div>
                 <div class="chart-canvas"><canvas id="chart-recall-yearly"></canvas></div>
               </div>
               <div class="chart-box">
-                <div class="chart-title">Trade Activity</div>
+                <div class="chart-title">Trade Activity
+                  <button class="fs-btn" @click="openFullscreen('chart-recall-activity')" title="Fullscreen">⛶</button>
+                </div>
                 <div class="chart-canvas"><canvas id="chart-recall-activity"></canvas></div>
               </div>
               <div class="chart-box">
                 <div class="chart-title">Ticker Breakdown
                   <span style="font-weight:400;font-size:10px;color:var(--dim)"> — size=weight · color=win-rate (pink→blue)</span>
+                  <button class="fs-btn" @click="openFullscreen('chart-recall-bubble')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-recall-bubble"></canvas></div>
               </div>
@@ -3909,6 +3938,12 @@
                   Equity Curve
                   <span style="font-weight:400;font-size:10px;color:#e84393">— portfolio union cumulative return</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-equity')">⛶</button>
+                  <div class="mode-seg" style="margin-left:auto">
+                    <span :class="{on: equityAggMode.port==='daily'}"
+                          @click="setEquityAggMode('port','daily')">Daily-compounded</span>
+                    <span :class="{on: equityAggMode.port==='pertrade'}"
+                          @click="setEquityAggMode('port','pertrade')">Per-trade sum</span>
+                  </div>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-equity"></canvas></div>
               </div>
@@ -3927,7 +3962,7 @@
             <div class="chart-grid" style="margin-bottom:12px">
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
-                  Yearly Returns
+                  Avg Return by Year
                   <span style="font-weight:400;font-size:10px;color:var(--dim)">— portfolio union · opacity = trade count</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-yearly')">⛶</button>
                 </div>

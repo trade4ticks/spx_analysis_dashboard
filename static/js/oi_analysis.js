@@ -2245,6 +2245,23 @@ document.addEventListener('alpine:init', () => {
     // diverged from the primary.
     zoneOutcome:      '',
 
+    // Per-pane equity-curve aggregation mode. Each of the four
+    // single-line equity views has its own independent toggle —
+    // editing one does NOT sync the others.
+    //   daily    → group trades by trade_date, equal-weight average
+    //              within day, compound days sequentially. Models
+    //              constant daily capital spread across that day's
+    //              signals (the honest "account performance" view).
+    //   pertrade → cumulative additive sum of per-trade returns
+    //              (the existing behavior).
+    // Default = daily everywhere.
+    equityAggMode: {
+      zone:   'daily',  // chart-zone-equity
+      sec:    'daily',  // sec-equity-canvas
+      recall: 'daily',  // chart-recall-equity
+      port:   'daily',  // chart-port-equity
+    },
+
     // Signals — saved named cell-sets
     signals:          [],
     signalsExpanded:  false,
@@ -3423,6 +3440,11 @@ document.addEventListener('alpine:init', () => {
         'chart-port-yearly':    'port-yearly',
         'chart-port-activity':  'port-activity',
         'chart-port-bubble':    'port-bubble',
+        // Recall view (added when recall fullscreen wiring shipped)
+        'chart-recall-equity':   'recall-equity',
+        'chart-recall-yearly':   'recall-yearly',
+        'chart-recall-activity': 'recall-activity',
+        'chart-recall-bubble':   'recall-bubble',
         // Signal Survey (IC.5 + IC.7)
         'chart-ic-leaderboard': 'ic-leader',
         'chart-ic-scatter':     'ic-scatter',
@@ -3467,11 +3489,27 @@ document.addEventListener('alpine:init', () => {
           'corr-yearly-canvas':   () => this._renderCorrYearly(),
           'corr-activity-canvas': () => this._renderCorrActivity(),
           'corr-bubble-canvas':   () => this._renderCorrBubble(),
-          // System Portfolio
-          'chart-port-equity':    () => this._renderPortEquity(),
+          // System Portfolio — route through the parameterized
+          // _renderSec* renderers (matching _renderPortCharts). The
+          // previous mapping called this._renderPortEquity /
+          // _renderPortActivity / _renderPortBubble which DON'T EXIST
+          // anywhere in this file; the call threw silently, the FS
+          // canvas stayed blank, and on close the same broken call
+          // left the original canvas blank too. Only _renderPortYearly
+          // exists, which is why Yearly worked and the other three
+          // didn't. Confirmed by grep — zero hits on _renderPortEquity
+          // / _renderPortActivity / _renderPortBubble.
+          'chart-port-equity':    () => this._renderSecEquity('chart-port-equity', this.portAggregate, true),
           'chart-port-yearly':    () => this._renderPortYearly(),
-          'chart-port-activity':  () => this._renderPortActivity(),
-          'chart-port-bubble':    () => this._renderPortBubble(),
+          'chart-port-activity':  () => this._renderSecActivity('chart-port-activity', this.portAggregate),
+          'chart-port-bubble':    () => this._renderSecBubble('chart-port-bubble', this.portAggregate),
+          // Recall view — same parameterized renderers as the recall
+          // path's normal mount, just targeted at the FS canvas after
+          // the openFullscreen id-swap.
+          'chart-recall-equity':   () => this._renderSecEquity('chart-recall-equity',   this.recallZoneData, true),
+          'chart-recall-yearly':   () => this._renderZoneYearly('chart-recall-yearly',  this.recallZoneData),
+          'chart-recall-activity': () => this._renderSecActivity('chart-recall-activity', this.recallZoneData),
+          'chart-recall-bubble':   () => this._renderSecBubble('chart-recall-bubble',   this.recallZoneData),
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
@@ -3538,10 +3576,15 @@ document.addEventListener('alpine:init', () => {
           'corr-yearly-canvas':  () => this._renderCorrYearly(),
           'corr-activity-canvas':() => this._renderCorrActivity(),
           'corr-bubble-canvas':  () => this._renderCorrBubble(),
-          'chart-port-equity':   () => this._renderPortEquity(),
+          'chart-port-equity':   () => this._renderSecEquity('chart-port-equity', this.portAggregate, true),
           'chart-port-yearly':   () => this._renderPortYearly(),
-          'chart-port-activity': () => this._renderPortActivity(),
-          'chart-port-bubble':   () => this._renderPortBubble(),
+          'chart-port-activity': () => this._renderSecActivity('chart-port-activity', this.portAggregate),
+          'chart-port-bubble':   () => this._renderSecBubble('chart-port-bubble', this.portAggregate),
+          // Recall view
+          'chart-recall-equity':   () => this._renderSecEquity('chart-recall-equity',   this.recallZoneData, true),
+          'chart-recall-yearly':   () => this._renderZoneYearly('chart-recall-yearly',  this.recallZoneData),
+          'chart-recall-activity': () => this._renderSecActivity('chart-recall-activity', this.recallZoneData),
+          'chart-recall-bubble':   () => this._renderSecBubble('chart-recall-bubble',   this.recallZoneData),
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
@@ -6860,14 +6903,92 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // Maps a canvas id to the per-pane mode key in this.equityAggMode.
+    // 'chart-zone-equity'   → 'zone'
+    // 'sec-equity-canvas'   → 'sec'
+    // 'chart-recall-equity' → 'recall'
+    // 'chart-port-equity'   → 'port'
+    _equityModeKey(canvasId) {
+      const c = canvasId || '';
+      if (c.includes('zone'))   return 'zone';
+      if (c.includes('recall')) return 'recall';
+      if (c.includes('port'))   return 'port';
+      return 'sec';
+    },
+
+    // Daily-compounded transform. Input: the backend's per-trade
+    // additive cumulative series [{date, value}, ...] (each `value`
+    // is the running sum of all trade returns through that point —
+    // same-date entries appear as consecutive points sharing a date).
+    // Pertrade mode passes the series through unchanged. Daily mode:
+    //   - reconstruct per-trade returns from consecutive diffs
+    //     (first point's prior is 0, so ret[0] = value[0])
+    //   - group by trade_date and equal-weight average within day
+    //   - compound days sequentially: equity *= (1 + daily_avg)
+    //   - emit `equity - 1` so the y-axis stays on the same
+    //     %-return scale as the additive mode
+    // Each day contributes ONE point regardless of trade count.
+    _equityForMode(rawPoints, mode) {
+      if (!rawPoints || !rawPoints.length) return [];
+      if (mode === 'pertrade') return rawPoints;
+      const byDate = {};
+      const dates  = [];
+      let prev = 0;
+      for (const p of rawPoints) {
+        const ret = p.value - prev;
+        prev = p.value;
+        if (byDate[p.date] === undefined) {
+          byDate[p.date] = { sum: 0, n: 0 };
+          dates.push(p.date);
+        }
+        byDate[p.date].sum += ret;
+        byDate[p.date].n   += 1;
+      }
+      // Backend already sorts by date, so dates[] is in order; no resort needed.
+      let equity = 1.0;
+      const out = [];
+      for (const d of dates) {
+        const dailyAvg = byDate[d].sum / byDate[d].n;
+        equity *= (1 + dailyAvg);
+        out.push({ date: d, value: equity - 1 });
+      }
+      return out;
+    },
+
+    // Peak-to-trough drawdown from an equity series. Treats equity as
+    // (1 + cumulative_return) so the same formula works for both
+    // daily-compounded and per-trade-additive inputs — drawdown is a
+    // %-from-peak measure on whichever curve is currently shown. NB:
+    // when the equity series is per-trade additive, the resulting
+    // drawdown is a fictional "infinite capital" view (overlapping
+    // trades double-count exposure). Don't read those numbers as a
+    // real-account drawdown — daily-compounded is the honest mode.
+    _drawdownFromEquity(eqPoints) {
+      let peak = 1;
+      const out = [];
+      for (const p of eqPoints) {
+        const equity = 1 + p.value;
+        if (equity > peak) peak = equity;
+        out.push({
+          date:  p.date,
+          value: ((equity - peak) / peak) * 100,
+        });
+      }
+      return out;
+    },
+
     _renderSecEquity(canvasId = 'sec-equity-canvas', detail = null, singleSeries = false) {
       detail = detail || this.secDetail;
       const _key = canvasId.replace(/-canvas$/, '').replace(/^chart-/, '');
       const canvas = document.getElementById(canvasId);
       if (!canvas || !detail) return;
       if (this._charts[_key]) { this._charts[_key].destroy(); delete this._charts[_key]; }
-      const eqP = detail.equity_primary || [];
-      const eqC = detail.equity_combined || [];
+      // Per-pane mode: each of the four single-line equity views
+      // (zone / sec / recall / port) carries its own toggle state.
+      const modeKey = this._equityModeKey(canvasId);
+      const mode    = (this.equityAggMode && this.equityAggMode[modeKey]) || 'daily';
+      const eqP = this._equityForMode(detail.equity_primary  || [], mode);
+      const eqC = this._equityForMode(detail.equity_combined || [], mode);
       if (!eqP.length) return;
       const ctx = canvas.getContext('2d');
 
@@ -6883,6 +7004,7 @@ document.addEventListener('alpine:init', () => {
           pointRadius: 0,
           fill: false,
           tension: 0,
+          yAxisID: 'y',
         }];
       } else {
         // Sec-detail mode: primary + combined curves
@@ -6902,6 +7024,7 @@ document.addEventListener('alpine:init', () => {
             pointRadius: 0,
             fill: false,
             tension: 0,
+            yAxisID: 'y',
           },
           {
             label: '+ Secondary filter',
@@ -6913,9 +7036,27 @@ document.addEventListener('alpine:init', () => {
             fill: false,
             tension: 0,
             spanGaps: true,
+            yAxisID: 'y',
           },
         ];
       }
+
+      // Drawdown overlay — faint pink line on a secondary y-axis on
+      // the right. Recomputed peak-to-trough from whichever equity
+      // series the mode toggle just produced, so it follows the
+      // toggle automatically without any separate drawdown state.
+      const drawdown = this._drawdownFromEquity(eqP);
+      datasets.push({
+        label: 'Drawdown',
+        data: drawdown.map(p => +p.value.toFixed(3)),
+        borderColor: 'rgba(232,67,147,.32)',
+        backgroundColor: 'transparent',
+        borderWidth: 1,
+        pointRadius: 0,
+        fill: false,
+        tension: 0,
+        yAxisID: 'y1',
+      });
 
       this._charts[_key] = new Chart(ctx, {
         type: 'line',
@@ -6924,7 +7065,11 @@ document.addEventListener('alpine:init', () => {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: {
-              display: !singleSeries,
+              // Single-series mode previously hid the legend; with the
+              // drawdown overlay we want a small legend so the user
+              // can see what each line is. Keep the existing two-curve
+              // legend behavior for sec-detail.
+              display: true,
               labels: { color: '#888', font: { size: 9 }, boxWidth: 12 },
             },
             tooltip: { mode: 'index', intersect: false },
@@ -6932,12 +7077,38 @@ document.addEventListener('alpine:init', () => {
           scales: {
             x: { display: false },
             y: {
+              position: 'left',
               ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(1) + '%' },
               grid: { color: '#222' },
+            },
+            y1: {
+              position: 'right',
+              ticks: {
+                color: 'rgba(232,67,147,.6)', font: { size: 9 },
+                callback: v => v.toFixed(0) + '%',
+              },
+              grid: { drawOnChartArea: false },
+              max: 0,
             },
           },
         },
       });
+    },
+
+    // Per-pane setter. Updates ONLY that pane's mode and re-renders
+    // it; other panes' modes are untouched.
+    setEquityAggMode(modeKey, mode) {
+      this.equityAggMode = { ...this.equityAggMode, [modeKey]: mode };
+      // Re-render only the affected pane — each canvas/data pair is
+      // guarded so collapsed/uninitialized views silently skip.
+      if (modeKey === 'zone'   && this.zoneData)
+        this._renderSecEquity('chart-zone-equity',   this.zoneData,        true);
+      if (modeKey === 'sec'    && this.secDetail)
+        this._renderSecEquity();
+      if (modeKey === 'recall' && this.recallZoneData)
+        this._renderSecEquity('chart-recall-equity', this.recallZoneData, true);
+      if (modeKey === 'port'   && this.portAggregate)
+        this._renderSecEquity('chart-port-equity',   this.portAggregate,  true);
     },
 
     _renderSecYearly() {
