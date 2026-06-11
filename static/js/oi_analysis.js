@@ -6958,6 +6958,54 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
+    // Build the trading-day timeline the equity curve gets laid out
+    // on. Same source chain _renderSecActivity uses, so equity and
+    // activity share the SAME real-time x-axis:
+    //   spot_series  → full S&P trading-day list (most precise)
+    //   trade_calendar → fallback when spot_series isn't loaded
+    //   eq dates     → last-resort fallback (recall view without
+    //                  this.data loaded; degrades to trade-sequential)
+    // Filtered to first-to-last trade date so the curve spans the
+    // actual operating period without 10 years of leading zeros.
+    _buildEquityTimeline(eqPoints) {
+      if (!eqPoints || !eqPoints.length) return [];
+      const minDate = eqPoints[0].date;
+      const maxDate = eqPoints[eqPoints.length - 1].date;
+      const between = d => d >= minDate && d <= maxDate;
+      const spotSeries = this.data?.spot_series || [];
+      if (spotSeries.length > 0) {
+        return spotSeries.map(s => s.date).filter(between);
+      }
+      const cal = this.data?.trade_calendar || [];
+      if (cal.length > 0) {
+        return [...new Set(cal.map(c => c.date))]
+          .filter(between).sort();
+      }
+      return [...new Set(eqPoints.map(p => p.date))].sort();
+    },
+
+    // Lay an equity series onto the trading-day timeline by
+    // CARRY-FORWARD. Days without a trade hold the last known value
+    // (= no return added that day), so a 3-month gap with no trades
+    // renders as a 3-month-wide flat stretch at the prior cumulative
+    // — true elapsed-time spacing. Days BEFORE the first trade get
+    // value 0 (initial equity). Multiple trades on the same day
+    // collapse to the day's EOD cumulative (the last value assigned
+    // to that date), which is what we want.
+    _equityOnTimeline(eqPoints, timeline) {
+      if (!timeline || !timeline.length) return eqPoints || [];
+      if (!eqPoints || !eqPoints.length) {
+        return timeline.map(d => ({ date: d, value: 0 }));
+      }
+      const eqByDate = {};
+      for (const p of eqPoints) eqByDate[p.date] = p.value;
+      let last = 0;
+      return timeline.map(d => {
+        if (eqByDate[d] !== undefined) last = eqByDate[d];
+        return { date: d, value: last };
+      });
+    },
+
     // Peak-to-trough drawdown from an equity series. Treats equity as
     // (1 + cumulative_return) so the same formula works for both
     // daily-compounded and per-trade-additive inputs — drawdown is a
@@ -6990,9 +7038,17 @@ document.addEventListener('alpine:init', () => {
       // (zone / sec / recall / port) carries its own toggle state.
       const modeKey = this._equityModeKey(canvasId);
       const mode    = (this.equityAggMode && this.equityAggMode[modeKey]) || 'daily';
-      const eqP = this._equityForMode(detail.equity_primary  || [], mode);
-      const eqC = this._equityForMode(detail.equity_combined || [], mode);
-      if (!eqP.length) return;
+      const eqP_raw = this._equityForMode(detail.equity_primary  || [], mode);
+      const eqC_raw = this._equityForMode(detail.equity_combined || [], mode);
+      if (!eqP_raw.length) return;
+      // True real-time x-axis: lay both series onto the full trading-
+      // day timeline so days with no trades occupy real horizontal
+      // space (flat carry-forward) instead of being collapsed into
+      // trade-sequential adjacency. Same approach the activity chart
+      // uses; equity and activity now share the same time axis.
+      const timeline = this._buildEquityTimeline(eqP_raw);
+      const eqP = this._equityOnTimeline(eqP_raw, timeline);
+      const eqC = this._equityOnTimeline(eqC_raw, timeline);
       const ctx = canvas.getContext('2d');
 
       let datasets;
@@ -7013,13 +7069,10 @@ document.addEventListener('alpine:init', () => {
           yAxisID: 'y',
         }];
       } else {
-        // Sec-detail mode: primary + combined curves
-        const cMap = Object.fromEntries(eqC.map(p => [p.date, +(p.value * 100).toFixed(4)]));
-        let lastCombined = 0;
-        const combinedAligned = eqP.map(p => {
-          if (cMap[p.date] !== undefined) lastCombined = cMap[p.date];
-          return lastCombined;
-        });
+        // Sec-detail mode: primary + combined curves. Both series
+        // are already laid out on the shared timeline (_equityOnTimeline
+        // above), so they're aligned index-by-index — no more manual
+        // date-map carry-forward.
         datasets = [
           {
             label: 'Primary filter',
@@ -7034,14 +7087,13 @@ document.addEventListener('alpine:init', () => {
           },
           {
             label: '+ Secondary filter',
-            data: combinedAligned,
+            data: eqC.map(p => +(p.value * 100).toFixed(4)),
             borderColor: '#e84393',
             backgroundColor: 'transparent',
             borderWidth: 1.5,
             pointRadius: 0,
             fill: false,
             tension: 0,
-            spanGaps: true,
             yAxisID: 'y',
           },
         ];
@@ -7078,7 +7130,27 @@ document.addEventListener('alpine:init', () => {
             tooltip: { mode: 'index', intersect: false },
           },
           scales: {
-            x: { display: false },
+            // Real time axis — categorical labels are the trading-
+            // day list (one per timeline entry), so positions reflect
+            // actual elapsed time. Chart.js auto-skips ticks down to
+            // ~10 evenly spaced dates so a 25-year span still reads.
+            // Same source as the activity chart's x-axis so equity
+            // and activity line up day-for-day.
+            x: {
+              type: 'category',
+              ticks: {
+                color: '#888', font: { size: 9 },
+                maxTicksLimit: 10,
+                autoSkip: true,
+                autoSkipPadding: 16,
+                callback: function(_, idx) {
+                  // Show YYYY-MM for cleaner labels
+                  const d = this.getLabelForValue(idx);
+                  return (d || '').slice(0, 7);
+                },
+              },
+              grid: { color: '#222' },
+            },
             y: {
               position: 'left',
               ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(1) + '%' },
