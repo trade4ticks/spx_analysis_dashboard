@@ -46,18 +46,81 @@ CREATE TABLE IF NOT EXISTS metric_classification (
 
 # ── Exclusions ────────────────────────────────────────────────────────────────
 
-# Family numbers whose metrics are NEVER eligible as primary/secondary
+# Family numbers whose metrics are NEVER eligible as primary/secondary.
 _INELIGIBLE_FAMILIES: set[int] = {
     1,  # Identity (ticker, trade_date) — key fields, not metrics
+    2,  # Spot snapshots (spot_pc, spot_co) — raw dollar price levels; confounded
+        # with price regime and secular drift over the 7-year history.
     7,  # Forward returns — prediction TARGETS, not features.
         # Critical: they are EVENING-tier so the tier check alone would not
         # exclude them; the family check is the authoritative guard.
 }
 
-# Individual metrics that are NULL by design.
-# All 25-delta skew metrics (30d and 7d tenors) are now active as of the
-# 2026-06 data dictionary update; this set is intentionally empty.
-_NULL_BY_DESIGN: frozenset[str] = frozenset()
+# Individual metrics excluded from eligibility regardless of family.
+# Two exclusion reasons are combined here:
+#
+#  (a) Deliberate _pc suppression (Family 4 + 5 _pc variants):
+#      These divide OI-weighted strikes by YESTERDAY'S close (C_{T-1}).  The
+#      _co variants use today's open and are the correct reference for morning
+#      analysis.  The _pc variants are intentionally hidden; they are NOT a
+#      data-quality issue — the data exists and the columns compute correctly.
+#
+#  (b) Raw drift metrics (Family 3 levels, Family 4 _co raw counts,
+#      Family 5 raw count differences):
+#      Dollar-denominated price levels and raw contract counts that scale with
+#      the underlying's price and with secular OI growth.  Their per-ticker
+#      walk-forward bins are confounded with time and price regime.  The
+#      normalised siblings (_div_spot, pct_, zscore_) are kept eligible.
+#
+# Columns in this set remain in daily_features — ineligible = hidden from
+# signal selection, NOT deleted.  "Storage is cheap, dropping is irreversible."
+_INELIGIBLE_METRICS: frozenset[str] = frozenset({
+
+    # ── (b) Family 3 — raw OI levels & dollar-denominated strike prices ────
+    "total_oi", "call_oi", "put_oi",
+    "max_oi_strike_call", "max_oi_strike_put",
+    "oi_weighted_call",     "oi_weighted_put",     "oi_weighted_all",
+    "oi_weighted_all_0_30d",  "oi_weighted_call_0_30d",  "oi_weighted_put_0_30d",
+    "oi_weighted_all_31_90d", "oi_weighted_call_31_90d", "oi_weighted_put_31_90d",
+
+    # ── (a) Family 4 — ALL _pc variants (prior-close spot reference) ───────
+    "oi_weighted_call_minus_spot_pc",
+    "oi_weighted_put_minus_spot_pc",
+    "oi_weighted_all_minus_spot_pc",
+    "oi_weighted_call_div_spot_pc",
+    "oi_weighted_put_div_spot_pc",
+    "oi_weighted_all_div_spot_pc",
+    "oi_weighted_all_0_30d_div_spot_pc",
+    "oi_weighted_call_0_30d_div_spot_pc",
+    "oi_weighted_put_0_30d_div_spot_pc",
+    "oi_weighted_all_31_90d_div_spot_pc",
+    "oi_weighted_call_31_90d_div_spot_pc",
+    "oi_weighted_put_31_90d_div_spot_pc",
+    "oi_weighted_next_monthly_div_spot_pc",
+    "oi_within_5pct_pc",   "oi_within_10pct_pc",
+    "oi_above_spot_pc",    "oi_below_spot_pc",
+    "oi_above_below_ratio_pc",
+    "pct_oi_within_5pct_pc",  "pct_oi_within_10pct_pc",
+    "pct_oi_above_spot_pc",   "pct_oi_below_spot_pc",
+
+    # ── (b) Family 4 — _co raw counts & dollar-level minus_spot ───────────
+    # (_co div_spot, ratio, pct_ siblings remain eligible)
+    "oi_weighted_call_minus_spot_co",
+    "oi_weighted_put_minus_spot_co",
+    "oi_weighted_all_minus_spot_co",
+    "oi_within_5pct_co",  "oi_within_10pct_co",
+    "oi_above_spot_co",   "oi_below_spot_co",
+
+    # ── (a) Family 5 — ALL _pc variants (prior-close spot reference) ───────
+    "d1_oi_weighted_all_div_spot_change_pc",
+    "d5_oi_weighted_all_div_spot_change_pc",
+    "zscore_oi_weighted_all_div_spot_3m_pc",
+    "zscore_oi_above_below_ratio_3m_pc",
+
+    # ── (b) Family 5 — raw OI count differences (not pct_change) ──────────
+    # (d_total_oi_pct_change, zscore_, ratio_ siblings remain eligible)
+    "d1_total_oi_change", "d5_total_oi_change", "d20_total_oi_change",
+})
 
 # ── Parser ────────────────────────────────────────────────────────────────────
 
@@ -126,7 +189,7 @@ def _make_row(metric: str, family_num: int, family_name: str, tier: str) -> dict
     eligible = True
     if family_num in _INELIGIBLE_FAMILIES:
         eligible = False
-    elif metric in _NULL_BY_DESIGN:
+    elif metric in _INELIGIBLE_METRICS:
         eligible = False
     return {
         "metric": metric,
@@ -164,12 +227,28 @@ async def write_to_db(conn: asyncpg.Connection, rows: list[dict]) -> None:
 async def verify(conn: asyncpg.Connection) -> None:
     """Print spot-checks against the freshly-written table."""
     spot_checks = [
-        ("put_call_oi_ratio", "MORNING",       True,  "OI metric"),
-        ("rv_20d",            "EVENING",        True,  "vol metric"),
-        ("ret_5d_fwd_oc",     "EVENING",        False, "Family 7 forward return"),
-        ("iv_25d_call_30d",   "EVENING",        True,  "30d skew metric (now active)"),
-        ("atm_iv_30d",        "EVENING",        True,  "IV metric"),
-        ("spot_pc",           "MORNING",        True,  "spot snapshot"),
+        # ── Eligible metrics that must remain eligible ─────────────────────
+        ("put_call_oi_ratio",             "MORNING", True,  "OI ratio — keep eligible"),
+        ("rv_20d",                        "EVENING", True,  "vol metric — keep eligible"),
+        ("iv_25d_call_30d",               "EVENING", True,  "30d skew metric (now active)"),
+        ("atm_iv_30d",                    "EVENING", True,  "IV metric — keep eligible"),
+        ("oi_weighted_all_div_spot_co",   "MORNING", True,  "_co div_spot — keep eligible"),
+        ("pct_oi_within_5pct_co",         "MORNING", True,  "_co pct_ — keep eligible"),
+        ("oi_above_below_ratio_co",       "MORNING", True,  "_co ratio — keep eligible"),
+        ("d1_total_oi_pct_change",        "MORNING", True,  "pct_change — keep eligible"),
+        # ── Family 7 forward returns must stay ineligible ──────────────────
+        ("ret_5d_fwd_oc",                 "EVENING", False, "Family 7 forward return"),
+        # ── Family 2 spot (now via _INELIGIBLE_FAMILIES) ──────────────────
+        ("spot_pc",                       "MORNING", False, "Family 2 spot — dollar level"),
+        # ── (b) New drift exclusions: raw OI levels ────────────────────────
+        ("total_oi",                      "MORNING", False, "F3 raw OI level — drift"),
+        ("oi_weighted_all",               "MORNING", False, "F3 OI-weighted strike — drift"),
+        ("oi_within_5pct_co",             "MORNING", False, "F4 _co raw count — drift"),
+        ("d1_total_oi_change",            "MORNING", False, "F5 raw OI count diff — drift"),
+        # ── (a) _pc suppression: folded into eligibility, must stay hidden ──
+        ("oi_weighted_all_div_spot_pc",   "MORNING", False, "F4 _pc — prior-close suppressed"),
+        ("oi_above_below_ratio_pc",       "MORNING", False, "F4 _pc ratio — prior-close suppressed"),
+        ("zscore_oi_above_below_ratio_3m_pc", "MORNING", False, "F5 _pc zscore — prior-close suppressed"),
     ]
 
     print("\n── Spot checks ────────────────────────────────────────────────")
@@ -208,10 +287,39 @@ async def verify(conn: asyncpg.Connection) -> None:
     if not fam7_ok:
         all_pass = False
 
+    # Family 2 check: spot_pc and spot_co must be ineligible
+    fam2_wrong = await conn.fetchval(
+        """SELECT COUNT(*) FROM metric_classification
+           WHERE family_num=2 AND eligible_as_metric=true"""
+    )
+    fam2_ok = fam2_wrong == 0
+    print(
+        f"  {'✓' if fam2_ok else '✗ FAIL'}  Family 2: spot snapshots "
+        f"(spot_pc/co) — {fam2_wrong} erroneously eligible (must be 0)"
+    )
+    if not fam2_ok:
+        all_pass = False
+
+    # _pc suppression check: no Family 4/5 _pc metric may be eligible
+    pc_wrong = await conn.fetchval(
+        """SELECT COUNT(*) FROM metric_classification
+           WHERE family_num IN (4,5)
+             AND RIGHT(metric,3) = '_pc'
+             AND eligible_as_metric=true"""
+    )
+    pc_ok = pc_wrong == 0
+    print(
+        f"  {'✓' if pc_ok else '✗ FAIL'}  Family 4/5 _pc suppression: "
+        f"{pc_wrong} _pc metrics erroneously eligible (must be 0)"
+    )
+    if not pc_ok:
+        all_pass = False
+
     # Summary counts
     totals = await conn.fetchrow(
         """SELECT COUNT(*) AS total,
                   COUNT(*) FILTER (WHERE eligible_as_metric) AS n_elig,
+                  COUNT(*) FILTER (WHERE NOT eligible_as_metric) AS n_inelig,
                   COUNT(*) FILTER (WHERE tier='MORNING') AS n_morning,
                   COUNT(*) FILTER (WHERE tier='EVENING') AS n_evening
            FROM metric_classification"""
@@ -219,6 +327,7 @@ async def verify(conn: asyncpg.Connection) -> None:
     print(
         f"\n  Total rows:      {totals['total']}\n"
         f"  Eligible:        {totals['n_elig']}\n"
+        f"  Ineligible:      {totals['n_inelig']}\n"
         f"  MORNING tier:    {totals['n_morning']}\n"
         f"  EVENING tier:    {totals['n_evening']}\n"
     )
