@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=201"></script>
+  <script src="/static/js/oi_analysis.js?v=202"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3286,13 +3286,17 @@
 
                         <!-- Avg Return by Year -->
                         <div class="chart-box">
-                          <div class="chart-title">Avg Return by Year</div>
+                          <div class="chart-title">Avg Return by Year
+                            <button class="fs-btn" @click="openFullscreen('chart-zone-yearly')" title="Fullscreen">⛶</button>
+                          </div>
                           <div class="chart-canvas"><canvas id="chart-zone-yearly"></canvas></div>
                         </div>
 
                         <!-- Trade Activity -->
                         <div class="chart-box">
-                          <div class="chart-title">Trade Activity</div>
+                          <div class="chart-title">Trade Activity
+                            <button class="fs-btn" @click="openFullscreen('chart-zone-activity')" title="Fullscreen">⛶</button>
+                          </div>
                           <div class="chart-canvas"><canvas id="chart-zone-activity"></canvas></div>
                         </div>
 
@@ -3300,6 +3304,7 @@
                         <div class="chart-box">
                           <div class="chart-title">Ticker Breakdown
                             <span style="font-weight:400;font-size:10px;color:var(--dim)"> — size=weight · color=win-rate (pink→blue)</span>
+                            <button class="fs-btn" @click="openFullscreen('chart-zone-bubble')" title="Fullscreen">⛶</button>
                           </div>
                           <div class="chart-canvas"><canvas id="chart-zone-bubble"></canvas></div>
                         </div>

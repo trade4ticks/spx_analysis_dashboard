@@ -3510,6 +3510,16 @@ document.addEventListener('alpine:init', () => {
           'chart-recall-yearly':   () => this._renderZoneYearly('chart-recall-yearly',  this.recallZoneData),
           'chart-recall-activity': () => this._renderSecActivity('chart-recall-activity', this.recallZoneData),
           'chart-recall-bubble':   () => this._renderSecBubble('chart-recall-bubble',   this.recallZoneData),
+          // Zone-analyze (main heatmap zone) — same pattern as recall
+          // and portfolio: parameterized _renderSec* / _renderZoneYearly
+          // calls targeting the FS canvas via the id-swap. Without
+          // these entries, openFullscreen looks up the chart id, finds
+          // no fn, and silently does nothing — exact same symptom the
+          // portfolio bug had (blank FS + blank original on close).
+          'chart-zone-equity':     () => this._renderSecEquity('chart-zone-equity',   this.zoneData, true),
+          'chart-zone-yearly':     () => this._renderZoneYearly('chart-zone-yearly',  this.zoneData),
+          'chart-zone-activity':   () => this._renderSecActivity('chart-zone-activity', this.zoneData),
+          'chart-zone-bubble':     () => this._renderSecBubble('chart-zone-bubble',   this.zoneData),
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
@@ -3585,6 +3595,11 @@ document.addEventListener('alpine:init', () => {
           'chart-recall-yearly':   () => this._renderZoneYearly('chart-recall-yearly',  this.recallZoneData),
           'chart-recall-activity': () => this._renderSecActivity('chart-recall-activity', this.recallZoneData),
           'chart-recall-bubble':   () => this._renderSecBubble('chart-recall-bubble',   this.recallZoneData),
+          // Zone-analyze
+          'chart-zone-equity':     () => this._renderSecEquity('chart-zone-equity',   this.zoneData, true),
+          'chart-zone-yearly':     () => this._renderZoneYearly('chart-zone-yearly',  this.zoneData),
+          'chart-zone-activity':   () => this._renderSecActivity('chart-zone-activity', this.zoneData),
+          'chart-zone-bubble':     () => this._renderSecBubble('chart-zone-bubble',   this.zoneData),
           // Signal Survey
           'chart-ic-leaderboard': () => this._renderIcLeaderboard(),
           'chart-ic-scatter':     () => this._renderIcScatter(),
@@ -7112,6 +7127,12 @@ document.addEventListener('alpine:init', () => {
             // formatter.
             x: {
               type: 'linear',
+              // Hug the data range — no padding on either end. With
+              // bounds:'data' Chart.js still pads to "nice" tick
+              // boundaries, so set min/max explicitly to the first
+              // and last data points.
+              min: eqPxy[0].x,
+              max: eqPxy[eqPxy.length - 1].x,
               ticks: {
                 color: '#888', font: { size: 9 },
                 maxTicksLimit: 10,
