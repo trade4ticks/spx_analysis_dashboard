@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=207"></script>
+  <script src="/static/js/oi_analysis.js?v=208"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3200,7 +3200,7 @@
                          outcome — their explicit choice persists in
                          zoneOutcome. -->
                     <template x-if="hmSelectedCells.size > 0">
-                      <div style="display:flex;align-items:center;gap:6px"
+                      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"
                            x-init="if (!zoneOutcome) zoneOutcome = outcome">
                         <label style="font-size:11px;color:var(--dim)">Outcome:</label>
                         <select x-model="zoneOutcome"
@@ -3218,6 +3218,28 @@
                           <span x-show="!zoneLoading">Analyze Zone</span>
                           <span x-show="zoneLoading">Loading…</span>
                         </button>
+                        <!-- Outlier filter — one-sided high cutoff that
+                             feeds the heatmap AND the zone aggregates
+                             the same filtered trade set. Independent of
+                             recall and portfolio filters. Threshold is
+                             armed at 30% even when toggle is OFF so
+                             flipping on re-renders immediately. -->
+                        <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
+                          <input type="checkbox"
+                                 :checked="outlierFilter.zone.enabled"
+                                 @change="setOutlierFilter('zone', { enabled: $event.target.checked })"
+                                 :disabled="zoneLoading || heatmapLoading"
+                                 title="Exclude trades whose return exceeds the chosen threshold (one-sided high; losses kept)">
+                          <span>Exclude outliers &gt;</span>
+                          <select :value="outlierFilter.zone.threshold"
+                                  @change="setOutlierFilter('zone', { threshold: +$event.target.value })"
+                                  :disabled="zoneLoading || heatmapLoading"
+                                  style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                            <template x-for="t in outlierThresholdChoices" :key="'oz-'+t">
+                              <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
+                            </template>
+                          </select>
+                        </span>
                       </div>
                     </template>
                     <span x-show="hmSelectedCells.size === 0"
@@ -3642,6 +3664,25 @@
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
             <span x-show="recallSaveMsg" style="font-size:11px;color:#3498db"
                   x-text="recallSaveMsg"></span>
+            <!-- Outlier filter — independent of zone-analyze and portfolio
+                 toggles. Re-fires heatmap + zone-analyze together so the
+                 cell grid and aggregates remain consistent. -->
+            <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dim);border-left:1px solid var(--border);padding-left:8px">
+              <input type="checkbox"
+                     :checked="outlierFilter.recall.enabled"
+                     @change="setOutlierFilter('recall', { enabled: $event.target.checked })"
+                     :disabled="recallLoading"
+                     title="Exclude trades whose return exceeds the chosen threshold (one-sided high; losses kept)">
+              <span>Exclude outliers &gt;</span>
+              <select :value="outlierFilter.recall.threshold"
+                      @change="setOutlierFilter('recall', { threshold: +$event.target.value })"
+                      :disabled="recallLoading"
+                      style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                <template x-for="t in outlierThresholdChoices" :key="'or-'+t">
+                  <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
+                </template>
+              </select>
+            </span>
             <span style="font-size:11px;color:var(--dim)">
               <b x-text="recallSelectedCells.size"></b> cell(s) selected
             </span>
@@ -3873,6 +3914,26 @@
           <button @click="deletePortfolio()" :disabled="!portfolioId"
                   class="if-pill" :style="portfolioId ? 'cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)' : 'opacity:.4;cursor:not-allowed'">Delete</button>
           <span x-show="portLoading" style="font-size:12px;color:var(--dim)">Loading…</span>
+          <!-- Outlier filter — independent of zone-analyze and recall
+               toggles. Re-fires portfolio aggregate so equity, drawdown,
+               yearly, ticker breakdown, and the per-signal contribution
+               summary all reflect the same filtered trade set. -->
+          <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dim);border-left:1px solid var(--border);padding-left:10px;margin-left:4px">
+            <input type="checkbox"
+                   :checked="outlierFilter.port.enabled"
+                   @change="setOutlierFilter('port', { enabled: $event.target.checked })"
+                   :disabled="portLoading || !portfolioId"
+                   title="Exclude trades whose return exceeds the chosen threshold (one-sided high; losses kept)">
+            <span>Exclude outliers &gt;</span>
+            <select :value="outlierFilter.port.threshold"
+                    @change="setOutlierFilter('port', { threshold: +$event.target.value })"
+                    :disabled="portLoading || !portfolioId"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+              <template x-for="t in outlierThresholdChoices" :key="'op-'+t">
+                <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
+              </template>
+            </select>
+          </span>
         </div>
 
         <!-- Active portfolio header -->

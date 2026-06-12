@@ -1591,6 +1591,11 @@ async def heatmap_2d(
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
     cutoff_date: Optional[str] = Query(None),
+    # Outlier filter — exclude trades whose outcome > this threshold
+    # (one-sided high cutoff; losses kept). Applied at the per-row
+    # accumulator BEFORE per-cell aggregation so each cell's avg_ret
+    # and n reflect the filtered set. None / omitted = no filter.
+    outlier_max_ret: Optional[float] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """2D heatmap: bin metric_x and metric_y, show avg outcome in each cell.
@@ -1697,6 +1702,10 @@ async def heatmap_2d(
                         continue
                 except (TypeError, ValueError):
                     continue
+                # OUTLIER FILTER — applied per-row so per-cell avg_ret
+                # and n reflect the filtered trade set. One-sided high.
+                if outlier_max_ret is not None and fov > outlier_max_ret:
+                    continue
                 bx20 = r["bin_x_20"]
                 by20 = r["bin_y_20"]
                 if bins == 20:
@@ -1783,6 +1792,7 @@ async def metric_bins_1d(
     date_to: Optional[str] = Query(None),
     walk_forward: bool = Query(False),
     cutoff_date: Optional[str] = Query(None),
+    outlier_max_ret: Optional[float] = Query(None),
     pool=Depends(get_oi_pool),
 ):
     """N-bin decile stats for one metric vs one outcome (lightweight version of /analyze).
@@ -1899,6 +1909,11 @@ async def metric_bins_1d(
                 if math.isnan(fov):
                     continue
             except (TypeError, ValueError):
+                continue
+            # OUTLIER FILTER — same one-sided cutoff applied here so
+            # the 1D bin chart on the heatmap side panel matches the
+            # filtered 2D grid.
+            if outlier_max_ret is not None and fov > outlier_max_ret:
                 continue
             try:
                 fv = float(r["metric_val"])
@@ -7753,6 +7768,12 @@ class ZoneAnalyzeRequest(BaseModel):
     ticker: str = "ALL"
     date_from: Optional[str] = None
     date_to: Optional[str] = None
+    # Outlier filter: exclude trades whose outcome > this threshold
+    # (one-sided high cutoff — losses are always kept). Applied as a
+    # single filter in valid_rows assembly so EVERY downstream
+    # calculation (stats, equity, drawdown, yearly, ticker breakdown,
+    # combined_trades) reconciles automatically.
+    outlier_max_ret: Optional[float] = None
 
 
 @router.post("/secondary-zone-analyze")
@@ -7859,6 +7880,11 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             if math.isnan(fov):
                 continue
         except (TypeError, ValueError):
+            continue
+        # OUTLIER FILTER — single point of exclusion. Drops trades whose
+        # outcome > threshold (one-sided; losses always kept). EVERY
+        # downstream visual reads valid_rows so they all reconcile.
+        if req.outlier_max_ret is not None and fov > req.outlier_max_ret:
             continue
         # Store as a plain dict so helpers like _sec_equity_curve can use .get().
         # Carry pmetric / smetric / spot_co so _build_enriched_trade can populate

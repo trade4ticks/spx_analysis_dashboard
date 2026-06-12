@@ -2245,6 +2245,22 @@ document.addEventListener('alpine:init', () => {
     // diverged from the primary.
     zoneOutcome:      '',
 
+    // Per-section outlier-exclusion filter. Each of the three signal-
+    // evaluation sections (zone-analyze / recall / signal portfolio)
+    // carries an independent state — toggling one does NOT affect the
+    // others. Default threshold 30% is armed behind an off toggle so
+    // flipping on immediately re-renders without first picking a value.
+    // One-sided high cutoff — losses are always kept. Threshold
+    // options exposed in the UI: 20 / 30 / 40 / 50 / 75 / 100 %.
+    outlierFilter: {
+      zone:   { enabled: false, threshold: 0.30 },
+      recall: { enabled: false, threshold: 0.30 },
+      port:   { enabled: false, threshold: 0.30 },
+    },
+    // Shared threshold options for the dropdowns. Stored as decimals
+    // for the backend payload; rendered as % in the UI.
+    outlierThresholdChoices: [0.20, 0.30, 0.40, 0.50, 0.75, 1.00],
+
     // Per-pane equity-curve aggregation mode. Each of the four
     // single-line equity views has its own independent toggle —
     // editing one does NOT sync the others.
@@ -2339,6 +2355,11 @@ document.addEventListener('alpine:init', () => {
       let wf = '';
       if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
       else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+      // Outlier filter ride-along: when the zone section's toggle is
+      // ON, append &outlier_max_ret so per-cell aggregation reflects
+      // the same filter the zone's stats/equity/etc. apply.
+      const outZone = this.outlierMaxRetFor('zone');
+      const outQ    = outZone != null ? `&outlier_max_ret=${outZone}` : '';
       try {
         const r = await fetch(
           `/api/factor-analysis/heatmap?ticker=${encodeURIComponent(this.ticker)}`
@@ -2347,7 +2368,7 @@ document.addEventListener('alpine:init', () => {
           + `&outcome=${encodeURIComponent(this._heatmapOutcome())}&bins=${this.heatmapBins}`
           + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
           + (this.dateTo   ? `&date_to=${this.dateTo}`     : '')
-          + wf);
+          + wf + outQ);
         if (r.ok) {
           const d = await r.json();
           // Gate F replacement: `_hmRange` is no longer set here. It's
@@ -2388,11 +2409,15 @@ document.addEventListener('alpine:init', () => {
       let wf = '';
       if (this.pageMode === 'walk_forward') wf = '&walk_forward=true';
       else if (this.pageMode === 'train_test') wf = `&cutoff_date=${encodeURIComponent(this.cutoffDate)}`;
+      // Outlier filter ride-along on /metric-bins so the side bin chart
+      // matches the filtered 2D heatmap grid.
+      const outZone = this.outlierMaxRetFor('zone');
+      const outQ    = outZone != null ? `&outlier_max_ret=${outZone}` : '';
       const base = `/api/factor-analysis/metric-bins?ticker=${encodeURIComponent(this.ticker)}`
         + `&outcome=${encodeURIComponent(this._heatmapOutcome())}&bins=${this.hmBins1d}`
         + (this.dateFrom ? `&date_from=${this.dateFrom}` : '')
         + (this.dateTo ? `&date_to=${this.dateTo}` : '')
-        + wf;
+        + wf + outQ;
 
       // Overnight Gap mode: serve the X-axis sidebar directly from the
       // bundle so its values match the main Quantile pane exactly. The
@@ -4709,6 +4734,7 @@ document.addEventListener('alpine:init', () => {
             ticker:           this.ticker,
             date_from:        this.dateFrom  || null,
             date_to:          this.dateTo    || null,
+            outlier_max_ret:  this.outlierMaxRetFor('zone'),
           }),
         });
         if (r.ok) {
@@ -5156,12 +5182,16 @@ document.addEventListener('alpine:init', () => {
         // the slow main-flow preamble. Heatmap reads is_bins directly,
         // zone-analyze reads is_bins + daily_features for the
         // cell-set. Both ~5-10s; parallel = the slower of the two.
+        // Outlier filter rides along on both so heatmap cells AND
+        // aggregate visuals share the same filtered trade set.
+        const outRecall = this.outlierMaxRetFor('recall');
         const heatmapUrl =
           `/api/factor-analysis/heatmap?ticker=ALL`
           + `&metric_x=${encodeURIComponent(sig.primary_metric)}`
           + `&metric_y=${encodeURIComponent(sig.secondary_metric)}`
           + `&outcome=${encodeURIComponent(sig.outcome)}`
-          + `&bins=${sig.n_bins}`;
+          + `&bins=${sig.n_bins}`
+          + (outRecall != null ? `&outlier_max_ret=${outRecall}` : '');
         const [hmResp, zoneResp] = await Promise.all([
           fetch(heatmapUrl),
           fetch('/api/factor-analysis/secondary-zone-analyze', {
@@ -5174,6 +5204,7 @@ document.addEventListener('alpine:init', () => {
               n_bins:           sig.n_bins,
               cell_set:         sig.cell_set || [],
               ticker:           'ALL',
+              outlier_max_ret:  outRecall,
             }),
           }),
         ]);
@@ -5207,6 +5238,7 @@ document.addEventListener('alpine:init', () => {
             n_bins:           sig.n_bins,
             cell_set:         this.recallCellSet(),
             ticker:           'ALL',
+            outlier_max_ret:  this.outlierMaxRetFor('recall'),
           }),
         });
         if (r.ok) this.recallZoneData = await r.json();
@@ -7334,6 +7366,49 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    // Resolve the outlier threshold to pass to the backend for a
+    // given section. Returns the decimal threshold when the toggle
+    // is ON, or null when OFF (which the backend treats as "no
+    // filter"). Centralised so every endpoint call uses the same
+    // logic; one place to fix if semantics change.
+    outlierMaxRetFor(section) {
+      const s = this.outlierFilter[section];
+      if (!s || !s.enabled) return null;
+      return s.threshold;
+    },
+
+    // Setter — toggles or updates the threshold for one section,
+    // then re-fires that section's endpoints. Re-fire is the
+    // backend's job (one filter line at trade-set assembly); the
+    // frontend just re-runs the existing endpoint calls with the
+    // new outlier_max_ret in the body / query.
+    //
+    // Semantics:
+    //   - Toggle changed   → always re-fire (turning on with armed
+    //                        30% applies immediately; turning off
+    //                        re-fires without the filter).
+    //   - Threshold change while ON → re-fire with new value.
+    //   - Threshold change while OFF → state-only, no fetch.
+    async setOutlierFilter(section, opts) {
+      const prev = { ...this.outlierFilter[section] };
+      const next = { ...prev, ...opts };
+      this.outlierFilter = { ...this.outlierFilter, [section]: next };
+      const toggleChanged    = ('enabled'   in opts) && opts.enabled   !== prev.enabled;
+      const thresholdChanged = ('threshold' in opts) && opts.threshold !== prev.threshold;
+      const shouldRefire = toggleChanged || (thresholdChanged && next.enabled);
+      if (!shouldRefire) return;
+      if (section === 'zone') {
+        // Zone view re-fires both the heatmap and the zone-analyze
+        // payload in parallel so cell colors AND aggregate visuals
+        // both reflect the filter consistently.
+        await Promise.all([this.loadHeatmap(), this.analyzeZone()]);
+      } else if (section === 'recall') {
+        await this._recallFireRequests();
+      } else if (section === 'port') {
+        if (this.portfolioId) await this.loadPortfolioAggregate();
+      }
+    },
+
     // Per-pane setter. Updates ONLY that pane's mode and re-renders
     // it; other panes' modes are untouched.
     setEquityAggMode(modeKey, mode) {
@@ -7621,9 +7696,14 @@ document.addEventListener('alpine:init', () => {
       this.portLoading = true;
       try {
         // Portfolio aggregate is always IS — no mode params sent.
+        // Outlier filter rides along when the portfolio section's
+        // toggle is ON; backend filters per-signal trade rows before
+        // both per-signal contribution stats and union_rows assembly.
         const r = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/aggregate`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
+          body: JSON.stringify({
+            outlier_max_ret: this.outlierMaxRetFor('port'),
+          }),
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();

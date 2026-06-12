@@ -101,7 +101,11 @@ class SignalLinkUpdate(BaseModel):
 
 
 class AggregateRequest(BaseModel):
-    pass
+    # Outlier filter: exclude trades whose outcome > this threshold
+    # (one-sided high cutoff; losses always kept). Applied in the
+    # per-signal trade-row assembly so both the per-signal
+    # contribution stats AND the deduped union_rows reconcile.
+    outlier_max_ret: Optional[float] = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -532,6 +536,11 @@ async def portfolio_aggregate(
                     if math.isnan(fov):
                         continue
                 except (TypeError, ValueError):
+                    continue
+                # OUTLIER FILTER — applied at the per-signal trade-row
+                # assembly so both per-signal contribution stats AND
+                # the deduped union_rows reconcile. One-sided high.
+                if req.outlier_max_ret is not None and fov > req.outlier_max_ret:
                     continue
                 sig_trade_rows.append({
                     "ticker":     r["ticker"],
