@@ -7865,12 +7865,14 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             "equity_primary": [], "equity_combined": [],
             "combined_trades": [], "horizon": _parse_horizon(outcome),
             "tickers": [], "yearly": [],
+            "outlier_excluded": 0,
         }
 
     # ── Filter valid rows and compute per-row outcome ──────────────────────────
     # Keep rows as dict-like objects sorted (date, ticker) — same ordering
     # as /secondary-detail's primary_sorted / combined_sorted lists.
     valid_rows: list = []
+    outlier_excluded = 0
     for r in raw_rows:
         ov = _outcome_value(r, outcome)
         if ov is None:
@@ -7885,6 +7887,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         # outcome > threshold (one-sided; losses always kept). EVERY
         # downstream visual reads valid_rows so they all reconcile.
         if req.outlier_max_ret is not None and fov > req.outlier_max_ret:
+            outlier_excluded += 1
             continue
         # Store as a plain dict so helpers like _sec_equity_curve can use .get().
         # Carry pmetric / smetric / spot_co so _build_enriched_trade can populate
@@ -7911,6 +7914,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             "equity_primary": [], "equity_combined": [],
             "combined_trades": [], "horizon": _parse_horizon(outcome),
             "tickers": [], "yearly": [],
+            "outlier_excluded": outlier_excluded,
         }
 
     arr = np.array([r[outcome] for r in valid_rows], dtype=np.float64)
@@ -8027,6 +8031,9 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         "horizon":         _parse_horizon(outcome),
         "tickers":         tickers_out,
         "yearly":          yearly,
+        # Outlier filter telemetry — count of rows dropped because
+        # outcome > req.outlier_max_ret. 0 when filter is off.
+        "outlier_excluded": outlier_excluded,
     }
 
 

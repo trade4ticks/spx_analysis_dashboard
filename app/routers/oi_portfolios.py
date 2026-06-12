@@ -144,7 +144,8 @@ def _stats_from_trades(trades: list, outcome_col: str) -> dict:
     }
 
 
-def _empty_aggregate(portfolio: dict, outcome: str, all_ps: list) -> dict:
+def _empty_aggregate(portfolio: dict, outcome: str, all_ps: list,
+                     outlier_excluded: int = 0) -> dict:
     """Return a zero-state aggregate response when there are no enabled signals."""
     signals_out = [
         {"id": ps["ps_id"], "signal_id": ps["signal_id"],
@@ -168,6 +169,7 @@ def _empty_aggregate(portfolio: dict, outcome: str, all_ps: list) -> dict:
         "phi_systems": [], "overlap_systems": [], "system_labels": [],
         "phi_pairs": [], "overlap_pairs": [], "pair_labels": [],
         "system_boundaries": [],
+        "outlier_excluded": outlier_excluded,
     }
 
 
@@ -495,6 +497,12 @@ async def portfolio_aggregate(
     out_nn  = " AND ".join(f"df.{c} IS NOT NULL" for c in outcome_cols)
 
     per_signal_rows: list = []   # list[list[dict]]
+    # Outlier exclusion telemetry — track unique (ticker, trade_date)
+    # rows dropped by the filter so the tagline reports the de-duped
+    # count that matches the union-level `n`. A row excluded by one
+    # signal is excluded by every signal (same outcome value) so the
+    # set naturally dedupes across signals.
+    outlier_excluded_keys: set = set()
     async with oi_pool.acquire() as conn:
         for entry in enabled_signals:
             sig    = entry["sig"]
@@ -541,6 +549,7 @@ async def portfolio_aggregate(
                 # assembly so both per-signal contribution stats AND
                 # the deduped union_rows reconcile. One-sided high.
                 if req.outlier_max_ret is not None and fov > req.outlier_max_ret:
+                    outlier_excluded_keys.add((r["ticker"], str(r["trade_date"])))
                     continue
                 sig_trade_rows.append({
                     "ticker":     r["ticker"],
@@ -566,7 +575,8 @@ async def portfolio_aggregate(
 
     n = len(union_rows)
     if n == 0:
-        return _empty_aggregate(portfolio, outcome, all_ps)
+        return _empty_aggregate(portfolio, outcome, all_ps,
+                                outlier_excluded=len(outlier_excluded_keys))
 
     # ── Stats ────────────────────────────────────────────────────────────────
     arr    = np.array([r[outcome] for r in union_rows], dtype=np.float64)
@@ -748,4 +758,7 @@ async def portfolio_aggregate(
         "overlap_pairs":     [],
         "pair_labels":       [],
         "system_boundaries": [],
+        # Outlier filter telemetry — de-duped count of (ticker,date) rows
+        # dropped because outcome > req.outlier_max_ret. 0 when off.
+        "outlier_excluded":  len(outlier_excluded_keys),
     }

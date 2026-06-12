@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=208"></script>
+  <script src="/static/js/oi_analysis.js?v=209"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3239,6 +3239,13 @@
                               <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
                             </template>
                           </select>
+                          <!-- Tagline: count of trades dropped by the
+                               filter on the LAST zone-analyze run. Sourced
+                               from /secondary-zone-analyze response so it
+                               matches the n/avg shown in the stats bar. -->
+                          <span x-show="outlierFilter.zone.enabled && zoneData && (zoneData.outlier_excluded||0) > 0"
+                                style="color:#e84393;font-style:italic"
+                                x-text="'(' + (zoneData?.outlier_excluded||0).toLocaleString() + ' excluded)'"></span>
                         </span>
                       </div>
                     </template>
@@ -3682,6 +3689,11 @@
                   <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
                 </template>
               </select>
+              <!-- Tagline: count from the recall /secondary-zone-analyze
+                   response so the number matches the recall stats bar. -->
+              <span x-show="outlierFilter.recall.enabled && recallZoneData && (recallZoneData.outlier_excluded||0) > 0"
+                    style="color:#e84393;font-style:italic"
+                    x-text="'(' + (recallZoneData?.outlier_excluded||0).toLocaleString() + ' excluded)'"></span>
             </span>
             <span style="font-size:11px;color:var(--dim)">
               <b x-text="recallSelectedCells.size"></b> cell(s) selected
@@ -3933,6 +3945,11 @@
                 <option :value="t" x-text="(t*100).toFixed(0)+'%'"></option>
               </template>
             </select>
+            <!-- Tagline: de-duped count from /portfolios/{pid}/aggregate
+                 so the number matches the n shown in the portfolio stats. -->
+            <span x-show="outlierFilter.port.enabled && portAggregate && (portAggregate.outlier_excluded||0) > 0"
+                  style="color:#e84393;font-style:italic"
+                  x-text="'(' + (portAggregate?.outlier_excluded||0).toLocaleString() + ' excluded)'"></span>
           </span>
         </div>
 
