@@ -5241,6 +5241,39 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.recallSaveMsg = ''; }, 4000);
     },
 
+    // CSV export of the current recall view. Same shape as
+    // zoneDownloadCSV — ticker breakdown rows + equity curve —
+    // pointed at recallZoneData. Filename derived from the open
+    // signal's identity so multiple downloads don't collide.
+    recallDownloadCSV() {
+      if (!this.recallZoneData?.tickers?.length) return;
+      const rows = [['ticker', 'n', 'avg_ret', 'win_rate', 'contrib_pct']];
+      for (const t of this.recallZoneData.tickers) {
+        rows.push([
+          t.ticker, t.n,
+          (t.avg_ret  * 100).toFixed(4) + '%',
+          (t.win_rate * 100).toFixed(2) + '%',
+          t.contrib_pct.toFixed(2) + '%',
+        ]);
+      }
+      const eq = this.recallZoneData.equity_primary || [];
+      if (eq.length) {
+        rows.push([]);
+        rows.push(['date', 'cum_ret_pct']);
+        for (const p of eq) rows.push([p.date, (p.value * 100).toFixed(4) + '%']);
+      }
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const sig  = this.recallSig || {};
+      const safe = (s) => String(s || '').replace(/[^a-z0-9_]/gi, '_');
+      const name = `recall_${safe(sig.name)}_${safe(sig.primary_metric)}_${safe(sig.secondary_metric)}_${safe(sig.outcome)}.csv`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+
     recallCancel() {
       this.recallSig = null;
       this.recallEditedName = '';

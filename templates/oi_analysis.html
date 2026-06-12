@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=203"></script>
+  <script src="/static/js/oi_analysis.js?v=204"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3604,6 +3604,12 @@
             <span style="font-size:11px;color:var(--dim)">
               <b x-text="recallSelectedCells.size"></b> cell(s) selected
             </span>
+            <button class="btn-batch blue"
+                    @click="recallDownloadCSV()"
+                    :disabled="!recallZoneData || !recallZoneData.tickers || !recallZoneData.tickers.length"
+                    title="Download the recall view's ticker breakdown + equity curve as CSV">
+              ↓ CSV
+            </button>
             <button class="btn-batch blue"
                     @click="recallReanalyze()"
                     :disabled="recallLoading || recallSelectedCells.size === 0"
