@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=205"></script>
+  <script src="/static/js/oi_analysis.js?v=206"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1009,11 +1009,17 @@
                   <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q avg%</th>
                   <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q %/day</th>
                   <th @click="cs2fSort('q_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q n</th>
+                  <!-- Per-user metadata persisted in corner_scan_notes,
+                       independent of corner_scan_2f so it survives a
+                       scan rebuild. Not sortable — these are notes,
+                       not scan metrics. -->
+                  <th style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Reviewed</th>
+                  <th style="text-align:left;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Note</th>
                 </tr>
               </thead>
               <tbody>
                 <template x-if="cs2fRows.length === 0 && !cs2fLoading">
-                  <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
+                  <tr><td colspan="12" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
                     <template x-if="cs2fMode !== 'train_test'">
                       <span>No rows — try lowering min n or clearing filters.</span>
                     </template>
@@ -1050,6 +1056,28 @@
                         :style="{ color: row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
+                    <!-- Reviewed checkbox + Note input. @click.stop on
+                         both <td>s so clicking inside them doesn't
+                         bubble to the row's recallFromCornerScan
+                         handler. CRITICAL UX RULE: row appearance does
+                         NOT change based on `reviewed` — the checkbox
+                         state is the ONLY visual cue. No dim/color/
+                         restyle for reviewed rows. -->
+                    <td style="padding:3px 8px;text-align:center;white-space:nowrap" @click.stop>
+                      <input type="checkbox"
+                             x-model="row.reviewed"
+                             @change="cs2fSaveReviewed(row)"
+                             title="Mark this corner as reviewed (persists across scan rebuilds)">
+                    </td>
+                    <td style="padding:3px 8px;white-space:nowrap" @click.stop>
+                      <input type="text"
+                             x-model.lazy="row.note"
+                             @blur="cs2fSaveNote(row)"
+                             maxlength="1000"
+                             placeholder="(jot a quick note)"
+                             :title="row.note || 'Note saves on blur'"
+                             style="width:200px;background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 6px;border-radius:3px;font-family:inherit">
+                    </td>
                   </tr>
                 </template>
               </tbody>

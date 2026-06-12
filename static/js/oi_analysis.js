@@ -4082,6 +4082,48 @@ document.addEventListener('alpine:init', () => {
       this._cs2fStoreSlot(meta, rows, total);
       this.cs2fLoading = false;
     },
+    // Per-corner note + reviewed handlers. Both upsert into
+    // corner_scan_notes via POST /corner-scan/notes, which uses
+    // COALESCE so a note-only write doesn't clobber reviewed and a
+    // reviewed-only write doesn't clobber the note. Identity is the
+    // four-column key tuple — same one corner_scan_2f emits on every
+    // rebuild, so notes survive scan rebuilds and re-associate via
+    // the LEFT JOIN in /corner-scan/2f.
+    async cs2fSaveNote(row) {
+      if (!row) return;
+      try {
+        await fetch('/api/factor-analysis/corner-scan/notes', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            primary_metric:   row.primary_metric,
+            secondary_metric: row.secondary_metric,
+            corner_direction: row.corner_direction,
+            outcome:          row.outcome,
+            note:             row.note || '',
+          }),
+        });
+      } catch (_) { /* offline / network — silent so the user can keep
+                       typing; next blur will retry. Note text is still
+                       in row.note locally. */ }
+    },
+    async cs2fSaveReviewed(row) {
+      if (!row) return;
+      try {
+        await fetch('/api/factor-analysis/corner-scan/notes', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            primary_metric:   row.primary_metric,
+            secondary_metric: row.secondary_metric,
+            corner_direction: row.corner_direction,
+            outcome:          row.outcome,
+            reviewed:         !!row.reviewed,
+          }),
+        });
+      } catch (_) { /* offline / network — silent. */ }
+    },
+
     cs2fSort(key) {
       if (this.cs2fSortKey === key) {
         this.cs2fSortDir = this.cs2fSortDir === 'desc' ? 'asc' : 'desc';

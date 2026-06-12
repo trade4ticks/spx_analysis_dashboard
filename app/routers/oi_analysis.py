@@ -7121,6 +7121,30 @@ async def threshold_drift_meta(
 
 _corner_scan_tables_ensured: bool = False
 
+
+# Per-corner notes + reviewed flag. Lives SEPARATE from corner_scan_2f
+# by design — when the corner scan rebuilds (DELETE + INSERT on
+# corner_scan_2f), notes survive because nothing touches this table.
+# The four-column key is the same identity tuple recallFromCornerScan
+# uses for its synthetic id, so a note re-associates with a rebuilt
+# corner row automatically via the LEFT JOIN. No FK to corner_scan_2f
+# is intentional: a note on a corner that drops below threshold and
+# disappears just sits dormant until that corner reappears — harmless.
+# PK on the four columns IS the unique constraint, so the upsert's
+# ON CONFLICT inference works with no separate index to forget.
+_DDL_CORNER_NOTES = """\
+CREATE TABLE IF NOT EXISTS corner_scan_notes (
+    primary_metric    TEXT NOT NULL,
+    secondary_metric  TEXT NOT NULL,
+    corner_direction  TEXT NOT NULL,
+    outcome           TEXT NOT NULL,
+    note              TEXT        NOT NULL DEFAULT '',
+    reviewed          BOOLEAN     NOT NULL DEFAULT FALSE,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome)
+);
+"""
+
 _DDL_CORNER_2F = """\
 CREATE TABLE IF NOT EXISTS corner_scan_2f (
     primary_metric    TEXT NOT NULL,
@@ -7257,6 +7281,9 @@ async def _ensure_corner_scan_tables(pool) -> None:
         await conn.execute(_DDL_CORNER_1F_MIGRATE_COLS)
         await conn.execute(_DDL_CORNER_1F_MIGRATE_TS)
         await conn.execute(_DDL_CORNER_1F_MIGRATE_PK)
+        # 3. corner_scan_notes — independent of the 2F/1F result tables
+        #    so corner-scan rebuilds don't disturb stored notes.
+        await conn.execute(_DDL_CORNER_NOTES)
     _corner_scan_tables_ensured = True
 
 
@@ -7371,18 +7398,24 @@ async def corner_scan_2f_endpoint(
     dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
     nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
 
-    conds:  list[str] = ["d_n >= $1", "mode = $2"]
+    # All conds reference corner_scan_2f columns via the `cs.` alias —
+    # corner_scan_notes (joined as `n` below) has columns with the same
+    # names, so qualifying explicitly avoids ambiguity in the row fetch.
+    # The COUNT query uses the same conds without aliasing (no JOIN
+    # there), which is fine because `cs` is just a stripped alias and
+    # Postgres tolerates it when the FROM only has corner_scan_2f.
+    conds:  list[str] = ["cs.d_n >= $1", "cs.mode = $2"]
     params: list      = [min_d_n, mode]
     p = 3
 
     if primary_metric:
-        conds.append(f"primary_metric   = ${p}"); params.append(primary_metric);   p += 1
+        conds.append(f"cs.primary_metric   = ${p}"); params.append(primary_metric);   p += 1
     if secondary_metric:
-        conds.append(f"secondary_metric = ${p}"); params.append(secondary_metric); p += 1
+        conds.append(f"cs.secondary_metric = ${p}"); params.append(secondary_metric); p += 1
     if corner_direction:
-        conds.append(f"corner_direction = ${p}"); params.append(corner_direction); p += 1
+        conds.append(f"cs.corner_direction = ${p}"); params.append(corner_direction); p += 1
     if outcome:
-        conds.append(f"outcome = ${p}");          params.append(outcome);          p += 1
+        conds.append(f"cs.outcome = ${p}");          params.append(outcome);          p += 1
 
     # Display-only metric exclusion: Family 2 always; Family 4+5 _pc only.
     # Wrapped in a try/except so a missing metric_classification table degrades
@@ -7400,21 +7433,35 @@ async def corner_scan_2f_endpoint(
             "  WHERE table_name = 'metric_classification')"
         )
         if mc_exists:
-            conds.append(f"primary_metric   {_EXCL}")
-            conds.append(f"secondary_metric {_EXCL}")
+            conds.append(f"cs.primary_metric   {_EXCL}")
+            conds.append(f"cs.secondary_metric {_EXCL}")
 
         where = " AND ".join(conds)
-        order = f"{sort_key} {dir_sql} {nulls_sql}"
+        order = f"cs.{sort_key} {dir_sql} {nulls_sql}"
 
         total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM corner_scan_2f WHERE {where}", *params
+            f"SELECT COUNT(*) FROM corner_scan_2f cs WHERE {where}", *params
         )
+        # LEFT JOIN corner_scan_notes so each row carries its persisted
+        # note + reviewed flag (defaulted to '' / FALSE when no note
+        # row exists yet). The join key is the four-column identity
+        # tuple — same tuple recallFromCornerScan uses for its
+        # synthetic id, and the same tuple a future scan rebuild will
+        # re-emit so notes re-associate automatically.
         rows = await conn.fetch(
-            f"""SELECT primary_metric, secondary_metric, corner_direction, outcome,
-                       d_avg_ret, d_ret_per_day, d_n,
-                       q_avg_ret, q_ret_per_day, q_n,
-                       as_of, scanned_at, mode
-                FROM corner_scan_2f WHERE {where}
+            f"""SELECT cs.primary_metric, cs.secondary_metric, cs.corner_direction, cs.outcome,
+                       cs.d_avg_ret, cs.d_ret_per_day, cs.d_n,
+                       cs.q_avg_ret, cs.q_ret_per_day, cs.q_n,
+                       cs.as_of, cs.scanned_at, cs.mode,
+                       COALESCE(n.note,     '')    AS note,
+                       COALESCE(n.reviewed, FALSE) AS reviewed
+                FROM corner_scan_2f cs
+                LEFT JOIN corner_scan_notes n
+                  ON  cs.primary_metric   = n.primary_metric
+                  AND cs.secondary_metric = n.secondary_metric
+                  AND cs.corner_direction = n.corner_direction
+                  AND cs.outcome          = n.outcome
+                WHERE {where}
                 ORDER BY {order} LIMIT {limit} OFFSET {offset}""",
             *params,
         )
@@ -7423,6 +7470,60 @@ async def corner_scan_2f_endpoint(
         "total":  int(total),
         "mode":   mode,
         "status": "ok" if int(total) > 0 else "no_data",
+    }
+
+
+class CornerNoteIn(BaseModel):
+    primary_metric:   str
+    secondary_metric: str
+    corner_direction: str
+    outcome:          str
+    # Both optional so the frontend can send a note-only write (on
+    # input blur) or a reviewed-only write (on checkbox change)
+    # without clobbering the other field. The COALESCE in the upsert
+    # SQL preserves whichever column is omitted.
+    note:             Optional[str]  = None
+    reviewed:         Optional[bool] = None
+
+
+@router.post("/corner-scan/notes")
+async def upsert_corner_note(req: CornerNoteIn,
+                              pool=Depends(get_oi_pool)):
+    """Upsert a per-corner note + reviewed flag. Identity is the
+    four-column tuple (primary, secondary, direction, outcome) —
+    same tuple corner_scan_2f rebuilds emit, so notes survive any
+    scan rebuild and re-associate via the LEFT JOIN in
+    /corner-scan/2f.
+
+    Either `note` or `reviewed` may be omitted; the COALESCE in the
+    UPDATE clause preserves whichever side isn't sent. When the row
+    doesn't exist yet, the COALESCE on the INSERT side falls back to
+    the column defaults ('' for note, FALSE for reviewed)."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    await _ensure_corner_scan_tables(pool)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO corner_scan_notes
+                 (primary_metric, secondary_metric, corner_direction, outcome,
+                  note, reviewed)
+               VALUES ($1, $2, $3, $4,
+                       COALESCE($5, ''), COALESCE($6, FALSE))
+               ON CONFLICT (primary_metric, secondary_metric,
+                            corner_direction, outcome)
+               DO UPDATE SET
+                   note       = COALESCE($5, corner_scan_notes.note),
+                   reviewed   = COALESCE($6, corner_scan_notes.reviewed),
+                   updated_at = NOW()
+               RETURNING note, reviewed, updated_at""",
+            req.primary_metric, req.secondary_metric,
+            req.corner_direction, req.outcome,
+            req.note, req.reviewed,
+        )
+    return {
+        "note":       row["note"],
+        "reviewed":   row["reviewed"],
+        "updated_at": str(row["updated_at"])[:19],
     }
 
 
