@@ -5023,6 +5023,52 @@ document.addEventListener('alpine:init', () => {
     // Editing happens on the recall heatmap; Save updates the signal
     // in place via PUT /signals/{id}, which recomputes stats inline.
 
+    // Map a corner-scan direction to the four 20x20 cell coordinates
+    // that the 10x10 corner cell expands to. The 10x10 corner is
+    // always at one of (i,j) ∈ {(0,0),(0,9),(9,0),(9,9)} per the
+    // 'low'/'high' encoding scripts/corner_scan.py emits at
+    // line 441-443. Each 10x10 cell c maps to 20x20 indices 2c and
+    // 2c+1, so a corner cell (i,j) yields the 2x2 block
+    // {(2i,2j),(2i+1,2j),(2i,2j+1),(2i+1,2j+1)}.
+    _cornerDirectionToCells(direction) {
+      const [p, s] = (direction || '').split('-');
+      const i = p === 'high' ? 9 : 0;
+      const j = s === 'high' ? 9 : 0;
+      return [
+        [2*i,     2*j    ], [2*i + 1, 2*j    ],
+        [2*i,     2*j + 1], [2*i + 1, 2*j + 1],
+      ];
+    },
+
+    // Entry point #2 for Recall — fed by a corner-scan row click.
+    // Builds a synthetic, unsaved sig (id is a string prefixed 'cs-'
+    // so recallSignal's dirty-check id-compare correctly distinguishes
+    // it from saved signals AND from other corner-scan rows) and
+    // delegates to recallSignal verbatim. Same fast-render path,
+    // same heatmap with pre-selected cells, same editable workflow.
+    // Synthetic id includes outcome so same-pair / same-direction /
+    // different-outcome rows are correctly treated as distinct sigs.
+    async recallFromCornerScan(row) {
+      if (!row) return;
+      const cells = this._cornerDirectionToCells(row.corner_direction);
+      const sig = {
+        id: `cs-${row.primary_metric}-${row.secondary_metric}`
+            + `-${row.corner_direction}-${row.outcome}`,
+        name: `${row.primary_metric} × ${row.secondary_metric}`
+              + ` · ${row.corner_direction} · ${row.outcome}`,
+        primary_metric:   row.primary_metric,
+        secondary_metric: row.secondary_metric,
+        outcome:          row.outcome,
+        n_bins:           20,
+        cell_set:         cells,
+        agg_avg_ret:      null,
+        agg_n:            null,
+        per_cell_stats:   [],
+        stats_updated_at: null,
+      };
+      await this.recallSignal(sig);
+    },
+
     async recallSignal(sig) {
       if (!sig) return;
       // Dirty check uses set-equality (order-independent) so that
@@ -5122,40 +5168,71 @@ document.addEventListener('alpine:init', () => {
       }
       this.recallSaving = true;
       this.recallSaveMsg = '';
+
+      // Branch on id type:
+      //   - number  → PUT /signals/{id}  (update an existing saved signal)
+      //   - string  → POST /signals       (create from a corner-scan or
+      //                                    other ad-hoc unsaved sig)
+      //   - null    → POST /signals       (defensive — same as string)
+      // After a successful POST, recallSig.id is replaced with the
+      // returned integer id so a SECOND save on the same open recall
+      // hits the PUT branch and updates in place instead of creating
+      // a duplicate.
+      const isNew = typeof this.recallSig.id !== 'number';
+      const cellSet = this.recallCellSet();
+
       try {
-        // Include name in the body whenever it differs from the saved
-        // signal's name (server only writes it when present). Sending
-        // the unchanged name is also fine — backend uses COALESCE.
-        const body = { cell_set: this.recallCellSet() };
-        if (trimmedName !== this.recallSig.name) body.name = trimmedName;
-        const r = await fetch(
-          `/api/factor-analysis/signals/${this.recallSig.id}`,
-          {
-            method:  'PUT',
+        let r;
+        if (isNew) {
+          r = await fetch('/api/factor-analysis/signals', {
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify(body),
+            body:    JSON.stringify({
+              name:             trimmedName,
+              primary_metric:   this.recallSig.primary_metric,
+              secondary_metric: this.recallSig.secondary_metric,
+              outcome:          this.recallSig.outcome,
+              n_bins:           this.recallSig.n_bins,
+              cell_set:         cellSet,
+            }),
           });
+        } else {
+          const body = { cell_set: cellSet };
+          if (trimmedName !== this.recallSig.name) body.name = trimmedName;
+          r = await fetch(
+            `/api/factor-analysis/signals/${this.recallSig.id}`,
+            {
+              method:  'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify(body),
+            });
+        }
         if (r.ok) {
-          const updated = await r.json();
+          const resp = await r.json();
           // Update the in-memory recallSig so subsequent dirty checks
-          // compare against the just-saved cell_set + name (no
-          // false-positive 'unsaved edits' confirmation right after).
+          // compare against the just-saved cell_set + name, and so
+          // the NEXT save (on the same open recall) routes via PUT.
+          // POST response carries id / agg_* but not per_cell_stats;
+          // that gets refreshed via loadSignals below.
           this.recallSig = {
             ...this.recallSig,
-            name:             updated.name,
-            cell_set:         updated.cell_set,
-            agg_avg_ret:      updated.agg_avg_ret,
-            agg_n:            updated.agg_n,
-            per_cell_stats:   updated.per_cell_stats,
-            stats_updated_at: updated.stats_updated_at,
+            id:               resp.id,
+            name:             trimmedName,
+            cell_set:         cellSet,
+            agg_avg_ret:      resp.agg_avg_ret      ?? this.recallSig.agg_avg_ret,
+            agg_n:            resp.agg_n            ?? this.recallSig.agg_n,
+            per_cell_stats:   resp.per_cell_stats   ?? this.recallSig.per_cell_stats,
+            stats_updated_at: resp.stats_updated_at ?? this.recallSig.stats_updated_at,
           };
-          this.recallEditedName = updated.name;
-          this.recallSaveMsg = '✓ Saved';
-          // Refresh the Saved Signals list so the row's stats,
-          // thumbnail, and name reflect the edit immediately.
+          this.recallEditedName = trimmedName;
+          this.recallSaveMsg = isNew ? '✓ Created' : '✓ Saved';
+          // Refresh the Saved Signals list so the new/updated row's
+          // stats, thumbnail, and name reflect the change immediately.
           await this.loadSignals();
         } else {
-          this.recallSaveMsg = '✗ Save failed';
+          const detail = (await r.json().catch(() => ({}))).detail
+                       || (isNew ? 'create failed' : 'save failed');
+          this.recallSaveMsg = `✗ ${detail}`;
         }
       } catch (_) {
         this.recallSaveMsg = '✗ Network error';

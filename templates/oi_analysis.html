@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=202"></script>
+  <script src="/static/js/oi_analysis.js?v=203"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1027,7 +1027,11 @@
                   </td></tr>
                 </template>
                 <template x-for="row in cs2fRows" :key="row.primary_metric+'|'+row.secondary_metric+'|'+row.corner_direction+'|'+row.outcome">
-                  <tr style="border-bottom:1px solid rgba(255,255,255,.04)">
+                  <tr style="border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer"
+                      @click="recallFromCornerScan(row)"
+                      @mouseenter="$el.style.background='rgba(52,152,219,.06)'"
+                      @mouseleave="$el.style.background=''"
+                      :title="'Open in Recall — 20×20 with this corner pre-selected (~10s)'">
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.primary_metric"></td>
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.secondary_metric"></td>
                     <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
