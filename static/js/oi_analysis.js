@@ -4123,6 +4123,22 @@ document.addEventListener('alpine:init', () => {
         });
       } catch (_) { /* offline / network — silent. */ }
     },
+    async cs2fSaveSaved(row) {
+      if (!row) return;
+      try {
+        await fetch('/api/factor-analysis/corner-scan/notes', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            primary_metric:   row.primary_metric,
+            secondary_metric: row.secondary_metric,
+            corner_direction: row.corner_direction,
+            outcome:          row.outcome,
+            saved:            !!row.saved,
+          }),
+        });
+      } catch (_) { /* offline / network — silent. */ }
+    },
 
     cs2fSort(key) {
       if (this.cs2fSortKey === key) {

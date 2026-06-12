@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=206"></script>
+  <script src="/static/js/oi_analysis.js?v=207"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1012,14 +1012,21 @@
                   <!-- Per-user metadata persisted in corner_scan_notes,
                        independent of corner_scan_2f so it survives a
                        scan rebuild. Not sortable — these are notes,
-                       not scan metrics. -->
-                  <th style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Reviewed</th>
+                       not scan metrics. Reviewed = "I've looked at
+                       this corner"; Saved = "I saved a signal from
+                       this corner" (manual; not auto-detected from
+                       the signals table because refined zones often
+                       don't match the corner's raw cells). -->
+                  <th title="I've looked at this corner"
+                      style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Rev</th>
+                  <th title="I saved a signal from this corner (manual flag)"
+                      style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Saved</th>
                   <th style="text-align:left;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Note</th>
                 </tr>
               </thead>
               <tbody>
                 <template x-if="cs2fRows.length === 0 && !cs2fLoading">
-                  <tr><td colspan="12" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
+                  <tr><td colspan="13" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
                     <template x-if="cs2fMode !== 'train_test'">
                       <span>No rows — try lowering min n or clearing filters.</span>
                     </template>
@@ -1067,7 +1074,13 @@
                       <input type="checkbox"
                              x-model="row.reviewed"
                              @change="cs2fSaveReviewed(row)"
-                             title="Mark this corner as reviewed (persists across scan rebuilds)">
+                             title="I've looked at this corner (persists across scan rebuilds)">
+                    </td>
+                    <td style="padding:3px 8px;text-align:center;white-space:nowrap" @click.stop>
+                      <input type="checkbox"
+                             x-model="row.saved"
+                             @change="cs2fSaveSaved(row)"
+                             title="I saved a signal from this corner — manual flag (persists across scan rebuilds)">
                     </td>
                     <td style="padding:3px 8px;white-space:nowrap" @click.stop>
                       <input type="text"

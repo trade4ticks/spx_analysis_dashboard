@@ -7140,10 +7140,20 @@ CREATE TABLE IF NOT EXISTS corner_scan_notes (
     outcome           TEXT NOT NULL,
     note              TEXT        NOT NULL DEFAULT '',
     reviewed          BOOLEAN     NOT NULL DEFAULT FALSE,
+    saved             BOOLEAN     NOT NULL DEFAULT FALSE,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome)
 );
 """
+
+# Independent migration step: adds `saved` to an existing
+# corner_scan_notes table from the earlier (note+reviewed-only)
+# schema. IF NOT EXISTS makes this a no-op once applied; lives in
+# its own conn.execute() call so a partial migration self-heals.
+_DDL_CORNER_NOTES_MIGRATE_SAVED = (
+    "ALTER TABLE corner_scan_notes "
+    "ADD COLUMN IF NOT EXISTS saved BOOLEAN NOT NULL DEFAULT FALSE"
+)
 
 _DDL_CORNER_2F = """\
 CREATE TABLE IF NOT EXISTS corner_scan_2f (
@@ -7284,6 +7294,11 @@ async def _ensure_corner_scan_tables(pool) -> None:
         # 3. corner_scan_notes — independent of the 2F/1F result tables
         #    so corner-scan rebuilds don't disturb stored notes.
         await conn.execute(_DDL_CORNER_NOTES)
+        # 3b. Migrate older corner_scan_notes installs that lacked
+        #     the `saved` column. ADD COLUMN IF NOT EXISTS is a clean
+        #     no-op after the first apply, and fresh installs already
+        #     have the column from _DDL_CORNER_NOTES — also a no-op.
+        await conn.execute(_DDL_CORNER_NOTES_MIGRATE_SAVED)
     _corner_scan_tables_ensured = True
 
 
@@ -7454,7 +7469,8 @@ async def corner_scan_2f_endpoint(
                        cs.q_avg_ret, cs.q_ret_per_day, cs.q_n,
                        cs.as_of, cs.scanned_at, cs.mode,
                        COALESCE(n.note,     '')    AS note,
-                       COALESCE(n.reviewed, FALSE) AS reviewed
+                       COALESCE(n.reviewed, FALSE) AS reviewed,
+                       COALESCE(n.saved,    FALSE) AS saved
                 FROM corner_scan_2f cs
                 LEFT JOIN corner_scan_notes n
                   ON  cs.primary_metric   = n.primary_metric
@@ -7478,12 +7494,13 @@ class CornerNoteIn(BaseModel):
     secondary_metric: str
     corner_direction: str
     outcome:          str
-    # Both optional so the frontend can send a note-only write (on
-    # input blur) or a reviewed-only write (on checkbox change)
-    # without clobbering the other field. The COALESCE in the upsert
-    # SQL preserves whichever column is omitted.
+    # All three optional so the frontend can send any one field
+    # independently (note on blur, reviewed on toggle, saved on
+    # toggle) without clobbering the others. The COALESCE in the
+    # upsert SQL preserves whichever columns are omitted.
     note:             Optional[str]  = None
     reviewed:         Optional[bool] = None
+    saved:            Optional[bool] = None
 
 
 @router.post("/corner-scan/notes")
@@ -7506,23 +7523,27 @@ async def upsert_corner_note(req: CornerNoteIn,
         row = await conn.fetchrow(
             """INSERT INTO corner_scan_notes
                  (primary_metric, secondary_metric, corner_direction, outcome,
-                  note, reviewed)
+                  note, reviewed, saved)
                VALUES ($1, $2, $3, $4,
-                       COALESCE($5, ''), COALESCE($6, FALSE))
+                       COALESCE($5, ''),
+                       COALESCE($6, FALSE),
+                       COALESCE($7, FALSE))
                ON CONFLICT (primary_metric, secondary_metric,
                             corner_direction, outcome)
                DO UPDATE SET
                    note       = COALESCE($5, corner_scan_notes.note),
                    reviewed   = COALESCE($6, corner_scan_notes.reviewed),
+                   saved      = COALESCE($7, corner_scan_notes.saved),
                    updated_at = NOW()
-               RETURNING note, reviewed, updated_at""",
+               RETURNING note, reviewed, saved, updated_at""",
             req.primary_metric, req.secondary_metric,
             req.corner_direction, req.outcome,
-            req.note, req.reviewed,
+            req.note, req.reviewed, req.saved,
         )
     return {
         "note":       row["note"],
         "reviewed":   row["reviewed"],
+        "saved":      row["saved"],
         "updated_at": str(row["updated_at"])[:19],
     }
 
