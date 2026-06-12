@@ -5241,37 +5241,39 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.recallSaveMsg = ''; }, 4000);
     },
 
-    // CSV export of the current recall view. Same shape as
-    // zoneDownloadCSV — ticker breakdown rows + equity curve —
-    // pointed at recallZoneData. Filename derived from the open
-    // signal's identity so multiple downloads don't collide.
+    // CSV export of the current recall view — mirrors secDownloadCSV's
+    // format exactly so the recall and secondary exports carry the
+    // same per-trade data shape: ticker, trade_date, primary metric
+    // value, secondary metric value, spot entry/exit, exit date,
+    // return %. Reads from recallZoneData.combined_trades, which
+    // the backend now enriches via _build_enriched_trade (matching
+    // /secondary-detail's behavior).
     recallDownloadCSV() {
-      if (!this.recallZoneData?.tickers?.length) return;
-      const rows = [['ticker', 'n', 'avg_ret', 'win_rate', 'contrib_pct']];
-      for (const t of this.recallZoneData.tickers) {
-        rows.push([
-          t.ticker, t.n,
-          (t.avg_ret  * 100).toFixed(4) + '%',
-          (t.win_rate * 100).toFixed(2) + '%',
-          t.contrib_pct.toFixed(2) + '%',
-        ]);
-      }
-      const eq = this.recallZoneData.equity_primary || [];
-      if (eq.length) {
-        rows.push([]);
-        rows.push(['date', 'cum_ret_pct']);
-        for (const p of eq) rows.push([p.date, (p.value * 100).toFixed(4) + '%']);
-      }
-      const csv = rows.map(r => r.join(',')).join('\n');
-      const blob = new Blob([csv], { type: 'text/csv' });
-      const sig  = this.recallSig || {};
+      const trades = this.recallZoneData?.combined_trades;
+      if (!trades?.length) return;
+      const sig         = this.recallSig || {};
+      const prim_metric = sig.primary_metric   || 'primary';
+      const sec_metric  = sig.secondary_metric || 'secondary';
+      const header = [
+        'ticker', 'trade_date', `${prim_metric}_val`, `${sec_metric}_val`,
+        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+      ].join(',');
+      const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
+      const rows = trades.map(t => [
+        t.ticker     || '',
+        t.trade_date || '',
+        fmt(t.primary_val),
+        fmt(t.secondary_val),
+        fmt(t.spot_entry, 2),
+        t.exit_date  || '',
+        fmt(t.spot_exit, 2),
+        t.ret != null ? (t.ret * 100).toFixed(6) : '',
+      ].join(','));
       const safe = (s) => String(s || '').replace(/[^a-z0-9_]/gi, '_');
-      const name = `recall_${safe(sig.name)}_${safe(sig.primary_metric)}_${safe(sig.secondary_metric)}_${safe(sig.outcome)}.csv`;
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      this._downloadCsv(
+        [header, ...rows].join('\n'),
+        `recall_${safe(prim_metric)}_${safe(sec_metric)}_${new Date().toISOString().slice(0,10)}.csv`,
+      );
     },
 
     recallCancel() {

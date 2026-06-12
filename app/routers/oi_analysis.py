@@ -7683,8 +7683,14 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     if req.ticker != "ALL":
         ticker_sql = f" AND df.ticker = ${p}"; params.append(req.ticker); p += 1
 
+    # Include df.{pmetric} and df.{smetric} in the SELECT so the
+    # frontend CSV export (recallDownloadCSV) can include per-trade
+    # metric values matching the secondary-detail export format. Also
+    # pull df.spot_co for spot_entry in _build_enriched_trade.
     query = f"""
-        SELECT df.ticker, df.trade_date::text AS trade_date, {out_sel}
+        SELECT df.ticker, df.trade_date::text AS trade_date,
+               df.{pmetric}, df.{smetric}, df.spot_co,
+               {out_sel}
         FROM daily_features df
         JOIN is_bins ib USING (ticker, trade_date)
         WHERE ib.bin20_{pmetric} > 0
@@ -7732,10 +7738,15 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
                 continue
         except (TypeError, ValueError):
             continue
-        # Store as a plain dict so helpers like _sec_equity_curve can use .get()
+        # Store as a plain dict so helpers like _sec_equity_curve can use .get().
+        # Carry pmetric / smetric / spot_co so _build_enriched_trade can populate
+        # primary_val, secondary_val, and spot_entry for the CSV export.
         valid_rows.append({
             "ticker":     r["ticker"],
             "trade_date": str(r["trade_date"]),
+            pmetric:      r.get(pmetric),
+            smetric:      r.get(smetric),
+            "spot_co":    r.get("spot_co"),
             outcome:      fov,   # keyed by outcome name — what _sec_equity_curve reads
         })
 
@@ -7807,10 +7818,22 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             "win_rate": float(np.sum(yv > 0) / len(yv)),
         })
 
-    # ── combined_trades — same format as /secondary-detail ────────────────────
-    # Activity chart reads t.trade_date (or t.date) and t.ticker.
+    # ── combined_trades — same enriched format as /secondary-detail ───────────
+    # Fetches per-ticker calendars to populate spot_entry, exit_date, spot_exit
+    # so the Recall CSV export carries the same per-trade detail (ticker,
+    # trade_date, primary metric value, secondary metric value, entry/exit spot
+    # prices, exit date, return) as the secondary-detail CSV does. Activity
+    # chart still reads t.trade_date and t.ticker so its render is unchanged.
+    horizon_n = _parse_horizon(outcome)
+    tickers_in_zone = sorted({r["ticker"] for r in valid_rows})
+    calendars = await _fetch_ticker_calendars(pool, tickers_in_zone)
     combined_trades = [
-        {"ticker": r["ticker"], "trade_date": r["trade_date"]}
+        _build_enriched_trade(
+            r, calendars, horizon_n,
+            primary_metric=pmetric,
+            secondary_metric=smetric,
+            outcome_col=outcome,
+        )
         for r in valid_rows
     ]
 

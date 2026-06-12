@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=204"></script>
+  <script src="/static/js/oi_analysis.js?v=205"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3606,8 +3606,8 @@
             </span>
             <button class="btn-batch blue"
                     @click="recallDownloadCSV()"
-                    :disabled="!recallZoneData || !recallZoneData.tickers || !recallZoneData.tickers.length"
-                    title="Download the recall view's ticker breakdown + equity curve as CSV">
+                    :disabled="!recallZoneData || !recallZoneData.combined_trades || !recallZoneData.combined_trades.length"
+                    title="Download per-trade CSV (same format as the secondary section)">
               ↓ CSV
             </button>
             <button class="btn-batch blue"
