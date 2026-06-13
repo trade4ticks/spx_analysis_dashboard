@@ -8210,6 +8210,14 @@ document.addEventListener('alpine:init', () => {
         });
         if (!r.ok) { this.portAggregate = null; return; }
         this.portAggregate = await r.json();
+        // Initialise loss-correlation slider to the portfolio's actual date range.
+        const _td = (this.portAggregate.combined_trade_dates || []).filter(Boolean);
+        if (_td.length) {
+          const _min = _td.reduce((a, b) => a < b ? a : b);
+          const _max = _td.reduce((a, b) => a > b ? a : b);
+          this.lcSliderFrom = Math.max(0,   this._lcDateToMonths(_min));
+          this.lcSliderTo   = Math.min(108, this._lcDateToMonths(_max) + 1);
+        }
         await this.$nextTick();
         this._renderPortCharts();
       } catch (e) {
@@ -8283,6 +8291,14 @@ document.addEventListener('alpine:init', () => {
       const yr   = Math.floor(abs / 12);
       const mo   = (abs % 12) + 1;
       return `${yr}-${String(mo).padStart(2,'0')}-01`;
+    },
+
+    // Convert 'YYYY-MM-DD' date string to slider month index (months since 2018-01).
+    _lcDateToMonths(dateStr) {
+      if (!dateStr) return 0;
+      const yr = parseInt(dateStr.slice(0, 4), 10);
+      const mo = parseInt(dateStr.slice(5, 7), 10);
+      return (yr - 2018) * 12 + (mo - 1);
     },
 
     // CSS background gradient for the dual-range track fill.

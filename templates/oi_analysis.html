@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=213"></script>
+  <script src="/static/js/oi_analysis.js?v=214"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4314,69 +4314,59 @@
                 📉 Loss Correlation Analysis
               </div>
 
-              <!-- Controls -->
-              <div style="margin-bottom:14px">
-                <!-- Dual-handle date range slider -->
-                <div style="font-size:11px;color:var(--dim);margin-bottom:6px">
-                  Date window
-                  <span style="font-family:monospace;color:var(--text);margin-left:6px"
-                        x-text="_lcMonthsToDate(lcSliderFrom).slice(0,7) + ' → ' + _lcMonthsToDate(lcSliderTo).slice(0,7)"></span>
+              <!-- Controls — single inline row -->
+              <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+
+                <!-- Dual-handle date range slider (compact, inline) -->
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:12px;color:var(--dim);white-space:nowrap">Date</span>
+                  <!-- Slider track + two thumbs in a fixed-width box -->
+                  <div style="position:relative;width:160px;height:20px;user-select:none;flex-shrink:0">
+                    <div :style="lcSliderTrackStyle()"
+                         style="position:absolute;top:50%;left:0;right:0;height:4px;
+                                border-radius:2px;transform:translateY(-50%);pointer-events:none"></div>
+                    <input type="range" min="0" max="108" step="1"
+                           x-model.number="lcSliderFrom"
+                           @input="if (lcSliderFrom >= lcSliderTo) lcSliderFrom = lcSliderTo - 1"
+                           class="lc-range-thumb" style="z-index:3">
+                    <input type="range" min="0" max="108" step="1"
+                           x-model.number="lcSliderTo"
+                           @input="if (lcSliderTo <= lcSliderFrom) lcSliderTo = lcSliderFrom + 1"
+                           class="lc-range-thumb" style="z-index:4">
+                  </div>
+                  <!-- Live date label -->
+                  <span style="font-size:11px;color:var(--dim);white-space:nowrap;font-family:monospace"
+                        x-text="_lcMonthsToDate(lcSliderFrom).slice(0,7) + ' – ' + _lcMonthsToDate(lcSliderTo).slice(0,7)"></span>
                 </div>
-                <div style="position:relative;height:20px;margin:0 8px 4px;user-select:none">
-                  <!-- Track fill (accent between the two thumbs) -->
-                  <div :style="lcSliderTrackStyle()"
-                       style="position:absolute;top:50%;left:0;right:0;height:4px;
-                              border-radius:2px;transform:translateY(-50%);pointer-events:none"></div>
-                  <!-- From handle (lower bound) -->
-                  <input type="range" min="0" max="108" step="1"
-                         x-model.number="lcSliderFrom"
-                         @input="if (lcSliderFrom >= lcSliderTo) lcSliderFrom = lcSliderTo - 1"
-                         class="lc-range-thumb"
-                         :style="'z-index:' + (lcSliderFrom > 54 ? '5' : '3')">
-                  <!-- To handle (upper bound) -->
-                  <input type="range" min="0" max="108" step="1"
-                         x-model.number="lcSliderTo"
-                         @input="if (lcSliderTo <= lcSliderFrom) lcSliderTo = lcSliderFrom + 1"
-                         class="lc-range-thumb"
-                         :style="'z-index:' + (lcSliderFrom <= 54 ? '5' : '3')">
-                </div>
-                <div style="display:flex;justify-content:space-between;font-size:10px;
-                            color:var(--dim);margin:0 8px 10px;opacity:.7">
-                  <span>2018</span><span>2019</span><span>2020</span><span>2021</span>
-                  <span>2022</span><span>2023</span><span>2024</span><span>2025</span>
-                  <span>2026</span><span>2027</span>
-                </div>
-                <!-- Sizing params + Compute -->
-                <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-                  <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
-                    $/trade
-                    <select x-model.number="lcPerTrade"
-                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                                   padding:3px 6px;border-radius:4px;font-size:12px">
-                      <option value="1000">$1,000</option>
-                      <option value="2000">$2,000</option>
-                      <option value="5000">$5,000</option>
-                      <option value="10000">$10,000</option>
-                    </select>
-                  </label>
-                  <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
-                    Daily cap
-                    <select x-model.number="lcDailyCap"
-                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);
-                                   padding:3px 6px;border-radius:4px;font-size:12px">
-                      <option value="5000">$5,000</option>
-                      <option value="10000">$10,000</option>
-                      <option value="20000">$20,000</option>
-                      <option value="50000">$50,000</option>
-                    </select>
-                  </label>
-                  <button @click="loadLossCorr()"
-                          :disabled="lcLoading"
-                          style="background:var(--accent);color:#fff;border:none;
-                                 padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px">
-                    <span x-text="lcLoading ? 'Computing…' : '⚡ Compute'"></span>
-                  </button>
-                </div>
+
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  $/trade
+                  <select x-model.number="lcPerTrade"
+                          style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                 padding:3px 6px;border-radius:4px;font-size:12px">
+                    <option value="1000">$1,000</option>
+                    <option value="2000">$2,000</option>
+                    <option value="5000">$5,000</option>
+                    <option value="10000">$10,000</option>
+                  </select>
+                </label>
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  Daily cap
+                  <select x-model.number="lcDailyCap"
+                          style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                 padding:3px 6px;border-radius:4px;font-size:12px">
+                    <option value="5000">$5,000</option>
+                    <option value="10000">$10,000</option>
+                    <option value="20000">$20,000</option>
+                    <option value="50000">$50,000</option>
+                  </select>
+                </label>
+                <button @click="loadLossCorr()"
+                        :disabled="lcLoading"
+                        style="background:var(--accent);color:#fff;border:none;
+                               padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px">
+                  <span x-text="lcLoading ? 'Computing…' : '⚡ Compute'"></span>
+                </button>
               </div>
 
               <template x-if="lcData">
