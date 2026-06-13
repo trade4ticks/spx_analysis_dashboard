@@ -1718,6 +1718,55 @@ document.addEventListener('alpine:init', () => {
       return `Single mode · ${this.decileActiveOutcome}`;
     },
 
+    // Shared cache-timestamp formatter. ALL breadcrumb taglines route
+    // through this so timezone handling stays in one place. Backend
+    // timestamps are stored UTC; we render them in America/New_York
+    // (EST/EDT, DST-aware via Intl) with an explicit suffix so the
+    // user can never confuse the wall-clock with UTC.
+    //
+    // Accepts:
+    //   - epoch ms (number)  — e.g. Threshold Drift's Date.now() slot
+    //   - ISO string         — server cache timestamps
+    //   - bare "YYYY-MM-DD HH:MM:SS" with no tz designator — treated
+    //     as UTC, since that's what every backend write uses
+    //
+    // Returns "YYYY-MM-DD HH:MM:SS EST" / "...EDT", or "unknown" when
+    // the input is null / unparseable.
+    _fmtCacheTs(ts) {
+      if (ts == null || ts === '') return 'unknown';
+      let date;
+      if (typeof ts === 'number') {
+        date = new Date(ts);
+      } else {
+        const raw = String(ts);
+        // Detect a timezone designator at the end (Z, +HH:MM, -HH:MM,
+        // ignoring any fractional seconds). If absent, the server is
+        // emitting a bare UTC timestamp — append Z so JS doesn't
+        // interpret it as local time.
+        const hasTz = /([Zz]|[+-]\d{2}:?\d{2})$/.test(raw.replace(/\.\d+$/, ''));
+        const iso = hasTz ? raw : raw.replace(' ', 'T') + 'Z';
+        date = new Date(iso);
+      }
+      if (isNaN(date.getTime())) return 'unknown';
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone:     'America/New_York',
+        year:         'numeric',
+        month:        '2-digit',
+        day:          '2-digit',
+        hour:         '2-digit',
+        minute:       '2-digit',
+        second:       '2-digit',
+        hour12:       false,
+        timeZoneName: 'short',
+      }).formatToParts(date);
+      const get = t => parts.find(p => p.type === t)?.value || '';
+      const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+      // hour12:false renders midnight as "24" in some browsers; normalise.
+      const timeStr = `${get('hour')}:${get('minute')}:${get('second')}`.replace(/^24:/, '00:');
+      const tz = get('timeZoneName');   // "EST" or "EDT"
+      return `${dateStr} ${timeStr} ${tz}`;
+    },
+
     // Analyze-section breadcrumb. Same "last: YYYY-MM-DD HH:MM:SS · <Mode>"
     // shape used by the 6 lower-section panes (smBreadcrumb / surveyBreadcrumb
     // / cs2fBreadcrumb / topBinsBreadcrumb / tdBreadcrumb). Reads
@@ -1728,7 +1777,7 @@ document.addEventListener('alpine:init', () => {
     analyzeBreadcrumb() {
       const b = this.analyzeBundle;
       if (!b || !b.computed_at) return 'no data yet';
-      const ts = String(b.computed_at).slice(0, 19).replace('T', ' ');
+      const ts = this._fmtCacheTs(b.computed_at);
       const mode = b.mode || 'unknown';
       const label = mode === 'walk_forward' ? 'Walk-fwd'
                   : mode === 'in_sample'    ? 'In-sample'
@@ -3876,7 +3925,7 @@ document.addEventListener('alpine:init', () => {
       if (!slot || !slot.meta || slot.meta.count === 0) {
         return `no data yet · ${label}`;
       }
-      const ts = slot.meta.last_run || 'unknown';
+      const ts = this._fmtCacheTs(slot.meta.last_run);
       return `last: ${ts} · ${label}`;
     },
 
@@ -4030,7 +4079,7 @@ document.addEventListener('alpine:init', () => {
       if (!meta || !meta.scanned_at_2f) {
         return `no data yet · ${label}`;
       }
-      const ts = String(meta.scanned_at_2f).slice(0, 19).replace('T', ' ');
+      const ts = this._fmtCacheTs(meta.scanned_at_2f);
       return `last: ${ts} · ${label}`;
     },
     cs1fBreadcrumb() {
@@ -4039,7 +4088,7 @@ document.addEventListener('alpine:init', () => {
       if (!meta || !meta.scanned_at_1f) {
         return `no data yet · ${label}`;
       }
-      const ts = String(meta.scanned_at_1f).slice(0, 19).replace('T', ' ');
+      const ts = this._fmtCacheTs(meta.scanned_at_1f);
       return `last: ${ts} · ${label}`;
     },
 
@@ -6300,9 +6349,7 @@ document.addEventListener('alpine:init', () => {
       // Authoritative: this-session slot loaded by the user expanding +
       // refreshing the pane.
       if (slot && slot.tdData && !slot.tdData.error) {
-        const ts = slot.loaded_at
-          ? new Date(slot.loaded_at).toISOString().slice(0, 19).replace('T', ' ')
-          : 'unknown';
+        const ts = this._fmtCacheTs(slot.loaded_at);
         return `last: ${ts} · ${label}`;
       }
       // Fallback: init-time meta for default selectors. Threshold-drift
@@ -6311,7 +6358,7 @@ document.addEventListener('alpine:init', () => {
       if (this.tdBinMode === 'walk_forward'
           && this.tdMeta?.exists
           && this.tdMeta?.cached_at) {
-        const ts = String(this.tdMeta.cached_at).slice(0, 19).replace('T', ' ');
+        const ts = this._fmtCacheTs(this.tdMeta.cached_at);
         return `last: ${ts} · ${label}`;
       }
       return `no data yet · ${label}`;
@@ -6613,7 +6660,7 @@ document.addEventListener('alpine:init', () => {
       const label = this._topBinsModeLabel(this.topBinsMode);
       // Authoritative: per-mode slot once the user has expanded + loaded.
       if (slot && !slot.error && slot.metrics?.length) {
-        const ts = slot.cached_at ? String(slot.cached_at).slice(0, 19) : 'unknown';
+        const ts = this._fmtCacheTs(slot.cached_at);
         return `last: ${ts} · ${label}`;
       }
       // Fallback: init-time meta for the default selectors. The meta
@@ -6622,7 +6669,7 @@ document.addEventListener('alpine:init', () => {
       if (this.topBinsMode === 'walk_forward'
           && this.topBinsMeta?.exists
           && this.topBinsMeta?.cached_at) {
-        const ts = String(this.topBinsMeta.cached_at).slice(0, 19);
+        const ts = this._fmtCacheTs(this.topBinsMeta.cached_at);
         return `last: ${ts} · ${label}`;
       }
       return `no data yet · ${label}`;
@@ -8559,9 +8606,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.icBatchData?.metrics?.length) {
         return `no data yet · ${label}`;
       }
-      const ts = this.icBatchData.cached_at
-        ? String(this.icBatchData.cached_at).slice(0, 19)
-        : 'unknown';
+      const ts = this._fmtCacheTs(this.icBatchData.cached_at);
       return `last: ${ts} · ${label}`;
     },
 

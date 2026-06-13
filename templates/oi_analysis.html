@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=212"></script>
+  <script src="/static/js/oi_analysis.js?v=213"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3627,7 +3627,7 @@
                           <td class="sig-td sig-td-num"
                               :class="sigSmallN(sig.agg_n)"
                               x-text="(sig.agg_n != null) ? sig.agg_n.toLocaleString() : '—'"></td>
-                          <td class="sig-td" x-text="(sig.stats_updated_at || '').slice(0,10) || '—'"></td>
+                          <td class="sig-td" x-text="sig.stats_updated_at ? _fmtCacheTs(sig.stats_updated_at).slice(0,10) : '—'"></td>
                           <td class="sig-td sig-td-thumb">
                             <div x-html="signalThumbnailSVG(sig)"
                                  @click="recallSignal(sig)"
