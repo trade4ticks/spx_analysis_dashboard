@@ -133,7 +133,9 @@ document.addEventListener('alpine:init', () => {
     portBubbleMinN: 1,       // bubble chart min-n filter
 
     // Portfolio Loss Correlation Analysis
-    lcData: null, lcLoading: false, lcDateFrom: '', lcDateTo: '',
+    // Slider: 0 = 2018-01, 108 = 2027-01 (months since 2018-01)
+    lcData: null, lcLoading: false,
+    lcSliderFrom: 0, lcSliderTo: 108,
     lcNWorstWeeks: 15, lcPerTrade: 2000, lcDailyCap: 10000,
 
     // Trade Activity dedupe — when on, a new entry for a ticker is skipped
@@ -8274,15 +8276,38 @@ document.addEventListener('alpine:init', () => {
 
     // ── Portfolio Loss Correlation ─────────────────────────────────────────
 
+    // Convert slider value (months since 2018-01) to 'YYYY-MM-01' string.
+    _lcMonthsToDate(m) {
+      const base = 2018 * 12;   // months since year 0
+      const abs  = base + m;
+      const yr   = Math.floor(abs / 12);
+      const mo   = (abs % 12) + 1;
+      return `${yr}-${String(mo).padStart(2,'0')}-01`;
+    },
+
+    // CSS background gradient for the dual-range track fill.
+    lcSliderTrackStyle() {
+      const pctA = (this.lcSliderFrom / 108 * 100).toFixed(1);
+      const pctB = (this.lcSliderTo   / 108 * 100).toFixed(1);
+      return `background:linear-gradient(to right,` +
+        ` rgba(128,128,128,0.25) ${pctA}%,` +
+        ` var(--accent) ${pctA}%,` +
+        ` var(--accent) ${pctB}%,` +
+        ` rgba(128,128,128,0.25) ${pctB}%)`;
+    },
+
     async loadLossCorr() {
       if (!this.portfolioId || this.lcLoading) return;
       this.lcLoading = true;
       this.lcData = null;
       try {
-        const body = { per_trade: this.lcPerTrade, daily_cap: this.lcDailyCap };
-        if (this.lcDateFrom) body.date_from = this.lcDateFrom;
-        if (this.lcDateTo)   body.date_to   = this.lcDateTo;
-        const resp = await fetch(`/portfolios/${this.portfolioId}/loss-analysis`, {
+        const body = {
+          per_trade: this.lcPerTrade,
+          daily_cap: this.lcDailyCap,
+          date_from: this._lcMonthsToDate(this.lcSliderFrom),
+          date_to:   this._lcMonthsToDate(this.lcSliderTo),
+        };
+        const resp = await fetch(`/api/factor-analysis/portfolios/${this.portfolioId}/loss-analysis`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
