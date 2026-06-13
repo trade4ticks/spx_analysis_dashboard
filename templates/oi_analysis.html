@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=210"></script>
+  <script src="/static/js/oi_analysis.js?v=211"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3367,19 +3367,25 @@
                             <span x-show="equityAggMode.zone==='dollar_capped'"
                                   style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
                               <span>$/trade</span>
-                              <select :value="equityDollarParams.zone.perTrade"
-                                      @change="setEquityDollarParam('zone','perTrade', $event.target.value)"
+                              <!-- :selected on each option (not :value on
+                                   the select) so the chosen item displays
+                                   correctly on first render. With :value
+                                   on the select, Alpine fires the binding
+                                   before x-for populates the options, and
+                                   the select resets to its first child. -->
+                              <select @change="setEquityDollarParam('zone','perTrade', $event.target.value)"
                                       style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                                 <template x-for="v in equityDollarChoices.perTrade" :key="'pt-z-'+v">
-                                  <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                                  <option :value="v" :selected="v === equityDollarParams.zone.perTrade"
+                                          x-text="'$'+(v/1000)+'k'"></option>
                                 </template>
                               </select>
                               <span>· cap</span>
-                              <select :value="equityDollarParams.zone.dailyCap"
-                                      @change="setEquityDollarParam('zone','dailyCap', $event.target.value)"
+                              <select @change="setEquityDollarParam('zone','dailyCap', $event.target.value)"
                                       style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                                 <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-z-'+v">
-                                  <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                                  <option :value="v" :selected="v === equityDollarParams.zone.dailyCap"
+                                          x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
                                 </template>
                               </select>
                             </span>
@@ -3396,10 +3402,21 @@
                           <div class="chart-canvas"><canvas id="chart-zone-yearly"></canvas></div>
                         </div>
 
-                        <!-- Trade Activity -->
+                        <!-- Trade Activity — Count is the default lens.
+                             Capital lens (dollars deployed / day +
+                             rolling deployed capital) is only available
+                             when the equity toggle is on Dollar-capped,
+                             since both depend on the $/trade and daily-
+                             cap inputs that only exist in that mode. -->
                         <div class="chart-box">
                           <div class="chart-title">Trade Activity
                             <button class="fs-btn" @click="openFullscreen('chart-zone-activity')" title="Fullscreen">⛶</button>
+                            <div class="mode-seg" x-show="equityAggMode.zone==='dollar_capped'" style="margin-left:auto">
+                              <span :class="{on: activityMode.zone==='count'}"
+                                    @click="setActivityMode('zone','count')">Count</span>
+                              <span :class="{on: activityMode.zone==='capital'}"
+                                    @click="setActivityMode('zone','capital')">Capital</span>
+                            </div>
                           </div>
                           <div class="chart-canvas"><canvas id="chart-zone-activity"></canvas></div>
                         </div>
@@ -3858,19 +3875,19 @@
                   <span x-show="equityAggMode.recall==='dollar_capped'"
                         style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
                     <span>$/trade</span>
-                    <select :value="equityDollarParams.recall.perTrade"
-                            @change="setEquityDollarParam('recall','perTrade', $event.target.value)"
+                    <select @change="setEquityDollarParam('recall','perTrade', $event.target.value)"
                             style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                       <template x-for="v in equityDollarChoices.perTrade" :key="'pt-r-'+v">
-                        <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                        <option :value="v" :selected="v === equityDollarParams.recall.perTrade"
+                                x-text="'$'+(v/1000)+'k'"></option>
                       </template>
                     </select>
                     <span>· cap</span>
-                    <select :value="equityDollarParams.recall.dailyCap"
-                            @change="setEquityDollarParam('recall','dailyCap', $event.target.value)"
+                    <select @change="setEquityDollarParam('recall','dailyCap', $event.target.value)"
                             style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                       <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-r-'+v">
-                        <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                        <option :value="v" :selected="v === equityDollarParams.recall.dailyCap"
+                                x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
                       </template>
                     </select>
                   </span>
@@ -3887,6 +3904,12 @@
               <div class="chart-box">
                 <div class="chart-title">Trade Activity
                   <button class="fs-btn" @click="openFullscreen('chart-recall-activity')" title="Fullscreen">⛶</button>
+                  <div class="mode-seg" x-show="equityAggMode.recall==='dollar_capped'" style="margin-left:auto">
+                    <span :class="{on: activityMode.recall==='count'}"
+                          @click="setActivityMode('recall','count')">Count</span>
+                    <span :class="{on: activityMode.recall==='capital'}"
+                          @click="setActivityMode('recall','capital')">Capital</span>
+                  </div>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-recall-activity"></canvas></div>
               </div>
@@ -4153,19 +4176,19 @@
                   <span x-show="equityAggMode.port==='dollar_capped'"
                         style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
                     <span>$/trade</span>
-                    <select :value="equityDollarParams.port.perTrade"
-                            @change="setEquityDollarParam('port','perTrade', $event.target.value)"
+                    <select @change="setEquityDollarParam('port','perTrade', $event.target.value)"
                             style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                       <template x-for="v in equityDollarChoices.perTrade" :key="'pt-p-'+v">
-                        <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                        <option :value="v" :selected="v === equityDollarParams.port.perTrade"
+                                x-text="'$'+(v/1000)+'k'"></option>
                       </template>
                     </select>
                     <span>· cap</span>
-                    <select :value="equityDollarParams.port.dailyCap"
-                            @change="setEquityDollarParam('port','dailyCap', $event.target.value)"
+                    <select @change="setEquityDollarParam('port','dailyCap', $event.target.value)"
                             style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
                       <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-p-'+v">
-                        <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                        <option :value="v" :selected="v === equityDollarParams.port.dailyCap"
+                                x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
                       </template>
                     </select>
                   </span>
@@ -4180,6 +4203,12 @@
                           @click="toggleDedupeConc('port')"
                           title="Skip a same-ticker entry while a prior trade of that ticker is still open">⊘</button>
                   <button class="fs-btn" @click="openFullscreen('chart-port-activity')">⛶</button>
+                  <div class="mode-seg" x-show="equityAggMode.port==='dollar_capped'" style="margin-left:auto">
+                    <span :class="{on: activityMode.port==='count'}"
+                          @click="setActivityMode('port','count')">Count</span>
+                    <span :class="{on: activityMode.port==='capital'}"
+                          @click="setActivityMode('port','capital')">Capital</span>
+                  </div>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-activity"></canvas></div>
               </div>

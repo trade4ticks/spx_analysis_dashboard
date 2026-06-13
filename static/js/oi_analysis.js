@@ -2297,8 +2297,29 @@ document.addEventListener('alpine:init', () => {
       port:   { perTrade: 2000, dailyCap: 10000 },
     },
     equityDollarChoices: {
-      perTrade: [1000, 2000, 3000],
-      dailyCap: [10000, 12500, 15000, 20000],
+      perTrade: [1000, 2000, 3000, 5000, 10000],
+      dailyCap: [5000, 7500, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000],
+    },
+
+    // Trade Activity pane lens, per section. 'count' shows trades
+    // entered per day (bar) + rolling open trades (line); 'capital'
+    // shows dollars deployed per day (bar) + rolling deployed capital
+    // (line) — the dollar version of the same two components, using
+    // the SAME H-day window so the comparison is apples-to-apples.
+    //
+    // The Capital lens only makes sense when the equity toggle is on
+    // dollar-capped (that's where $/trade and daily-cap live). When
+    // equity flips away from dollar mode, the render path forces
+    // Count regardless of this state — and the toggle UI hides — so
+    // there's no choice to make in % modes. State remembers the
+    // user's preference for when they come back to dollar mode.
+    //
+    // Default 'capital' matches the default equity mode 'dollar_capped':
+    // on first open, both panes show the dollar lens together.
+    activityMode: {
+      zone:   'capital',
+      recall: 'capital',
+      port:   'capital',
     },
 
     // Signals — saved named cell-sets
@@ -7373,15 +7394,25 @@ document.addEventListener('alpine:init', () => {
     //   trade_pnl = shares * spot_entry * ret
     //   day_pnl   = sum(trade_pnl for trades that day)
     //
-    // Returns { equity: [{date, value}, ...], dayPnlByDate: Map<date,$> }.
-    // equity[i].value is the running cumulative dollar P&L through
-    // that day (starts at first day's day_pnl; the chart anchors at
-    // 0 only because no prior trades exist). dayPnlByDate is the
-    // per-day building block — reused by the by-year sum so the
-    // equity curve and the year bars share one source of truth and
-    // can't drift.
+    // Returns:
+    //   equity:            [{date, value}] running cumulative $ P&L
+    //   dayPnlByDate:      Map<date, $>   per-day P&L (year bars)
+    //   dayDeployedByDate: Map<date, $>   per-day SUM(shares×spot_entry)
+    //                      — dollars deployed that day BEFORE returns.
+    //                      Drives the Capital-view per-day bars on the
+    //                      Trade Activity pane. Same loop that builds
+    //                      dayPnl, so it can't drift from the equity
+    //                      curve's deployment.
+    //   tradeDollarSizes:  Array<{ticker, trade_date, dollar_size}>
+    //                      one entry per surviving trade. Used by the
+    //                      Capital-view rolling line so the existing
+    //                      rolling-concurrent windowing can operate on
+    //                      dollar amounts instead of unit counts.
     _computeDollarSeries(trades, perTrade, dailyCap) {
-      const empty = { equity: [], dayPnlByDate: new Map() };
+      const empty = {
+        equity: [], dayPnlByDate: new Map(),
+        dayDeployedByDate: new Map(), tradeDollarSizes: [],
+      };
       if (!trades || !trades.length) return empty;
       // Group by date and count distinct tickers per day so dilution
       // matches reality (a ticker firing under multiple cells in the
@@ -7401,27 +7432,38 @@ document.addEventListener('alpine:init', () => {
         if (t.ticker) tickersByDate.get(d).add(t.ticker);
       }
       const dates = Array.from(tradesByDate.keys()).sort();
-      const dayPnlByDate = new Map();
+      const dayPnlByDate      = new Map();
+      const dayDeployedByDate = new Map();
+      const tradeDollarSizes  = [];
       const equity = [];
       let cum = 0;
       for (const d of dates) {
         const dayTrades = tradesByDate.get(d);
         const N = Math.max(1, tickersByDate.get(d).size);
         const perTickerAlloc = Math.min(perTrade, dailyCap / N);
-        let dayPnl = 0;
+        let dayPnl      = 0;
+        let dayDeployed = 0;
         for (const t of dayTrades) {
           const px  = +t.spot_entry;
           const ret = +t.ret;
           if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
           let shares = Math.floor(perTickerAlloc / px);
           if (shares < 1) shares = 1;   // 1-share min, no redistribution
-          dayPnl += shares * px * ret;
+          const dollarSize = shares * px;
+          dayPnl      += dollarSize * ret;
+          dayDeployed += dollarSize;
+          tradeDollarSizes.push({
+            ticker:      t.ticker,
+            trade_date:  d,
+            dollar_size: dollarSize,
+          });
         }
         cum += dayPnl;
         dayPnlByDate.set(d, dayPnl);
+        dayDeployedByDate.set(d, dayDeployed);
         equity.push({ date: d, value: cum });
       }
-      return { equity, dayPnlByDate };
+      return { equity, dayPnlByDate, dayDeployedByDate, tradeDollarSizes };
     },
 
     _renderSecEquity(canvasId = 'sec-equity-canvas', detail = null, singleSeries = false) {
@@ -7705,16 +7747,20 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Per-pane setter. Updates ONLY that pane's mode and re-renders
-    // both that pane's equity AND its by-year chart so the two stay
-    // in lock-step on the same lens. Other panes are untouched.
-    // Secondary still routes only through the equity canvas — its
-    // by-year chart is a clustered primary-vs-secondary visual and
-    // is intentionally NOT driven by this toggle.
+    // that pane's equity, by-year, AND Trade Activity so the three
+    // stay in lock-step on the same lens. Activity re-renders because
+    // the Count/Capital toggle visibility depends on this mode, and
+    // the Capital render branch is conditional on dollar mode being
+    // active. Other panes are untouched. Secondary still routes only
+    // through the equity canvas — its by-year is clustered primary-vs-
+    // secondary (untouched by this toggle), and its activity pane
+    // has no Capital option.
     setEquityAggMode(modeKey, mode) {
       this.equityAggMode = { ...this.equityAggMode, [modeKey]: mode };
       if (modeKey === 'zone'   && this.zoneData) {
         this._renderSecEquity('chart-zone-equity',   this.zoneData,        true);
         this._renderZoneYearly('chart-zone-yearly',  this.zoneData);
+        this._renderSecActivity('chart-zone-activity', this.zoneData);
       }
       if (modeKey === 'sec'    && this.secDetail) {
         this._renderSecEquity();
@@ -7722,16 +7768,19 @@ document.addEventListener('alpine:init', () => {
       if (modeKey === 'recall' && this.recallZoneData) {
         this._renderSecEquity('chart-recall-equity', this.recallZoneData, true);
         this._renderZoneYearly('chart-recall-yearly', this.recallZoneData);
+        this._renderSecActivity('chart-recall-activity', this.recallZoneData);
       }
       if (modeKey === 'port'   && this.portAggregate) {
         this._renderSecEquity('chart-port-equity',   this.portAggregate,  true);
         this._renderPortYearly();
+        this._renderSecActivity('chart-port-activity', this.portAggregate);
       }
     },
 
-    // Per-section setter for $/trade and daily-cap. Only re-renders
-    // when the section is currently in dollar mode (otherwise the
-    // value is just stored for when the user switches back).
+    // Per-section setter for $/trade and daily-cap. Re-renders the
+    // equity, by-year, AND Trade Activity Capital view — all three
+    // depend on these inputs. Only fires when the section is in
+    // dollar mode (otherwise the value is just stored for later).
     setEquityDollarParam(section, key, value) {
       const cur = this.equityDollarParams[section] || { perTrade: 2000, dailyCap: 10000 };
       this.equityDollarParams = {
@@ -7742,13 +7791,31 @@ document.addEventListener('alpine:init', () => {
       if (section === 'zone'   && this.zoneData) {
         this._renderSecEquity('chart-zone-equity',   this.zoneData,        true);
         this._renderZoneYearly('chart-zone-yearly',  this.zoneData);
+        this._renderSecActivity('chart-zone-activity', this.zoneData);
       } else if (section === 'recall' && this.recallZoneData) {
         this._renderSecEquity('chart-recall-equity', this.recallZoneData, true);
         this._renderZoneYearly('chart-recall-yearly', this.recallZoneData);
+        this._renderSecActivity('chart-recall-activity', this.recallZoneData);
       } else if (section === 'port'   && this.portAggregate) {
         this._renderSecEquity('chart-port-equity',   this.portAggregate,  true);
         this._renderPortYearly();
+        this._renderSecActivity('chart-port-activity', this.portAggregate);
       }
+    },
+
+    // Per-section setter for the Trade Activity Count/Capital lens.
+    // No-op outside dollar mode (no Capital lens defined there). Only
+    // re-renders the activity canvas — equity and by-year are
+    // independent and don't read activityMode.
+    setActivityMode(section, mode) {
+      this.activityMode = { ...this.activityMode, [section]: mode };
+      if (this.equityAggMode[section] !== 'dollar_capped') return;
+      if (section === 'zone'   && this.zoneData)
+        this._renderSecActivity('chart-zone-activity', this.zoneData);
+      else if (section === 'recall' && this.recallZoneData)
+        this._renderSecActivity('chart-recall-activity', this.recallZoneData);
+      else if (section === 'port'   && this.portAggregate)
+        this._renderSecActivity('chart-port-activity', this.portAggregate);
     },
 
     _renderSecYearly() {
@@ -7833,22 +7900,59 @@ document.addEventListener('alpine:init', () => {
       const kept = this.dedupeConc[_dedupeKey]
         ? this._dedupeConcurrent(trades, tradingDays, horizon)
         : trades;
-      const entriesByDate = {};
-      for (const t of kept) {
-        const d = t.trade_date || t.date;
-        entriesByDate[d] = (entriesByDate[d] || 0) + 1;
+
+      // Section key for activity-mode lookup. Secondary stays on
+      // count-only (no dollar mode available); all others can switch
+      // to capital when their equity toggle is on dollar-capped.
+      const sectionKey = this._equityModeKey(canvasId);
+      const isDollarEquity = (this.equityAggMode?.[sectionKey] === 'dollar_capped');
+      const wantsCapital   = (this.activityMode?.[sectionKey] === 'capital');
+      const isCapital      = isDollarEquity && wantsCapital && sectionKey !== 'sec';
+
+      // Per-trade weight: 1 for count view, dollar_size for capital
+      // view. Single windowing function runs over a weights-by-date
+      // map — same H, same boundaries in both views.
+      let weightByDate;
+      if (isCapital) {
+        const params = this.equityDollarParams[sectionKey] || { perTrade: 2000, dailyCap: 10000 };
+        // Run the dollar series over the dedupe-filtered trade list
+        // so the dedupeConcurrent toggle propagates into the Capital
+        // view too: skipped trades contribute neither to bars nor to
+        // the rolling line. dayDeployedByDate already aggregates per
+        // day, so the same windowing loop below sums it over H days
+        // to get rolling deployed capital — identical math to the
+        // count path, dollar weights instead of unit weights.
+        const { dayDeployedByDate } = this._computeDollarSeries(
+          kept, params.perTrade, params.dailyCap,
+        );
+        weightByDate = dayDeployedByDate;
+      } else {
+        weightByDate = new Map();
+        for (const t of kept) {
+          const d = t.trade_date || t.date;
+          weightByDate.set(d, (weightByDate.get(d) || 0) + 1);
+        }
       }
 
-      const entered = tradingDays.map(d => entriesByDate[d] || 0);
+      const entered = tradingDays.map(d => weightByDate.get(d) || 0);
 
-      // Open positions on day i = entries in the N-trading-day window [i-N+1 .. i]
-      // (exact same logic as the primary _renderActivity)
+      // Open positions on day i = sum of weights in the H-trading-day
+      // window [i-H+1 .. i]. Same window/boundary as the count view —
+      // only the per-day weight differs (count vs dollar size).
       const open = tradingDays.map((_, i) => {
         const start = Math.max(0, i - horizon + 1);
-        let count = 0;
-        for (let j = start; j <= i; j++) count += entriesByDate[tradingDays[j]] || 0;
-        return count;
+        let s = 0;
+        for (let j = start; j <= i; j++) s += weightByDate.get(tradingDays[j]) || 0;
+        return s;
       });
+
+      const fmt$ = v => {
+        const abs = Math.abs(v);
+        const sign = v < 0 ? '-' : '';
+        if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+        if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+        return sign + '$' + abs.toFixed(0);
+      };
 
       const ctx = canvas.getContext('2d');
       this._charts[_key] = new Chart(ctx, {
@@ -7858,7 +7962,7 @@ document.addEventListener('alpine:init', () => {
           datasets: [
             {
               type: 'line',
-              label: 'Open Trades',
+              label: isCapital ? 'Deployed (rolling)' : 'Open Trades',
               data: open,
               borderColor: 'rgba(46,204,113,0.6)',
               backgroundColor: 'rgba(46,204,113,0.08)',
@@ -7867,7 +7971,7 @@ document.addEventListener('alpine:init', () => {
             },
             {
               type: 'bar',
-              label: 'Entered',
+              label: isCapital ? 'Deployed' : 'Entered',
               data: entered,
               backgroundColor: 'rgba(52,152,219,0.7)',
               barThickness: 2,
@@ -7884,14 +7988,20 @@ document.addEventListener('alpine:init', () => {
               mode: 'index', intersect: false,
               callbacks: {
                 title: ctx => tradingDays[ctx[0]?.dataIndex] || '',
-                label: ctx => `${ctx.dataset.label}: ${ctx.raw}`,
+                label: ctx => isCapital
+                  ? `${ctx.dataset.label}: ${fmt$(ctx.raw)}`
+                  : `${ctx.dataset.label}: ${ctx.raw}`,
               },
             },
           },
           scales: {
             ...this._darkScales(),
             x: { ...this._darkScales().x, ticks: { ...this._darkScales().x.ticks, maxTicksLimit: 12 } },
-            y: {
+            y: isCapital ? {
+              ...this._darkScales().y,
+              title: { display: true, text: 'Capital ($)', color: '#888', font: { size: 9 } },
+              ticks: { ...this._darkScales().y.ticks, callback: fmt$ },
+            } : {
               ...this._darkScales().y,
               title: { display: true, text: 'Count', color: '#888', font: { size: 9 } },
               ticks: { ...this._darkScales().y.ticks, stepSize: 1 },
