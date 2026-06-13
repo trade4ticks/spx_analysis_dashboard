@@ -7888,12 +7888,26 @@ document.addEventListener('alpine:init', () => {
       if (!trades.length) return;
       const horizon = detail.horizon || 1;
 
+      // Trading-day calendar resolution, preferred → last-resort:
+      //   1. detail.trading_days — dense ride-along from the section's
+      //      own endpoint (secondary-zone-analyze, portfolios/aggregate).
+      //      Available on initial page load without requiring a prior
+      //      primary Analyze; spans the trade set's date range exactly,
+      //      so the activity-pane x-axis lines up with the equity curve.
+      //   2. this.data.spot_series — populated only after primary /analyze.
+      //   3. this.data.trade_calendar — same gate as (2).
+      //   4. Sparse fired-trade dates (last-resort safety net; only fires
+      //      if all three above are missing — used to be the broken
+      //      initial-load path and is now effectively dead code).
+      const detailDays = detail.trading_days || [];
       const spotSeries = this.data?.spot_series || [];
       const cal = this.data?.trade_calendar || [];
       const dates = trades.map(t => t.trade_date || t.date);
-      const tradingDays = spotSeries.length > 0
-        ? spotSeries.map(s => s.date)
-        : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
+      const tradingDays = detailDays.length > 0
+        ? detailDays
+        : spotSeries.length > 0
+          ? spotSeries.map(s => s.date)
+          : [...new Set(cal.length > 0 ? cal.map(c => c.date) : dates)].sort();
 
       // Derive dedupeConc key from canvasId: chart-port-activity → 'port', else 'sec'
       const _dedupeKey = canvasId.includes('port') ? 'port' : 'sec';

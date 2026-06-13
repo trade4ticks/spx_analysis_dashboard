@@ -7915,6 +7915,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             "combined_trades": [], "horizon": _parse_horizon(outcome),
             "tickers": [], "yearly": [],
             "outlier_excluded": outlier_excluded,
+            "trading_days": [],
         }
 
     arr = np.array([r[outcome] for r in valid_rows], dtype=np.float64)
@@ -7945,6 +7946,31 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             pass
 
     n_tickers = len({r["ticker"] for r in valid_rows})
+
+    # ── Trading-day calendar ride-along ────────────────────────────────────────
+    # Dense NYSE-style trading-day list spanning the trade set's date
+    # range. Drives the Trade Activity pane's x-axis so it shows zero-
+    # trade days and gaps, and so its rolling H-day window indexes
+    # ACTUAL trading days (not fired-trade dates). Span clamped to
+    # min/max of valid_rows.trade_date — same range eq_zone uses, so
+    # the activity pane lines up exactly with the equity curve.
+    trading_days: list = []
+    if dates_all:
+        try:
+            d0_iso = min(dates_all)
+            d1_iso = max(dates_all)
+            d0 = _date.fromisoformat(d0_iso)
+            d1 = _date.fromisoformat(d1_iso)
+            async with pool.acquire() as conn:
+                td_rows = await conn.fetch(
+                    "SELECT DISTINCT trade_date FROM daily_features "
+                    "WHERE trade_date BETWEEN $1 AND $2 "
+                    "ORDER BY trade_date",
+                    d0, d1,
+                )
+            trading_days = [r["trade_date"].isoformat() for r in td_rows]
+        except Exception:
+            trading_days = sorted(set(dates_all))   # safe fallback
 
     # ── Equity curve — cumulative SUM, same as _sec_equity_curve ──────────────
     # "cum += float(y)" for each row in date order.  No per-date averaging,
@@ -8034,6 +8060,12 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         # Outlier filter telemetry — count of rows dropped because
         # outcome > req.outlier_max_ret. 0 when filter is off.
         "outlier_excluded": outlier_excluded,
+        # Dense trading-day calendar spanning the trade set's date
+        # range. Used by the Trade Activity pane so the x-axis and
+        # H-day rolling window operate on actual trading days, not
+        # on the sparse fired-trade dates. Available on initial load
+        # without requiring a prior primary Analyze.
+        "trading_days":     trading_days,
     }
 
 

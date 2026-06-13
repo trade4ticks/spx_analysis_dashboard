@@ -170,6 +170,7 @@ def _empty_aggregate(portfolio: dict, outcome: str, all_ps: list,
         "phi_pairs": [], "overlap_pairs": [], "pair_labels": [],
         "system_boundaries": [],
         "outlier_excluded": outlier_excluded,
+        "trading_days": [],
     }
 
 
@@ -595,6 +596,29 @@ async def portfolio_aggregate(
     avg_losers  = float(np.mean(losses)) if len(losses)  else 0.0
     n_tickers   = len({r["ticker"] for r in union_rows})
 
+    # ── Trading-day calendar ride-along ────────────────────────────────────────
+    # Dense NYSE-style trading-day list spanning the union trade set's
+    # date range. Drives the Trade Activity pane's x-axis on initial
+    # page load (no primary Analyze required) so its rolling H-day
+    # window indexes actual trading days, not fired-trade dates.
+    # Range matches the equity curve (eq_port spans min→max of
+    # union_rows.trade_date), so the two panes line up exactly.
+    trading_days: list = []
+    try:
+        td_dates = [r["trade_date"] for r in union_rows]
+        d0 = _date.fromisoformat(min(td_dates))
+        d1 = _date.fromisoformat(max(td_dates))
+        async with oi_pool.acquire() as conn:
+            td_rows = await conn.fetch(
+                "SELECT DISTINCT trade_date FROM daily_features "
+                "WHERE trade_date BETWEEN $1 AND $2 "
+                "ORDER BY trade_date",
+                d0, d1,
+            )
+        trading_days = [r["trade_date"].isoformat() for r in td_rows]
+    except Exception:
+        trading_days = sorted({r["trade_date"] for r in union_rows})
+
     winner_avg = round(avg_winners, 6)
     loser_avg  = round(avg_losers,  6)
 
@@ -763,4 +787,7 @@ async def portfolio_aggregate(
         # Outlier filter telemetry — de-duped count of (ticker,date) rows
         # dropped because outcome > req.outlier_max_ret. 0 when off.
         "outlier_excluded":  len(outlier_excluded_keys),
+        # Dense trading-day calendar spanning the union trade set's
+        # date range; drives the Trade Activity pane's x-axis on load.
+        "trading_days":      trading_days,
     }
