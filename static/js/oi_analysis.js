@@ -132,6 +132,10 @@ document.addEventListener('alpine:init', () => {
     portSignalPick: '',      // signal_id selected in the "add signal" dropdown
     portBubbleMinN: 1,       // bubble chart min-n filter
 
+    // Portfolio Loss Correlation Analysis
+    lcData: null, lcLoading: false, lcDateFrom: '', lcDateTo: '',
+    lcNWorstWeeks: 15, lcPerTrade: 2000, lcDailyCap: 10000,
+
     // Trade Activity dedupe — when on, a new entry for a ticker is skipped
     // while a previous trade of the same ticker is still inside its horizon.
     // Independent per chart so the user can A/B them visually.
@@ -8266,6 +8270,147 @@ document.addEventListener('alpine:init', () => {
       ].join(','));
       this._downloadCsv([header, ...rows].join('\n'),
         `portfolio_${this.portfolioId}_union_${new Date().toISOString().slice(0,10)}.csv`);
+    },
+
+    // ── Portfolio Loss Correlation ─────────────────────────────────────────
+
+    async loadLossCorr() {
+      if (!this.portfolioId || this.lcLoading) return;
+      this.lcLoading = true;
+      this.lcData = null;
+      try {
+        const body = { per_trade: this.lcPerTrade, daily_cap: this.lcDailyCap };
+        if (this.lcDateFrom) body.date_from = this.lcDateFrom;
+        if (this.lcDateTo)   body.date_to   = this.lcDateTo;
+        const resp = await fetch(`/portfolios/${this.portfolioId}/loss-analysis`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.error) { alert('Loss analysis: ' + data.error); return; }
+        this.lcData = data;
+        await this.$nextTick();
+        this._renderLcBars(data);
+      } catch (e) {
+        console.error('loadLossCorr error:', e);
+      } finally {
+        this.lcLoading = false;
+      }
+    },
+
+    _renderLcBars(data) {
+      const canvas = document.getElementById('chart-lc-bars');
+      if (!canvas) return;
+      if (this._lcBarsChart) { this._lcBarsChart.destroy(); this._lcBarsChart = null; }
+
+      const N  = Math.max(1, Math.min(50, this.lcNWorstWeeks));
+      const ww = (data.worst_weeks || []).slice(0, N);
+      if (!ww.length) return;
+
+      const labels = ww.map(w => w.monday);
+      const names  = data.signal_names || [];
+
+      const COLORS = [
+        'rgba(59,130,246,0.75)',    // blue
+        'rgba(239,68,68,0.75)',     // red
+        'rgba(34,197,94,0.75)',     // green
+        'rgba(245,158,11,0.75)',    // amber
+        'rgba(168,85,247,0.75)',    // purple
+        'rgba(236,72,153,0.75)',    // pink
+        'rgba(20,184,166,0.75)',    // teal
+        'rgba(249,115,22,0.75)',    // orange
+      ];
+
+      // One dataset per signal — full signed value, stacked.
+      // Positives go above zero (cushion), negatives below (pile-on).
+      const datasets = names.map((name, idx) => ({
+        label: name,
+        data: ww.map(w => {
+          const sp = (w.signal_pnls || []).find(p => p.name === name);
+          return sp ? sp.pnl : 0;
+        }),
+        backgroundColor: COLORS[idx % COLORS.length],
+        stack: 'signals',
+        barPercentage: 0.85,
+      }));
+
+      // Net deduped reference markers (diamond scatter points)
+      datasets.push({
+        label: 'Net (deduped)',
+        data: ww.map(w => w.net_pnl),
+        type: 'scatter',
+        showLine: false,
+        pointStyle: 'rectRot',
+        pointRadius: 7,
+        pointBorderWidth: 2,
+        borderColor:     'rgba(255,255,255,0.95)',
+        backgroundColor: 'rgba(255,255,255,0.95)',
+        order: -1,
+      });
+
+      this._lcBarsChart = new Chart(canvas, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              labels: { color: 'var(--text)', font: { size: 11 }, boxWidth: 12 },
+            },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const v = ctx.parsed.y;
+                  const sign = v >= 0 ? '+' : '';
+                  return `${ctx.dataset.label}: $${sign}${Math.round(v).toLocaleString()}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              stacked: true,
+              ticks: {
+                color: 'var(--dim)', font: { size: 10 }, maxRotation: 45,
+              },
+              grid: { color: 'rgba(128,128,128,0.1)' },
+            },
+            y: {
+              stacked: true,
+              ticks: {
+                color: 'var(--dim)',
+                callback: v => '$' + Math.round(v).toLocaleString(),
+              },
+              grid: { color: 'rgba(128,128,128,0.15)' },
+            },
+          },
+        },
+      });
+    },
+
+    lcCorrCellStyle(val, isDiag) {
+      if (isDiag) return 'background:rgba(128,128,128,0.15);font-weight:bold;';
+      if (val === null || val === undefined) return 'color:var(--dim);';
+      const v = Math.abs(val);
+      const a = Math.min(v, 1) * 0.55;
+      if (val > 0) {
+        // Positive = co-movement (bad) → reddish
+        return `background:rgba(239,68,68,${a.toFixed(2)});color:${v > 0.55 ? '#fff' : 'var(--text)'};`;
+      } else {
+        // Negative = divergence (good diversifier) → greenish
+        return `background:rgba(34,197,94,${a.toFixed(2)});color:${v > 0.55 ? '#fff' : 'var(--text)'};`;
+      }
+    },
+
+    lcCorrCellTitle(i, j, data) {
+      if (!data) return '';
+      const names = data.signal_names || [];
+      if (i === j) return names[i] || '';
+      const v = (data.corr_matrix || [])[i]?.[j];
+      const vs = (v != null) ? v.toFixed(3) : 'n/a';
+      return `${names[i]} × ${names[j]}\nSpearman ρ = ${vs}\n(n = ${data.corr_n_weeks} downside weeks)`;
     },
 
     // ── P1: analyze_cache 12-outcome bundle ───────────────────────────────

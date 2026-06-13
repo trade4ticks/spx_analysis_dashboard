@@ -4287,6 +4287,123 @@
               </div>
             </div>
 
+            <!-- Loss Correlation Analysis -->
+            <div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+              <div style="font-size:13px;font-weight:600;margin-bottom:10px">
+                📉 Loss Correlation Analysis
+              </div>
+
+              <!-- Controls -->
+              <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  From
+                  <input type="date" x-model="lcDateFrom"
+                         style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                padding:3px 6px;border-radius:4px;font-size:12px">
+                </label>
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  To
+                  <input type="date" x-model="lcDateTo"
+                         style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                padding:3px 6px;border-radius:4px;font-size:12px">
+                </label>
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  $/trade
+                  <select x-model.number="lcPerTrade"
+                          style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                 padding:3px 6px;border-radius:4px;font-size:12px">
+                    <option value="1000">$1,000</option>
+                    <option value="2000">$2,000</option>
+                    <option value="5000">$5,000</option>
+                    <option value="10000">$10,000</option>
+                  </select>
+                </label>
+                <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
+                  Daily cap
+                  <select x-model.number="lcDailyCap"
+                          style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                 padding:3px 6px;border-radius:4px;font-size:12px">
+                    <option value="5000">$5,000</option>
+                    <option value="10000">$10,000</option>
+                    <option value="20000">$20,000</option>
+                    <option value="50000">$50,000</option>
+                  </select>
+                </label>
+                <button @click="loadLossCorr()"
+                        :disabled="lcLoading"
+                        style="background:var(--accent);color:#fff;border:none;
+                               padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px">
+                  <span x-text="lcLoading ? 'Computing…' : '⚡ Compute'"></span>
+                </button>
+              </div>
+
+              <template x-if="lcData">
+                <div>
+                  <!-- Downside Co-Movement Heatmap -->
+                  <div style="font-size:12px;font-weight:600;margin-bottom:6px">
+                    Downside Co-Movement
+                    <span style="font-weight:normal;color:var(--dim)"
+                          x-text="'(Spearman ρ on ' + lcData.corr_n_weeks + ' downside weeks)'"></span>
+                  </div>
+                  <div style="overflow-x:auto;margin-bottom:18px">
+                    <table style="border-collapse:separate;border-spacing:3px;font-size:11px">
+                      <thead>
+                        <tr>
+                          <th style="padding:4px 8px;color:var(--dim);text-align:left"></th>
+                          <template x-for="name in lcData.signal_names" :key="name">
+                            <th style="padding:4px 8px;color:var(--dim);text-align:center;
+                                       max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                                :title="name"
+                                x-text="name"></th>
+                          </template>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="(row, i) in lcData.corr_matrix" :key="i">
+                          <tr>
+                            <td style="padding:4px 8px;color:var(--dim);white-space:nowrap;
+                                       max-width:110px;overflow:hidden;text-overflow:ellipsis;font-size:11px"
+                                :title="(lcData.signal_names || [])[i]"
+                                x-text="(lcData.signal_names || [])[i]"></td>
+                            <template x-for="(val, j) in row" :key="j">
+                              <td :style="'padding:5px 12px;text-align:center;border-radius:4px;cursor:default;' + lcCorrCellStyle(val, i === j)"
+                                  :title="lcCorrCellTitle(i, j, lcData)">
+                                <span x-text="val != null ? val.toFixed(2) : '—'"></span>
+                              </td>
+                            </template>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <!-- Worst-Weeks Stacked Bar Chart -->
+                  <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;flex-wrap:wrap">
+                    <span style="font-size:12px;font-weight:600">Worst-Weeks Loss Composition</span>
+                    <label style="font-size:11px;color:var(--dim);display:flex;align-items:center;gap:6px">
+                      Show top
+                      <input type="range" min="5" max="50" step="1"
+                             x-model.number="lcNWorstWeeks"
+                             @input="_renderLcBars(lcData)"
+                             style="width:90px;accent-color:var(--accent)">
+                      <span x-text="lcNWorstWeeks"></span> weeks
+                    </label>
+                    <span style="font-size:11px;color:var(--dim)">
+                      ◆ = net deduped P&amp;L · bars = per-signal (full signed)
+                    </span>
+                  </div>
+                  <div style="height:340px;position:relative">
+                    <canvas id="chart-lc-bars"></canvas>
+                  </div>
+                </div>
+              </template>
+
+              <div x-show="!lcData && !lcLoading"
+                   style="font-size:12px;color:var(--dim);padding:4px 0">
+                Select a date range and click Compute to analyse loss co-movement across signals.
+              </div>
+            </div>
+
             <!-- Download -->
             <div>
               <button @click="portCsvDownload()"
