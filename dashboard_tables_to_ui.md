@@ -57,7 +57,6 @@ All return `{"ok": true}` or `{"ok": true, "deleted": N, "scope": "..."}`. No au
 | POST `/api/factor-analysis/global-metric-bins/invalidate` | `global_bins_cache` + in-memory dict | — |
 | POST `/api/factor-analysis/analyze-primary/invalidate` | `analyze_primary_cache` | Optional `?ticker=&metric=&outcome=` scopes (all / ticker / ticker+metric / ticker+metric+outcome) |
 | POST `/api/factor-analysis/analyze-cache/invalidate` | `analyze_cache_slim` + `trade_meta` + `outcome` (cascade) | Optional `?ticker=&metric=` scopes |
-| POST `/api/factor-analysis/analyze-bundle/invalidate` | Same cascade as above | Convenience alias |
 | POST `/api/factor-analysis/ic-batch/invalidate` | `ic_batch_cache` | — |
 | POST `/api/factor-analysis/threshold-drift/invalidate` | in-memory only | — |
 
