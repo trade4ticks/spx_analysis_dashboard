@@ -8315,7 +8315,9 @@ document.addEventListener('alpine:init', () => {
     async loadLossCorr() {
       if (!this.portfolioId || this.lcLoading) return;
       this.lcLoading = true;
-      this.lcData = null;
+      // Do NOT null lcData here — that would collapse x-if and remove the canvas
+      // from DOM. Keeping lcData set (or null on first call) means the canvas stays
+      // in place and _renderLcBars can destroy + re-create the chart on the same element.
       try {
         const body = {
           per_trade: this.lcPerTrade,
@@ -8330,6 +8332,14 @@ document.addEventListener('alpine:init', () => {
         });
         const data = await resp.json();
         if (data.error) { alert('Loss analysis: ' + data.error); return; }
+        // Pre-process corr_matrix into corr_rows so the template never needs
+        // to cross nested x-for scope boundaries to compute isDiag.
+        // Alpine v3 nested x-for doesn't reliably expose the outer loop index (i)
+        // inside the inner loop's expression context.
+        data.corr_rows = (data.corr_matrix || []).map((row, ri) => ({
+          rowIdx: ri,
+          cells:  row.map((val, ci) => ({ val, isDiag: ri === ci, colIdx: ci })),
+        }));
         this.lcData = data;
         await this.$nextTick();
         this._renderLcBars(data);
@@ -8432,7 +8442,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     lcCorrCellStyle(val, isDiag) {
-      if (isDiag) return 'background:rgba(128,128,128,0.15);font-weight:bold;';
+      if (isDiag) return 'background:rgba(80,80,80,0.45);color:var(--dim);';
       if (val === null || val === undefined) return 'color:var(--dim);';
       const v = Math.abs(val);
       const a = Math.min(v, 1) * 0.55;

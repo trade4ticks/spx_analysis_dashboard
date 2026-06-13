@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=214"></script>
+  <script src="/static/js/oi_analysis.js?v=215"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4341,24 +4341,26 @@
 
                 <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
                   $/trade
-                  <select x-model.number="lcPerTrade"
+                  <!-- Same option list as equity pane dollar-capped controls (equityDollarChoices.perTrade) -->
+                  <select @change="lcPerTrade = +$event.target.value"
                           style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                                  padding:3px 6px;border-radius:4px;font-size:12px">
-                    <option value="1000">$1,000</option>
-                    <option value="2000">$2,000</option>
-                    <option value="5000">$5,000</option>
-                    <option value="10000">$10,000</option>
+                    <template x-for="v in equityDollarChoices.perTrade" :key="'pt-lc-'+v">
+                      <option :value="v" :selected="v === lcPerTrade"
+                              x-text="'$'+(v/1000)+'k'"></option>
+                    </template>
                   </select>
                 </label>
                 <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px">
                   Daily cap
-                  <select x-model.number="lcDailyCap"
+                  <!-- Same option list as equity pane dollar-capped controls (equityDollarChoices.dailyCap) -->
+                  <select @change="lcDailyCap = +$event.target.value"
                           style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                                  padding:3px 6px;border-radius:4px;font-size:12px">
-                    <option value="5000">$5,000</option>
-                    <option value="10000">$10,000</option>
-                    <option value="20000">$20,000</option>
-                    <option value="50000">$50,000</option>
+                    <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-lc-'+v">
+                      <option :value="v" :selected="v === lcDailyCap"
+                              x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                    </template>
                   </select>
                 </label>
                 <button @click="loadLossCorr()"
@@ -4391,16 +4393,20 @@
                         </tr>
                       </thead>
                       <tbody>
-                        <template x-for="(row, i) in lcData.corr_matrix" :key="i">
+                        <!-- Use lcData.corr_rows (pre-processed in loadLossCorr) so each
+                             cell carries its own isDiag flag. This avoids relying on the
+                             outer x-for index (i) being visible inside the inner x-for
+                             expression context — a known Alpine v3 scope limitation. -->
+                        <template x-for="rowObj in lcData.corr_rows" :key="rowObj.rowIdx">
                           <tr>
                             <td style="padding:4px 8px;color:var(--dim);white-space:nowrap;
                                        max-width:110px;overflow:hidden;text-overflow:ellipsis;font-size:11px"
-                                :title="(lcData.signal_names || [])[i]"
-                                x-text="(lcData.signal_names || [])[i]"></td>
-                            <template x-for="(val, j) in row" :key="j">
-                              <td :style="'padding:5px 12px;text-align:center;border-radius:4px;cursor:default;' + lcCorrCellStyle(val, i === j)"
-                                  :title="lcCorrCellTitle(i, j, lcData)">
-                                <span x-text="val != null ? val.toFixed(2) : '—'"></span>
+                                :title="(lcData.signal_names || [])[rowObj.rowIdx]"
+                                x-text="(lcData.signal_names || [])[rowObj.rowIdx]"></td>
+                            <template x-for="cell in rowObj.cells" :key="cell.colIdx">
+                              <td :style="'padding:5px 12px;text-align:center;border-radius:4px;cursor:default;' + lcCorrCellStyle(cell.val, cell.isDiag)"
+                                  :title="lcCorrCellTitle(rowObj.rowIdx, cell.colIdx, lcData)">
+                                <span x-text="cell.val != null ? cell.val.toFixed(2) : '—'"></span>
                               </td>
                             </template>
                           </tr>
