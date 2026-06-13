@@ -515,7 +515,8 @@ async def portfolio_aggregate(
             sec    = sig["secondary_metric"]
 
             query = f"""
-                SELECT df.ticker, df.trade_date::text AS trade_date, {out_sel}
+                SELECT df.ticker, df.trade_date::text AS trade_date,
+                       df.spot_co, {out_sel}
                 FROM daily_features df
                 JOIN is_bins ib USING (ticker, trade_date)
                 WHERE ib.bin20_{prim} > 0
@@ -554,6 +555,7 @@ async def portfolio_aggregate(
                 sig_trade_rows.append({
                     "ticker":     r["ticker"],
                     "trade_date": str(r["trade_date"]),
+                    "spot_co":    r.get("spot_co"),
                     outcome:      fov,
                 })
             per_signal_rows.append(sig_trade_rows)

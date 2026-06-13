@@ -2271,11 +2271,34 @@ document.addEventListener('alpine:init', () => {
     //   pertrade → cumulative additive sum of per-trade returns
     //              (the existing behavior).
     // Default = daily everywhere.
+    // 'daily'         → mean-of-daily-mean equity (additive %)
+    // 'pertrade'      → cumulative sum of per-trade returns (additive %)
+    // 'dollar_capped' → fixed $/trade with a daily cap; honest dollar
+    //                   equity curve. Default for zone/recall/port so
+    //                   the first view a user sees is the "what would
+    //                   I have experienced" lens, not the over-stated
+    //                   thin-day daily-average. Secondary is untouched.
     equityAggMode: {
-      zone:   'daily',  // chart-zone-equity
-      sec:    'daily',  // sec-equity-canvas
-      recall: 'daily',  // chart-recall-equity
-      port:   'daily',  // chart-port-equity
+      zone:   'dollar_capped',  // chart-zone-equity
+      sec:    'daily',          // sec-equity-canvas — UNCHANGED, no dollar mode
+      recall: 'dollar_capped',  // chart-recall-equity
+      port:   'dollar_capped',  // chart-port-equity
+    },
+
+    // Dollar-mode parameters per section. Snapped to a small set of
+    // round values via dropdown — no free sliders (granularity is
+    // meaningless here). $/trade snaps to {$1k, $2k, $3k}; daily cap
+    // snaps to {$10k, $12.5k, $15k, $20k}. Defaults: $2k / $10k.
+    // Per-section state mirrors equityAggMode and outlierFilter so
+    // each view's lens is independent.
+    equityDollarParams: {
+      zone:   { perTrade: 2000, dailyCap: 10000 },
+      recall: { perTrade: 2000, dailyCap: 10000 },
+      port:   { perTrade: 2000, dailyCap: 10000 },
+    },
+    equityDollarChoices: {
+      perTrade: [1000, 2000, 3000],
+      dailyCap: [10000, 12500, 15000, 20000],
     },
 
     // Signals — saved named cell-sets
@@ -4768,32 +4791,145 @@ document.addEventListener('alpine:init', () => {
     // Parameterized so the Recall view can call with its own canvas ID
     // and data source without reimplementing the chart. Main flow keeps
     // the same defaults; nothing else changes.
+    // Build the year-row array for the by-year pane in whichever mode
+    // the section's equity toggle is in. One source of truth — the
+    // equity renderer and this function read the same mode/state, so
+    // the two charts can't disagree.
+    //
+    //   'daily'         → MEAN of daily-avg returns per year (quality
+    //                     metric: "the avg daily return that year"). %.
+    //                     Does NOT decompose the daily-avg equity
+    //                     curve — by design. The curve sums daily-avgs;
+    //                     the bar averages them. Different questions.
+    //   'pertrade'      → MEAN of trade returns per year (avg trade
+    //                     quality). %. Same backend-yearly math, moved
+    //                     client-side so the toggle drives it.
+    //   'dollar_capped' → SUM of day_pnl per year (annual P&L). $.
+    //                     Reconciles with the dollar curve by
+    //                     construction: bars = year-end - year-start
+    //                     of the cumulative curve; bars sum to the
+    //                     curve's endpoint.
+    _yearlyForMode(trades, mode, dollarParams) {
+      if (!trades || !trades.length) return [];
+      // Bucket trades by year and by (year, date)
+      const byYear = new Map();          // year → trade returns[]
+      const byYearDate = new Map();      // year → Map(date → return[])
+      for (const t of trades) {
+        const d = t.trade_date;
+        const r = +t.ret;
+        if (!d || !isFinite(r)) continue;
+        const y = +d.slice(0, 4);
+        if (!byYear.has(y)) {
+          byYear.set(y, []);
+          byYearDate.set(y, new Map());
+        }
+        byYear.get(y).push(r);
+        const dmap = byYearDate.get(y);
+        if (!dmap.has(d)) dmap.set(d, []);
+        dmap.get(d).push(r);
+      }
+      const years = Array.from(byYear.keys()).sort();
+
+      if (mode === 'dollar_capped') {
+        // Reuse _computeDollarSeries so the year bars come from the
+        // SAME dayPnlByDate the equity curve does — guarantees
+        // reconciliation (sum of bars = endpoint of curve).
+        const params = dollarParams || { perTrade: 2000, dailyCap: 10000 };
+        const { dayPnlByDate } = this._computeDollarSeries(trades, params.perTrade, params.dailyCap);
+        const yearPnl = new Map();
+        const yearN   = new Map();
+        for (const [d, pnl] of dayPnlByDate.entries()) {
+          const y = +d.slice(0, 4);
+          yearPnl.set(y, (yearPnl.get(y) || 0) + pnl);
+          yearN.set(y, (yearN.get(y) || 0) + (byYearDate.get(y)?.get(d)?.length || 0));
+        }
+        return years.map(y => ({
+          year:    y,
+          value:   yearPnl.get(y) || 0,
+          n:       yearN.get(y)   || 0,
+          win_rate: (() => {
+            const rs = byYear.get(y) || [];
+            return rs.length ? rs.filter(r => r > 0).length / rs.length : 0;
+          })(),
+        }));
+      }
+
+      if (mode === 'daily') {
+        // Per-day mean → mean of those daily means for the year.
+        return years.map(y => {
+          const dmap = byYearDate.get(y);
+          const dailyAvgs = [];
+          for (const arr of dmap.values()) {
+            const s = arr.reduce((a, b) => a + b, 0);
+            dailyAvgs.push(s / arr.length);
+          }
+          const ys = byYear.get(y);
+          return {
+            year:    y,
+            value:   dailyAvgs.reduce((a, b) => a + b, 0) / dailyAvgs.length,
+            n:       ys.length,
+            win_rate: ys.filter(r => r > 0).length / ys.length,
+          };
+        });
+      }
+
+      // pertrade — mean of trade returns per year
+      return years.map(y => {
+        const ys = byYear.get(y);
+        return {
+          year:    y,
+          value:   ys.reduce((a, b) => a + b, 0) / ys.length,
+          n:       ys.length,
+          win_rate: ys.filter(r => r > 0).length / ys.length,
+        };
+      });
+    },
+
     _renderZoneYearly(canvasId, data) {
       canvasId = canvasId || 'chart-zone-yearly';
       const src = data || this.zoneData;
       const canvas = document.getElementById(canvasId);
-      if (!canvas || !src || !src.yearly || !src.yearly.length) return;
+      if (!canvas || !src) return;
       // Chart-key derived from canvasId so main ('zone-yearly') and
       // recall ('recall-yearly') don't collide in this._charts.
       const chartKey = canvasId.replace(/^chart-/, '');
       if (this._charts[chartKey]) { this._charts[chartKey].destroy(); delete this._charts[chartKey]; }
-      const yearly = src.yearly;
+
+      // Mode-aware: which section is this canvas in, and what mode is
+      // that section's equity toggle in? Read the trade-level data
+      // (combined_trades) and recompute — the backend's `yearly` field
+      // is per-trade-mean only, so we can't trust it once the toggle
+      // is on a different mode.
+      const modeKey = this._equityModeKey(canvasId);
+      const mode    = (this.equityAggMode && this.equityAggMode[modeKey]) || 'daily';
+      const dollarParams = this.equityDollarParams[modeKey];
+      const yearly = this._yearlyForMode(src.combined_trades || [], mode, dollarParams);
+      if (!yearly.length) return;
+
+      const isDollar = (mode === 'dollar_capped');
       // n-count gradient: dim bars for thin years, vivid for well-populated ones
       const ns = yearly.map(y => y.n);
       const minN = Math.min(...ns), maxN = Math.max(...ns);
       const nPct = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
       const alpha = y => (0.2 + nPct(y) * 0.6).toFixed(2);
-      const bgColor = y => y.avg_ret >= 0
+      const bgColor = y => y.value >= 0
         ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
-      const borderColor = y => y.avg_ret >= 0 ? '#3498db' : '#e84393';
+      const borderColor = y => y.value >= 0 ? '#3498db' : '#e84393';
+      const fmt$ = v => {
+        const abs = Math.abs(v);
+        const sign = v < 0 ? '-' : '';
+        if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+        if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+        return sign + '$' + abs.toFixed(0);
+      };
       const ctx = canvas.getContext('2d');
       this._charts[chartKey] = new Chart(ctx, {
         type: 'bar',
         data: {
           labels:   yearly.map(y => y.year),
           datasets: [{
-            label:           'Avg Ret',
-            data:            yearly.map(y => +(y.avg_ret * 100).toFixed(3)),
+            label:           isDollar ? 'Annual P&L' : 'Avg Ret',
+            data:            yearly.map(y => isDollar ? +y.value.toFixed(2) : +(y.value * 100).toFixed(3)),
             backgroundColor: yearly.map(bgColor),
             borderColor:     yearly.map(borderColor),
             borderWidth:     1,
@@ -4808,14 +4944,18 @@ document.addEventListener('alpine:init', () => {
               callbacks: {
                 label: ctx => {
                   const y = yearly[ctx.dataIndex];
-                  return [`Avg: ${(y.avg_ret*100).toFixed(3)}%`, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
+                  const primary = isDollar
+                    ? `P&L: ${fmt$(y.value)}`
+                    : `Avg: ${(y.value*100).toFixed(3)}%`;
+                  return [primary, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
                 },
               },
             },
           },
           scales: {
             x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
-            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v.toFixed(2) + '%' },
+            y: { ticks: { color: '#888', font: { size: 9 },
+                          callback: v => isDollar ? fmt$(v) : v.toFixed(2) + '%' },
                  grid:  { color: '#222' } },
           },
         },
@@ -7197,6 +7337,93 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
+    // Peak-to-trough drawdown for the dollar-capped mode. Operates on
+    // a cumulative-dollar series (p.value is $, starting at 0). Unlike
+    // the %-mode drawdown above, this is a raw dollar amount from peak
+    // — no (1+x) normalisation — so it's directly readable as "how
+    // much I'd have been down from the high-water mark in dollars".
+    _drawdownFromDollarEquity(eqPoints) {
+      let peak = 0;
+      const out = [];
+      for (const p of eqPoints) {
+        if (p.value > peak) peak = p.value;
+        out.push({ date: p.date, value: p.value - peak });
+      }
+      return out;
+    },
+
+    // Dollar-capped equity series. Models how a signal's trades would
+    // actually be capitalized inside a portfolio: a fixed $/trade
+    // diluted by a strict daily cap. Inputs: an array of trade dicts
+    // (each carries ticker, trade_date, ret, spot_entry — supplied by
+    // _build_enriched_trade backend-side); perTrade and dailyCap in
+    // dollars.
+    //
+    // Algorithm (per trade_date):
+    //   N = distinct tickers triggered that day in this trade list.
+    //       For zone/recall this is the single-signal load; for
+    //       portfolio it's the union-N because the portfolio endpoint
+    //       deduplicates combined_trades to one row per (ticker,date).
+    //   per_ticker_alloc = min(perTrade, dailyCap / N)
+    //   shares = floor(per_ticker_alloc / spot_entry); bumped to 1
+    //       when floor would yield 0 (expensive ticker on busy day).
+    //       No redistribution — leftover from floored cheaper tickers
+    //       covers the occasional 1-share overage. Deployed daily
+    //       total may slightly over- or under-shoot the cap; honest.
+    //   trade_pnl = shares * spot_entry * ret
+    //   day_pnl   = sum(trade_pnl for trades that day)
+    //
+    // Returns { equity: [{date, value}, ...], dayPnlByDate: Map<date,$> }.
+    // equity[i].value is the running cumulative dollar P&L through
+    // that day (starts at first day's day_pnl; the chart anchors at
+    // 0 only because no prior trades exist). dayPnlByDate is the
+    // per-day building block — reused by the by-year sum so the
+    // equity curve and the year bars share one source of truth and
+    // can't drift.
+    _computeDollarSeries(trades, perTrade, dailyCap) {
+      const empty = { equity: [], dayPnlByDate: new Map() };
+      if (!trades || !trades.length) return empty;
+      // Group by date and count distinct tickers per day so dilution
+      // matches reality (a ticker firing under multiple cells in the
+      // same signal is still one position; combined_trades carries
+      // deduped rows for portfolio and single-signal-deduped rows
+      // for zone/recall, so distinct-counting is correct in both).
+      const tradesByDate = new Map();
+      const tickersByDate = new Map();
+      for (const t of trades) {
+        const d = t.trade_date;
+        if (!d) continue;
+        if (!tradesByDate.has(d)) {
+          tradesByDate.set(d, []);
+          tickersByDate.set(d, new Set());
+        }
+        tradesByDate.get(d).push(t);
+        if (t.ticker) tickersByDate.get(d).add(t.ticker);
+      }
+      const dates = Array.from(tradesByDate.keys()).sort();
+      const dayPnlByDate = new Map();
+      const equity = [];
+      let cum = 0;
+      for (const d of dates) {
+        const dayTrades = tradesByDate.get(d);
+        const N = Math.max(1, tickersByDate.get(d).size);
+        const perTickerAlloc = Math.min(perTrade, dailyCap / N);
+        let dayPnl = 0;
+        for (const t of dayTrades) {
+          const px  = +t.spot_entry;
+          const ret = +t.ret;
+          if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
+          let shares = Math.floor(perTickerAlloc / px);
+          if (shares < 1) shares = 1;   // 1-share min, no redistribution
+          dayPnl += shares * px * ret;
+        }
+        cum += dayPnl;
+        dayPnlByDate.set(d, dayPnl);
+        equity.push({ date: d, value: cum });
+      }
+      return { equity, dayPnlByDate };
+    },
+
     _renderSecEquity(canvasId = 'sec-equity-canvas', detail = null, singleSeries = false) {
       detail = detail || this.secDetail;
       const _key = canvasId.replace(/-canvas$/, '').replace(/^chart-/, '');
@@ -7207,6 +7434,74 @@ document.addEventListener('alpine:init', () => {
       // (zone / sec / recall / port) carries its own toggle state.
       const modeKey = this._equityModeKey(canvasId);
       const mode    = (this.equityAggMode && this.equityAggMode[modeKey]) || 'daily';
+
+      // Dollar-capped branch — zone/recall/port only. Secondary is
+      // never in dollar mode (its toggle stays binary, untouched).
+      // Computes equity, drawdown, and y-axis tick formatters from
+      // combined_trades rather than the backend's pre-built %
+      // equity_primary series, so $/trade and daily-cap changes
+      // re-render without a server call.
+      const isDollar = (mode === 'dollar_capped') && (modeKey !== 'sec');
+      if (isDollar) {
+        const params  = this.equityDollarParams[modeKey] || { perTrade: 2000, dailyCap: 10000 };
+        const trades  = detail.combined_trades || [];
+        const dollarS = this._computeDollarSeries(trades, params.perTrade, params.dailyCap);
+        if (!dollarS.equity.length) return;
+        const toMs = d => new Date(d).getTime();
+        const eqPxy = dollarS.equity.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
+        const dd    = this._drawdownFromDollarEquity(dollarS.equity);
+        const ddxy  = dd.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
+        const ctx   = canvas.getContext('2d');
+        const fmt$  = v => {
+          const abs = Math.abs(v);
+          const sign = v < 0 ? '-' : '';
+          if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+          if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+          return sign + '$' + abs.toFixed(0);
+        };
+        this._charts[_key] = new Chart(ctx, {
+          type: 'line',
+          data: { datasets: [
+            { label: 'Equity ($)', data: eqPxy, borderColor: '#3498db',
+              backgroundColor: 'rgba(52,152,219,0.08)', borderWidth: 1.5,
+              pointRadius: 0, fill: false, tension: 0, stepped: 'after', yAxisID: 'y' },
+            { label: 'Drawdown ($)', data: ddxy, borderColor: 'rgba(232,67,147,.32)',
+              backgroundColor: 'transparent', borderWidth: 1,
+              pointRadius: 0, fill: false, tension: 0, stepped: 'after', yAxisID: 'y1' },
+          ] },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            parsing: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                mode: 'index', intersect: false,
+                callbacks: {
+                  title: items => items.length
+                    ? new Date(items[0].parsed.x).toISOString().slice(0, 10) : '',
+                  label: item => `${item.dataset.label}: ${fmt$(item.parsed.y)}`,
+                },
+              },
+            },
+            scales: {
+              x: {
+                type: 'linear',
+                min: eqPxy[0].x, max: eqPxy[eqPxy.length - 1].x,
+                ticks: { color: '#888', font: { size: 9 }, maxTicksLimit: 10,
+                  autoSkip: true, autoSkipPadding: 16,
+                  callback: val => new Date(val).toISOString().slice(0, 7) },
+                grid: { color: '#222' },
+              },
+              y:  { position: 'left',  ticks: { color: '#888', font: { size: 9 }, callback: fmt$ },
+                    grid: { color: '#222' } },
+              y1: { position: 'right', ticks: { color: 'rgba(232,67,147,.6)', font: { size: 9 }, callback: fmt$ },
+                    grid: { drawOnChartArea: false }, max: 0 },
+            },
+          },
+        });
+        return;
+      }
+
       const eqP = this._equityForMode(detail.equity_primary  || [], mode);
       const eqC = this._equityForMode(detail.equity_combined || [], mode);
       if (!eqP.length) return;
@@ -7410,19 +7705,50 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Per-pane setter. Updates ONLY that pane's mode and re-renders
-    // it; other panes' modes are untouched.
+    // both that pane's equity AND its by-year chart so the two stay
+    // in lock-step on the same lens. Other panes are untouched.
+    // Secondary still routes only through the equity canvas — its
+    // by-year chart is a clustered primary-vs-secondary visual and
+    // is intentionally NOT driven by this toggle.
     setEquityAggMode(modeKey, mode) {
       this.equityAggMode = { ...this.equityAggMode, [modeKey]: mode };
-      // Re-render only the affected pane — each canvas/data pair is
-      // guarded so collapsed/uninitialized views silently skip.
-      if (modeKey === 'zone'   && this.zoneData)
+      if (modeKey === 'zone'   && this.zoneData) {
         this._renderSecEquity('chart-zone-equity',   this.zoneData,        true);
-      if (modeKey === 'sec'    && this.secDetail)
+        this._renderZoneYearly('chart-zone-yearly',  this.zoneData);
+      }
+      if (modeKey === 'sec'    && this.secDetail) {
         this._renderSecEquity();
-      if (modeKey === 'recall' && this.recallZoneData)
+      }
+      if (modeKey === 'recall' && this.recallZoneData) {
         this._renderSecEquity('chart-recall-equity', this.recallZoneData, true);
-      if (modeKey === 'port'   && this.portAggregate)
+        this._renderZoneYearly('chart-recall-yearly', this.recallZoneData);
+      }
+      if (modeKey === 'port'   && this.portAggregate) {
         this._renderSecEquity('chart-port-equity',   this.portAggregate,  true);
+        this._renderPortYearly();
+      }
+    },
+
+    // Per-section setter for $/trade and daily-cap. Only re-renders
+    // when the section is currently in dollar mode (otherwise the
+    // value is just stored for when the user switches back).
+    setEquityDollarParam(section, key, value) {
+      const cur = this.equityDollarParams[section] || { perTrade: 2000, dailyCap: 10000 };
+      this.equityDollarParams = {
+        ...this.equityDollarParams,
+        [section]: { ...cur, [key]: +value },
+      };
+      if (this.equityAggMode[section] !== 'dollar_capped') return;
+      if (section === 'zone'   && this.zoneData) {
+        this._renderSecEquity('chart-zone-equity',   this.zoneData,        true);
+        this._renderZoneYearly('chart-zone-yearly',  this.zoneData);
+      } else if (section === 'recall' && this.recallZoneData) {
+        this._renderSecEquity('chart-recall-equity', this.recallZoneData, true);
+        this._renderZoneYearly('chart-recall-yearly', this.recallZoneData);
+      } else if (section === 'port'   && this.portAggregate) {
+        this._renderSecEquity('chart-port-equity',   this.portAggregate,  true);
+        this._renderPortYearly();
+      }
     },
 
     _renderSecYearly() {
@@ -7735,42 +8061,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderPortYearly() {
-      // Single-series yearly bars with n-count gradient (same pattern as _renderZoneYearly).
-      const canvas = document.getElementById('chart-port-yearly');
-      if (!canvas || !this.portAggregate?.yearly?.length) return;
-      if (this._charts['port-yearly']) { this._charts['port-yearly'].destroy(); delete this._charts['port-yearly']; }
-      const yearly = this.portAggregate.yearly;
-      const ns = yearly.map(y => y.n);
-      const minN = Math.min(...ns), maxN = Math.max(...ns);
-      const nPct  = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
-      const alpha = y => (0.2 + nPct(y) * 0.6).toFixed(2);
-      const bgColor = y => y.avg_ret >= 0
-        ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
-      this._charts['port-yearly'] = new Chart(canvas.getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels: yearly.map(y => y.year),
-          datasets: [{
-            label: 'Union Avg Ret',
-            data: yearly.map(y => +(y.avg_ret * 100).toFixed(3)),
-            backgroundColor: yearly.map(bgColor),
-            borderColor: yearly.map(y => y.avg_ret >= 0 ? '#3498db' : '#e84393'),
-            borderWidth: 1,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false },
-            tooltip: { callbacks: { label: ctx => {
-              const y = yearly[ctx.dataIndex];
-              return [`Avg: ${(y.avg_ret*100).toFixed(3)}%`, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
-            } } } },
-          scales: {
-            ...this._darkScales(),
-            y: { ...this._darkScales().y, title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
-          },
-        },
-      });
+      // Delegates to _renderZoneYearly so the portfolio by-year pane
+      // picks up the mode-aware (daily-avg-mean / per-trade-mean /
+      // dollar-sum) logic — and so all three sections render through
+      // one path. portAggregate.combined_trades is the deduped union
+      // trade set, which is exactly what the dollar algorithm needs
+      // for portfolio-wide union-N per day.
+      this._renderZoneYearly('chart-port-yearly', this.portAggregate);
     },
 
     portSigCellTitle(i, j) {

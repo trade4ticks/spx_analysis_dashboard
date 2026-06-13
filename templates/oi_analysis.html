@@ -345,7 +345,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=209"></script>
+  <script src="/static/js/oi_analysis.js?v=210"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3348,19 +3348,49 @@
                             <span style="font-weight:400;font-size:10px;color:#3498db">— blue: equity</span>
                             <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                             <button class="fs-btn" @click="openFullscreen('chart-zone-equity')" title="Fullscreen">⛶</button>
+                            <!-- Three-mode toggle. dollar_capped is the
+                                 default — models real dollar P&L with a
+                                 fixed $/trade and daily cap; the two %
+                                 modes are quality lenses. -->
                             <div class="mode-seg" style="margin-left:auto">
+                              <span :class="{on: equityAggMode.zone==='dollar_capped'}"
+                                    @click="setEquityAggMode('zone','dollar_capped')">Dollar-capped</span>
                               <span :class="{on: equityAggMode.zone==='daily'}"
                                     @click="setEquityAggMode('zone','daily')">Daily average</span>
                               <span :class="{on: equityAggMode.zone==='pertrade'}"
                                     @click="setEquityAggMode('zone','pertrade')">Per-trade sum</span>
                             </div>
+                            <!-- $/trade and daily-cap inputs — snapped
+                                 dropdowns, visible only in dollar mode.
+                                 Changing either re-renders both this
+                                 chart and the by-year pane. -->
+                            <span x-show="equityAggMode.zone==='dollar_capped'"
+                                  style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
+                              <span>$/trade</span>
+                              <select :value="equityDollarParams.zone.perTrade"
+                                      @change="setEquityDollarParam('zone','perTrade', $event.target.value)"
+                                      style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                                <template x-for="v in equityDollarChoices.perTrade" :key="'pt-z-'+v">
+                                  <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                                </template>
+                              </select>
+                              <span>· cap</span>
+                              <select :value="equityDollarParams.zone.dailyCap"
+                                      @change="setEquityDollarParam('zone','dailyCap', $event.target.value)"
+                                      style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                                <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-z-'+v">
+                                  <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                                </template>
+                              </select>
+                            </span>
                           </div>
                           <div class="chart-canvas"><canvas id="chart-zone-equity"></canvas></div>
                         </div>
 
-                        <!-- Avg Return by Year -->
+                        <!-- Avg Return by Year (or Annual P&L in $ mode) -->
                         <div class="chart-box">
-                          <div class="chart-title">Avg Return by Year
+                          <div class="chart-title">
+                            <span x-text="equityAggMode.zone==='dollar_capped' ? 'Annual P&L' : 'Avg Return by Year'"></span>
                             <button class="fs-btn" @click="openFullscreen('chart-zone-yearly')" title="Fullscreen">⛶</button>
                           </div>
                           <div class="chart-canvas"><canvas id="chart-zone-yearly"></canvas></div>
@@ -3818,16 +3848,38 @@
                   <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                   <button class="fs-btn" @click="openFullscreen('chart-recall-equity')" title="Fullscreen">⛶</button>
                   <div class="mode-seg" style="margin-left:auto">
+                    <span :class="{on: equityAggMode.recall==='dollar_capped'}"
+                          @click="setEquityAggMode('recall','dollar_capped')">Dollar-capped</span>
                     <span :class="{on: equityAggMode.recall==='daily'}"
                           @click="setEquityAggMode('recall','daily')">Daily average</span>
                     <span :class="{on: equityAggMode.recall==='pertrade'}"
                           @click="setEquityAggMode('recall','pertrade')">Per-trade sum</span>
                   </div>
+                  <span x-show="equityAggMode.recall==='dollar_capped'"
+                        style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
+                    <span>$/trade</span>
+                    <select :value="equityDollarParams.recall.perTrade"
+                            @change="setEquityDollarParam('recall','perTrade', $event.target.value)"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.perTrade" :key="'pt-r-'+v">
+                        <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                      </template>
+                    </select>
+                    <span>· cap</span>
+                    <select :value="equityDollarParams.recall.dailyCap"
+                            @change="setEquityDollarParam('recall','dailyCap', $event.target.value)"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-r-'+v">
+                        <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                      </template>
+                    </select>
+                  </span>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-recall-equity"></canvas></div>
               </div>
               <div class="chart-box">
-                <div class="chart-title">Avg Return by Year
+                <div class="chart-title">
+                  <span x-text="equityAggMode.recall==='dollar_capped' ? 'Annual P&L' : 'Avg Return by Year'"></span>
                   <button class="fs-btn" @click="openFullscreen('chart-recall-yearly')" title="Fullscreen">⛶</button>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-recall-yearly"></canvas></div>
@@ -4091,11 +4143,32 @@
                   <span style="font-weight:400;font-size:10px;color:#e84393"> · pink: drawdown</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-equity')">⛶</button>
                   <div class="mode-seg" style="margin-left:auto">
+                    <span :class="{on: equityAggMode.port==='dollar_capped'}"
+                          @click="setEquityAggMode('port','dollar_capped')">Dollar-capped</span>
                     <span :class="{on: equityAggMode.port==='daily'}"
                           @click="setEquityAggMode('port','daily')">Daily average</span>
                     <span :class="{on: equityAggMode.port==='pertrade'}"
                           @click="setEquityAggMode('port','pertrade')">Per-trade sum</span>
                   </div>
+                  <span x-show="equityAggMode.port==='dollar_capped'"
+                        style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--dim);margin-left:8px;border-left:1px solid var(--border);padding-left:8px">
+                    <span>$/trade</span>
+                    <select :value="equityDollarParams.port.perTrade"
+                            @change="setEquityDollarParam('port','perTrade', $event.target.value)"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.perTrade" :key="'pt-p-'+v">
+                        <option :value="v" x-text="'$'+(v/1000)+'k'"></option>
+                      </template>
+                    </select>
+                    <span>· cap</span>
+                    <select :value="equityDollarParams.port.dailyCap"
+                            @change="setEquityDollarParam('port','dailyCap', $event.target.value)"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:10px;padding:1px 4px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.dailyCap" :key="'dc-p-'+v">
+                        <option :value="v" x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                      </template>
+                    </select>
+                  </span>
                 </div>
                 <div class="chart-canvas"><canvas id="chart-port-equity"></canvas></div>
               </div>
@@ -4114,7 +4187,7 @@
             <div class="chart-grid" style="margin-bottom:12px">
               <div class="chart-box" style="position:relative">
                 <div class="chart-title">
-                  Avg Return by Year
+                  <span x-text="equityAggMode.port==='dollar_capped' ? 'Annual P&L' : 'Avg Return by Year'"></span>
                   <span style="font-weight:400;font-size:10px;color:var(--dim)">— portfolio union · opacity = trade count</span>
                   <button class="fs-btn" @click="openFullscreen('chart-port-yearly')">⛶</button>
                 </div>
