@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=223"></script>
+  <script src="/static/js/oi_analysis.js?v=224"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3541,8 +3541,13 @@
                                   @change="rgZoneThreshold=null; rgZoneSpyData=null; loadRgZoneSpyData()"
                                   style="background:var(--raised);border:1px solid var(--border);color-scheme:dark;
                                          border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px;max-width:200px">
-                            <template x-for="m in rgAvailMetrics" :key="'rgm-'+m">
-                              <option :value="m" x-text="m" style="background:var(--raised);color:var(--text)"></option>
+                            <template x-for="grp in groupMetricsByFamily(rgAvailMetrics)" :key="'rgmg-'+grp.family_num">
+                              <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name"
+                                        style="background:var(--raised);color:var(--dim)">
+                                <template x-for="m in grp.metrics" :key="'rgm-'+m">
+                                  <option :value="m" x-text="m" style="background:var(--raised);color:var(--text)"></option>
+                                </template>
+                              </optgroup>
                             </template>
                           </select>
                           <!-- Window selector -->
