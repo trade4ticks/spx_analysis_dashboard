@@ -4557,18 +4557,44 @@ document.addEventListener('alpine:init', () => {
       this.rgZoneParityResult = { rows, pass: rows.every(r => r.ok) };
     },
 
-    /** Render (or recreate) the rolling avg-ret chart with amber shading. */
+    /** Render (or recreate) the rolling avg-ret chart with amber shading.
+     *
+     *  IMPORTANT: Chart.js 4 type:'time' requires a registered date adapter
+     *  (chartjs-adapter-date-fns etc.) which this page does NOT load.  All
+     *  existing charts in this codebase use category scales with label arrays.
+     *  We match that pattern: x-axis = YYYY-MM-DD string labels (category),
+     *  and the shading plugin maps SPY ms-timestamp ranges to category indices.
+     */
     _rgRenderZoneChart() {
       const self = this;
       const el   = document.getElementById('rgZoneChart');
-      if (!el) return;
+
+      // ── Diagnostic logs (visible in browser console) ──────────────────────
+      if (!el) {
+        console.warn('[rgChart] canvas #rgZoneChart not found — template not rendered yet?');
+        return;
+      }
+      const _par = el.parentElement;
+      console.log('[rgChart] canvas parent BCR:',
+        _par ? `${_par.getBoundingClientRect().width.toFixed(0)}w × ${_par.getBoundingClientRect().height.toFixed(0)}h` : 'no parent');
+      console.log('[rgChart] canvas offsetW/H:', el.offsetWidth, el.offsetHeight);
+      // ── End diagnostics ───────────────────────────────────────────────────
+
       const existing = Chart.getChart(el);
       if (existing) existing.destroy();
 
       const rolling = this.rgZoneRolling;
-      if (!rolling.length) return;
+      console.log('[rgChart] rolling length:', rolling.length,
+        rolling.length ? `first={t:${rolling[0].t}, avg:${rolling[0].avg?.toFixed(4)}, n:${rolling[0].n}}` : '');
+      if (!rolling.length) { console.warn('[rgChart] empty rolling series — no chart'); return; }
 
-      // Plugin: draw amber rectangles for above-threshold intervals
+      // Category-scale labels: YYYY-MM-DD strings, one per trade date in the series
+      const labels  = rolling.map(p => new Date(p.t).toISOString().slice(0, 10));
+      const labelTs = rolling.map(p => p.t);  // ms timestamps, parallel to labels[]
+
+      // Plugin: shade contiguous above-threshold intervals using category indices.
+      // For each SPY range [from_ms, to_ms], find the first and last rolling
+      // point that falls inside the range and shade between their pixel positions.
       const shadingPlugin = {
         id: 'rgShading',
         beforeDatasetsDraw(chart) {
@@ -4579,72 +4605,89 @@ document.addEventListener('alpine:init', () => {
           ctx.save();
           ctx.fillStyle = 'rgba(253,203,110,0.18)';
           for (const { from, to } of ranges) {
-            const x0 = scales.x.getPixelForValue(from);
-            const x1 = scales.x.getPixelForValue(to);
-            if (x0 > chartArea.right || x1 < chartArea.left) continue;
-            ctx.fillRect(
-              Math.max(x0, chartArea.left), chartArea.top,
-              Math.min(x1, chartArea.right) - Math.max(x0, chartArea.left),
-              chartArea.height
-            );
+            let fi = -1, li = -1;
+            for (let i = 0; i < labelTs.length; i++) {
+              if (fi < 0 && labelTs[i] >= from) fi = i;
+              if (labelTs[i] <= to) li = i;
+            }
+            if (fi < 0 || li < 0 || fi > li) continue;
+            // getPixelForValue(i) on a CategoryScale takes the numeric index
+            const x0 = scales.x.getPixelForValue(fi);
+            const x1 = scales.x.getPixelForValue(li);
+            const lx = Math.max(Math.min(x0, x1), chartArea.left);
+            const rx = Math.min(Math.max(x0, x1), chartArea.right);
+            if (lx >= rx) continue;
+            ctx.fillRect(lx, chartArea.top, rx - lx, chartArea.height);
           }
           ctx.restore();
         },
       };
 
-      new Chart(el, {
-        type: 'line',
-        data: {
-          datasets: [
-            {
-              label: 'Rolling Avg Ret',
-              data: rolling.map(p => ({ x: p.t, y: +(p.avg * 100).toFixed(4) })),
-              borderColor: '#0984e3', backgroundColor: 'transparent',
-              borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
-            },
-            {
-              label: 'Rolling N',
-              data: rolling.map(p => ({ x: p.t, y: p.n })),
-              borderColor: '#636e72', backgroundColor: 'transparent',
-              borderWidth: 1, pointRadius: 0, yAxisID: 'y2',
-              borderDash: [3, 3],
-            },
-          ],
-        },
-        plugins: [shadingPlugin],
-        options: {
-          animation: false, responsive: true, maintainAspectRatio: false,
-          scales: {
-            x: {
-              type: 'time', time: { unit: 'month' },
-              grid: { color: 'rgba(255,255,255,0.05)' },
-              ticks: { color: '#888', maxTicksLimit: 8, maxRotation: 0 },
-            },
-            y: {
-              position: 'left',
-              grid: { color: 'rgba(255,255,255,0.05)' },
-              ticks: { color: '#0984e3', callback: v => v.toFixed(2) + '%' },
-              title: { display: true, text: 'Avg Ret (%)', color: '#0984e3', font: { size: 9 } },
-            },
-            y2: {
-              position: 'right',
-              grid: { drawOnChartArea: false },
-              ticks: { color: '#636e72' },
-              title: { display: true, text: 'N', color: '#636e72', font: { size: 9 } },
-            },
+      try {
+        new Chart(el, {
+          type: 'line',
+          data: {
+            labels,   // category x-axis — no date adapter needed
+            datasets: [
+              {
+                label: 'Rolling Avg Ret',
+                data: rolling.map(p => +(p.avg * 100).toFixed(4)),
+                borderColor: '#0984e3', backgroundColor: 'transparent',
+                borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
+              },
+              {
+                label: 'Rolling N',
+                data: rolling.map(p => p.n),
+                borderColor: '#636e72', backgroundColor: 'transparent',
+                borderWidth: 1, pointRadius: 0, yAxisID: 'y2',
+                borderDash: [3, 3],
+              },
+            ],
           },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: ctx => ctx.datasetIndex === 0
-                  ? `Avg Ret: ${ctx.parsed.y.toFixed(3)}%`
-                  : `N: ${ctx.parsed.y}`,
+          plugins: [shadingPlugin],
+          options: {
+            animation: false, responsive: true, maintainAspectRatio: false,
+            scales: {
+              x: {
+                // Default category scale — matches all other charts on this page
+                grid: { color: 'rgba(255,255,255,0.05)' },
+                ticks: {
+                  color: '#888', maxTicksLimit: 8, maxRotation: 0,
+                  // Show only YYYY-MM for readability (full label is YYYY-MM-DD)
+                  callback: (val, idx) => labels[idx]?.slice(0, 7) ?? '',
+                },
+              },
+              y: {
+                position: 'left',
+                grid: { color: 'rgba(255,255,255,0.05)' },
+                ticks: { color: '#0984e3', callback: v => v.toFixed(2) + '%' },
+                title: { display: true, text: 'Avg Ret (%)', color: '#0984e3', font: { size: 9 } },
+              },
+              y2: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#636e72' },
+                title: { display: true, text: 'N', color: '#636e72', font: { size: 9 } },
+              },
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  title: items => labels[items[0]?.dataIndex] ?? '',
+                  label: ctx => ctx.datasetIndex === 0
+                    ? `Avg Ret: ${ctx.parsed.y.toFixed(3)}%`
+                    : `N: ${ctx.parsed.y}`,
+                },
               },
             },
           },
-        },
-      });
+        });
+        console.log('[rgChart] Chart created OK — datasets:',
+          rolling.length, 'points, shading ranges:', self.rgZoneShadedRanges.length);
+      } catch (err) {
+        console.error('[rgChart] Chart.js creation FAILED:', err);
+      }
     },
 
     async runBatchScore() {
