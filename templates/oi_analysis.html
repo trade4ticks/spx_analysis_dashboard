@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=217"></script>
+  <script src="/static/js/oi_analysis.js?v=218"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -994,6 +994,18 @@
             <option value="ret_20d_fwd_cc">ret_20d_fwd_cc</option>
             <option value="overnight_gap">overnight_gap</option>
           </select>
+          <span style="font-size:11px;color:var(--dim)">from:</span>
+          <input type="date" x-model="cs2fDateFrom"
+                 style="font-size:11px;padding:3px 6px;width:130px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)"
+                 title="Date filter from (leave blank for full-history stored results)">
+          <span style="font-size:11px;color:var(--dim)">to:</span>
+          <input type="date" x-model="cs2fDateTo"
+                 style="font-size:11px;padding:3px 6px;width:130px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)"
+                 title="Date filter to (leave blank for full-history stored results)">
           <span style="font-size:11px;color:var(--dim)">min n:</span>
           <input type="number" x-model.number="cs2fMinN" min="0" step="50"
                  style="width:70px;font-size:11px;padding:3px 6px;
@@ -1003,12 +1015,14 @@
                   :disabled="!cs2fCanRefresh() || cs2fLoading"
                   :style="{ opacity: (cs2fCanRefresh() && !cs2fLoading) ? 1 : 0.5,
                             cursor:  (cs2fCanRefresh() && !cs2fLoading) ? 'pointer' : 'not-allowed' }"
-                  :title="cs2fCanRefresh()
-                    ? 'Re-read corner_scan_2f for the active mode (fast — does not trigger the batch job)'
-                    : 'Refresh disabled — corner-scan batch for this mode pending'"
+                  :title="(cs2fDateFrom || cs2fDateTo)
+                    ? 'Live windowed recompute for the selected date range (30–90 s)'
+                    : cs2fCanRefresh()
+                      ? 'Re-read corner_scan_2f for the active mode (fast — does not trigger the batch job)'
+                      : 'Refresh disabled — corner-scan batch for this mode pending'"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:700">
-            ⟳ Refresh
+            <span x-text="(cs2fDateFrom || cs2fDateTo) ? '⟳ Compute' : '⟳ Refresh'"></span>
           </button>
         </div>
       </div>
@@ -1212,6 +1226,18 @@
             <option value="ret_20d_fwd_cc">ret_20d_fwd_cc</option>
             <option value="overnight_gap">overnight_gap</option>
           </select>
+          <span style="font-size:11px;color:var(--dim)">from:</span>
+          <input type="date" x-model="cs1fDateFrom"
+                 style="font-size:11px;padding:3px 6px;width:130px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)"
+                 title="Date filter from (leave blank for full-history stored results)">
+          <span style="font-size:11px;color:var(--dim)">to:</span>
+          <input type="date" x-model="cs1fDateTo"
+                 style="font-size:11px;padding:3px 6px;width:130px;
+                        background:var(--raised);border:1px solid var(--border);
+                        border-radius:4px;color:var(--text)"
+                 title="Date filter to (leave blank for full-history stored results)">
           <span style="font-size:11px;color:var(--dim)">min n:</span>
           <input type="number" x-model.number="cs1fMinN" min="0" step="50"
                  style="width:70px;font-size:11px;padding:3px 6px;
@@ -1221,12 +1247,14 @@
                   :disabled="!cs1fCanRefresh() || cs1fLoading"
                   :style="{ opacity: (cs1fCanRefresh() && !cs1fLoading) ? 1 : 0.5,
                             cursor:  (cs1fCanRefresh() && !cs1fLoading) ? 'pointer' : 'not-allowed' }"
-                  :title="cs1fCanRefresh()
-                    ? 'Re-read corner_scan_1f for the active mode (fast — does not trigger the batch job)'
-                    : 'Refresh disabled — corner-scan batch for this mode pending'"
+                  :title="(cs1fDateFrom || cs1fDateTo)
+                    ? 'Live windowed recompute for the selected date range (30–90 s)'
+                    : cs1fCanRefresh()
+                      ? 'Re-read corner_scan_1f for the active mode (fast — does not trigger the batch job)'
+                      : 'Refresh disabled — corner-scan batch for this mode pending'"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:700">
-            ⟳ Refresh
+            <span x-text="(cs1fDateFrom || cs1fDateTo) ? '⟳ Compute' : '⟳ Refresh'"></span>
           </button>
         </div>
       </div>

@@ -3788,6 +3788,7 @@ document.addEventListener('alpine:init', () => {
     cs2fPage: 1,  // current page (50 rows/page, server-side)
     cs2fSortKey: 'd_ret_per_day', cs2fSortDir: 'desc',
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
+    cs2fDateFrom: '', cs2fDateTo: '',   // windowed live recompute (empty = full-history DB query)
     cs2fMode:       'in_sample',
     cs2fCutoffDate: '2024-01-01',
     cs2fDataByMode: {
@@ -3800,6 +3801,7 @@ document.addEventListener('alpine:init', () => {
     cs1fPage: 1,  // current page (50 rows/page, server-side)
     cs1fSortKey: 'd_ret_per_day', cs1fSortDir: 'desc',
     cs1fFilterMetric: '', cs1fFilterExtreme: '', cs1fFilterOutcome: '', cs1fMinN: 300,
+    cs1fDateFrom: '', cs1fDateTo: '',   // windowed live recompute (empty = full-history DB query)
     cs1fMeta:       null,  // pane-local meta (previously read from cs2fMeta — decoupled in step 6)
     cs1fMode:       'in_sample',
     cs1fCutoffDate: '2024-01-01',
@@ -4178,6 +4180,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.cs2fCanRefresh()) return;
       if (resetPage) this.cs2fPage = 1;
       this.cs2fLoading = true;
+      const isWindowed = !!(this.cs2fDateFrom || this.cs2fDateTo);
       const cutoffQ = this.cs2fMode === 'train_test'
         ? `&cutoff_date=${encodeURIComponent(this.cs2fCutoffDate)}` : '';
       // Meta: counts + scanned_at for the breadcrumb. Always re-fetched
@@ -4198,12 +4201,22 @@ document.addEventListener('alpine:init', () => {
       if (this.cs2fFilterS)       p.set('secondary_metric', this.cs2fFilterS);
       if (this.cs2fFilterDir)     p.set('corner_direction', this.cs2fFilterDir);
       if (this.cs2fFilterOutcome) p.set('outcome',          this.cs2fFilterOutcome);
+      if (this.cs2fDateFrom)      p.set('date_from',        this.cs2fDateFrom);
+      if (this.cs2fDateTo)        p.set('date_to',          this.cs2fDateTo);
       let rows = [], total = 0;
       try {
         const r = await fetch('/api/factor-analysis/corner-scan/2f?' + p);
         if (r.ok) { const d = await r.json(); rows = d.rows || []; total = d.total || 0; }
       } catch (_) {}
-      this._cs2fStoreSlot(meta, rows, total);
+      if (isWindowed) {
+        // Windowed results are ephemeral (tied to this specific date range).
+        // Don't cache in the mode slot — cache is for full-history stored results.
+        this.cs2fMeta  = meta;
+        this.cs2fRows  = rows;
+        this.cs2fTotal = total;
+      } else {
+        this._cs2fStoreSlot(meta, rows, total);
+      }
       this.cs2fLoading = false;
     },
     // Per-corner note + reviewed handlers. Both upsert into
@@ -4294,6 +4307,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.cs1fCanRefresh()) return;
       if (resetPage) this.cs1fPage = 1;
       this.cs1fLoading = true;
+      const isWindowed = !!(this.cs1fDateFrom || this.cs1fDateTo);
       const cutoffQ = this.cs1fMode === 'train_test'
         ? `&cutoff_date=${encodeURIComponent(this.cs1fCutoffDate)}` : '';
       let meta = null;
@@ -4311,12 +4325,21 @@ document.addEventListener('alpine:init', () => {
       if (this.cs1fFilterMetric)  p.set('metric',   this.cs1fFilterMetric);
       if (this.cs1fFilterExtreme) p.set('extreme',  this.cs1fFilterExtreme);
       if (this.cs1fFilterOutcome) p.set('outcome',  this.cs1fFilterOutcome);
+      if (this.cs1fDateFrom)      p.set('date_from', this.cs1fDateFrom);
+      if (this.cs1fDateTo)        p.set('date_to',   this.cs1fDateTo);
       let rows = [], total = 0;
       try {
         const r = await fetch('/api/factor-analysis/corner-scan/1f?' + p);
         if (r.ok) { const d = await r.json(); rows = d.rows || []; total = d.total || 0; }
       } catch (_) {}
-      this._cs1fStoreSlot(meta, rows, total);
+      if (isWindowed) {
+        // Windowed results are ephemeral — don't cache in the mode slot.
+        this.cs1fMeta  = meta;
+        this.cs1fRows  = rows;
+        this.cs1fTotal = total;
+      } else {
+        this._cs1fStoreSlot(meta, rows, total);
+      }
       this.cs1fLoading = false;
     },
     cs1fSort(key) {

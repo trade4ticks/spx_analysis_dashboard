@@ -7285,6 +7285,438 @@ _CS_1F_SORT_WHITELIST: frozenset = frozenset({
     "q_avg_ret", "q_ret_per_day", "q_n",
 })
 
+# ── Corner scan live computation constants (mirror scripts/corner_scan.py) ────
+# These are used by the date-filtered live recompute path in /corner-scan/2f
+# and /corner-scan/1f.  Values must stay in sync with the offline script.
+
+_CS_FWDRET: list = [
+    "ret_1d_fwd_oc", "ret_3d_fwd_oc",  "ret_5d_fwd_oc",
+    "ret_7d_fwd_oc", "ret_10d_fwd_oc", "ret_20d_fwd_oc",
+    "ret_1d_fwd_cc", "ret_3d_fwd_cc",  "ret_5d_fwd_cc",
+    "ret_7d_fwd_cc", "ret_10d_fwd_cc", "ret_20d_fwd_cc",
+]
+_CS_OUTCOMES  = _CS_FWDRET + ["overnight_gap"]
+_CS_O         = len(_CS_OUTCOMES)   # 13
+_CS_CC_OUTC   = frozenset(
+    o for o in _CS_OUTCOMES if o.endswith("_cc") or o == "overnight_gap"
+)
+_CS_HOLD_DAYS: dict = {
+    "ret_1d_fwd_oc":  1,  "ret_3d_fwd_oc":  3,  "ret_5d_fwd_oc":  5,
+    "ret_7d_fwd_oc":  7,  "ret_10d_fwd_oc": 10, "ret_20d_fwd_oc": 20,
+    "ret_1d_fwd_cc":  1,  "ret_3d_fwd_cc":  3,  "ret_5d_fwd_cc":  5,
+    "ret_7d_fwd_cc":  7,  "ret_10d_fwd_cc": 10, "ret_20d_fwd_cc": 20,
+    "overnight_gap":  None,
+}
+
+
+def _py_sort(rows: list, sk: str, direction: str) -> None:
+    """Sort rows in-place, matching SQL DESC=NULLS LAST / ASC=NULLS FIRST."""
+    desc   = direction == "desc"
+    sample = next((r.get(sk) for r in rows if r.get(sk) is not None), None)
+    if isinstance(sample, str):
+        # For strings: "" < any non-empty string.
+        # reverse=True (desc): non-empty sorted Z→A, "" last  ✓
+        # reverse=False (asc): "" first, then A→Z             ✓
+        rows.sort(key=lambda r: r.get(sk) or "", reverse=desc)
+    else:
+        _NEG_INF = float("-inf")
+        rows.sort(
+            key=lambda r: _NEG_INF if r.get(sk) is None else r[sk],
+            reverse=desc,
+        )
+
+
+async def _cs_live_load(conn, mode: str, date_from: str, date_to: str):
+    """Load stored bins + outcomes for a windowed corner-scan recompute.
+
+    Reads bin assignments from wf_bins (mode='walk_forward') or is_bins
+    (mode='in_sample') — same source as the offline job, guaranteeing
+    identical bin semantics for every (ticker, trade_date, metric) triple.
+
+    Parameters
+    ----------
+    conn        asyncpg connection (caller holds it for the lifetime of this call)
+    mode        'walk_forward' | 'in_sample'
+    date_from   '' or 'YYYY-MM-DD' — empty = no lower bound
+    date_to     '' or 'YYYY-MM-DD' — empty = no upper bound
+
+    Returns
+    -------
+    dict  with keys: eligible_metrics, morning_set, bins_d, bins_q,
+                     out_mat, vld_mat, ticker_slices, tickers_order, F, N
+    None  on any error (missing table, invalid dates, empty result, DB error)
+    """
+    from datetime import date as _date_cls
+
+    bin_table = "wf_bins" if mode == "walk_forward" else "is_bins"
+
+    # Phase 0: eligible metrics + tiers from metric_classification
+    try:
+        mc_rows = await conn.fetch(
+            "SELECT metric, tier FROM metric_classification"
+            " WHERE eligible_as_metric = true"
+        )
+    except Exception:
+        return None
+    eligible_by_name: dict = {r["metric"]: r["tier"] for r in mc_rows}
+    if not eligible_by_name:
+        return None
+
+    # Which bin20 columns exist in the stored bin table?
+    try:
+        bin_col_rows = await conn.fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = $1 AND table_schema = 'public'
+                 AND column_name LIKE 'bin20_%'""",
+            bin_table,
+        )
+    except Exception:
+        return None
+
+    available_bin20: set = {r["column_name"][6:] for r in bin_col_rows}  # strip "bin20_"
+    eligible_metrics: list = sorted(
+        m for m in eligible_by_name if m in available_bin20
+    )
+    F = len(eligible_metrics)
+    if F == 0:
+        return None
+
+    morning_set: frozenset = frozenset(
+        m for m in eligible_metrics if eligible_by_name[m] == "MORNING"
+    )
+
+    # Phase 1: JOIN stored bins with daily_features, apply date filter
+    bin_cols_sql = ", ".join(f'bt."bin20_{m}"' for m in eligible_metrics)
+    out_cols_sql = ", ".join(f'df."{o}"' for o in _CS_FWDRET)
+
+    params: list = []
+    date_conds: list = []
+    if date_from:
+        try:
+            params.append(_date_cls.fromisoformat(date_from))
+            date_conds.append(f"bt.trade_date >= ${len(params)}")
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            params.append(_date_cls.fromisoformat(date_to))
+            date_conds.append(f"bt.trade_date <= ${len(params)}")
+        except ValueError:
+            pass
+
+    where_extra = (" AND " + " AND ".join(date_conds)) if date_conds else ""
+
+    try:
+        db_rows = await conn.fetch(
+            f"""SELECT bt.ticker, bt.trade_date,
+                       {bin_cols_sql},
+                       df.spot_co, df.spot_pc,
+                       {out_cols_sql}
+                FROM {bin_table} bt
+                INNER JOIN daily_features df
+                    ON bt.ticker     = df.ticker
+                   AND bt.trade_date = df.trade_date
+                WHERE 1=1{where_extra}
+                ORDER BY bt.ticker, bt.trade_date""",
+            *params,
+            timeout=120,
+        )
+    except Exception:
+        return None
+
+    N = len(db_rows)
+    if N == 0:
+        return None
+
+    # Phase 2: Build numpy arrays from DB rows
+    raw_bin20 = np.zeros((N, F), dtype=np.int32)
+    out_mat   = np.full((N, _CS_O), np.nan, dtype=np.float64)
+    vld_mat   = np.zeros((N, _CS_O), dtype=bool)
+
+    for f_idx, feat in enumerate(eligible_metrics):
+        col = f"bin20_{feat}"
+        raw_bin20[:, f_idx] = np.fromiter(
+            (v if v is not None else 0 for v in (r[col] for r in db_rows)),
+            dtype=np.int32, count=N,
+        )
+
+    # Sentinel: bin20=0 → warmup / NaN / null-by-design → excluded from extremes
+    mask_valid = raw_bin20 > 0
+    bins_d = np.zeros((N, F), dtype=np.int32)
+    bins_q = np.zeros((N, F), dtype=np.int32)
+    b20v = raw_bin20[mask_valid]
+    bins_d[mask_valid] = ((b20v - 1) * 10) // 20 + 1   # → 1..10
+    bins_q[mask_valid] = ((b20v - 1) * 5)  // 20 + 1   # → 1..5
+    del raw_bin20
+
+    # Forward-return outcomes (12 columns)
+    for o_idx, o_name in enumerate(_CS_FWDRET):
+        col_arr = np.array(
+            [float(r[o_name]) if r[o_name] is not None else np.nan for r in db_rows],
+            dtype=np.float64,
+        )
+        out_mat[:, o_idx] = col_arr
+        vld_mat[:, o_idx] = ~np.isnan(col_arr)
+
+    # Overnight gap (col 12): O_T / C_{T-1} − 1
+    spot_co = np.array(
+        [float(r["spot_co"]) if r["spot_co"] is not None else np.nan for r in db_rows],
+        dtype=np.float64,
+    )
+    spot_pc = np.array(
+        [float(r["spot_pc"]) if r["spot_pc"] is not None else np.nan for r in db_rows],
+        dtype=np.float64,
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        gap = spot_co / spot_pc - 1.0
+    out_mat[:, 12] = gap
+    vld_mat[:, 12] = ~np.isnan(gap)
+
+    # Ticker slice map (rows are ORDER BY ticker, trade_date)
+    tickers_order: list = []
+    ticker_slices: dict = {}
+    prev_tkr   = None
+    prev_start = 0
+    for i, row in enumerate(db_rows):
+        tkr = row["ticker"]
+        if tkr != prev_tkr:
+            if prev_tkr is not None:
+                ticker_slices[prev_tkr] = (prev_start, i)
+            tickers_order.append(tkr)
+            prev_start = i
+            prev_tkr   = tkr
+    if prev_tkr is not None:
+        ticker_slices[prev_tkr] = (prev_start, N)
+
+    del db_rows
+
+    return {
+        "eligible_metrics": eligible_metrics,
+        "morning_set":      morning_set,
+        "bins_d":           bins_d,
+        "bins_q":           bins_q,
+        "out_mat":          out_mat,
+        "vld_mat":          vld_mat,
+        "ticker_slices":    ticker_slices,
+        "tickers_order":    tickers_order,
+        "F":                F,
+        "N":                N,
+    }
+
+
+def _cs_live_2f(
+    data: dict, *,
+    primary_metric_f:   "str | None" = None,
+    secondary_metric_f: "str | None" = None,
+    corner_direction_f: "str | None" = None,
+    outcome_f:          "str | None" = None,
+    min_d_n: int = 300,
+    sort_key: str = "d_ret_per_day",
+    sort_dir: str = "desc",
+    limit: int = 50,
+    offset: int = 0,
+) -> "tuple[list, int]":
+    """2-factor corner scan on pre-loaded arrays.
+
+    Faithfully replicates the Phase 6 algorithm in scripts/corner_scan.py —
+    same bin source, same matmul aggregation, same CC exclusion, same
+    holding-days division.  Only difference: operates on the date-windowed
+    slice of rows rather than the full corpus.
+
+    Returns (page_rows, total) where total is the count before pagination.
+    """
+    eligible_metrics = data["eligible_metrics"]
+    morning_set      = data["morning_set"]
+    bins_d           = data["bins_d"]
+    bins_q           = data["bins_q"]
+    out_mat          = data["out_mat"]
+    vld_mat          = data["vld_mat"]
+    ticker_slices    = data["ticker_slices"]
+    tickers_order    = data["tickers_order"]
+    F                = data["F"]
+
+    def _excl(p: str, s: str, outcome: str) -> bool:
+        return outcome in _CS_CC_OUTC and (p in morning_set or s in morning_set)
+
+    # If a P-filter is set, only iterate that one P — fast path for filtered queries
+    p_indices: list = (
+        [i for i, m in enumerate(eligible_metrics) if m == primary_metric_f]
+        if primary_metric_f else list(range(F))
+    )
+    s_indices_fixed: "list | None" = (
+        [i for i, m in enumerate(eligible_metrics) if m == secondary_metric_f]
+        if secondary_metric_f else None
+    )
+
+    rows: list = []
+
+    for p_idx in p_indices:
+        p_name = eligible_metrics[p_idx]
+
+        # Accumulators [p_edge, s_edge, S_metric_idx, outcome_idx]
+        d_sums = np.zeros((2, 2, F, _CS_O), dtype=np.float64)
+        d_cnts = np.zeros((2, 2, F, _CS_O), dtype=np.int32)
+        q_sums = np.zeros((2, 2, F, _CS_O), dtype=np.float64)
+        q_cnts = np.zeros((2, 2, F, _CS_O), dtype=np.int32)
+
+        for tkr in tickers_order:
+            s, e  = ticker_slices[tkr]
+            bd_t  = bins_d[s:e, :]
+            bq_t  = bins_q[s:e, :]
+            out_t = out_mat[s:e, :]
+            vld_t = vld_mat[s:e, :]
+
+            # Four P-edge configurations: D-low, D-high, Q-low, Q-high
+            pe_configs = [
+                (bd_t[:, p_idx],  1, bd_t, 10, d_sums, d_cnts, 0),
+                (bd_t[:, p_idx], 10, bd_t, 10, d_sums, d_cnts, 1),
+                (bq_t[:, p_idx],  1, bq_t,  5, q_sums, q_cnts, 0),
+                (bq_t[:, p_idx],  5, bq_t,  5, q_sums, q_cnts, 1),
+            ]
+
+            for (p_col, p_edge_val, S_bin_mat,
+                 n_bins_S, sums_ref, cnts_ref, p_ei) in pe_configs:
+                pe_rows = np.where(p_col == p_edge_val)[0]
+                n_pe    = len(pe_rows)
+                if n_pe < 2:
+                    continue
+                S_bins  = S_bin_mat[pe_rows, :]
+                out_pe  = out_t[pe_rows, :]
+                vld_pe  = vld_t[pe_rows, :]
+                out_cln = np.where(vld_pe, out_pe, 0.0)
+
+                S_low_f  = (S_bins == 1       ).astype(np.float64)
+                S_high_f = (S_bins == n_bins_S).astype(np.float64)
+                vld_f    = vld_pe.astype(np.float64)
+
+                # Vectorised aggregation: (F, n_pe) @ (n_pe, O) → (F, O)
+                sums_ref[p_ei, 0] += S_low_f.T  @ out_cln
+                cnts_ref[p_ei, 0] += (S_low_f.T  @ vld_f).astype(np.int32)
+                sums_ref[p_ei, 1] += S_high_f.T @ out_cln
+                cnts_ref[p_ei, 1] += (S_high_f.T @ vld_f).astype(np.int32)
+
+        # Emit rows for all (S, direction, outcome) combos for this P
+        s_indices = s_indices_fixed if s_indices_fixed is not None else list(range(F))
+        for s_idx in s_indices:
+            if s_idx == p_idx:
+                continue
+            s_name = eligible_metrics[s_idx]
+            for p_ei, p_lbl in ((0, "low"), (1, "high")):
+                for s_ej, s_lbl in ((0, "low"), (1, "high")):
+                    direction = f"{p_lbl}-{s_lbl}"
+                    if corner_direction_f and direction != corner_direction_f:
+                        continue
+                    for o_idx, o_name in enumerate(_CS_OUTCOMES):
+                        if outcome_f and o_name != outcome_f:
+                            continue
+                        if _excl(p_name, s_name, o_name):
+                            continue
+                        d_n = int(d_cnts[p_ei, s_ej, s_idx, o_idx])
+                        if d_n < min_d_n:
+                            continue
+                        q_n   = int(q_cnts[p_ei, s_ej, s_idx, o_idx])
+                        d_avg = (
+                            float(d_sums[p_ei, s_ej, s_idx, o_idx]) / d_n
+                            if d_n else None
+                        )
+                        q_avg = (
+                            float(q_sums[p_ei, s_ej, s_idx, o_idx]) / q_n
+                            if q_n else None
+                        )
+                        days = _CS_HOLD_DAYS[o_name]
+                        rows.append({
+                            "primary_metric":   p_name,
+                            "secondary_metric": s_name,
+                            "corner_direction": direction,
+                            "outcome":          o_name,
+                            "d_avg_ret":     d_avg,
+                            "d_ret_per_day": (d_avg / days
+                                              if d_avg is not None and days else None),
+                            "d_n":           d_n,
+                            "q_avg_ret":     q_avg,
+                            "q_ret_per_day": (q_avg / days
+                                              if q_avg is not None and days else None),
+                            "q_n":           q_n,
+                            "as_of":         None,
+                            "scanned_at":    None,
+                            "mode":          "windowed",
+                            "note":          "",
+                            "reviewed":      False,
+                            "saved":         False,
+                        })
+
+    total = len(rows)
+    _py_sort(rows, sort_key, sort_dir)
+    return rows[offset: offset + limit], total
+
+
+def _cs_live_1f(
+    data: dict, *,
+    metric_f:  "str | None" = None,
+    extreme_f: "str | None" = None,
+    outcome_f: "str | None" = None,
+    min_d_n: int = 300,
+    sort_key: str = "d_ret_per_day",
+    sort_dir: str = "desc",
+    limit: int = 50,
+    offset: int = 0,
+) -> "tuple[list, int]":
+    """1-factor extreme-bin scan on pre-loaded arrays.
+
+    Faithfully replicates Phase 5 of scripts/corner_scan.py.
+
+    Returns (page_rows, total) where total is the count before pagination.
+    """
+    eligible_metrics = data["eligible_metrics"]
+    bins_d           = data["bins_d"]
+    bins_q           = data["bins_q"]
+    out_mat          = data["out_mat"]
+
+    rows: list = []
+
+    for f_idx, m_name in enumerate(eligible_metrics):
+        if metric_f and m_name != metric_f:
+            continue
+        for extreme, d_edge, q_edge in (("low", 1, 1), ("high", 10, 5)):
+            if extreme_f and extreme != extreme_f:
+                continue
+            d_mask = bins_d[:, f_idx] == d_edge
+            q_mask = bins_q[:, f_idx] == q_edge
+            for o_idx, o_name in enumerate(_CS_OUTCOMES):
+                if outcome_f and o_name != outcome_f:
+                    continue
+                d_vals = out_mat[d_mask, o_idx]
+                d_vals = d_vals[~np.isnan(d_vals)]
+                d_n    = len(d_vals)
+                if d_n < min_d_n:
+                    continue
+                q_vals = out_mat[q_mask, o_idx]
+                q_vals = q_vals[~np.isnan(q_vals)]
+                q_n    = len(q_vals)
+                d_avg  = float(np.mean(d_vals)) if d_n else None
+                q_avg  = float(np.mean(q_vals)) if q_n else None
+                days   = _CS_HOLD_DAYS[o_name]
+                rows.append({
+                    "metric":        m_name,
+                    "extreme":       extreme,
+                    "outcome":       o_name,
+                    "d_avg_ret":     d_avg,
+                    "d_ret_per_day": (d_avg / days
+                                      if d_avg is not None and days else None),
+                    "d_n":           d_n,
+                    "q_avg_ret":     q_avg,
+                    "q_ret_per_day": (q_avg / days
+                                      if q_avg is not None and days else None),
+                    "q_n":           q_n,
+                    "as_of":         None,
+                    "scanned_at":    None,
+                    "mode":          "windowed",
+                })
+
+    total = len(rows)
+    _py_sort(rows, sort_key, sort_dir)
+    return rows[offset: offset + limit], total
+
 
 async def _ensure_corner_scan_tables(pool) -> None:
     global _corner_scan_tables_ensured
@@ -7396,6 +7828,8 @@ async def corner_scan_2f_endpoint(
     corner_direction: Optional[str] = Query(None),
     outcome:          Optional[str] = Query(None),
     mode:             str           = Query("walk_forward"),
+    date_from:        Optional[str] = Query(None),   # '' or 'YYYY-MM-DD' — windowed live recompute
+    date_to:          Optional[str] = Query(None),   # '' or 'YYYY-MM-DD'
     min_d_n:          int           = Query(300, ge=0),
     sort_key:         str           = Query("d_ret_per_day"),
     sort_dir:         str           = Query("desc"),
@@ -7425,6 +7859,38 @@ async def corner_scan_2f_endpoint(
 
     if sort_key not in _CS_2F_SORT_WHITELIST:
         sort_key = "d_ret_per_day"
+
+    # ── Live windowed path: date_from or date_to set → in-memory recompute ────
+    # Reads stored bins (wf_bins / is_bins) + daily_features for the date window,
+    # then runs the same Phase 6 matmul aggregation as the offline job.
+    # Results are NOT stored in corner_scan_2f — ephemeral, date-window-specific.
+    # min_d_n applies to the windowed observation count (d_n within the window).
+    if date_from or date_to:
+        async with pool.acquire() as conn:
+            data = await _cs_live_load(conn, mode, date_from or "", date_to or "")
+        if data is None:
+            return {"rows": [], "total": 0, "mode": mode,
+                    "status": "no_data", "windowed": True}
+        page_rows, total = _cs_live_2f(
+            data,
+            primary_metric_f   = primary_metric,
+            secondary_metric_f = secondary_metric,
+            corner_direction_f = corner_direction,
+            outcome_f          = outcome,
+            min_d_n  = min_d_n,
+            sort_key = sort_key,
+            sort_dir = sort_dir,
+            limit    = limit,
+            offset   = offset,
+        )
+        return {
+            "rows":     page_rows,
+            "total":    total,
+            "mode":     mode,
+            "status":   "ok" if total > 0 else "no_data",
+            "windowed": True,
+        }
+
     dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
     nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
 
@@ -7565,15 +8031,17 @@ async def upsert_corner_note(req: CornerNoteIn,
 
 @router.get("/corner-scan/1f")
 async def corner_scan_1f_endpoint(
-    metric:   Optional[str] = Query(None),
-    extreme:  Optional[str] = Query(None),
-    outcome:  Optional[str] = Query(None),
-    mode:     str           = Query("walk_forward"),
-    min_d_n:  int           = Query(300, ge=0),
-    sort_key: str           = Query("d_ret_per_day"),
-    sort_dir: str           = Query("desc"),
-    limit:    int           = Query(50, ge=1, le=2000),
-    offset:   int           = Query(0, ge=0),
+    metric:    Optional[str] = Query(None),
+    extreme:   Optional[str] = Query(None),
+    outcome:   Optional[str] = Query(None),
+    mode:      str           = Query("walk_forward"),
+    date_from: Optional[str] = Query(None),   # '' or 'YYYY-MM-DD' — windowed live recompute
+    date_to:   Optional[str] = Query(None),   # '' or 'YYYY-MM-DD'
+    min_d_n:   int           = Query(300, ge=0),
+    sort_key:  str           = Query("d_ret_per_day"),
+    sort_dir:  str           = Query("desc"),
+    limit:     int           = Query(50, ge=1, le=2000),
+    offset:    int           = Query(0, ge=0),
     pool=Depends(get_oi_pool),
 ):
     """Filtered + sorted 1-factor extreme-bin rows for a single binning mode.
@@ -7589,6 +8057,33 @@ async def corner_scan_1f_endpoint(
 
     if sort_key not in _CS_1F_SORT_WHITELIST:
         sort_key = "d_ret_per_day"
+
+    # ── Live windowed path: date_from or date_to set → in-memory recompute ────
+    if date_from or date_to:
+        async with pool.acquire() as conn:
+            data = await _cs_live_load(conn, mode, date_from or "", date_to or "")
+        if data is None:
+            return {"rows": [], "total": 0, "mode": mode,
+                    "status": "no_data", "windowed": True}
+        page_rows, total = _cs_live_1f(
+            data,
+            metric_f  = metric,
+            extreme_f = extreme,
+            outcome_f = outcome,
+            min_d_n   = min_d_n,
+            sort_key  = sort_key,
+            sort_dir  = sort_dir,
+            limit     = limit,
+            offset    = offset,
+        )
+        return {
+            "rows":     page_rows,
+            "total":    total,
+            "mode":     mode,
+            "status":   "ok" if total > 0 else "no_data",
+            "windowed": True,
+        }
+
     dir_sql   = "ASC"   if sort_dir == "asc" else "DESC"
     nulls_sql = "NULLS FIRST" if sort_dir == "asc" else "NULLS LAST"
 
