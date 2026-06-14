@@ -384,6 +384,13 @@ document.addEventListener('alpine:init', () => {
       this.$watch('analyzeBundle', (val) => {
         if (val) this._renderTradeTable();
       });
+      // Regime pane: recompute stats when zone-analyze re-runs with new data
+      this.$watch('zoneData', (val) => {
+        if (val && !val.error && this.rgZoneExpanded && this.rgZoneSpyData) {
+          this.rgZoneParityDone = false;
+          this._rgZoneRecompute();
+        }
+      });
       this.loadIcBatch();
       // Init-time breadcrumb metadata for the 4 panes that don't
       // auto-load on init (Corner Scan 2F/1F, All-Ticker Metric Bins,
@@ -3811,6 +3818,26 @@ document.addEventListener('alpine:init', () => {
       train_test:   null,
     },
 
+    // ── Regime Exploration — Zone pane ──────────────────────────────────────────
+    rgZoneExpanded:    false,
+    rgZoneLoading:     false,
+    rgZoneMetric:      '',
+    rgZoneWindow:      3,        // months; 1|2|3|6|12
+    rgZoneThreshold:   null,     // set to median on first spy-data load
+    rgAvailMetrics:    [],
+    rgAvailLoaded:     false,
+    rgZoneSpyData:     null,     // raw {dates, values, min_val, max_val}
+    rgZoneSpyDates_ms: [],       // parsed timestamps (ms)
+    rgZoneSpyVals:     [],       // metric value per date
+    rgZoneAboveStats:  null,     // {n, mean, median, std, p5, p95, win_rate, …}
+    rgZoneBelowStats:  null,
+    rgZoneRolling:     [],       // [{t, avg, n}] rolling avg-ret of zone trades
+    rgZoneShadedRanges:[],       // [{from, to}] ms for amber shading
+    rgZoneShadedPct:   '0.0',   // % of zone trades that fall in above-threshold dates
+    rgZoneParityResult:null,     // {rows:[{stat,js,py,delta_pct,ok}], pass}
+    rgZoneParityDone:  false,
+    rgZoneParityOpen:  false,
+
     surveyExpanded: false,
     selectedStats: null,
 
@@ -4357,6 +4384,264 @@ document.addEventListener('alpine:init', () => {
     cs1fGoToPage(n)  {
       const pg = Math.max(1, Math.min(this.cs1fTotalPages(), parseInt(n) || 1));
       if (pg !== this.cs1fPage) { this.cs1fPage = pg; this.loadCs1f(false); }
+    },
+
+    // ── Regime Exploration helpers ─────────────────────────────────────────────
+
+    /** Numpy-matching stats: median averages two middle values for even n;
+     *  P5/P95 use linear interpolation; std is population ddof=0. */
+    _rgComputeStats(vals) {
+      if (!vals || !vals.length) return null;
+      const n = vals.length;
+      const sorted = [...vals].sort((a, b) => a - b);
+      const mean = vals.reduce((s, v) => s + v, 0) / n;
+      const median = n % 2 === 1
+        ? sorted[(n - 1) / 2]
+        : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+      const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+      const std = Math.sqrt(variance);
+      const _q = p => {
+        const idx = (n - 1) * p / 100;
+        const lo = Math.floor(idx), hi = Math.ceil(idx);
+        return sorted[lo] + (idx - lo) * (sorted[hi] - sorted[lo]);
+      };
+      const p5 = _q(5), p95 = _q(95);
+      const n_winners = vals.filter(v => v > 0).length;
+      const win_rate = n_winners / n;
+      const winners = vals.filter(v => v > 0);
+      const losers  = vals.filter(v => v <= 0);
+      const avg_winners = winners.length ? winners.reduce((s, v) => s + v, 0) / winners.length : 0;
+      const avg_losers  = losers.length  ? losers.reduce((s, v)  => s + v, 0) / losers.length  : 0;
+      const sharpe = std > 0 ? mean / std : null;
+      return { n, mean, median, std, p5, p95, win_rate, n_winners, avg_winners, avg_losers, sharpe };
+    },
+
+    /** O(N) two-pointer rolling avg-ret over trade dates (lookback window). */
+    _rgRolling(tradeDates_ms, tradeRets, windowMonths) {
+      const W = windowMonths * (365.25 / 12) * 86400 * 1000;
+      const N = tradeDates_ms.length;
+      const result = [];
+      let lo = 0, sum = 0;
+      for (let hi = 0; hi < N; hi++) {
+        sum += tradeRets[hi];
+        while (tradeDates_ms[hi] - tradeDates_ms[lo] > W) { sum -= tradeRets[lo++]; }
+        result.push({ t: tradeDates_ms[hi], avg: sum / (hi - lo + 1), n: hi - lo + 1 });
+      }
+      return result;
+    },
+
+    /** Contiguous date intervals (in ms) where spyVals[i] > threshold. */
+    _rgShadedRanges(spyDates_ms, spyVals, threshold) {
+      const ranges = [];
+      let inRange = false, from = null;
+      for (let i = 0; i < spyDates_ms.length; i++) {
+        const above = spyVals[i] > threshold;
+        if (above && !inRange) { inRange = true; from = spyDates_ms[i]; }
+        else if (!above && inRange) { inRange = false; ranges.push({ from, to: spyDates_ms[i - 1] }); }
+      }
+      if (inRange) ranges.push({ from, to: spyDates_ms[spyDates_ms.length - 1] });
+      return ranges;
+    },
+
+    /** Load the list of metrics SPY actually has data for (once per session). */
+    async _rgLoadAvailMetrics() {
+      if (this.rgAvailLoaded) return;
+      try {
+        const r = await fetch('/api/factor-analysis/regime/spy-available-metrics');
+        const d = await r.json();
+        this.rgAvailMetrics = d.metrics || [];
+        if (!this.rgZoneMetric && this.rgAvailMetrics.length) this.rgZoneMetric = this.rgAvailMetrics[0];
+      } catch (e) { console.error('rgLoadAvail:', e); }
+      this.rgAvailLoaded = true;
+    },
+
+    toggleRgZone() {
+      this.rgZoneExpanded = !this.rgZoneExpanded;
+      if (this.rgZoneExpanded) {
+        this._rgLoadAvailMetrics().then(() => {
+          if (this.rgZoneMetric && !this.rgZoneSpyData) this.loadRgZoneSpyData();
+        });
+      }
+    },
+
+    async loadRgZoneSpyData() {
+      if (!this.rgZoneMetric) return;
+      this.rgZoneLoading = true;
+      this.rgZoneParityDone = false;
+      try {
+        const r = await fetch('/api/factor-analysis/regime/spy-metric?'
+          + new URLSearchParams({ metric: this.rgZoneMetric }));
+        const d = await r.json();
+        if (!d.metric_present) { this.rgZoneLoading = false; return; }
+        this.rgZoneSpyData     = d;
+        this.rgZoneSpyDates_ms = d.dates.map(s => new Date(s).getTime());
+        this.rgZoneSpyVals     = d.values;
+        // Set threshold to median of SPY values for this metric
+        const sv = [...d.values].sort((a, b) => a - b);
+        const sn = sv.length;
+        this.rgZoneThreshold = sn % 2 === 1 ? sv[(sn - 1) / 2] : (sv[sn / 2 - 1] + sv[sn / 2]) / 2;
+        this._rgZoneRecompute();
+      } catch (e) { console.error('rgSpyMetric:', e); }
+      this.rgZoneLoading = false;
+    },
+
+    /** Core recompute: split zone trades by threshold, rolling chart, shading. */
+    _rgZoneRecompute() {
+      if (!this.rgZoneSpyData || !this.zoneData?.combined_trades?.length) return;
+      const spyDates_ms = this.rgZoneSpyDates_ms;
+      const spyVals     = this.rgZoneSpyVals;
+      const threshold   = this.rgZoneThreshold ?? 0;
+
+      // Build SPY date → value lookup
+      const spyMap = new Map();
+      for (let i = 0; i < this.rgZoneSpyData.dates.length; i++) spyMap.set(this.rgZoneSpyData.dates[i], spyVals[i]);
+
+      // Sort zone trades by date
+      const trades = this.zoneData.combined_trades
+        .filter(t => t.trade_date != null && t.ret != null)
+        .sort((a, b) => a.trade_date < b.trade_date ? -1 : 1);
+
+      const tradeDates_ms = trades.map(t => new Date(t.trade_date).getTime());
+      const tradeRets     = trades.map(t => parseFloat(t.ret));
+
+      // Split above/below threshold using SPY metric on each trade date
+      const aboveRets = [], belowRets = [];
+      for (const t of trades) {
+        const v = spyMap.get(t.trade_date);
+        if (v == null) continue;
+        (v > threshold ? aboveRets : belowRets).push(parseFloat(t.ret));
+      }
+
+      this.rgZoneAboveStats = this._rgComputeStats(aboveRets);
+      this.rgZoneBelowStats = this._rgComputeStats(belowRets);
+      const classified = aboveRets.length + belowRets.length;
+      this.rgZoneShadedPct = classified > 0 ? (aboveRets.length / classified * 100).toFixed(1) : '0.0';
+
+      // Rolling avg-ret of ALL zone trades (x-axis = trade dates)
+      this.rgZoneRolling = this._rgRolling(tradeDates_ms, tradeRets, this.rgZoneWindow);
+
+      // Amber shading: contiguous SPY dates above threshold
+      this.rgZoneShadedRanges = this._rgShadedRanges(spyDates_ms, spyVals, threshold);
+
+      // Parity check — once per spy-metric load
+      if (!this.rgZoneParityDone) {
+        this._rgDoParityCheck(tradeRets);
+        this.rgZoneParityDone = true;
+      }
+
+      this.$nextTick(() => this._rgRenderZoneChart());
+    },
+
+    /** Compare JS stats for all zone trades against backend zoneData values. */
+    _rgDoParityCheck(allRets) {
+      const js = this._rgComputeStats(allRets);
+      if (!js) { this.rgZoneParityResult = null; return; }
+      const py = this.zoneData;
+      const defs = [
+        ['n',        js.n,        py.n,         false],
+        ['mean',     js.mean,     py.avg_ret,   true],
+        ['median',   js.median,   py.median,    true],
+        ['std',      js.std,      py.std,       true],
+        ['p5',       js.p5,       py.p5,        true],
+        ['p95',      js.p95,      py.p95,       true],
+        ['win_rate', js.win_rate, py.win_rate,  true],
+      ];
+      const rows = defs.map(([stat, jv, pv]) => {
+        const ref = Math.abs(pv);
+        const delta_pct = ref > 1e-12 ? Math.abs(jv - pv) / ref * 100 : (Math.abs(jv - pv) < 1e-12 ? 0 : 999);
+        return { stat, js: jv, py: pv, delta_pct, ok: delta_pct < 0.01 };
+      });
+      this.rgZoneParityResult = { rows, pass: rows.every(r => r.ok) };
+    },
+
+    /** Render (or recreate) the rolling avg-ret chart with amber shading. */
+    _rgRenderZoneChart() {
+      const self = this;
+      const el   = document.getElementById('rgZoneChart');
+      if (!el) return;
+      const existing = Chart.getChart(el);
+      if (existing) existing.destroy();
+
+      const rolling = this.rgZoneRolling;
+      if (!rolling.length) return;
+
+      // Plugin: draw amber rectangles for above-threshold intervals
+      const shadingPlugin = {
+        id: 'rgShading',
+        beforeDatasetsDraw(chart) {
+          const ranges = self.rgZoneShadedRanges;
+          if (!ranges || !ranges.length) return;
+          const { ctx, chartArea, scales } = chart;
+          if (!chartArea || !scales.x) return;
+          ctx.save();
+          ctx.fillStyle = 'rgba(253,203,110,0.18)';
+          for (const { from, to } of ranges) {
+            const x0 = scales.x.getPixelForValue(from);
+            const x1 = scales.x.getPixelForValue(to);
+            if (x0 > chartArea.right || x1 < chartArea.left) continue;
+            ctx.fillRect(
+              Math.max(x0, chartArea.left), chartArea.top,
+              Math.min(x1, chartArea.right) - Math.max(x0, chartArea.left),
+              chartArea.height
+            );
+          }
+          ctx.restore();
+        },
+      };
+
+      new Chart(el, {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              label: 'Rolling Avg Ret',
+              data: rolling.map(p => ({ x: p.t, y: +(p.avg * 100).toFixed(4) })),
+              borderColor: '#0984e3', backgroundColor: 'transparent',
+              borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
+            },
+            {
+              label: 'Rolling N',
+              data: rolling.map(p => ({ x: p.t, y: p.n })),
+              borderColor: '#636e72', backgroundColor: 'transparent',
+              borderWidth: 1, pointRadius: 0, yAxisID: 'y2',
+              borderDash: [3, 3],
+            },
+          ],
+        },
+        plugins: [shadingPlugin],
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false,
+          scales: {
+            x: {
+              type: 'time', time: { unit: 'month' },
+              grid: { color: 'rgba(255,255,255,0.05)' },
+              ticks: { color: '#888', maxTicksLimit: 8, maxRotation: 0 },
+            },
+            y: {
+              position: 'left',
+              grid: { color: 'rgba(255,255,255,0.05)' },
+              ticks: { color: '#0984e3', callback: v => v.toFixed(2) + '%' },
+              title: { display: true, text: 'Avg Ret (%)', color: '#0984e3', font: { size: 9 } },
+            },
+            y2: {
+              position: 'right',
+              grid: { drawOnChartArea: false },
+              ticks: { color: '#636e72' },
+              title: { display: true, text: 'N', color: '#636e72', font: { size: 9 } },
+            },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => ctx.datasetIndex === 0
+                  ? `Avg Ret: ${ctx.parsed.y.toFixed(3)}%`
+                  : `N: ${ctx.parsed.y}`,
+              },
+            },
+          },
+        },
+      });
     },
 
     async runBatchScore() {
