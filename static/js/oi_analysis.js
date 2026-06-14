@@ -4417,15 +4417,38 @@ document.addEventListener('alpine:init', () => {
     },
 
     /** O(N) two-pointer rolling avg-ret over trade dates (lookback window). */
-    _rgRolling(tradeDates_ms, tradeRets, windowMonths) {
+    /** Rolling avg-ret by calendar day.
+     *  Multiple trades on the same calendar day collapse to ONE x-axis point,
+     *  but every individual trade return is counted in the rolling mean so that
+     *  N = total trades (not calendar days) in the window.
+     *  Output: [{t: epochMs, avg: meanRet, n: tradeCnt}] — one per unique day.
+     */
+    _rgRollingDays(trades, windowMonths) {
+      // Group by ISO date string → accumulate sum and count per day
+      const dayMap = new Map();  // date_str → { ms, sum, count }
+      for (const t of trades) {
+        const ds = t.trade_date;
+        const ms = new Date(ds).getTime();
+        const e  = dayMap.get(ds);
+        if (e) { e.sum += parseFloat(t.ret); e.count++; }
+        else   { dayMap.set(ds, { ms, sum: parseFloat(t.ret), count: 1 }); }
+      }
+      // Chronological array of day buckets
+      const days = Array.from(dayMap.values()).sort((a, b) => a.ms - b.ms);
+
       const W = windowMonths * (365.25 / 12) * 86400 * 1000;
-      const N = tradeDates_ms.length;
+      const N = days.length;
       const result = [];
-      let lo = 0, sum = 0;
+      let lo = 0, winSum = 0, winCount = 0;
       for (let hi = 0; hi < N; hi++) {
-        sum += tradeRets[hi];
-        while (tradeDates_ms[hi] - tradeDates_ms[lo] > W) { sum -= tradeRets[lo++]; }
-        result.push({ t: tradeDates_ms[hi], avg: sum / (hi - lo + 1), n: hi - lo + 1 });
+        winSum   += days[hi].sum;
+        winCount += days[hi].count;
+        while (days[hi].ms - days[lo].ms > W) {
+          winSum   -= days[lo].sum;
+          winCount -= days[lo].count;
+          lo++;
+        }
+        result.push({ t: days[hi].ms, avg: winSum / winCount, n: winCount });
       }
       return result;
     },
@@ -4517,8 +4540,8 @@ document.addEventListener('alpine:init', () => {
       const classified = aboveRets.length + belowRets.length;
       this.rgZoneShadedPct = classified > 0 ? (aboveRets.length / classified * 100).toFixed(1) : '0.0';
 
-      // Rolling avg-ret of ALL zone trades (x-axis = trade dates)
-      this.rgZoneRolling = this._rgRolling(tradeDates_ms, tradeRets, this.rgZoneWindow);
+      // Rolling avg-ret of ALL zone trades (one x-axis node per calendar day)
+      this.rgZoneRolling = this._rgRollingDays(trades, this.rgZoneWindow);
 
       // Amber shading: contiguous SPY dates above threshold
       this.rgZoneShadedRanges = this._rgShadedRanges(spyDates_ms, spyVals, threshold);
@@ -4557,44 +4580,32 @@ document.addEventListener('alpine:init', () => {
       this.rgZoneParityResult = { rows, pass: rows.every(r => r.ok) };
     },
 
-    /** Render (or recreate) the rolling avg-ret chart with amber shading.
+    /** Render (or recreate) the rolling avg-ret chart with calendar x-axis.
      *
-     *  IMPORTANT: Chart.js 4 type:'time' requires a registered date adapter
-     *  (chartjs-adapter-date-fns etc.) which this page does NOT load.  All
-     *  existing charts in this codebase use category scales with label arrays.
-     *  We match that pattern: x-axis = YYYY-MM-DD string labels (category),
-     *  and the shading plugin maps SPY ms-timestamp ranges to category indices.
+     *  Uses type:'linear' with epoch-ms data ({x, y} objects, parsing:false) —
+     *  the same pattern as the equity-curve chart.  No date adapter required.
+     *  Shading ranges from _rgShadedRanges() map directly to ms values via
+     *  scales.x.getPixelForValue(ms) — no category-index lookup needed.
      */
     _rgRenderZoneChart() {
       const self = this;
       const el   = document.getElementById('rgZoneChart');
-
-      // ── Diagnostic logs (visible in browser console) ──────────────────────
-      if (!el) {
-        console.warn('[rgChart] canvas #rgZoneChart not found — template not rendered yet?');
-        return;
-      }
-      const _par = el.parentElement;
-      console.log('[rgChart] canvas parent BCR:',
-        _par ? `${_par.getBoundingClientRect().width.toFixed(0)}w × ${_par.getBoundingClientRect().height.toFixed(0)}h` : 'no parent');
-      console.log('[rgChart] canvas offsetW/H:', el.offsetWidth, el.offsetHeight);
-      // ── End diagnostics ───────────────────────────────────────────────────
+      if (!el) { console.warn('[rgChart] canvas #rgZoneChart not found'); return; }
 
       const existing = Chart.getChart(el);
       if (existing) existing.destroy();
 
       const rolling = this.rgZoneRolling;
-      console.log('[rgChart] rolling length:', rolling.length,
-        rolling.length ? `first={t:${rolling[0].t}, avg:${rolling[0].avg?.toFixed(4)}, n:${rolling[0].n}}` : '');
-      if (!rolling.length) { console.warn('[rgChart] empty rolling series — no chart'); return; }
+      if (!rolling.length) { console.warn('[rgChart] empty rolling series'); return; }
 
-      // Category-scale labels: YYYY-MM-DD strings, one per trade date in the series
-      const labels  = rolling.map(p => new Date(p.t).toISOString().slice(0, 10));
-      const labelTs = rolling.map(p => p.t);  // ms timestamps, parallel to labels[]
+      // Pre-parsed {x: epochMs, y: value} — no label array, parsing:false
+      const retData = rolling.map(p => ({ x: p.t, y: +(p.avg * 100).toFixed(4) }));
+      const nData   = rolling.map(p => ({ x: p.t, y: p.n }));
+      const xMin    = rolling[0].t;
+      const xMax    = rolling[rolling.length - 1].t;
 
-      // Plugin: shade contiguous above-threshold intervals using category indices.
-      // For each SPY range [from_ms, to_ms], find the first and last rolling
-      // point that falls inside the range and shade between their pixel positions.
+      // Plugin: shade contiguous above-threshold SPY intervals.
+      // On a linear scale getPixelForValue(ms) works directly.
       const shadingPlugin = {
         id: 'rgShading',
         beforeDatasetsDraw(chart) {
@@ -4605,15 +4616,11 @@ document.addEventListener('alpine:init', () => {
           ctx.save();
           ctx.fillStyle = 'rgba(160,160,160,0.15)';
           for (const { from, to } of ranges) {
-            let fi = -1, li = -1;
-            for (let i = 0; i < labelTs.length; i++) {
-              if (fi < 0 && labelTs[i] >= from) fi = i;
-              if (labelTs[i] <= to) li = i;
-            }
-            if (fi < 0 || li < 0 || fi > li) continue;
-            // getPixelForValue(i) on a CategoryScale takes the numeric index
-            const x0 = scales.x.getPixelForValue(fi);
-            const x1 = scales.x.getPixelForValue(li);
+            const f  = Math.max(from, xMin);
+            const t  = Math.min(to,   xMax);
+            if (f > t) continue;
+            const x0 = scales.x.getPixelForValue(f);
+            const x1 = scales.x.getPixelForValue(t);
             const lx = Math.max(Math.min(x0, x1), chartArea.left);
             const rx = Math.min(Math.max(x0, x1), chartArea.right);
             if (lx >= rx) continue;
@@ -4627,17 +4634,16 @@ document.addEventListener('alpine:init', () => {
         new Chart(el, {
           type: 'line',
           data: {
-            labels,   // category x-axis — no date adapter needed
             datasets: [
               {
                 label: 'Rolling Avg Ret',
-                data: rolling.map(p => +(p.avg * 100).toFixed(4)),
+                data: retData,
                 borderColor: '#0984e3', backgroundColor: 'transparent',
                 borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
               },
               {
                 label: 'Rolling N',
-                data: rolling.map(p => p.n),
+                data: nData,
                 borderColor: '#636e72', backgroundColor: 'transparent',
                 borderWidth: 1, pointRadius: 0, yAxisID: 'y2',
                 borderDash: [3, 3],
@@ -4647,14 +4653,15 @@ document.addEventListener('alpine:init', () => {
           plugins: [shadingPlugin],
           options: {
             animation: false, responsive: true, maintainAspectRatio: false,
+            parsing: false,   // data already in {x,y} form — skip Chart.js parsing
             scales: {
               x: {
-                // Default category scale — matches all other charts on this page
+                type: 'linear',
+                min: xMin, max: xMax,
                 grid: { color: 'rgba(255,255,255,0.05)' },
                 ticks: {
                   color: '#888', maxTicksLimit: 8, maxRotation: 0,
-                  // Show only YYYY-MM for readability (full label is YYYY-MM-DD)
-                  callback: (val, idx) => labels[idx]?.slice(0, 7) ?? '',
+                  callback: val => new Date(val).toISOString().slice(0, 7),
                 },
               },
               y: {
@@ -4674,7 +4681,7 @@ document.addEventListener('alpine:init', () => {
               legend: { display: false },
               tooltip: {
                 callbacks: {
-                  title: items => labels[items[0]?.dataIndex] ?? '',
+                  title: items => new Date(items[0]?.parsed?.x ?? 0).toISOString().slice(0, 10),
                   label: ctx => ctx.datasetIndex === 0
                     ? `Avg Ret: ${ctx.parsed.y.toFixed(3)}%`
                     : `N: ${ctx.parsed.y}`,
@@ -4683,8 +4690,6 @@ document.addEventListener('alpine:init', () => {
             },
           },
         });
-        console.log('[rgChart] Chart created OK — datasets:',
-          rolling.length, 'points, shading ranges:', self.rgZoneShadedRanges.length);
       } catch (err) {
         console.error('[rgChart] Chart.js creation FAILED:', err);
       }
