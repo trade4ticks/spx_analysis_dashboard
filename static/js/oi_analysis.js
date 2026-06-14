@@ -8353,7 +8353,7 @@ document.addEventListener('alpine:init', () => {
     _renderLcBars(data) {
       const canvas = document.getElementById('chart-lc-bars');
       if (!canvas) return;
-      if (this._lcBarsChart) { this._lcBarsChart.destroy(); this._lcBarsChart = null; }
+      if (this._charts['lc-bars']) { this._charts['lc-bars'].destroy(); delete this._charts['lc-bars']; }
 
       const N  = Math.max(1, Math.min(50, this.lcNWorstWeeks));
       const ww = (data.worst_weeks || []).slice(0, N);
@@ -8400,7 +8400,7 @@ document.addEventListener('alpine:init', () => {
         order: -1,
       });
 
-      this._lcBarsChart = new Chart(canvas, {
+      this._charts['lc-bars'] = new Chart(canvas, {
         type: 'bar',
         data: { labels, datasets },
         options: {
@@ -8408,7 +8408,7 @@ document.addEventListener('alpine:init', () => {
           maintainAspectRatio: false,
           plugins: {
             legend: {
-              labels: { color: 'var(--text)', font: { size: 11 }, boxWidth: 12 },
+              labels: { color: '#aaa', font: { size: 11 }, boxWidth: 12 },
             },
             tooltip: {
               callbacks: {
@@ -8424,14 +8424,14 @@ document.addEventListener('alpine:init', () => {
             x: {
               stacked: true,
               ticks: {
-                color: 'var(--dim)', font: { size: 10 }, maxRotation: 45,
+                color: '#888', font: { size: 10 }, maxRotation: 45,
               },
               grid: { color: 'rgba(128,128,128,0.1)' },
             },
             y: {
               stacked: true,
               ticks: {
-                color: 'var(--dim)',
+                color: '#888',
                 callback: v => '$' + Math.round(v).toLocaleString(),
               },
               grid: { color: 'rgba(128,128,128,0.15)' },
