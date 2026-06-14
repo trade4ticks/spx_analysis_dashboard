@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=219"></script>
+  <script src="/static/js/oi_analysis.js?v=220"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3516,10 +3516,14 @@
                   </div>
 
                   <!-- ── Regime Exploration ─────────────────────────────────── -->
+                  <!-- BUG-NOTE: x-show on this outer div intentionally has NO
+                       inline display style. Alpine's x-show toggles display:none /
+                       display:'' which restores the element's natural block flow.
+                       The flex layout lives one level deeper, never touched by x-show. -->
                   <div x-show="zoneData && !zoneData.error"
                        style="border:1px solid var(--border);border-radius:6px;margin-top:12px;overflow:hidden">
 
-                    <!-- Header row -->
+                    <!-- Header row (always rendered when pane is visible) -->
                     <div @click="toggleRgZone()"
                          style="display:flex;align-items:center;gap:8px;padding:8px 12px;
                                 cursor:pointer;background:rgba(255,255,255,.03);user-select:none">
@@ -3528,31 +3532,46 @@
                       <span style="font-size:12px;font-weight:600">Regime Exploration</span>
                       <span style="font-size:11px;color:var(--dim)">SPY metric vs zone trade performance</span>
 
-                      <!-- Controls (only when expanded) -->
+                      <!-- Controls visible when expanded — threshold slider included here -->
                       <template x-if="rgZoneExpanded">
-                        <div style="display:flex;align-items:center;gap:8px;margin-left:auto" @click.stop>
+                        <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:nowrap" @click.stop>
                           <!-- Metric dropdown -->
                           <span style="font-size:11px;color:var(--dim)">Metric:</span>
                           <select x-model="rgZoneMetric"
                                   @change="rgZoneThreshold=null; rgZoneSpyData=null; loadRgZoneSpyData()"
                                   style="background:var(--bg-surface);border:1px solid var(--border);
-                                         border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px;max-width:220px">
+                                         border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px;max-width:200px">
                             <template x-for="m in rgAvailMetrics" :key="'rgm-'+m">
                               <option :value="m" x-text="m"></option>
                             </template>
                           </select>
                           <!-- Window selector -->
-                          <span style="font-size:11px;color:var(--dim)">Window:</span>
+                          <span style="font-size:11px;color:var(--dim)">Win:</span>
                           <select x-model.number="rgZoneWindow"
                                   @change="_rgZoneRecompute()"
                                   style="background:var(--bg-surface);border:1px solid var(--border);
                                          border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px">
-                            <option value="1">1 mo</option>
-                            <option value="2">2 mo</option>
-                            <option value="3">3 mo</option>
-                            <option value="6">6 mo</option>
-                            <option value="12">12 mo</option>
+                            <option value="1">1mo</option>
+                            <option value="2">2mo</option>
+                            <option value="3">3mo</option>
+                            <option value="6">6mo</option>
+                            <option value="12">12mo</option>
                           </select>
+                          <!-- Threshold slider (inline in header) -->
+                          <span style="font-size:11px;color:var(--dim);border-left:1px solid var(--border);
+                                       padding-left:8px;margin-left:2px">Thr:</span>
+                          <input type="range"
+                                 x-model.number="rgZoneThreshold"
+                                 :min="rgZoneSpyData?.min_val ?? 0"
+                                 :max="rgZoneSpyData?.max_val ?? 1"
+                                 step="any"
+                                 @input="_rgZoneRecompute()"
+                                 :disabled="!rgZoneSpyData"
+                                 style="width:110px;accent-color:#fdcb6e;cursor:pointer">
+                          <span x-text="rgZoneThreshold != null ? rgZoneThreshold.toFixed(4) : '—'"
+                                style="font-size:11px;color:#fdcb6e;min-width:58px"></span>
+                          <span style="font-size:11px;color:var(--dim);white-space:nowrap"
+                                x-text="'(' + rgZoneShadedPct + '% above)'"></span>
                         </div>
                       </template>
                     </div>
@@ -3561,167 +3580,162 @@
                     <template x-if="rgZoneExpanded">
                       <div style="padding:10px 12px">
 
-                        <!-- Loading -->
-                        <div x-show="rgZoneLoading" style="font-size:12px;color:var(--dim);padding:6px 0">
+                        <!-- Loading state -->
+                        <div x-show="rgZoneLoading"
+                             style="font-size:12px;color:var(--dim);padding:6px 0">
                           Loading SPY regime data…
                         </div>
 
-                        <!-- No metric data available -->
+                        <!-- No metrics found -->
                         <div x-show="!rgZoneLoading && rgAvailLoaded && !rgAvailMetrics.length"
                              style="font-size:12px;color:var(--dim);padding:6px 0">
                           No eligible SPY metrics found.
                         </div>
 
-                        <!-- Main layout: chart 75% + stat panels 25% -->
-                        <div x-show="!rgZoneLoading && rgZoneSpyData"
-                             style="display:flex;gap:14px;align-items:flex-start">
+                        <!-- Main content wrapper: x-show on a neutral block div so
+                             Alpine never touches the inner display:flex container. -->
+                        <div x-show="!rgZoneLoading && !!rgZoneSpyData">
 
-                          <!-- LEFT: threshold slider + rolling chart -->
-                          <div style="flex:3;min-width:0">
-                            <!-- Threshold slider row -->
-                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                              <span style="font-size:11px;color:var(--dim);white-space:nowrap">Threshold:</span>
-                              <input type="range"
-                                     x-model.number="rgZoneThreshold"
-                                     :min="rgZoneSpyData?.min_val ?? 0"
-                                     :max="rgZoneSpyData?.max_val ?? 1"
-                                     step="any"
-                                     @input="_rgZoneRecompute()"
-                                     style="flex:1;accent-color:#fdcb6e">
-                              <span x-text="rgZoneThreshold != null ? rgZoneThreshold.toFixed(4) : '—'"
-                                    style="font-size:11px;color:#fdcb6e;min-width:64px;text-align:right"></span>
-                              <span style="font-size:11px;color:var(--dim);white-space:nowrap"
-                                    x-text="rgZoneShadedPct + '% of trades above'"></span>
-                            </div>
+                          <!-- Flex layout: chart 75% left, stat panels 25% right.
+                               NO x-show here — the parent wrapper controls visibility. -->
+                          <div style="display:flex;gap:14px;align-items:flex-start">
 
-                            <!-- Rolling avg-ret chart -->
-                            <div style="height:220px;position:relative">
-                              <canvas id="rgZoneChart"></canvas>
-                            </div>
+                            <!-- LEFT: rolling chart (flex:3 ≈ 75%) -->
+                            <div style="flex:3;min-width:0">
+                              <!-- chart-canvas matches the established CSS pattern
+                                   (.chart-canvas { height:240px; position:relative })
+                                   so Chart.js always finds a measurable container. -->
+                              <div class="chart-canvas" style="height:220px">
+                                <canvas id="rgZoneChart"></canvas>
+                              </div>
+                              <!-- Legend -->
+                              <div style="display:flex;gap:14px;margin-top:5px;font-size:10px;color:var(--dim)">
+                                <span style="display:flex;align-items:center;gap:4px">
+                                  <span style="display:inline-block;width:18px;height:2px;
+                                               background:#0984e3;vertical-align:middle"></span>
+                                  Rolling avg ret (<span x-text="rgZoneWindow"></span>mo lookback)
+                                </span>
+                                <span style="display:flex;align-items:center;gap:4px">
+                                  <span style="display:inline-block;width:18px;height:0;
+                                               border-top:2px dashed #636e72;vertical-align:middle"></span>
+                                  Rolling N
+                                </span>
+                                <span style="display:flex;align-items:center;gap:4px">
+                                  <span style="display:inline-block;width:14px;height:10px;
+                                               background:rgba(253,203,110,.28);vertical-align:middle"></span>
+                                  SPY above threshold
+                                </span>
+                              </div>
+                            </div><!-- end LEFT -->
 
-                            <!-- Chart legend -->
-                            <div style="display:flex;gap:14px;margin-top:5px;font-size:10px;color:var(--dim)">
-                              <span style="display:flex;align-items:center;gap:4px">
-                                <span style="display:inline-block;width:18px;height:2px;background:#0984e3;vertical-align:middle"></span>
-                                Rolling avg ret (<span x-text="rgZoneWindow+'mo'"></span> lookback)
-                              </span>
-                              <span style="display:flex;align-items:center;gap:4px">
-                                <span style="display:inline-block;width:18px;height:0;border-top:2px dashed #636e72;vertical-align:middle"></span>
-                                Rolling N
-                              </span>
-                              <span style="display:flex;align-items:center;gap:4px">
-                                <span style="display:inline-block;width:14px;height:10px;background:rgba(253,203,110,.28);vertical-align:middle"></span>
-                                SPY metric above threshold
-                              </span>
-                            </div>
-                          </div><!-- end LEFT -->
+                            <!-- RIGHT: stat panels (flex:1 ≈ 25%) -->
+                            <div style="flex:1;min-width:148px;display:flex;flex-direction:column;gap:8px">
 
-                          <!-- RIGHT: stat panels -->
-                          <div style="flex:1;min-width:148px;display:flex;flex-direction:column;gap:8px">
+                              <!-- ABOVE threshold (amber) -->
+                              <div style="border:1px solid rgba(253,203,110,.4);border-radius:4px;
+                                          padding:6px 8px;background:rgba(253,203,110,.06)">
+                                <div style="font-size:10px;color:#fdcb6e;font-weight:600;margin-bottom:5px;
+                                            letter-spacing:.04em">ABOVE THRESHOLD</div>
+                                <template x-if="rgZoneAboveStats">
+                                  <div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">N</span>
+                                      <span class="stat-value" x-text="(rgZoneAboveStats.n||0).toLocaleString()"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Avg Ret</span>
+                                      <span :class="rgZoneAboveStats.mean>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneAboveStats.mean*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Median</span>
+                                      <span :class="rgZoneAboveStats.median>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneAboveStats.median*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Std Dev</span>
+                                      <span class="stat-value" x-text="(rgZoneAboveStats.std*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">P5</span>
+                                      <span :class="rgZoneAboveStats.p5>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneAboveStats.p5*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">P95</span>
+                                      <span :class="rgZoneAboveStats.p95>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneAboveStats.p95*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Win %</span>
+                                      <span :class="rgZoneAboveStats.win_rate>=0.5?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneAboveStats.win_rate*100).toFixed(1)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Sharpe</span>
+                                      <span :class="(rgZoneAboveStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="rgZoneAboveStats.sharpe!=null?rgZoneAboveStats.sharpe.toFixed(3):'—'"></span>
+                                    </div>
+                                  </div>
+                                </template>
+                                <div x-show="!rgZoneAboveStats"
+                                     style="font-size:11px;color:var(--dim);padding:2px 0">No trades</div>
+                              </div>
 
-                            <!-- ABOVE threshold (amber) -->
-                            <div style="border:1px solid rgba(253,203,110,.4);border-radius:4px;
-                                        padding:6px 8px;background:rgba(253,203,110,.06)">
-                              <div style="font-size:10px;color:#fdcb6e;font-weight:600;margin-bottom:5px;
-                                          letter-spacing:.04em">ABOVE THRESHOLD</div>
-                              <template x-if="rgZoneAboveStats">
-                                <div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">N</span>
-                                    <span class="stat-value" x-text="(rgZoneAboveStats.n||0).toLocaleString()"></span>
+                              <!-- BELOW threshold (neutral) -->
+                              <div style="border:1px solid var(--border);border-radius:4px;padding:6px 8px">
+                                <div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:5px;
+                                            letter-spacing:.04em">BELOW THRESHOLD</div>
+                                <template x-if="rgZoneBelowStats">
+                                  <div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">N</span>
+                                      <span class="stat-value" x-text="(rgZoneBelowStats.n||0).toLocaleString()"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Avg Ret</span>
+                                      <span :class="rgZoneBelowStats.mean>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneBelowStats.mean*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Median</span>
+                                      <span :class="rgZoneBelowStats.median>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneBelowStats.median*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Std Dev</span>
+                                      <span class="stat-value" x-text="(rgZoneBelowStats.std*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">P5</span>
+                                      <span :class="rgZoneBelowStats.p5>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneBelowStats.p5*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">P95</span>
+                                      <span :class="rgZoneBelowStats.p95>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneBelowStats.p95*100).toFixed(3)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Win %</span>
+                                      <span :class="rgZoneBelowStats.win_rate>=0.5?'stat-value pos':'stat-value neg'"
+                                            x-text="(rgZoneBelowStats.win_rate*100).toFixed(1)+'%'"></span>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
+                                      <span class="stat-label">Sharpe</span>
+                                      <span :class="(rgZoneBelowStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'"
+                                            x-text="rgZoneBelowStats.sharpe!=null?rgZoneBelowStats.sharpe.toFixed(3):'—'"></span>
+                                    </div>
                                   </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Avg Ret</span>
-                                    <span :class="rgZoneAboveStats.mean>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneAboveStats.mean*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Median</span>
-                                    <span :class="rgZoneAboveStats.median>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneAboveStats.median*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Std Dev</span>
-                                    <span class="stat-value" x-text="(rgZoneAboveStats.std*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">P5</span>
-                                    <span :class="rgZoneAboveStats.p5>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneAboveStats.p5*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">P95</span>
-                                    <span :class="rgZoneAboveStats.p95>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneAboveStats.p95*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Win %</span>
-                                    <span :class="rgZoneAboveStats.win_rate>=0.5?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneAboveStats.win_rate*100).toFixed(1)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Sharpe</span>
-                                    <span :class="(rgZoneAboveStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="rgZoneAboveStats.sharpe!=null?(rgZoneAboveStats.sharpe).toFixed(3):'—'"></span>
-                                  </div>
-                                </div>
-                              </template>
-                              <div x-show="!rgZoneAboveStats"
-                                   style="font-size:11px;color:var(--dim);padding:2px 0">No trades</div>
-                            </div>
+                                </template>
+                                <div x-show="!rgZoneBelowStats"
+                                     style="font-size:11px;color:var(--dim);padding:2px 0">No trades</div>
+                              </div>
 
-                            <!-- BELOW threshold (neutral) -->
-                            <div style="border:1px solid var(--border);border-radius:4px;padding:6px 8px">
-                              <div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:5px;
-                                          letter-spacing:.04em">BELOW THRESHOLD</div>
-                              <template x-if="rgZoneBelowStats">
-                                <div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">N</span>
-                                    <span class="stat-value" x-text="(rgZoneBelowStats.n||0).toLocaleString()"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Avg Ret</span>
-                                    <span :class="rgZoneBelowStats.mean>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneBelowStats.mean*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Median</span>
-                                    <span :class="rgZoneBelowStats.median>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneBelowStats.median*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Std Dev</span>
-                                    <span class="stat-value" x-text="(rgZoneBelowStats.std*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">P5</span>
-                                    <span :class="rgZoneBelowStats.p5>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneBelowStats.p5*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">P95</span>
-                                    <span :class="rgZoneBelowStats.p95>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneBelowStats.p95*100).toFixed(3)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Win %</span>
-                                    <span :class="rgZoneBelowStats.win_rate>=0.5?'stat-value pos':'stat-value neg'"
-                                          x-text="(rgZoneBelowStats.win_rate*100).toFixed(1)+'%'"></span>
-                                  </div>
-                                  <div class="stat-item" style="display:flex;justify-content:space-between;font-size:11px;padding:1px 0">
-                                    <span class="stat-label">Sharpe</span>
-                                    <span :class="(rgZoneBelowStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'"
-                                          x-text="rgZoneBelowStats.sharpe!=null?(rgZoneBelowStats.sharpe).toFixed(3):'—'"></span>
-                                  </div>
-                                </div>
-                              </template>
-                              <div x-show="!rgZoneBelowStats"
-                                   style="font-size:11px;color:var(--dim);padding:2px 0">No trades</div>
-                            </div>
+                            </div><!-- end RIGHT -->
+                          </div><!-- end flex layout (no x-show) -->
 
-                          </div><!-- end RIGHT -->
-                        </div><!-- end main layout -->
+                        </div><!-- end neutral x-show wrapper -->
 
                         <!-- Parity check (collapsible, shown after first load) -->
                         <template x-if="rgZoneParityResult">

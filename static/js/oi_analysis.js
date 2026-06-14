@@ -4529,7 +4529,10 @@ document.addEventListener('alpine:init', () => {
         this.rgZoneParityDone = true;
       }
 
-      this.$nextTick(() => this._rgRenderZoneChart());
+      // Two-step defer: $nextTick lets Alpine flush DOM updates (x-show, x-if),
+      // then requestAnimationFrame ensures the browser has done a layout pass so
+      // Chart.js can measure the canvas container's real pixel height.
+      this.$nextTick(() => requestAnimationFrame(() => this._rgRenderZoneChart()));
     },
 
     /** Compare JS stats for all zone trades against backend zoneData values. */
