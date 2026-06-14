@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=216"></script>
+  <script src="/static/js/oi_analysis.js?v=217"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4276,10 +4276,9 @@
                       <tr>
                         <th style="padding:0"></th>
                         <template x-for="lab in portAggregate.system_labels" :key="'psh-'+lab">
-                          <th style="padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;
+                          <th style="padding:2px 6px;color:var(--dim);font-weight:400;white-space:nowrap;
                                      max-width:110px;overflow:hidden;text-overflow:ellipsis;
-                                     writing-mode:vertical-lr;transform:rotate(180deg);
-                                     height:80px;vertical-align:bottom;text-align:left;font-size:12px"
+                                     text-align:center;font-size:11px"
                               :title="lab" x-text="lab"></th>
                         </template>
                       </tr>
@@ -4379,16 +4378,15 @@
                     <span style="font-weight:normal;color:var(--dim)"
                           x-text="'(Spearman ρ on ' + lcData.corr_n_weeks + ' downside weeks)'"></span>
                   </div>
-                  <div style="overflow-x:auto;margin-bottom:18px">
+                  <div style="overflow:auto;padding:8px 4px;margin-bottom:10px">
                     <table style="border-collapse:separate;border-spacing:3px;font-size:12px;font-family:monospace">
                       <thead>
                         <tr>
                           <th style="padding:0"></th>
                           <template x-for="name in lcData.signal_names" :key="name">
-                            <th style="padding:2px 4px;color:var(--dim);font-weight:400;white-space:nowrap;
+                            <th style="padding:2px 6px;color:var(--dim);font-weight:400;white-space:nowrap;
                                        max-width:110px;overflow:hidden;text-overflow:ellipsis;
-                                       writing-mode:vertical-lr;transform:rotate(180deg);
-                                       height:80px;vertical-align:bottom;text-align:left;font-size:12px"
+                                       text-align:center;font-size:11px"
                                 :title="name"
                                 x-text="name"></th>
                           </template>
@@ -4406,7 +4404,7 @@
                                 :title="(lcData.signal_names || [])[rowObj.rowIdx]"
                                 x-text="(lcData.signal_names || [])[rowObj.rowIdx]"></td>
                             <template x-for="cell in rowObj.cells" :key="cell.colIdx">
-                              <td :style="corrCellStyle(cell.val, cell.isDiag)"
+                              <td :style="lcCorrCellStyle(cell.val, cell.isDiag)"
                                   :title="lcCorrCellTitle(rowObj.rowIdx, cell.colIdx, lcData)"
                                   x-text="cell.isDiag ? '—' : (cell.val != null ? cell.val.toFixed(2) : '—')"></td>
                             </template>

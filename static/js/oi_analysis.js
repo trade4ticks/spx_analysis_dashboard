@@ -8353,7 +8353,6 @@ document.addEventListener('alpine:init', () => {
     _renderLcBars(data) {
       const canvas = document.getElementById('chart-lc-bars');
       if (!canvas) return;
-      if (this._charts['lc-bars']) { this._charts['lc-bars'].destroy(); delete this._charts['lc-bars']; }
 
       const N  = Math.max(1, Math.min(50, this.lcNWorstWeeks));
       const ww = (data.worst_weeks || []).slice(0, N);
@@ -8400,6 +8399,19 @@ document.addEventListener('alpine:init', () => {
         order: -1,
       });
 
+      // Chart.getChart() retrieves the raw Chart.js instance from Chart.js's internal
+      // registry — bypasses Alpine's Proxy entirely so destroy/update call with correct
+      // `this`. Update-in-place (no destroy+recreate) avoids canvas-flash and is the
+      // correct approach for slider changes.
+      const existing = Chart.getChart(canvas);
+      if (existing) {
+        existing.data.labels   = labels;
+        existing.data.datasets = datasets;
+        existing.update('none');  // 'none' = instant, no animation
+        return;
+      }
+
+      // First render: create chart
       this._charts['lc-bars'] = new Chart(canvas, {
         type: 'bar',
         data: { labels, datasets },
@@ -8442,17 +8454,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     lcCorrCellStyle(val, isDiag) {
-      if (isDiag) return 'background:rgba(80,80,80,0.45);color:var(--dim);';
-      if (val === null || val === undefined) return 'color:var(--dim);';
-      const v = Math.abs(val);
-      const a = Math.min(v, 1) * 0.55;
-      if (val > 0) {
-        // Positive = co-movement (bad) → reddish
-        return `background:rgba(239,68,68,${a.toFixed(2)});color:${v > 0.55 ? '#fff' : 'var(--text)'};`;
-      } else {
-        // Negative = divergence (good diversifier) → greenish
-        return `background:rgba(34,197,94,${a.toFixed(2)});color:${v > 0.55 ? '#fff' : 'var(--text)'};`;
-      }
+      // Invert sign so semantics match: positive ρ = co-loss = BAD → pink;
+      // negative ρ = diversifying = GOOD → blue. corrCellStyle maps positive→blue,
+      // so negate val to flip. Diagonal handled by isDiag (dark gray, ignores val).
+      return this.corrCellStyle(val != null ? -val : 0, isDiag);
     },
 
     lcCorrCellTitle(i, j, data) {
