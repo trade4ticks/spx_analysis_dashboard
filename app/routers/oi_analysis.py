@@ -8564,6 +8564,177 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     }
 
 
+# ── Regime Exploration — SPY metric data for background shading ───────────────
+#
+# Two endpoints:
+#   /regime/spy-metric          — daily SPY values for one metric over a date range
+#   /regime/spy-available-metrics — which eligible metrics SPY actually has data for
+#                                  (used to grey out empty-state metrics in the dropdown)
+#
+# Design: the Regime Exploration pane keeps all threshold computation, rolling
+# window, and stat splits client-side so the slider and window selector respond
+# instantly without a round-trip.  These endpoints are one-time loads per pane
+# expand.
+
+
+@router.get("/regime/spy-metric")
+async def regime_spy_metric(
+    metric:    str           = Query(...),
+    date_from: Optional[str] = Query(None),   # '' or 'YYYY-MM-DD'
+    date_to:   Optional[str] = Query(None),   # '' or 'YYYY-MM-DD'
+    pool=Depends(get_oi_pool),
+):
+    """Daily SPY values for one regime metric over an optional date range.
+
+    Source: daily_features WHERE ticker = 'SPY'.  Rows where the metric column
+    is NULL are excluded (SPY may have missing values for some metrics).
+
+    Returns
+    -------
+    {
+        metric_present: bool,     // false = column missing or all-NULL for SPY
+        dates:   [str, ...],      // 'YYYY-MM-DD' — one per trading day with non-NULL value
+        values:  [float, ...],    // aligned with dates
+        min_val: float | null,
+        max_val: float | null,
+    }
+
+    metric_present=false is a normal "no data" state — the frontend shows a
+    placeholder message, not an error.  Missing column and all-NULL are treated
+    identically (the metric is unavailable as a regime lens for SPY).
+    """
+    if not pool:
+        return {"metric_present": False, "dates": [], "values": [],
+                "min_val": None, "max_val": None}
+
+    # Validate metric name: only lowercase letters, digits, underscore.
+    # Same safety check used in secondary-zone-analyze to prevent SQL injection.
+    _SAFE = frozenset("abcdefghijklmnopqrstuvwxyz_0123456789")
+    if not metric or not all(c in _SAFE for c in metric):
+        return {"error": "Invalid metric name"}
+
+    from datetime import date as _date
+
+    params: list = ["SPY"]
+    date_conds: list = []
+    if date_from:
+        try:
+            params.append(_date.fromisoformat(date_from))
+            date_conds.append(f"trade_date >= ${len(params)}")
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            params.append(_date.fromisoformat(date_to))
+            date_conds.append(f"trade_date <= ${len(params)}")
+        except ValueError:
+            pass
+
+    where_extra = (" AND " + " AND ".join(date_conds)) if date_conds else ""
+
+    _EMPTY = {"metric_present": False, "dates": [], "values": [],
+              "min_val": None, "max_val": None}
+
+    async with pool.acquire() as conn:
+        # Check the column exists in daily_features before attempting the query.
+        col_exists = await conn.fetchval(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM information_schema.columns"
+            "  WHERE table_name = 'daily_features' AND table_schema = 'public'"
+            "  AND column_name = $1"
+            ")",
+            metric,
+        )
+        if not col_exists:
+            return _EMPTY
+
+        try:
+            rows = await conn.fetch(
+                f"""SELECT trade_date, "{metric}" AS val
+                    FROM daily_features
+                    WHERE ticker = $1
+                      AND "{metric}" IS NOT NULL
+                      {where_extra}
+                    ORDER BY trade_date""",
+                *params,
+            )
+        except Exception:
+            return _EMPTY
+
+    if not rows:
+        return _EMPTY
+
+    dates  = [r["trade_date"].isoformat() for r in rows]
+    values = [float(r["val"]) for r in rows]
+
+    return {
+        "metric_present": True,
+        "dates":   dates,
+        "values":  values,
+        "min_val": min(values),
+        "max_val": max(values),
+    }
+
+
+@router.get("/regime/spy-available-metrics")
+async def regime_spy_available_metrics(pool=Depends(get_oi_pool)):
+    """Eligible metrics where SPY has at least one non-null value in daily_features.
+
+    Used by the regime dropdown to grey out metrics that would produce the
+    empty-state ("SPY has no data") immediately after selection.
+
+    Algorithm: single table scan over daily_features WHERE ticker='SPY' with
+    one CASE expression per eligible metric column.  ~1,300 SPY rows × ≤130
+    CASE expressions — fast (typically <100 ms).
+
+    Returns
+    -------
+    { "metrics": [str, ...] }   // sorted list of eligible metric names with SPY data
+    """
+    if not pool:
+        return {"metrics": []}
+
+    async with pool.acquire() as conn:
+        # Eligible metrics from metric_classification
+        try:
+            mc_rows = await conn.fetch(
+                "SELECT metric FROM metric_classification WHERE eligible_as_metric = true"
+            )
+        except Exception:
+            return {"metrics": []}
+
+        eligible = [r["metric"] for r in mc_rows]
+        if not eligible:
+            return {"metrics": []}
+
+        # Which of those actually exist as columns in daily_features?
+        col_rows = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name = 'daily_features' AND table_schema = 'public'"
+        )
+        df_cols   = {r["column_name"] for r in col_rows}
+        testable  = [m for m in eligible if m in df_cols]
+        if not testable:
+            return {"metrics": []}
+
+        # Single scan: one CASE per metric, aggregate with MAX so even a single
+        # non-null row marks the metric as present.
+        case_exprs = ", ".join(
+            f'MAX(CASE WHEN "{m}" IS NOT NULL THEN 1 ELSE 0 END) AS c_{i}'
+            for i, m in enumerate(testable)
+        )
+        try:
+            row = await conn.fetchrow(
+                f"SELECT {case_exprs} FROM daily_features WHERE ticker = 'SPY'"
+            )
+        except Exception:
+            return {"metrics": []}
+
+        available = [m for i, m in enumerate(testable) if row[f"c_{i}"] == 1]
+
+    return {"metrics": sorted(available)}
+
+
 # ── Signals CRUD ───────────────────────────────────────────────────────────────
 
 class SaveSignalRequest(BaseModel):
