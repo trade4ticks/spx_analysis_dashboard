@@ -384,11 +384,23 @@ document.addEventListener('alpine:init', () => {
       this.$watch('analyzeBundle', (val) => {
         if (val) this._renderTradeTable();
       });
-      // Regime pane: recompute stats when zone-analyze re-runs with new data
+      // Regime panes: recompute when source data refreshes (zone/recall/port)
       this.$watch('zoneData', (val) => {
         if (val && !val.error && this.rgZoneExpanded && this.rgZoneSpyData) {
           this.rgZoneParityDone = false;
-          this._rgZoneRecompute();
+          this._rgCompute('zone');
+        }
+      });
+      this.$watch('recallZoneData', (val) => {
+        if (val && !val.error && this.rgRecallExpanded && this.rgRecallSpyData) {
+          this.rgRecallParityDone = false;
+          this._rgCompute('recall');
+        }
+      });
+      this.$watch('portAggregate', (val) => {
+        if (val && !val.error && this.rgPortExpanded && this.rgPortSpyData) {
+          this.rgPortParityDone = false;
+          this._rgCompute('port');
         }
       });
       this.loadIcBatch();
@@ -3838,6 +3850,38 @@ document.addEventListener('alpine:init', () => {
     rgZoneParityDone:  false,
     rgZoneParityOpen:  false,
 
+    // ── Regime Exploration — Recall pane ─────────────────────────────────────────
+    rgRecallExpanded:    false,
+    rgRecallLoading:     false,
+    rgRecallMetric:      '',
+    rgRecallWindow:      3,
+    rgRecallThreshold:   null,
+    rgRecallSpyData:     null,
+    rgRecallSpyDates_ms: [],
+    rgRecallSpyVals:     [],
+    rgRecallAboveStats:  null,
+    rgRecallBelowStats:  null,
+    rgRecallRolling:     [],
+    rgRecallShadedRanges:[],
+    rgRecallShadedPct:   '0.0',
+    rgRecallParityDone:  false,
+
+    // ── Regime Exploration — Portfolio pane ──────────────────────────────────────
+    rgPortExpanded:    false,
+    rgPortLoading:     false,
+    rgPortMetric:      '',
+    rgPortWindow:      3,
+    rgPortThreshold:   null,
+    rgPortSpyData:     null,
+    rgPortSpyDates_ms: [],
+    rgPortSpyVals:     [],
+    rgPortAboveStats:  null,
+    rgPortBelowStats:  null,
+    rgPortRolling:     [],
+    rgPortShadedRanges:[],
+    rgPortShadedPct:   '0.0',
+    rgPortParityDone:  false,
+
     surveyExpanded: false,
     selectedStats: null,
 
@@ -4473,61 +4517,67 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/factor-analysis/regime/spy-available-metrics');
         const d = await r.json();
         this.rgAvailMetrics = d.metrics || [];
-        if (!this.rgZoneMetric && this.rgAvailMetrics.length) this.rgZoneMetric = this.rgAvailMetrics[0];
+        const first = this.rgAvailMetrics[0] ?? '';
+        if (!this.rgZoneMetric)   this.rgZoneMetric   = first;
+        if (!this.rgRecallMetric) this.rgRecallMetric = first;
+        if (!this.rgPortMetric)   this.rgPortMetric   = first;
       } catch (e) { console.error('rgLoadAvail:', e); }
       this.rgAvailLoaded = true;
     },
 
-    toggleRgZone() {
-      this.rgZoneExpanded = !this.rgZoneExpanded;
-      if (this.rgZoneExpanded) {
-        this._rgLoadAvailMetrics().then(() => {
-          if (this.rgZoneMetric && !this.rgZoneSpyData) this.loadRgZoneSpyData();
-        });
-      }
+    // ── Regime Exploration: generic helpers ──────────────────────────────────────
+    _rgCapKey(key) { return key[0].toUpperCase() + key.slice(1); },
+
+    _rgDataForKey(key) {
+      if (key === 'zone')   return this.zoneData;
+      if (key === 'recall') return this.recallZoneData;
+      if (key === 'port')   return this.portAggregate;
+      return null;
     },
 
-    async loadRgZoneSpyData() {
-      if (!this.rgZoneMetric) return;
-      this.rgZoneLoading = true;
-      this.rgZoneParityDone = false;
+    /** Fetch SPY metric data for any section key ('zone'|'recall'|'port'). */
+    async _rgLoadData(key) {
+      const K      = this._rgCapKey(key);
+      const metric = this['rg' + K + 'Metric'];
+      if (!metric) return;
+      this['rg' + K + 'Loading']    = true;
+      this['rg' + K + 'ParityDone'] = false;
       try {
         const r = await fetch('/api/factor-analysis/regime/spy-metric?'
-          + new URLSearchParams({ metric: this.rgZoneMetric }));
+          + new URLSearchParams({ metric }));
         const d = await r.json();
-        if (!d.metric_present) { this.rgZoneLoading = false; return; }
-        this.rgZoneSpyData     = d;
-        this.rgZoneSpyDates_ms = d.dates.map(s => new Date(s).getTime());
-        this.rgZoneSpyVals     = d.values;
-        // Set threshold to median of SPY values for this metric
+        if (!d.metric_present) { this['rg' + K + 'Loading'] = false; return; }
+        this['rg' + K + 'SpyData']     = d;
+        this['rg' + K + 'SpyDates_ms'] = d.dates.map(s => new Date(s).getTime());
+        this['rg' + K + 'SpyVals']     = d.values;
         const sv = [...d.values].sort((a, b) => a - b);
         const sn = sv.length;
-        this.rgZoneThreshold = sn % 2 === 1 ? sv[(sn - 1) / 2] : (sv[sn / 2 - 1] + sv[sn / 2]) / 2;
-        this._rgZoneRecompute();
-      } catch (e) { console.error('rgSpyMetric:', e); }
-      this.rgZoneLoading = false;
+        this['rg' + K + 'Threshold'] = sn % 2 === 1
+          ? sv[(sn - 1) / 2]
+          : (sv[sn / 2 - 1] + sv[sn / 2]) / 2;
+        this._rgCompute(key);
+      } catch (e) { console.error('rgLoadData[' + key + ']:', e); }
+      this['rg' + K + 'Loading'] = false;
     },
 
-    /** Core recompute: split zone trades by threshold, rolling chart, shading. */
-    _rgZoneRecompute() {
-      if (!this.rgZoneSpyData || !this.zoneData?.combined_trades?.length) return;
-      const spyDates_ms = this.rgZoneSpyDates_ms;
-      const spyVals     = this.rgZoneSpyVals;
-      const threshold   = this.rgZoneThreshold ?? 0;
+    /** Generic recompute: split trades by threshold, rolling, shading. */
+    _rgCompute(key) {
+      const K       = this._rgCapKey(key);
+      const spyData = this['rg' + K + 'SpyData'];
+      const data    = this._rgDataForKey(key);
+      if (!spyData || !data?.combined_trades?.length) return;
 
-      // Build SPY date → value lookup
+      const spyDates_ms = this['rg' + K + 'SpyDates_ms'];
+      const spyVals     = this['rg' + K + 'SpyVals'];
+      const threshold   = this['rg' + K + 'Threshold'] ?? 0;
+
       const spyMap = new Map();
-      for (let i = 0; i < this.rgZoneSpyData.dates.length; i++) spyMap.set(this.rgZoneSpyData.dates[i], spyVals[i]);
+      for (let i = 0; i < spyData.dates.length; i++) spyMap.set(spyData.dates[i], spyVals[i]);
 
-      // Sort zone trades by date
-      const trades = this.zoneData.combined_trades
+      const trades = data.combined_trades
         .filter(t => t.trade_date != null && t.ret != null)
         .sort((a, b) => a.trade_date < b.trade_date ? -1 : 1);
 
-      const tradeDates_ms = trades.map(t => new Date(t.trade_date).getTime());
-      const tradeRets     = trades.map(t => parseFloat(t.ret));
-
-      // Split above/below threshold using SPY metric on each trade date
       const aboveRets = [], belowRets = [];
       for (const t of trades) {
         const v = spyMap.get(t.trade_date);
@@ -4535,30 +4585,26 @@ document.addEventListener('alpine:init', () => {
         (v > threshold ? aboveRets : belowRets).push(parseFloat(t.ret));
       }
 
-      this.rgZoneAboveStats = this._rgComputeStats(aboveRets);
-      this.rgZoneBelowStats = this._rgComputeStats(belowRets);
+      this['rg' + K + 'AboveStats']   = this._rgComputeStats(aboveRets);
+      this['rg' + K + 'BelowStats']   = this._rgComputeStats(belowRets);
       const classified = aboveRets.length + belowRets.length;
-      this.rgZoneShadedPct = classified > 0 ? (aboveRets.length / classified * 100).toFixed(1) : '0.0';
+      this['rg' + K + 'ShadedPct']    = classified > 0
+        ? (aboveRets.length / classified * 100).toFixed(1) : '0.0';
+      this['rg' + K + 'Rolling']      = this._rgRollingDays(trades, this['rg' + K + 'Window']);
+      this['rg' + K + 'ShadedRanges'] = this._rgShadedRanges(spyDates_ms, spyVals, threshold);
 
-      // Rolling avg-ret of ALL zone trades (one x-axis node per calendar day)
-      this.rgZoneRolling = this._rgRollingDays(trades, this.rgZoneWindow);
-
-      // Amber shading: contiguous SPY dates above threshold
-      this.rgZoneShadedRanges = this._rgShadedRanges(spyDates_ms, spyVals, threshold);
-
-      // Parity check — once per spy-metric load
-      if (!this.rgZoneParityDone) {
-        this._rgDoParityCheck(tradeRets);
+      // Parity check — zone pane only (diagnostic; not surfaced for recall/port)
+      if (key === 'zone' && !this.rgZoneParityDone) {
+        this._rgDoParityCheck(trades.map(t => parseFloat(t.ret)));
         this.rgZoneParityDone = true;
+      } else {
+        this['rg' + K + 'ParityDone'] = true;
       }
 
-      // Two-step defer: $nextTick lets Alpine flush DOM updates (x-show, x-if),
-      // then requestAnimationFrame ensures the browser has done a layout pass so
-      // Chart.js can measure the canvas container's real pixel height.
-      this.$nextTick(() => requestAnimationFrame(() => this._rgRenderZoneChart()));
+      this.$nextTick(() => requestAnimationFrame(() => this._rgDraw(key)));
     },
 
-    /** Compare JS stats for all zone trades against backend zoneData values. */
+    /** Compare JS stats for zone trades against backend zoneData. Zone-only. */
     _rgDoParityCheck(allRets) {
       const js = this._rgComputeStats(allRets);
       if (!js) { this.rgZoneParityResult = null; return; }
@@ -4580,36 +4626,28 @@ document.addEventListener('alpine:init', () => {
       this.rgZoneParityResult = { rows, pass: rows.every(r => r.ok) };
     },
 
-    /** Render (or recreate) the rolling avg-ret chart with calendar x-axis.
-     *
-     *  Uses type:'linear' with epoch-ms data ({x, y} objects, parsing:false) —
-     *  the same pattern as the equity-curve chart.  No date adapter required.
-     *  Shading ranges from _rgShadedRanges() map directly to ms values via
-     *  scales.x.getPixelForValue(ms) — no category-index lookup needed.
-     */
-    _rgRenderZoneChart() {
-      const self = this;
-      const el   = document.getElementById('rgZoneChart');
-      if (!el) { console.warn('[rgChart] canvas #rgZoneChart not found'); return; }
+    /** Generic chart render — type:'linear' epoch-ms, same as equity-curve chart. */
+    _rgDraw(key) {
+      const K    = this._rgCapKey(key);
+      const el   = document.getElementById('rg' + K + 'Chart');
+      if (!el) { console.warn('[rgDraw] #rg' + K + 'Chart not found'); return; }
 
       const existing = Chart.getChart(el);
       if (existing) existing.destroy();
 
-      const rolling = this.rgZoneRolling;
-      if (!rolling.length) { console.warn('[rgChart] empty rolling series'); return; }
+      const rolling = this['rg' + K + 'Rolling'];
+      if (!rolling.length) { console.warn('[rgDraw] empty rolling [' + key + ']'); return; }
 
-      // Pre-parsed {x: epochMs, y: value} — no label array, parsing:false
       const retData = rolling.map(p => ({ x: p.t, y: +(p.avg * 100).toFixed(4) }));
       const nData   = rolling.map(p => ({ x: p.t, y: p.n }));
       const xMin    = rolling[0].t;
       const xMax    = rolling[rolling.length - 1].t;
+      const self    = this;
 
-      // Plugin: shade contiguous above-threshold SPY intervals.
-      // On a linear scale getPixelForValue(ms) works directly.
       const shadingPlugin = {
-        id: 'rgShading',
+        id: 'rgShading-' + key,
         beforeDatasetsDraw(chart) {
-          const ranges = self.rgZoneShadedRanges;
+          const ranges = self['rg' + K + 'ShadedRanges'];
           if (!ranges || !ranges.length) return;
           const { ctx, chartArea, scales } = chart;
           if (!chartArea || !scales.x) return;
@@ -4633,31 +4671,25 @@ document.addEventListener('alpine:init', () => {
       try {
         new Chart(el, {
           type: 'line',
-          data: {
-            datasets: [
-              {
-                label: 'Rolling Avg Ret',
-                data: retData,
-                borderColor: '#0984e3', backgroundColor: 'transparent',
-                borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
-              },
-              {
-                label: 'Rolling N',
-                data: nData,
-                borderColor: '#636e72', backgroundColor: 'transparent',
-                borderWidth: 1, pointRadius: 0, yAxisID: 'y2',
-                borderDash: [3, 3],
-              },
-            ],
-          },
+          data: { datasets: [
+            {
+              label: 'Rolling Avg Ret', data: retData,
+              borderColor: '#0984e3', backgroundColor: 'transparent',
+              borderWidth: 1.5, pointRadius: 0, yAxisID: 'y',
+            },
+            {
+              label: 'Rolling N', data: nData,
+              borderColor: '#636e72', backgroundColor: 'transparent',
+              borderWidth: 1, pointRadius: 0, yAxisID: 'y2', borderDash: [3, 3],
+            },
+          ]},
           plugins: [shadingPlugin],
           options: {
             animation: false, responsive: true, maintainAspectRatio: false,
-            parsing: false,   // data already in {x,y} form — skip Chart.js parsing
+            parsing: false,
             scales: {
               x: {
-                type: 'linear',
-                min: xMin, max: xMax,
+                type: 'linear', min: xMin, max: xMax,
                 grid: { color: 'rgba(255,255,255,0.05)' },
                 ticks: {
                   color: '#888', maxTicksLimit: 8, maxRotation: 0,
@@ -4691,9 +4723,46 @@ document.addEventListener('alpine:init', () => {
           },
         });
       } catch (err) {
-        console.error('[rgChart] Chart.js creation FAILED:', err);
+        console.error('[rgDraw] FAILED [' + key + ']:', err);
       }
     },
+
+    // ── Zone thin wrappers — HTML still calls these names ────────────────────────
+    toggleRgZone() {
+      this.rgZoneExpanded = !this.rgZoneExpanded;
+      if (this.rgZoneExpanded) {
+        this._rgLoadAvailMetrics().then(() => {
+          if (this.rgZoneMetric && !this.rgZoneSpyData) this._rgLoadData('zone');
+        });
+      }
+    },
+    async loadRgZoneSpyData() { await this._rgLoadData('zone'); },
+    _rgZoneRecompute()         { this._rgCompute('zone'); },
+    _rgRenderZoneChart()       { this._rgDraw('zone'); },
+
+    // ── Recall thin wrappers ─────────────────────────────────────────────────────
+    toggleRgRecall() {
+      this.rgRecallExpanded = !this.rgRecallExpanded;
+      if (this.rgRecallExpanded) {
+        this._rgLoadAvailMetrics().then(() => {
+          if (this.rgRecallMetric && !this.rgRecallSpyData) this._rgLoadData('recall');
+        });
+      }
+    },
+    async loadRgRecallSpyData() { await this._rgLoadData('recall'); },
+    _rgRecallRecompute()        { this._rgCompute('recall'); },
+
+    // ── Portfolio thin wrappers ──────────────────────────────────────────────────
+    toggleRgPort() {
+      this.rgPortExpanded = !this.rgPortExpanded;
+      if (this.rgPortExpanded) {
+        this._rgLoadAvailMetrics().then(() => {
+          if (this.rgPortMetric && !this.rgPortSpyData) this._rgLoadData('port');
+        });
+      }
+    },
+    async loadRgPortSpyData() { await this._rgLoadData('port'); },
+    _rgPortRecompute()        { this._rgCompute('port'); },
 
     async runBatchScore() {
       try {

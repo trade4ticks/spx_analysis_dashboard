@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=224"></script>
+  <script src="/static/js/oi_analysis.js?v=225"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4264,6 +4264,168 @@
             <span x-text="recallZoneData?.error"></span>
           </div>
 
+          <!-- ── Regime Exploration (Recall) ────────────────────────────── -->
+          <div x-show="recallZoneData && !recallZoneData.error"
+               style="border:1px solid var(--border);border-radius:6px;margin-top:4px;margin-bottom:12px;overflow:hidden">
+            <div @click="toggleRgRecall()"
+                 style="display:flex;align-items:center;gap:8px;padding:8px 12px;
+                        cursor:pointer;background:rgba(255,255,255,.03);user-select:none">
+              <span x-text="rgRecallExpanded ? '▾' : '▸'" style="font-size:10px;color:var(--dim)"></span>
+              <span style="font-size:12px;font-weight:600">Regime Exploration</span>
+              <span style="font-size:11px;color:var(--dim)">SPY metric vs recall trade performance</span>
+              <template x-if="rgRecallExpanded">
+                <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:nowrap" @click.stop>
+                  <span style="font-size:11px;color:var(--dim)">Metric:</span>
+                  <select x-model="rgRecallMetric"
+                          @change="rgRecallThreshold=null; rgRecallSpyData=null; loadRgRecallSpyData()"
+                          style="background:var(--raised);border:1px solid var(--border);color-scheme:dark;
+                                 border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px;max-width:200px">
+                    <template x-for="grp in groupMetricsByFamily(rgAvailMetrics)" :key="'rrg-'+grp.family_num">
+                      <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name"
+                                style="background:var(--raised);color:var(--dim)">
+                        <template x-for="m in grp.metrics" :key="'rrm-'+m">
+                          <option :value="m" x-text="m" style="background:var(--raised);color:var(--text)"></option>
+                        </template>
+                      </optgroup>
+                    </template>
+                  </select>
+                  <span style="font-size:11px;color:var(--dim)">Window:</span>
+                  <select x-model.number="rgRecallWindow" @change="_rgRecallRecompute()"
+                          style="background:var(--raised);border:1px solid var(--border);color-scheme:dark;
+                                 border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px">
+                    <option value="1"  style="background:var(--raised);color:var(--text)">1mo</option>
+                    <option value="2"  style="background:var(--raised);color:var(--text)">2mo</option>
+                    <option value="3"  style="background:var(--raised);color:var(--text)">3mo</option>
+                    <option value="6"  style="background:var(--raised);color:var(--text)">6mo</option>
+                    <option value="12" style="background:var(--raised);color:var(--text)">12mo</option>
+                  </select>
+                  <span style="font-size:11px;color:var(--dim);border-left:1px solid var(--border);
+                               padding-left:8px;margin-left:2px">Threshold:</span>
+                  <input type="range" x-model.number="rgRecallThreshold"
+                         :min="rgRecallSpyData?.min_val ?? 0" :max="rgRecallSpyData?.max_val ?? 1"
+                         step="any" @input="_rgRecallRecompute()" :disabled="!rgRecallSpyData"
+                         style="width:110px;accent-color:#aaa;cursor:pointer">
+                  <span x-text="rgRecallThreshold != null ? rgRecallThreshold.toFixed(4) : '—'"
+                        style="font-size:11px;color:var(--text);min-width:58px"></span>
+                  <span style="font-size:11px;color:var(--dim);white-space:nowrap"
+                        x-text="'(' + rgRecallShadedPct + '% above)'"></span>
+                </div>
+              </template>
+            </div>
+            <template x-if="rgRecallExpanded">
+              <div style="padding:10px 12px">
+                <div x-show="rgRecallLoading" style="font-size:12px;color:var(--dim);padding:6px 0">Loading SPY regime data…</div>
+                <div x-show="!rgRecallLoading && rgAvailLoaded && !rgAvailMetrics.length"
+                     style="font-size:12px;color:var(--dim);padding:6px 0">No eligible SPY metrics found.</div>
+                <div x-show="!rgRecallLoading && !!rgRecallSpyData">
+                  <div style="display:flex;gap:12px">
+                    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px">
+                      <div style="flex:1;position:relative;min-height:100px">
+                        <canvas id="rgRecallChart"></canvas>
+                      </div>
+                      <div style="display:flex;gap:14px;font-size:10px;color:var(--dim)">
+                        <span style="display:flex;align-items:center;gap:4px">
+                          <span style="display:inline-block;width:18px;height:2px;background:#0984e3;vertical-align:middle"></span>
+                          Rolling avg ret (<span x-text="rgRecallWindow"></span>mo)
+                        </span>
+                        <span style="display:flex;align-items:center;gap:4px">
+                          <span style="display:inline-block;width:18px;height:0;border-top:2px dashed #636e72;vertical-align:middle"></span>
+                          Rolling N
+                        </span>
+                        <span style="display:flex;align-items:center;gap:4px">
+                          <span style="display:inline-block;width:14px;height:10px;background:rgba(160,160,160,.22);vertical-align:middle"></span>
+                          Above threshold
+                        </span>
+                      </div>
+                    </div>
+                    <div style="flex:0 0 148px;display:flex;flex-direction:column;gap:6px">
+                      <div style="border:1px solid rgba(160,160,160,.3);border-radius:4px;padding:4px 6px;background:rgba(160,160,160,.05)">
+                        <div style="font-size:9px;color:#aaa;font-weight:600;margin-bottom:4px;letter-spacing:.04em">ABOVE THRESHOLD</div>
+                        <template x-if="rgRecallAboveStats">
+                          <div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">N</span>
+                              <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.n||0).toLocaleString()"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Avg Ret</span>
+                              <span :class="rgRecallAboveStats.mean>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.mean*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Median</span>
+                              <span :class="rgRecallAboveStats.median>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.median*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Std Dev</span>
+                              <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.std*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">P5</span>
+                              <span :class="rgRecallAboveStats.p5>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.p5*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">P95</span>
+                              <span :class="rgRecallAboveStats.p95>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.p95*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Win %</span>
+                              <span :class="rgRecallAboveStats.win_rate>=0.5?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallAboveStats.win_rate*100).toFixed(1)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Sharpe</span>
+                              <span :class="(rgRecallAboveStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="rgRecallAboveStats.sharpe!=null?rgRecallAboveStats.sharpe.toFixed(3):'—'"></span>
+                            </div>
+                          </div>
+                        </template>
+                        <div x-show="!rgRecallAboveStats" style="font-size:10px;color:var(--dim);padding:2px 0">No trades</div>
+                      </div>
+                      <div style="border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+                        <div style="font-size:9px;color:var(--dim);font-weight:600;margin-bottom:4px;letter-spacing:.04em">BELOW THRESHOLD</div>
+                        <template x-if="rgRecallBelowStats">
+                          <div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">N</span>
+                              <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.n||0).toLocaleString()"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Avg Ret</span>
+                              <span :class="rgRecallBelowStats.mean>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.mean*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Median</span>
+                              <span :class="rgRecallBelowStats.median>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.median*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Std Dev</span>
+                              <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.std*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">P5</span>
+                              <span :class="rgRecallBelowStats.p5>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.p5*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">P95</span>
+                              <span :class="rgRecallBelowStats.p95>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.p95*100).toFixed(3)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Win %</span>
+                              <span :class="rgRecallBelowStats.win_rate>=0.5?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgRecallBelowStats.win_rate*100).toFixed(1)+'%'"></span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                              <span class="stat-label">Sharpe</span>
+                              <span :class="(rgRecallBelowStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="rgRecallBelowStats.sharpe!=null?rgRecallBelowStats.sharpe.toFixed(3):'—'"></span>
+                            </div>
+                          </div>
+                        </template>
+                        <div x-show="!rgRecallBelowStats" style="font-size:10px;color:var(--dim);padding:2px 0">No trades</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div><!-- end Regime Exploration (Recall) -->
+
           <!-- Recall heatmap — bottom. Same markup as the main heatmap
                bound to recall* state. Skips the 1D quantile bar charts
                that flank the main heatmap (discovery widgets, not part
@@ -4575,6 +4737,167 @@
                 <div class="chart-canvas"><canvas id="chart-port-bubble"></canvas></div>
               </div>
             </div>
+
+            <!-- ── Regime Exploration (Portfolio) ───────────────────────── -->
+            <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:12px;overflow:hidden">
+              <div @click="toggleRgPort()"
+                   style="display:flex;align-items:center;gap:8px;padding:8px 12px;
+                          cursor:pointer;background:rgba(255,255,255,.03);user-select:none">
+                <span x-text="rgPortExpanded ? '▾' : '▸'" style="font-size:10px;color:var(--dim)"></span>
+                <span style="font-size:12px;font-weight:600">Regime Exploration</span>
+                <span style="font-size:11px;color:var(--dim)">SPY metric vs portfolio trade performance</span>
+                <template x-if="rgPortExpanded">
+                  <div style="display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:nowrap" @click.stop>
+                    <span style="font-size:11px;color:var(--dim)">Metric:</span>
+                    <select x-model="rgPortMetric"
+                            @change="rgPortThreshold=null; rgPortSpyData=null; loadRgPortSpyData()"
+                            style="background:var(--raised);border:1px solid var(--border);color-scheme:dark;
+                                   border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px;max-width:200px">
+                      <template x-for="grp in groupMetricsByFamily(rgAvailMetrics)" :key="'rpg-'+grp.family_num">
+                        <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name"
+                                  style="background:var(--raised);color:var(--dim)">
+                          <template x-for="m in grp.metrics" :key="'rpm-'+m">
+                            <option :value="m" x-text="m" style="background:var(--raised);color:var(--text)"></option>
+                          </template>
+                        </optgroup>
+                      </template>
+                    </select>
+                    <span style="font-size:11px;color:var(--dim)">Window:</span>
+                    <select x-model.number="rgPortWindow" @change="_rgPortRecompute()"
+                            style="background:var(--raised);border:1px solid var(--border);color-scheme:dark;
+                                   border-radius:4px;color:var(--text);font-size:11px;padding:2px 6px">
+                      <option value="1"  style="background:var(--raised);color:var(--text)">1mo</option>
+                      <option value="2"  style="background:var(--raised);color:var(--text)">2mo</option>
+                      <option value="3"  style="background:var(--raised);color:var(--text)">3mo</option>
+                      <option value="6"  style="background:var(--raised);color:var(--text)">6mo</option>
+                      <option value="12" style="background:var(--raised);color:var(--text)">12mo</option>
+                    </select>
+                    <span style="font-size:11px;color:var(--dim);border-left:1px solid var(--border);
+                                 padding-left:8px;margin-left:2px">Threshold:</span>
+                    <input type="range" x-model.number="rgPortThreshold"
+                           :min="rgPortSpyData?.min_val ?? 0" :max="rgPortSpyData?.max_val ?? 1"
+                           step="any" @input="_rgPortRecompute()" :disabled="!rgPortSpyData"
+                           style="width:110px;accent-color:#aaa;cursor:pointer">
+                    <span x-text="rgPortThreshold != null ? rgPortThreshold.toFixed(4) : '—'"
+                          style="font-size:11px;color:var(--text);min-width:58px"></span>
+                    <span style="font-size:11px;color:var(--dim);white-space:nowrap"
+                          x-text="'(' + rgPortShadedPct + '% above)'"></span>
+                  </div>
+                </template>
+              </div>
+              <template x-if="rgPortExpanded">
+                <div style="padding:10px 12px">
+                  <div x-show="rgPortLoading" style="font-size:12px;color:var(--dim);padding:6px 0">Loading SPY regime data…</div>
+                  <div x-show="!rgPortLoading && rgAvailLoaded && !rgAvailMetrics.length"
+                       style="font-size:12px;color:var(--dim);padding:6px 0">No eligible SPY metrics found.</div>
+                  <div x-show="!rgPortLoading && !!rgPortSpyData">
+                    <div style="display:flex;gap:12px">
+                      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px">
+                        <div style="flex:1;position:relative;min-height:100px">
+                          <canvas id="rgPortChart"></canvas>
+                        </div>
+                        <div style="display:flex;gap:14px;font-size:10px;color:var(--dim)">
+                          <span style="display:flex;align-items:center;gap:4px">
+                            <span style="display:inline-block;width:18px;height:2px;background:#0984e3;vertical-align:middle"></span>
+                            Rolling avg ret (<span x-text="rgPortWindow"></span>mo)
+                          </span>
+                          <span style="display:flex;align-items:center;gap:4px">
+                            <span style="display:inline-block;width:18px;height:0;border-top:2px dashed #636e72;vertical-align:middle"></span>
+                            Rolling N
+                          </span>
+                          <span style="display:flex;align-items:center;gap:4px">
+                            <span style="display:inline-block;width:14px;height:10px;background:rgba(160,160,160,.22);vertical-align:middle"></span>
+                            Above threshold
+                          </span>
+                        </div>
+                      </div>
+                      <div style="flex:0 0 148px;display:flex;flex-direction:column;gap:6px">
+                        <div style="border:1px solid rgba(160,160,160,.3);border-radius:4px;padding:4px 6px;background:rgba(160,160,160,.05)">
+                          <div style="font-size:9px;color:#aaa;font-weight:600;margin-bottom:4px;letter-spacing:.04em">ABOVE THRESHOLD</div>
+                          <template x-if="rgPortAboveStats">
+                            <div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">N</span>
+                                <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.n||0).toLocaleString()"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Avg Ret</span>
+                                <span :class="rgPortAboveStats.mean>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.mean*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Median</span>
+                                <span :class="rgPortAboveStats.median>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.median*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Std Dev</span>
+                                <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.std*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">P5</span>
+                                <span :class="rgPortAboveStats.p5>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.p5*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">P95</span>
+                                <span :class="rgPortAboveStats.p95>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.p95*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Win %</span>
+                                <span :class="rgPortAboveStats.win_rate>=0.5?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortAboveStats.win_rate*100).toFixed(1)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Sharpe</span>
+                                <span :class="(rgPortAboveStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="rgPortAboveStats.sharpe!=null?rgPortAboveStats.sharpe.toFixed(3):'—'"></span>
+                              </div>
+                            </div>
+                          </template>
+                          <div x-show="!rgPortAboveStats" style="font-size:10px;color:var(--dim);padding:2px 0">No trades</div>
+                        </div>
+                        <div style="border:1px solid var(--border);border-radius:4px;padding:4px 6px">
+                          <div style="font-size:9px;color:var(--dim);font-weight:600;margin-bottom:4px;letter-spacing:.04em">BELOW THRESHOLD</div>
+                          <template x-if="rgPortBelowStats">
+                            <div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">N</span>
+                                <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.n||0).toLocaleString()"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Avg Ret</span>
+                                <span :class="rgPortBelowStats.mean>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.mean*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Median</span>
+                                <span :class="rgPortBelowStats.median>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.median*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Std Dev</span>
+                                <span class="stat-value" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.std*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">P5</span>
+                                <span :class="rgPortBelowStats.p5>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.p5*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">P95</span>
+                                <span :class="rgPortBelowStats.p95>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.p95*100).toFixed(3)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Win %</span>
+                                <span :class="rgPortBelowStats.win_rate>=0.5?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="(rgPortBelowStats.win_rate*100).toFixed(1)+'%'"></span>
+                              </div>
+                              <div style="display:flex;justify-content:space-between;font-size:10px;padding:1px 0">
+                                <span class="stat-label">Sharpe</span>
+                                <span :class="(rgPortBelowStats.sharpe??0)>=0?'stat-value pos':'stat-value neg'" style="font-size:10px;font-weight:600" x-text="rgPortBelowStats.sharpe!=null?rgPortBelowStats.sharpe.toFixed(3):'—'"></span>
+                              </div>
+                            </div>
+                          </template>
+                          <div x-show="!rgPortBelowStats" style="font-size:10px;color:var(--dim);padding:2px 0">No trades</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div><!-- end Regime Exploration (Portfolio) -->
 
             <!-- Signal × Signal phi heatmap -->
             <div class="chart-box" style="margin-bottom:12px">
