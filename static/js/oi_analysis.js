@@ -4603,7 +4603,7 @@ document.addEventListener('alpine:init', () => {
           const { ctx, chartArea, scales } = chart;
           if (!chartArea || !scales.x) return;
           ctx.save();
-          ctx.fillStyle = 'rgba(253,203,110,0.18)';
+          ctx.fillStyle = 'rgba(160,160,160,0.15)';
           for (const { from, to } of ranges) {
             let fi = -1, li = -1;
             for (let i = 0; i < labelTs.length; i++) {
