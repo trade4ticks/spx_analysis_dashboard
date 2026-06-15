@@ -3882,6 +3882,14 @@ document.addEventListener('alpine:init', () => {
     rgPortShadedPct:   '0.0',
     rgPortParityDone:  false,
 
+    // ── Portfolio Lab ─────────────────────────────────────────────────────────
+    labExpanded:       false,
+    labLoading:        false,
+    labCandidates:     [],      // full array from /portfolio-lab/candidates
+    labError:          null,
+    labLoaded:         false,   // true after first successful fetch
+    labLoadPortfolioId: '',     // "load from portfolio" select value
+
     surveyExpanded: false,
     selectedStats: null,
 
@@ -10302,6 +10310,81 @@ document.addEventListener('alpine:init', () => {
       // is gated on ALL mode. loadIcDecomp returns immediately for
       // non-ALL tickers regardless.
       if (this.ticker === 'ALL') this.loadIcDecomp(name);
+    },
+
+    // ── Portfolio Lab — Stage 1 ───────────────────────────────────────────────
+
+    toggleLab() {
+      this.labExpanded = !this.labExpanded;
+      if (this.labExpanded && !this.labLoaded) this.loadLabCandidates();
+    },
+
+    async loadLabCandidates() {
+      this.labLoading = true;
+      this.labError   = null;
+      try {
+        const r = await fetch('/api/factor-analysis/portfolio-lab/candidates');
+        const d = await r.json();
+        if (d.error) { this.labError = d.error; this.labCandidates = []; }
+        else         { this.labCandidates = d.candidates || []; this.labLoaded = true; }
+      } catch (e) {
+        this.labError = 'Network error: ' + e.message;
+        this.labCandidates = [];
+      } finally {
+        this.labLoading = false;
+      }
+    },
+
+    // Group candidates into OI signals first, then non-OI by family.
+    // Within each group sort by agg_avg_ret descending.
+    labGroupedCandidates() {
+      const oi    = this.labCandidates.filter(c => c.is_oi_signal)
+                      .sort((a,b) => (b.agg_avg_ret||0) - (a.agg_avg_ret||0));
+      const nonOi = this.labCandidates.filter(c => !c.is_oi_signal)
+                      .sort((a,b) => (b.agg_avg_ret||0) - (a.agg_avg_ret||0));
+      const groups = [];
+      if (oi.length)    groups.push({ label: 'OI-Driver Signals', candidates: oi });
+      if (nonOi.length) groups.push({ label: 'Other Signals',     candidates: nonOi });
+      return groups;
+    },
+
+    // Card size: proportional to n trades; clamp to [56, 110] px.
+    labCardSize(n) {
+      const lo = 56, hi = 110;
+      const ns = this.labCandidates.map(c => c.agg_n || 0);
+      const maxN = Math.max(...ns, 1);
+      return Math.round(lo + (hi - lo) * Math.min(n / maxN, 1));
+    },
+
+    // Card border color: blue positive, pink negative, grey zero.
+    labCardColor(avgRet) {
+      if (avgRet == null) return '#555';
+      if (avgRet >  0.0002) return '#2980b9';
+      if (avgRet < -0.0002) return '#c0392b';
+      return '#555';
+    },
+
+    // Card background tint for avg ret magnitude.
+    labCardBg(avgRet) {
+      if (avgRet == null) return 'transparent';
+      if (avgRet >  0.0002) return 'rgba(41,128,185,.10)';
+      if (avgRet < -0.0002) return 'rgba(192,57,43,.10)';
+      return 'transparent';
+    },
+
+    // Tooltip text shown on card hover.
+    labCardTooltip(c) {
+      const ret = c.agg_avg_ret != null
+        ? (c.agg_avg_ret * 100).toFixed(3) + '%'
+        : '—';
+      return [
+        c.name,
+        `P: ${c.primary_metric}`,
+        `S: ${c.secondary_metric}`,
+        `Outcome: ${c.outcome}`,
+        `IS trades: ${(c.agg_n || 0).toLocaleString()}`,
+        `IS avg ret: ${ret}`,
+      ].join('\n');
     },
   }));
 });

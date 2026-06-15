@@ -1118,3 +1118,153 @@ async def portfolio_loss_analysis(
         "worst_weeks":   worst_weeks,
         "n_weeks":       len(all_weeks),
     }
+
+
+# ── Portfolio Lab ─────────────────────────────────────────────────────────────
+
+
+@router.get("/portfolio-lab/candidates")
+async def portfolio_lab_candidates(
+    oi_pool = Depends(get_oi_pool),
+):
+    """Return all saved signals with metadata + IS trade arrays for Portfolio Lab.
+
+    Each candidate includes:
+      - Signal metadata (id, name, primary_metric, secondary_metric, outcome,
+        n_bins, cell_set, agg_n, agg_avg_ret)
+      - Metric family classification (family_num, family_name for both metrics)
+      - is_oi_signal flag: true when primary OR secondary metric is in family 3, 4, or 5
+      - trades array: [{ticker, trade_date, spot_entry, ret}] — all IS trades,
+        no date/ticker filter (full history)
+
+    The client uses this data for the card tray (Stage 1) and later for
+    _computeDollarSeries-based parity checking (Stage 2).
+    """
+    if not oi_pool:
+        return {"error": "OI database not configured"}
+
+    async with oi_pool.acquire() as conn:
+        # ── Load all signals with family classification ────────────────────────
+        sig_rows = await conn.fetch(
+            """
+            SELECT s.id, s.name,
+                   s.primary_metric, s.secondary_metric,
+                   s.outcome, s.n_bins, s.cell_set,
+                   s.agg_n, s.agg_avg_ret,
+                   COALESCE(mc_p.family_num,  0)  AS p_family_num,
+                   COALESCE(mc_p.family_name, '') AS p_family_name,
+                   COALESCE(mc_s.family_num,  0)  AS s_family_num,
+                   COALESCE(mc_s.family_name, '') AS s_family_name
+            FROM signals s
+            LEFT JOIN metric_classification mc_p
+                   ON mc_p.metric = s.primary_metric
+            LEFT JOIN metric_classification mc_s
+                   ON mc_s.metric = s.secondary_metric
+            ORDER BY s.id
+            """
+        )
+
+    candidates = []
+    for row in sig_rows:
+        sig = dict(row)
+        p_fam = sig["p_family_num"]
+        s_fam = sig["s_family_num"]
+        is_oi = (p_fam in (3, 4, 5)) or (s_fam in (3, 4, 5))
+        sig["is_oi_signal"] = is_oi
+
+        # Parse cell_set JSON
+        raw_cs = sig.get("cell_set") or "[]"
+        cells  = json.loads(raw_cs) if isinstance(raw_cs, str) else raw_cs
+        sig["cells_parsed"] = cells   # keep for trade query below
+
+        candidates.append(sig)
+
+    if not candidates:
+        return {"candidates": []}
+
+    # ── Per-signal IS trade queries (no date/ticker filter) ───────────────────
+    async with oi_pool.acquire() as conn:
+        for cand in candidates:
+            prim   = cand["primary_metric"]
+            sec    = cand["secondary_metric"]
+            outcome = cand["outcome"]
+            n_bins = int(cand["n_bins"])
+            cells  = cand["cells_parsed"]
+
+            # Safety: skip if metric names contain unsafe chars
+            if not all(c in _SAFE_METRIC for c in (prim or "")) or \
+               not all(c in _SAFE_METRIC for c in (sec  or "")):
+                cand["trades"] = []
+                continue
+
+            if not cells:
+                cand["trades"] = []
+                continue
+
+            xs = [int(c[0]) for c in cells]
+            ys = [int(c[1]) for c in cells]
+
+            outcome_cols = _outcome_select_cols(outcome)
+            out_sel = ", ".join(f"df.{c}" for c in outcome_cols)
+            out_nn  = " AND ".join(f"df.{c} IS NOT NULL" for c in outcome_cols)
+
+            query = f"""
+                SELECT df.ticker, df.trade_date::text AS trade_date,
+                       df.spot_co, {out_sel}
+                FROM daily_features df
+                JOIN is_bins ib USING (ticker, trade_date)
+                WHERE ib.bin20_{prim} > 0
+                  AND ib.bin20_{sec}  > 0
+                  AND {out_nn}
+                  AND (
+                    ((ib.bin20_{prim} - 1) * $1::int) / 20,
+                    ((ib.bin20_{sec}  - 1) * $1::int) / 20
+                  ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+                ORDER BY df.trade_date, df.ticker
+            """
+            try:
+                raw = await conn.fetch(query, n_bins, xs, ys)
+            except Exception:
+                cand["trades"] = []
+                continue
+
+            trades = []
+            for r in raw:
+                ov = _outcome_value(r, outcome)
+                if ov is None:
+                    continue
+                try:
+                    fov = float(ov)
+                    if math.isnan(fov):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                trades.append({
+                    "ticker":     r["ticker"],
+                    "trade_date": str(r["trade_date"]),
+                    "spot_entry": float(r["spot_co"]) if r.get("spot_co") is not None else None,
+                    "ret":        fov,
+                })
+            cand["trades"] = trades
+
+        # Clean up internal keys before serialising
+        result = []
+        for cand in candidates:
+            result.append({
+                "id":               cand["id"],
+                "name":             cand["name"],
+                "primary_metric":   cand["primary_metric"],
+                "secondary_metric": cand["secondary_metric"],
+                "outcome":          cand["outcome"],
+                "n_bins":           cand["n_bins"],
+                "agg_n":            cand["agg_n"],
+                "agg_avg_ret":      cand["agg_avg_ret"],
+                "p_family_num":     cand["p_family_num"],
+                "p_family_name":    cand["p_family_name"],
+                "s_family_num":     cand["s_family_num"],
+                "s_family_name":    cand["s_family_name"],
+                "is_oi_signal":     cand["is_oi_signal"],
+                "trades":           cand["trades"],
+            })
+
+    return {"candidates": result}
