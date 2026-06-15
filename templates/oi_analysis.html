@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=236"></script>
+  <script src="/static/js/oi_analysis.js?v=237"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5217,6 +5217,10 @@
                     Active: <strong x-text="Object.keys(labActiveIds).length"></strong>
                     / <span x-text="labCandidates.length"></span>
                     &nbsp;·&nbsp; Deduped: <strong x-text="labUnionN.toLocaleString()"></strong> trades
+                    <template x-if="labActiveOutcome()">
+                      <span>&nbsp;·&nbsp; outcome: <strong style="font-family:monospace"
+                            x-text="labActiveOutcome()"></strong></span>
+                    </template>
                   </span>
                   <button @click="labClearAll()"
                           :disabled="!Object.keys(labActiveIds).length"
@@ -5293,6 +5297,13 @@
                         <span><span style="color:var(--dim)">Avg− </span>
                               <strong style="color:#e84393"
                                       x-text="(labStats.avg_losers*100).toFixed(3)+'%'"></strong></span>
+                        <!-- Total $ P&L — same value the dollar equity
+                             curve ends at (reused from labStats.total_pnl,
+                             which is computed once in labRecompute and
+                             not recomputed for this readout). -->
+                        <span><span style="color:var(--dim)">Total $ </span>
+                              <strong :style="(labStats.total_pnl||0)>=0?'color:#2980b9':'color:#e84393'"
+                                      x-text="labFmtDollar(labStats.total_pnl)"></strong></span>
                       </div>
                     </template>
 
@@ -5399,7 +5410,7 @@
                                             font-size:11px;color:var(--dim);margin-bottom:3px">
                                   <span>Unique</span>
                                   <span>
-                                    <span x-text="labSelectedDetail.unique_n + 'tr'"></span>
+                                    <span x-text="labSelectedDetail.unique_n.toLocaleString()"></span>
                                     <span :style="labSelectedDetail.unique_avg_ret >= 0
                                                     ? 'color:#2980b9;margin-left:5px'
                                                     : 'color:#e84393;margin-left:5px'"
@@ -5426,7 +5437,7 @@
                                               font-size:11px;color:var(--dim);margin-bottom:3px">
                                     <span x-text="'Shared w/ #' + s.id"></span>
                                     <span>
-                                      <span x-text="s.n + 'tr'"></span>
+                                      <span x-text="s.n.toLocaleString()"></span>
                                       <span :style="s.avg_ret >= 0
                                                       ? 'color:#2980b9;margin-left:5px'
                                                       : 'color:#e84393;margin-left:5px'"

@@ -3899,7 +3899,8 @@ document.addEventListener('alpine:init', () => {
     labUnionN:            0,       // deduped trade count across active signals
     labParityResult:      null,    // result object from labRunParity()
     labNetworkPositions:  {},      // {[id]: {x,y}} — node centres (canvas coords)
-    labNetworkIncrements: {},      // {[id]: dollar_increment}
+    labNetworkIncrements: {},      // {[id]: dollar_increment} — cut-impact
+    labNetworkUniqueN:    {},      // {[id]: count of trades unique to this signal}
     labNetworkNodeRadii:  {},      // {[id]: px radius} — used for hit-test
     labSelectedNodeId:    null,    // currently clicked node id (or null)
     labSelectedDetail:    null,    // decomposition object for selected node
@@ -10347,7 +10348,20 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/factor-analysis/portfolio-lab/candidates');
         const d = await r.json();
         if (d.error) { this.labError = d.error; this.labCandidates = []; }
-        else         { this.labCandidates = d.candidates || []; this.labLoaded = true; }
+        else {
+          this.labCandidates = d.candidates || [];
+          // Precompute per-signal win_rate once at fetch time so the
+          // hover tooltip reads it from cache instead of recomputing on
+          // every mousemove. agg_n / agg_avg_ret come from the server;
+          // win_rate isn't carried by the signals.cached_stats schema
+          // but a one-pass scan of the trades array gives it for free.
+          for (const c of this.labCandidates) {
+            const trades = c.trades || [];
+            const wins = trades.filter(t => (t.ret || 0) > 0).length;
+            c.win_rate = trades.length ? wins / trades.length : 0;
+          }
+          this.labLoaded = true;
+        }
       } catch (e) {
         this.labError = 'Network error: ' + e.message;
         this.labCandidates = [];
@@ -10367,6 +10381,17 @@ document.addEventListener('alpine:init', () => {
       if (oi.length)    groups.push({ label: 'OI-Driver Signals', candidates: oi });
       if (nonOi.length) groups.push({ label: 'Other Signals',     candidates: nonOi });
       return groups;
+    },
+
+    // Outcome of the active set, surfaced in the breadcrumb so it's
+    // one-per-session (every active signal in a typical session shares
+    // an outcome). If the user happens to mix outcomes, say so rather
+    // than picking arbitrarily.
+    labActiveOutcome() {
+      const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
+      if (!active.length) return null;
+      const outs = [...new Set(active.map(c => c.outcome))];
+      return outs.length === 1 ? outs[0] : `mixed (${outs.length})`;
     },
 
     // Card size: proportional to n trades; clamp to [78, 110] px.
@@ -10479,6 +10504,10 @@ document.addEventListener('alpine:init', () => {
       // ── Dollar equity (reuses _computeDollarSeries unchanged) ───────────
       const ds = this._computeDollarSeries(union, this.labPerTrade, this.labDailyCap);
       this.labEquity = ds.equity;
+      // Total $ P&L for the current active set = endpoint of the
+      // cumulative dollar curve. Surfaced on labStats so the stats
+      // bar reads it verbatim with no extra computation.
+      const totalPnl = ds.equity.length ? ds.equity[ds.equity.length - 1].value : 0;
       // ── Pct-return stats ─────────────────────────────────────────────────
       const rets = union.map(t => t.ret).filter(r => r != null && isFinite(r));
       const n    = rets.length;
@@ -10499,6 +10528,7 @@ document.addEventListener('alpine:init', () => {
           n_tickers:   new Set(union.map(t => t.ticker).filter(Boolean)).size,
           avg_winners: wins.length   ? wins.reduce((s,v)=>s+v,0)/wins.length   : 0,
           avg_losers:  losses.length ? losses.reduce((s,v)=>s+v,0)/losses.length : 0,
+          total_pnl:   totalPnl,
         };
       } else {
         this.labStats = null;
@@ -10728,8 +10758,11 @@ document.addEventListener('alpine:init', () => {
         tradeSets[c.id] = new Set((c.trades || []).map(t => t.ticker + '|' + t.trade_date));
       }
 
-      // Unique avg-ret: trades in this signal NOT present in any other active signal
+      // Unique avg-ret: trades in this signal NOT present in any other
+      // active signal. Also cache unique trade count alongside the avg —
+      // the hover tooltip reads it via labNetworkUniqueN, no extra pass.
       const uniqueAvgRet = {};
+      const uniqueN      = {};
       for (const c of active) {
         const othersKeys = new Set();
         for (const o of active) {
@@ -10738,7 +10771,9 @@ document.addEventListener('alpine:init', () => {
         const uniq = (c.trades || []).filter(t => !othersKeys.has(t.ticker + '|' + t.trade_date));
         const rets = uniq.map(t => t.ret).filter(r => r != null && isFinite(r));
         uniqueAvgRet[c.id] = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : null;
+        uniqueN[c.id]      = uniq.length;
       }
+      this.labNetworkUniqueN = uniqueN;   // exposed for tooltip lookup
 
       // Edges: pairs with at least one shared trade
       const edges = [];
@@ -11020,11 +11055,27 @@ document.addEventListener('alpine:init', () => {
         if (ty + TH > H) ty = my - TH - 10;
         this.labTooltipX = Math.max(0, tx);
         this.labTooltipY = Math.max(0, ty);
+        // Stats-only tooltip — every value is a cached lookup, no
+        // compute on hover:
+        //   agg_n / agg_avg_ret / win_rate → precomputed at load time
+        //   uniqueN / increment           → precomputed during the
+        //                                   current network render
+        // Name encodes the metrics; outcome is shown once in the
+        // breadcrumb above (one-per-session). Both intentionally
+        // dropped here to keep the tooltip dense and useful.
+        const aggN  = hit.agg_n || 0;
+        const aggR  = hit.agg_avg_ret;
+        const winR  = hit.win_rate;
+        const uniqN = this.labNetworkUniqueN[hit.id] ?? 0;
+        const inc   = this.labNetworkIncrements[hit.id];
+        const fmtPct = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
         this.labTooltipLines = [
           '#' + hit.id + '  ' + hit.name,
-          'P: '  + hit.primary_metric,
-          'S: '  + hit.secondary_metric,
-          hit.outcome,
+          'n: '         + aggN.toLocaleString(),
+          'avg-ret: '   + fmtPct(aggR),
+          'win%: '      + (winR == null ? '—' : (winR * 100).toFixed(1) + '%'),
+          'unique n: '  + uniqN.toLocaleString(),
+          'cut-impact: ' + (inc == null ? '—' : this.labFmtDollar(inc)),
         ];
       } else {
         this.labTooltipVisible = false;
