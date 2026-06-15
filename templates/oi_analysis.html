@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=233"></script>
+  <script src="/static/js/oi_analysis.js?v=234"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5312,20 +5312,131 @@
                         </div>
                         <div style="height:400px;background:var(--surface)">
                           <canvas id="lab-network-canvas"
-                                  style="width:100%;height:100%;display:block"></canvas>
+                                  style="width:100%;height:100%;display:block;cursor:pointer"
+                                  @click="labHandleNetworkClick($event)"></canvas>
                         </div>
                       </div>
-                      <!-- Detail pane placeholder (30%) — Stage 4 -->
-                      <div style="flex:3;min-width:120px;border-left:1px solid var(--border);
-                                  display:flex;flex-direction:column;align-items:center;
-                                  justify-content:center;gap:6px;
-                                  background:rgba(255,255,255,.01)">
-                        <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
-                          Click a node
+                      <!-- Detail pane (30%) — Stage 4 -->
+                      <div style="flex:3;min-width:140px;border-left:1px solid var(--border);
+                                  background:rgba(255,255,255,.01);position:relative;
+                                  overflow:hidden;height:400px">
+                        <!-- Empty state -->
+                        <div x-show="!labSelectedDetail"
+                             style="display:flex;flex-direction:column;align-items:center;
+                                    justify-content:center;height:100%;gap:4px">
+                          <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
+                            Click a node
+                          </div>
+                          <div style="font-size:10px;color:rgba(255,255,255,.09)">
+                            to see decomposition
+                          </div>
                         </div>
-                        <div style="font-size:10px;color:rgba(255,255,255,.10)">
-                          Detail pane — Stage 4
-                        </div>
+
+                        <!-- Detail content -->
+                        <template x-if="labSelectedDetail">
+                          <div style="padding:10px 11px;overflow-y:auto;height:100%;
+                                      box-sizing:border-box;font-size:11px">
+
+                            <!-- Header -->
+                            <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:3px">
+                              <span style="font-size:14px;font-weight:700;color:var(--text)"
+                                    x-text="'#' + labSelectedDetail.id"></span>
+                            </div>
+                            <div style="font-size:10px;color:var(--dim);word-break:break-all;margin-bottom:2px"
+                                 x-text="labSelectedDetail.name"></div>
+                            <div style="font-size:10px;color:var(--dim);margin-bottom:1px"
+                                 x-text="'P: ' + labSelectedDetail.primary_metric"></div>
+                            <div style="font-size:10px;color:var(--dim);margin-bottom:1px"
+                                 x-text="'S: ' + labSelectedDetail.secondary_metric"></div>
+                            <div style="font-size:10px;color:var(--dim);margin-bottom:9px"
+                                 x-text="labSelectedDetail.outcome"></div>
+
+                            <!-- Cut impact -->
+                            <div style="border-top:1px solid var(--border);padding-top:7px;margin-bottom:10px">
+                              <div style="font-size:10px;color:var(--dim);margin-bottom:4px">
+                                Cut impact (remove this signal)
+                              </div>
+                              <div :style="'font-size:16px;font-weight:700;' +
+                                           (labSelectedDetail.increment >= 0 ? 'color:#3498db' : 'color:#e84393')"
+                                   x-text="labFmtDollar(labSelectedDetail.increment)">
+                              </div>
+                              <div style="font-size:10px;color:var(--dim);margin-top:2px"
+                                   x-text="labSelectedDetail.increment < 0
+                                             ? '⚠ drop candidate'
+                                             : '✓ contributing'">
+                              </div>
+                            </div>
+
+                            <!-- Trade decomposition bars -->
+                            <div style="border-top:1px solid var(--border);padding-top:7px">
+                              <div style="font-size:10px;color:var(--dim);margin-bottom:6px;font-weight:600">
+                                Trade decomposition
+                                <span style="font-weight:400;color:rgba(255,255,255,.2)"
+                                      x-text="'(of ' + labSelectedDetail.total_n + ' total trades)'">
+                                </span>
+                              </div>
+
+                              <!-- Unique row -->
+                              <div style="margin-bottom:7px">
+                                <div style="display:flex;justify-content:space-between;
+                                            font-size:10px;color:var(--dim);margin-bottom:3px">
+                                  <span>Unique</span>
+                                  <span>
+                                    <span x-text="labSelectedDetail.unique_n + 'tr'"></span>
+                                    <span :style="labSelectedDetail.unique_avg_ret >= 0
+                                                    ? 'color:#2980b9;margin-left:5px'
+                                                    : 'color:#e84393;margin-left:5px'"
+                                          x-text="labSelectedDetail.unique_avg_ret != null
+                                                    ? (labSelectedDetail.unique_avg_ret*100).toFixed(2)+'%'
+                                                    : ''">
+                                    </span>
+                                  </span>
+                                </div>
+                                <div style="height:7px;background:rgba(255,255,255,.06);
+                                            border-radius:3px;overflow:hidden">
+                                  <div :style="'height:100%;border-radius:3px;transition:width .2s;width:' +
+                                               Math.round(labSelectedDetail.unique_n /
+                                                 Math.max(labSelectedDetail.total_n,1) * 100) + '%;' +
+                                               _labBarColor(labSelectedDetail.unique_avg_ret)">
+                                  </div>
+                                </div>
+                              </div>
+
+                              <!-- Shared-with rows -->
+                              <template x-for="s in labSelectedDetail.shared" :key="'lsd-'+s.id">
+                                <div style="margin-bottom:7px">
+                                  <div style="display:flex;justify-content:space-between;
+                                              font-size:10px;color:var(--dim);margin-bottom:3px">
+                                    <span x-text="'Shared w/ #' + s.id"></span>
+                                    <span>
+                                      <span x-text="s.n + 'tr'"></span>
+                                      <span :style="s.avg_ret >= 0
+                                                      ? 'color:#2980b9;margin-left:5px'
+                                                      : 'color:#e84393;margin-left:5px'"
+                                            x-text="s.avg_ret != null
+                                                      ? (s.avg_ret*100).toFixed(2)+'%' : ''">
+                                      </span>
+                                    </span>
+                                  </div>
+                                  <div style="height:7px;background:rgba(255,255,255,.06);
+                                              border-radius:3px;overflow:hidden">
+                                    <div :style="'height:100%;border-radius:3px;transition:width .2s;width:' +
+                                                 Math.round(s.n / Math.max(labSelectedDetail.total_n,1) * 100) + '%;' +
+                                                 _labBarColor(s.avg_ret)">
+                                    </div>
+                                  </div>
+                                </div>
+                              </template>
+
+                              <!-- Zero-overlap note -->
+                              <div x-show="!labSelectedDetail.shared.length"
+                                   style="font-size:10px;color:rgba(255,255,255,.2);margin-top:4px">
+                                No shared trades with other active signals
+                              </div>
+                            </div>
+
+                          </div>
+                        </template>
                       </div>
                     </div>
 

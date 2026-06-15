@@ -3898,10 +3898,13 @@ document.addEventListener('alpine:init', () => {
     labEquity:         [],      // [{date, value}] from _computeDollarSeries
     labUnionN:            0,       // deduped trade count across active signals
     labParityResult:      null,    // result object from labRunParity()
-    labNetworkPositions:  {},      // {[id]: {x,y}} — node positions for Stage 4 hit-test
-    labNetworkIncrements: {},      // {[id]: dollar_increment} — expose for Stage 4
+    labNetworkPositions:  {},      // {[id]: {x,y}} — node centres (canvas coords)
+    labNetworkIncrements: {},      // {[id]: dollar_increment}
+    labNetworkNodeRadii:  {},      // {[id]: px radius} — used for hit-test
+    labSelectedNodeId:    null,    // currently clicked node id (or null)
+    labSelectedDetail:    null,    // decomposition object for selected node
     // Lab charts tracked in this._charts: 'lab-equity', 'lab-yearly'
-    // Lab network graph is a raw canvas (not Chart.js), tracked via labNetworkPositions
+    // Lab network graph is a raw canvas (not Chart.js)
 
     surveyExpanded: false,
     selectedStats: null,
@@ -10518,7 +10521,20 @@ document.addEventListener('alpine:init', () => {
                  dollar_pnl: dollarByYear[yr] || 0 };
       });
       this.labReady = true;
-      this.$nextTick(() => { this._labRenderEquity(); this._labRenderYearly(); this._labRenderNetwork(); });
+      this.$nextTick(() => {
+        this._labRenderEquity();
+        this._labRenderYearly();
+        this._labRenderNetwork();
+        // If selected node was removed from active set, clear it; else refresh detail.
+        if (this.labSelectedNodeId) {
+          if (this.labActiveIds[this.labSelectedNodeId]) {
+            this.labSelectedDetail = this._labComputeNodeDetail(this.labSelectedNodeId);
+          } else {
+            this.labSelectedNodeId = null;
+            this.labSelectedDetail = null;
+          }
+        }
+      });
     },
 
     // Render lab equity curve — dual-axis dollar mode matching canonical
@@ -10834,6 +10850,10 @@ document.addEventListener('alpine:init', () => {
       }
 
       // ── Draw nodes ────────────────────────────────────────────────────────
+      // Cache radii first so hit-test in labHandleNetworkClick is accurate.
+      this.labNetworkNodeRadii = {};
+      for (const c of active) this.labNetworkNodeRadii[c.id] = nodeRad(c);
+
       for (const c of active) {
         const pos = positions[c.id];
         if (!pos) continue;
@@ -10871,6 +10891,16 @@ document.addEventListener('alpine:init', () => {
         ctx.stroke();
         ctx.setLineDash([]);
 
+        // Selection highlight: bright outer ring drawn before label
+        if (c.id === this.labSelectedNodeId) {
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, rad + 5, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(255,255,255,.80)';
+          ctx.lineWidth   = 2.5;
+          ctx.stroke();
+        }
+
         // Signal ID label
         ctx.fillStyle    = 'rgba(255,255,255,.92)';
         ctx.font         = `bold ${rad >= 24 ? 14 : rad >= 18 ? 12 : 10}px sans-serif`;
@@ -10878,6 +10908,103 @@ document.addEventListener('alpine:init', () => {
         ctx.textBaseline = 'middle';
         ctx.fillText('#' + c.id, pos.x, pos.y);
       }
+    },
+
+    // ── Portfolio Lab — Stage 4: detail pane ────────────────────────────
+
+    // Canvas click: hit-test node positions, toggle selection, re-render.
+    labHandleNetworkClick(event) {
+      const canvas = document.getElementById('lab-network-canvas');
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx   = event.clientX - rect.left;
+      const my   = event.clientY - rect.top;
+      const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
+      for (const c of active) {
+        const pos = this.labNetworkPositions[c.id];
+        const rad = this.labNetworkNodeRadii[c.id];
+        if (!pos || rad == null) continue;
+        if (Math.hypot(mx - pos.x, my - pos.y) <= rad + 4) {
+          // Toggle: clicking the already-selected node deselects.
+          const newId = (this.labSelectedNodeId === c.id) ? null : c.id;
+          this.labSelectedNodeId = newId;
+          this.labSelectedDetail = newId ? this._labComputeNodeDetail(newId) : null;
+          this._labRenderNetwork();
+          return;
+        }
+      }
+      // Click on background — deselect.
+      this.labSelectedNodeId = null;
+      this.labSelectedDetail = null;
+      this._labRenderNetwork();
+    },
+
+    // Compute the decomposition detail object for a given node id.
+    // Called synchronously on click and whenever the active set changes.
+    _labComputeNodeDetail(id) {
+      const c = this.labCandidates.find(x => x.id === id);
+      if (!c) return null;
+      const active = this.labCandidates.filter(x => this.labActiveIds[x.id]);
+      // Trade key sets (raw, before union dedup — same as network graph)
+      const tradeSets = {};
+      for (const x of active) {
+        tradeSets[x.id] = new Set((x.trades || []).map(t => t.ticker + '|' + t.trade_date));
+      }
+      // Unique: trades not present in any other active signal
+      const othersKeys = new Set();
+      for (const x of active) {
+        if (x.id !== id) for (const k of tradeSets[x.id]) othersKeys.add(k);
+      }
+      const uniqTrades = (c.trades || []).filter(t => !othersKeys.has(t.ticker + '|' + t.trade_date));
+      const uniqRets   = uniqTrades.map(t => t.ret).filter(r => r != null && isFinite(r));
+      // Shared with each other active signal (sorted by shared count desc)
+      const shared = [];
+      for (const x of active) {
+        if (x.id === id) continue;
+        const sh = (c.trades || []).filter(t => tradeSets[x.id].has(t.ticker + '|' + t.trade_date));
+        if (!sh.length) continue;
+        const sr = sh.map(t => t.ret).filter(r => r != null && isFinite(r));
+        shared.push({
+          id:      x.id,
+          n:       sh.length,
+          avg_ret: sr.length ? sr.reduce((s, v) => s + v, 0) / sr.length : null,
+        });
+      }
+      shared.sort((a, b) => b.n - a.n);
+      return {
+        id,
+        name:            c.name,
+        primary_metric:  c.primary_metric,
+        secondary_metric:c.secondary_metric,
+        outcome:         c.outcome,
+        total_n:         (c.trades || []).length,
+        unique_n:        uniqTrades.length,
+        unique_avg_ret:  uniqRets.length ? uniqRets.reduce((s, v) => s + v, 0) / uniqRets.length : null,
+        shared,
+        increment:       this.labNetworkIncrements[id] ?? null,
+      };
+    },
+
+    // Inline bar color used in detail pane HTML :style bindings.
+    _labBarColor(ret) {
+      const SCALE = 0.05;
+      if (ret == null || Math.abs(ret) < 0.0002) return 'background:rgba(120,120,120,.4)';
+      if (ret > 0) {
+        const a = (0.35 + Math.min(0.55, ret / SCALE)).toFixed(2);
+        return `background:rgba(41,128,185,${a})`;
+      }
+      const a = (0.35 + Math.min(0.55, Math.abs(ret) / SCALE)).toFixed(2);
+      return `background:rgba(232,67,147,${a})`;
+    },
+
+    // Dollar formatter for detail pane (matches _labRenderEquity fmt$).
+    labFmtDollar(v) {
+      if (v == null) return '—';
+      const abs  = Math.abs(v);
+      const sign = v < 0 ? '-' : '+';
+      if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+      if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+      return sign + '$' + abs.toFixed(0);
     },
 
     // Compare lab union (with portfolio date/ticker filters applied) against
