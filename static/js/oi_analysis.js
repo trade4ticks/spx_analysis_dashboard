@@ -10356,20 +10356,32 @@ document.addEventListener('alpine:init', () => {
       return Math.round(lo + (hi - lo) * Math.min(n / maxN, 1));
     },
 
-    // Card border color: blue positive, pink negative, grey zero.
-    labCardColor(avgRet) {
-      if (avgRet == null) return '#555';
-      if (avgRet >  0.0002) return '#2980b9';
-      if (avgRet < -0.0002) return '#c0392b';
-      return '#555';
-    },
-
-    // Card background tint for avg ret magnitude.
-    labCardBg(avgRet) {
-      if (avgRet == null) return 'transparent';
-      if (avgRet >  0.0002) return 'rgba(41,128,185,.10)';
-      if (avgRet < -0.0002) return 'rgba(192,57,43,.10)';
-      return 'transparent';
+    // Full card inline style: gradient-fill by avg-ret magnitude.
+    // Positive → blue (#2980b9), negative → bright pink (#e84393),
+    // near-zero → neutral gray. Alpha scales linearly, capped at 0.82
+    // (reference: 5% return = full saturation, i.e. max colour depth).
+    labCardStyle(c) {
+      const n    = c.agg_n || 0;
+      const ret  = c.agg_avg_ret;
+      const size = this.labCardSize(n);
+      const SCALE = 0.05;   // 5% return = full saturation
+      let bg, border;
+      if (ret == null || Math.abs(ret) < 0.0002) {
+        bg     = 'rgba(120,120,120,.18)';
+        border = '1px solid rgba(255,255,255,.08)';
+      } else if (ret > 0) {
+        const a = Math.min(0.82, ret / SCALE).toFixed(2);
+        bg      = `rgba(41,128,185,${a})`;
+        border  = '1px solid rgba(41,128,185,.45)';
+      } else {
+        const a = Math.min(0.82, Math.abs(ret) / SCALE).toFixed(2);
+        bg      = `rgba(232,67,147,${a})`;        // #e84393 — dashboard bright pink
+        border  = '1px solid rgba(232,67,147,.45)';
+      }
+      return `width:${size}px;height:${size}px;background:${bg};border:${border};` +
+             `border-radius:5px;padding:5px 5px 3px 5px;cursor:pointer;` +
+             `display:flex;flex-direction:column;justify-content:space-between;` +
+             `overflow:hidden;flex-shrink:0`;
     },
 
     // Tooltip text shown on card hover.

@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=226"></script>
+  <script src="/static/js/oi_analysis.js?v=227"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4899,128 +4899,6 @@
               </template>
             </div><!-- end Regime Exploration (Portfolio) -->
 
-            <!-- ── Portfolio Lab ──────────────────────────────────────────── -->
-            <div style="border:1px solid var(--border);border-radius:6px;margin-bottom:12px;overflow:hidden">
-              <!-- Header -->
-              <div @click="toggleLab()"
-                   style="display:flex;align-items:center;gap:8px;padding:8px 12px;
-                          cursor:pointer;background:rgba(255,255,255,.03);user-select:none">
-                <span x-text="labExpanded ? '▾' : '▸'" style="font-size:10px;color:var(--dim)"></span>
-                <span style="font-size:12px;font-weight:600">Portfolio Lab</span>
-                <span style="font-size:11px;color:var(--dim)">All-signals scratchpad — combine and compare</span>
-                <div style="display:flex;align-items:center;gap:8px;margin-left:auto" @click.stop>
-                  <span x-show="labLoaded && !labLoading"
-                        style="font-size:11px;color:var(--dim)"
-                        x-text="labCandidates.length + ' signals'"></span>
-                  <button @click="loadLabCandidates()"
-                          :disabled="labLoading"
-                          style="font-size:11px;padding:2px 8px;cursor:pointer;
-                                 background:var(--raised);border:1px solid var(--border);
-                                 border-radius:4px;color:var(--text)">
-                    <span x-text="labLoading ? '…' : '⟳ Refresh'"></span>
-                  </button>
-                </div>
-              </div>
-
-              <!-- Content — lazy, only mounted on first expand -->
-              <template x-if="labExpanded">
-                <div style="padding:10px 12px">
-
-                  <!-- Error -->
-                  <div x-show="!!labError"
-                       style="font-size:12px;color:#e84393;padding:6px 0"
-                       x-text="labError"></div>
-
-                  <!-- Loading -->
-                  <div x-show="labLoading && !labError"
-                       style="font-size:12px;color:var(--dim);padding:6px 0">Loading candidates…</div>
-
-                  <!-- Empty -->
-                  <div x-show="!labLoading && !labError && labCandidates.length === 0"
-                       style="font-size:12px;color:var(--dim);padding:6px 0">No saved signals found.</div>
-
-                  <!-- Card tray — grouped: OI signals first, then other -->
-                  <template x-if="!labLoading && !labError && labCandidates.length > 0">
-                    <div>
-                      <template x-for="grp in labGroupedCandidates()" :key="grp.label">
-                        <div style="margin-bottom:14px">
-                          <!-- Group header -->
-                          <div style="font-size:10px;font-weight:600;color:var(--dim);
-                                      letter-spacing:.06em;text-transform:uppercase;
-                                      margin-bottom:6px;padding-bottom:3px;
-                                      border-bottom:1px solid var(--border)"
-                               x-text="grp.label"></div>
-
-                          <!-- Cards -->
-                          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end">
-                            <template x-for="c in grp.candidates" :key="'lc-'+c.id">
-                              <div :title="labCardTooltip(c)"
-                                   :style="`
-                                     width:${labCardSize(c.agg_n||0)}px;
-                                     height:${labCardSize(c.agg_n||0)}px;
-                                     border:2px solid ${labCardColor(c.agg_avg_ret)};
-                                     background:${labCardBg(c.agg_avg_ret)};
-                                     border-radius:5px;
-                                     padding:5px 5px 3px 5px;
-                                     cursor:pointer;
-                                     display:flex;flex-direction:column;
-                                     justify-content:space-between;
-                                     overflow:hidden;
-                                     flex-shrink:0
-                                   `">
-                                <!-- Signal name — truncated -->
-                                <div style="font-size:9px;font-weight:600;color:var(--text);
-                                            overflow:hidden;text-overflow:ellipsis;
-                                            white-space:nowrap;line-height:1.2"
-                                     x-text="c.name"></div>
-                                <!-- Metric pair — tiny -->
-                                <div style="font-size:8px;color:var(--dim);overflow:hidden;
-                                            text-overflow:ellipsis;white-space:nowrap;margin-top:2px"
-                                     x-text="c.primary_metric.replace(/_/g,' ')"></div>
-                                <!-- Stats row -->
-                                <div style="display:flex;justify-content:space-between;
-                                            align-items:flex-end;margin-top:auto;padding-top:2px">
-                                  <span style="font-size:8px;color:var(--dim)"
-                                        x-text="(c.agg_n||0).toLocaleString() + 'tr'"></span>
-                                  <span :style="`font-size:9px;font-weight:600;
-                                                 color:${labCardColor(c.agg_avg_ret)}`"
-                                        x-text="c.agg_avg_ret!=null
-                                                  ? (c.agg_avg_ret*100).toFixed(2)+'%'
-                                                  : '—'"></span>
-                                </div>
-                              </div>
-                            </template>
-                          </div>
-                        </div>
-                      </template>
-
-                      <!-- Legend -->
-                      <div style="display:flex;gap:16px;font-size:10px;color:var(--dim);
-                                  margin-top:4px;flex-wrap:wrap">
-                        <span>Card size ∝ n IS trades</span>
-                        <span style="display:flex;align-items:center;gap:4px">
-                          <span style="display:inline-block;width:10px;height:10px;
-                                       border:2px solid #2980b9;border-radius:2px"></span>
-                          Positive avg ret
-                        </span>
-                        <span style="display:flex;align-items:center;gap:4px">
-                          <span style="display:inline-block;width:10px;height:10px;
-                                       border:2px solid #c0392b;border-radius:2px"></span>
-                          Negative avg ret
-                        </span>
-                        <span style="display:flex;align-items:center;gap:4px">
-                          <span style="display:inline-block;width:10px;height:10px;
-                                       border:2px solid #555;border-radius:2px"></span>
-                          Near-zero / unclassified
-                        </span>
-                      </div>
-                    </div>
-                  </template>
-
-                </div>
-              </template>
-            </div><!-- end Portfolio Lab -->
-
             <!-- Signal × Signal phi heatmap -->
             <div class="chart-box" style="margin-bottom:12px">
               <div class="chart-title">
@@ -5219,6 +5097,116 @@
         </template>
       </div>
     </template>
+
+    <!-- ══════════════════════════════════════════════════════════════════
+         Portfolio Lab — independent bottom-of-page pane.
+         No dependency on a loaded portfolio. Lazy-loads its own
+         candidates directly from /portfolio-lab/candidates on first expand.
+         ══════════════════════════════════════════════════════════════════ -->
+    <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px;padding-bottom:24px">
+      <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <!-- Header -->
+        <div @click="toggleLab()"
+             style="display:flex;align-items:center;gap:8px;padding:8px 12px;
+                    cursor:pointer;background:rgba(255,255,255,.03);user-select:none">
+          <span x-text="labExpanded ? '▾' : '▸'" style="font-size:10px;color:var(--dim)"></span>
+          <span style="font-size:12px;font-weight:600">Portfolio Lab</span>
+          <span style="font-size:11px;color:var(--dim)">All-signals scratchpad — combine and compare without loading a saved portfolio</span>
+          <div style="display:flex;align-items:center;gap:8px;margin-left:auto" @click.stop>
+            <span x-show="labLoaded && !labLoading"
+                  style="font-size:11px;color:var(--dim)"
+                  x-text="labCandidates.length + ' signals'"></span>
+            <button @click="loadLabCandidates()"
+                    :disabled="labLoading"
+                    style="font-size:11px;padding:2px 8px;cursor:pointer;
+                           background:var(--raised);border:1px solid var(--border);
+                           border-radius:4px;color:var(--text)">
+              <span x-text="labLoading ? '…' : '⟳ Refresh'"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Content — lazy, only mounted on first expand -->
+        <template x-if="labExpanded">
+          <div style="padding:10px 12px">
+
+            <!-- Error -->
+            <div x-show="!!labError"
+                 style="font-size:12px;color:#e84393;padding:6px 0"
+                 x-text="labError"></div>
+
+            <!-- Loading -->
+            <div x-show="labLoading && !labError"
+                 style="font-size:12px;color:var(--dim);padding:6px 0">Loading candidates…</div>
+
+            <!-- Empty -->
+            <div x-show="!labLoading && !labError && labCandidates.length === 0"
+                 style="font-size:12px;color:var(--dim);padding:6px 0">No saved signals found.</div>
+
+            <!-- Card tray — OI-driver signals first, then other, sorted by avg ret desc -->
+            <template x-if="!labLoading && !labError && labCandidates.length > 0">
+              <div>
+                <template x-for="grp in labGroupedCandidates()" :key="grp.label">
+                  <div style="margin-bottom:14px">
+                    <!-- Group label -->
+                    <div style="font-size:10px;font-weight:600;color:var(--dim);
+                                letter-spacing:.06em;text-transform:uppercase;
+                                margin-bottom:6px;padding-bottom:3px;
+                                border-bottom:1px solid var(--border)"
+                         x-text="grp.label"></div>
+
+                    <!-- Cards -->
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end">
+                      <template x-for="c in grp.candidates" :key="'lc-'+c.id">
+                        <div :title="labCardTooltip(c)"
+                             :style="labCardStyle(c)">
+                          <!-- Signal number — primary card label -->
+                          <div style="font-size:16px;font-weight:700;color:rgba(255,255,255,.92);
+                                      line-height:1;text-align:center;margin-top:2px"
+                               x-text="'#' + c.id"></div>
+                          <!-- Stats row: n trades left, avg ret right -->
+                          <div style="display:flex;justify-content:space-between;
+                                      align-items:flex-end;padding-top:2px">
+                            <span style="font-size:8px;color:rgba(255,255,255,.6)"
+                                  x-text="(c.agg_n||0).toLocaleString() + 'tr'"></span>
+                            <span style="font-size:9px;font-weight:600;color:rgba(255,255,255,.92)"
+                                  x-text="c.agg_avg_ret!=null
+                                            ? (c.agg_avg_ret*100).toFixed(2)+'%'
+                                            : '—'"></span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Legend -->
+                <div style="display:flex;gap:16px;font-size:10px;color:var(--dim);
+                            margin-top:4px;flex-wrap:wrap">
+                  <span>Card size ∝ n IS trades · fill intensity ∝ |avg ret| (5% = max)</span>
+                  <span style="display:flex;align-items:center;gap:4px">
+                    <span style="display:inline-block;width:10px;height:10px;
+                                 background:rgba(41,128,185,.7);border-radius:2px"></span>
+                    Positive avg ret
+                  </span>
+                  <span style="display:flex;align-items:center;gap:4px">
+                    <span style="display:inline-block;width:10px;height:10px;
+                                 background:rgba(232,67,147,.7);border-radius:2px"></span>
+                    Negative avg ret
+                  </span>
+                  <span style="display:flex;align-items:center;gap:4px">
+                    <span style="display:inline-block;width:10px;height:10px;
+                                 background:rgba(120,120,120,.3);border-radius:2px"></span>
+                    Near-zero
+                  </span>
+                </div>
+              </div>
+            </template>
+
+          </div>
+        </template>
+      </div>
+    </div><!-- end Portfolio Lab -->
 
 
   </div>
