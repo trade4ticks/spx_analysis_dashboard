@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=237"></script>
+  <script src="/static/js/oi_analysis.js?v=238"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5348,15 +5348,36 @@
                       <div style="flex:3;min-width:140px;border-left:1px solid var(--border);
                                   background:rgba(255,255,255,.01);position:relative;
                                   overflow:hidden;height:400px">
-                        <!-- Empty state -->
+                        <!-- Allocation donut — default view when no node
+                             selected. Descriptive partition: where
+                             realized $ SITS in unique vs. shared trades.
+                             NOT causal (≠ cut-impact). The two answer
+                             different questions and won't agree. -->
                         <div x-show="!labSelectedDetail"
-                             style="display:flex;flex-direction:column;align-items:center;
-                                    justify-content:center;height:100%;gap:4px">
-                          <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
-                            Click a node
+                             style="display:flex;flex-direction:column;height:100%">
+                          <div style="font-size:10px;color:rgba(255,255,255,.45);
+                                      padding:5px 10px;border-bottom:1px solid var(--border);
+                                      background:rgba(255,255,255,.02);line-height:1.3">
+                            Dollar-capped P&amp;L by trade overlap
+                            <span style="color:rgba(255,255,255,.25);font-size:9px;display:block">
+                              inner: unique vs shared · outer: unique split by signal
+                            </span>
                           </div>
-                          <div style="font-size:10px;color:rgba(255,255,255,.09)">
-                            to see decomposition
+                          <div style="flex:1;position:relative;min-height:0">
+                            <canvas id="lab-allocation-canvas"
+                                    style="width:100%;height:100%;display:block"></canvas>
+                            <!-- Empty fallback (no active signals) -->
+                            <div x-show="!labAllocation"
+                                 style="position:absolute;inset:0;display:flex;
+                                        flex-direction:column;align-items:center;
+                                        justify-content:center;gap:4px;pointer-events:none">
+                              <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
+                                Activate signals
+                              </div>
+                              <div style="font-size:10px;color:rgba(255,255,255,.09)">
+                                to see allocation
+                              </div>
+                            </div>
                           </div>
                         </div>
 

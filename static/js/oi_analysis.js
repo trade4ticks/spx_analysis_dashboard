@@ -3902,6 +3902,11 @@ document.addEventListener('alpine:init', () => {
     labNetworkIncrements: {},      // {[id]: dollar_increment} — cut-impact
     labNetworkUniqueN:    {},      // {[id]: count of trades unique to this signal}
     labNetworkNodeRadii:  {},      // {[id]: px radius} — used for hit-test
+    // Right-pane allocation donut (shown when no node is selected).
+    // Computed in labRecompute from the existing dedup pass + the
+    // dollar-capped per-trade pnl in ds.tradeDollarSizes. Renders into
+    // #lab-allocation-canvas via _labRenderAllocation.
+    labAllocation:        null,    // see labRecompute for shape
     labSelectedNodeId:    null,    // currently clicked node id (or null)
     labSelectedDetail:    null,    // decomposition object for selected node
     labHoveredNodeId:     null,    // node under cursor (hover only, not click)
@@ -7961,12 +7966,14 @@ document.addEventListener('alpine:init', () => {
           let shares = Math.floor(perTickerAlloc / px);
           if (shares < 1) shares = 1;   // 1-share min, no redistribution
           const dollarSize = shares * px;
-          dayPnl      += dollarSize * ret;
+          const tradePnl   = dollarSize * ret;
+          dayPnl      += tradePnl;
           dayDeployed += dollarSize;
           tradeDollarSizes.push({
             ticker:      t.ticker,
             trade_date:  d,
             dollar_size: dollarSize,
+            dollar_pnl:  tradePnl,
           });
         }
         cum += dayPnl;
@@ -10471,11 +10478,12 @@ document.addEventListener('alpine:init', () => {
     labRecompute() {
       const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
       if (!active.length) {
-        this.labEquity  = [];
-        this.labStats   = null;
-        this.labYearly  = [];
-        this.labUnionN  = 0;
-        this.labReady   = false;
+        this.labEquity     = [];
+        this.labStats      = null;
+        this.labYearly     = [];
+        this.labUnionN     = 0;
+        this.labAllocation = null;
+        this.labReady      = false;
         if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
         if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
         return;
@@ -10555,11 +10563,86 @@ document.addEventListener('alpine:init', () => {
                  win_rate: yn ? yrets.filter(r=>r>0).length/yn : 0,
                  dollar_pnl: dollarByYear[yr] || 0 };
       });
+
+      // ── Allocation by overlap degree (donut data) ────────────────────────
+      // Reuses TWO already-computed things:
+      //   (1) The active candidates' raw trade lists — same data the
+      //       dedup pass above iterates. We do ONE more pass here to
+      //       count degree per (ticker,date) key.
+      //   (2) Per-trade dollar_pnl from ds.tradeDollarSizes — set in
+      //       _computeDollarSeries during the same loop that builds
+      //       the equity curve. Per-trade capped P&L is read-through,
+      //       NOT recomputed.
+      // Inner ring = degree slices (1=unique, 2=2-way, 3+, ...);
+      // outer ring = degree-1 (unique) exploded by owning signal.
+      // Partition is descriptive — where realized $ SITS in unique vs.
+      // shared trades — NOT causal attribution (that's cut-impact).
+      const degreeByKey = new Map();
+      for (const cand of active) {
+        for (const t of (cand.trades || [])) {
+          const key = t.ticker + '|' + t.trade_date;
+          degreeByKey.set(key, (degreeByKey.get(key) || 0) + 1);
+        }
+      }
+      const pnlByKey = new Map();
+      for (const t of ds.tradeDollarSizes || []) {
+        pnlByKey.set(t.ticker + '|' + t.trade_date, t.dollar_pnl || 0);
+      }
+      // Owner of each degree-1 key = the one active signal containing it.
+      const ownerByKey = new Map();
+      for (const cand of active) {
+        for (const t of (cand.trades || [])) {
+          const key = t.ticker + '|' + t.trade_date;
+          if (degreeByKey.get(key) === 1 && !ownerByKey.has(key)) {
+            ownerByKey.set(key, cand.id);
+          }
+        }
+      }
+      const byDegreeMap     = new Map();
+      const uniqueBySigMap  = new Map();
+      for (const cand of active) {
+        uniqueBySigMap.set(cand.id, { id: cand.id, name: cand.name,
+                                       dollar_pnl: 0, count: 0 });
+      }
+      for (const trade of union) {
+        const key = trade.ticker + '|' + trade.trade_date;
+        const deg = degreeByKey.get(key) || 1;
+        const pnl = pnlByKey.get(key) || 0;
+        if (!byDegreeMap.has(deg)) byDegreeMap.set(deg, { degree: deg, dollar_pnl: 0, count: 0 });
+        const b = byDegreeMap.get(deg);
+        b.dollar_pnl += pnl;
+        b.count      += 1;
+        if (deg === 1) {
+          const owner = ownerByKey.get(key);
+          const u = owner != null ? uniqueBySigMap.get(owner) : null;
+          if (u) { u.dollar_pnl += pnl; u.count += 1; }
+        }
+      }
+      const byDegree = Array.from(byDegreeMap.values()).sort((a,b) => a.degree - b.degree);
+      // Outer ring: only signals with degree-1 contribution; keep
+      // active-set order so colors stay stable as user toggles.
+      const uniqueBySignal = active
+        .map(c => uniqueBySigMap.get(c.id))
+        .filter(u => u && u.count > 0);
+      const uniqueAbs = Math.abs(byDegree.find(d => d.degree === 1)?.dollar_pnl || 0);
+      const sharedAbs = byDegree.filter(d => d.degree > 1)
+                                .reduce((s, d) => s + Math.abs(d.dollar_pnl), 0);
+      const totalAbs  = uniqueAbs + sharedAbs;
+      this.labAllocation = {
+        total_pnl:       totalPnl,
+        total_abs:       totalAbs,
+        byDegree,
+        uniqueBySignal,
+        unique_pct:      totalAbs > 0 ? uniqueAbs / totalAbs : 0,
+        shared_pct:      totalAbs > 0 ? sharedAbs / totalAbs : 0,
+      };
+
       this.labReady = true;
       this.$nextTick(() => {
         this._labRenderEquity();
         this._labRenderYearly();
         this._labRenderNetwork();
+        this._labRenderAllocation();
         // If selected node was removed from active set, clear it; else refresh detail.
         if (this.labSelectedNodeId) {
           if (this.labActiveIds[this.labSelectedNodeId]) {
@@ -10996,6 +11079,182 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // Stable categorical color per outer-ring signal arc. Indexed by
+    // position in labAllocation.uniqueBySignal so adjacent slices stay
+    // visually distinct. NOT tied to the network's signed return color
+    // (those nodes encode SIGN, this ring encodes IDENTITY — different
+    // dimensions, deliberately different palettes).
+    _labOuterColor(idx, total) {
+      const hue = Math.round((idx / Math.max(total, 1)) * 320);  // 0..320° (skip far red)
+      return `hsl(${hue}, 60%, 58%)`;
+    },
+
+    // Sequential gray ramp for inner-ring degree slices. degree=1
+    // (unique) is lightest; deeper overlaps darken. Sign-blind on
+    // purpose — this view is a structural partition, not a directional
+    // P&L read (the blue/pink scale is reserved for signed returns).
+    _labInnerColor(degree) {
+      if (degree === 1) return 'rgba(218, 222, 232, 0.88)';
+      const a = Math.min(0.92, 0.5 + (degree - 2) * 0.12);
+      return `rgba(120, 132, 150, ${a})`;
+    },
+
+    // ── Portfolio Lab — allocation donut (right pane, no selection) ─────
+    //
+    // Two concentric rings drawn on raw canvas:
+    //   INNER — every deduped trade partitioned by overlap degree
+    //           (1 = unique, 2 = 2-way, 3+ = ...). Slices sized by
+    //           |dollar_pnl| / total |dollar_pnl| so opposite-signed
+    //           buckets all render visibly. Sum = total union P&L.
+    //   OUTER — degree-1 slice exploded by owning signal. Spans only
+    //           the angular extent of the inner unique slice (a visual
+    //           zoom-in; totals reconcile by construction — no
+    //           allocation fudge, no double-counting).
+    //
+    // Hover link: when labHoveredNodeId is set, the matching signal's
+    // outer arc keeps full alpha and gets a thin white outline; all
+    // other arcs (inner + outer) dim to ~0.18. Hover NEVER mutates
+    // labSelectedNodeId, so the pane-swap state is preserved.
+    //
+    // This is a pure draw from precomputed labAllocation. Recomputing
+    // the allocation itself only happens in labRecompute (active-set
+    // change). Hover redraw is cheap (~one ring, ~10 slices typical).
+    _labRenderAllocation() {
+      const canvas = document.getElementById('lab-allocation-canvas');
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const W   = canvas.offsetWidth  || 240;
+      const H   = canvas.offsetHeight || 400;
+      canvas.width  = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+
+      const alloc = this.labAllocation;
+      if (!alloc || !alloc.byDegree.length || alloc.total_abs <= 0) {
+        // No data yet — leave blank; the Alpine x-show fallback
+        // ("Activate signals to see allocation") covers messaging.
+        return;
+      }
+
+      // Geometry: center the donut horizontally; vertical center sits
+      // above the label block so center text doesn't crowd.
+      const cx     = W / 2;
+      const cy     = Math.min(H * 0.42, 130);
+      const rOuter = Math.min(W * 0.45, cy - 8);
+      const rMid   = Math.max(rOuter - 16, rOuter * 0.78);   // ring boundary
+      const rIn    = Math.max(rMid - 28, rMid * 0.55);       // inner hole
+
+      const hovId = this.labHoveredNodeId;
+
+      // Draw annulus segment between (rIn, rOut) from angStart to angEnd.
+      const segPath = (rA, rB, a0, a1) => {
+        ctx.beginPath();
+        ctx.arc(cx, cy, rB, a0, a1);
+        ctx.arc(cx, cy, rA, a1, a0, true);
+        ctx.closePath();
+      };
+
+      // INNER RING — by overlap degree
+      let ang = -Math.PI / 2;
+      const innerSpans = [];   // [{degree, a0, a1}] — captured for outer ring placement
+      for (const d of alloc.byDegree) {
+        const span = (Math.abs(d.dollar_pnl) / alloc.total_abs) * 2 * Math.PI;
+        if (span <= 0) continue;
+        segPath(rIn, rMid, ang, ang + span);
+        ctx.globalAlpha = hovId ? 0.32 : 1.0;
+        ctx.fillStyle   = this._labInnerColor(d.degree);
+        ctx.fill();
+        innerSpans.push({ degree: d.degree, a0: ang, a1: ang + span });
+        ang += span;
+      }
+      ctx.globalAlpha = 1.0;
+
+      // OUTER RING — degree-1 slice only, exploded by signal
+      const uniqSpan = innerSpans.find(s => s.degree === 1);
+      if (uniqSpan && alloc.uniqueBySignal.length) {
+        const uniqTotalAbs = alloc.uniqueBySignal
+          .reduce((s, u) => s + Math.abs(u.dollar_pnl), 0);
+        if (uniqTotalAbs > 0) {
+          const arcExtent = uniqSpan.a1 - uniqSpan.a0;
+          let a = uniqSpan.a0;
+          alloc.uniqueBySignal.forEach((u, i) => {
+            const w = (Math.abs(u.dollar_pnl) / uniqTotalAbs) * arcExtent;
+            if (w <= 0) return;
+            const isHov   = (hovId === u.id);
+            const dimmed  = (hovId != null && !isHov);
+            segPath(rMid, rOuter, a, a + w);
+            ctx.globalAlpha = dimmed ? 0.18 : 1.0;
+            ctx.fillStyle   = this._labOuterColor(i, alloc.uniqueBySignal.length);
+            ctx.fill();
+            if (isHov) {
+              ctx.strokeStyle = 'rgba(255,255,255,.85)';
+              ctx.lineWidth   = 1.5;
+              ctx.stroke();
+            }
+            a += w;
+          });
+          ctx.globalAlpha = 1.0;
+        }
+      }
+
+      // Subtle ring boundaries — paint over the joints for cleanliness.
+      ctx.strokeStyle = 'rgba(0,0,0,.35)';
+      ctx.lineWidth   = 0.5;
+      for (const r of [rIn, rMid, rOuter]) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        ctx.stroke();
+      }
+
+      // CENTER LABEL — total $ + headline split
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = 'rgba(255,255,255,.92)';
+      ctx.font         = 'bold 15px sans-serif';
+      ctx.fillText(this.labFmtDollar(alloc.total_pnl), cx, cy - 7);
+      ctx.fillStyle    = 'rgba(255,255,255,.55)';
+      ctx.font         = '10px sans-serif';
+      const pctU = Math.round(alloc.unique_pct * 100);
+      const pctS = 100 - pctU;
+      ctx.fillText(`${pctU}% unique / ${pctS}% shared`, cx, cy + 9);
+
+      // LEGEND below the donut — degree colors + per-signal swatches.
+      // Compact, single column so the 30%-width pane isn't cramped.
+      const legendTop = cy + rOuter + 14;
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.font         = '10px sans-serif';
+      let ly = legendTop;
+      const swatch = (color, label) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(10, ly + 1, 9, 9);
+        ctx.fillStyle = 'rgba(255,255,255,.65)';
+        ctx.fillText(label, 24, ly);
+        ly += 13;
+      };
+      // Degree rows: "Unique", "2-way", "3-way", ...
+      for (const d of alloc.byDegree) {
+        if (ly > H - 12) break;
+        const lbl = d.degree === 1
+          ? `Unique  ${this.labFmtDollar(d.dollar_pnl)}  (${d.count})`
+          : `${d.degree}-way  ${this.labFmtDollar(d.dollar_pnl)}  (${d.count})`;
+        swatch(this._labInnerColor(d.degree), lbl);
+      }
+      if (alloc.uniqueBySignal.length && ly < H - 26) {
+        ly += 4;
+        ctx.fillStyle = 'rgba(255,255,255,.40)';
+        ctx.fillText('Unique by signal', 10, ly);
+        ly += 13;
+        alloc.uniqueBySignal.forEach((u, i) => {
+          if (ly > H - 12) return;
+          swatch(this._labOuterColor(i, alloc.uniqueBySignal.length),
+                 `#${u.id}  ${this.labFmtDollar(u.dollar_pnl)}  (${u.count})`);
+        });
+      }
+    },
+
     // ── Portfolio Lab — Stage 4: detail pane ────────────────────────────
 
     // Canvas click: hit-test node positions, toggle selection, re-render.
@@ -11016,13 +11275,18 @@ document.addEventListener('alpine:init', () => {
           this.labSelectedNodeId = newId;
           this.labSelectedDetail = newId ? this._labComputeNodeDetail(newId) : null;
           this._labRenderNetwork();
+          // Deselect → donut becomes visible; render now so the
+          // x-show swap doesn't reveal an empty canvas.
+          if (!newId) this.$nextTick(() => this._labRenderAllocation());
           return;
         }
       }
       // Click on background — deselect.
+      const wasSelected = this.labSelectedNodeId != null;
       this.labSelectedNodeId = null;
       this.labSelectedDetail = null;
       this._labRenderNetwork();
+      if (wasSelected) this.$nextTick(() => this._labRenderAllocation());
     },
 
     // Mousemove on network canvas: hit-test for hover highlight + tooltip.
@@ -11080,8 +11344,12 @@ document.addEventListener('alpine:init', () => {
       } else {
         this.labTooltipVisible = false;
       }
-      // Re-render only when hover state actually changes (avoid redraw every px)
-      if (prevHov !== this.labHoveredNodeId) this._labRenderNetwork();
+      // Re-render only when hover state actually changes (avoid redraw every px).
+      // Donut redraw is paired so the highlight/dim follows the same hover key.
+      if (prevHov !== this.labHoveredNodeId) {
+        this._labRenderNetwork();
+        if (!this.labSelectedNodeId) this._labRenderAllocation();
+      }
     },
 
     // Mouseleave on network canvas: clear hover state.
@@ -11090,6 +11358,7 @@ document.addEventListener('alpine:init', () => {
         this.labHoveredNodeId  = null;
         this.labTooltipVisible = false;
         this._labRenderNetwork();
+        if (!this.labSelectedNodeId) this._labRenderAllocation();
       }
     },
 
