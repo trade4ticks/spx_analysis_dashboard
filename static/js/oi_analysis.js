@@ -10746,7 +10746,7 @@ document.addEventListener('alpine:init', () => {
 
       // ── Node size from |increment| ────────────────────────────────────────
       const maxInc  = Math.max(...active.map(c => Math.abs(increments[c.id])), 1);
-      const nodeRad = c => Math.round(9 + (Math.abs(increments[c.id]) / maxInc) * 21); // 9..30 px
+      const nodeRad = c => Math.round(14 + (Math.abs(increments[c.id]) / maxInc) * 28); // 14..42 px
 
       // ── Anchored layout: OI left cluster / other right cluster ────────────
       const oiGroup    = active.filter(c => c.is_oi_signal);
@@ -10769,26 +10769,26 @@ document.addEventListener('alpine:init', () => {
         });
       };
 
-      const pad = 40;
+      const pad = 50;
       const cy  = H / 2;
       if (twoGroups) {
-        const maxR = Math.min(W * 0.19, (H - pad * 2) / 2, 105);
+        const maxR = Math.min(W * 0.19, (H - pad * 2) / 2, 150);
         layoutCircle(oiGroup,    W * 0.25, cy, maxR);
         layoutCircle(otherGroup, W * 0.75, cy, maxR);
       } else {
-        const maxR = Math.min(W * 0.32, (H - pad * 2) / 2, 120);
+        const maxR = Math.min(W * 0.38, (H - pad * 2) / 2, 165);
         layoutCircle(active, W / 2, cy, maxR);
       }
       this.labNetworkPositions = positions;  // expose for Stage 4
 
       // ── Draw group labels + separator ─────────────────────────────────────
       if (twoGroups) {
-        ctx.font = '10px sans-serif';
+        ctx.font = '12px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle = 'rgba(255,255,255,.22)';
-        ctx.fillText('OI-driver', W * 0.25, 6);
-        ctx.fillText('Other', W * 0.75, 6);
+        ctx.fillText('OI-driver', W * 0.25, 7);
+        ctx.fillText('Other', W * 0.75, 7);
         ctx.setLineDash([3, 4]);
         ctx.strokeStyle = 'rgba(255,255,255,.07)';
         ctx.lineWidth = 1;
@@ -10823,12 +10823,12 @@ document.addEventListener('alpine:init', () => {
         ctx.lineTo(pj.x, pj.y);
         ctx.stroke();
         // Shared-trade count label on the edge midpoint (only for prominent edges)
-        if (e.n / maxEdgeN > 0.12) {
+        if (e.n / maxEdgeN > 0.08) {
           const mx = (pi.x + pj.x) / 2, my = (pi.y + pj.y) / 2;
-          ctx.font = '8px sans-serif';
+          ctx.font = '11px sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(255,255,255,.42)';
+          ctx.fillStyle = 'rgba(255,255,255,.55)';
           ctx.fillText(e.n, mx, my);
         }
       }
@@ -10873,7 +10873,7 @@ document.addEventListener('alpine:init', () => {
 
         // Signal ID label
         ctx.fillStyle    = 'rgba(255,255,255,.92)';
-        ctx.font         = `bold ${rad >= 18 ? 11 : 9}px sans-serif`;
+        ctx.font         = `bold ${rad >= 24 ? 14 : rad >= 18 ? 12 : 10}px sans-serif`;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('#' + c.id, pos.x, pos.y);
