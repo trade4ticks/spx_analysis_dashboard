@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=239"></script>
+  <script src="/static/js/oi_analysis.js?v=240"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5321,7 +5321,7 @@
                             · edge weight = shared trades · dashed outline = negative incremental
                           </span>
                         </div>
-                        <div style="height:400px;background:var(--surface);position:relative">
+                        <div style="height:520px;background:var(--surface);position:relative">
                           <canvas id="lab-network-canvas"
                                   style="width:100%;height:100%;display:block;cursor:pointer"
                                   @click="labHandleNetworkClick($event)"
@@ -5347,7 +5347,7 @@
                       <!-- Detail pane (30%) — Stage 4 -->
                       <div style="flex:3;min-width:140px;border-left:1px solid var(--border);
                                   background:rgba(255,255,255,.01);position:relative;
-                                  overflow:hidden;height:400px">
+                                  overflow:hidden;height:520px">
                         <!-- Allocation donut — default view when no node
                              selected. Descriptive partition: where
                              realized $ SITS in unique vs. shared trades.
@@ -5370,42 +5370,45 @@
                             </span>
                           </div>
                           <div style="flex:1;display:flex;min-height:0;position:relative">
-                            <!-- Legend (LEFT) — vertically centered against
-                                 the donut; scrolls if it overflows. -->
-                            <div style="flex:0 0 96px;padding:8px 4px 8px 10px;
+                            <!-- Legend (LEFT) — every bucket shown; tight
+                                 single-column layout; vertically centered
+                                 against the donut. Each row: swatch +
+                                 single line "label  $X.Xk (N)". No wraps,
+                                 no nested second line — keeps the column
+                                 narrow and the full degree list visible
+                                 even at 8+ buckets in the 520px pane. -->
+                            <div style="flex:0 0 102px;padding:6px 4px 6px 8px;
                                         overflow-y:auto;display:flex;flex-direction:column;
-                                        justify-content:center;font-size:10px;line-height:1.45;
+                                        justify-content:center;font-size:9.5px;line-height:1.25;
                                         border-right:1px solid rgba(255,255,255,.04)">
                               <template x-if="labAllocation">
                                 <div>
-                                  <!-- Degree rows -->
                                   <template x-for="d in labAllocation.byDegree" :key="'lad-'+d.degree">
-                                    <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px">
-                                      <span :style="'flex:0 0 9px;height:9px;border-radius:2px;margin-top:3px;background:'
+                                    <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
+                                      <span :style="'flex:0 0 8px;height:8px;border-radius:2px;background:'
                                                      + _labInnerColor(d.degree)"></span>
-                                      <span style="color:rgba(255,255,255,.78);min-width:0;word-break:break-word">
-                                        <span x-text="d.label"></span><br>
-                                        <span style="color:rgba(255,255,255,.5);font-size:9px"
-                                              x-text="labFmtDollar(d.dollar_pnl) + '  (' + d.count + ')'"></span>
+                                      <span style="color:rgba(255,255,255,.78);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                                        <span x-text="d.label"></span>
+                                        <span style="color:rgba(255,255,255,.5)"
+                                              x-text="' ' + labFmtDollar(d.dollar_pnl) + ' (' + d.count + ')'"></span>
                                       </span>
                                     </div>
                                   </template>
-                                  <!-- Per-signal swatches under Unique -->
                                   <template x-if="labAllocation.uniqueBySignal.length">
-                                    <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.05)">
-                                      <div style="color:rgba(255,255,255,.4);font-size:9px;
+                                    <div style="margin-top:6px;padding-top:4px;border-top:1px solid rgba(255,255,255,.05)">
+                                      <div style="color:rgba(255,255,255,.4);font-size:8.5px;
                                                   letter-spacing:.04em;text-transform:uppercase;
-                                                  margin-bottom:4px">
+                                                  margin-bottom:2px">
                                         Unique by signal
                                       </div>
                                       <template x-for="(u, i) in labAllocation.uniqueBySignal" :key="'lau-'+u.id">
-                                        <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:3px">
-                                          <span :style="'flex:0 0 9px;height:9px;border-radius:2px;margin-top:3px;background:'
+                                        <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
+                                          <span :style="'flex:0 0 8px;height:8px;border-radius:2px;background:'
                                                          + _labOuterColor(i, labAllocation.uniqueBySignal.length)"></span>
-                                          <span style="color:rgba(255,255,255,.7);min-width:0">
-                                            <span x-text="'#' + u.id"></span><br>
-                                            <span style="color:rgba(255,255,255,.45);font-size:9px"
-                                                  x-text="labFmtDollar(u.dollar_pnl) + '  (' + u.count + ')'"></span>
+                                          <span style="color:rgba(255,255,255,.7);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                                            <span x-text="'#' + u.id"></span>
+                                            <span style="color:rgba(255,255,255,.45)"
+                                                  x-text="' ' + labFmtDollar(u.dollar_pnl) + ' (' + u.count + ')'"></span>
                                           </span>
                                         </div>
                                       </template>

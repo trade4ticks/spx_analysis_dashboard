@@ -10605,14 +10605,12 @@ document.addEventListener('alpine:init', () => {
           }
         }
       }
-      // Collapse the deep tail: degree ≥ 6 merges into one "6+ way"
-      // bucket — both ring arc and legend. The tail (7-way, 8-way) is
-      // visually invisible and adds legend rows for very little $.
-      // Per-trade pnl values are NOT changed; this is a grouping of
-      // already-computed bucket sums. Total reconciliation to the
-      // stats-bar Total $ is preserved by construction.
-      const capDeg = d => Math.min(d, 6);
-      const labelDeg = d => d === 1 ? 'Unique' : d >= 6 ? '6+ way' : `${d}-way`;
+      // Every degree present in the active set gets its own bucket —
+      // both ring and legend. The visual must faithfully partition
+      // ALL trades; a 7-way and 8-way are different structures even
+      // if their $ slices are thin. Tooltip carries the per-bucket
+      // detail when slices are too small to read at a glance.
+      const labelDeg = d => d === 1 ? 'Unique' : `${d}-way`;
       const byDegreeMap     = new Map();
       const uniqueBySigMap  = new Map();
       for (const cand of active) {
@@ -10620,10 +10618,9 @@ document.addEventListener('alpine:init', () => {
                                        dollar_pnl: 0, count: 0 });
       }
       for (const trade of union) {
-        const key   = trade.ticker + '|' + trade.trade_date;
-        const rawD  = degreeByKey.get(key) || 1;
-        const deg   = capDeg(rawD);
-        const pnl   = pnlByKey.get(key) || 0;
+        const key = trade.ticker + '|' + trade.trade_date;
+        const deg = degreeByKey.get(key) || 1;
+        const pnl = pnlByKey.get(key) || 0;
         if (!byDegreeMap.has(deg)) {
           byDegreeMap.set(deg, { degree: deg, label: labelDeg(deg),
                                   dollar_pnl: 0, count: 0 });
@@ -10929,12 +10926,15 @@ document.addEventListener('alpine:init', () => {
 
       const pad = 50;
       const cy  = H / 2;
+      // Hard radius caps raised in step with the 30% pane height
+      // bump so the extra vertical room actually spreads the nodes
+      // out, instead of leaving dead space at the bottom.
       if (twoGroups) {
-        const maxR = Math.min(W * 0.19, (H - pad * 2) / 2, 150);
+        const maxR = Math.min(W * 0.19, (H - pad * 2) / 2, 200);
         layoutCircle(oiGroup,    W * 0.25, cy, maxR);
         layoutCircle(otherGroup, W * 0.75, cy, maxR);
       } else {
-        const maxR = Math.min(W * 0.38, (H - pad * 2) / 2, 165);
+        const maxR = Math.min(W * 0.38, (H - pad * 2) / 2, 220);
         layoutCircle(active, W / 2, cy, maxR);
       }
       this.labNetworkPositions = positions;  // expose for Stage 4
@@ -11161,14 +11161,19 @@ document.addEventListener('alpine:init', () => {
         return;
       }
 
-      // Donut occupies the canvas's centre. Legend is in HTML now,
-      // so the only thing this draw call cares about is the rings
-      // and the centre label — no dependency on legend layout.
+      // Donut occupies the canvas centre. Diameter is a fixed
+      // fraction of the smaller canvas dimension with a clear margin
+      // on all sides — number of slices does NOT affect size. Deep-
+      // degree slices get thin (their data lives in the tooltip);
+      // the ring never grows past the pane edge.
       const cx     = W / 2;
       const cy     = H / 2;
-      const rOuter = Math.min(W, H) * 0.45 - 4;
-      const rMid   = Math.max(rOuter - 18, rOuter * 0.78);
-      const rIn    = Math.max(rMid - 32, rMid * 0.55);
+      const margin = 14;
+      const rOuter = Math.max(20, Math.min(W, H) / 2 - margin);
+      // Ring widths are proportional to rOuter — middle band is 30%
+      // of the radius, outer ring 18%. Works at any donut size.
+      const rMid   = rOuter * 0.82;
+      const rIn    = rOuter * 0.52;
 
       const hovId = this.labHoveredNodeId;
 
