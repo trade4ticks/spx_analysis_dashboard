@@ -3908,6 +3908,13 @@ document.addEventListener('alpine:init', () => {
     // Shape: {year_str: {bySignalId: {[id]: dollar_pnl}, shared: dollar_pnl}}
     labYearlyBanded:   null,
     labYearlyMode:     'stacked',  // 'stacked' | 'clustered'
+    // Stable per-signal identity color map.  Keyed by signal id; value is
+    // the hue integer (0-320°) for that signal's canonical HSL color.
+    // Built once in loadLabCandidates from the full candidates list so
+    // colors are stable regardless of which signals are active.
+    // ALL four views (cards, nodes, donut outer ring, stacked chart) derive
+    // their signal color from this map via _labSignalColor(id).
+    labSigColorMap:    {},
     // Right-pane allocation donut (shown when no node is selected).
     // Computed in labRecompute from the existing dedup pass + the
     // dollar-capped per-trade pnl in ds.tradeDollarSizes. Renders into
@@ -10388,6 +10395,20 @@ document.addEventListener('alpine:init', () => {
             const wins = trades.filter(t => (t.ret || 0) > 0).length;
             c.win_rate = trades.length ? wins / trades.length : 0;
           }
+          // Build stable per-signal identity color map from candidates array
+          // order.  Indexed by position in labCandidates (fixed after load)
+          // so the same signal id always gets the same hue regardless of
+          // which other signals are currently active.  All four views —
+          // cards, network nodes, donut outer ring, stacked-by-year chart —
+          // derive their signal color from this map via _labSignalColor(id).
+          {
+            const N = this.labCandidates.length;
+            const cm = {};
+            this.labCandidates.forEach((c, i) => {
+              cm[c.id] = Math.round((i / Math.max(N, 1)) * 320);   // hue 0-320°
+            });
+            this.labSigColorMap = cm;
+          }
           this.labLoaded = true;
         }
       } catch (e) {
@@ -10436,23 +10457,17 @@ document.addEventListener('alpine:init', () => {
     // near-zero → neutral gray. Alpha scales 0→0.82 over 0→5%.
     // isActive: white ring border; position:relative always (for ✓ badge).
     labCardStyle(c, isActive) {
+      // Card color = per-signal IDENTITY (same hue in nodes, donut, stacked chart).
+      // Active = deep saturated fill so the card reads as "in the mix".
+      // Inactive = same hue, very dim so identity is still readable but the
+      // card clearly isn't contributing yet.
+      // avg-ret is NOT encoded here — it's printed as a number on the card.
       const n    = c.agg_n || 0;
-      const ret  = c.agg_avg_ret;
       const size = this.labCardSize(n);
-      const SCALE = 0.05;
-      let bg, border;
-      if (ret == null || Math.abs(ret) < 0.0002) {
-        bg     = 'rgba(120,120,120,.18)';
-        border = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(255,255,255,.08)';
-      } else if (ret > 0) {
-        const a = Math.min(0.82, ret / SCALE).toFixed(2);
-        bg      = `rgba(41,128,185,${a})`;
-        border  = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(41,128,185,.45)';
-      } else {
-        const a = Math.min(0.82, Math.abs(ret) / SCALE).toFixed(2);
-        bg      = `rgba(232,67,147,${a})`;
-        border  = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(232,67,147,.45)';
-      }
+      const hue  = this.labSigColorMap[c.id] ?? 0;
+      const bg     = isActive ? `hsl(${hue}, 62%, 36%)` : `hsl(${hue}, 28%, 19%)`;
+      const border = isActive ? '2px solid rgba(255,255,255,.80)'
+                              : `1px solid hsl(${hue}, 28%, 30%)`;
       return `width:${size}px;height:${size}px;background:${bg};border:${border};` +
              `border-radius:5px;padding:5px 5px 3px 5px;cursor:pointer;position:relative;` +
              `display:flex;flex-direction:column;justify-content:space-between;` +
@@ -10848,7 +10863,7 @@ document.addEventListener('alpine:init', () => {
         // ── Clustered: one dataset per signal, unique P&L only ───────────
         for (let i = 0; i < sigCount; i++) {
           const sig   = signals[i];
-          const color = this._labOuterColor(i, sigCount);
+          const color = this._labSignalColor(sig.id);
           datasets.push({
             label:           sig.name,
             data:            years.map(yr => +(banded[yr]?.bySignalId[sig.id] || 0).toFixed(2)),
@@ -10863,7 +10878,7 @@ document.addEventListener('alpine:init', () => {
         // them occupy the same column width at the same x position).
         for (let i = 0; i < sigCount; i++) {
           const sig   = signals[i];
-          const color = this._labOuterColor(i, sigCount);
+          const color = this._labSignalColor(sig.id);
           const vals  = years.map(yr => banded[yr]?.bySignalId[sig.id] || 0);
           datasets.push({
             label:           sig.name,
@@ -11021,20 +11036,17 @@ document.addEventListener('alpine:init', () => {
         tradeSets[c.id] = new Set((c.trades || []).map(t => t.ticker + '|' + t.trade_date));
       }
 
-      // Unique avg-ret: trades in this signal NOT present in any other
-      // active signal. Also cache unique trade count alongside the avg —
-      // the hover tooltip reads it via labNetworkUniqueN, no extra pass.
-      const uniqueAvgRet = {};
-      const uniqueN      = {};
+      // Unique trade count per signal (trades not shared with any other active
+      // signal).  Exposed for hover tooltip.  unique avg-ret no longer needed
+      // as a visual encoding — node fill now uses per-signal identity color.
+      const uniqueN = {};
       for (const c of active) {
         const othersKeys = new Set();
         for (const o of active) {
           if (o.id !== c.id) for (const k of tradeSets[o.id]) othersKeys.add(k);
         }
-        const uniq = (c.trades || []).filter(t => !othersKeys.has(t.ticker + '|' + t.trade_date));
-        const rets = uniq.map(t => t.ret).filter(r => r != null && isFinite(r));
-        uniqueAvgRet[c.id] = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : null;
-        uniqueN[c.id]      = uniq.length;
+        uniqueN[c.id] = (c.trades || [])
+          .filter(t => !othersKeys.has(t.ticker + '|' + t.trade_date)).length;
       }
       this.labNetworkUniqueN = uniqueN;   // exposed for tooltip lookup
 
@@ -11196,21 +11208,14 @@ document.addEventListener('alpine:init', () => {
         const isNear   = !hovId || incidentNodeIds.has(c.id);
         const isHov    = c.id === hovId;
         const isNegInc = increments[c.id] < 0;
-        const uRet     = uniqueAvgRet[c.id];
 
         ctx.globalAlpha = isNear ? 1.0 : 0.15;
 
-        // Node fill from unique avg-ret
-        let fillColor;
-        if (uRet == null || Math.abs(uRet) < 0.0002) {
-          fillColor = 'rgba(120,120,120,.55)';
-        } else if (uRet > 0) {
-          const a = (0.3 + Math.min(0.55, uRet / SCALE)).toFixed(2);
-          fillColor = `rgba(41,128,185,${a})`;
-        } else {
-          const a = (0.3 + Math.min(0.55, Math.abs(uRet) / SCALE)).toFixed(2);
-          fillColor = `rgba(232,67,147,${a})`;
-        }
+        // Node fill = per-signal identity color (same as card, donut arc,
+        // stacked-chart band for this signal).  Node SIZE = cut-impact;
+        // node OUTLINE = dashed-pink drop-candidate.  avg-ret is a number
+        // in the hover tooltip / detail pane, not a visual fill encoding.
+        const fillColor = this._labSignalColor(c.id);
 
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, rad, 0, 2 * Math.PI);
@@ -11267,6 +11272,15 @@ document.addEventListener('alpine:init', () => {
     // visually distinct. NOT tied to the network's signed return color
     // (those nodes encode SIGN, this ring encodes IDENTITY — different
     // dimensions, deliberately different palettes).
+    // Single source of truth for per-signal identity colors.
+    // All four views (cards, nodes, donut outer ring, stacked-by-year chart)
+    // call this — same signal id → identical color everywhere, every render.
+    // Falls back to hue=0 (red-ish) if labSigColorMap not yet built.
+    _labSignalColor(id) {
+      const hue = this.labSigColorMap[id] ?? 0;
+      return `hsl(${hue}, 60%, 58%)`;
+    },
+
     _labOuterColor(idx, total) {
       const hue = Math.round((idx / Math.max(total, 1)) * 320);  // 0..320° (skip far red)
       return `hsl(${hue}, 60%, 58%)`;
@@ -11386,7 +11400,7 @@ document.addEventListener('alpine:init', () => {
             const dimmed = (hovId != null && !isHov);
             segPath(rMid, rOuter, a, a + w);
             ctx.globalAlpha = dimmed ? 0.18 : 1.0;
-            ctx.fillStyle   = this._labOuterColor(i, alloc.uniqueBySignal.length);
+            ctx.fillStyle   = this._labSignalColor(u.id);
             ctx.fill();
             if (isHov) {
               ctx.strokeStyle = 'rgba(255,255,255,.85)';
