@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=238"></script>
+  <script src="/static/js/oi_analysis.js?v=239"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5352,7 +5352,13 @@
                              selected. Descriptive partition: where
                              realized $ SITS in unique vs. shared trades.
                              NOT causal (≠ cut-impact). The two answer
-                             different questions and won't agree. -->
+                             different questions and won't agree.
+
+                             Legend is HTML (Alpine-rendered from
+                             labAllocation), NOT painted on canvas, so
+                             it never depends on canvas dimensions at
+                             render time — same legend on first-load
+                             and on deselect-return. -->
                         <div x-show="!labSelectedDetail"
                              style="display:flex;flex-direction:column;height:100%">
                           <div style="font-size:10px;color:rgba(255,255,255,.45);
@@ -5363,19 +5369,83 @@
                               inner: unique vs shared · outer: unique split by signal
                             </span>
                           </div>
-                          <div style="flex:1;position:relative;min-height:0">
-                            <canvas id="lab-allocation-canvas"
-                                    style="width:100%;height:100%;display:block"></canvas>
-                            <!-- Empty fallback (no active signals) -->
-                            <div x-show="!labAllocation"
-                                 style="position:absolute;inset:0;display:flex;
-                                        flex-direction:column;align-items:center;
-                                        justify-content:center;gap:4px;pointer-events:none">
-                              <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
-                                Activate signals
+                          <div style="flex:1;display:flex;min-height:0;position:relative">
+                            <!-- Legend (LEFT) — vertically centered against
+                                 the donut; scrolls if it overflows. -->
+                            <div style="flex:0 0 96px;padding:8px 4px 8px 10px;
+                                        overflow-y:auto;display:flex;flex-direction:column;
+                                        justify-content:center;font-size:10px;line-height:1.45;
+                                        border-right:1px solid rgba(255,255,255,.04)">
+                              <template x-if="labAllocation">
+                                <div>
+                                  <!-- Degree rows -->
+                                  <template x-for="d in labAllocation.byDegree" :key="'lad-'+d.degree">
+                                    <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px">
+                                      <span :style="'flex:0 0 9px;height:9px;border-radius:2px;margin-top:3px;background:'
+                                                     + _labInnerColor(d.degree)"></span>
+                                      <span style="color:rgba(255,255,255,.78);min-width:0;word-break:break-word">
+                                        <span x-text="d.label"></span><br>
+                                        <span style="color:rgba(255,255,255,.5);font-size:9px"
+                                              x-text="labFmtDollar(d.dollar_pnl) + '  (' + d.count + ')'"></span>
+                                      </span>
+                                    </div>
+                                  </template>
+                                  <!-- Per-signal swatches under Unique -->
+                                  <template x-if="labAllocation.uniqueBySignal.length">
+                                    <div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.05)">
+                                      <div style="color:rgba(255,255,255,.4);font-size:9px;
+                                                  letter-spacing:.04em;text-transform:uppercase;
+                                                  margin-bottom:4px">
+                                        Unique by signal
+                                      </div>
+                                      <template x-for="(u, i) in labAllocation.uniqueBySignal" :key="'lau-'+u.id">
+                                        <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:3px">
+                                          <span :style="'flex:0 0 9px;height:9px;border-radius:2px;margin-top:3px;background:'
+                                                         + _labOuterColor(i, labAllocation.uniqueBySignal.length)"></span>
+                                          <span style="color:rgba(255,255,255,.7);min-width:0">
+                                            <span x-text="'#' + u.id"></span><br>
+                                            <span style="color:rgba(255,255,255,.45);font-size:9px"
+                                                  x-text="labFmtDollar(u.dollar_pnl) + '  (' + u.count + ')'"></span>
+                                          </span>
+                                        </div>
+                                      </template>
+                                    </div>
+                                  </template>
+                                </div>
+                              </template>
+                            </div>
+                            <!-- Donut (RIGHT) -->
+                            <div style="flex:1;position:relative;min-width:0">
+                              <canvas id="lab-allocation-canvas"
+                                      style="width:100%;height:100%;display:block;cursor:default"
+                                      @mousemove="labHandleAllocMousemove($event)"
+                                      @mouseleave="labHandleAllocMouseleave()"></canvas>
+                              <!-- Slice tooltip -->
+                              <div x-show="labAllocTooltipVisible"
+                                   :style="'position:absolute;pointer-events:none;z-index:10;' +
+                                           'top:'+labAllocTooltipY+'px;left:'+labAllocTooltipX+'px;' +
+                                           'background:rgba(10,10,10,.93);border:1px solid rgba(255,255,255,.14);' +
+                                           'border-radius:5px;padding:7px 10px;line-height:1.5;' +
+                                           'white-space:nowrap;max-width:260px'">
+                                <template x-for="(line, i) in labAllocTooltipLines" :key="'at'+i">
+                                  <div x-text="line"
+                                       :style="i === 0
+                                         ? 'font-size:12px;font-weight:700;color:var(--text);margin-bottom:2px'
+                                         : 'font-size:11px;color:var(--dim)'">
+                                  </div>
+                                </template>
                               </div>
-                              <div style="font-size:10px;color:rgba(255,255,255,.09)">
-                                to see allocation
+                              <!-- Empty fallback (no active signals) -->
+                              <div x-show="!labAllocation"
+                                   style="position:absolute;inset:0;display:flex;
+                                          flex-direction:column;align-items:center;
+                                          justify-content:center;gap:4px;pointer-events:none">
+                                <div style="font-size:11px;color:rgba(255,255,255,.18);font-style:italic">
+                                  Activate signals
+                                </div>
+                                <div style="font-size:10px;color:rgba(255,255,255,.09)">
+                                  to see allocation
+                                </div>
                               </div>
                             </div>
                           </div>

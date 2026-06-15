@@ -3907,6 +3907,13 @@ document.addEventListener('alpine:init', () => {
     // dollar-capped per-trade pnl in ds.tradeDollarSizes. Renders into
     // #lab-allocation-canvas via _labRenderAllocation.
     labAllocation:        null,    // see labRecompute for shape
+    // Donut slice hover-tooltip state. Lines built in
+    // labHandleAllocMousemove from the cached _labInnerSpans /
+    // _labOuterSpans — no recompute on hover.
+    labAllocTooltipVisible: false,
+    labAllocTooltipX:       0,
+    labAllocTooltipY:       0,
+    labAllocTooltipLines:   [],
     labSelectedNodeId:    null,    // currently clicked node id (or null)
     labSelectedDetail:    null,    // decomposition object for selected node
     labHoveredNodeId:     null,    // node under cursor (hover only, not click)
@@ -10598,6 +10605,14 @@ document.addEventListener('alpine:init', () => {
           }
         }
       }
+      // Collapse the deep tail: degree ≥ 6 merges into one "6+ way"
+      // bucket — both ring arc and legend. The tail (7-way, 8-way) is
+      // visually invisible and adds legend rows for very little $.
+      // Per-trade pnl values are NOT changed; this is a grouping of
+      // already-computed bucket sums. Total reconciliation to the
+      // stats-bar Total $ is preserved by construction.
+      const capDeg = d => Math.min(d, 6);
+      const labelDeg = d => d === 1 ? 'Unique' : d >= 6 ? '6+ way' : `${d}-way`;
       const byDegreeMap     = new Map();
       const uniqueBySigMap  = new Map();
       for (const cand of active) {
@@ -10605,10 +10620,14 @@ document.addEventListener('alpine:init', () => {
                                        dollar_pnl: 0, count: 0 });
       }
       for (const trade of union) {
-        const key = trade.ticker + '|' + trade.trade_date;
-        const deg = degreeByKey.get(key) || 1;
-        const pnl = pnlByKey.get(key) || 0;
-        if (!byDegreeMap.has(deg)) byDegreeMap.set(deg, { degree: deg, dollar_pnl: 0, count: 0 });
+        const key   = trade.ticker + '|' + trade.trade_date;
+        const rawD  = degreeByKey.get(key) || 1;
+        const deg   = capDeg(rawD);
+        const pnl   = pnlByKey.get(key) || 0;
+        if (!byDegreeMap.has(deg)) {
+          byDegreeMap.set(deg, { degree: deg, label: labelDeg(deg),
+                                  dollar_pnl: 0, count: 0 });
+        }
         const b = byDegreeMap.get(deg);
         b.dollar_pnl += pnl;
         b.count      += 1;
@@ -11131,24 +11150,28 @@ document.addEventListener('alpine:init', () => {
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, W, H);
 
+      // Clear cached hit-test spans; the legend renders from
+      // labAllocation directly, so we never re-read the canvas
+      // dimensions to decide what to show.
+      this._labInnerSpans = [];
+      this._labOuterSpans = [];
+
       const alloc = this.labAllocation;
       if (!alloc || !alloc.byDegree.length || alloc.total_abs <= 0) {
-        // No data yet — leave blank; the Alpine x-show fallback
-        // ("Activate signals to see allocation") covers messaging.
         return;
       }
 
-      // Geometry: center the donut horizontally; vertical center sits
-      // above the label block so center text doesn't crowd.
+      // Donut occupies the canvas's centre. Legend is in HTML now,
+      // so the only thing this draw call cares about is the rings
+      // and the centre label — no dependency on legend layout.
       const cx     = W / 2;
-      const cy     = Math.min(H * 0.42, 130);
-      const rOuter = Math.min(W * 0.45, cy - 8);
-      const rMid   = Math.max(rOuter - 16, rOuter * 0.78);   // ring boundary
-      const rIn    = Math.max(rMid - 28, rMid * 0.55);       // inner hole
+      const cy     = H / 2;
+      const rOuter = Math.min(W, H) * 0.45 - 4;
+      const rMid   = Math.max(rOuter - 18, rOuter * 0.78);
+      const rIn    = Math.max(rMid - 32, rMid * 0.55);
 
       const hovId = this.labHoveredNodeId;
 
-      // Draw annulus segment between (rIn, rOut) from angStart to angEnd.
       const segPath = (rA, rB, a0, a1) => {
         ctx.beginPath();
         ctx.arc(cx, cy, rB, a0, a1);
@@ -11156,9 +11179,9 @@ document.addEventListener('alpine:init', () => {
         ctx.closePath();
       };
 
-      // INNER RING — by overlap degree
+      // INNER RING — by overlap degree. Spans cached for hit-test.
       let ang = -Math.PI / 2;
-      const innerSpans = [];   // [{degree, a0, a1}] — captured for outer ring placement
+      const innerSpans = [];
       for (const d of alloc.byDegree) {
         const span = (Math.abs(d.dollar_pnl) / alloc.total_abs) * 2 * Math.PI;
         if (span <= 0) continue;
@@ -11166,13 +11189,21 @@ document.addEventListener('alpine:init', () => {
         ctx.globalAlpha = hovId ? 0.32 : 1.0;
         ctx.fillStyle   = this._labInnerColor(d.degree);
         ctx.fill();
-        innerSpans.push({ degree: d.degree, a0: ang, a1: ang + span });
+        innerSpans.push({
+          degree:     d.degree,
+          label:      d.label,
+          dollar_pnl: d.dollar_pnl,
+          count:      d.count,
+          a0:         ang,
+          a1:         ang + span,
+        });
         ang += span;
       }
       ctx.globalAlpha = 1.0;
 
-      // OUTER RING — degree-1 slice only, exploded by signal
+      // OUTER RING — degree-1 only, exploded by signal. Spans cached.
       const uniqSpan = innerSpans.find(s => s.degree === 1);
+      const outerSpans = [];
       if (uniqSpan && alloc.uniqueBySignal.length) {
         const uniqTotalAbs = alloc.uniqueBySignal
           .reduce((s, u) => s + Math.abs(u.dollar_pnl), 0);
@@ -11182,8 +11213,8 @@ document.addEventListener('alpine:init', () => {
           alloc.uniqueBySignal.forEach((u, i) => {
             const w = (Math.abs(u.dollar_pnl) / uniqTotalAbs) * arcExtent;
             if (w <= 0) return;
-            const isHov   = (hovId === u.id);
-            const dimmed  = (hovId != null && !isHov);
+            const isHov  = (hovId === u.id);
+            const dimmed = (hovId != null && !isHov);
             segPath(rMid, rOuter, a, a + w);
             ctx.globalAlpha = dimmed ? 0.18 : 1.0;
             ctx.fillStyle   = this._labOuterColor(i, alloc.uniqueBySignal.length);
@@ -11193,13 +11224,27 @@ document.addEventListener('alpine:init', () => {
               ctx.lineWidth   = 1.5;
               ctx.stroke();
             }
+            outerSpans.push({
+              id:         u.id,
+              name:       u.name,
+              dollar_pnl: u.dollar_pnl,
+              count:      u.count,
+              a0:         a,
+              a1:         a + w,
+              color_idx:  i,
+            });
             a += w;
           });
           ctx.globalAlpha = 1.0;
         }
       }
 
-      // Subtle ring boundaries — paint over the joints for cleanliness.
+      // Cache geometry + spans for the slice-hover hit-test.
+      this._labInnerSpans = innerSpans;
+      this._labOuterSpans = outerSpans;
+      this._labDonutGeom  = { cx, cy, rIn, rMid, rOuter };
+
+      // Subtle ring boundaries
       ctx.strokeStyle = 'rgba(0,0,0,.35)';
       ctx.lineWidth   = 0.5;
       for (const r of [rIn, rMid, rOuter]) {
@@ -11219,40 +11264,84 @@ document.addEventListener('alpine:init', () => {
       const pctU = Math.round(alloc.unique_pct * 100);
       const pctS = 100 - pctU;
       ctx.fillText(`${pctU}% unique / ${pctS}% shared`, cx, cy + 9);
+    },
 
-      // LEGEND below the donut — degree colors + per-signal swatches.
-      // Compact, single column so the 30%-width pane isn't cramped.
-      const legendTop = cy + rOuter + 14;
-      ctx.textAlign    = 'left';
-      ctx.textBaseline = 'top';
-      ctx.font         = '10px sans-serif';
-      let ly = legendTop;
-      const swatch = (color, label) => {
-        ctx.fillStyle = color;
-        ctx.fillRect(10, ly + 1, 9, 9);
-        ctx.fillStyle = 'rgba(255,255,255,.65)';
-        ctx.fillText(label, 24, ly);
-        ly += 13;
-      };
-      // Degree rows: "Unique", "2-way", "3-way", ...
-      for (const d of alloc.byDegree) {
-        if (ly > H - 12) break;
-        const lbl = d.degree === 1
-          ? `Unique  ${this.labFmtDollar(d.dollar_pnl)}  (${d.count})`
-          : `${d.degree}-way  ${this.labFmtDollar(d.dollar_pnl)}  (${d.count})`;
-        swatch(this._labInnerColor(d.degree), lbl);
+    // Hit-test: which donut span (if any) is under (mx, my)?
+    // Returns {ring: 'inner'|'outer', span: ...} or null. Pure lookup
+    // over the cached spans — no recompute.
+    _labDonutHit(mx, my) {
+      const g = this._labDonutGeom;
+      if (!g) return null;
+      const dx = mx - g.cx;
+      const dy = my - g.cy;
+      const r  = Math.hypot(dx, dy);
+      if (r < g.rIn || r > g.rOuter) return null;
+      // Angle: atan2 gives [-PI, PI]; our ring starts at -PI/2 and
+      // sweeps clockwise. Normalise to a positive sweep from start.
+      let theta = Math.atan2(dy, dx);
+      // Map -PI..PI → -PI/2 origin sweep; bring into [-PI/2, 3PI/2)
+      if (theta < -Math.PI / 2) theta += 2 * Math.PI;
+      const inOuter = r >= g.rMid;
+      const spans = inOuter ? this._labOuterSpans : this._labInnerSpans;
+      for (const s of spans) {
+        // Handle wraparound: a span may cross 3PI/2 (-PI/2 + 2PI).
+        let a0 = s.a0, a1 = s.a1;
+        if (theta >= a0 && theta < a1) return { ring: inOuter ? 'outer' : 'inner', span: s };
       }
-      if (alloc.uniqueBySignal.length && ly < H - 26) {
-        ly += 4;
-        ctx.fillStyle = 'rgba(255,255,255,.40)';
-        ctx.fillText('Unique by signal', 10, ly);
-        ly += 13;
-        alloc.uniqueBySignal.forEach((u, i) => {
-          if (ly > H - 12) return;
-          swatch(this._labOuterColor(i, alloc.uniqueBySignal.length),
-                 `#${u.id}  ${this.labFmtDollar(u.dollar_pnl)}  (${u.count})`);
-        });
+      return null;
+    },
+
+    // Mousemove on the donut canvas. Cached lookup; no recompute.
+    // Tooltip lines mirror the network's hover layout for consistency.
+    labHandleAllocMousemove(event) {
+      const canvas = document.getElementById('lab-allocation-canvas');
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx   = event.clientX - rect.left;
+      const my   = event.clientY - rect.top;
+      const hit  = this._labDonutHit(mx, my);
+      if (!hit) {
+        if (this.labAllocTooltipVisible) this.labAllocTooltipVisible = false;
+        return;
       }
+      const total = this.labAllocation?.total_abs || 0;
+      const fmtPct = v => total > 0
+        ? (Math.abs(v) / total * 100).toFixed(1) + '%'
+        : '—';
+      let lines;
+      if (hit.ring === 'inner') {
+        const s = hit.span;
+        lines = [
+          s.label,
+          'P&L: '    + this.labFmtDollar(s.dollar_pnl),
+          'trades: ' + s.count.toLocaleString(),
+          '% of |total|: ' + fmtPct(s.dollar_pnl),
+        ];
+      } else {
+        const s = hit.span;
+        lines = [
+          '#' + s.id + '  ' + s.name,
+          'unique P&L: '    + this.labFmtDollar(s.dollar_pnl),
+          'unique trades: ' + s.count.toLocaleString(),
+          '% of |total|: '  + fmtPct(s.dollar_pnl),
+        ];
+      }
+      this.labAllocTooltipLines = lines;
+      // Position: follow cursor, flip if near edges.
+      const W = canvas.offsetWidth || 280;
+      const H = canvas.offsetHeight || 400;
+      const TW = 200, TH = 78;
+      let tx = mx + 14;
+      if (tx + TW > W) tx = mx - TW - 14;
+      let ty = my + 14;
+      if (ty + TH > H) ty = my - TH - 10;
+      this.labAllocTooltipX = Math.max(0, tx);
+      this.labAllocTooltipY = Math.max(0, ty);
+      this.labAllocTooltipVisible = true;
+    },
+
+    labHandleAllocMouseleave() {
+      if (this.labAllocTooltipVisible) this.labAllocTooltipVisible = false;
     },
 
     // ── Portfolio Lab — Stage 4: detail pane ────────────────────────────
