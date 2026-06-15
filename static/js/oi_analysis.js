@@ -7932,6 +7932,14 @@ document.addEventListener('alpine:init', () => {
     //                      rolling-concurrent windowing can operate on
     //                      dollar amounts instead of unit counts.
     _computeDollarSeries(trades, perTrade, dailyCap) {
+      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
+      // _labDsCallsThisHover is set to 0 by the hover/leave handlers before
+      // they call anything; we count every _computeDollarSeries invocation
+      // that occurs while that flag is defined.
+      if (typeof this._labDsCallsThisHover === 'number') {
+        this._labDsCallsThisHover++;
+      }
+      // ─────────────────────────────────────────────────────────────────────
       const empty = {
         equity: [], dayPnlByDate: new Map(),
         dayDeployedByDate: new Map(), tradeDollarSizes: [],
@@ -10829,6 +10837,9 @@ document.addEventListener('alpine:init', () => {
     // Layout: OI-driver signals on left cluster, others on right cluster (anchored,
     // no force layout). Positions saved in this.labNetworkPositions for Stage 4.
     _labRenderNetwork() {
+      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
+      console.log('[Lab] _labRenderNetwork() called — full redraw');
+      // ─────────────────────────────────────────────────────────────────────
       const canvas = document.getElementById('lab-network-canvas');
       if (!canvas) return;
       const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
@@ -11386,6 +11397,11 @@ document.addEventListener('alpine:init', () => {
     // Mousemove on network canvas: hit-test for hover highlight + tooltip.
     // Independent of click selection — does NOT change labSelectedNodeId.
     labHandleNetworkMousemove(event) {
+      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
+      const _diagT0 = performance.now();
+      this._labDsCallsThisHover = 0;   // reset counter; _computeDollarSeries increments it
+      let _diagRedrew = false;
+      // ─────────────────────────────────────────────────────────────────────
       const canvas = document.getElementById('lab-network-canvas');
       if (!canvas) return;
       const rect   = canvas.getBoundingClientRect();
@@ -11441,18 +11457,42 @@ document.addEventListener('alpine:init', () => {
       // Re-render only when hover state actually changes (avoid redraw every px).
       // Donut redraw is paired so the highlight/dim follows the same hover key.
       if (prevHov !== this.labHoveredNodeId) {
+        _diagRedrew = true;
         this._labRenderNetwork();
         if (!this.labSelectedNodeId) this._labRenderAllocation();
       }
+      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
+      const _diagMs = (performance.now() - _diagT0).toFixed(2);
+      const _diagDs = this._labDsCallsThisHover;
+      delete this._labDsCallsThisHover;   // stop counting outside handler
+      console.log(
+        `[Lab hover] ${_diagMs}ms | _computeDollarSeries calls: ${_diagDs}` +
+        ` | full redraw: ${_diagRedrew}` +
+        ` | prevHov=${prevHov} → newHov=${this.labHoveredNodeId}`
+      );
+      // ─────────────────────────────────────────────────────────────────────
     },
 
     // Mouseleave on network canvas: clear hover state.
     labHandleNetworkMouseleave() {
       if (this.labHoveredNodeId !== null || this.labTooltipVisible) {
+        // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────
+        const _diagT0 = performance.now();
+        this._labDsCallsThisHover = 0;
+        // ─────────────────────────────────────────────────────────────────
         this.labHoveredNodeId  = null;
         this.labTooltipVisible = false;
         this._labRenderNetwork();
         if (!this.labSelectedNodeId) this._labRenderAllocation();
+        // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────
+        const _diagMs = (performance.now() - _diagT0).toFixed(2);
+        const _diagDs = this._labDsCallsThisHover;
+        delete this._labDsCallsThisHover;
+        console.log(
+          `[Lab mouseleave] ${_diagMs}ms | _computeDollarSeries calls: ${_diagDs}` +
+          ` | full redraw: true`
+        );
+        // ─────────────────────────────────────────────────────────────────
       }
     },
 
