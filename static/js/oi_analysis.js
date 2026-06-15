@@ -3896,9 +3896,12 @@ document.addEventListener('alpine:init', () => {
     labStats:          null,    // {n, avg_ret, win_rate, std, p5, p95, median, ...}
     labYearly:         [],      // [{year, n, avg_ret, win_rate}]
     labEquity:         [],      // [{date, value}] from _computeDollarSeries
-    labUnionN:         0,       // deduped trade count across active signals
-    labParityResult:   null,    // result object from labRunParity()
+    labUnionN:            0,       // deduped trade count across active signals
+    labParityResult:      null,    // result object from labRunParity()
+    labNetworkPositions:  {},      // {[id]: {x,y}} — node positions for Stage 4 hit-test
+    labNetworkIncrements: {},      // {[id]: dollar_increment} — expose for Stage 4
     // Lab charts tracked in this._charts: 'lab-equity', 'lab-yearly'
+    // Lab network graph is a raw canvas (not Chart.js), tracked via labNetworkPositions
 
     surveyExpanded: false,
     selectedStats: null,
@@ -10515,7 +10518,7 @@ document.addEventListener('alpine:init', () => {
                  dollar_pnl: dollarByYear[yr] || 0 };
       });
       this.labReady = true;
-      this.$nextTick(() => { this._labRenderEquity(); this._labRenderYearly(); });
+      this.$nextTick(() => { this._labRenderEquity(); this._labRenderYearly(); this._labRenderNetwork(); });
     },
 
     // Render lab equity curve — dual-axis dollar mode matching canonical
@@ -10640,6 +10643,241 @@ document.addEventListener('alpine:init', () => {
           },
         },
       });
+    },
+
+    // ── Portfolio Lab — Stage 3: network graph ───────────────────────────
+
+    // Helper: union-dedup a candidate array (first-wins on ticker|trade_date).
+    // Identical algorithm to the inline dedup in labRecompute() and server Phase 3.
+    _labBuildUnion(candidates) {
+      const seen = new Map();
+      for (const cand of candidates) {
+        for (const t of (cand.trades || [])) {
+          const key = t.ticker + '|' + t.trade_date;
+          if (!seen.has(key)) seen.set(key, t);
+        }
+      }
+      return Array.from(seen.values())
+        .sort((a, b) => a.trade_date < b.trade_date ? -1
+                      : a.trade_date > b.trade_date ?  1
+                      : a.ticker < b.ticker ? -1
+                      : a.ticker > b.ticker ?  1 : 0);
+    },
+
+    // Render the signal network graph onto lab-network-canvas.
+    // Called every time the active set or dollar params change.
+    //
+    // Nodes:
+    //   size    ∝ |incremental $ contribution| (full-set equity minus leave-one-out equity)
+    //   fill    = unique avg-ret (trades not shared with any other active signal)
+    //   outline = dashed pink when incremental contribution is negative
+    //
+    // Edges (drawn only when two signals share at least one trade by ticker+date):
+    //   thickness ∝ shared-trade count
+    //   color     = shared-trade avg-ret (same diverging blue/pink scale)
+    //
+    // Layout: OI-driver signals on left cluster, others on right cluster (anchored,
+    // no force layout). Positions saved in this.labNetworkPositions for Stage 4.
+    _labRenderNetwork() {
+      const canvas = document.getElementById('lab-network-canvas');
+      if (!canvas) return;
+      const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
+      if (!active.length) return;
+
+      // ── Incremental contributions — run _computeDollarSeries N+1 times ───
+      const fullUnion = this._labBuildUnion(active);
+      const fullEq    = this._computeDollarSeries(fullUnion, this.labPerTrade, this.labDailyCap).equity;
+      const finalVal  = fullEq.length ? fullEq[fullEq.length - 1].value : 0;
+
+      const increments = {};
+      for (const cand of active) {
+        if (active.length === 1) {
+          increments[cand.id] = finalVal;  // single node: full equity = its contribution
+        } else {
+          const wo   = this._labBuildUnion(active.filter(c => c.id !== cand.id));
+          const woEq = this._computeDollarSeries(wo, this.labPerTrade, this.labDailyCap).equity;
+          increments[cand.id] = finalVal - (woEq.length ? woEq[woEq.length - 1].value : 0);
+        }
+      }
+      this.labNetworkIncrements = increments;  // expose for Stage 4
+
+      // ── Trade-set analysis (raw sets before union dedup) ─────────────────
+      const tradeSets = {};
+      for (const c of active) {
+        tradeSets[c.id] = new Set((c.trades || []).map(t => t.ticker + '|' + t.trade_date));
+      }
+
+      // Unique avg-ret: trades in this signal NOT present in any other active signal
+      const uniqueAvgRet = {};
+      for (const c of active) {
+        const othersKeys = new Set();
+        for (const o of active) {
+          if (o.id !== c.id) for (const k of tradeSets[o.id]) othersKeys.add(k);
+        }
+        const uniq = (c.trades || []).filter(t => !othersKeys.has(t.ticker + '|' + t.trade_date));
+        const rets = uniq.map(t => t.ret).filter(r => r != null && isFinite(r));
+        uniqueAvgRet[c.id] = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : null;
+      }
+
+      // Edges: pairs with at least one shared trade
+      const edges = [];
+      let maxEdgeN = 1;
+      for (let i = 0; i < active.length; i++) {
+        for (let j = i + 1; j < active.length; j++) {
+          const ci = active[i], cj = active[j];
+          const shared = (ci.trades || []).filter(t => tradeSets[cj.id].has(t.ticker + '|' + t.trade_date));
+          if (!shared.length) continue;
+          const rets   = shared.map(t => t.ret).filter(r => r != null && isFinite(r));
+          const avgRet = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : null;
+          edges.push({ from: ci.id, to: cj.id, n: shared.length, avg_ret: avgRet });
+          if (shared.length > maxEdgeN) maxEdgeN = shared.length;
+        }
+      }
+
+      // ── Canvas sizing (high-DPI) ──────────────────────────────────────────
+      const dpr = window.devicePixelRatio || 1;
+      const W   = canvas.offsetWidth  || 500;
+      const H   = canvas.offsetHeight || 280;
+      canvas.width  = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+
+      // ── Node size from |increment| ────────────────────────────────────────
+      const maxInc  = Math.max(...active.map(c => Math.abs(increments[c.id])), 1);
+      const nodeRad = c => Math.round(9 + (Math.abs(increments[c.id]) / maxInc) * 21); // 9..30 px
+
+      // ── Anchored layout: OI left cluster / other right cluster ────────────
+      const oiGroup    = active.filter(c => c.is_oi_signal);
+      const otherGroup = active.filter(c => !c.is_oi_signal);
+      const twoGroups  = oiGroup.length > 0 && otherGroup.length > 0;
+      const positions  = {};  // {id: {x, y}} — saved for Stage 4 hit-test
+
+      const layoutCircle = (nodes, cx, cy, R) => {
+        if (!nodes.length) return;
+        if (nodes.length === 1) {
+          positions[nodes[0].id] = { x: cx, y: cy };
+          return;
+        }
+        nodes.forEach((n, i) => {
+          const angle = (2 * Math.PI / nodes.length) * i - Math.PI / 2;
+          positions[n.id] = {
+            x: cx + R * Math.cos(angle),
+            y: cy + R * Math.sin(angle),
+          };
+        });
+      };
+
+      const pad = 40;
+      const cy  = H / 2;
+      if (twoGroups) {
+        const maxR = Math.min(W * 0.19, (H - pad * 2) / 2, 105);
+        layoutCircle(oiGroup,    W * 0.25, cy, maxR);
+        layoutCircle(otherGroup, W * 0.75, cy, maxR);
+      } else {
+        const maxR = Math.min(W * 0.32, (H - pad * 2) / 2, 120);
+        layoutCircle(active, W / 2, cy, maxR);
+      }
+      this.labNetworkPositions = positions;  // expose for Stage 4
+
+      // ── Draw group labels + separator ─────────────────────────────────────
+      if (twoGroups) {
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = 'rgba(255,255,255,.22)';
+        ctx.fillText('OI-driver', W * 0.25, 6);
+        ctx.fillText('Other', W * 0.75, 6);
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = 'rgba(255,255,255,.07)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(W / 2, pad * 0.4);
+        ctx.lineTo(W / 2, H - pad * 0.4);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // ── Draw edges (before nodes so nodes render on top) ──────────────────
+      const SCALE = 0.05;
+      for (const e of edges) {
+        const pi = positions[e.from], pj = positions[e.to];
+        if (!pi || !pj) continue;
+        const r = e.avg_ret;
+        let edgeColor;
+        if (r == null || Math.abs(r) < 0.0002) {
+          edgeColor = 'rgba(160,160,160,.35)';
+        } else if (r > 0) {
+          const a = Math.min(0.65, (r / SCALE) * 0.65).toFixed(2);
+          edgeColor = `rgba(41,128,185,${a})`;
+        } else {
+          const a = Math.min(0.65, (Math.abs(r) / SCALE) * 0.65).toFixed(2);
+          edgeColor = `rgba(232,67,147,${a})`;
+        }
+        ctx.strokeStyle = edgeColor;
+        ctx.lineWidth   = 0.5 + (e.n / maxEdgeN) * 3.5;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(pi.x, pi.y);
+        ctx.lineTo(pj.x, pj.y);
+        ctx.stroke();
+        // Shared-trade count label on the edge midpoint (only for prominent edges)
+        if (e.n / maxEdgeN > 0.12) {
+          const mx = (pi.x + pj.x) / 2, my = (pi.y + pj.y) / 2;
+          ctx.font = '8px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255,255,255,.42)';
+          ctx.fillText(e.n, mx, my);
+        }
+      }
+
+      // ── Draw nodes ────────────────────────────────────────────────────────
+      for (const c of active) {
+        const pos = positions[c.id];
+        if (!pos) continue;
+        const rad      = nodeRad(c);
+        const isNegInc = increments[c.id] < 0;
+        const uRet     = uniqueAvgRet[c.id];
+
+        // Node fill from unique avg-ret
+        let fillColor;
+        if (uRet == null || Math.abs(uRet) < 0.0002) {
+          fillColor = 'rgba(120,120,120,.55)';
+        } else if (uRet > 0) {
+          const a = (0.3 + Math.min(0.55, uRet / SCALE)).toFixed(2);
+          fillColor = `rgba(41,128,185,${a})`;
+        } else {
+          const a = (0.3 + Math.min(0.55, Math.abs(uRet) / SCALE)).toFixed(2);
+          fillColor = `rgba(232,67,147,${a})`;
+        }
+
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, rad, 0, 2 * Math.PI);
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+
+        // Outline: dashed pink = negative incremental; subtle ring = positive
+        if (isNegInc) {
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = '#e84393';
+          ctx.lineWidth   = 2;
+        } else {
+          ctx.setLineDash([]);
+          ctx.strokeStyle = 'rgba(255,255,255,.22)';
+          ctx.lineWidth   = 1;
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Signal ID label
+        ctx.fillStyle    = 'rgba(255,255,255,.92)';
+        ctx.font         = `bold ${rad >= 18 ? 11 : 9}px sans-serif`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('#' + c.id, pos.x, pos.y);
+      }
     },
 
     // Compare lab union (with portfolio date/ticker filters applied) against
