@@ -3888,7 +3888,17 @@ document.addEventListener('alpine:init', () => {
     labCandidates:     [],      // full array from /portfolio-lab/candidates
     labError:          null,
     labLoaded:         false,   // true after first successful fetch
-    labLoadPortfolioId: '',     // "load from portfolio" select value
+    // Stage 2 — active set + controls + results
+    labActiveIds:      {},      // {[signalId]: true} — toggled-on signals
+    labPerTrade:       2000.0,
+    labDailyCap:       10000.0,
+    labReady:          false,   // true once active set has been computed
+    labStats:          null,    // {n, avg_ret, win_rate, std, p5, p95, median, ...}
+    labYearly:         [],      // [{year, n, avg_ret, win_rate}]
+    labEquity:         [],      // [{date, value}] from _computeDollarSeries
+    labUnionN:         0,       // deduped trade count across active signals
+    labChartInst:      null,    // Chart.js instance for lab equity curve
+    labParityResult:   null,    // result object from labRunParity()
 
     surveyExpanded: false,
     selectedStats: null,
@@ -10358,30 +10368,255 @@ document.addEventListener('alpine:init', () => {
 
     // Full card inline style: gradient-fill by avg-ret magnitude.
     // Positive → blue (#2980b9), negative → bright pink (#e84393),
-    // near-zero → neutral gray. Alpha scales linearly, capped at 0.82
-    // (reference: 5% return = full saturation, i.e. max colour depth).
-    labCardStyle(c) {
+    // near-zero → neutral gray. Alpha scales 0→0.82 over 0→5%.
+    // isActive: white ring border; position:relative always (for ✓ badge).
+    labCardStyle(c, isActive) {
       const n    = c.agg_n || 0;
       const ret  = c.agg_avg_ret;
       const size = this.labCardSize(n);
-      const SCALE = 0.05;   // 5% return = full saturation
+      const SCALE = 0.05;
       let bg, border;
       if (ret == null || Math.abs(ret) < 0.0002) {
         bg     = 'rgba(120,120,120,.18)';
-        border = '1px solid rgba(255,255,255,.08)';
+        border = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(255,255,255,.08)';
       } else if (ret > 0) {
         const a = Math.min(0.82, ret / SCALE).toFixed(2);
         bg      = `rgba(41,128,185,${a})`;
-        border  = '1px solid rgba(41,128,185,.45)';
+        border  = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(41,128,185,.45)';
       } else {
         const a = Math.min(0.82, Math.abs(ret) / SCALE).toFixed(2);
-        bg      = `rgba(232,67,147,${a})`;        // #e84393 — dashboard bright pink
-        border  = '1px solid rgba(232,67,147,.45)';
+        bg      = `rgba(232,67,147,${a})`;
+        border  = isActive ? '2px solid rgba(255,255,255,.8)' : '1px solid rgba(232,67,147,.45)';
       }
       return `width:${size}px;height:${size}px;background:${bg};border:${border};` +
-             `border-radius:5px;padding:5px 5px 3px 5px;cursor:pointer;` +
+             `border-radius:5px;padding:5px 5px 3px 5px;cursor:pointer;position:relative;` +
              `display:flex;flex-direction:column;justify-content:space-between;` +
              `overflow:hidden;flex-shrink:0`;
+    },
+
+    // ── Portfolio Lab — Stage 2: toggle, recompute, parity ───────────────────
+
+    // Toggle a signal on/off; always replace the object for Alpine reactivity.
+    labToggle(id) {
+      if (this.labActiveIds[id]) {
+        const next = { ...this.labActiveIds };
+        delete next[id];
+        this.labActiveIds = next;
+      } else {
+        this.labActiveIds = { ...this.labActiveIds, [id]: true };
+      }
+      this.labRecompute();
+    },
+
+    labClearAll() {
+      this.labActiveIds = {};
+      this.labRecompute();
+    },
+
+    // Pre-populate active set from the currently loaded portfolio's enabled signals.
+    labLoadFromPortfolio() {
+      if (!this.portAggregate || !(this.portAggregate.signals || []).length) {
+        alert('Load a portfolio in the Signal Portfolio section first.');
+        return;
+      }
+      const newActive = {};
+      for (const s of this.portAggregate.signals) {
+        if (s.enabled && this.labCandidates.some(c => c.id === s.signal_id))
+          newActive[s.signal_id] = true;
+      }
+      this.labActiveIds = newActive;
+      this.labRecompute();
+    },
+
+    // Union-dedup active-signal trades, compute dollar equity + stats + yearly.
+    // Mirrors server Phase 3 (first-wins on ticker|trade_date) and client
+    // _computeDollarSeries exactly — that's what makes the parity check valid.
+    labRecompute() {
+      const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
+      if (!active.length) {
+        this.labEquity  = [];
+        this.labStats   = null;
+        this.labYearly  = [];
+        this.labUnionN  = 0;
+        this.labReady   = false;
+        if (this.labChartInst) { this.labChartInst.destroy(); this.labChartInst = null; }
+        return;
+      }
+      // ── Union dedup ──────────────────────────────────────────────────────
+      const seen = new Map();
+      for (const cand of active) {
+        for (const t of (cand.trades || [])) {
+          const key = t.ticker + '|' + t.trade_date;
+          if (!seen.has(key)) seen.set(key, t);
+        }
+      }
+      const union = Array.from(seen.values())
+        .sort((a,b) => a.trade_date < b.trade_date ? -1 : a.trade_date > b.trade_date ? 1
+                       : a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0);
+      this.labUnionN = union.length;
+      if (!union.length) {
+        this.labEquity  = [];
+        this.labStats   = null;
+        this.labYearly  = [];
+        this.labReady   = false;
+        return;
+      }
+      // ── Dollar equity (reuses _computeDollarSeries unchanged) ───────────
+      const ds = this._computeDollarSeries(union, this.labPerTrade, this.labDailyCap);
+      this.labEquity = ds.equity;
+      // ── Pct-return stats ─────────────────────────────────────────────────
+      const rets = union.map(t => t.ret).filter(r => r != null && isFinite(r));
+      const n    = rets.length;
+      if (n) {
+        const sorted   = rets.slice().sort((a,b) => a-b);
+        const mean     = rets.reduce((s,v) => s+v, 0) / n;
+        const wins     = rets.filter(r => r > 0);
+        const losses   = rets.filter(r => r < 0);
+        const variance = rets.reduce((s,v) => s + (v-mean)**2, 0) / n;
+        this.labStats = {
+          n,
+          avg_ret:     mean,
+          win_rate:    wins.length / n,
+          std:         Math.sqrt(variance),
+          p5:          sorted[Math.max(0, Math.floor(n * 0.05))],
+          p95:         sorted[Math.min(n-1, Math.floor(n * 0.95))],
+          median:      sorted[Math.floor(n / 2)],
+          n_tickers:   new Set(union.map(t => t.ticker).filter(Boolean)).size,
+          avg_winners: wins.length   ? wins.reduce((s,v)=>s+v,0)/wins.length   : 0,
+          avg_losers:  losses.length ? losses.reduce((s,v)=>s+v,0)/losses.length : 0,
+        };
+      } else {
+        this.labStats = null;
+      }
+      // ── Yearly ───────────────────────────────────────────────────────────
+      const byYear = {};
+      for (const t of union) {
+        const yr = t.trade_date ? t.trade_date.slice(0,4) : null;
+        if (!yr) continue;
+        if (!byYear[yr]) byYear[yr] = [];
+        byYear[yr].push(t.ret);
+      }
+      this.labYearly = Object.keys(byYear).sort().map(yr => {
+        const yrets = byYear[yr];
+        const yn    = yrets.length;
+        const ymean = yn ? yrets.reduce((s,v)=>s+v,0)/yn : 0;
+        return { year: +yr, n: yn, avg_ret: ymean,
+                 win_rate: yn ? yrets.filter(r=>r>0).length/yn : 0 };
+      });
+      this.labReady = true;
+      this.$nextTick(() => this._labRenderEquity());
+    },
+
+    _labRenderEquity() {
+      const canvas = document.getElementById('lab-equity-canvas');
+      if (!canvas) return;
+      if (this.labChartInst) { this.labChartInst.destroy(); this.labChartInst = null; }
+      if (!this.labEquity || !this.labEquity.length) return;
+      const pts = this.labEquity.map(p => ({
+        x: new Date(p.date + 'T00:00:00').getTime(),
+        y: p.value,
+      }));
+      const finalPnl = pts[pts.length-1].y;
+      this.labChartInst = new Chart(canvas, {
+        type: 'line',
+        data: {
+          datasets: [{
+            data: pts,
+            borderColor: finalPnl >= 0 ? '#0984e3' : '#e84393',
+            borderWidth: 1.5,
+            fill: {
+              target: 'origin',
+              above: 'rgba(9,132,227,.06)',
+              below: 'rgba(232,67,147,.06)',
+            },
+            pointRadius: 0, tension: 0, parsing: false,
+          }],
+        },
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: {
+              type: 'linear', parsing: false,
+              ticks: {
+                color: '#888', font: { size: 9 }, maxTicksLimit: 8,
+                callback: ms => new Date(ms).getFullYear(),
+              },
+              grid: { color: 'rgba(255,255,255,.04)' },
+            },
+            y: {
+              ticks: {
+                color: '#888', font: { size: 9 }, maxTicksLimit: 6,
+                callback: v => '$' + (Math.abs(v)>=1000
+                  ? (v/1000).toFixed(0)+'k' : v.toFixed(0)),
+              },
+              grid: { color: 'rgba(255,255,255,.04)' },
+            },
+          },
+        },
+      });
+    },
+
+    // Compare lab union (with portfolio date/ticker filters applied) against
+    // the currently loaded portAggregate by trade count + avg pct return.
+    // PASS means the dedup algorithm and trade-loading are identical to the server.
+    labRunParity() {
+      this.labParityResult = null;
+      if (!this.portAggregate || !this.portAggregate.n) {
+        this.labParityResult = {
+          error: 'No portfolio loaded — select a portfolio and run Aggregate first.',
+        };
+        return;
+      }
+      const port = this.portAggregate.portfolio || {};
+      // Enabled signal IDs from the loaded portfolio
+      const portSigIds = new Set(
+        (this.portAggregate.signals || []).filter(s => s.enabled).map(s => s.signal_id)
+      );
+      if (!portSigIds.size) {
+        this.labParityResult = { error: 'No enabled signals in the loaded portfolio.' };
+        return;
+      }
+      const portCands  = this.labCandidates.filter(c => portSigIds.has(c.id));
+      const missingIds = [...portSigIds].filter(id => !portCands.some(c => c.id === id));
+      // Union dedup (same first-wins algorithm)
+      const seen = new Map();
+      for (const cand of portCands) {
+        for (const t of (cand.trades || [])) {
+          const key = t.ticker + '|' + t.trade_date;
+          if (!seen.has(key)) seen.set(key, t);
+        }
+      }
+      // Apply portfolio date/ticker filters (mirrors server Phase 2)
+      const df  = port.date_from || null;
+      const dt  = port.date_to   || null;
+      const tkr = (port.ticker && port.ticker !== 'ALL') ? port.ticker : null;
+      const filtered = Array.from(seen.values()).filter(t => {
+        if (df  && t.trade_date < df)  return false;
+        if (dt  && t.trade_date > dt)  return false;
+        if (tkr && t.ticker !== tkr)   return false;
+        return true;
+      });
+      const labN   = filtered.length;
+      const labRets = filtered.map(t=>t.ret).filter(r=>r!=null && isFinite(r));
+      const labAvg  = labRets.length ? labRets.reduce((s,v)=>s+v,0)/labRets.length : null;
+      const portN   = this.portAggregate.n;
+      const portAvg = this.portAggregate.avg_ret;
+      const nOk     = labN === portN;
+      const avgOk   = labAvg != null && portAvg != null
+                      && Math.abs(labAvg - portAvg) < 1e-7;
+      this.labParityResult = {
+        ok:          nOk && avgOk,
+        lab_n:       labN,    port_n:   portN,
+        lab_avg:     labAvg,  port_avg: portAvg,
+        n_ok:        nOk,     avg_ok:   avgOk,
+        missing_ids: missingIds,
+        port_name:   port.name || '?',
+        n_matched:   portCands.length,
+        n_expected:  portSigIds.size,
+        date_from:   df,
+        date_to:     dt,
+      };
     },
 
     // Tooltip text shown on card hover.

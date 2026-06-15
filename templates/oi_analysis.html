@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=228"></script>
+  <script src="/static/js/oi_analysis.js?v=229"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5159,7 +5159,13 @@
                     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end">
                       <template x-for="c in grp.candidates" :key="'lc-'+c.id">
                         <div :title="labCardTooltip(c)"
-                             :style="labCardStyle(c)">
+                             :style="labCardStyle(c, !!labActiveIds[c.id])"
+                             @click="labToggle(c.id)">
+                          <!-- Active ✓ badge — top-right corner, absolutely positioned -->
+                          <div x-show="!!labActiveIds[c.id]"
+                               style="position:absolute;top:2px;right:3px;font-size:8px;
+                                      color:rgba(255,255,255,.9);font-weight:700;
+                                      text-shadow:0 0 4px rgba(0,0,0,.6)">✓</div>
                           <!-- Signal number — primary card label -->
                           <div style="font-size:16px;font-weight:700;color:rgba(255,255,255,.92);
                                       line-height:1;text-align:center;margin-top:2px"
@@ -5200,6 +5206,193 @@
                     Near-zero
                   </span>
                 </div>
+
+                <!-- ── Controls ──────────────────────────────────────────── -->
+                <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px;
+                            display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                  <span style="font-size:11px;color:var(--dim)">
+                    Active: <strong x-text="Object.keys(labActiveIds).length"></strong>
+                    / <span x-text="labCandidates.length"></span>
+                    &nbsp;·&nbsp; Deduped: <strong x-text="labUnionN.toLocaleString()"></strong> trades
+                  </span>
+                  <button @click="labClearAll()"
+                          :disabled="!Object.keys(labActiveIds).length"
+                          style="font-size:11px;padding:2px 8px;cursor:pointer;
+                                 background:var(--raised);border:1px solid var(--border);
+                                 border-radius:4px;color:var(--text)">Clear all</button>
+                  <button @click="labLoadFromPortfolio()"
+                          style="font-size:11px;padding:2px 8px;cursor:pointer;
+                                 background:var(--raised);border:1px solid var(--border);
+                                 border-radius:4px;color:var(--text)"
+                          title="Loads enabled signals from the currently loaded Signal Portfolio">
+                    Load from portfolio ↓
+                  </button>
+                  <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <label style="font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px">
+                      Per trade $
+                      <input type="number" x-model.number="labPerTrade" @change="labRecompute()"
+                             min="100" max="50000" step="100"
+                             style="width:70px;background:var(--raised);border:1px solid var(--border);
+                                    color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                    </label>
+                    <label style="font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px">
+                      Daily cap $
+                      <input type="number" x-model.number="labDailyCap" @change="labRecompute()"
+                             min="1000" max="200000" step="1000"
+                             style="width:80px;background:var(--raised);border:1px solid var(--border);
+                                    color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Idle hint -->
+                <div x-show="!labReady && !Object.keys(labActiveIds).length"
+                     style="font-size:11px;color:var(--dim);margin-top:8px">
+                  Click a card to add it to the active set — combined stats appear below.
+                </div>
+
+                <!-- ── Results (only when labReady) ──────────────────────── -->
+                <template x-if="labReady">
+                  <div style="margin-top:12px">
+
+                    <!-- Stats bar -->
+                    <template x-if="labStats">
+                      <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:11px;
+                                  background:var(--raised);border:1px solid var(--border);
+                                  border-radius:5px;padding:8px 12px;margin-bottom:10px">
+                        <span><span style="color:var(--dim)">N </span>
+                              <strong x-text="(labStats.n||0).toLocaleString()"></strong></span>
+                        <span><span style="color:var(--dim)">Avg Ret </span>
+                              <strong :style="labStats.avg_ret>=0?'color:#2980b9':'color:#e84393'"
+                                      x-text="(labStats.avg_ret*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">Win% </span>
+                              <strong x-text="(labStats.win_rate*100).toFixed(1)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">Std </span>
+                              <strong x-text="(labStats.std*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">P5 </span>
+                              <strong :style="labStats.p5>=0?'color:#2980b9':'color:#e84393'"
+                                      x-text="(labStats.p5*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">P95 </span>
+                              <strong :style="labStats.p95>=0?'color:#2980b9':'color:#e84393'"
+                                      x-text="(labStats.p95*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">Median </span>
+                              <strong :style="labStats.median>=0?'color:#2980b9':'color:#e84393'"
+                                      x-text="(labStats.median*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">Tickers </span>
+                              <strong x-text="labStats.n_tickers||0"></strong></span>
+                        <span><span style="color:var(--dim)">Avg+ </span>
+                              <strong style="color:#2980b9"
+                                      x-text="(labStats.avg_winners*100).toFixed(3)+'%'"></strong></span>
+                        <span><span style="color:var(--dim)">Avg− </span>
+                              <strong style="color:#e84393"
+                                      x-text="(labStats.avg_losers*100).toFixed(3)+'%'"></strong></span>
+                      </div>
+                    </template>
+
+                    <!-- Equity chart + Yearly table -->
+                    <div style="display:flex;gap:14px;align-items:flex-start">
+                      <!-- Equity curve -->
+                      <div style="flex:2;min-width:0">
+                        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">
+                          Dollar equity — active signals combined
+                          <span style="font-size:10px">
+                            ($<span x-text="labPerTrade.toLocaleString()"></span>/trade ·
+                             $<span x-text="labDailyCap.toLocaleString()"></span>/day cap)
+                          </span>
+                        </div>
+                        <div style="height:180px;position:relative">
+                          <canvas id="lab-equity-canvas"></canvas>
+                        </div>
+                      </div>
+                      <!-- Yearly table -->
+                      <div style="flex:1;min-width:100px">
+                        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">By year</div>
+                        <template x-if="labYearly.length">
+                          <div style="overflow:auto;max-height:200px">
+                            <table style="font-size:11px;width:100%;border-collapse:collapse">
+                              <thead>
+                                <tr style="color:var(--dim)">
+                                  <th style="text-align:left;padding:1px 6px 1px 0;font-weight:400">Yr</th>
+                                  <th style="text-align:right;padding:1px 6px;font-weight:400">N</th>
+                                  <th style="text-align:right;padding:1px 6px;font-weight:400">Avg</th>
+                                  <th style="text-align:right;padding:1px 0;font-weight:400">Win%</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <template x-for="y in labYearly" :key="y.year">
+                                  <tr>
+                                    <td style="padding:1px 6px 1px 0" x-text="y.year"></td>
+                                    <td style="text-align:right;padding:1px 6px"
+                                        x-text="y.n.toLocaleString()"></td>
+                                    <td :style="'text-align:right;padding:1px 6px;'+(y.avg_ret>=0?'color:#2980b9':'color:#e84393')"
+                                        x-text="(y.avg_ret*100).toFixed(2)+'%'"></td>
+                                    <td style="text-align:right;padding:1px 0"
+                                        x-text="(y.win_rate*100).toFixed(0)+'%'"></td>
+                                  </tr>
+                                </template>
+                              </tbody>
+                            </table>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+
+                    <!-- ── Parity check ──────────────────────────────────── -->
+                    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:8px">
+                      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <span style="font-size:11px;color:var(--dim)">
+                          Parity vs loaded portfolio
+                          <span style="font-size:10px;color:var(--dim)">(applies portfolio date/ticker filters)</span>:
+                        </span>
+                        <button @click="labRunParity()"
+                                style="font-size:11px;padding:2px 8px;cursor:pointer;
+                                       background:var(--raised);border:1px solid var(--border);
+                                       border-radius:4px;color:var(--text)">Run check</button>
+                      </div>
+                      <template x-if="labParityResult">
+                        <div style="margin-top:6px;font-size:11px">
+                          <div x-show="labParityResult.error"
+                               style="color:#e84393" x-text="labParityResult.error"></div>
+                          <div x-show="!labParityResult.error">
+                            <span :style="labParityResult.ok
+                                            ?'color:#27ae60;font-weight:600'
+                                            :'color:#e84393;font-weight:600'"
+                                  x-text="labParityResult.ok ? '✓ PASS' : '✗ FAIL'"></span>
+                            <span style="color:var(--dim);margin-left:10px">
+                              Portfolio: <strong x-text="labParityResult.port_name"></strong>
+                            </span>
+                            <span style="margin-left:10px">
+                              <span style="color:var(--dim)">N: </span>
+                              lab <strong x-text="(labParityResult.lab_n||0).toLocaleString()"></strong>
+                              vs port <strong x-text="(labParityResult.port_n||0).toLocaleString()"></strong>
+                              <span x-show="!labParityResult.n_ok" style="color:#e84393"> ✗</span>
+                              <span x-show="labParityResult.n_ok"  style="color:#27ae60"> ✓</span>
+                            </span>
+                            <span style="margin-left:10px">
+                              <span style="color:var(--dim)">Avg ret: </span>
+                              lab <strong x-text="labParityResult.lab_avg!=null
+                                ?(labParityResult.lab_avg*100).toFixed(4)+'%':'—'"></strong>
+                              vs port <strong x-text="labParityResult.port_avg!=null
+                                ?(labParityResult.port_avg*100).toFixed(4)+'%':'—'"></strong>
+                              <span x-show="!labParityResult.avg_ok" style="color:#e84393"> ✗</span>
+                              <span x-show="labParityResult.avg_ok"  style="color:#27ae60"> ✓</span>
+                            </span>
+                            <div x-show="labParityResult.missing_ids && labParityResult.missing_ids.length"
+                                 style="color:#e84393;margin-top:3px"
+                                 x-text="'Missing from lab candidates: signal IDs '+(labParityResult.missing_ids||[]).join(', ')">
+                            </div>
+                            <div x-show="labParityResult.date_from || labParityResult.date_to"
+                                 style="color:var(--dim);margin-top:2px;font-size:10px"
+                                 x-text="'Filters applied — from: '+(labParityResult.date_from||'—')+' to: '+(labParityResult.date_to||'—')">
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+
+                  </div>
+                </template><!-- end Results -->
+
               </div>
             </template>
 
