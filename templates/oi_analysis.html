@@ -5266,44 +5266,69 @@
                 <template x-if="labReady">
                   <div style="margin-top:12px">
 
-                    <!-- Stats bar -->
+                    <!-- Stats bar — mini-cards. Uses the same
+                         .stat-item / .stat-label / .stat-value
+                         component as the primary analyze and zone
+                         stats bars (defined at the top of this
+                         template's CSS). Same shell, same colors,
+                         same signed-value pos/neg classes — no new
+                         CSS, no hand-rolled card styling, so the
+                         lab can't visually drift from those bars.
+                         Values + computations are unchanged. -->
                     <template x-if="labStats">
-                      <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:11px;
-                                  background:var(--raised);border:1px solid var(--border);
-                                  border-radius:5px;padding:8px 12px;margin-bottom:10px">
-                        <span><span style="color:var(--dim)">N </span>
-                              <strong x-text="(labStats.n||0).toLocaleString()"></strong></span>
-                        <span><span style="color:var(--dim)">Avg Ret </span>
-                              <strong :style="labStats.avg_ret>=0?'color:#2980b9':'color:#e84393'"
-                                      x-text="(labStats.avg_ret*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">Win% </span>
-                              <strong x-text="(labStats.win_rate*100).toFixed(1)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">Std </span>
-                              <strong x-text="(labStats.std*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">P5 </span>
-                              <strong :style="labStats.p5>=0?'color:#2980b9':'color:#e84393'"
-                                      x-text="(labStats.p5*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">P95 </span>
-                              <strong :style="labStats.p95>=0?'color:#2980b9':'color:#e84393'"
-                                      x-text="(labStats.p95*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">Median </span>
-                              <strong :style="labStats.median>=0?'color:#2980b9':'color:#e84393'"
-                                      x-text="(labStats.median*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">Tickers </span>
-                              <strong x-text="labStats.n_tickers||0"></strong></span>
-                        <span><span style="color:var(--dim)">Avg+ </span>
-                              <strong style="color:#2980b9"
-                                      x-text="(labStats.avg_winners*100).toFixed(3)+'%'"></strong></span>
-                        <span><span style="color:var(--dim)">Avg− </span>
-                              <strong style="color:#e84393"
-                                      x-text="(labStats.avg_losers*100).toFixed(3)+'%'"></strong></span>
-                        <!-- Total $ P&L — same value the dollar equity
-                             curve ends at (reused from labStats.total_pnl,
-                             which is computed once in labRecompute and
-                             not recomputed for this readout). -->
-                        <span><span style="color:var(--dim)">Total $ </span>
-                              <strong :style="(labStats.total_pnl||0)>=0?'color:#2980b9':'color:#e84393'"
-                                      x-text="labFmtDollar(labStats.total_pnl)"></strong></span>
+                      <div style="display:flex;gap:4px;margin-bottom:10px">
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">N</div>
+                          <div class="stat-value" x-text="(labStats.n||0).toLocaleString()"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Ret</div>
+                          <div :class="(labStats.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="(labStats.avg_ret*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Win %</div>
+                          <div class="stat-value" x-text="(labStats.win_rate*100).toFixed(1)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Std Dev</div>
+                          <div class="stat-value" x-text="(labStats.std*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">P5</div>
+                          <div :class="(labStats.p5||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="(labStats.p5*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">P95</div>
+                          <div :class="(labStats.p95||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="(labStats.p95*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Median</div>
+                          <div :class="(labStats.median||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="(labStats.median*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Tickers</div>
+                          <div class="stat-value" x-text="(labStats.n_tickers||0).toLocaleString()"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Win</div>
+                          <div class="stat-value pos" x-text="(labStats.avg_winners*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Avg Loss</div>
+                          <div class="stat-value neg" x-text="(labStats.avg_losers*100).toFixed(3)+'%'"></div>
+                        </div>
+                        <!-- Total $ P&L — endpoint of the dollar equity
+                             curve; precomputed in labRecompute as
+                             labStats.total_pnl, no recompute here. -->
+                        <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+                          <div class="stat-label">Total $</div>
+                          <div :class="(labStats.total_pnl||0)>=0?'stat-value pos':'stat-value neg'"
+                               x-text="labFmtDollar(labStats.total_pnl)"></div>
+                        </div>
                       </div>
                     </template>
 
@@ -5370,45 +5395,47 @@
                             </span>
                           </div>
                           <div style="flex:1;display:flex;min-height:0;position:relative">
-                            <!-- Legend (LEFT) — every bucket shown; tight
-                                 single-column layout; vertically centered
-                                 against the donut. Each row: swatch +
-                                 single line "label  $X.Xk (N)". No wraps,
-                                 no nested second line — keeps the column
-                                 narrow and the full degree list visible
-                                 even at 8+ buckets in the 520px pane. -->
-                            <div style="flex:0 0 102px;padding:6px 4px 6px 8px;
+                            <!-- Legend (LEFT) — every bucket shown.
+                                 Column self-sizes to its widest row
+                                 (width: max-content) so no value is
+                                 ever truncated. Capped at 55% of the
+                                 pane width so the donut always gets a
+                                 reasonable canvas; white-space:nowrap
+                                 on each row guarantees one-line entries
+                                 regardless of degree count. -->
+                            <div style="flex:0 0 auto;width:max-content;max-width:55%;
+                                        padding:6px 8px 6px 10px;
                                         overflow-y:auto;display:flex;flex-direction:column;
-                                        justify-content:center;font-size:9.5px;line-height:1.25;
+                                        justify-content:center;font-size:10px;line-height:1.3;
                                         border-right:1px solid rgba(255,255,255,.04)">
                               <template x-if="labAllocation">
                                 <div>
                                   <template x-for="d in labAllocation.byDegree" :key="'lad-'+d.degree">
-                                    <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
-                                      <span :style="'flex:0 0 8px;height:8px;border-radius:2px;background:'
+                                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;white-space:nowrap">
+                                      <span :style="'flex:0 0 9px;height:9px;border-radius:2px;background:'
                                                      + _labInnerColor(d.degree)"></span>
-                                      <span style="color:rgba(255,255,255,.78);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                                      <span style="color:rgba(255,255,255,.8)">
                                         <span x-text="d.label"></span>
-                                        <span style="color:rgba(255,255,255,.5)"
-                                              x-text="' ' + labFmtDollar(d.dollar_pnl) + ' (' + d.count + ')'"></span>
+                                        <span style="color:rgba(255,255,255,.55)"
+                                              x-text="' ' + labFmtDollar(d.dollar_pnl) + ' (' + d.count.toLocaleString() + ')'"></span>
                                       </span>
                                     </div>
                                   </template>
                                   <template x-if="labAllocation.uniqueBySignal.length">
-                                    <div style="margin-top:6px;padding-top:4px;border-top:1px solid rgba(255,255,255,.05)">
-                                      <div style="color:rgba(255,255,255,.4);font-size:8.5px;
+                                    <div style="margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,.05)">
+                                      <div style="color:rgba(255,255,255,.4);font-size:9px;
                                                   letter-spacing:.04em;text-transform:uppercase;
-                                                  margin-bottom:2px">
+                                                  margin-bottom:3px;white-space:nowrap">
                                         Unique by signal
                                       </div>
                                       <template x-for="(u, i) in labAllocation.uniqueBySignal" :key="'lau-'+u.id">
-                                        <div style="display:flex;align-items:center;gap:5px;margin-bottom:2px">
-                                          <span :style="'flex:0 0 8px;height:8px;border-radius:2px;background:'
+                                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;white-space:nowrap">
+                                          <span :style="'flex:0 0 9px;height:9px;border-radius:2px;background:'
                                                          + _labOuterColor(i, labAllocation.uniqueBySignal.length)"></span>
-                                          <span style="color:rgba(255,255,255,.7);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                                          <span style="color:rgba(255,255,255,.72)">
                                             <span x-text="'#' + u.id"></span>
-                                            <span style="color:rgba(255,255,255,.45)"
-                                                  x-text="' ' + labFmtDollar(u.dollar_pnl) + ' (' + u.count + ')'"></span>
+                                            <span style="color:rgba(255,255,255,.48)"
+                                                  x-text="' ' + labFmtDollar(u.dollar_pnl) + ' (' + u.count.toLocaleString() + ')'"></span>
                                           </span>
                                         </div>
                                       </template>
@@ -5417,7 +5444,11 @@
                                 </div>
                               </template>
                             </div>
-                            <!-- Donut (RIGHT) -->
+                            <!-- Donut (RIGHT) — fills the remaining width
+                                 after the legend self-sizes. Canvas
+                                 reads its actual offsetWidth/offsetHeight,
+                                 so the donut diameter scales to whatever
+                                 space the layout leaves. -->
                             <div style="flex:1;position:relative;min-width:0">
                               <canvas id="lab-allocation-canvas"
                                       style="width:100%;height:100%;display:block;cursor:default"
