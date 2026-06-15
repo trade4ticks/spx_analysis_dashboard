@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=242"></script>
+  <script src="/static/js/oi_analysis.js?v=243"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5593,10 +5593,10 @@
                       </div>
                     </div>
 
-                    <!-- Equity chart + Annual P&L chart -->
+                    <!-- Equity curve + Unique P&L by signal by year -->
                     <div style="display:flex;gap:14px;align-items:flex-start">
                       <!-- Equity curve -->
-                      <div style="flex:2;min-width:0">
+                      <div style="flex:1;min-width:0">
                         <div style="font-size:11px;color:var(--dim);margin-bottom:4px">
                           Dollar equity — active signals combined
                           <span style="font-size:10px">
@@ -5608,9 +5608,23 @@
                           <canvas id="lab-equity-canvas"></canvas>
                         </div>
                       </div>
-                      <!-- Annual P&L bar chart — matches canonical _renderZoneYearly dollar mode -->
-                      <div style="flex:1;min-width:120px">
-                        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Annual P&amp;L</div>
+                      <!-- Stacked/clustered unique P&L by signal by year -->
+                      <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                          <span style="font-size:11px;color:var(--dim)">Unique P&amp;L by signal · by year</span>
+                          <div style="display:flex;gap:3px">
+                            <button @click="labYearlyMode='stacked'; _labRenderYearly()"
+                                    :style="`font-size:10px;padding:1px 6px;cursor:pointer;
+                                             border-radius:3px;border:1px solid var(--border);
+                                             background:${labYearlyMode==='stacked' ? 'var(--raised-more,#2a2a2a)' : 'transparent'};
+                                             color:${labYearlyMode==='stacked' ? 'var(--text)' : 'var(--dim)'}`">Stacked</button>
+                            <button @click="labYearlyMode='clustered'; _labRenderYearly()"
+                                    :style="`font-size:10px;padding:1px 6px;cursor:pointer;
+                                             border-radius:3px;border:1px solid var(--border);
+                                             background:${labYearlyMode==='clustered' ? 'var(--raised-more,#2a2a2a)' : 'transparent'};
+                                             color:${labYearlyMode==='clustered' ? 'var(--text)' : 'var(--dim)'}`">Clustered</button>
+                          </div>
+                        </div>
                         <div style="height:260px;position:relative">
                           <canvas id="lab-yearly-canvas"></canvas>
                         </div>

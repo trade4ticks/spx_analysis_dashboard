@@ -3902,6 +3902,12 @@ document.addEventListener('alpine:init', () => {
     labNetworkIncrements: {},      // {[id]: dollar_increment} — cut-impact
     labNetworkUniqueN:    {},      // {[id]: count of trades unique to this signal}
     labNetworkNodeRadii:  {},      // {[id]: px radius} — used for hit-test
+    // Per-year banded data for stacked/clustered contribution chart.
+    // Built in labRecompute from same degreeByKey/ownerByKey/pnlByKey
+    // maps used for the donut — no extra _computeDollarSeries runs.
+    // Shape: {year_str: {bySignalId: {[id]: dollar_pnl}, shared: dollar_pnl}}
+    labYearlyBanded:   null,
+    labYearlyMode:     'stacked',  // 'stacked' | 'clustered'
     // Right-pane allocation donut (shown when no node is selected).
     // Computed in labRecompute from the existing dedup pass + the
     // dollar-capped per-trade pnl in ds.tradeDollarSizes. Renders into
@@ -10496,6 +10502,7 @@ document.addEventListener('alpine:init', () => {
         this.labEquity            = [];
         this.labStats             = null;
         this.labYearly            = [];
+        this.labYearlyBanded      = null;
         this.labUnionN            = 0;
         this.labAllocation        = null;
         this.labNetworkIncrements = {};   // clear stale cache when set goes empty
@@ -10517,10 +10524,11 @@ document.addEventListener('alpine:init', () => {
                        : a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0);
       this.labUnionN = union.length;
       if (!union.length) {
-        this.labEquity  = [];
-        this.labStats   = null;
-        this.labYearly  = [];
-        this.labReady   = false;
+        this.labEquity       = [];
+        this.labStats        = null;
+        this.labYearly       = [];
+        this.labYearlyBanded = null;
+        this.labReady        = false;
         if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
         if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
         return;
@@ -10679,6 +10687,31 @@ document.addEventListener('alpine:init', () => {
         shared_pct:      totalAbs > 0 ? sharedAbs / totalAbs : 0,
       };
 
+      // ── Per-year banded data for stacked contribution chart ───────────────
+      // Reuses degreeByKey, ownerByKey, pnlByKey already computed above.
+      // Groups the same capped-dollar P&L by year and by (unique owner | shared).
+      // This is the same partition as the donut's uniqueBySignal / byDegree,
+      // just with an added year dimension — no extra _computeDollarSeries calls.
+      {
+        const yb = {};
+        for (const trade of union) {
+          const yr = trade.trade_date ? trade.trade_date.slice(0, 4) : null;
+          if (!yr) continue;
+          const key = trade.ticker + '|' + trade.trade_date;
+          const deg = degreeByKey.get(key) || 1;
+          const pnl = pnlByKey.get(key) || 0;
+          if (!yb[yr]) yb[yr] = { bySignalId: {}, shared: 0 };
+          if (deg === 1) {
+            const owner = ownerByKey.get(key);
+            if (owner != null)
+              yb[yr].bySignalId[owner] = (yb[yr].bySignalId[owner] || 0) + pnl;
+          } else {
+            yb[yr].shared += pnl;
+          }
+        }
+        this.labYearlyBanded = yb;
+      }
+
       this.labReady = true;
       this.$nextTick(() => {
         this._labRenderEquity();
@@ -10762,20 +10795,43 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    // Render lab annual P&L bar chart — matches canonical _renderZoneYearly dollar mode.
-    // n-count gradient alpha; blue positive / pink negative bars.
+    // Render the stacked/clustered unique-P&L-by-signal-by-year chart.
+    // REPLACES the old single-color annual P&L bar chart.
+    //
+    // Stacked mode — signed stacked bar:
+    //   Each year's column is partitioned into per-signal UNIQUE P&L bands
+    //   (degree-1 trades) + one neutral-gray 'Shared' band (degree-2+ trades).
+    //   Positive bands stack above zero; negative bands stack below zero.
+    //   Two Chart.js stack groups ('positive'/'negative') + grouped:false on
+    //   the x-axis cause both groups to occupy the same column width at the
+    //   same x position — standard diverging stacked bar.
+    //   Signal colors mirror the donut's _labOuterColor palette exactly.
+    //
+    // Clustered mode — unique P&L only, side-by-side per year:
+    //   Shared band omitted (it's not a per-signal value).
+    //   Each signal's unique bars are shown independently from zero so
+    //   head-to-head comparison across years is unambiguous and honest
+    //   (unique trades don't overlap — no double-counting risk).
+    //
+    // Data: this.labYearlyBanded (built in labRecompute, no extra DS calls).
+    // Colors: this._labOuterColor(i, total) — same function + indices as donut.
     _labRenderYearly() {
       const canvas = document.getElementById('lab-yearly-canvas');
       if (!canvas) return;
-      if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
-      const yearly = this.labYearly;
-      if (!yearly || !yearly.length) return;
-      const ns   = yearly.map(y => y.n);
-      const minN = Math.min(...ns), maxN = Math.max(...ns);
-      const nPct = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
-      const alpha       = y => (0.2 + nPct(y) * 0.6).toFixed(2);
-      const bgColor     = y => y.dollar_pnl >= 0 ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
-      const borderColor = y => y.dollar_pnl >= 0 ? '#3498db' : '#e84393';
+      if (this._charts['lab-yearly']) {
+        this._charts['lab-yearly'].destroy();
+        delete this._charts['lab-yearly'];
+      }
+      const yearly  = this.labYearly;
+      const banded  = this.labYearlyBanded;
+      const alloc   = this.labAllocation;
+      if (!yearly || !yearly.length || !banded || !alloc) return;
+
+      const years    = yearly.map(y => String(y.year));
+      const signals  = alloc.uniqueBySignal;  // [{id, name, dollar_pnl, count}] active-set order
+      const sigCount = signals.length;
+      const stacked  = this.labYearlyMode !== 'clustered';
+
       const fmt$ = v => {
         const abs = Math.abs(v);
         const sign = v < 0 ? '-' : '';
@@ -10783,39 +10839,130 @@ document.addEventListener('alpine:init', () => {
         if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
         return sign + '$' + abs.toFixed(0);
       };
+
+      const SHARED_COLOR = 'rgba(120,132,150,0.70)';
+      const SHARED_BORDER = 'rgba(120,132,150,0.90)';
+      const datasets = [];
+
+      if (!stacked) {
+        // ── Clustered: one dataset per signal, unique P&L only ───────────
+        for (let i = 0; i < sigCount; i++) {
+          const sig   = signals[i];
+          const color = this._labOuterColor(i, sigCount);
+          datasets.push({
+            label:           sig.name,
+            data:            years.map(yr => +(banded[yr]?.bySignalId[sig.id] || 0).toFixed(2)),
+            backgroundColor: color,
+            borderColor:     color,
+            borderWidth:     1,
+          });
+        }
+      } else {
+        // ── Stacked (signed): pos stack above 0, neg stack below 0 ───────
+        // Two datasets per signal (pos half + neg half, grouped:false makes
+        // them occupy the same column width at the same x position).
+        for (let i = 0; i < sigCount; i++) {
+          const sig   = signals[i];
+          const color = this._labOuterColor(i, sigCount);
+          const vals  = years.map(yr => banded[yr]?.bySignalId[sig.id] || 0);
+          datasets.push({
+            label:           sig.name,
+            data:            vals.map(v => v > 0 ? +v.toFixed(2) : 0),
+            stack:           'positive',
+            backgroundColor: color,
+            borderColor:     color,
+            borderWidth:     1,
+          });
+          datasets.push({
+            label:           '__neg_' + sig.id,   // filtered from legend + tooltip
+            data:            vals.map(v => v < 0 ? +v.toFixed(2) : 0),
+            stack:           'negative',
+            backgroundColor: color,
+            borderColor:     color,
+            borderWidth:     1,
+          });
+        }
+        // Shared band (degree-2+ trades)
+        const sv = years.map(yr => banded[yr]?.shared || 0);
+        datasets.push({
+          label:           'Shared',
+          data:            sv.map(v => v > 0 ? +v.toFixed(2) : 0),
+          stack:           'positive',
+          backgroundColor: SHARED_COLOR,
+          borderColor:     SHARED_BORDER,
+          borderWidth:     1,
+        });
+        datasets.push({
+          label:           '__neg_shared',
+          data:            sv.map(v => v < 0 ? +v.toFixed(2) : 0),
+          stack:           'negative',
+          backgroundColor: SHARED_COLOR,
+          borderColor:     SHARED_BORDER,
+          borderWidth:     1,
+        });
+      }
+
       const ctx = canvas.getContext('2d');
       this._charts['lab-yearly'] = new Chart(ctx, {
         type: 'bar',
-        data: {
-          labels:   yearly.map(y => y.year),
-          datasets: [{
-            label:           'Annual P&L',
-            data:            yearly.map(y => +y.dollar_pnl.toFixed(2)),
-            backgroundColor: yearly.map(bgColor),
-            borderColor:     yearly.map(borderColor),
-            borderWidth:     1,
-          }],
-        },
+        data: { labels: years, datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
-            legend: { display: false },
+            legend: {
+              display: true,
+              position: 'bottom',
+              labels: {
+                // Hide neg-half datasets from legend (they're visual mirrors of
+                // the pos half — only the true signed values matter to the user).
+                filter:   item => !item.text.startsWith('__neg_'),
+                color:    '#999',
+                font:     { size: 9 },
+                boxWidth: 10,
+                padding:  5,
+              },
+            },
             tooltip: {
-              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              backgroundColor: 'rgba(20,20,20,0.95)',
+              borderColor: '#444', borderWidth: 1,
               callbacks: {
-                label: ctx => {
-                  const y = yearly[ctx.dataIndex];
-                  return [`P&L: ${fmt$(y.dollar_pnl)}`,
-                          `WR: ${(y.win_rate * 100).toFixed(1)}%`,
-                          `n: ${y.n}`];
+                title: items => items[0]?.label || '',
+                label: item => {
+                  const lbl = item.dataset.label;
+                  if (lbl.startsWith('__neg_')) return null;  // suppress neg duplicates
+                  const yr = String(years[item.dataIndex]);
+                  // Reconstitute the TRUE signed value for the signal/shared band so
+                  // the tooltip always shows the net number, never just the pos half.
+                  let trueVal;
+                  if (lbl === 'Shared') {
+                    trueVal = banded[yr]?.shared || 0;
+                  } else {
+                    const sig = signals.find(s => s.name === lbl);
+                    trueVal   = sig ? (banded[yr]?.bySignalId[sig.id] || 0) : item.parsed.y;
+                  }
+                  if (trueVal === 0) return null;  // skip zero-contribution bands
+                  return `${lbl}: ${fmt$(trueVal)}`;
+                },
+                footer: items => {
+                  const yr  = String(years[items[0]?.dataIndex]);
+                  const net = yearly.find(y => String(y.year) === yr);
+                  return net ? [`Net: ${fmt$(net.dollar_pnl)}`, `n: ${net.n}`] : [];
                 },
               },
             },
           },
           scales: {
-            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
-            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => fmt$(v) },
-                 grid: { color: '#222' } },
+            x: {
+              grouped: !stacked,   // false = stacks overlap at same x pos (diverging bar)
+              stacked,
+              ticks: { color: '#888', font: { size: 9 } },
+              grid:  { color: '#222' },
+            },
+            y: {
+              stacked,
+              ticks: { color: '#888', font: { size: 9 }, callback: v => fmt$(v) },
+              grid:  { color: '#222' },
+            },
           },
         },
       });
