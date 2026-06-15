@@ -10688,8 +10688,12 @@ document.addEventListener('alpine:init', () => {
       const portN   = this.portAggregate.n;
       const portAvg = this.portAggregate.avg_ret;
       const nOk     = labN === portN;
-      const avgOk   = labAvg != null && portAvg != null
-                      && Math.abs(labAvg - portAvg) < 1e-7;
+      // Round lab avg to 6 dp (server stores round(avg_ret,6)) then compare
+      // at that precision — exact match at the resolution portAvg can represent.
+      // Using 1e-9 epsilon post-rounding guards float64 representation noise.
+      const labAvg6 = labAvg != null ? Math.round(labAvg * 1e6) / 1e6 : null;
+      const avgOk   = labAvg6 != null && portAvg != null
+                      && Math.abs(labAvg6 - portAvg) < 1e-9;
       // ── DIAGNOSTIC — full-precision parity log (no logic change) ───────────
       console.group('[Lab Parity Diagnostic]');
       console.log(`Portfolio: "${(this.portAggregate.portfolio||{}).name||'?'}"`);
