@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=227"></script>
+  <script src="/static/js/oi_analysis.js?v=228"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5164,12 +5164,12 @@
                           <div style="font-size:16px;font-weight:700;color:rgba(255,255,255,.92);
                                       line-height:1;text-align:center;margin-top:2px"
                                x-text="'#' + c.id"></div>
-                          <!-- Stats row: n trades left, avg ret right -->
-                          <div style="display:flex;justify-content:space-between;
-                                      align-items:flex-end;padding-top:2px">
-                            <span style="font-size:8px;color:rgba(255,255,255,.6)"
+                          <!-- Stats — stacked vertically; hidden on very small cards (<68px) -->
+                          <div x-show="labCardSize(c.agg_n||0) >= 68"
+                               style="display:flex;flex-direction:column;gap:0">
+                            <span style="font-size:8px;color:rgba(255,255,255,.6);line-height:1.35"
                                   x-text="(c.agg_n||0).toLocaleString() + 'tr'"></span>
-                            <span style="font-size:9px;font-weight:600;color:rgba(255,255,255,.92)"
+                            <span style="font-size:9px;font-weight:600;color:rgba(255,255,255,.92);line-height:1.35"
                                   x-text="c.agg_avg_ret!=null
                                             ? (c.agg_avg_ret*100).toFixed(2)+'%'
                                             : '—'"></span>
@@ -5186,17 +5186,17 @@
                   <span>Card size ∝ n IS trades · fill intensity ∝ |avg ret| (5% = max)</span>
                   <span style="display:flex;align-items:center;gap:4px">
                     <span style="display:inline-block;width:10px;height:10px;
-                                 background:rgba(41,128,185,.7);border-radius:2px"></span>
+                                 background:#2980b9;border-radius:2px"></span>
                     Positive avg ret
                   </span>
                   <span style="display:flex;align-items:center;gap:4px">
                     <span style="display:inline-block;width:10px;height:10px;
-                                 background:rgba(232,67,147,.7);border-radius:2px"></span>
+                                 background:#e84393;border-radius:2px"></span>
                     Negative avg ret
                   </span>
                   <span style="display:flex;align-items:center;gap:4px">
                     <span style="display:inline-block;width:10px;height:10px;
-                                 background:rgba(120,120,120,.3);border-radius:2px"></span>
+                                 background:rgba(120,120,120,.5);border-radius:2px"></span>
                     Near-zero
                   </span>
                 </div>
