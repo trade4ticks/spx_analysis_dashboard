@@ -10493,12 +10493,13 @@ document.addEventListener('alpine:init', () => {
     labRecompute() {
       const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
       if (!active.length) {
-        this.labEquity     = [];
-        this.labStats      = null;
-        this.labYearly     = [];
-        this.labUnionN     = 0;
-        this.labAllocation = null;
-        this.labReady      = false;
+        this.labEquity            = [];
+        this.labStats             = null;
+        this.labYearly            = [];
+        this.labUnionN            = 0;
+        this.labAllocation        = null;
+        this.labNetworkIncrements = {};   // clear stale cache when set goes empty
+        this.labReady             = false;
         if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
         if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
         return;
@@ -10531,6 +10532,23 @@ document.addEventListener('alpine:init', () => {
       // cumulative dollar curve. Surfaced on labStats so the stats
       // bar reads it verbatim with no extra computation.
       const totalPnl = ds.equity.length ? ds.equity[ds.equity.length - 1].value : 0;
+      // ── Incremental contributions (N+1 leave-one-out, cached for network) ─
+      // Moved OUT of _labRenderNetwork so hover is a pure canvas repaint.
+      // All five mutation paths (toggle, clear, load, $/trade, cap) already
+      // call labRecompute, so this cache is always fresh — never stale.
+      {
+        const increments = {};
+        for (const cand of active) {
+          if (active.length === 1) {
+            increments[cand.id] = totalPnl;  // single node: full equity = its contribution
+          } else {
+            const wo   = this._labBuildUnion(active.filter(c => c.id !== cand.id));
+            const woEq = this._computeDollarSeries(wo, this.labPerTrade, this.labDailyCap).equity;
+            increments[cand.id] = totalPnl - (woEq.length ? woEq[woEq.length - 1].value : 0);
+          }
+        }
+        this.labNetworkIncrements = increments;
+      }
       // ── Pct-return stats ─────────────────────────────────────────────────
       const rets = union.map(t => t.ret).filter(r => r != null && isFinite(r));
       const n    = rets.length;
@@ -10845,22 +10863,10 @@ document.addEventListener('alpine:init', () => {
       const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
       if (!active.length) return;
 
-      // ── Incremental contributions — run _computeDollarSeries N+1 times ───
-      const fullUnion = this._labBuildUnion(active);
-      const fullEq    = this._computeDollarSeries(fullUnion, this.labPerTrade, this.labDailyCap).equity;
-      const finalVal  = fullEq.length ? fullEq[fullEq.length - 1].value : 0;
-
-      const increments = {};
-      for (const cand of active) {
-        if (active.length === 1) {
-          increments[cand.id] = finalVal;  // single node: full equity = its contribution
-        } else {
-          const wo   = this._labBuildUnion(active.filter(c => c.id !== cand.id));
-          const woEq = this._computeDollarSeries(wo, this.labPerTrade, this.labDailyCap).equity;
-          increments[cand.id] = finalVal - (woEq.length ? woEq[woEq.length - 1].value : 0);
-        }
-      }
-      this.labNetworkIncrements = increments;  // expose for Stage 4
+      // ── Incremental contributions: read cached values from labRecompute ────
+      // (N+1 _computeDollarSeries calls moved to labRecompute so hover is
+      // a cheap canvas repaint with zero _computeDollarSeries invocations.)
+      const increments = this.labNetworkIncrements;
 
       // ── Trade-set analysis (raw sets before union dedup) ─────────────────
       const tradeSets = {};
