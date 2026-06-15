@@ -10838,14 +10838,24 @@ document.addEventListener('alpine:init', () => {
         ctx.moveTo(pi.x, pi.y);
         ctx.lineTo(pj.x, pj.y);
         ctx.stroke();
-        // Shared-trade count label on the edge midpoint (only for prominent edges)
-        if (e.n / maxEdgeN > 0.08) {
-          const mx = (pi.x + pj.x) / 2, my = (pi.y + pj.y) / 2;
+        // Edge count label — only on thick edges (>25% of max shared count).
+        // Offset perpendicular to the edge, alternating sign by edge index so
+        // crossing pairs separate to opposite sides instead of colliding.
+        if (e.n / maxEdgeN > 0.25) {
+          const edgeIdx = edges.indexOf(e);
+          const mx = (pi.x + pj.x) / 2;
+          const my = (pi.y + pj.y) / 2;
+          const dx = pj.x - pi.x, dy = pj.y - pi.y;
+          const len = Math.hypot(dx, dy) || 1;
+          // Unit normal perpendicular to edge (rotated 90°); sign alternates by index
+          const sign = (edgeIdx % 2 === 0) ? 1 : -1;
+          const nx = -dy / len * 10 * sign;
+          const ny =  dx / len * 10 * sign;
           ctx.font = '11px sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(255,255,255,.55)';
-          ctx.fillText(e.n, mx, my);
+          ctx.fillStyle = 'rgba(255,255,255,.60)';
+          ctx.fillText(e.n, mx + nx, my + ny);
         }
       }
 
