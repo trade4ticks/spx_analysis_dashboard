@@ -3903,6 +3903,11 @@ document.addEventListener('alpine:init', () => {
     labNetworkNodeRadii:  {},      // {[id]: px radius} — used for hit-test
     labSelectedNodeId:    null,    // currently clicked node id (or null)
     labSelectedDetail:    null,    // decomposition object for selected node
+    labHoveredNodeId:     null,    // node under cursor (hover only, not click)
+    labTooltipVisible:    false,   // whether hover tooltip shows
+    labTooltipX:          0,       // tooltip left (px, relative to canvas container)
+    labTooltipY:          0,       // tooltip top  (px, relative to canvas container)
+    labTooltipLines:      [],      // tooltip text lines [#id+name, P:…, S:…, outcome]
     // Lab charts tracked in this._charts: 'lab-equity', 'lab-yearly'
     // Lab network graph is a raw canvas (not Chart.js)
 
@@ -10815,11 +10820,28 @@ document.addEventListener('alpine:init', () => {
         ctx.setLineDash([]);
       }
 
+      // ── Hover context: incident edges + neighbour nodes ──────────────────
+      const SCALE  = 0.05;
+      const hovId  = this.labHoveredNodeId;
+      const incidentEdgeIdxs = new Set();
+      const incidentNodeIds  = new Set();
+      if (hovId) {
+        incidentNodeIds.add(hovId);
+        edges.forEach((e, i) => {
+          if (e.from === hovId || e.to === hovId) {
+            incidentEdgeIdxs.add(i);
+            incidentNodeIds.add(e.from);
+            incidentNodeIds.add(e.to);
+          }
+        });
+      }
+
       // ── Draw edges (before nodes so nodes render on top) ──────────────────
-      const SCALE = 0.05;
-      for (const e of edges) {
+      edges.forEach((e, edgeIdx) => {
         const pi = positions[e.from], pj = positions[e.to];
-        if (!pi || !pj) continue;
+        if (!pi || !pj) return;
+        const isIncident = !hovId || incidentEdgeIdxs.has(edgeIdx);
+        ctx.globalAlpha  = isIncident ? 1.0 : 0.12;
         const r = e.avg_ret;
         let edgeColor;
         if (r == null || Math.abs(r) < 0.0002) {
@@ -10838,38 +10860,44 @@ document.addEventListener('alpine:init', () => {
         ctx.moveTo(pi.x, pi.y);
         ctx.lineTo(pj.x, pj.y);
         ctx.stroke();
-        // Edge count label — only on thick edges (>25% of max shared count).
-        // Offset perpendicular to the edge, alternating sign by edge index so
-        // crossing pairs separate to opposite sides instead of colliding.
-        if (e.n / maxEdgeN > 0.25) {
-          const edgeIdx = edges.indexOf(e);
-          const mx = (pi.x + pj.x) / 2;
-          const my = (pi.y + pj.y) / 2;
-          const dx = pj.x - pi.x, dy = pj.y - pi.y;
+        // Count label: only on thick/incident edges.
+        // Position at t=1/3 from the lower-id endpoint (so crossing edges in
+        // the same cluster place their labels at t=0.33 vs t=0.67, not the same
+        // midpoint). Perpendicular offset alternates sign by edge index.
+        if (e.n / maxEdgeN > 0.25 && isIncident) {
+          const dx  = pj.x - pi.x, dy = pj.y - pi.y;
           const len = Math.hypot(dx, dy) || 1;
-          // Unit normal perpendicular to edge (rotated 90°); sign alternates by index
-          const sign = (edgeIdx % 2 === 0) ? 1 : -1;
-          const nx = -dy / len * 10 * sign;
-          const ny =  dx / len * 10 * sign;
-          ctx.font = '11px sans-serif';
-          ctx.textAlign = 'center';
+          const t   = (e.from < e.to) ? 0.33 : 0.67;  // 1/3 from lower-id end
+          const lx  = pi.x + dx * t;
+          const ly  = pi.y + dy * t;
+          const sign = (edgeIdx % 2 === 0) ? 1 : -1;   // perp offset, alternating
+          const nx  = -dy / len * 10 * sign;
+          const ny  =  dx / len * 10 * sign;
+          ctx.globalAlpha = 1.0;
+          ctx.font         = '11px sans-serif';
+          ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(255,255,255,.60)';
-          ctx.fillText(e.n, mx + nx, my + ny);
+          ctx.fillStyle    = 'rgba(255,255,255,.60)';
+          ctx.fillText(e.n, lx + nx, ly + ny);
         }
-      }
+        ctx.globalAlpha = 1.0;
+      });
 
       // ── Draw nodes ────────────────────────────────────────────────────────
-      // Cache radii first so hit-test in labHandleNetworkClick is accurate.
+      // Cache radii first so hit-test in click/mousemove handlers is accurate.
       this.labNetworkNodeRadii = {};
       for (const c of active) this.labNetworkNodeRadii[c.id] = nodeRad(c);
 
       for (const c of active) {
-        const pos = positions[c.id];
+        const pos      = positions[c.id];
         if (!pos) continue;
         const rad      = nodeRad(c);
+        const isNear   = !hovId || incidentNodeIds.has(c.id);
+        const isHov    = c.id === hovId;
         const isNegInc = increments[c.id] < 0;
         const uRet     = uniqueAvgRet[c.id];
+
+        ctx.globalAlpha = isNear ? 1.0 : 0.15;
 
         // Node fill from unique avg-ret
         let fillColor;
@@ -10888,7 +10916,7 @@ document.addEventListener('alpine:init', () => {
         ctx.fillStyle = fillColor;
         ctx.fill();
 
-        // Outline: dashed pink = negative incremental; subtle ring = positive
+        // Outline: dashed pink = negative incremental; subtle ring otherwise
         if (isNegInc) {
           ctx.setLineDash([3, 3]);
           ctx.strokeStyle = '#e84393';
@@ -10901,15 +10929,28 @@ document.addEventListener('alpine:init', () => {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Selection highlight: bright outer ring drawn before label
+        // Hover glow ring (inner, subtle — drawn under selection ring)
+        if (isHov) {
+          ctx.globalAlpha = 1.0;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, rad + 3, 0, 2 * Math.PI);
+          ctx.strokeStyle = 'rgba(255,255,255,.45)';
+          ctx.lineWidth   = 1.5;
+          ctx.stroke();
+        }
+
+        // Selection highlight: bright outer ring (drawn on top of hover ring)
         if (c.id === this.labSelectedNodeId) {
+          ctx.globalAlpha = 1.0;
           ctx.setLineDash([]);
           ctx.beginPath();
-          ctx.arc(pos.x, pos.y, rad + 5, 0, 2 * Math.PI);
+          ctx.arc(pos.x, pos.y, rad + (isHov ? 6 : 5), 0, 2 * Math.PI);
           ctx.strokeStyle = 'rgba(255,255,255,.80)';
           ctx.lineWidth   = 2.5;
           ctx.stroke();
         }
+
+        ctx.globalAlpha = 1.0;
 
         // Signal ID label
         ctx.fillStyle    = 'rgba(255,255,255,.92)';
@@ -10947,6 +10988,58 @@ document.addEventListener('alpine:init', () => {
       this.labSelectedNodeId = null;
       this.labSelectedDetail = null;
       this._labRenderNetwork();
+    },
+
+    // Mousemove on network canvas: hit-test for hover highlight + tooltip.
+    // Independent of click selection — does NOT change labSelectedNodeId.
+    labHandleNetworkMousemove(event) {
+      const canvas = document.getElementById('lab-network-canvas');
+      if (!canvas) return;
+      const rect   = canvas.getBoundingClientRect();
+      const mx     = event.clientX - rect.left;
+      const my     = event.clientY - rect.top;
+      const active = this.labCandidates.filter(c => this.labActiveIds[c.id]);
+      let hit = null;
+      for (const c of active) {
+        const pos = this.labNetworkPositions[c.id];
+        const rad = this.labNetworkNodeRadii[c.id];
+        if (!pos || rad == null) continue;
+        if (Math.hypot(mx - pos.x, my - pos.y) <= rad + 4) { hit = c; break; }
+      }
+      const prevHov = this.labHoveredNodeId;
+      this.labHoveredNodeId = hit ? hit.id : null;
+      if (hit) {
+        this.labTooltipVisible = true;
+        // Position tooltip: follow cursor, flip left if near the right edge
+        const W = canvas.offsetWidth || 500;
+        const H = canvas.offsetHeight || 400;
+        const TW = 240, TH = 90;   // estimated tooltip dimensions
+        let tx = mx + 16;
+        if (tx + TW > W) tx = mx - TW - 16;
+        let ty = my + 16;
+        if (ty + TH > H) ty = my - TH - 10;
+        this.labTooltipX = Math.max(0, tx);
+        this.labTooltipY = Math.max(0, ty);
+        this.labTooltipLines = [
+          '#' + hit.id + '  ' + hit.name,
+          'P: '  + hit.primary_metric,
+          'S: '  + hit.secondary_metric,
+          hit.outcome,
+        ];
+      } else {
+        this.labTooltipVisible = false;
+      }
+      // Re-render only when hover state actually changes (avoid redraw every px)
+      if (prevHov !== this.labHoveredNodeId) this._labRenderNetwork();
+    },
+
+    // Mouseleave on network canvas: clear hover state.
+    labHandleNetworkMouseleave() {
+      if (this.labHoveredNodeId !== null || this.labTooltipVisible) {
+        this.labHoveredNodeId  = null;
+        this.labTooltipVisible = false;
+        this._labRenderNetwork();
+      }
     },
 
     // Compute the decomposition detail object for a given node id.
