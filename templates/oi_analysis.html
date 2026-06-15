@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=229"></script>
+  <script src="/static/js/oi_analysis.js?v=230"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5170,12 +5170,15 @@
                           <div style="font-size:16px;font-weight:700;color:rgba(255,255,255,.92);
                                       line-height:1;text-align:center;margin-top:2px"
                                x-text="'#' + c.id"></div>
-                          <!-- Stats — stacked vertically; hidden on very small cards (<68px) -->
-                          <div x-show="labCardSize(c.agg_n||0) >= 68"
-                               style="display:flex;flex-direction:column;gap:0">
-                            <span style="font-size:8px;color:rgba(255,255,255,.6);line-height:1.35"
+                          <!-- Stats — always shown; two stacked block lines.
+                               No x-show here: Alpine x-show sets el.style.display=''
+                               which removes the display:flex from the same inline
+                               style attribute, causing spans to render inline.
+                               Min card size (78px) guarantees both lines fit. -->
+                          <div style="display:flex;flex-direction:column;gap:0">
+                            <span style="font-size:8px;color:rgba(255,255,255,.6);line-height:1.35;display:block"
                                   x-text="(c.agg_n||0).toLocaleString() + 'tr'"></span>
-                            <span style="font-size:9px;font-weight:600;color:rgba(255,255,255,.92);line-height:1.35"
+                            <span style="font-size:9px;font-weight:600;color:rgba(255,255,255,.92);line-height:1.35;display:block"
                                   x-text="c.agg_avg_ret!=null
                                             ? (c.agg_avg_ret*100).toFixed(2)+'%'
                                             : '—'"></span>
@@ -5227,21 +5230,25 @@
                           title="Loads enabled signals from the currently loaded Signal Portfolio">
                     Load from portfolio ↓
                   </button>
-                  <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                    <label style="font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px">
-                      Per trade $
-                      <input type="number" x-model.number="labPerTrade" @change="labRecompute()"
-                             min="100" max="50000" step="100"
-                             style="width:70px;background:var(--raised);border:1px solid var(--border);
-                                    color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
-                    </label>
-                    <label style="font-size:11px;color:var(--dim);display:flex;align-items:center;gap:5px">
-                      Daily cap $
-                      <input type="number" x-model.number="labDailyCap" @change="labRecompute()"
-                             min="1000" max="200000" step="1000"
-                             style="width:80px;background:var(--raised);border:1px solid var(--border);
-                                    color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
-                    </label>
+                  <!-- $/trade and cap dropdowns — same option lists as canonical
+                       equityDollarChoices so they can't drift apart. -->
+                  <div style="margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--dim)">
+                    <span>$/trade</span>
+                    <select @change="labPerTrade = +$event.target.value; labRecompute()"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.perTrade" :key="'lab-pt-'+v">
+                        <option :value="v" :selected="v === labPerTrade"
+                                x-text="'$'+(v/1000)+'k'"></option>
+                      </template>
+                    </select>
+                    <span>· cap</span>
+                    <select @change="labDailyCap = +$event.target.value; labRecompute()"
+                            style="background:var(--raised);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px">
+                      <template x-for="v in equityDollarChoices.dailyCap" :key="'lab-dc-'+v">
+                        <option :value="v" :selected="v === labDailyCap"
+                                x-text="'$'+(v/1000).toFixed(v%1000?1:0)+'k'"></option>
+                      </template>
+                    </select>
                   </div>
                 </div>
 
@@ -5304,36 +5311,12 @@
                           <canvas id="lab-equity-canvas"></canvas>
                         </div>
                       </div>
-                      <!-- Yearly table -->
-                      <div style="flex:1;min-width:100px">
-                        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">By year</div>
-                        <template x-if="labYearly.length">
-                          <div style="overflow:auto;max-height:200px">
-                            <table style="font-size:11px;width:100%;border-collapse:collapse">
-                              <thead>
-                                <tr style="color:var(--dim)">
-                                  <th style="text-align:left;padding:1px 6px 1px 0;font-weight:400">Yr</th>
-                                  <th style="text-align:right;padding:1px 6px;font-weight:400">N</th>
-                                  <th style="text-align:right;padding:1px 6px;font-weight:400">Avg</th>
-                                  <th style="text-align:right;padding:1px 0;font-weight:400">Win%</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                <template x-for="y in labYearly" :key="y.year">
-                                  <tr>
-                                    <td style="padding:1px 6px 1px 0" x-text="y.year"></td>
-                                    <td style="text-align:right;padding:1px 6px"
-                                        x-text="y.n.toLocaleString()"></td>
-                                    <td :style="'text-align:right;padding:1px 6px;'+(y.avg_ret>=0?'color:#2980b9':'color:#e84393')"
-                                        x-text="(y.avg_ret*100).toFixed(2)+'%'"></td>
-                                    <td style="text-align:right;padding:1px 0"
-                                        x-text="(y.win_rate*100).toFixed(0)+'%'"></td>
-                                  </tr>
-                                </template>
-                              </tbody>
-                            </table>
-                          </div>
-                        </template>
+                      <!-- Annual P&L bar chart — matches canonical _renderZoneYearly dollar mode -->
+                      <div style="flex:1;min-width:120px">
+                        <div style="font-size:11px;color:var(--dim);margin-bottom:4px">Annual P&amp;L</div>
+                        <div style="height:180px;position:relative">
+                          <canvas id="lab-yearly-canvas"></canvas>
+                        </div>
                       </div>
                     </div>
 

@@ -3897,8 +3897,8 @@ document.addEventListener('alpine:init', () => {
     labYearly:         [],      // [{year, n, avg_ret, win_rate}]
     labEquity:         [],      // [{date, value}] from _computeDollarSeries
     labUnionN:         0,       // deduped trade count across active signals
-    labChartInst:      null,    // Chart.js instance for lab equity curve
     labParityResult:   null,    // result object from labRunParity()
+    // Lab charts tracked in this._charts: 'lab-equity', 'lab-yearly'
 
     surveyExpanded: false,
     selectedStats: null,
@@ -10358,9 +10358,10 @@ document.addEventListener('alpine:init', () => {
       return groups;
     },
 
-    // Card size: proportional to n trades; clamp to [56, 110] px.
+    // Card size: proportional to n trades; clamp to [78, 110] px.
+    // 78 px is the minimum that fits both stacked stat lines without clipping.
     labCardSize(n) {
-      const lo = 56, hi = 110;
+      const lo = 78, hi = 110;
       const ns = this.labCandidates.map(c => c.agg_n || 0);
       const maxN = Math.max(...ns, 1);
       return Math.round(lo + (hi - lo) * Math.min(n / maxN, 1));
@@ -10439,7 +10440,8 @@ document.addEventListener('alpine:init', () => {
         this.labYearly  = [];
         this.labUnionN  = 0;
         this.labReady   = false;
-        if (this.labChartInst) { this.labChartInst.destroy(); this.labChartInst = null; }
+        if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
+        if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
         return;
       }
       // ── Union dedup ──────────────────────────────────────────────────────
@@ -10459,6 +10461,8 @@ document.addEventListener('alpine:init', () => {
         this.labStats   = null;
         this.labYearly  = [];
         this.labReady   = false;
+        if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
+        if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
         return;
       }
       // ── Dollar equity (reuses _computeDollarSeries unchanged) ───────────
@@ -10496,62 +10500,143 @@ document.addEventListener('alpine:init', () => {
         if (!byYear[yr]) byYear[yr] = [];
         byYear[yr].push(t.ret);
       }
+      // Sum dollar P&L per year from dayPnlByDate (same loop that drives equity curve)
+      const dollarByYear = {};
+      for (const [d, pnl] of ds.dayPnlByDate) {
+        const yr = d.slice(0, 4);
+        dollarByYear[yr] = (dollarByYear[yr] || 0) + pnl;
+      }
       this.labYearly = Object.keys(byYear).sort().map(yr => {
         const yrets = byYear[yr];
         const yn    = yrets.length;
         const ymean = yn ? yrets.reduce((s,v)=>s+v,0)/yn : 0;
         return { year: +yr, n: yn, avg_ret: ymean,
-                 win_rate: yn ? yrets.filter(r=>r>0).length/yn : 0 };
+                 win_rate: yn ? yrets.filter(r=>r>0).length/yn : 0,
+                 dollar_pnl: dollarByYear[yr] || 0 };
       });
       this.labReady = true;
-      this.$nextTick(() => this._labRenderEquity());
+      this.$nextTick(() => { this._labRenderEquity(); this._labRenderYearly(); });
     },
 
+    // Render lab equity curve — dual-axis dollar mode matching canonical
+    // _renderSecEquity dollar branch: equity (left y) + drawdown (right y1 max:0),
+    // stepped:'after', parsing:false, x bounded to active-set date range.
     _labRenderEquity() {
       const canvas = document.getElementById('lab-equity-canvas');
       if (!canvas) return;
-      if (this.labChartInst) { this.labChartInst.destroy(); this.labChartInst = null; }
+      if (this._charts['lab-equity']) { this._charts['lab-equity'].destroy(); delete this._charts['lab-equity']; }
       if (!this.labEquity || !this.labEquity.length) return;
-      const pts = this.labEquity.map(p => ({
-        x: new Date(p.date + 'T00:00:00').getTime(),
-        y: p.value,
-      }));
-      const finalPnl = pts[pts.length-1].y;
-      this.labChartInst = new Chart(canvas, {
+      const toMs  = d => new Date(d + 'T00:00:00').getTime();
+      const eqPts = this.labEquity;
+      const eqPxy = eqPts.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
+      const dd    = this._drawdownFromDollarEquity(eqPts);
+      const ddxy  = dd.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
+      const fmt$  = v => {
+        const abs = Math.abs(v);
+        const sign = v < 0 ? '-' : '';
+        if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+        if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+        return sign + '$' + abs.toFixed(0);
+      };
+      const ctx = canvas.getContext('2d');
+      this._charts['lab-equity'] = new Chart(ctx, {
         type: 'line',
-        data: {
-          datasets: [{
-            data: pts,
-            borderColor: finalPnl >= 0 ? '#0984e3' : '#e84393',
-            borderWidth: 1.5,
-            fill: {
-              target: 'origin',
-              above: 'rgba(9,132,227,.06)',
-              below: 'rgba(232,67,147,.06)',
+        data: { datasets: [
+          { label: 'Equity ($)', data: eqPxy, borderColor: '#3498db',
+            backgroundColor: 'rgba(52,152,219,0.08)', borderWidth: 1.5,
+            pointRadius: 0, fill: false, tension: 0, stepped: 'after', yAxisID: 'y' },
+          { label: 'Drawdown ($)', data: ddxy, borderColor: 'rgba(232,67,147,.32)',
+            backgroundColor: 'transparent', borderWidth: 1,
+            pointRadius: 0, fill: false, tension: 0, stepped: 'after', yAxisID: 'y1' },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          parsing: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              mode: 'index', intersect: false,
+              callbacks: {
+                title: items => items.length
+                  ? new Date(items[0].parsed.x).toISOString().slice(0, 10) : '',
+                label: item => `${item.dataset.label}: ${fmt$(item.parsed.y)}`,
+              },
             },
-            pointRadius: 0, tension: 0, parsing: false,
+          },
+          scales: {
+            x: {
+              type: 'linear',
+              min: eqPxy[0].x, max: eqPxy[eqPxy.length - 1].x,
+              ticks: { color: '#888', font: { size: 9 }, maxTicksLimit: 10,
+                autoSkip: true, autoSkipPadding: 16,
+                callback: val => new Date(val).toISOString().slice(0, 7) },
+              grid: { color: '#222' },
+            },
+            y:  { position: 'left',
+                  ticks: { color: '#888', font: { size: 9 }, callback: fmt$ },
+                  grid: { color: '#222' } },
+            y1: { position: 'right',
+                  ticks: { color: 'rgba(232,67,147,.6)', font: { size: 9 }, callback: fmt$ },
+                  grid: { drawOnChartArea: false }, max: 0 },
+          },
+        },
+      });
+    },
+
+    // Render lab annual P&L bar chart — matches canonical _renderZoneYearly dollar mode.
+    // n-count gradient alpha; blue positive / pink negative bars.
+    _labRenderYearly() {
+      const canvas = document.getElementById('lab-yearly-canvas');
+      if (!canvas) return;
+      if (this._charts['lab-yearly']) { this._charts['lab-yearly'].destroy(); delete this._charts['lab-yearly']; }
+      const yearly = this.labYearly;
+      if (!yearly || !yearly.length) return;
+      const ns   = yearly.map(y => y.n);
+      const minN = Math.min(...ns), maxN = Math.max(...ns);
+      const nPct = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
+      const alpha       = y => (0.2 + nPct(y) * 0.6).toFixed(2);
+      const bgColor     = y => y.dollar_pnl >= 0 ? `rgba(52,152,219,${alpha(y)})` : `rgba(232,67,147,${alpha(y)})`;
+      const borderColor = y => y.dollar_pnl >= 0 ? '#3498db' : '#e84393';
+      const fmt$ = v => {
+        const abs = Math.abs(v);
+        const sign = v < 0 ? '-' : '';
+        if (abs >= 1e6) return sign + '$' + (abs / 1e6).toFixed(2) + 'M';
+        if (abs >= 1e3) return sign + '$' + (abs / 1e3).toFixed(1) + 'k';
+        return sign + '$' + abs.toFixed(0);
+      };
+      const ctx = canvas.getContext('2d');
+      this._charts['lab-yearly'] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels:   yearly.map(y => y.year),
+          datasets: [{
+            label:           'Annual P&L',
+            data:            yearly.map(y => +y.dollar_pnl.toFixed(2)),
+            backgroundColor: yearly.map(bgColor),
+            borderColor:     yearly.map(borderColor),
+            borderWidth:     1,
           }],
         },
         options: {
-          animation: false, responsive: true, maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,0.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: ctx => {
+                  const y = yearly[ctx.dataIndex];
+                  return [`P&L: ${fmt$(y.dollar_pnl)}`,
+                          `WR: ${(y.win_rate * 100).toFixed(1)}%`,
+                          `n: ${y.n}`];
+                },
+              },
+            },
+          },
           scales: {
-            x: {
-              type: 'linear', parsing: false,
-              ticks: {
-                color: '#888', font: { size: 9 }, maxTicksLimit: 8,
-                callback: ms => new Date(ms).getFullYear(),
-              },
-              grid: { color: 'rgba(255,255,255,.04)' },
-            },
-            y: {
-              ticks: {
-                color: '#888', font: { size: 9 }, maxTicksLimit: 6,
-                callback: v => '$' + (Math.abs(v)>=1000
-                  ? (v/1000).toFixed(0)+'k' : v.toFixed(0)),
-              },
-              grid: { color: 'rgba(255,255,255,.04)' },
-            },
+            x: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
+            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => fmt$(v) },
+                 grid: { color: '#222' } },
           },
         },
       });
@@ -10605,6 +10690,24 @@ document.addEventListener('alpine:init', () => {
       const nOk     = labN === portN;
       const avgOk   = labAvg != null && portAvg != null
                       && Math.abs(labAvg - portAvg) < 1e-7;
+      // ── DIAGNOSTIC — full-precision parity log (no logic change) ───────────
+      console.group('[Lab Parity Diagnostic]');
+      console.log(`Portfolio: "${(this.portAggregate.portfolio||{}).name||'?'}"`);
+      console.log(`Signal IDs expected: ${portSigIds.size}  matched in candidates: ${portCands.length}  missing: [${missingIds.join(', ')||'none'}]`);
+      console.log(`Date filter: from=${df||'none'}  to=${dt||'none'}  ticker=${tkr||'ALL'}`);
+      console.log(`N : lab=${labN}  port=${portN}  Δ=${Math.abs(labN-portN)}`);
+      console.log(`nOk: ${nOk}`);
+      console.log(`Avg ret (full precision): lab=${labAvg}  port=${portAvg}  Δ=${labAvg!=null&&portAvg!=null?Math.abs(labAvg-portAvg):'N/A'}`);
+      console.log(`portAvg note: server stores round(avg_ret,6) — max rounding error ≈5e-7; tolerance is 1e-7`);
+      console.log(`outlier_excluded: ${this.portAggregate?.outlier_excluded??0}`);
+      console.log(`avgOk: ${avgOk}`);
+      console.log(`RESULT: ${nOk&&avgOk ? 'PASS' : 'FAIL'}`);
+      if (!nOk) {
+        const labDates = new Set(filtered.map(t=>t.trade_date));
+        console.log(`  Lab date range: ${filtered.length ? filtered[0].trade_date : '—'} → ${filtered.length ? filtered[filtered.length-1].trade_date : '—'}`);
+      }
+      console.groupEnd();
+      // ────────────────────────────────────────────────────────────────────────
       this.labParityResult = {
         ok:          nOk && avgOk,
         lab_n:       labN,    port_n:   portN,
