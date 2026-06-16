@@ -11407,12 +11407,12 @@ document.addEventListener('alpine:init', () => {
         return;
       }
 
-      // Ring fills the square canvas minus a small margin.  Ring widths
+      // Ring fills the square canvas minus a small inner pad.  Ring widths
       // are proportional to rOuter so the visual stays balanced at any size.
       const cx     = W / 2;
       const cy     = H / 2;
-      const margin = 8;
-      const rOuter = Math.max(20, W / 2 - margin);
+      const ringPad = 8;
+      const rOuter = Math.max(20, W / 2 - ringPad);
       // Ring widths are proportional to rOuter — middle band is 30%
       // of the radius, outer ring 18%. Works at any donut size.
       const rMid   = rOuter * 0.82;
