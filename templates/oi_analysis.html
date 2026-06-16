@@ -366,8 +366,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/signal_thumbnail.js?v=2"></script>
-  <script src="/static/js/oi_analysis.js?v=249"></script>
+  <script src="/static/js/signal_thumbnail.js?v=3"></script>
+  <script src="/static/js/oi_analysis.js?v=250"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3496,6 +3496,21 @@
                                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
                                       font-size:11px;padding:3px 8px;border-radius:3px;width:160px"
                                @keyup.enter="saveSignal()">
+                        <!-- Stage 1: declared corner-quadrant tag.
+                             Optional; saving without one is allowed.
+                             The four values are the canonical
+                             corner_direction strings from corner_scan.py
+                             so Stage-3's auto-detect matches exactly. -->
+                        <select x-model="signalCorner"
+                                title="Optional: declare which corner-quadrant this signal lives in"
+                                style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                                       font-size:11px;padding:3px 6px;border-radius:3px">
+                          <option value="">corner…</option>
+                          <option value="low-low">low-low</option>
+                          <option value="low-high">low-high</option>
+                          <option value="high-low">high-low</option>
+                          <option value="high-high">high-high</option>
+                        </select>
                         <button @click="saveSignal()"
                                 :disabled="!signalName.trim() || signalSaving"
                                 style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.35);
@@ -4080,6 +4095,24 @@
             <span style="font-size:11px;color:var(--dim)">
               <b x-text="recallSelectedCells.size"></b> cell(s) selected
             </span>
+            <!-- Stage 1: editable corner tag for this Recall save.
+                 Prefilled from sig.corner on open (existing saved
+                 signals carry the stored value; corner-scan-seeded
+                 sigs carry the scanned row's canonical value). Empty
+                 string means "no change" on PUT — the COALESCE
+                 server-side preserves the existing value. On a fresh
+                 corner-scan synthetic the dropdown is already set
+                 to the scanned direction so first-save tags it. -->
+            <select x-model="recallCorner"
+                    title="Declared corner-quadrant tag — used by Corner Scan 2F auto-match"
+                    style="background:var(--raised);border:1px solid var(--border);color:var(--text);
+                           font-size:11px;padding:3px 6px;border-radius:3px">
+              <option value="">corner…</option>
+              <option value="low-low">low-low</option>
+              <option value="low-high">low-high</option>
+              <option value="high-low">high-low</option>
+              <option value="high-high">high-high</option>
+            </select>
             <button class="btn-batch blue"
                     @click="recallDownloadCSV()"
                     :disabled="!recallZoneData || !recallZoneData.combined_trades || !recallZoneData.combined_trades.length"

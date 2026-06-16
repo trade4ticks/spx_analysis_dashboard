@@ -1151,6 +1151,7 @@ async def portfolio_lab_candidates(
                    s.primary_metric, s.secondary_metric,
                    s.outcome, s.n_bins, s.cell_set,
                    s.agg_n, s.agg_avg_ret,
+                   s.status, s.color_slot, s.corner,
                    COALESCE(mc_p.family_num,  0)  AS p_family_num,
                    COALESCE(mc_p.family_name, '') AS p_family_name,
                    COALESCE(mc_s.family_num,  0)  AS s_family_num,
@@ -1265,6 +1266,13 @@ async def portfolio_lab_candidates(
                 "s_family_name":    cand["s_family_name"],
                 "is_oi_signal":     cand["is_oi_signal"],
                 "trades":           cand["trades"],
+                # Stage 1 of the persistent color + status tier feature.
+                # Lab reads color_slot to look up the hex from the
+                # shared SignalThumb.SLOT_PALETTE — single source of
+                # truth, no per-render computation.
+                "status":           cand.get("status") or "Test",
+                "color_slot":       cand.get("color_slot"),
+                "corner":           cand.get("corner"),
             })
 
     return {"candidates": result}

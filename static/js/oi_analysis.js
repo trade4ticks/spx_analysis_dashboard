@@ -2402,6 +2402,10 @@ document.addEventListener('alpine:init', () => {
     signalName:       '',
     signalSaving:     false,
     signalSaveMsg:    '',
+    // Stage 1: declared corner-quadrant tag for the next save. Empty
+    // string = no tag (send nothing). Set by a dropdown next to the
+    // Save button on the Zone-Analysis save bar.
+    signalCorner:     '',
     // Saved Signals table — sort, checkbox, expand, batch action state.
     // sigCheckedIds is keyed by signal_id so sorting doesn't drop checks
     // and reload re-applies them to whichever rows still exist.
@@ -2430,6 +2434,11 @@ document.addEventListener('alpine:init', () => {
     // object instance as the row in `signals[]`, and any direct edit
     // would flash the new name in the list before the save completes.
     recallEditedName:    '',
+    // Stage 1: editable corner tag for Recall. Initialized from
+    // recallSig.corner when a sig is opened; from corner_direction
+    // when seeded by a corner-scan row click (recallFromCornerScan).
+    // Empty string = no tag.
+    recallCorner:        '',
 
     // P5: in Overnight Gap mode, the heatmap and sidebar bin charts use
     // the synthetic outcome `overnight_gap`, which the backend resolves
@@ -5560,6 +5569,50 @@ document.addEventListener('alpine:init', () => {
       if (r.ok) this.signals = (await r.json()).signals || [];
     },
 
+    // Single helper that builds the JSON body for every signal save
+    // path. There are three (kind values):
+    //   'zone-new'      → POST /signals from Zone-Analysis main flow
+    //   'recall-new'    → POST /signals from Recall (first save of an
+    //                     unsaved/corner-scan-seeded sig)
+    //   'recall-update' → PUT  /signals/{id} (in-place edit; identity
+    //                     fields locked server-side, name/corner
+    //                     optional)
+    //
+    // All three sites must funnel through here so the next added
+    // field (e.g. tags, notes) only needs to touch this one function.
+    // The corner dropdown is read from signalCorner (zone) or
+    // recallCorner (recall); empty string sends no corner.
+    _buildSignalSaveBody(kind, opts) {
+      const body = {};
+      if (kind === 'zone-new') {
+        body.name             = opts.name;
+        body.primary_metric   = this.metric;
+        body.secondary_metric = this.secSelectedMetric;
+        body.outcome          = this.zoneOutcome || this.outcome || 'ret_5d_fwd_oc';
+        body.n_bins           = this.heatmapBins;
+        body.cell_set         = opts.cell_set;
+        if (this.signalCorner) body.corner = this.signalCorner;
+      } else if (kind === 'recall-new') {
+        body.name             = opts.name;
+        body.primary_metric   = this.recallSig.primary_metric;
+        body.secondary_metric = this.recallSig.secondary_metric;
+        body.outcome          = this.recallSig.outcome;
+        body.n_bins           = this.recallSig.n_bins;
+        body.cell_set         = opts.cell_set;
+        if (this.recallCorner) body.corner = this.recallCorner;
+      } else if (kind === 'recall-update') {
+        body.cell_set = opts.cell_set;
+        if (opts.name !== undefined) body.name = opts.name;
+        // Send corner ONLY when it differs from the saved value (a
+        // real edit). Avoids clobbering with the same value on every
+        // re-save, and lets the server-side COALESCE no-op cleanly.
+        if (this.recallCorner && this.recallCorner !== (this.recallSig.corner || '')) {
+          body.corner = this.recallCorner;
+        }
+      }
+      return body;
+    },
+
     async saveSignal() {
       if (!this.signalName.trim() || !this.hmSelectedCells.size) return;
       if (!this.metric || !this.secSelectedMetric) return;
@@ -5569,18 +5622,15 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/factor-analysis/signals', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({
-            name:             this.signalName.trim(),
-            primary_metric:   this.metric,
-            secondary_metric: this.secSelectedMetric,
-            outcome:          this.zoneOutcome || this.outcome || 'ret_5d_fwd_oc',
-            n_bins:           this.heatmapBins,
-            cell_set:         this.hmCellSet(),
-          }),
+          body:    JSON.stringify(this._buildSignalSaveBody('zone-new', {
+            name:     this.signalName.trim(),
+            cell_set: this.hmCellSet(),
+          })),
         });
         if (r.ok) {
           this.signalSaveMsg = '✓ Saved';
           this.signalName    = '';
+          this.signalCorner  = '';   // reset for next save
           // POST now computes stats inline, so reloading shows them right
           // away without an extra Refresh.
           await this.loadSignals();
@@ -5834,6 +5884,10 @@ document.addEventListener('alpine:init', () => {
         agg_n:            null,
         per_cell_stats:   [],
         stats_updated_at: null,
+        // Stage 1: seed the corner field from the scan row so the
+        // Recall save dropdown is prefilled to the canonical value
+        // the user is creating from. They can override before save.
+        corner:           row.corner_direction || '',
       };
       await this.recallSignal(sig);
     },
@@ -5849,6 +5903,11 @@ document.addEventListener('alpine:init', () => {
       }
       this.recallSig = sig;
       this.recallEditedName = sig.name || '';
+      // Stage 1: seed the corner dropdown from the loaded sig. Existing
+      // saved signals carry their stored corner; corner-scan-seeded
+      // sigs carry the canonical value of the scanned row. Empty
+      // string when neither is present (legacy signals pre-Stage-1).
+      this.recallCorner = sig.corner || '';
       this.recallSelectedCells = new Set(
         (sig.cell_set || []).map(c => c[0] + '-' + c[1]));
       this.recallExpanded = true;
@@ -5962,24 +6021,22 @@ document.addEventListener('alpine:init', () => {
           r = await fetch('/api/factor-analysis/signals', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({
-              name:             trimmedName,
-              primary_metric:   this.recallSig.primary_metric,
-              secondary_metric: this.recallSig.secondary_metric,
-              outcome:          this.recallSig.outcome,
-              n_bins:           this.recallSig.n_bins,
-              cell_set:         cellSet,
-            }),
+            body:    JSON.stringify(this._buildSignalSaveBody('recall-new', {
+              name:     trimmedName,
+              cell_set: cellSet,
+            })),
           });
         } else {
-          const body = { cell_set: cellSet };
-          if (trimmedName !== this.recallSig.name) body.name = trimmedName;
+          // PUT body: cell_set always; name only when it changed; corner
+          // only when it changed (handled inside _buildSignalSaveBody).
+          const opts = { cell_set: cellSet };
+          if (trimmedName !== this.recallSig.name) opts.name = trimmedName;
           r = await fetch(
             `/api/factor-analysis/signals/${this.recallSig.id}`,
             {
               method:  'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body:    JSON.stringify(body),
+              body:    JSON.stringify(this._buildSignalSaveBody('recall-update', opts)),
             });
         }
         if (r.ok) {
@@ -10352,30 +10409,16 @@ document.addEventListener('alpine:init', () => {
           // order.  Beyond ~16 active signals some pairs will be close; the
           // #id label remains the definitive identifier.
           {
-            // Consecutive hue differences (min of CW/CCW) for slots 0-15:
-            // 185°, 95°, 130°, 80°, 135°, 75°, 150°, 90°, 145°, 110°, 130°,
-            // 185°, 125°, 140°, 135°, 80° (wrap back to 0).  Min = 75°.
-            const LAB_HUE_PALETTE = [
-              210,  // 0  blue
-               25,  // 1  orange
-              120,  // 2  green
-              350,  // 3  red
-              270,  // 4  purple
-               45,  // 5  yellow-orange
-              330,  // 6  pink
-              180,  // 7  teal
-               90,  // 8  lime
-              305,  // 9  magenta
-              195,  // 10 cyan
-               65,  // 11 yellow-green
-              250,  // 12 blue-violet
-               15,  // 13 orange-red
-              155,  // 14 sea-green
-              290,  // 15 violet
-            ];
+            // Stage 1 of the persistent color + status feature.
+            // Color is now READ from the signal's stored color_slot
+            // (single source of truth — PATCH /signals/{id}/status
+            // owns the slot allocation transaction). No per-render
+            // computation; no list-position dependence; no hue-ramp
+            // duplicates. Test signals (color_slot null) resolve to
+            // neutral gray via SignalThumb.colorForSlot.
             const cm = {};
             this.labCandidates.forEach(c => {
-              cm[c.id] = LAB_HUE_PALETTE[c.id % LAB_HUE_PALETTE.length];
+              cm[c.id] = window.SignalThumb.colorForSlot(c.color_slot);
             });
             this.labSigColorMap = cm;
           }
@@ -10434,10 +10477,16 @@ document.addEventListener('alpine:init', () => {
       // avg-ret is NOT encoded here — it's printed as a number on the card.
       const n    = c.agg_n || 0;
       const size = this.labCardSize(n);
-      const hue  = this.labSigColorMap[c.id] ?? 0;
-      const bg     = isActive ? `hsl(${hue}, 62%, 36%)` : `hsl(${hue}, 28%, 19%)`;
+      // Stage 1: color is the stored identity color via SignalThumb.
+      // RGBA-with-alpha (not CSS opacity on the wrapper) so the text
+      // inside the card stays fully readable while the background
+      // fades for inactive cards.
+      const slot   = c.color_slot;
+      const bg     = isActive
+        ? window.SignalThumb.colorForSlotRGBA(slot, 0.85)
+        : window.SignalThumb.colorForSlotRGBA(slot, 0.18);
       const border = isActive ? '2px solid rgba(255,255,255,.80)'
-                              : `1px solid hsl(${hue}, 28%, 30%)`;
+                              : '1px solid ' + window.SignalThumb.colorForSlotRGBA(slot, 0.40);
       // Cross-pane hover dimming: when another signal is hovered, dim this card.
       const hovId = this.labHoveredSignalId;
       const opacity = (hovId !== null && hovId !== c.id) ? '0.28' : '1';
@@ -10830,11 +10879,18 @@ document.addEventListener('alpine:init', () => {
       };
 
       // Dimming: when a signal is hovered, non-matching bands drop to ~13% opacity.
+      // Stage 1: color comes from each candidate's stored color_slot
+      // (Test = neutral gray). Look the slot up via the candidate map
+      // so dim/full use the SAME hex base — no scale drift.
+      const slotOf = (id) => {
+        const c = this.labCandidates.find(x => x.id === id);
+        return c ? c.color_slot : null;
+      };
       const sigDimColor = (id) => {
-        const hue = this.labSigColorMap[id] ?? 0;
+        const slot = slotOf(id);
         return hovId != null && id !== hovId
-          ? `hsla(${hue}, 60%, 58%, 0.13)`
-          : `hsl(${hue}, 60%, 58%)`;
+          ? window.SignalThumb.colorForSlotRGBA(slot, 0.13)
+          : window.SignalThumb.colorForSlot(slot);
       };
       const sharedDim  = hovId != null;
       const SHARED_COLOR  = sharedDim ? 'rgba(120,132,150,0.13)' : 'rgba(120,132,150,0.70)';
@@ -11254,19 +11310,17 @@ document.addEventListener('alpine:init', () => {
     // visually distinct. NOT tied to the network's signed return color
     // (those nodes encode SIGN, this ring encodes IDENTITY — different
     // dimensions, deliberately different palettes).
-    // Single source of truth for per-signal identity colors.
-    // All four views (cards, nodes, donut outer ring, stacked-by-year chart)
-    // call this — same signal id → identical color everywhere, every render.
-    // Falls back to hue=0 (red-ish) if labSigColorMap not yet built.
+    // Single source of truth for per-signal identity colors. labSigColorMap
+    // is built from each candidate's stored color_slot via
+    // SignalThumb.colorForSlot, so map values are already hex strings.
+    // All four Lab views (cards, nodes, donut outer ring, stacked-by-year
+    // chart) call this — same signal id → identical color everywhere.
+    // Falls back to Test gray for ids not yet in the map.
     _labSignalColor(id) {
-      const hue = this.labSigColorMap[id] ?? 0;
-      return `hsl(${hue}, 60%, 58%)`;
+      return this.labSigColorMap[id] || '#6B7280';
     },
-
-    _labOuterColor(idx, total) {
-      const hue = Math.round((idx / Math.max(total, 1)) * 320);  // 0..320° (skip far red)
-      return `hsl(${hue}, 60%, 58%)`;
-    },
+    // _labOuterColor removed (Stage 1) — dead code that never had a
+    // caller after the network layout rewrote to use _labSignalColor.
 
     // Sequential gray ramp for inner-ring degree slices. degree=1
     // (unique) is lightest; deeper overlaps darken. Sign-blind on

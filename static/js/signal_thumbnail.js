@@ -14,6 +14,84 @@
 // untouched.
 window.SignalThumb = {
 
+  // 24-color categorical palette used to render Active signals'
+  // identity color across the dashboard. NOT a hue ramp — adjacent
+  // slots are deliberately contrasting to prevent the "three greens"
+  // problem when only a few Actives are visible. Ordered so the FIRST
+  // slots are the most mutually distinct (they're what the user sees
+  // most, since promotion takes lowest-free slot).
+  //
+  // Avoids the project's two semantic anchors so palette colors can't
+  // be confused with signed-return shades:
+  //   - positive blue   #3498db
+  //   - negative pink   #e84393
+  // Both of those hue regions are present but in lightnesses well
+  // away from those exact codes.
+  //
+  // SOURCE — hand-curated for dark UI bg, drawing on the design
+  // intent of Kelly's 22 + Tableau qualitative palettes (vivid,
+  // mid-saturation, no adjacent-hue near-duplicates). The user can
+  // replace any slot value; consumers read this array, not hardcoded
+  // hex anywhere else.
+  SLOT_PALETTE: [
+    '#F59E0B',  // 0  amber
+    '#10B981',  // 1  emerald
+    '#A855F7',  // 2  vivid purple
+    '#06B6D4',  // 3  cyan
+    '#EAB308',  // 4  golden yellow
+    '#EF4444',  // 5  vivid red
+    '#6366F1',  // 6  indigo
+    '#84CC16',  // 7  lime
+    '#F97316',  // 8  orange
+    '#14B8A6',  // 9  teal
+    '#D946EF',  // 10 magenta
+    '#0EA5E9',  // 11 sky
+    '#FB923C',  // 12 light orange
+    '#4ADE80',  // 13 bright green
+    '#C084FC',  // 14 light purple
+    '#FDE047',  // 15 bright yellow
+    '#F87171',  // 16 coral
+    '#67E8F9',  // 17 light cyan
+    '#A78BFA',  // 18 lavender
+    '#FCD34D',  // 19 light mustard
+    '#5EEAD4',  // 20 pale teal
+    '#BE185D',  // 21 deep magenta
+    '#65A30D',  // 22 dark olive
+    '#94A3B8',  // 23 slate (neutral fallback)
+  ],
+
+  // Resolve a signal's identity color from its stored color_slot.
+  // - Active signal: SLOT_PALETTE[color_slot] (modulo capacity if a
+  //   future bug ever assigns out of range).
+  // - Test signal (color_slot null/undefined): neutral gray.
+  // The neutral gray is also returned for any signal that hasn't been
+  // tier-resolved yet (legacy rows pre-Stage-1; transient client
+  // states between fetch and re-render).
+  colorForSlot(slot) {
+    if (slot === null || slot === undefined) return '#6B7280';   // Test gray
+    const i = ((+slot % this.SLOT_PALETTE.length) + this.SLOT_PALETTE.length)
+              % this.SLOT_PALETTE.length;
+    return this.SLOT_PALETTE[i];
+  },
+
+  // Same color resolution but emit as rgba(...,alpha) so callers can
+  // dim/fade without a wrapper element's opacity affecting child text.
+  // Used by the Lab card backgrounds (dim inactive cards, full active)
+  // and the yearly chart's active/dim bar fills — single source.
+  colorForSlotRGBA(slot, alpha) {
+    const hex = this.colorForSlot(slot);
+    // 3- or 6-digit hex; strip leading '#'.
+    const h = hex.replace('#', '');
+    const x = h.length === 3
+      ? h.split('').map(c => c + c).join('')
+      : h;
+    const r = parseInt(x.slice(0, 2), 16);
+    const g = parseInt(x.slice(2, 4), 16);
+    const b = parseInt(x.slice(4, 6), 16);
+    const a = (alpha == null) ? 1 : Math.max(0, Math.min(1, +alpha));
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  },
+
   // Per-cell color on a fixed ±3% divergent scale. Same canonical hex
   // anchors as .pos / .neg CSS across the project — no per-signal or
   // per-global max_abs calibration. A cell's color means the same return

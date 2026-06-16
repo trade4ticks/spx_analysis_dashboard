@@ -8168,6 +8168,30 @@ _SIGNALS_DDL_STEPS = [
     "ALTER TABLE signals ADD COLUMN IF NOT EXISTS agg_n            INTEGER",
     "ALTER TABLE signals ADD COLUMN IF NOT EXISTS per_cell_stats   JSONB",
     "ALTER TABLE signals ADD COLUMN IF NOT EXISTS stats_updated_at TIMESTAMPTZ",
+    # Stage 1 of the persistent color + status tier feature.
+    # status        — 'Test' (default; experiments don't auto-consume a
+    #                 color slot or hit trading pages) or 'Active'.
+    # color_slot    — INTEGER 0..23 when status='Active', NULL when 'Test'.
+    #                 Slot is owned by the PATCH /signals/{id}/status
+    #                 endpoint (single-txn assign-lowest-free on promote,
+    #                 free on demote/delete). Never user-set directly.
+    # corner        — Declared corner-quadrant tag: 'low-low' / 'low-high' /
+    #                 'high-low' / 'high-high' or NULL on legacy rows.
+    #                 Used in Stage 3 to auto-match Corner Scan 2F rows to
+    #                 saved signals on the exact tuple (primary, secondary,
+    #                 outcome, corner). Pydantic validates the enum-y value
+    #                 (no Postgres CHECK constraint — matches the project
+    #                 convention everywhere else).
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status      TEXT NOT NULL DEFAULT 'Test'",
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS color_slot  INTEGER",
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS corner      TEXT",
+    # Partial index used by Stage 3's Corner Scan 2F auto-match — O(1)
+    # lookup on the four-column key for the small subset that's been
+    # tagged with a corner. NULLs (legacy rows) are not indexed and
+    # don't slow the SELECT down.
+    """CREATE INDEX IF NOT EXISTS ix_signals_match
+       ON signals (primary_metric, secondary_metric, corner, outcome)
+       WHERE corner IS NOT NULL""",
 ]
 _signals_table_ensured = False
 
@@ -8737,6 +8761,20 @@ async def regime_spy_available_metrics(pool=Depends(get_oi_pool)):
 
 # ── Signals CRUD ───────────────────────────────────────────────────────────────
 
+_CORNER_VALUES = {"low-low", "low-high", "high-low", "high-high"}
+
+
+def _validate_corner(v):
+    """Pydantic-side corner validator. None/empty → None (allowed; legacy
+    rows have no corner). Anything else must match the four canonical
+    strings emitted by scripts/corner_scan.py."""
+    if v is None or v == "":
+        return None
+    if v not in _CORNER_VALUES:
+        raise ValueError(f"corner must be one of {sorted(_CORNER_VALUES)} or None")
+    return v
+
+
 class SaveSignalRequest(BaseModel):
     name:             str
     primary_metric:   str
@@ -8744,10 +8782,21 @@ class SaveSignalRequest(BaseModel):
     outcome:          str
     n_bins:           int = 10
     cell_set:         List[List[int]]
+    # Optional declared corner-quadrant tag. Status is intentionally
+    # NOT on this model — every new save lands in 'Test' tier by
+    # construction (the column DDL default). Promotion to 'Active' is
+    # a separate user action via PATCH /signals/{id}/status.
+    corner:           Optional[str] = None
 
 
 class SignalsBatchRequest(BaseModel):
     signal_ids: List[int]
+
+
+class SignalStatusRequest(BaseModel):
+    """Body for PATCH /signals/{id}/status. The endpoint owns the slot
+    allocation transaction; clients only declare the target tier."""
+    status: str   # 'Active' | 'Test'
 
 
 def _parse_jsonb(v):
@@ -8777,7 +8826,8 @@ async def list_signals(pool=Depends(get_oi_pool)):
         rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric,
                       outcome, n_bins, cell_set, created_at,
-                      agg_avg_ret, agg_n, per_cell_stats, stats_updated_at
+                      agg_avg_ret, agg_n, per_cell_stats, stats_updated_at,
+                      status, color_slot, corner
                FROM signals ORDER BY created_at DESC"""
         )
     return {
@@ -8797,6 +8847,13 @@ async def list_signals(pool=Depends(get_oi_pool)):
                 "agg_n":            int(r["agg_n"]) if r["agg_n"] is not None else None,
                 "per_cell_stats":   _parse_jsonb(r["per_cell_stats"]) or [],
                 "stats_updated_at": str(r["stats_updated_at"])[:19] if r["stats_updated_at"] else None,
+                # Stage 1 of the persistent color + status tier feature.
+                # status: 'Active' | 'Test' (default 'Test' on save).
+                # color_slot: 0..PALETTE_SIZE-1 when Active, None when Test.
+                # corner: declared corner-quadrant tag or None.
+                "status":           r["status"] or "Test",
+                "color_slot":       r["color_slot"],
+                "corner":           r["corner"],
             }
             for r in rows
         ]
@@ -8806,13 +8863,22 @@ async def list_signals(pool=Depends(get_oi_pool)):
 @router.post("/signals")
 async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
     """Persist a named cell-set signal and compute its stats inline so
-    the list never shows blank stats for fresh signals."""
+    the list never shows blank stats for fresh signals.
+
+    Status is ALWAYS 'Test' on save — promotion to 'Active' is a
+    separate, atomic operation via PATCH /signals/{id}/status (so the
+    slot-allocation transaction owns the color-slot column exclusively
+    and the save path stays simple)."""
     if not pool:
         return {"error": "OI database not configured"}
     if not req.name.strip():
         return {"error": "Signal name required"}
     if not req.cell_set:
         return {"error": "cell_set is empty"}
+    try:
+        corner = _validate_corner(req.corner)
+    except ValueError as exc:
+        return {"error": str(exc)}
     await _ensure_signals_table(pool)
 
     stats = await _compute_signal_stats(
@@ -8826,13 +8892,16 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
         row = await conn.fetchrow(
             """INSERT INTO signals
                (name, primary_metric, secondary_metric, outcome, n_bins, cell_set,
-                agg_avg_ret, agg_n, per_cell_stats, stats_updated_at)
+                agg_avg_ret, agg_n, per_cell_stats, stats_updated_at,
+                status, color_slot, corner)
                VALUES ($1, $2, $3, $4, $5, $6::jsonb,
-                       $7, $8, $9::jsonb, NOW())
+                       $7, $8, $9::jsonb, NOW(),
+                       'Test', NULL, $10)
                RETURNING id, created_at, stats_updated_at""",
             req.name.strip(), req.primary_metric, req.secondary_metric,
             req.outcome, req.n_bins, cell_json,
             stats["agg_avg_ret"], stats["agg_n"], per_cell_json,
+            corner,
         )
     return {
         "id":               row["id"],
@@ -8840,6 +8909,9 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
         "stats_updated_at": str(row["stats_updated_at"])[:19],
         "agg_avg_ret":      stats["agg_avg_ret"],
         "agg_n":            stats["agg_n"],
+        "status":           "Test",
+        "color_slot":       None,
+        "corner":           corner,
     }
 
 
@@ -8863,7 +8935,12 @@ class SignalUpdateRequest(BaseModel):
     # Optional rename — when present and non-empty, replaces signals.name.
     # Identity stays anchored on (primary, secondary, outcome) — only the
     # human-readable label changes. None / empty means no rename.
-    name: Optional[str] = None
+    name:   Optional[str] = None
+    # Optional corner re-tag (mislabel correction). None = no change to
+    # the stored corner; pass a valid 'low-low'/'low-high'/'high-low'/
+    # 'high-high' string to update. Status and color_slot are NEVER
+    # editable via PUT — they belong to the status endpoint.
+    corner: Optional[str] = None
 
 
 @router.put("/signals/{signal_id}")
@@ -8882,6 +8959,10 @@ async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
     new_name = (req.name or "").strip() if req.name is not None else None
     if req.name is not None and not new_name:
         return {"error": "name cannot be empty"}
+    try:
+        new_corner = _validate_corner(req.corner) if req.corner is not None else None
+    except ValueError as exc:
+        return {"error": str(exc)}
     await _ensure_signals_table(pool)
 
     async with pool.acquire() as conn:
@@ -8897,8 +8978,9 @@ async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
 
     cell_json     = json.dumps(req.cell_set)
     per_cell_json = json.dumps(stats["per_cell_stats"])
-    # COALESCE keeps the existing name when no rename is requested; a
-    # provided non-null new_name overwrites it.
+    # COALESCE keeps the existing value when the corresponding optional
+    # field is None — name and corner share this pattern. Status and
+    # color_slot are NEVER editable via this endpoint.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE signals
@@ -8907,20 +8989,130 @@ async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
                    agg_avg_ret      = $3,
                    agg_n            = $4,
                    per_cell_stats   = $5::jsonb,
+                   corner           = COALESCE($7, corner),
                    stats_updated_at = NOW()
                WHERE id = $1
-               RETURNING id, name, stats_updated_at""",
+               RETURNING id, name, corner, stats_updated_at""",
             signal_id, cell_json, stats["agg_avg_ret"], stats["agg_n"],
-            per_cell_json, new_name)
+            per_cell_json, new_name, new_corner)
     return {
         "id":               row["id"],
         "name":             row["name"],
+        "corner":           row["corner"],
         "stats_updated_at": str(row["stats_updated_at"])[:19],
         "agg_avg_ret":      stats["agg_avg_ret"],
         "agg_n":            stats["agg_n"],
         "per_cell_stats":   stats["per_cell_stats"],
         "cell_set":         req.cell_set,
     }
+
+
+_STATUS_VALUES = {"Active", "Test"}
+# Palette capacity. Slots are 0..PALETTE_SIZE-1. The actual hex values
+# are defined client-side (static/js/signal_thumbnail.js → SLOT_PALETTE)
+# so the rendering layer owns the visual decisions; the backend only
+# tracks which slot index a signal owns. Promote requests beyond the
+# palette size graceful-degrade: a slot is still assigned (modulo
+# capacity), the UI just may render duplicate colors. #ID is the
+# backstop identifier in that case.
+PALETTE_SIZE = 24
+
+
+@router.patch("/signals/{signal_id}/status")
+async def set_signal_status(signal_id: int, req: SignalStatusRequest,
+                              pool=Depends(get_oi_pool)):
+    """Atomic status transition. Owns the color_slot column exclusively.
+
+    Promotion (Test → Active):
+      Find the lowest free slot in [0, PALETTE_SIZE) that no other
+      Active signal owns. Assign it. The query is purely a function
+      of currently-occupied slots — clicking order doesn't affect
+      assignment, so promoting the same set of signals always yields
+      the same color→signal mapping regardless of click order
+      (deterministic by ID order if you promote in ID order).
+
+    Demotion (Active → Test):
+      Set status='Test', color_slot=NULL. Frees the slot back to the
+      pool — the next promotion will reuse it.
+
+    No-op (status matches current):
+      Returns current state without writing.
+
+    Degeneration (PALETTE_SIZE Actives already exist):
+      A new promote still succeeds — slot = next_id % PALETTE_SIZE.
+      Two Actives may share a color, #ID disambiguates. Not a failure.
+
+    Single transaction, single-user app — no advisory locks needed.
+    Single statement actually: one CTE handles read-current + branch
+    + slot-find + update, atomically by SQL-execution boundary.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    if req.status not in _STATUS_VALUES:
+        return {"error": f"status must be one of {sorted(_STATUS_VALUES)}"}
+    await _ensure_signals_table(pool)
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            cur = await conn.fetchrow(
+                "SELECT status, color_slot FROM signals WHERE id = $1",
+                signal_id)
+            if cur is None:
+                raise HTTPException(404, f"signal_id {signal_id} not found")
+
+            cur_status = cur["status"] or "Test"
+            cur_slot   = cur["color_slot"]
+
+            # No-op: already in the requested tier. Idempotent.
+            if cur_status == req.status:
+                return {
+                    "id":         signal_id,
+                    "status":     cur_status,
+                    "color_slot": cur_slot,
+                }
+
+            if req.status == "Test":
+                # Demote: free the slot.
+                await conn.execute(
+                    """UPDATE signals
+                       SET status = 'Test', color_slot = NULL
+                       WHERE id = $1""",
+                    signal_id)
+                return {
+                    "id":         signal_id,
+                    "status":     "Test",
+                    "color_slot": None,
+                }
+
+            # Promote (Test → Active). Find the lowest free slot.
+            # generate_series(0, PALETTE_SIZE-1) is the full pool; the
+            # LEFT JOIN exclusion drops slots already owned by an
+            # Active signal. ORDER BY s ASC + LIMIT 1 gives the
+            # lowest-numbered free slot — purely a function of
+            # currently-occupied slots, independent of click order.
+            free_slot = await conn.fetchval(
+                """SELECT s
+                   FROM generate_series(0, $1::int - 1) AS s
+                   WHERE s NOT IN (
+                       SELECT color_slot FROM signals
+                       WHERE status = 'Active' AND color_slot IS NOT NULL
+                   )
+                   ORDER BY s
+                   LIMIT 1""",
+                PALETTE_SIZE)
+            if free_slot is None:
+                # Palette exhausted — degenerate to id % PALETTE_SIZE.
+                free_slot = signal_id % PALETTE_SIZE
+            await conn.execute(
+                """UPDATE signals
+                   SET status = 'Active', color_slot = $2
+                   WHERE id = $1""",
+                signal_id, free_slot)
+            return {
+                "id":         signal_id,
+                "status":     "Active",
+                "color_slot": free_slot,
+            }
 
 
 @router.post("/signals/refresh")
