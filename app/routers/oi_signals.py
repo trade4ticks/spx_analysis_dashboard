@@ -514,13 +514,22 @@ async def get_firing(
     # AND a 20d signal renders as TWO separate rows. Each row is
     # single-outcome by construction and every downstream stat is
     # comparable.
-    firings_by_group: dict = defaultdict(list)   # (ticker, outcome) -> [sid,...]
+    # The Signals page enumerates EVERY (ticker, trade_date == as_of)
+    # firing — it's a ticker-discovery tool, with per-ticker signal
+    # attribution as a subset view. Previously this loop broke after
+    # the first match per signal, which captured only the alphabetically-
+    # first ticker that signal fired on for the date (cache rows are
+    # ORDER BY trade_date, ticker). That collapsed multi-ticker firings
+    # to one per signal AND corrupted per-ticker attribution (a ticker
+    # driven by N signals would list only those whose first-alpha
+    # firing landed there). Collect every match, dedupe via set in
+    # case a signal yields duplicate (ticker, as_of) rows defensively.
+    firings_by_group: dict = defaultdict(set)    # (ticker, outcome) -> {sid, ...}
     for sid, trades in cache.items():
         outcome = sig_by_id[sid]["outcome"]
         for t in trades:
             if t["trade_date"] == as_of_str:
-                firings_by_group[(t["ticker"], outcome)].append(sid)
-                break
+                firings_by_group[(t["ticker"], outcome)].add(sid)
 
     if not firings_by_group:
         return {"as_of": as_of_str, "rows": [],
@@ -529,7 +538,9 @@ async def get_firing(
 
     out_rows = []
     for ticker, outcome in sorted(firings_by_group.keys()):
-        firing_sids = firings_by_group[(ticker, outcome)]
+        # Sort for deterministic per-row signals_firing output now that
+        # the source is a set rather than an append-ordered list.
+        firing_sids = sorted(firings_by_group[(ticker, outcome)])
 
         # SCOPE A union. All signals in this group share the outcome
         # (the grouping IS by outcome), so dedup key drops to
