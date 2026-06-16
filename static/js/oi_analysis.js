@@ -5569,6 +5569,54 @@ document.addEventListener('alpine:init', () => {
       if (r.ok) this.signals = (await r.json()).signals || [];
     },
 
+    // Stage 2: Active/Test toggle handler for the Saved Signals row.
+    // Calls the Stage-1 PATCH /signals/{id}/status endpoint (which owns
+    // the slot allocate/free transaction) and mutates the LOCAL sig
+    // object in place from the endpoint's return so the toggle and
+    // swatch re-render immediately without re-fetching the whole
+    // /signals list. Other rows in the table are untouched.
+    //
+    // No optimistic guess of the slot — the response is authoritative.
+    // The slot the user sees is exactly what the database now holds.
+    async setSignalStatus(sig) {
+      if (!sig || sig.id == null) return;
+      const next = (sig.status === 'Active') ? 'Test' : 'Active';
+      try {
+        const r = await fetch(
+          '/api/factor-analysis/signals/' + sig.id + '/status',
+          {
+            method:  'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ status: next }),
+          });
+        if (!r.ok) return;
+        const resp = await r.json();
+        if (resp && resp.id === sig.id) {
+          sig.status     = resp.status;
+          sig.color_slot = resp.color_slot;
+          // Mirror the status/slot into the Lab's cached candidate
+          // (when present) and rebuild labSigColorMap so the Lab's
+          // next render picks up the new color without forcing the
+          // user to click its Refresh button. Touches only the local
+          // cache; no network call.
+          if (this.labCandidates && this.labCandidates.length) {
+            const cand = this.labCandidates.find(c => c.id === sig.id);
+            if (cand) {
+              cand.status     = resp.status;
+              cand.color_slot = resp.color_slot;
+            }
+            const cm = {};
+            this.labCandidates.forEach(c => {
+              cm[c.id] = window.SignalThumb.colorForSlot(c.color_slot);
+            });
+            this.labSigColorMap = cm;
+          }
+        }
+      } catch (_) {
+        // Network error — leave the row's state untouched.
+      }
+    },
+
     // Single helper that builds the JSON body for every signal save
     // path. There are three (kind values):
     //   'zone-new'      → POST /signals from Zone-Analysis main flow
@@ -5653,9 +5701,14 @@ document.addEventListener('alpine:init', () => {
         this.sigSortKey = key;
         // String / date columns default asc; numeric defaults desc
         // (largest first — best avg_ret, biggest n, freshest stats date).
+        // id is ASC default (lowest first — useful for "promote in
+        // signal-ID order so slots land 0,1,2,..." workflow).
+        // status is ASC default — 'Active' sorts before 'Test'
+        // alphabetically, which is the grouping the user wants.
         const ASC_DEFAULT = new Set([
           'name', 'primary', 'primary_family',
           'secondary', 'secondary_family', 'outcome',
+          'id', 'status',
         ]);
         this.sigSortDir = ASC_DEFAULT.has(key) ? 'asc' : 'desc';
       }
@@ -5669,6 +5722,8 @@ document.addEventListener('alpine:init', () => {
     },
     _sigSortValueFor(s, key) {
       switch (key) {
+        case 'id':               return s.id || 0;
+        case 'status':           return (s.status           || 'Test').toLowerCase();
         case 'name':             return (s.name             || '').toLowerCase();
         case 'primary':          return (s.primary_metric   || '').toLowerCase();
         case 'primary_family':   return (this.signalFamilyName(s.primary_metric)   || '').toLowerCase();

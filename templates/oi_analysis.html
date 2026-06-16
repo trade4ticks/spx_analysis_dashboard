@@ -367,7 +367,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=250"></script>
+  <script src="/static/js/oi_analysis.js?v=251"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3908,6 +3908,19 @@
                           <input type="checkbox" :checked="sigAllChecked()"
                                  @change="sigToggleAll($event.target.checked)">
                         </th>
+                        <!-- Stage 2: ID + Status toggle + Color swatch.
+                             Three columns added up front so they sit
+                             next to the checkbox where the user already
+                             interacts with each row. -->
+                        <th class="sig-th-sort"
+                            :class="sigSortClass('id')" @click="sigSortBy('id')">
+                          ID <span class="sig-sort-arrow" x-text="sigSortArrow('id')"></span>
+                        </th>
+                        <th class="sig-th-sort"
+                            :class="sigSortClass('status')" @click="sigSortBy('status')">
+                          Tier <span class="sig-sort-arrow" x-text="sigSortArrow('status')"></span>
+                        </th>
+                        <th>Color</th>
                         <th class="sig-th-sort sig-th-left"
                             :class="sigSortClass('name')" @click="sigSortBy('name')">
                           Name <span class="sig-sort-arrow" x-text="sigSortArrow('name')"></span>
@@ -3954,6 +3967,40 @@
                             <input type="checkbox" :checked="!!sigCheckedIds[sig.id]"
                                    @change="sigToggle(sig.id)">
                           </td>
+                          <!-- ID — fixed identifier, also the column the
+                               user sorts by when promoting in ID order
+                               so slots land 0,1,2,... cleanly. -->
+                          <td class="sig-td sig-td-num"
+                              style="color:var(--dim);font-variant-numeric:tabular-nums"
+                              x-text="'#' + sig.id"></td>
+                          <!-- Tier toggle — click calls PATCH /signals/
+                               {id}/status which owns the slot allocate/
+                               free transaction. Response is authoritative;
+                               sig.status + sig.color_slot are mutated
+                               from the returned values, so the swatch
+                               cell re-renders with the assigned slot
+                               color without a full /signals reload. -->
+                          <td class="sig-td">
+                            <span @click.stop="setSignalStatus(sig)"
+                                  :title="(sig.status === 'Active')
+                                            ? 'Active — click to demote to Test (frees the color slot)'
+                                            : 'Test — click to promote to Active (assigns lowest-free slot)'"
+                                  :style="(sig.status === 'Active')
+                                            ? 'cursor:pointer;background:rgba(52,152,219,.20);color:#3498db;border:1px solid rgba(52,152,219,.45);font-weight:700;font-size:9.5px;padding:2px 8px;border-radius:3px;letter-spacing:.05em;text-transform:uppercase;display:inline-block;user-select:none'
+                                            : 'cursor:pointer;background:rgba(140,140,140,.10);color:#999;border:1px solid rgba(140,140,140,.30);font-weight:600;font-size:9.5px;padding:2px 8px;border-radius:3px;letter-spacing:.05em;text-transform:uppercase;display:inline-block;user-select:none'"
+                                  x-text="sig.status || 'Test'"></span>
+                          </td>
+                          <!-- Color swatch — reads SignalThumb.colorForSlot,
+                               the SAME single source the Lab uses. Test
+                               (color_slot null) → neutral gray. -->
+                          <td class="sig-td"
+                              :title="(sig.color_slot != null)
+                                        ? ('slot ' + sig.color_slot)
+                                        : 'Test — no color slot'">
+                            <span :style="'display:inline-block;width:16px;height:16px;border-radius:3px;'
+                                          + 'border:1px solid rgba(255,255,255,.22);vertical-align:middle;'
+                                          + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"></span>
+                          </td>
                           <td class="sig-td sig-td-name">
                             <span class="sig-caret" @click.stop="sigToggleExpand(sig.id)"
                                   x-text="sigExpanded[sig.id] ? '▾' : '▸'"></span>
@@ -3986,7 +4033,7 @@
                           </td>
                         </tr>
                         <tr x-show="!!sigExpanded[sig.id]">
-                          <td colspan="11" class="sig-detail-td">
+                          <td colspan="14" class="sig-detail-td">
                             <div class="sig-detail-wrap">
                               <div class="sig-detail-title"
                                    x-text="(sig.per_cell_stats || []).length + ' selected cell' + ((sig.per_cell_stats || []).length === 1 ? '' : 's') + ' · sorted by avg_ret desc'"></div>
