@@ -38,6 +38,20 @@ from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 
+
+def _parse_signal_jsonb(v):
+    """JSONB columns may come back as parsed list/dict (asyncpg JSONB codec)
+    or as a JSON string depending on environment. Mirrors the helper at
+    oi_analysis.py:_parse_jsonb so per_cell_stats round-trips reliably."""
+    if v is None:
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    try:
+        return json.loads(v)
+    except (TypeError, ValueError):
+        return None
+
 router = APIRouter(tags=["oi_signals"])
 
 # Metric-name allowlist (lowercase ascii + digits + underscore). Used to
@@ -494,16 +508,41 @@ async def get_firing(
             "SELECT signal_id FROM tracked_signals")
     if not tracked_rows:
         return {"as_of": as_of_str, "rows": [],
-                "n_tracked": 0, "n_firing_rows": 0, "n_firing_tickers": 0}
+                "n_tracked": 0, "n_firing_rows": 0, "n_firing_tickers": 0,
+                "all_signals": []}
 
     sids = [r["signal_id"] for r in tracked_rows]
     async with oi_pool.acquire() as conn:
+        # per_cell_stats + agg_avg_ret + agg_n added so the response can
+        # carry the column thumbnail data (per_cell_stats drives the
+        # SignalThumb.thumbnailSVG render) and the lifetime stats used
+        # by the Signals page's fixed-column firing grid in ALL mode.
         sig_rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric, outcome,
-                      n_bins, cell_set
+                      n_bins, cell_set,
+                      per_cell_stats, agg_avg_ret, agg_n
                FROM signals WHERE id = ANY($1)""", sids)
     signals   = [dict(r) for r in sig_rows]
     sig_by_id = {s["id"]: s for s in signals}
+
+    # Build all_signals[] up front so every return path below can include
+    # it — when the firing set is empty, the grid still renders its
+    # fixed-position column headers (just with no row data), which is
+    # what gives the layout its day-to-day visual consistency.
+    all_signals_out = [
+        {
+            "signal_id":        sig["id"],
+            "name":             sig["name"],
+            "primary_metric":   sig["primary_metric"],
+            "secondary_metric": sig["secondary_metric"],
+            "outcome":          sig["outcome"],
+            "n_bins":           sig["n_bins"],
+            "per_cell_stats":   _parse_signal_jsonb(sig.get("per_cell_stats")) or [],
+            "agg_avg_ret":      sig.get("agg_avg_ret"),
+            "agg_n":            sig.get("agg_n") or 0,
+        }
+        for sig in sorted(signals, key=lambda s: s["id"])
+    ]
 
     cache = await _fetch_signal_trade_cache(oi_pool, signals)
 
@@ -534,7 +573,8 @@ async def get_firing(
     if not firings_by_group:
         return {"as_of": as_of_str, "rows": [],
                 "n_tracked": len(sids), "n_firing_rows": 0,
-                "n_firing_tickers": 0}
+                "n_firing_tickers": 0,
+                "all_signals": all_signals_out}
 
     out_rows = []
     for ticker, outcome in sorted(firings_by_group.keys()):
@@ -603,6 +643,7 @@ async def get_firing(
         # outcomes still counts as one ticker for this metric).
         "n_firing_tickers":  len({r["ticker"] for r in out_rows}),
         "rows":              out_rows,
+        "all_signals":       all_signals_out,
     }
 
 

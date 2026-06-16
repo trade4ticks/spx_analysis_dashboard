@@ -16,8 +16,20 @@ document.addEventListener('alpine:init', () => {
     // rows. avg_ret is only comparable WITHIN one horizon, so pooling
     // across horizons produces nonsense. Each row is single-outcome by
     // construction; every downstream stat is comparable.
+    //
+    // all_signals = every tracked signal, ordered by signal_id ASC.
+    // Drives the fixed-position columns of the firing-grid pane below
+    // the table. Columns do NOT shift with the firing set day-to-day —
+    // muscle memory: "column 5 is signal #29".
     firingData: { as_of: null, n_tracked: 0, n_firing_rows: 0,
-                  n_firing_tickers: 0, rows: [] },
+                  n_firing_tickers: 0, rows: [], all_signals: [] },
+
+    // Firing-grid pane state. gridStatMode flips every cell, every
+    // row-end, every column-foot together — never mixed on screen.
+    // gridMinN fades cells whose n (current mode) is below the slider
+    // so dark shades on thin samples don't read as edge.
+    gridStatMode: 'ticker',   // 'ticker' | 'all'
+    gridMinN:     30,
     firingDate: '',           // optional ISO date; '' means "use server MAX(trade_date)"
     firingLoading: false,
     // Expansion is keyed by `${ticker}|${outcome}` since a ticker can
@@ -106,6 +118,7 @@ document.addEventListener('alpine:init', () => {
             n_firing_rows:    data.n_firing_rows    ?? 0,
             n_firing_tickers: data.n_firing_tickers ?? 0,
             rows:             data.rows             ?? [],
+            all_signals:      data.all_signals      ?? [],
           };
           if (!this.firingDate && this.firingData.as_of) {
             this.firingDate = this.firingData.as_of;
@@ -117,6 +130,107 @@ document.addEventListener('alpine:init', () => {
 
     hasFirings() {
       return (this.firingData.rows || []).length > 0;
+    },
+
+    // ── Firing-grid helpers ─────────────────────────────────────────────
+    //
+    // The grid sits above the existing ticker table — same firing data,
+    // wide read instead of deep read. Rows are the same (ticker, outcome)
+    // entries the table uses; columns are every tracked signal in
+    // signal_id order. Cell stats reuse what's already in the /firing
+    // payload — ticker_slice per firing entry for TICKER mode, overall
+    // for ALL mode, scope_b/scope_a for row-end union dedup. No parallel
+    // computation; the table and grid read the same source values so
+    // they can't disagree.
+
+    // Shade + thumbnail wrappers delegate to the shared SignalThumb
+    // globals — guarantees no scale drift between a grid cell shaded by
+    // cellColor and the column-header thumbnail above it (literally the
+    // same function).
+    signalThumbnailSVG(sig) {
+      return window.SignalThumb.thumbnailSVG(sig, { width: 70, clickable: false });
+    },
+    cellColor(avgRet) {
+      return window.SignalThumb.cellColor(avgRet);
+    },
+    cellOpacity(n) {
+      return window.SignalThumb.cellOpacity(n);
+    },
+
+    // Per-row lookup: Map of signal_id → its signals_firing entry. Built
+    // once per row in template via x-init / x-effect to keep per-cell
+    // access O(1).
+    gridBuildFiringMap(row) {
+      const m = new Map();
+      for (const sf of (row.signals_firing || [])) m.set(sf.signal_id, sf);
+      return m;
+    },
+
+    // Per-cell value in the current stat mode. Returns null for empty
+    // cells (ticker didn't fire this signal). For filled cells, returns
+    // { avg_ret, n } drawn from ticker_slice (TICKER) or overall (ALL).
+    gridCellValue(firingMap, sid) {
+      const sf = firingMap.get(sid);
+      if (!sf) return null;
+      if (this.gridStatMode === 'all') {
+        return { avg_ret: sf.overall && sf.overall.avg_ret, n: sf.overall && sf.overall.n };
+      }
+      // Default TICKER mode.
+      return { avg_ret: sf.ticker_slice && sf.ticker_slice.avg_ret,
+               n:       sf.ticker_slice && sf.ticker_slice.n };
+    },
+
+    // Row-end union-deduped aggregate for the current stat mode. Reads
+    // the exact field the ticker table reads above (scope_b for ticker
+    // mode, scope_a for ALL mode), so the two views literally share the
+    // source number and can't drift.
+    gridRowAgg(row) {
+      return this.gridStatMode === 'all' ? (row.scope_a || null)
+                                          : (row.scope_b || null);
+    },
+
+    // Per-column ticker count — how many rows fired this signal today.
+    // The frequency read at the column foot. Same in both modes (firing
+    // count is mode-independent).
+    gridColTickerCount(sid) {
+      let n = 0;
+      for (const row of (this.firingData.rows || [])) {
+        for (const sf of (row.signals_firing || [])) {
+          if (sf.signal_id === sid) { n++; break; }
+        }
+      }
+      return n;
+    },
+
+    // Combined cell opacity: cellOpacity(n) for the small-n shade
+    // honesty cue, multiplied by the min-n slider fade (0.32 when below
+    // the slider, 1.0 otherwise). A cell with n=8 hits BOTH dimmings
+    // and goes very faint — exactly the "ignore me" reading the slider
+    // is for.
+    gridCellOpacity(cell) {
+      if (!cell || cell.n == null) return 0.35;
+      const base = this.cellOpacity(cell.n);
+      const fade = (cell.n < this.gridMinN) ? 0.32 : 1.0;
+      return base * fade;
+    },
+
+    // Stat-mode + slider setters. Pure draw — no fetch.
+    setGridStatMode(mode) {
+      this.gridStatMode = (mode === 'all') ? 'all' : 'ticker';
+    },
+    setGridMinN(v) {
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n >= 0) this.gridMinN = n;
+    },
+
+    // Number formatting reused by the cell render.
+    gridFmtPct(x) {
+      if (x == null || !isFinite(x)) return '—';
+      return (x * 100).toFixed(2) + '%';
+    },
+    gridFmtN(x) {
+      if (x == null) return '—';
+      return Number(x).toLocaleString();
     },
 
     // Composite (ticker, outcome) row key. A ticker firing on two
