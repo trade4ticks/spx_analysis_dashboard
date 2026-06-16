@@ -10400,17 +10400,43 @@ document.addEventListener('alpine:init', () => {
             const wins = trades.filter(t => (t.ret || 0) > 0).length;
             c.win_rate = trades.length ? wins / trades.length : 0;
           }
-          // Build stable per-signal identity color map from candidates array
-          // order.  Indexed by position in labCandidates (fixed after load)
-          // so the same signal id always gets the same hue regardless of
-          // which other signals are currently active.  All four views —
-          // cards, network nodes, donut outer ring, stacked-by-year chart —
-          // derive their signal color from this map via _labSignalColor(id).
+          // Build stable per-signal identity color map.
+          // Previous approach: even hue ramp keyed by LIST POSITION (i/N * 320°).
+          // Problem: adjacent positions landed ~27° apart — indistinguishable
+          // in green and blue bands.  Signals next to each other in the list
+          // (#18/#19/#20, #16/#17, #25/#26) collided visually.
+          //
+          // New approach: fixed 16-slot categorical palette ordered so that
+          // EVERY consecutive slot is ≥75° apart on the hue wheel.  Keyed
+          // by (signal_id % 16) — pure function of the id, not list position.
+          // Same id → same color always, regardless of active set or server
+          // order.  Beyond ~16 active signals some pairs will be close; the
+          // #id label remains the definitive identifier.
           {
-            const N = this.labCandidates.length;
+            // Consecutive hue differences (min of CW/CCW) for slots 0-15:
+            // 185°, 95°, 130°, 80°, 135°, 75°, 150°, 90°, 145°, 110°, 130°,
+            // 185°, 125°, 140°, 135°, 80° (wrap back to 0).  Min = 75°.
+            const LAB_HUE_PALETTE = [
+              210,  // 0  blue
+               25,  // 1  orange
+              120,  // 2  green
+              350,  // 3  red
+              270,  // 4  purple
+               45,  // 5  yellow-orange
+              330,  // 6  pink
+              180,  // 7  teal
+               90,  // 8  lime
+              305,  // 9  magenta
+              195,  // 10 cyan
+               65,  // 11 yellow-green
+              250,  // 12 blue-violet
+               15,  // 13 orange-red
+              155,  // 14 sea-green
+              290,  // 15 violet
+            ];
             const cm = {};
-            this.labCandidates.forEach((c, i) => {
-              cm[c.id] = Math.round((i / Math.max(N, 1)) * 320);   // hue 0-320°
+            this.labCandidates.forEach(c => {
+              cm[c.id] = LAB_HUE_PALETTE[c.id % LAB_HUE_PALETTE.length];
             });
             this.labSigColorMap = cm;
           }
