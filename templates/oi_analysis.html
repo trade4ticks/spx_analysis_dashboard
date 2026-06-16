@@ -367,7 +367,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=252"></script>
+  <script src="/static/js/oi_analysis.js?v=253"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4667,22 +4667,11 @@
         <template x-if="portfolio && portfolio.signals && portfolio.signals.length">
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-bottom:14px;margin-top:10px">
             <template x-for="sig in portfolio.signals" :key="'psig-'+sig.id">
-              <div :style="(sig.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:10px'">
+              <div :style="(sig.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:10px 10px 0 10px;overflow:hidden'">
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
                   <input type="checkbox" :checked="sig.enabled"
                          @change="togglePortfolioSignal(sig.id, $event.target.checked)"
                          style="cursor:pointer">
-                  <!-- Identity color swatch — Stage 3. Reads SignalThumb.
-                       colorForSlot (single source shared with Saved
-                       Signals, Lab, Corner Scan match cell). Test
-                       signals (color_slot null) render as neutral gray.
-                       Tooltip shows tier + slot for quick identity check. -->
-                  <span :title="'#' + (sig.signal_id || sig.id) + '  ·  '
-                                + (sig.status || 'Test')
-                                + (sig.color_slot != null ? ('  ·  slot ' + sig.color_slot) : '')"
-                        :style="'flex:0 0 14px;width:14px;height:14px;border-radius:3px;'
-                                + 'border:1px solid rgba(255,255,255,.22);display:inline-block;'
-                                + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"></span>
                   <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
                         x-text="sig.name"></span>
                   <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"
@@ -4697,6 +4686,18 @@
                   <span style="color:var(--dim)" title="Contribution to union P&L"
                         x-text="(portAggregate?.signals?.find(s=>s.id===sig.id)?.contrib_pct??0).toFixed(1)+'%'"></span>
                 </div>
+                <!-- Identity color bar — same treatment as the firing
+                     grid column headers (consistent placement, full
+                     card width, ~9px tall). Frees the name row to use
+                     the full card width instead of fighting with an
+                     inline swatch. Reads SignalThumb.colorForSlot —
+                     same source. Test signals → neutral gray. -->
+                <div :title="'#' + (sig.signal_id || sig.id) + '  ·  '
+                              + (sig.status || 'Test')
+                              + (sig.color_slot != null ? ('  ·  slot ' + sig.color_slot) : '')"
+                     :style="'margin:8px -10px 0 -10px;height:9px;'
+                             + 'border-top:1px solid rgba(0,0,0,.35);'
+                             + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"></div>
               </div>
             </template>
           </div>

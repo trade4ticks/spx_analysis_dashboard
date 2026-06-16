@@ -2409,8 +2409,11 @@ document.addEventListener('alpine:init', () => {
     // Saved Signals table — sort, checkbox, expand, batch action state.
     // sigCheckedIds is keyed by signal_id so sorting doesn't drop checks
     // and reload re-applies them to whichever rows still exist.
-    sigSortKey:       'agg_avg_ret',
-    sigSortDir:       'desc',
+    // Default sort: ID ascending. Matches the workflow of promoting
+    // Active in ID order (so slots land 0,1,2,... cleanly) and gives a
+    // stable identity-anchored ordering on first load.
+    sigSortKey:       'id',
+    sigSortDir:       'asc',
     sigCheckedIds:    {},
     sigExpanded:      {},
     sigBatchBusy:     false,

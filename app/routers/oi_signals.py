@@ -520,7 +520,8 @@ async def get_firing(
         sig_rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric, outcome,
                       n_bins, cell_set,
-                      per_cell_stats, agg_avg_ret, agg_n
+                      per_cell_stats, agg_avg_ret, agg_n,
+                      status, color_slot, corner
                FROM signals WHERE id = ANY($1)""", sids)
     signals   = [dict(r) for r in sig_rows]
     sig_by_id = {s["id"]: s for s in signals}
@@ -540,6 +541,13 @@ async def get_firing(
             "per_cell_stats":   _parse_signal_jsonb(sig.get("per_cell_stats")) or [],
             "agg_avg_ret":      sig.get("agg_avg_ret"),
             "agg_n":            sig.get("agg_n") or 0,
+            # Identity color + tier — drives the column-header color bar
+            # in the firing grid via SignalThumb.colorForSlot (single
+            # source shared with Saved Signals / Lab / Corner Scan /
+            # Portfolio cards). Test rows degrade to neutral gray.
+            "status":           sig.get("status") or "Test",
+            "color_slot":       sig.get("color_slot"),
+            "corner":           sig.get("corner"),
         }
         for sig in sorted(signals, key=lambda s: s["id"])
     ]

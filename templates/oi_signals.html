@@ -311,7 +311,7 @@
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_signals.js?v=19"></script>
+  <script src="/static/js/oi_signals.js?v=20"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -516,6 +516,20 @@
                                  max-width:100%;
                                  overflow:hidden;white-space:nowrap;text-overflow:ellipsis"
                           x-text="sig.secondary_metric || '—'"></span>
+                    <!-- Identity color bar — anchors the whole column
+                         header to the signal's persistent slot color.
+                         Width is RELATIVE to the column (75%), height
+                         fixed at ~9px, so it scales with the fit-to-
+                         width columns instead of being hardcoded.
+                         Reads SignalThumb.colorForSlot — same source
+                         the Saved Signals row swatch, Lab cards, and
+                         Portfolio card use. Test / no-slot → gray. -->
+                    <span :style="'width:75%;height:9px;border-radius:2px;'
+                                  + 'margin-top:3px;display:block;'
+                                  + 'border:1px solid rgba(0,0,0,.35);'
+                                  + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"
+                          :title="(sig.status || 'Test')
+                                  + (sig.color_slot != null ? '  ·  slot ' + sig.color_slot : '')"></span>
                   </div>
                 </th>
               </template>
