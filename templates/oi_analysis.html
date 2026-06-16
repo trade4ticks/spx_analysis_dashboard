@@ -367,7 +367,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=253"></script>
+  <script src="/static/js/oi_analysis.js?v=254"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4662,12 +4662,27 @@
           </div>
         </template>
 
-        <!-- Signal cards — iterate portfolio.signals (Alpine reactive property).
-             Stats (n_trades etc.) are merged in from portAggregate after aggregate loads. -->
+        <!-- Signal cards — iterate portfolio.signals sorted by underlying
+             signal_id ascending. Lowest-ID signals (typically the
+             earliest-promoted and lowest color slots) sit top-left so
+             card position mirrors the promote-in-ID-order workflow
+             elsewhere on the page. Sort inline via a copied array so
+             the source portfolio.signals stays untouched (the API
+             returns it in (position, id) order for other consumers). -->
         <template x-if="portfolio && portfolio.signals && portfolio.signals.length">
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;margin-bottom:14px;margin-top:10px">
-            <template x-for="sig in portfolio.signals" :key="'psig-'+sig.id">
-              <div :style="(sig.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:10px 10px 0 10px;overflow:hidden'">
+            <template x-for="sig in [...portfolio.signals].sort((a,b) => (a.signal_id||0) - (b.signal_id||0))"
+                      :key="'psig-'+sig.id">
+              <div :style="(sig.enabled ? 'background:var(--surface);border:1px solid var(--border)' : 'background:#1a1a1a;border:1px dashed rgba(255,255,255,.08);opacity:.55') + ';border-radius:6px;padding:8px 10px 0 10px;overflow:hidden'">
+                <!-- Signal-ID row, top-left. Small + dim — identifier
+                     anchor without competing with the name. Tooltip
+                     carries tier + slot so the card-bottom color bar's
+                     identity is readable from the top of the card too. -->
+                <div :title="(sig.status || 'Test')
+                              + (sig.color_slot != null ? '  ·  slot ' + sig.color_slot : '')"
+                     style="font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums;
+                            letter-spacing:.05em;margin-bottom:3px"
+                     x-text="'#' + (sig.signal_id || sig.id)"></div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
                   <input type="checkbox" :checked="sig.enabled"
                          @change="togglePortfolioSignal(sig.id, $event.target.checked)"
