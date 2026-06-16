@@ -11337,20 +11337,53 @@ document.addEventListener('alpine:init', () => {
       const canvas = document.getElementById('lab-allocation-canvas');
       if (!canvas) return;
 
-      // ── Size canvas as the largest centered square that fits in the
-      // container (= canvas's parent after the legend column).  Measuring
-      // the PARENT avoids the chicken-and-egg problem where canvas.offsetWidth
-      // reflects its own old style rather than the available room.
-      // Absolute-positioned within position:relative parent so that top/left
-      // centering works without affecting legend layout.
-      const container = canvas.parentElement;
-      const cW = container.offsetWidth  || 240;
-      const cH = container.offsetHeight || 400;
-      const pad  = 8;
-      const side = Math.max(40, Math.min(cW, cH) - pad * 2);
+      // ── Sizing: walk the DOM hierarchy to measure each named region ─────
+      //
+      // DOM hierarchy (from canvas outward):
+      //   canvas  ←  wrapper (flex:1, right of legend)
+      //           ←  innerRow (flex:1 row, min-height:0)
+      //           ←  pane    (flex-column, height:100% of a fixed-px parent)
+      //
+      // Reading at the PANE level avoids unreliable wrapper.offsetHeight —
+      // the wrapper can appear to have no height after the canvas goes
+      // position:absolute (no in-flow children left to size it by).
+      //
+      // Formula (per user spec):
+      //   availW = paneW − legendW − small_margin
+      //   availH = paneH − headerH − small_margin
+      //   side   = MIN(availW, availH)            ← whichever axis binds first
+      //   center the ring within the wrapper area (which ≈ availW × availH)
+      const wrapper  = canvas.parentElement;
+      const innerRow = wrapper.parentElement;
+      const pane     = innerRow.parentElement;
+      const header   = pane.firstElementChild;
+      const legend   = wrapper.previousElementSibling;
+
+      const paneW   = pane.offsetWidth   || 0;
+      const paneH   = pane.offsetHeight  || 0;
+      const headerH = header ? header.offsetHeight : 30;
+      const legendW = legend ? legend.offsetWidth  : 0;
+      // Wrapper dims for centering — these are reliable for width (flex:1
+      // width is not affected by absolute children); height mirrors innerRow.
+      const wW = wrapper.offsetWidth  || Math.max(0, paneW - legendW);
+      const wH = wrapper.offsetHeight || Math.max(0, paneH - headerH);
+
+      // 6px breathing room so the ring doesn't kiss the edges.
+      const margin  = 6;
+      const availW  = Math.max(0, paneW - legendW - margin * 2);
+      const availH  = Math.max(0, paneH - headerH - margin * 2);
+      const side    = Math.max(40, Math.min(availW, availH));
+
+      // Diagnostic — log every render so the user can see what's happening.
+      console.log(
+        `[Lab donut size] pane=${paneW}×${paneH}  header=${headerH}px  legend=${legendW}px` +
+        `  → availW=${availW}  availH=${availH}  → side=${side}` +
+        `  (wrapper reported ${wW}×${wH})`
+      );
+
       canvas.style.position = 'absolute';
-      canvas.style.left     = Math.max(0, (cW - side) / 2) + 'px';
-      canvas.style.top      = Math.max(0, (cH - side) / 2) + 'px';
+      canvas.style.left     = Math.max(0, (wW - side) / 2) + 'px';
+      canvas.style.top      = Math.max(0, (wH - side) / 2) + 'px';
       canvas.style.width    = side + 'px';
       canvas.style.height   = side + 'px';
 
