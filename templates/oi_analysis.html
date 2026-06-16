@@ -366,7 +366,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/oi_analysis.js?v=244"></script>
+  <script src="/static/js/oi_analysis.js?v=245"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -5160,7 +5160,9 @@
                       <template x-for="c in grp.candidates" :key="'lc-'+c.id">
                         <div :title="labCardTooltip(c)"
                              :style="labCardStyle(c, !!labActiveIds[c.id])"
-                             @click="labToggle(c.id)">
+                             @click="labToggle(c.id)"
+                             @mouseenter="if(labActiveIds[c.id]) _onLabSignalHoverChange(c.id, 'card')"
+                             @mouseleave="_onLabSignalHoverChange(null, 'card')">
                           <!-- Active ✓ badge — top-right corner, absolutely positioned -->
                           <div x-show="!!labActiveIds[c.id]"
                                style="position:absolute;top:2px;right:3px;font-size:8px;
@@ -5613,7 +5615,9 @@
                           </div>
                         </div>
                         <div style="height:260px;position:relative">
-                          <canvas id="lab-yearly-canvas"></canvas>
+                          <canvas id="lab-yearly-canvas"
+                                  @mousemove.passive="labHandleYearlyMousemove($event)"
+                                  @mouseleave="labHandleYearlyMouseleave()"></canvas>
                         </div>
                       </div>
                     </div>

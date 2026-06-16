@@ -3929,7 +3929,12 @@ document.addEventListener('alpine:init', () => {
     labAllocTooltipLines:   [],
     labSelectedNodeId:    null,    // currently clicked node id (or null)
     labSelectedDetail:    null,    // decomposition object for selected node
-    labHoveredNodeId:     null,    // node under cursor (hover only, not click)
+    // Shared hover state — ONE variable that all four views (cards, nodes,
+    // donut arcs, stacked-chart bands) both SET and react to.
+    // Hover ANY signal-keyed element → sets this id → all views highlight
+    // that signal + dim the rest.  _onLabSignalHoverChange() is the shared
+    // repaint callback; it gates on id-change so hover-same-id is a no-op.
+    labHoveredSignalId:   null,    // signal id under cursor (any view), or null
     labTooltipVisible:    false,   // whether hover tooltip shows
     labTooltipX:          0,       // tooltip left (px, relative to canvas container)
     labTooltipY:          0,       // tooltip top  (px, relative to canvas container)
@@ -10468,10 +10473,13 @@ document.addEventListener('alpine:init', () => {
       const bg     = isActive ? `hsl(${hue}, 62%, 36%)` : `hsl(${hue}, 28%, 19%)`;
       const border = isActive ? '2px solid rgba(255,255,255,.80)'
                               : `1px solid hsl(${hue}, 28%, 30%)`;
+      // Cross-pane hover dimming: when another signal is hovered, dim this card.
+      const hovId = this.labHoveredSignalId;
+      const opacity = (hovId !== null && hovId !== c.id) ? '0.28' : '1';
       return `width:${size}px;height:${size}px;background:${bg};border:${border};` +
              `border-radius:5px;padding:5px 5px 3px 5px;cursor:pointer;position:relative;` +
              `display:flex;flex-direction:column;justify-content:space-between;` +
-             `overflow:hidden;flex-shrink:0`;
+             `overflow:hidden;flex-shrink:0;opacity:${opacity};transition:opacity 0.1s`;
     },
 
     // ── Portfolio Lab — Stage 2: toggle, recompute, parity ───────────────────
@@ -10846,6 +10854,7 @@ document.addEventListener('alpine:init', () => {
       const signals  = alloc.uniqueBySignal;  // [{id, name, dollar_pnl, count}] active-set order
       const sigCount = signals.length;
       const stacked  = this.labYearlyMode !== 'clustered';
+      const hovId    = this.labHoveredSignalId;
 
       const fmt$ = v => {
         const abs = Math.abs(v);
@@ -10855,17 +10864,25 @@ document.addEventListener('alpine:init', () => {
         return sign + '$' + abs.toFixed(0);
       };
 
-      const SHARED_COLOR = 'rgba(120,132,150,0.70)';
-      const SHARED_BORDER = 'rgba(120,132,150,0.90)';
+      // Dimming: when a signal is hovered, non-matching bands drop to ~13% opacity.
+      const sigDimColor = (id) => {
+        const hue = this.labSigColorMap[id] ?? 0;
+        return hovId != null && id !== hovId
+          ? `hsla(${hue}, 60%, 58%, 0.13)`
+          : `hsl(${hue}, 60%, 58%)`;
+      };
+      const sharedDim  = hovId != null;
+      const SHARED_COLOR  = sharedDim ? 'rgba(120,132,150,0.13)' : 'rgba(120,132,150,0.70)';
+      const SHARED_BORDER = sharedDim ? 'rgba(120,132,150,0.20)' : 'rgba(120,132,150,0.90)';
       const datasets = [];
 
       if (!stacked) {
         // ── Clustered: one dataset per signal, unique P&L only ───────────
         for (let i = 0; i < sigCount; i++) {
           const sig   = signals[i];
-          const color = this._labSignalColor(sig.id);
+          const color = sigDimColor(sig.id);
           datasets.push({
-            label:           sig.name,
+            label:           '#' + sig.id,  // compact ID; full name in tooltip footer
             data:            years.map(yr => +(banded[yr]?.bySignalId[sig.id] || 0).toFixed(2)),
             backgroundColor: color,
             borderColor:     color,
@@ -10878,10 +10895,10 @@ document.addEventListener('alpine:init', () => {
         // them occupy the same column width at the same x position).
         for (let i = 0; i < sigCount; i++) {
           const sig   = signals[i];
-          const color = this._labSignalColor(sig.id);
+          const color = sigDimColor(sig.id);
           const vals  = years.map(yr => banded[yr]?.bySignalId[sig.id] || 0);
           datasets.push({
-            label:           sig.name,
+            label:           '#' + sig.id,  // compact ID; full name in tooltip footer
             data:            vals.map(v => v > 0 ? +v.toFixed(2) : 0),
             stack:           'positive',
             backgroundColor: color,
@@ -10928,12 +10945,12 @@ document.addEventListener('alpine:init', () => {
               display: true,
               position: 'bottom',
               labels: {
-                // Hide neg-half datasets from legend (they're visual mirrors of
-                // the pos half — only the true signed values matter to the user).
+                // Hide neg-half datasets; show compact '#N' IDs + 'Shared' on
+                // one row.  Full signal names are in the donut legend (left pane).
                 filter:   item => !item.text.startsWith('__neg_'),
                 color:    '#999',
                 font:     { size: 9 },
-                boxWidth: 10,
+                boxWidth: 7,
                 padding:  5,
               },
             },
@@ -10946,16 +10963,16 @@ document.addEventListener('alpine:init', () => {
                   const lbl = item.dataset.label;
                   if (lbl.startsWith('__neg_')) return null;  // suppress neg duplicates
                   const yr = String(years[item.dataIndex]);
-                  // Reconstitute the TRUE signed value for the signal/shared band so
-                  // the tooltip always shows the net number, never just the pos half.
+                  // Reconstitute the TRUE signed value (labels are now '#N'; find by id).
                   let trueVal;
                   if (lbl === 'Shared') {
                     trueVal = banded[yr]?.shared || 0;
                   } else {
-                    const sig = signals.find(s => s.name === lbl);
+                    const sid = parseInt(lbl.replace('#', ''), 10);
+                    const sig = isNaN(sid) ? null : signals.find(s => s.id === sid);
                     trueVal   = sig ? (banded[yr]?.bySignalId[sig.id] || 0) : item.parsed.y;
                   }
-                  if (trueVal === 0) return null;  // skip zero-contribution bands
+                  if (trueVal === 0) return null;
                   return `${lbl}: ${fmt$(trueVal)}`;
                 },
                 footer: items => {
@@ -11135,7 +11152,7 @@ document.addEventListener('alpine:init', () => {
 
       // ── Hover context: incident edges + neighbour nodes ──────────────────
       const SCALE  = 0.05;
-      const hovId  = this.labHoveredNodeId;
+      const hovId  = this.labHoveredSignalId;   // shared cross-pane hover id
       const incidentEdgeIdxs = new Set();
       const incidentNodeIds  = new Set();
       if (hovId) {
@@ -11308,7 +11325,7 @@ document.addEventListener('alpine:init', () => {
     //           zoom-in; totals reconcile by construction — no
     //           allocation fudge, no double-counting).
     //
-    // Hover link: when labHoveredNodeId is set, the matching signal's
+    // Hover link: when labHoveredSignalId is set, the matching signal's
     // outer arc keeps full alpha and gets a thin white outline; all
     // other arcs (inner + outer) dim to ~0.18. Hover NEVER mutates
     // labSelectedNodeId, so the pane-swap state is preserved.
@@ -11319,11 +11336,29 @@ document.addEventListener('alpine:init', () => {
     _labRenderAllocation() {
       const canvas = document.getElementById('lab-allocation-canvas');
       if (!canvas) return;
+
+      // ── Size canvas as the largest centered square that fits in the
+      // container (= canvas's parent after the legend column).  Measuring
+      // the PARENT avoids the chicken-and-egg problem where canvas.offsetWidth
+      // reflects its own old style rather than the available room.
+      // Absolute-positioned within position:relative parent so that top/left
+      // centering works without affecting legend layout.
+      const container = canvas.parentElement;
+      const cW = container.offsetWidth  || 240;
+      const cH = container.offsetHeight || 400;
+      const pad  = 8;
+      const side = Math.max(40, Math.min(cW, cH) - pad * 2);
+      canvas.style.position = 'absolute';
+      canvas.style.left     = Math.max(0, (cW - side) / 2) + 'px';
+      canvas.style.top      = Math.max(0, (cH - side) / 2) + 'px';
+      canvas.style.width    = side + 'px';
+      canvas.style.height   = side + 'px';
+
       const dpr = window.devicePixelRatio || 1;
-      const W   = canvas.offsetWidth  || 240;
-      const H   = canvas.offsetHeight || 400;
-      canvas.width  = Math.round(W * dpr);
-      canvas.height = Math.round(H * dpr);
+      const W   = side;
+      const H   = side;
+      canvas.width  = Math.round(side * dpr);
+      canvas.height = Math.round(side * dpr);
       const ctx = canvas.getContext('2d');
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, W, H);
@@ -11339,21 +11374,18 @@ document.addEventListener('alpine:init', () => {
         return;
       }
 
-      // Donut occupies the canvas centre. Diameter is a fixed
-      // fraction of the smaller canvas dimension with a clear margin
-      // on all sides — number of slices does NOT affect size. Deep-
-      // degree slices get thin (their data lives in the tooltip);
-      // the ring never grows past the pane edge.
+      // Ring fills the square canvas minus a small margin.  Ring widths
+      // are proportional to rOuter so the visual stays balanced at any size.
       const cx     = W / 2;
       const cy     = H / 2;
-      const margin = 14;
-      const rOuter = Math.max(20, Math.min(W, H) / 2 - margin);
+      const margin = 8;
+      const rOuter = Math.max(20, W / 2 - margin);
       // Ring widths are proportional to rOuter — middle band is 30%
       // of the radius, outer ring 18%. Works at any donut size.
       const rMid   = rOuter * 0.82;
       const rIn    = rOuter * 0.52;
 
-      const hovId = this.labHoveredNodeId;
+      const hovId = this.labHoveredSignalId;
 
       const segPath = (rA, rB, a0, a1) => {
         ctx.beginPath();
@@ -11474,6 +11506,43 @@ document.addEventListener('alpine:init', () => {
       return null;
     },
 
+    // ── Cross-pane hover callback ─────────────────────────────────────────────
+    // Single entry-point for ALL hover-change events from any of the four views
+    // (cards, network nodes, donut arcs, stacked-chart bars).
+    // Gates on id-change so repeated calls with the same id are no-ops.
+    // DRAW-ONLY: repaints using cached values; never calls _computeDollarSeries.
+    _onLabSignalHoverChange(newId, source) {
+      if (newId === this.labHoveredSignalId) return;   // gate: no-op if unchanged
+      this.labHoveredSignalId = newId;
+
+      // Repaint each view that has a visual highlight/dim.
+      // Cards react via labCardStyle() which reads labHoveredSignalId reactively
+      // — Alpine's reactivity handles that; no explicit repaint call needed.
+
+      // Network graph (draw-only — uses labNetworkIncrements from cache)
+      const _t0net = performance.now();
+      this._labRenderNetwork();
+      const _dtNet = (performance.now() - _t0net).toFixed(2);
+
+      // Donut: repaint unless a node is selected (detail pane covers it)
+      let _dtAlloc = '—';
+      if (!this.labSelectedNodeId) {
+        const _t0a = performance.now();
+        this._labRenderAllocation();
+        _dtAlloc = (performance.now() - _t0a).toFixed(2);
+      }
+
+      // Stacked / clustered chart
+      const _t0yr = performance.now();
+      this._labRenderYearly();
+      const _dtYr = (performance.now() - _t0yr).toFixed(2);
+
+      console.log(
+        `[Lab signal hover] source=${source} id=${newId} | ` +
+        `network=${_dtNet}ms | alloc=${_dtAlloc}ms | yearly=${_dtYr}ms | DS=0`
+      );
+    },
+
     // Mousemove on the donut canvas. Cached lookup; no recompute.
     // Tooltip lines mirror the network's hover layout for consistency.
     labHandleAllocMousemove(event) {
@@ -11485,7 +11554,14 @@ document.addEventListener('alpine:init', () => {
       const hit  = this._labDonutHit(mx, my);
       if (!hit) {
         if (this.labAllocTooltipVisible) this.labAllocTooltipVisible = false;
+        this._onLabSignalHoverChange(null, 'donut');
         return;
+      }
+      // Cross-pane hover: outer ring maps to a signal id; inner ring is degree (no id).
+      if (hit.ring === 'outer') {
+        this._onLabSignalHoverChange(hit.span.id, 'donut');
+      } else {
+        this._onLabSignalHoverChange(null, 'donut');
       }
       const total = this.labAllocation?.total_abs || 0;
       const fmtPct = v => total > 0
@@ -11525,6 +11601,36 @@ document.addEventListener('alpine:init', () => {
 
     labHandleAllocMouseleave() {
       if (this.labAllocTooltipVisible) this.labAllocTooltipVisible = false;
+      this._onLabSignalHoverChange(null, 'donut');
+    },
+
+    // Mousemove on the stacked/clustered yearly chart canvas.
+    // Uses Chart.js element hit-test to find the hovered dataset; parses the
+    // '#N' label to extract signal id; delegates to _onLabSignalHoverChange.
+    labHandleYearlyMousemove(event) {
+      const chart = this._charts && this._charts['lab-yearly'];
+      if (!chart) return;
+      const elements = chart.getElementsAtEventForMode(
+        event, 'dataset', { intersect: false }, false
+      );
+      let sigId = null;
+      if (elements.length) {
+        const dsIdx = elements[0].datasetIndex;
+        const ds    = chart.data.datasets[dsIdx];
+        if (ds) {
+          // Label is '#N' or '__neg_#N' (negative-stack twin) or 'Shared'
+          const label = (ds.label || '').replace(/^__neg_/, '');
+          if (label.startsWith('#')) {
+            const parsed = parseInt(label.slice(1), 10);
+            if (!isNaN(parsed)) sigId = parsed;
+          }
+        }
+      }
+      this._onLabSignalHoverChange(sigId, 'yearly');
+    },
+
+    labHandleYearlyMouseleave() {
+      this._onLabSignalHoverChange(null, 'yearly');
     },
 
     // ── Portfolio Lab — Stage 4: detail pane ────────────────────────────
@@ -11563,12 +11669,9 @@ document.addEventListener('alpine:init', () => {
 
     // Mousemove on network canvas: hit-test for hover highlight + tooltip.
     // Independent of click selection — does NOT change labSelectedNodeId.
+    // Hover state changes are delegated to _onLabSignalHoverChange so that
+    // all four views repaint together via the shared labHoveredSignalId.
     labHandleNetworkMousemove(event) {
-      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
-      const _diagT0 = performance.now();
-      this._labDsCallsThisHover = 0;   // reset counter; _computeDollarSeries increments it
-      let _diagRedrew = false;
-      // ─────────────────────────────────────────────────────────────────────
       const canvas = document.getElementById('lab-network-canvas');
       if (!canvas) return;
       const rect   = canvas.getBoundingClientRect();
@@ -11582,28 +11685,19 @@ document.addEventListener('alpine:init', () => {
         if (!pos || rad == null) continue;
         if (Math.hypot(mx - pos.x, my - pos.y) <= rad + 4) { hit = c; break; }
       }
-      const prevHov = this.labHoveredNodeId;
-      this.labHoveredNodeId = hit ? hit.id : null;
+      // Update tooltip (always, so it follows cursor even while on same node)
       if (hit) {
         this.labTooltipVisible = true;
-        // Position tooltip: follow cursor, flip left if near the right edge
         const W = canvas.offsetWidth || 500;
         const H = canvas.offsetHeight || 400;
-        const TW = 240, TH = 90;   // estimated tooltip dimensions
+        const TW = 240, TH = 90;
         let tx = mx + 16;
         if (tx + TW > W) tx = mx - TW - 16;
         let ty = my + 16;
         if (ty + TH > H) ty = my - TH - 10;
         this.labTooltipX = Math.max(0, tx);
         this.labTooltipY = Math.max(0, ty);
-        // Stats-only tooltip — every value is a cached lookup, no
-        // compute on hover:
-        //   agg_n / agg_avg_ret / win_rate → precomputed at load time
-        //   uniqueN / increment           → precomputed during the
-        //                                   current network render
-        // Name encodes the metrics; outcome is shown once in the
-        // breadcrumb above (one-per-session). Both intentionally
-        // dropped here to keep the tooltip dense and useful.
+        // Stats-only tooltip — all values are cached lookups, no recompute on hover.
         const aggN  = hit.agg_n || 0;
         const aggR  = hit.agg_avg_ret;
         const winR  = hit.win_rate;
@@ -11612,55 +11706,23 @@ document.addEventListener('alpine:init', () => {
         const fmtPct = v => v == null ? '—' : (v * 100).toFixed(2) + '%';
         this.labTooltipLines = [
           '#' + hit.id + '  ' + hit.name,
-          'n: '         + aggN.toLocaleString(),
-          'avg-ret: '   + fmtPct(aggR),
-          'win%: '      + (winR == null ? '—' : (winR * 100).toFixed(1) + '%'),
-          'unique n: '  + uniqN.toLocaleString(),
+          'n: '          + aggN.toLocaleString(),
+          'avg-ret: '    + fmtPct(aggR),
+          'win%: '       + (winR == null ? '—' : (winR * 100).toFixed(1) + '%'),
+          'unique n: '   + uniqN.toLocaleString(),
           'cut-impact: ' + (inc == null ? '—' : this.labFmtDollar(inc)),
         ];
       } else {
         this.labTooltipVisible = false;
       }
-      // Re-render only when hover state actually changes (avoid redraw every px).
-      // Donut redraw is paired so the highlight/dim follows the same hover key.
-      if (prevHov !== this.labHoveredNodeId) {
-        _diagRedrew = true;
-        this._labRenderNetwork();
-        if (!this.labSelectedNodeId) this._labRenderAllocation();
-      }
-      // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
-      const _diagMs = (performance.now() - _diagT0).toFixed(2);
-      const _diagDs = this._labDsCallsThisHover;
-      delete this._labDsCallsThisHover;   // stop counting outside handler
-      console.log(
-        `[Lab hover] ${_diagMs}ms | _computeDollarSeries calls: ${_diagDs}` +
-        ` | full redraw: ${_diagRedrew}` +
-        ` | prevHov=${prevHov} → newHov=${this.labHoveredNodeId}`
-      );
-      // ─────────────────────────────────────────────────────────────────────
+      // Delegate hover-change repaints to shared callback (gates on id-change).
+      this._onLabSignalHoverChange(hit ? hit.id : null, 'network');
     },
 
-    // Mouseleave on network canvas: clear hover state.
+    // Mouseleave on network canvas: clear shared hover state + tooltip.
     labHandleNetworkMouseleave() {
-      if (this.labHoveredNodeId !== null || this.labTooltipVisible) {
-        // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────
-        const _diagT0 = performance.now();
-        this._labDsCallsThisHover = 0;
-        // ─────────────────────────────────────────────────────────────────
-        this.labHoveredNodeId  = null;
-        this.labTooltipVisible = false;
-        this._labRenderNetwork();
-        if (!this.labSelectedNodeId) this._labRenderAllocation();
-        // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────
-        const _diagMs = (performance.now() - _diagT0).toFixed(2);
-        const _diagDs = this._labDsCallsThisHover;
-        delete this._labDsCallsThisHover;
-        console.log(
-          `[Lab mouseleave] ${_diagMs}ms | _computeDollarSeries calls: ${_diagDs}` +
-          ` | full redraw: true`
-        );
-        // ─────────────────────────────────────────────────────────────────
-      }
+      this.labTooltipVisible = false;
+      this._onLabSignalHoverChange(null, 'network');
     },
 
     // Compute the decomposition detail object for a given node id.
