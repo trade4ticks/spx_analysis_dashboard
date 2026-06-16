@@ -7821,6 +7821,42 @@ async def corner_scan_meta(
     }
 
 
+async def _cs_2f_attach_signal_matches(pool, rows: list) -> list:
+    """Stage 3 auto-detect: for each scan row, look up the saved signal
+    (if any) whose stored corner exactly matches this row's
+    (primary_metric, secondary_metric, corner_direction, outcome). Adds
+    matched_signal_id / matched_status / matched_color_slot / matched_name
+    to the row dict — all None when no match.
+
+    Single lookup over the tagged subset of signals; the ix_signals_match
+    partial index (Stage 1) makes the in-Python join O(rows × 1)."""
+    if not rows:
+        return rows
+    async with pool.acquire() as conn:
+        sig_rows = await conn.fetch(
+            """SELECT id, name, primary_metric, secondary_metric,
+                      corner, outcome, status, color_slot
+               FROM signals
+               WHERE corner IS NOT NULL
+               ORDER BY id"""
+        )
+    # First (lowest-id) match wins on the rare collision case.
+    by_key: dict = {}
+    for s in sig_rows:
+        key = (s["primary_metric"], s["secondary_metric"],
+               s["corner"], s["outcome"])
+        by_key.setdefault(key, s)
+    for r in rows:
+        key = (r.get("primary_metric"), r.get("secondary_metric"),
+               r.get("corner_direction"), r.get("outcome"))
+        m = by_key.get(key)
+        r["matched_signal_id"] = m["id"]              if m else None
+        r["matched_status"]    = (m["status"] or "Test") if m else None
+        r["matched_color_slot"] = m["color_slot"]     if m else None
+        r["matched_name"]      = m["name"]            if m else None
+    return rows
+
+
 @router.get("/corner-scan/2f")
 async def corner_scan_2f_endpoint(
     primary_metric:   Optional[str] = Query(None),
@@ -7883,6 +7919,9 @@ async def corner_scan_2f_endpoint(
             limit    = limit,
             offset   = offset,
         )
+        # Stage 3: attach matched-signal info (id/status/color_slot/name)
+        # to each row. Same post-process used by the offline branch.
+        page_rows = await _cs_2f_attach_signal_matches(pool, page_rows)
         return {
             "rows":     page_rows,
             "total":    total,
@@ -7962,8 +8001,14 @@ async def corner_scan_2f_endpoint(
                 ORDER BY {order} LIMIT {limit} OFFSET {offset}""",
             *params,
         )
+    row_dicts = [dict(r) for r in rows]
+    # Stage 3: attach matched-signal info (id/status/color_slot/name)
+    # via the ix_signals_match partial-index-backed lookup. None on
+    # rows whose (primary, secondary, corner_direction, outcome)
+    # tuple has no tagged saved signal.
+    row_dicts = await _cs_2f_attach_signal_matches(pool, row_dicts)
     return {
-        "rows":   [dict(r) for r in rows],
+        "rows":   row_dicts,
         "total":  int(total),
         "mode":   mode,
         "status": "ok" if int(total) > 0 else "no_data",

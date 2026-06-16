@@ -5706,9 +5706,8 @@ document.addEventListener('alpine:init', () => {
         // status is ASC default — 'Active' sorts before 'Test'
         // alphabetically, which is the grouping the user wants.
         const ASC_DEFAULT = new Set([
-          'name', 'primary', 'primary_family',
-          'secondary', 'secondary_family', 'outcome',
-          'id', 'status',
+          'name', 'primary', 'secondary', 'outcome',
+          'corner', 'id', 'status',
         ]);
         this.sigSortDir = ASC_DEFAULT.has(key) ? 'asc' : 'desc';
       }
@@ -5726,10 +5725,9 @@ document.addEventListener('alpine:init', () => {
         case 'status':           return (s.status           || 'Test').toLowerCase();
         case 'name':             return (s.name             || '').toLowerCase();
         case 'primary':          return (s.primary_metric   || '').toLowerCase();
-        case 'primary_family':   return (this.signalFamilyName(s.primary_metric)   || '').toLowerCase();
         case 'secondary':        return (s.secondary_metric || '').toLowerCase();
-        case 'secondary_family': return (this.signalFamilyName(s.secondary_metric) || '').toLowerCase();
         case 'outcome':          return (s.outcome          || '').toLowerCase();
+        case 'corner':           return (s.corner           || '').toLowerCase();
         case 'agg_avg_ret':      return s.agg_avg_ret;
         case 'agg_n':            return s.agg_n;
         case 'stats_updated_at': return s.stats_updated_at;

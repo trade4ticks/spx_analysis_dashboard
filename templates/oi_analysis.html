@@ -367,7 +367,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=251"></script>
+  <script src="/static/js/oi_analysis.js?v=252"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -1045,18 +1045,21 @@
                   <th @click="cs2fSort('q_avg_ret')"        style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_avg_ret'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q avg%</th>
                   <th @click="cs2fSort('q_ret_per_day')"    style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_ret_per_day'    ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q %/day</th>
                   <th @click="cs2fSort('q_n')"              style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_n'              ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q n</th>
-                  <!-- Per-user metadata persisted in corner_scan_notes,
-                       independent of corner_scan_2f so it survives a
-                       scan rebuild. Not sortable — these are notes,
-                       not scan metrics. Reviewed = "I've looked at
-                       this corner"; Saved = "I saved a signal from
-                       this corner" (manual; not auto-detected from
-                       the signals table because refined zones often
-                       don't match the corner's raw cells). -->
+                  <!-- Reviewed: per-user "I've looked at this" flag.
+                       Persisted in corner_scan_notes (survives scan
+                       rebuilds via the 4-column LEFT JOIN).
+                       Match: Stage-3 AUTO-DETECTED — if a saved signal
+                       has corner = this row's corner_direction AND the
+                       primary/secondary/outcome match, the swatch +
+                       #ID display. NO checkbox — saved status is
+                       derived from the signals table, not maintained
+                       manually. Color reflects current tier (Test gray
+                       / Active palette color via SignalThumb).
+                       Note: still manual, still persisted. -->
                   <th title="I've looked at this corner"
                       style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Rev</th>
-                  <th title="I saved a signal from this corner (manual flag)"
-                      style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Saved</th>
+                  <th title="Auto-detected match against saved signals — swatch + #ID when a saved signal's stored corner matches this row's tuple"
+                      style="text-align:center;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Match</th>
                   <th style="text-align:left;padding:3px 8px;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Note</th>
                 </tr>
               </thead>
@@ -1112,11 +1115,24 @@
                              @change="cs2fSaveReviewed(row)"
                              title="I've looked at this corner (persists across scan rebuilds)">
                     </td>
+                    <!-- Auto-detected match cell. NO click handler —
+                         identity is derived from the signals table,
+                         not toggled here. Blank when row.matched_signal_id
+                         is null. -->
                     <td style="padding:3px 8px;text-align:center;white-space:nowrap" @click.stop>
-                      <input type="checkbox"
-                             x-model="row.saved"
-                             @change="cs2fSaveSaved(row)"
-                             title="I saved a signal from this corner — manual flag (persists across scan rebuilds)">
+                      <template x-if="row.matched_signal_id != null">
+                        <span :title="(row.matched_name || ('Signal ' + row.matched_signal_id))
+                                      + '  ·  ' + (row.matched_status || 'Test')
+                                      + (row.matched_color_slot != null
+                                          ? '  ·  slot ' + row.matched_color_slot : '')"
+                              style="display:inline-flex;align-items:center;gap:5px;font-variant-numeric:tabular-nums">
+                          <span :style="'display:inline-block;width:13px;height:13px;border-radius:3px;'
+                                        + 'border:1px solid rgba(255,255,255,.22);'
+                                        + 'background:' + window.SignalThumb.colorForSlot(row.matched_color_slot)"></span>
+                          <span style="font-size:10px;color:var(--text)"
+                                x-text="'#' + row.matched_signal_id"></span>
+                        </span>
+                      </template>
                     </td>
                     <td style="padding:3px 8px;white-space:nowrap" @click.stop>
                       <input type="text"
@@ -3930,20 +3946,16 @@
                           Primary <span class="sig-sort-arrow" x-text="sigSortArrow('primary')"></span>
                         </th>
                         <th class="sig-th-sort sig-th-left"
-                            :class="sigSortClass('primary_family')" @click="sigSortBy('primary_family')">
-                          Primary Family <span class="sig-sort-arrow" x-text="sigSortArrow('primary_family')"></span>
-                        </th>
-                        <th class="sig-th-sort sig-th-left"
                             :class="sigSortClass('secondary')" @click="sigSortBy('secondary')">
                           Secondary <span class="sig-sort-arrow" x-text="sigSortArrow('secondary')"></span>
                         </th>
                         <th class="sig-th-sort sig-th-left"
-                            :class="sigSortClass('secondary_family')" @click="sigSortBy('secondary_family')">
-                          Secondary Family <span class="sig-sort-arrow" x-text="sigSortArrow('secondary_family')"></span>
-                        </th>
-                        <th class="sig-th-sort sig-th-left"
                             :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
                           Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
+                        </th>
+                        <th class="sig-th-sort sig-th-left"
+                            :class="sigSortClass('corner')" @click="sigSortBy('corner')">
+                          Corner <span class="sig-sort-arrow" x-text="sigSortArrow('corner')"></span>
                         </th>
                         <th class="sig-th-sort"
                             :class="sigSortClass('agg_avg_ret')" @click="sigSortBy('agg_avg_ret')">
@@ -4012,12 +4024,16 @@
                           <td class="sig-td" :title="sig.primary_metric"
                               x-text="sigTruncateMetric(sig.primary_metric)"
                               style="color:#3498db"></td>
-                          <td class="sig-td" x-text="signalFamilyName(sig.primary_metric)"></td>
                           <td class="sig-td" :title="sig.secondary_metric"
                               x-text="sigTruncateMetric(sig.secondary_metric)"
                               style="color:#e84393"></td>
-                          <td class="sig-td" x-text="signalFamilyName(sig.secondary_metric)"></td>
                           <td class="sig-td" x-text="sig.outcome"></td>
+                          <!-- Stage 3 saved-corner tag — the declared
+                               quadrant the user set at save time. Drives
+                               the Corner Scan 2F auto-match join key. -->
+                          <td class="sig-td"
+                              style="font-family:monospace;color:var(--dim)"
+                              x-text="sig.corner || '—'"></td>
                           <td class="sig-td sig-td-num"
                               :class="sigPosNeg(sig.agg_avg_ret)"
                               x-text="sigFormatPct(sig.agg_avg_ret)"></td>
@@ -4033,7 +4049,7 @@
                           </td>
                         </tr>
                         <tr x-show="!!sigExpanded[sig.id]">
-                          <td colspan="14" class="sig-detail-td">
+                          <td colspan="13" class="sig-detail-td">
                             <div class="sig-detail-wrap">
                               <div class="sig-detail-title"
                                    x-text="(sig.per_cell_stats || []).length + ' selected cell' + ((sig.per_cell_stats || []).length === 1 ? '' : 's') + ' · sorted by avg_ret desc'"></div>
@@ -4656,6 +4672,17 @@
                   <input type="checkbox" :checked="sig.enabled"
                          @change="togglePortfolioSignal(sig.id, $event.target.checked)"
                          style="cursor:pointer">
+                  <!-- Identity color swatch — Stage 3. Reads SignalThumb.
+                       colorForSlot (single source shared with Saved
+                       Signals, Lab, Corner Scan match cell). Test
+                       signals (color_slot null) render as neutral gray.
+                       Tooltip shows tier + slot for quick identity check. -->
+                  <span :title="'#' + (sig.signal_id || sig.id) + '  ·  '
+                                + (sig.status || 'Test')
+                                + (sig.color_slot != null ? ('  ·  slot ' + sig.color_slot) : '')"
+                        :style="'flex:0 0 14px;width:14px;height:14px;border-radius:3px;'
+                                + 'border:1px solid rgba(255,255,255,.22);display:inline-block;'
+                                + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"></span>
                   <span style="font-size:12px;font-weight:700;color:var(--text);flex:1"
                         x-text="sig.name"></span>
                   <span class="if-pill" style="cursor:pointer;color:#e84393;border-color:rgba(232,67,147,.4)"

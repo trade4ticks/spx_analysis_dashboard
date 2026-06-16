@@ -344,7 +344,8 @@ async def get_portfolio(pid: int,
         async with oi_pool.acquire() as conn:
             sig_rows = await conn.fetch(
                 """SELECT id, name, primary_metric, secondary_metric,
-                          outcome, n_bins, cell_set
+                          outcome, n_bins, cell_set,
+                          status, color_slot, corner
                    FROM signals WHERE id = ANY($1)""", all_sids)
         sig_by_id = {r["id"]: dict(r) for r in sig_rows}
         for ps in ps_rows:
@@ -362,6 +363,13 @@ async def get_portfolio(pid: int,
                 "outcome":          sig.get("outcome"),
                 "n_bins":           sig.get("n_bins"),
                 "n_cells":          len(sig.get("cell_set") or []),
+                # Stage 3: identity color + tier carried so the portfolio
+                # signal cards can show the same swatch as the Saved
+                # Signals pane and the Lab — single source via
+                # SignalThumb.colorForSlot(color_slot).
+                "status":           sig.get("status") or "Test",
+                "color_slot":       sig.get("color_slot"),
+                "corner":           sig.get("corner"),
             })
 
     return {
