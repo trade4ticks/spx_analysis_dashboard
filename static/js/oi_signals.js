@@ -30,6 +30,15 @@ document.addEventListener('alpine:init', () => {
     // so dark shades on thin samples don't read as edge.
     gridStatMode: 'ticker',   // 'ticker' | 'all'
     gridMinN:     30,
+
+    // Independent collapse for the two firing views — grid pane and
+    // detail table each have their own toggle, no shared state.
+    // Mirrors the Portfolio Lab / Score Matrix toggleX() pattern.
+    // Default open so the views are visible on first load.
+    gridExpanded:  true,
+    tableExpanded: true,
+    toggleGrid()  { this.gridExpanded  = !this.gridExpanded; },
+    toggleTable() { this.tableExpanded = !this.tableExpanded; },
     firingDate: '',           // optional ISO date; '' means "use server MAX(trade_date)"
     firingLoading: false,
     // Expansion is keyed by `${ticker}|${outcome}` since a ticker can
@@ -148,7 +157,8 @@ document.addEventListener('alpine:init', () => {
     // cellColor and the column-header thumbnail above it (literally the
     // same function).
     signalThumbnailSVG(sig) {
-      return window.SignalThumb.thumbnailSVG(sig, { width: 70, clickable: false });
+      return window.SignalThumb.thumbnailSVG(sig,
+        { width: 70, clickable: false, frameStrong: true });
     },
     cellColor(avgRet) {
       return window.SignalThumb.cellColor(avgRet);
@@ -202,16 +212,21 @@ document.addEventListener('alpine:init', () => {
       return n;
     },
 
-    // Combined cell opacity: cellOpacity(n) for the small-n shade
-    // honesty cue, multiplied by the min-n slider fade (0.32 when below
-    // the slider, 1.0 otherwise). A cell with n=8 hits BOTH dimmings
-    // and goes very faint — exactly the "ignore me" reading the slider
-    // is for.
+    // Cell opacity is the MIN-N SLIDER FADE ONLY. The cellOpacity(n)
+    // small-n dim was removed here because it makes the same avg_ret
+    // render at different brightness in TICKER vs ALL mode (TICKER's
+    // ticker-slice n is much smaller than ALL's lifetime n, so the
+    // shade darkens in one mode but not the other). Now the shade is
+    // a pure function of avg_ret on the fixed ±3% scale — flipping
+    // the toggle is a true brightness comparison: brighter in TICKER
+    // means the signal genuinely outperforms its lifetime average on
+    // that ticker. Min-n fade still applies as a separate channel
+    // (the thumbnail keeps its own cellOpacity-by-n dim because that
+    // visual is about per-cell sample size within ONE signal's
+    // history, not comparing across stat modes).
     gridCellOpacity(cell) {
-      if (!cell || cell.n == null) return 0.35;
-      const base = this.cellOpacity(cell.n);
-      const fade = (cell.n < this.gridMinN) ? 0.32 : 1.0;
-      return base * fade;
+      if (!cell || cell.n == null) return 0.32;
+      return (cell.n < this.gridMinN) ? 0.32 : 1.0;
     },
 
     // Stat-mode + slider setters. Pure draw — no fetch.

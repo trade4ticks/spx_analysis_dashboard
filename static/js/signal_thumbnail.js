@@ -66,6 +66,13 @@ window.SignalThumb = {
     // want a plain cursor (e.g. the read-only column header on the
     // Signals page grid) pass { clickable: false }.
     const cursor   = (opts && opts.clickable === false) ? 'default' : 'pointer';
+    // Frame stroke is opt-up only — caller passes { frameStrong: true }
+    // to read clearly against a dark pane (Signals page firing grid).
+    // Default keeps the FA Saved Signals cards' existing appearance
+    // exactly as-is; opt-in is the only way to bump it.
+    const fStroke  = (opts && opts.frameStrong) ? 'rgba(255,255,255,.55)'
+                                                 : 'rgba(255,255,255,.18)';
+    const fWidth   = (opts && opts.frameStrong) ? '0.16' : '0.08';
     const n        = (sig && sig.n_bins) || 0;
     const step     = n > 0 ? 20 / n : 20;
     const cells    = (sig && sig.per_cell_stats) || [];
@@ -75,7 +82,7 @@ window.SignalThumb = {
         + ' style="display:block;background:#1a1a1a;cursor:' + cursor + '">',
       // Frame
       '<rect x="0" y="0" width="20" height="20" fill="none"'
-        + ' stroke="rgba(255,255,255,.18)" stroke-width="0.08"/>',
+        + ' stroke="' + fStroke + '" stroke-width="' + fWidth + '"/>',
     ];
     // Gridlines at the signal's own n_bins resolution.
     for (let i = 1; i < n; i++) {
