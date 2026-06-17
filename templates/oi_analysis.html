@@ -247,14 +247,19 @@
       color: #e84393;
     }
 
-    /* ── Saved Signals table — per-signal stats + thumbnail grid ── */
-    .signals-table { width:100%; border-collapse:separate; border-spacing:0;
+    /* ── Saved Signals table — per-signal stats + thumbnail grid ──
+       table-layout:fixed so column widths track the headers' explicit
+       widths set via inline style, not the longest content. Pane fills
+       its container; no horizontal scrollbar. The three text columns
+       (Name, Primary, Secondary) get no fixed width and wrap freely
+       via sig-col-flex below; everything else stays tight to content. */
+    .signals-table { width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0;
                      font-size:12px; font-family:monospace; }
     .signals-table thead th {
       background:var(--raised); color:var(--dim);
       font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.3px;
       padding:6px 8px; border-bottom:1px solid var(--border);
-      white-space:nowrap; text-align:right;
+      text-align:right;
     }
     .signals-table thead th.sig-th-left  { text-align:left; }
     .signals-table thead th.sig-th-check { width:30px; text-align:center; padding:6px 4px; }
@@ -271,16 +276,32 @@
     .signals-table tbody.sig-body + tbody.sig-body {
       border-top:1px solid rgba(255,255,255,.04);
     }
+    /* Default cell behaviour: wrap if needed (not nowrap). Small
+       columns get their tight fixed widths from the <th> inline
+       style and won't have content to wrap anyway; the three flex
+       columns explicitly opt into multi-line text via sig-col-flex. */
     .sig-row td.sig-td {
       padding:8px 8px; color:var(--text); font-weight:500;
       border-bottom:1px solid rgba(255,255,255,.04);
-      white-space:nowrap; vertical-align:middle;
+      vertical-align:middle;
     }
     .sig-row:hover td.sig-td { background:rgba(255,255,255,.02); }
     .sig-td-check { width:30px; text-align:center; }
     .sig-td-name  { font-family:inherit; font-weight:700; }
     .sig-td-num   { text-align:right; }
     .sig-td-thumb { padding:6px 8px; }
+
+    /* Three text columns (Name / Primary / Secondary) share the
+       remaining width equally — table-layout:fixed gives the auto-
+       width columns the leftover space, and overflow-wrap:anywhere
+       allows mid-token breaks so long metric names like
+       ret_5d_fwd_oc wrap cleanly when the column narrows. */
+    .signals-table th.sig-col-flex,
+    .signals-table td.sig-col-flex {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: normal;
+    }
     .sig-caret    { color:var(--dim); margin-right:4px; cursor:pointer; user-select:none; }
     .sig-caret:hover { color:var(--text); }
     /* Name reserved for future recall/edit. cursor:pointer pre-set so the
@@ -367,7 +388,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=256"></script>
+  <script src="/static/js/oi_analysis.js?v=257"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3944,52 +3965,53 @@
                           <input type="checkbox" :checked="sigAllChecked()"
                                  @change="sigToggleAll($event.target.checked)">
                         </th>
-                        <!-- Stage 2: ID + Status toggle + Color swatch.
-                             Three columns added up front so they sit
-                             next to the checkbox where the user already
-                             interacts with each row. -->
-                        <th class="sig-th-sort"
+                        <!-- Small columns get tight fixed widths via
+                             inline style; table-layout:fixed honors
+                             those and lets the three sig-col-flex
+                             columns (Name, Primary, Secondary) share
+                             the remaining width equally. -->
+                        <th class="sig-th-sort" style="width:54px"
                             :class="sigSortClass('id')" @click="sigSortBy('id')">
                           ID <span class="sig-sort-arrow" x-text="sigSortArrow('id')"></span>
                         </th>
-                        <th class="sig-th-sort"
+                        <th class="sig-th-sort" style="width:68px"
                             :class="sigSortClass('status')" @click="sigSortBy('status')">
                           Tier <span class="sig-sort-arrow" x-text="sigSortArrow('status')"></span>
                         </th>
-                        <th>Color</th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th style="width:42px">Color</th>
+                        <th class="sig-th-sort sig-th-left sig-col-flex"
                             :class="sigSortClass('name')" @click="sigSortBy('name')">
                           Name <span class="sig-sort-arrow" x-text="sigSortArrow('name')"></span>
                         </th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th class="sig-th-sort sig-th-left sig-col-flex"
                             :class="sigSortClass('primary')" @click="sigSortBy('primary')">
                           Primary <span class="sig-sort-arrow" x-text="sigSortArrow('primary')"></span>
                         </th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th class="sig-th-sort sig-th-left sig-col-flex"
                             :class="sigSortClass('secondary')" @click="sigSortBy('secondary')">
                           Secondary <span class="sig-sort-arrow" x-text="sigSortArrow('secondary')"></span>
                         </th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th class="sig-th-sort sig-th-left" style="width:112px"
                             :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
                           Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
                         </th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th class="sig-th-sort sig-th-left" style="width:90px"
                             :class="sigSortClass('corner')" @click="sigSortBy('corner')">
                           Corner <span class="sig-sort-arrow" x-text="sigSortArrow('corner')"></span>
                         </th>
-                        <th class="sig-th-sort"
+                        <th class="sig-th-sort" style="width:78px"
                             :class="sigSortClass('agg_avg_ret')" @click="sigSortBy('agg_avg_ret')">
                           avg_ret <span class="sig-sort-arrow" x-text="sigSortArrow('agg_avg_ret')"></span>
                         </th>
-                        <th class="sig-th-sort"
+                        <th class="sig-th-sort" style="width:70px"
                             :class="sigSortClass('agg_n')" @click="sigSortBy('agg_n')">
                           n <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
                         </th>
-                        <th class="sig-th-sort sig-th-left"
+                        <th class="sig-th-sort sig-th-left" style="width:96px"
                             :class="sigSortClass('stats_updated_at')" @click="sigSortBy('stats_updated_at')">
                           Stats as of <span class="sig-sort-arrow" x-text="sigSortArrow('stats_updated_at')"></span>
                         </th>
-                        <th>Thumb</th>
+                        <th style="width:118px">Thumb</th>
                       </tr>
                     </thead>
                     <template x-for="sig in sortedSignals" :key="'sigrow-'+sig.id">
@@ -4033,7 +4055,7 @@
                                           + 'border:1px solid rgba(255,255,255,.22);vertical-align:middle;'
                                           + 'background:' + window.SignalThumb.colorForSlot(sig.color_slot)"></span>
                           </td>
-                          <td class="sig-td sig-td-name">
+                          <td class="sig-td sig-td-name sig-col-flex">
                             <span class="sig-caret" @click.stop="sigToggleExpand(sig.id)"
                                   x-text="sigExpanded[sig.id] ? '▾' : '▸'"></span>
                             <span class="sig-name"
@@ -4041,11 +4063,14 @@
                                   :title="sig.name + ' — click to open in Recall'"
                                   x-text="sig.name"></span>
                           </td>
-                          <td class="sig-td" :title="sig.primary_metric"
-                              x-text="sigTruncateMetric(sig.primary_metric)"
+                          <!-- Primary / Secondary: full text, wraps when
+                               narrow (no more sigTruncateMetric ellipsis).
+                               Title tooltip kept for hover read. -->
+                          <td class="sig-td sig-col-flex" :title="sig.primary_metric"
+                              x-text="sig.primary_metric"
                               style="color:#3498db"></td>
-                          <td class="sig-td" :title="sig.secondary_metric"
-                              x-text="sigTruncateMetric(sig.secondary_metric)"
+                          <td class="sig-td sig-col-flex" :title="sig.secondary_metric"
+                              x-text="sig.secondary_metric"
                               style="color:#e84393"></td>
                           <td class="sig-td" x-text="sig.outcome"></td>
                           <!-- Stage 3 saved-corner tag — the declared
