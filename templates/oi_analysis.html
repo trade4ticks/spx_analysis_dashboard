@@ -289,7 +289,12 @@
     .sig-td-check { width:30px; text-align:center; }
     .sig-td-name  { font-family:inherit; font-weight:700; }
     .sig-td-num   { text-align:right; }
-    .sig-td-thumb { padding:6px 8px; }
+    /* Thumb cell — the SVG renders at 110px; the column is 130px so
+       there's ~10px breathing room on each side without it jamming
+       against the right edge of the table. Padding is symmetrical
+       horizontally and slightly squeezed vertically so rows don't
+       grow taller than the metric cells next to them. */
+    .sig-td-thumb { padding:6px 10px; text-align:left; }
 
     /* Three text columns (Name / Primary / Secondary) share the
        remaining width equally — table-layout:fixed gives the auto-
@@ -388,7 +393,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=257"></script>
+  <script src="/static/js/oi_analysis.js?v=258"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -4011,7 +4016,7 @@
                             :class="sigSortClass('stats_updated_at')" @click="sigSortBy('stats_updated_at')">
                           Stats as of <span class="sig-sort-arrow" x-text="sigSortArrow('stats_updated_at')"></span>
                         </th>
-                        <th style="width:118px">Thumb</th>
+                        <th style="width:130px">Thumb</th>
                       </tr>
                     </thead>
                     <template x-for="sig in sortedSignals" :key="'sigrow-'+sig.id">

@@ -5929,8 +5929,11 @@ document.addEventListener('alpine:init', () => {
       const sig = {
         id: `cs-${row.primary_metric}-${row.secondary_metric}`
             + `-${row.corner_direction}-${row.outcome}`,
-        name: `${row.primary_metric} × ${row.secondary_metric}`
-              + ` · ${row.corner_direction} · ${row.outcome}`,
+        // Default name is the metric pair only — corner and outcome
+        // are already their own columns in the Saved Signals table,
+        // appending them here just duplicated that data. Going-
+        // forward only; existing signals keep their stored names.
+        name: `${row.primary_metric} × ${row.secondary_metric}`,
         primary_metric:   row.primary_metric,
         secondary_metric: row.secondary_metric,
         outcome:          row.outcome,
