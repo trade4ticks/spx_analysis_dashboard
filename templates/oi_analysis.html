@@ -367,7 +367,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_analysis.js?v=255"></script>
+  <script src="/static/js/oi_analysis.js?v=256"></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">
@@ -3172,27 +3172,25 @@
               </div>
             </template>
 
-            <!-- ── Normal layout (in-sample / walk-forward): table left, bars right ── -->
+            <!-- ── Normal layout (in-sample / walk-forward) ─────────────
+                 Heatmap fills the full page width with the same
+                 fixed-cell / overflow-x:auto behaviour the Recall
+                 heatmap uses, so both sections render the heatmap
+                 identically. The two 1D bin charts sit BELOW the
+                 heatmap, side by side at 50% each — they're
+                 orientation/reference, so keep their height fixed
+                 even when widened. -->
             <template x-if="heatmapData && heatmapData.grid && !heatmapData.train_grid">
               <div>
-              <!-- Width-constrained heatmap+bins row. The OUTER cap is
-                   ~50% of page width (min 480px so it stays usable on
-                   smaller screens); inside, the bin column is fixed-
-                   width modest and the heatmap takes whatever's left.
-                   Cells divide the heatmap container equally via
-                   table-layout:fixed + width:100% — 5×5 / 10×10 / 20×20
-                   all just splice the same container into more/fewer
-                   cells. Zone Analyze section below stays full width. -->
-              <div style="width:50%;min-width:480px;max-width:50%">
-              <div style="display:flex;gap:12px;align-items:flex-start;padding-top:2px">
-                <!-- Left: 2D heatmap table — flexes to fill remaining width -->
-                <div style="flex:1;min-width:0">
-                  <table style="border-collapse:collapse;table-layout:fixed;width:100%;font-size:11px;font-family:monospace">
+              <!-- 2D heatmap table — full width, scrolls horizontally
+                   at high bin counts (mirrors Recall sizing). -->
+              <div style="padding-top:2px;overflow-x:auto">
+                  <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
                     <thead>
                       <tr>
-                        <th style="text-align:right;color:#444;padding:2px 4px;font-weight:600;font-size:10px;width:42px">Y↓/X→</th>
+                        <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:11px">Y↓ / X→</th>
                         <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
-                          <th x-text="la" style="padding:2px 1px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></th>
+                          <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:11px;white-space:nowrap"></th>
                         </template>
                       </tr>
                     </thead>
@@ -3200,18 +3198,17 @@
                       <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
                         <tr>
                           <th x-text="heatmapData.y_labels[iy]"
-                              style="text-align:right;padding:2px 4px;color:#666;font-weight:600;font-size:10px;white-space:nowrap;width:42px"></th>
+                              style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
                           <template x-for="(cell, ix) in row" :key="'hmcell-'+iy+'-'+ix">
-                            <td :style="'background:' + hmCellBg(cell) + ';height:' + Math.max(18, Math.floor(420 / heatmapData.grid.length)) + 'px;text-align:center;vertical-align:middle;border:1px solid #111;padding:1px;transition:opacity .1s;overflow:hidden'"
+                            <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
                                 :class="pageMode === 'in_sample' ? ('hm-cell-selectable' + (isHmCellSelected(ix, iy) ? ' hm-cell-selected' : '')) : ''"
                                 :title="_hmCellTitle(cell, ix, iy)"
                                 @click="toggleHmCell(ix, iy)">
                               <template x-if="cell && cell.n > 0">
-                                <div style="line-height:1.1">
-                                  <span :style="'font-weight:700;display:block;color:#fff;font-size:' + (heatmapData.grid.length >= 15 ? 9 : heatmapData.grid.length >= 8 ? 11 : 13) + 'px'"
-                                        x-text="((cell.avg_ret||0)*100).toFixed(heatmapData.grid.length >= 15 ? 1 : 2) + '%'"></span>
-                                  <span :style="'opacity:.55;display:block;color:#fff;font-size:' + (heatmapData.grid.length >= 15 ? 8 : 10) + 'px'"
-                                        x-text="'n=' + cell.n"></span>
+                                <div>
+                                  <span style="font-size:13px;font-weight:700;display:block;color:#fff"
+                                        x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
+                                  <span style="font-size:11px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
                                 </div>
                               </template>
                             </td>
@@ -3221,26 +3218,37 @@
                     </tbody>
                   </table>
                 </div>
-                <!-- Right: 1D metric bar charts — modest fixed width
-                     (orientation/reference, not a precision read). -->
-                <div style="flex:0 0 160px;display:flex;flex-direction:column;gap:8px">
-                  <div style="display:flex;align-items:center;gap:6px">
-                    <span style="font-size:10px;color:var(--dim)">Bins:</span>
-                    <div class="mode-seg">
-                      <span :class="{on: hmBins1d===5}"  @click="setHmBins1d(5)">5</span>
-                      <span :class="{on: hmBins1d===10}" @click="setHmBins1d(10)">10</span>
-                      <span :class="{on: hmBins1d===20}" @click="setHmBins1d(20)">20</span>
+
+                <!-- 1D bin charts row, BELOW the heatmap. Side by side
+                     at 50% each (primary left, secondary right). The
+                     height stays modest (140px) — a wider canvas
+                     should not inflate vertical size, the charts are
+                     a shape/orientation reference, not a precision
+                     read. The Bins:5/10/20 toggle sits inline with
+                     the row so it controls both charts together. -->
+                <div style="display:flex;gap:12px;align-items:flex-start;margin-top:10px">
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <span style="font-size:10px;color:var(--dim)">Bins:</span>
+                      <div class="mode-seg">
+                        <span :class="{on: hmBins1d===5}"  @click="setHmBins1d(5)">5</span>
+                        <span :class="{on: hmBins1d===10}" @click="setHmBins1d(10)">10</span>
+                        <span :class="{on: hmBins1d===20}" @click="setHmBins1d(20)">20</span>
+                      </div>
+                    </div>
+                    <div style="height:140px;position:relative">
+                      <canvas id="chart-hm-x"></canvas>
                     </div>
                   </div>
-                  <div style="height:140px;position:relative">
-                    <canvas id="chart-hm-x"></canvas>
-                  </div>
-                  <div style="height:140px;position:relative">
-                    <canvas id="chart-hm-y"></canvas>
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">
+                    <!-- Spacer matches the Bins-toggle row height in the
+                         left column so both canvases line up vertically. -->
+                    <div style="height:22px"></div>
+                    <div style="height:140px;position:relative">
+                      <canvas id="chart-hm-y"></canvas>
+                    </div>
                   </div>
                 </div>
-              </div>
-              </div><!-- /50%-width wrap -->
 
               <!-- ── Zone Analyze — IS-mode only ───────────────────────────────────────
                    Shows when at least one heatmap cell is selected.

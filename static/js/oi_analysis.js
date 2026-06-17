@@ -2293,7 +2293,7 @@ document.addEventListener('alpine:init', () => {
     heatmapData: null,
     heatmapLoading: false,
     heatmapBins: 20,
-    hmBins1d: 10,
+    hmBins1d: 20,
     hmXData: null,
     hmYData: null,
     // Gate F replacement: n-slider for the heatmap. Cells with n below
