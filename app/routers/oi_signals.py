@@ -743,71 +743,96 @@ async def _ticker_calendars(oi_pool, tickers: list) -> dict:
     return by_t
 
 
-async def _holiday_mmdd_set(oi_pool) -> set:
-    """Derive a (month, day) holiday set from gaps in daily_features.
-    Single source of truth: the SAME table the equity curves and
-    firing detection read. No new persistent list, no external
-    dependency.
+_NYSE_VALID_DAYS_CACHE: dict = {"date": None, "valid_days": None}
 
-    Walks each weekday over the past 18 months; any weekday with no
-    trade_date row is a holiday. Stores as (month, day) tuples so
-    fixed-date holidays (Jan 1 / Jul 4 / Jun 19 Juneteenth / Dec 25)
-    project forward correctly across year boundaries.
 
-    Floating holidays (MLK 3rd Mon Jan, Memorial last Mon May, Labor
-    1st Mon Sep, Thanksgiving 4th Thu Nov, Good Friday by Easter)
-    shift 1-7 days year-over-year — the (mm, dd) heuristic will be
-    off for them. They self-correct as daily_features ingests new
-    data and the in-range branch (which uses the actual trade_date
-    list) takes over. Acceptable trade-off given the constraint of
-    not introducing a new persistent holiday list."""
-    if not oi_pool:
-        return set()
+def _get_nyse_valid_days() -> Optional[set]:
+    """Forward NYSE trading-day set from pandas_market_calendars.
+
+    Used by _exit_date_for's forward-projection branch when the
+    entry is at or past daily_features's last trade_date. The
+    library knows floating holidays (MLK 3rd Mon Jan, Memorial
+    last Mon May, Labor 1st Mon Sep, Thanksgiving 4th Thu Nov,
+    Good Friday by Easter) — the (mm, dd) heuristic this replaces
+    couldn't.
+
+    Cached daily — the underlying NYSE calendar is static so one
+    fetch covers every calendar request that day. Returns None
+    when pandas_market_calendars isn't installed; callers fall back
+    to weekend-only skipping and log nothing (the in-range branch
+    via daily_features remains the source of truth where data
+    exists, so the bleeding-edge forward case is the only thing
+    that degrades).
+
+    Range: 30 days back to 400 days forward of today. The back
+    overlap exists ONLY for the seam-verification logic the user
+    asked about — the most recent known holiday in daily_features
+    should also be a holiday in this library, otherwise the
+    handoff between branches drifts off-by-one near the data
+    boundary."""
     today = _date.today()
-    start = today - timedelta(days=18 * 30)
-    async with oi_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT DISTINCT trade_date FROM daily_features "
-            "WHERE trade_date >= $1 AND trade_date <= $2",
-            start, today)
-    known: set = {r["trade_date"] for r in rows}
-    holidays: set = set()
-    d = start
-    while d <= today:
-        if d.weekday() < 5 and d not in known:
-            holidays.add((d.month, d.day))
-        d = d + timedelta(days=1)
-    return holidays
+    if _NYSE_VALID_DAYS_CACHE["date"] == today:
+        return _NYSE_VALID_DAYS_CACHE["valid_days"]
+    try:
+        import pandas_market_calendars as mcal   # type: ignore
+    except ImportError:
+        _NYSE_VALID_DAYS_CACHE["date"] = today
+        _NYSE_VALID_DAYS_CACHE["valid_days"] = None
+        return None
+    try:
+        nyse  = mcal.get_calendar("NYSE")
+        start = today - timedelta(days=30)
+        end   = today + timedelta(days=400)
+        sched = nyse.valid_days(start_date=start.isoformat(),
+                                  end_date=end.isoformat())
+        valid = {ts.date() for ts in sched}
+    except Exception:
+        valid = None
+    _NYSE_VALID_DAYS_CACHE["date"] = today
+    _NYSE_VALID_DAYS_CACHE["valid_days"] = valid
+    return valid
 
 
-def _next_business_day(d: _date, holidays_mmdd: Optional[set] = None) -> _date:
-    """Add one calendar day, then skip weekends AND known holidays.
-    holidays_mmdd is the set built by _holiday_mmdd_set (derived from
-    daily_features gaps). When None or empty, falls back to weekend-
-    only skipping — used by callers that don't have the OI pool."""
+def _next_business_day(d: _date, valid_days: Optional[set] = None) -> _date:
+    """Add one calendar day, then advance until reaching the next
+    valid trading day. valid_days is the NYSE set from
+    _get_nyse_valid_days. When None (library unavailable), falls
+    back to weekend-only skipping — the documented limitation."""
     d = d + timedelta(days=1)
-    while d.weekday() >= 5 or (holidays_mmdd and (d.month, d.day) in holidays_mmdd):
+    if valid_days:
+        # Safety cap so a malformed cache can't hang the request.
+        guard = 0
+        while d not in valid_days and guard < 60:
+            d = d + timedelta(days=1)
+            guard += 1
+        return d
+    # Library unavailable: weekend-only fallback (off for holidays).
+    while d.weekday() >= 5:
         d = d + timedelta(days=1)
     return d
 
 
 def _exit_date_for(td_list: list, entry: _date, horizon: int,
-                    holidays_mmdd: Optional[set] = None) -> Optional[str]:
+                    valid_days: Optional[set] = None) -> Optional[str]:
     """Exit date = the Nth trade_date INCLUSIVE OF entry, where N = horizon.
     Entry day is day 1. A 1d outcome (held open-to-close same session)
     exits on the entry day itself; a 5d outcome entered Mon exits Fri
     of the same week (assuming no holiday).
 
-    In-range branch (entry within td_list): walks the actual
-    trade_date list from daily_features — weekends AND holidays are
-    skipped exactly, because they simply aren't in the list. This is
-    the SOURCE OF TRUTH and is preserved as-is.
+    The two branches operate on disjoint date ranges so they never
+    disagree on the same day — clean handoff at the data boundary:
 
-    Forward-projection branch (entry at or past td_list end):
-    previously skipped only Sat/Sun, which was the reported bug —
-    it'd land on holidays like Juneteenth. Now passes the
-    holidays_mmdd set (derived from daily_features gaps) into
-    _next_business_day so fixed-date holidays are skipped here too."""
+    In-range branch (entry within td_list, exit within td_list):
+    walks the actual trade_date list from daily_features. Source of
+    truth where data exists; weekends + holidays skipped exactly via
+    the list. This branch's correctness is independent of
+    valid_days — preserved as-is.
+
+    Forward-projection branch (entry or exit past td_list end):
+    walks the NYSE valid-days set from pandas_market_calendars,
+    which knows floating holidays (MLK, Memorial, Labor,
+    Thanksgiving, Good Friday). Falls back to weekend-only skipping
+    if the library is unavailable."""
     if horizon <= 0:
         return None
     # 1d (entry day only) always returns the entry date itself, even if
@@ -818,7 +843,7 @@ def _exit_date_for(td_list: list, entry: _date, horizon: int,
     if not td_list:
         d = entry
         for _ in range(horizon - 1):
-            d = _next_business_day(d, holidays_mmdd)
+            d = _next_business_day(d, valid_days)
         return d.isoformat()
 
     # Find the first index in td_list at or after entry. If entry is
@@ -827,7 +852,7 @@ def _exit_date_for(td_list: list, entry: _date, horizon: int,
     if idx is None:
         d = entry
         for _ in range(horizon - 1):
-            d = _next_business_day(d, holidays_mmdd)
+            d = _next_business_day(d, valid_days)
         return d.isoformat()
 
     # Step forward (horizon - 1) trading days from idx (entry counts as
@@ -835,12 +860,11 @@ def _exit_date_for(td_list: list, entry: _date, horizon: int,
     exit_idx = idx + (horizon - 1)
     if exit_idx < len(td_list):
         return td_list[exit_idx].isoformat()
-    # Need to walk past the end of the calendar by (exit_idx - last_idx)
-    # business days, holiday-aware.
+    # Past the end: walk forward via the NYSE library.
     d = td_list[-1]
     steps_past_end = exit_idx - (len(td_list) - 1)
     for _ in range(steps_past_end):
-        d = _next_business_day(d, holidays_mmdd)
+        d = _next_business_day(d, valid_days)
     return d.isoformat()
 
 
@@ -861,16 +885,16 @@ async def list_calendar(pool=Depends(get_pool), oi_pool=Depends(get_oi_pool)):
         return []
     tickers   = list({r["ticker"] for r in rows if r["ticker"]})
     calendars = await _ticker_calendars(oi_pool, tickers)
-    # Derive the holiday set once per request from daily_features
-    # gaps — same data the equity curves and firing detection use.
-    # Forward projections past each ticker's calendar max now skip
-    # fixed-date market holidays in addition to weekends.
-    holidays_mmdd = await _holiday_mmdd_set(oi_pool)
+    # NYSE valid-days from pandas_market_calendars for the forward-
+    # projection branch (entry/exit past daily_features's end).
+    # Library knows floating holidays + Good Friday + early closes.
+    # In-range branch uses daily_features directly — unchanged.
+    valid_days = _get_nyse_valid_days()
     out = []
     for r in rows:
         horizon = _parse_horizon(r["outcome"])
         td      = calendars.get(r["ticker"], [])
-        exit_d  = _exit_date_for(td, r["entry_date"], horizon, holidays_mmdd)
+        exit_d  = _exit_date_for(td, r["entry_date"], horizon, valid_days)
         out.append({
             "id":         r["id"],
             "ticker":     r["ticker"],

@@ -316,7 +316,7 @@
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_signals.js?v=21"></script>
+  <script src="/static/js/oi_signals.js?v=22"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -548,9 +548,26 @@
               <tr x-data="{ firingMap: gridBuildFiringMap(row) }">
                 <td style="font-size:11px;font-weight:700;color:var(--text);
                            padding:4px 4px;font-variant-numeric:tabular-nums">
-                  <span x-text="row.ticker"></span>
-                  <span style="display:block;font-size:9px;font-weight:400;color:var(--dim)"
-                        x-text="row.outcome"></span>
+                  <div style="display:flex;align-items:center;gap:5px">
+                    <!-- +Cal — confirmed unambiguous in the planning
+                         report: firing-grid rows are keyed
+                         by (ticker, outcome), so this is a clean call
+                         to the existing addToCalendar with the row's
+                         own outcome. No new calendar behavior. Uses
+                         firingData.as_of (the date the grid is
+                         showing), NOT today's calendar date, so the
+                         calendar entry's entry_date matches the
+                         firing date the user is actually viewing. -->
+                    <button class="btn-cal"
+                            @click.stop="addToCalendar(row.ticker, row.outcome, firingData.as_of)"
+                            :title="'+ Cal ' + row.ticker + ' · ' + row.outcome + ' · ' + (firingData.as_of || 'today')"
+                            style="font-size:9px;padding:2px 5px;flex-shrink:0">+ Cal</button>
+                    <div style="min-width:0">
+                      <span x-text="row.ticker"></span>
+                      <span style="display:block;font-size:9px;font-weight:400;color:var(--dim)"
+                            x-text="row.outcome"></span>
+                    </div>
+                  </div>
                 </td>
                 <template x-for="sig in firingData.all_signals" :key="'c-'+row.ticker+'|'+row.outcome+'|'+sig.signal_id">
                   <td style="padding:0;text-align:center">

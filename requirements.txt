@@ -12,3 +12,14 @@ scipy>=1.13.0
 matplotlib>=3.9.0
 reportlab>=4.2.0
 pyyaml>=6.0.2
+
+# Open Positions Calendar — NYSE valid-days for the forward-projection
+# branch of _exit_date_for in oi_signals.py. Library knows floating
+# holidays (MLK, Memorial, Labor, Thanksgiving, Good Friday) so the
+# close-date projection past daily_features's last trade_date is
+# correct. In-range branch (entry within daily_features) is unchanged
+# and remains the source of truth where data exists.
+# Lazy-imported with a weekend-only fallback so the app still serves
+# if pip hasn't run yet — install on VPS: pip install pandas_market_calendars
+pandas>=2.2.0
+pandas_market_calendars>=4.4.0
