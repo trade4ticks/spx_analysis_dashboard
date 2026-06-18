@@ -65,6 +65,13 @@ document.addEventListener('alpine:init', () => {
     calEntries:  [],
     calLoading:  false,
     _ganttRange: { start: new Date(), end: new Date(), totalDays: 60 },
+    // Open/closed lifecycle is DERIVED from exit_date vs today —
+    // no manual close flag. Default view is open-only (auto-pruned,
+    // no date limit needed); toggling closed-on reveals closed
+    // entries within calClosedDaysBack of today so 6 months of
+    // 5-10/day trades don't all render at once.
+    calShowClosed:     false,
+    calClosedDaysBack: 14,
 
     // ── Roster (watchlist-with-performance, every tracked signal) ───────
     roster:           [],
@@ -465,6 +472,50 @@ document.addEventListener('alpine:init', () => {
 
     // ── Calendar (Open Positions Gantt) ──────────────────────────────────
 
+    // Derived open/closed status — single rule that everything reads.
+    // Lacks an exit_date (server couldn't compute) → treat as open so
+    // it doesn't silently disappear; user can manually × it.
+    _calIsOpen(entry) {
+      if (!entry || !entry.exit_date) return true;
+      const today = new Date().toISOString().slice(0, 10);
+      return entry.exit_date >= today;
+    },
+
+    // Filtered list the template iterates. Open entries always shown;
+    // closed entries shown only when the toggle is on AND their
+    // exit_date is within calClosedDaysBack of today.
+    get filteredCalEntries() {
+      const today = new Date();
+      const cutoff = new Date(today.getTime()
+                              - (this.calClosedDaysBack || 14) * 86400000);
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      const out = [];
+      for (const e of (this.calEntries || [])) {
+        if (this._calIsOpen(e)) { out.push(e); continue; }
+        if (this.calShowClosed && e.exit_date >= cutoffIso) out.push(e);
+      }
+      return out;
+    },
+
+    calOpenCount() {
+      return (this.calEntries || []).filter(e => this._calIsOpen(e)).length;
+    },
+    calClosedCount() {
+      return (this.calEntries || []).filter(e => !this._calIsOpen(e)).length;
+    },
+
+    // Toggle / range setters — refresh the gantt time axis so the
+    // ticks track the visible set rather than the full backing list.
+    setCalShowClosed(v) {
+      this.calShowClosed = !!v;
+      this._updateGanttRange();
+    },
+    setCalClosedDaysBack(v) {
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n > 0) this.calClosedDaysBack = n;
+      this._updateGanttRange();
+    },
+
     async loadCalendar() {
       this.calLoading = true;
       try {
@@ -652,7 +703,10 @@ document.addEventListener('alpine:init', () => {
       let end = new Date(today);
       end.setDate(end.getDate() + 45);
 
-      for (const e of this.calEntries) {
+      // Range from the FILTERED list so the time axis tracks what's
+      // visible. Open-only views auto-prune to the near-future; the
+      // closed-on view expands left by calClosedDaysBack.
+      for (const e of this.filteredCalEntries) {
         if (e.entry_date) {
           const d = new Date(e.entry_date + 'T00:00:00');
           if (d < start) { start = new Date(d); start.setDate(start.getDate() - 3); }
