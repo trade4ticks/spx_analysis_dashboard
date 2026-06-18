@@ -316,7 +316,7 @@
   </style>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/oi_signals.js?v=22"></script>
+  <script src="/static/js/oi_signals.js?v=23"></script>
 </head>
 
 <body x-data="oiSignals" x-init="init()">
@@ -479,7 +479,14 @@
              N grows; min-width:0 on each cell prevents overflow. -->
         <table style="border-collapse:separate;border-spacing:2px;width:100%;table-layout:fixed">
           <colgroup>
-            <col style="width:54px">                                  <!-- ticker -->
+            <!-- Row-label column widened to fit the +Cal button +
+                 ticker stack on the top line (~75px content) and the
+                 outcome label on the bottom line (~60px). At 54px the
+                 ticker stack was overflowing into the first signal
+                 column; at 100px there's breathing room and the
+                 signal columns shrink proportionally to share the
+                 remaining width via table-layout:fixed. -->
+            <col style="width:100px">                                 <!-- ticker / outcome / +Cal -->
             <template x-for="sig in firingData.all_signals" :key="'col-'+sig.signal_id">
               <col :style="'max-width:78px;min-width:34px'">          <!-- signal cols -->
             </template>
