@@ -26,11 +26,17 @@
       background:var(--surface); border:1px solid var(--border);
       border-radius:6px; padding:8px 12px; margin-bottom:12px;
     }
-    .ta-ctrl .ta-sel {
+    /* Dark dropdowns everywhere on this page (control bar + pane headers),
+       matching Factor Analysis. The option/optgroup background is the part
+       that fixes the white popup on dark. */
+    .ta-sel {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:12px; padding:5px 8px; border-radius:4px;
     }
-    .ta-ctrl .ta-sel option { background:var(--raised); color:var(--text); }
+    .ta-sel option, .ta-sel optgroup {
+      background:var(--raised); color:var(--text);
+    }
+    .ta-sel optgroup { font-weight:700; color:var(--muted); }
     .ta-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
     .ta-spacer { margin-left:auto; }
 
@@ -108,6 +114,14 @@
     .ta-today-line b { color:var(--text); }
     .ta-x { background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; }
     .ta-x:hover { color:#e84393; }
+    /* "On price" overlay checkbox in pane header. */
+    .ta-onprice {
+      display:flex; align-items:center; gap:3px; white-space:nowrap;
+      font-size:10px; color:var(--dim); cursor:pointer; user-select:none;
+    }
+    .ta-onprice input { margin:0; cursor:pointer; accent-color:var(--accent); }
+    .ta-onprice.on { color:var(--accent); }
+    .ta-onprice .ta-swatch { width:9px; height:9px; border-radius:2px; display:inline-block; }
     .ta-pane-err { color:var(--danger); font-size:11px; padding:14px; text-align:center; }
     .ta-pane-loading { color:var(--dim); font-size:11px; padding:14px; text-align:center; }
   </style>
@@ -116,7 +130,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=3"></script>
+  <script src="/static/js/ticker_analysis.js?v=4"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -252,10 +266,19 @@
             <div class="ta-pane">
               <div class="ta-pane-hdr">
                 <select class="ta-sel" x-model="pane.metric" @change="onPaneMetricChange(pane)">
-                  <template x-for="m in metricOptions" :key="m">
-                    <option :value="m" x-text="m"></option>
+                  <template x-for="grp in groupMetricsByFamily(metricOptions)" :key="'g'+pane.id+'-'+grp.family_num">
+                    <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+                      <template x-for="m in grp.metrics" :key="m">
+                        <option :value="m" x-text="m"></option>
+                      </template>
+                    </optgroup>
                   </template>
                 </select>
+                <label class="ta-onprice" :class="{on: pane.onPrice}" title="Overlay this metric on the price chart">
+                  <input type="checkbox" x-model="pane.onPrice" @change="togglePaneOnPrice(pane)">
+                  <span class="ta-swatch" x-show="pane.onPrice" :style="`background:${paneOverlayColor(pane.id)}`"></span>
+                  on price
+                </label>
                 <span class="ta-pill" :class="{accent: pane.selectedBins.length}"
                       x-text="pane.selectedBins.length ? (pane.selectedBins.length + ' sel') : '—'"></span>
                 <button class="ta-x" @click="removePane(pane.id)" title="Remove pane">×</button>

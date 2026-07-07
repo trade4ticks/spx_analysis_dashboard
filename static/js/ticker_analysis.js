@@ -10,8 +10,10 @@
  *     lean marker) + value-over-time sub-pane (selected-bin band)
  *   • bin selection drives the confluence/union price-chart highlight
  *   • dynamic union/dedup stat strip, recomputed client-side
- * Deferred to later phases: "Today — what's unusual" row + on-price metric
- * overlays (2b), saved named layouts (P3), option-chain section (P4+).
+ *   • family-grouped metric dropdowns; "on price" overlays; spike-preserving
+ *     (min/max) value-over-time rendering at full span
+ * Deferred to later phases: "Today — what's unusual" row (2b), saved named
+ * layouts (P3), option-chain section (P4+).
  * ==========================================================================*/
 
 /* Forward-return horizons offered in the control bar (brief §3.1).
@@ -26,6 +28,10 @@ const TA_HORIZONS = [
 
 const TA_BLUE = '#3498db';   // positive / calls / long / above (theme --accent)
 const TA_PINK = '#e84393';   // negative / puts / short / below
+
+/* Distinct colors for "on price" metric overlays — deliberately NOT blue or
+ * pink (those carry sign meaning). Assigned by order among overlaid panes. */
+const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff', '#e056fd'];
 
 /* Chart.js instances and heavy per-pane series live OUTSIDE Alpine's
  * reactive proxy — wrapping Chart internals or 1.7k-row arrays in a Proxy
@@ -75,7 +81,8 @@ document.addEventListener('alpine:init', () => {
     shadeMode: 'confluence',       // 'confluence' (default) | 'union'  (§5.1)
 
     metricOptions: [],             // flat list of eligible metric columns
-    panes: [],                     // [{id, metric, loading, error, selectedBins:[], today}]
+    metricFamilyLookup: {},        // metric -> {family_num, family_name} (for <optgroup>)
+    panes: [],                     // [{id, metric, loading, error, selectedBins:[], today, onPrice}]
     paneSeq: 0,
     priceLoading: false,
     priceError: '',
@@ -109,6 +116,13 @@ document.addEventListener('alpine:init', () => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         this.metricOptions = j.features || [];
+        // Build metric→family lookup for <optgroup> rendering (same family
+        // hierarchy the Factor Analysis dropdowns use, from metric_classification).
+        const lut = {};
+        for (const grp of (j.feature_families || [])) {
+          for (const m of grp.metrics) lut[m] = { family_num: grp.family_num, family_name: grp.family_name };
+        }
+        this.metricFamilyLookup = lut;
       } catch (e) {
         console.error('[ticker-analysis] loadMetricOptions failed:', e);
         this.metricOptions = [];
@@ -154,6 +168,7 @@ document.addEventListener('alpine:init', () => {
         error: '',
         selectedBins: [],
         today: null,
+        onPrice: false,
       };
       this.panes.push(pane);
       if (render && this.ticker) {
@@ -167,18 +182,50 @@ document.addEventListener('alpine:init', () => {
     removePane(id) {
       const i = this.panes.findIndex(p => p.id === id);
       if (i === -1) return;
+      const wasOnPrice = this.panes[i].onPrice;
       this.destroyPaneCharts(id);
       delete TA_DATA[id];
       this.panes.splice(i, 1);
-      this.$nextTick(() => this.recompute());
+      this.$nextTick(() => {
+        if (wasOnPrice) this.renderPrice();   // remaining overlays re-color
+        this.recompute();
+      });
     },
 
     onPaneMetricChange(pane) {
       pane.selectedBins = [];   // bins are metric-specific; reset on metric swap
       this.loadPaneData(pane).then(() => this.$nextTick(() => {
         this.renderPane(pane);
+        if (pane.onPrice) this.renderPrice();   // overlay follows the new metric
         this.recompute();
       }));
+    },
+
+    // Group a flat metric list by family via metricFamilyLookup — same
+    // hierarchy and ordering the Factor Analysis dropdowns use (families
+    // sorted by number, metrics alpha within, unknowns → "Other").
+    groupMetricsByFamily(list) {
+      const groups = new Map();   // family_num -> {family_num, family_name, metrics:[]}
+      for (const m of (list || [])) {
+        const fam = this.metricFamilyLookup[m];
+        const key = fam ? fam.family_num : 999;
+        const label = fam ? fam.family_name : 'Other';
+        if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
+        groups.get(key).metrics.push(m);
+      }
+      for (const g of groups.values()) g.metrics.sort((a, b) => String(a).localeCompare(String(b)));
+      return [...groups.values()].sort((a, b) => a.family_num - b.family_num);
+    },
+
+    // ── "On price" overlays (§5.2) ───────────────────────────────────────
+    togglePaneOnPrice(pane) {
+      this.renderPrice();   // rebuild price chart with the current overlay set
+    },
+
+    paneOverlayColor(id) {
+      const on = this.panes.filter(p => p.onPrice);
+      const i = on.findIndex(p => p.id === id);
+      return i === -1 ? TA_BLUE : TA_OVERLAY_COLORS[i % TA_OVERLAY_COLORS.length];
     },
 
     async loadPaneData(pane) {
@@ -282,18 +329,46 @@ document.addEventListener('alpine:init', () => {
       labels.forEach((d, i) => { idxByDate[d] = i; });
       const splitIdx = pd.splits.map(s => ({ i: idxByDate[s.date], ratio: s.ratio })).filter(s => s.i != null);
 
+      // "On price" overlays (§5.2): each checked pane's metric, normalized to
+      // its own [min,max] and drawn on a hidden 0..1 right axis, distinct color.
+      const overlays = this.panes.filter(p => p.onPrice && TA_DATA[p.id]);
+      const ovlDatasets = overlays.map((p, k) => {
+        const d = TA_DATA[p.id];
+        let mn = Infinity, mx = -Infinity;
+        for (const pt of d.series) { if (pt.val < mn) mn = pt.val; if (pt.val > mx) mx = pt.val; }
+        const rng = mx > mn ? mx - mn : 1;
+        const arr = new Array(labels.length).fill(null);
+        for (const pt of d.series) { const i = idxByDate[pt.date]; if (i != null) arr[i] = (pt.val - mn) / rng; }
+        return {
+          label: p.metric, data: arr, yAxisID: 'ovl',
+          borderColor: TA_OVERLAY_COLORS[k % TA_OVERLAY_COLORS.length],
+          borderWidth: 1, pointRadius: 0, tension: 0, spanGaps: true,
+        };
+      });
+
+      const scales = this._baseScales();
+      scales.ovl = { position: 'right', display: false, min: 0, max: 1 };
+
       TA_CHARTS.price = new Chart(cvs.getContext('2d'), {
         type: 'line',
-        data: { labels, datasets: [{
-          data: pd.series.map(p => p.close),
-          borderColor: '#bdc3c7', borderWidth: 1, pointRadius: 0, tension: 0,
-        }] },
+        data: { labels, datasets: [
+          { label: this.ticker, data: pd.series.map(p => p.close),
+            borderColor: '#bdc3c7', borderWidth: 1, pointRadius: 0, tension: 0 },
+          ...ovlDatasets,
+        ] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
-          plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false,
-            callbacks: { title: items => labels[items[0].dataIndex],
-                         label: it => 'close ' + it.parsed.y } } },
-          scales: this._baseScales(),
+          plugins: {
+            legend: { display: overlays.length > 0, position: 'top',
+              labels: { color: '#c8c8c8', font: { size: 9 }, boxWidth: 10, boxHeight: 2,
+                        filter: item => item.datasetIndex !== 0 } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { title: items => labels[items[0].dataIndex],
+                label: it => it.datasetIndex === 0
+                  ? 'close ' + it.parsed.y
+                  : it.dataset.label + ' (norm) ' + (it.parsed.y == null ? '—' : it.parsed.y.toFixed(2)) } },
+          },
+          scales,
         },
         plugins: [{
           id: 'taPriceOverlay',
@@ -457,7 +532,9 @@ document.addEventListener('alpine:init', () => {
       TA_CHARTS.series[pane.id] = new Chart(cvs.getContext('2d'), {
         type: 'line',
         data: { labels, datasets: [{
-          data: vals, borderColor: TA_BLUE, borderWidth: 1, tension: 0,
+          // Faint connector through every daily point; the solid spike extent
+          // is drawn by the taMinMax plugin below.
+          data: vals, borderColor: 'rgba(52,152,219,.30)', borderWidth: 1, tension: 0,
           pointRadius: ptRadius, pointBackgroundColor: ptColor,
         }] },
         options: {
@@ -480,6 +557,35 @@ document.addEventListener('alpine:init', () => {
             ctx.fillRect(chartArea.left, yc, chartArea.right - chartArea.left, chartArea.bottom - yc);
             ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
             ctx.beginPath(); ctx.moveTo(chartArea.left, yc); ctx.lineTo(chartArea.right, yc); ctx.stroke();
+            ctx.restore();
+          },
+        }, {
+          // Min/max decimation: bucket every daily point by horizontal pixel
+          // and draw a vertical line from the bucket's min to its max. Any
+          // bucket containing a spike shows that spike's full vertical extent
+          // at any pane width — the full daily series, no thinning, no slider.
+          id: 'taMinMax',
+          afterDatasetsDraw(chart) {
+            const { ctx, scales } = chart;
+            const xs = scales.x, ys = scales.y;
+            const pts = d.series;
+            if (!pts.length) return;
+            const buckets = new Map();   // px -> {min, max}
+            for (let i = 0; i < pts.length; i++) {
+              const v = pts[i].val;
+              const px = Math.round(xs.getPixelForValue(i));
+              const b = buckets.get(px);
+              if (!b) buckets.set(px, { min: v, max: v });
+              else { if (v < b.min) b.min = v; if (v > b.max) b.max = v; }
+            }
+            ctx.save();
+            ctx.strokeStyle = 'rgba(52,152,219,.9)'; ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (const [px, b] of buckets) {
+              ctx.moveTo(px + 0.5, ys.getPixelForValue(b.max));
+              ctx.lineTo(px + 0.5, ys.getPixelForValue(b.min));
+            }
+            ctx.stroke();
             ctx.restore();
           },
         }],
