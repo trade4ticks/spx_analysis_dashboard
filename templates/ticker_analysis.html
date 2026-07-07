@@ -68,13 +68,55 @@
       white-space:nowrap;
     }
     .ta-pill.accent { background:rgba(52,152,219,.12); border-color:var(--accent); color:var(--accent); }
+
+    /* Stat strip (§4). */
+    .ta-stat-strip { display:flex; flex-wrap:wrap; gap:0; }
+    .ta-stat {
+      flex:1; min-width:78px; padding:6px 10px;
+      border-right:1px solid var(--border);
+    }
+    .ta-stat:last-child { border-right:none; }
+    .ta-stat-lbl { font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+    .ta-stat-val { font-size:14px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--text); }
+    .ta-stat-val.a { color:var(--accent); }
+    .ta-stat-val.pink { color:#e84393; }
+
+    /* Chart wrappers — Chart.js needs a sized, positioned parent. */
+    .ta-chart-wrap { position:relative; width:100%; }
+    .ta-chart-wrap.price  { height:230px; }
+    .ta-chart-wrap.bars   { height:150px; }
+    .ta-chart-wrap.series { height:120px; }
+
+    /* Metric panes grid. */
+    .ta-pane-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:10px; }
+    .ta-pane {
+      background:var(--bg); border:1px solid var(--border); border-radius:5px;
+      display:flex; flex-direction:column;
+    }
+    .ta-pane-hdr {
+      display:flex; align-items:center; gap:8px;
+      padding:6px 8px; border-bottom:1px solid var(--border); background:var(--raised);
+      border-top-left-radius:5px; border-top-right-radius:5px;
+    }
+    .ta-pane-hdr .ta-sel { flex:1; min-width:0; }
+    .ta-pane-body { padding:6px 8px 8px; }
+    .ta-subpane-lbl {
+      font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px;
+      margin:4px 2px 2px;
+    }
+    .ta-today-line { font-size:10px; color:var(--muted); margin-top:4px; }
+    .ta-today-line b { color:var(--text); }
+    .ta-x { background:transparent; border:none; color:var(--dim); cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; }
+    .ta-x:hover { color:#e84393; }
+    .ta-pane-err { color:var(--danger); font-size:11px; padding:14px; text-align:center; }
+    .ta-pane-loading { color:var(--dim); font-size:11px; padding:14px; text-align:center; }
   </style>
 
   <!-- Page module (?v= cache-bust, matching the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=2"></script>
+  <script src="/static/js/ticker_analysis.js?v=3"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -119,9 +161,9 @@
       <div class="ctrl-div"></div>
 
       <span class="ta-lbl">Horizon</span>
-      <select class="ta-sel" x-model="horizon" @change="onHorizonChange()" style="min-width:140px;">
-        <template x-for="h in horizons" :key="h.value">
-          <option :value="h.value" x-text="h.label"></option>
+      <select class="ta-sel" x-model="horizon" @change="onHorizonChange()" style="min-width:150px;">
+        <template x-for="h in horizons" :key="h">
+          <option :value="h" x-text="h"></option>
         </template>
       </select>
 
@@ -151,8 +193,18 @@
         <span class="ta-section-title">Stat Strip</span>
         <span class="ta-section-sub" x-text="selectedBinCount>0 ? 'working set = union of selected bins' : 'all dates (no bins selected)'"></span>
       </div>
-      <div class="ta-section-body">
-        <div class="ta-placeholder">Dynamic stat strip <span class="ta-phase-tag">Phase 2</span></div>
+      <div class="ta-section-body" style="padding:0;">
+        <template x-if="!stats.length">
+          <div class="ta-placeholder" style="margin:12px;">No returns in the working set yet.</div>
+        </template>
+        <div class="ta-stat-strip" x-show="stats.length">
+          <template x-for="s in stats" :key="s.label">
+            <div class="ta-stat">
+              <div class="ta-stat-lbl" x-text="s.label"></div>
+              <div class="ta-stat-val" :class="s.cls" x-text="s.value"></div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
@@ -160,10 +212,18 @@
     <div class="ta-section">
       <div class="ta-section-hdr">
         <span class="ta-section-title">Price — full history</span>
-        <span class="ta-section-sub">splits · bin-highlight overlay · metric overlays</span>
+        <span class="ta-section-sub">
+          close · <span style="color:#e84393">splits</span> ·
+          <span style="color:var(--accent)">bin-highlight</span> (<span x-text="shadeMode"></span>)
+        </span>
       </div>
       <div class="ta-section-body">
-        <div class="ta-placeholder" style="min-height:180px;">Full-width price chart <span class="ta-phase-tag">Phase 2</span></div>
+        <template x-if="priceError">
+          <div class="ta-pane-err" x-text="priceError"></div>
+        </template>
+        <div class="ta-chart-wrap price" x-show="!priceError">
+          <canvas id="ta-price"></canvas>
+        </div>
       </div>
     </div>
 
@@ -174,7 +234,7 @@
         <span class="ta-section-sub">value · 20-bin index · percentile, sorted by distance from median</span>
       </div>
       <div class="ta-section-body">
-        <div class="ta-placeholder">Today readout row <span class="ta-phase-tag">Phase 2</span></div>
+        <div class="ta-placeholder">Today readout row <span class="ta-phase-tag">Phase 2b</span></div>
       </div>
     </div>
 
@@ -182,12 +242,53 @@
     <div class="ta-section">
       <div class="ta-section-hdr">
         <span class="ta-section-title">Metric Panes</span>
-        <span class="ta-section-sub">20-bin fwd-P&amp;L bars + value-over-time, per metric</span>
+        <span class="ta-section-sub">click bars to select bins · today marker leans within its bin</span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
-        <button class="btn" disabled>+ Add pane</button>
+        <button class="btn" @click="addPane()" :disabled="!metricOptions.length">+ Add pane</button>
       </div>
       <div class="ta-section-body">
-        <div class="ta-placeholder" style="min-height:140px;">Metric panes (add/remove) <span class="ta-phase-tag">Phase 2</span></div>
+        <div class="ta-pane-grid">
+          <template x-for="pane in panes" :key="pane.id">
+            <div class="ta-pane">
+              <div class="ta-pane-hdr">
+                <select class="ta-sel" x-model="pane.metric" @change="onPaneMetricChange(pane)">
+                  <template x-for="m in metricOptions" :key="m">
+                    <option :value="m" x-text="m"></option>
+                  </template>
+                </select>
+                <span class="ta-pill" :class="{accent: pane.selectedBins.length}"
+                      x-text="pane.selectedBins.length ? (pane.selectedBins.length + ' sel') : '—'"></span>
+                <button class="ta-x" @click="removePane(pane.id)" title="Remove pane">×</button>
+              </div>
+              <div class="ta-pane-body">
+                <template x-if="pane.error">
+                  <div class="ta-pane-err" x-text="pane.error"></div>
+                </template>
+                <template x-if="pane.loading && !pane.error">
+                  <div class="ta-pane-loading">Loading…</div>
+                </template>
+                <div x-show="!pane.error && !pane.loading">
+                  <div class="ta-subpane-lbl">Avg fwd return by 20-bin (IS)</div>
+                  <div class="ta-chart-wrap bars">
+                    <canvas :id="`ta-bars-${pane.id}`"></canvas>
+                  </div>
+                  <div class="ta-subpane-lbl">Metric value over time</div>
+                  <div class="ta-chart-wrap series">
+                    <canvas :id="`ta-series-${pane.id}`"></canvas>
+                  </div>
+                  <template x-if="pane.today">
+                    <div class="ta-today-line">
+                      Today: <b x-text="pane.today.value"></b>
+                      · bin <b x-text="pane.today.bin"></b>
+                      · <b x-text="Math.round(pane.today.frac*100) + '%'"></b> into bin
+                      · <b x-text="pane.today.percentile + '%ile'"></b>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
