@@ -166,13 +166,27 @@
       font-size:12px; padding:4px 6px; border-radius:4px; width:66px;
       color-scheme:dark;   /* dark native spinner arrows */
     }
+
+    /* Strike×DTE heatmap grid. */
+    .ta-hm-scroll { overflow-x:auto; padding-bottom:4px; }
+    .ta-hm-scroll::-webkit-scrollbar { height:6px; }
+    .ta-hm-grid { display:grid; grid-auto-rows:20px; gap:1px; align-items:stretch; }
+    .ta-hm-rowlbl {
+      position:sticky; left:0; z-index:1;
+      background:var(--surface); color:var(--dim);
+      font-size:9px; display:flex; align-items:center; padding-right:6px;
+      justify-content:flex-end; white-space:nowrap;
+    }
+    .ta-hm-cell { height:20px; border-radius:1px; }
+    .ta-hm-cell.spot { box-shadow:inset 1px 0 0 rgba(255,255,255,.85); }
+    .ta-hm-axis { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:4px; }
   </style>
 
   <!-- Page module (?v= cache-bust, matching the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=12"></script>
+  <script src="/static/js/ticker_analysis.js?v=13"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -395,16 +409,23 @@
       </div>
     </div>
 
-    <!-- Option chain section (§5.4) — OI-by-strike profile (P4a) -->
+    <!-- Option chain section (§5.4) — OI profile (P4a) + strike×DTE heatmap (P4b) -->
     <div class="ta-section">
       <div class="ta-section-hdr">
-        <span class="ta-section-title">Option Chain — OI by strike</span>
-        <span class="ta-section-sub">
+        <span class="ta-section-title">Option Chain</span>
+        <div class="seg" style="margin-left:6px;">
+          <div class="seg-btn" :class="{on: chainView==='profile'}" @click="setChainView('profile')">OI profile</div>
+          <div class="seg-btn" :class="{on: chainView==='strikeDte'}" @click="setChainView('strikeDte')">Strike×DTE</div>
+        </div>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='profile'">
           split-adjusted · puts <span style="color:#e84393">left</span> /
           calls <span style="color:var(--accent)">right</span> · spot line
         </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='strikeDte'">
+          rows = DTE buckets · cols = strikes · <span style="color:var(--accent)">sequential blue</span> · spot column marked
+        </span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
-        <button class="btn" @click="loadChainProfile(true)" title="Recompute (bypass cache)">↻ Recompute</button>
+        <button class="btn" @click="chainReload(true)" title="Recompute (bypass cache)">↻ Recompute</button>
       </div>
       <div class="ta-section-body">
         <template x-if="chainError">
@@ -418,34 +439,88 @@
                    :disabled="!chainDates.length">
             <span class="ta-hint" x-text="chainDate || '—'"></span>
 
-            <div class="ctrl-div"></div>
-            <span class="ta-lbl">DTE</span>
-            <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="loadChainProfile()">
-            <span class="ta-hint">to</span>
-            <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="loadChainProfile()">
+            <!-- OI/Vol toggle (heatmap only) -->
+            <template x-if="chainView==='strikeDte'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Metric</span>
+                <div class="seg">
+                  <div class="seg-btn" :class="{on: chainMetric==='oi'}" @click="chainMetric='oi'; loadChainHeatmap()">OI</div>
+                  <div class="seg-btn" :class="{on: chainMetric==='vol'}" @click="chainMetric='vol'; loadChainHeatmap()">Vol</div>
+                </div>
+              </div>
+            </template>
+
+            <!-- DTE range (profile only — the heatmap shows all DTE buckets) -->
+            <template x-if="chainView==='profile'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">DTE</span>
+                <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="loadChainProfile()">
+                <span class="ta-hint">to</span>
+                <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="loadChainProfile()">
+              </div>
+            </template>
 
             <div class="ctrl-div"></div>
             <span class="ta-lbl">Moneyness&nbsp;±%</span>
             <input type="number" class="ta-num" min="0" step="1" placeholder="off"
-                   x-model="chainMoneyness" @change="loadChainProfile()">
+                   x-model="chainMoneyness" @change="chainReload()">
 
             <div class="ta-spacer" style="margin-left:auto;"></div>
-            <span class="ta-hint" x-show="chainProfile">
+            <span class="ta-hint" x-show="chainView==='profile' && chainProfile">
               spot <b x-text="chainProfile?.spot ?? '—'"></b> ·
               adj× <b x-text="chainProfile?.adj_factor ?? '—'"></b> ·
               <b x-text="chainProfile?.n ?? 0"></b> strikes
+            </span>
+            <span class="ta-hint" x-show="chainView==='strikeDte' && chainHeatmap">
+              spot <b x-text="chainHeatmap?.spot ?? '—'"></b> ·
+              <b x-text="chainHeatmap?.strikes?.length ?? 0"></b> strikes · max <b x-text="(chainHeatmap?.max ?? 0).toLocaleString()"></b>
             </span>
           </div>
 
           <template x-if="chainLoading">
             <div class="ta-pane-loading">Loading chain…</div>
           </template>
-          <template x-if="!chainLoading && chainProfile && chainProfile.empty">
-            <div class="ta-placeholder">No OI for this snapshot / filters.</div>
-          </template>
-          <div class="ta-chart-wrap" style="height:380px;"
-               x-show="!chainLoading && chainProfile && !chainProfile.empty">
-            <canvas id="ta-chain-profile"></canvas>
+
+          <!-- OI profile -->
+          <div x-show="chainView==='profile'">
+            <template x-if="!chainLoading && chainProfile && chainProfile.empty">
+              <div class="ta-placeholder">No OI for this snapshot / filters.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:380px;"
+                 x-show="!chainLoading && chainProfile && !chainProfile.empty">
+              <canvas id="ta-chain-profile"></canvas>
+            </div>
+          </div>
+
+          <!-- Strike×DTE heatmap -->
+          <div x-show="chainView==='strikeDte'">
+            <template x-if="!chainLoading && chainHeatmap && chainHeatmap.empty">
+              <div class="ta-placeholder">No data for this snapshot / metric / filters.</div>
+            </template>
+            <div x-show="!chainLoading && chainHeatmap && !chainHeatmap.empty">
+              <div class="ta-hm-scroll">
+                <div class="ta-hm-grid"
+                     :style="`grid-template-columns:64px repeat(${chainHeatmap.strikes.length}, 12px)`">
+                  <template x-for="row in chainHmRows" :key="row.label">
+                    <div style="display:contents;">
+                      <div class="ta-hm-rowlbl" x-text="row.label"></div>
+                      <template x-for="(v, ci) in row.values" :key="ci">
+                        <div class="ta-hm-cell" :class="{spot: ci===chainSpotCol}"
+                             :style="hmCellStyle(v)"
+                             :title="row.label + ' · ' + chainHeatmap.strikes[ci] + ' · ' + (v||0).toLocaleString()"></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <div class="ta-hm-axis" x-show="chainHeatmap.strikes.length">
+                <span x-text="'low ' + chainHeatmap.strikes[0]"></span>
+                <span style="color:var(--text)" x-text="'spot ' + (chainHeatmap.spot ?? '—')"></span>
+                <span x-text="'high ' + chainHeatmap.strikes[chainHeatmap.strikes.length-1]"></span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

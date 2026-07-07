@@ -15,7 +15,9 @@
  *   • "Today — what's unusual" row: per-metric today value / bin / percentile,
  *     extremes first (from /today-scan); click a cell to add it as a pane
  *   • saved layouts: name/save/apply/delete the pane set (ticker-agnostic)
- * Deferred to later phases: option-chain section (P4+).
+ *   • option chain: OI-by-strike profile + strike×DTE heatmap (OI/Vol),
+ *     split-adjusted, date-slider, cached (/chain/* endpoints)
+ * Deferred: chain flow map, 3D surface, ΔOI / vol-vs-OI, IV smile/term.
  * ==========================================================================*/
 
 /* Forward-return horizons offered in the control bar (brief §3.1).
@@ -100,13 +102,16 @@ document.addEventListener('alpine:init', () => {
     layouts: [],                   // [{id, name, layout, created_at}] saved layouts
     selectedLayoutId: '',          // control-bar layout selector
 
-    // Option chain — OI-by-strike profile (§5.4, P4a)
+    // Option chain (§5.4): OI profile (P4a) + strike×DTE heatmap (P4b)
+    chainView: 'profile',          // 'profile' | 'strikeDte'
+    chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
     chainDates: [],
     chainDateIdx: 0,
     chainDteMin: 0,
     chainDteMax: 3650,
     chainMoneyness: '',            // '' = off; else ± percent
     chainProfile: null,
+    chainHeatmap: null,
     chainLoading: false,
     chainError: '',
     _chainDebounce: null,
@@ -170,7 +175,7 @@ document.addEventListener('alpine:init', () => {
       });
       // Chain section loads independently (parquet-backed, cached) so it
       // never delays the metric layer.
-      this.loadChainDates().then(() => this.loadChainProfile());
+      this.loadChainDates().then(() => this.chainReload());
     },
 
     async loadTodayScan() {
@@ -459,7 +464,19 @@ document.addEventListener('alpine:init', () => {
 
     chainScrub() {
       clearTimeout(this._chainDebounce);
-      this._chainDebounce = setTimeout(() => this.loadChainProfile(), 300);
+      this._chainDebounce = setTimeout(() => this.chainReload(), 300);
+    },
+
+    // Route the shared controls (date/moneyness/Recompute) to the active view.
+    chainReload(force = false) {
+      if (this.chainView === 'strikeDte') this.loadChainHeatmap(force);
+      else this.loadChainProfile(force);
+    },
+
+    setChainView(v) {
+      if (this.chainView === v) return;
+      this.chainView = v;
+      this.chainReload();
     },
 
     async loadChainProfile(force = false) {
@@ -547,6 +564,54 @@ document.addEventListener('alpine:init', () => {
           },
         }],
       });
+    },
+
+    // Strike×DTE heatmap (P4b) --------------------------------------------
+    async loadChainHeatmap(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/strike-dte?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&metric=${this.chainMetric}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainHeatmap = null; }
+        else this.chainHeatmap = j;
+      } catch (e) {
+        console.error('[ticker-analysis] loadChainHeatmap failed:', e);
+        this.chainError = 'load failed'; this.chainHeatmap = null;
+      } finally {
+        this.chainLoading = false;
+      }
+    },
+
+    // Non-empty DTE-bucket rows only (skip buckets with no contracts).
+    get chainHmRows() {
+      const hm = this.chainHeatmap;
+      if (!hm || !hm.rows) return [];
+      return hm.rows
+        .map((values, i) => ({ label: hm.dte_buckets[i], values }))
+        .filter(r => r.values.some(v => v > 0));
+    },
+
+    // Column index of the strike nearest spot (for the vertical spot marker).
+    get chainSpotCol() {
+      const hm = this.chainHeatmap;
+      if (!hm || !hm.strikes || !hm.strikes.length || hm.spot == null) return -1;
+      let best = 0, bd = Infinity;
+      hm.strikes.forEach((s, i) => { const dd = Math.abs(s - hm.spot); if (dd < bd) { bd = dd; best = i; } });
+      return best;
+    },
+
+    hmCellStyle(v) {
+      const max = this.chainHeatmap?.max || 1;
+      if (!v) return 'background:transparent';
+      const a = 0.06 + 0.9 * (v / max);   // sequential blue (level mode)
+      return `background:rgba(52,152,219,${a.toFixed(3)})`;
     },
 
     // ── Data loads ───────────────────────────────────────────────────────
