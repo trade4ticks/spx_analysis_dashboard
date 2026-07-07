@@ -210,12 +210,24 @@ document.addEventListener('alpine:init', () => {
           // Guard against the <select> reconciling pane.metric back to its
           // first option before its own option renders (see paneMetricGroups).
           if (pane.metric !== wanted) pane.metric = wanted;
-          this.$nextTick(() => {
-            this.renderPane(pane);
-            this.recompute();
-          });
+          this._renderPaneWhenReady(pane);
         });
       }
+    },
+
+    // Render a pane's charts once its canvas is actually visible in the
+    // layout tree. A freshly-added pane is hidden (x-show, loading=true)
+    // while its data loads, so drawing immediately would target a zero-size
+    // canvas and show nothing — the reason a new pane came up blank until
+    // you changed its metric. Poll across animation frames until laid out.
+    _renderPaneWhenReady(pane, tries = 0) {
+      const cvs = document.getElementById(`ta-bars-${pane.id}`);
+      if ((cvs && cvs.offsetParent !== null) || tries >= 30) {
+        this.renderPane(pane);
+        this.recompute();
+        return;
+      }
+      requestAnimationFrame(() => this._renderPaneWhenReady(pane, tries + 1));
     },
 
     // Option list for a pane's metric dropdown: the eligible feature universe
@@ -243,11 +255,10 @@ document.addEventListener('alpine:init', () => {
 
     onPaneMetricChange(pane) {
       pane.selectedBins = [];   // bins are metric-specific; reset on metric swap
-      this.loadPaneData(pane).then(() => this.$nextTick(() => {
-        this.renderPane(pane);
-        if (pane.onPrice) this.renderPrice();   // overlay follows the new metric
-        this.recompute();
-      }));
+      this.loadPaneData(pane).then(() => {
+        this._renderPaneWhenReady(pane);
+        if (pane.onPrice) this.$nextTick(() => this.renderPrice());   // overlay follows the new metric
+      });
     },
 
     // Group a flat metric list by family via metricFamilyLookup — same
