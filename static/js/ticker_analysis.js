@@ -194,9 +194,10 @@ document.addEventListener('alpine:init', () => {
     // ── Panes ────────────────────────────────────────────────────────────
     addPane(metric = null, render = true) {
       const id = ++this.paneSeq;
+      const wanted = metric || (this.metricOptions[0] || '');
       const pane = {
         id,
-        metric: metric || (this.metricOptions[0] || ''),
+        metric: wanted,
         loading: false,
         error: '',
         selectedBins: [],
@@ -205,11 +206,26 @@ document.addEventListener('alpine:init', () => {
       };
       this.panes.push(pane);
       if (render && this.ticker) {
-        this.loadPaneData(pane).then(() => this.$nextTick(() => {
-          this.renderPane(pane);
-          this.recompute();
-        }));
+        this.loadPaneData(pane).then(() => {
+          // Guard against the <select> reconciling pane.metric back to its
+          // first option before its own option renders (see paneMetricGroups).
+          if (pane.metric !== wanted) pane.metric = wanted;
+          this.$nextTick(() => {
+            this.renderPane(pane);
+            this.recompute();
+          });
+        });
       }
+    },
+
+    // Option list for a pane's metric dropdown: the eligible feature universe
+    // PLUS this pane's own metric when it isn't in that list (e.g. a metric
+    // picked from the "what's unusual" scan, which spans all binned metrics).
+    // Guarantees the <select> can always represent pane.metric.
+    paneMetricGroups(pane) {
+      let list = this.metricOptions;
+      if (pane.metric && !list.includes(pane.metric)) list = [...list, pane.metric];
+      return this.groupMetricsByFamily(list);
     },
 
     removePane(id) {

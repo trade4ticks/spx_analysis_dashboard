@@ -149,7 +149,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=6"></script>
+  <script src="/static/js/ticker_analysis.js?v=7"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -304,8 +304,9 @@
           <template x-for="pane in panes" :key="pane.id">
             <div class="ta-pane">
               <div class="ta-pane-hdr">
-                <select class="ta-sel" x-model="pane.metric" @change="onPaneMetricChange(pane)">
-                  <template x-for="grp in groupMetricsByFamily(metricOptions)" :key="'g'+pane.id+'-'+grp.family_num">
+                <select class="ta-sel" x-model="pane.metric" @change="onPaneMetricChange(pane)"
+                        x-init="$nextTick(() => $el.value = pane.metric)">
+                  <template x-for="grp in paneMetricGroups(pane)" :key="'g'+pane.id+'-'+grp.family_num">
                     <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
                       <template x-for="m in grp.metrics" :key="m">
                         <option :value="m" x-text="m"></option>
