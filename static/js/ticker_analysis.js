@@ -513,15 +513,26 @@ document.addEventListener('alpine:init', () => {
       const d = TA_DATA[pane.id];
       if (!d) return;
 
-      // Selected level = midpoint of the selected bins' combined [minLo, maxHi]
+      // Selected level = the ACTUAL bin cutoff edge of the selected span,
+      // not its midpoint. The line sits at the edge facing the center of the
+      // distribution, so the shade covers exactly the selected extreme:
+      //   • high bins (e.g. 18–20) → line at the LOW edge (min lo of the
+      //     lowest selected bin); everything ABOVE is the selected zone.
+      //   • low bins (e.g. 1–3)    → line at the HIGH edge (max hi of the
+      //     highest selected bin); everything BELOW is the selected zone.
+      // Above is always shaded blue, below pink (theme convention).
       let level = null;
       if (pane.selectedBins.length) {
-        let lo = Infinity, hi = -Infinity;
+        let lo = Infinity, hi = -Infinity, binSum = 0;
         for (const b of pane.selectedBins) {
           const m = d.bins[b - 1];
           if (m) { lo = Math.min(lo, m.lo); hi = Math.max(hi, m.hi); }
+          binSum += b;
         }
-        if (lo !== Infinity) level = (lo + hi) / 2;
+        if (lo !== Infinity) {
+          const avgBin = binSum / pane.selectedBins.length;
+          level = avgBin >= 10.5 ? lo : hi;   // 10.5 = median of bins 1–20
+        }
       }
 
       const labels = d.series.map(p => p.date);
