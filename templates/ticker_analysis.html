@@ -10,6 +10,9 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <!-- Chart.js (used by the metric panes + price chart in Phase 2) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <!-- Hammer.js + zoom plugin (drag-box zoom on the price chart) -->
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 
   <style>
     /* ── Ticker Analysis — page-scoped styles ──────────────────────────────
@@ -93,6 +96,17 @@
     .ta-chart-wrap.bars   { height:150px; }
     .ta-chart-wrap.series { height:120px; }
 
+    /* Fullscreen price section — fills the viewport; chart grows to fit. */
+    .ta-section.fs {
+      position:fixed; inset:8px; z-index:300; margin:0;
+      display:flex; flex-direction:column;
+      box-shadow:0 8px 32px rgba(0,0,0,.7);
+    }
+    .ta-section.fs .ta-section-body { flex:1; min-height:0; }
+    .ta-section.fs .ta-chart-wrap.price { height:100%; }
+
+    .ta-hint { font-size:10px; color:var(--dim); }
+
     /* Metric panes grid. */
     .ta-pane-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:10px; }
     .ta-pane {
@@ -149,7 +163,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=8"></script>
+  <script src="/static/js/ticker_analysis.js?v=9"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -242,13 +256,17 @@
     </div>
 
     <!-- Full-width price chart (§5.1) -->
-    <div class="ta-section">
+    <div class="ta-section" :class="{fs: priceFullscreen}">
       <div class="ta-section-hdr">
         <span class="ta-section-title">Price — full history</span>
         <span class="ta-section-sub">
           close · <span style="color:#e84393">splits</span> ·
           <span style="color:var(--accent)">bin-highlight</span> (<span x-text="shadeMode"></span>)
         </span>
+        <span class="ta-hint" style="margin-left:auto;">drag to zoom</span>
+        <button class="btn" @click="resetPriceZoom()">Reset zoom</button>
+        <button class="btn" @click="togglePriceFullscreen()"
+                x-text="priceFullscreen ? '⤡ Exit' : '⤢ Fullscreen'"></button>
       </div>
       <div class="ta-section-body">
         <template x-if="priceError">

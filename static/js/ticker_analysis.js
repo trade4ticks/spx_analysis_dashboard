@@ -81,6 +81,7 @@ document.addEventListener('alpine:init', () => {
     horizon: 'ret_5d_fwd_oc',      // default matches Factor Analysis default
     shadeMode: 'confluence',       // 'confluence' (default) | 'union'  (§5.1)
 
+    priceFullscreen: false,        // price chart expanded to viewport
     metricOptions: [],             // flat list of eligible metric columns
     metricFamilyLookup: {},        // metric -> {family_num, family_name} (for <optgroup>)
     panes: [],                     // [{id, metric, loading, error, selectedBins:[], today, onPrice}]
@@ -195,7 +196,7 @@ document.addEventListener('alpine:init', () => {
     addPane(metric = null, render = true) {
       const id = ++this.paneSeq;
       const wanted = metric || (this.metricOptions[0] || '');
-      const pane = {
+      this.panes.push({
         id,
         metric: wanted,
         loading: false,
@@ -203,8 +204,11 @@ document.addEventListener('alpine:init', () => {
         selectedBins: [],
         today: null,
         onPrice: false,
-      };
-      this.panes.push(pane);
+      });
+      // IMPORTANT: mutate the REACTIVE element Alpine created in the array,
+      // not the raw literal above. Setting loading/error/today on the raw
+      // object would not trigger the template (it stays stuck on "Loading…").
+      const pane = this.panes[this.panes.length - 1];
       if (render && this.ticker) {
         this.loadPaneData(pane).then(() => {
           // Guard against the <select> reconciling pane.metric back to its
@@ -376,6 +380,19 @@ document.addEventListener('alpine:init', () => {
       };
     },
 
+    resetPriceZoom() {
+      if (TA_CHARTS.price && TA_CHARTS.price.resetZoom) TA_CHARTS.price.resetZoom();
+    },
+
+    togglePriceFullscreen() {
+      this.priceFullscreen = !this.priceFullscreen;
+      // The container size changes; let the layout settle, then resize the
+      // chart so it fills (or un-fills) the new box.
+      this.$nextTick(() => {
+        requestAnimationFrame(() => { if (TA_CHARTS.price) TA_CHARTS.price.resize(); });
+      });
+    },
+
     // Full-width price chart (§5.1) ---------------------------------------
     renderPrice() {
       const cvs = document.getElementById('ta-price');
@@ -427,6 +444,15 @@ document.addEventListener('alpine:init', () => {
                 label: it => it.datasetIndex === 0
                   ? 'close ' + it.parsed.y
                   : it.dataset.label + ' (norm) ' + (it.parsed.y == null ? '—' : it.parsed.y.toFixed(2)) } },
+            // Click-drag a horizontal box to zoom into that date range.
+            zoom: {
+              zoom: {
+                drag: { enabled: true, backgroundColor: 'rgba(52,152,219,.15)',
+                        borderColor: '#3498db', borderWidth: 1 },
+                mode: 'x',
+              },
+              pan: { enabled: false },
+            },
           },
           scales,
         },
@@ -436,11 +462,14 @@ document.addEventListener('alpine:init', () => {
             const { ctx, chartArea, scales } = chart;
             const x = scales.x;
             // Bin-highlight bands (confluence = opacity by overlap; union = flat)
+            // Clip to the plot area so markers stay inside the axes when zoomed.
+            const inPlot = px => px >= chartArea.left && px <= chartArea.right;
             const hl = chart.$taHL;
             if (hl && hl.entries.length) {
               ctx.save();
               for (const [i, cnt] of hl.entries) {
                 const px = x.getPixelForValue(i);
+                if (!inPlot(px)) continue;
                 const alpha = hl.mode === 'union' ? 0.16 : Math.min(0.40, 0.12 + 0.09 * (cnt - 1) + 0.09);
                 ctx.fillStyle = `rgba(52,152,219,${alpha})`;
                 ctx.fillRect(px - 1, chartArea.top, 2, chartArea.bottom - chartArea.top);
@@ -453,6 +482,7 @@ document.addEventListener('alpine:init', () => {
               ctx.setLineDash([3, 3]); ctx.strokeStyle = 'rgba(232,67,147,.55)'; ctx.lineWidth = 1;
               for (const s of splitIdx) {
                 const px = x.getPixelForValue(s.i);
+                if (!inPlot(px)) continue;
                 ctx.beginPath(); ctx.moveTo(px, chartArea.top); ctx.lineTo(px, chartArea.bottom); ctx.stroke();
               }
               ctx.restore();
