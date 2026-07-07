@@ -208,3 +208,83 @@ async def metric_panel(
         "series": series,
         "today": today,
     }
+
+
+@router.get("/today-scan")
+async def today_scan(
+    ticker: str = Query(...),
+    pool=Depends(get_oi_pool),
+):
+    """"Today — what's unusual" row (brief §3 item 4).
+
+    For every metric that carries stored IS bins, report today's value, its
+    20-bin index, and its full-history percentile — sorted by distance from
+    the median bin (10.5) so the extremes surface first. "Today" is the most
+    recent date present in BOTH daily_features and is_bins for the ticker
+    (same anchor the metric panes use).
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    async with pool.acquire() as conn:
+        df_cols = await _table_columns(conn, "daily_features")
+        ib_cols = await _table_columns(conn, "is_bins")
+
+        # Metrics that have BOTH a value column and a stored bin column.
+        metrics = sorted(
+            c[len("bin20_"):] for c in ib_cols
+            if c.startswith("bin20_") and c[len("bin20_"):] in df_cols
+        )
+        if not metrics:
+            return {"ticker": ticker, "date": None, "rows": []}
+
+        latest = await conn.fetchval(
+            "SELECT max(df.trade_date) FROM daily_features df "
+            "JOIN is_bins ib ON ib.ticker = df.ticker AND ib.trade_date = df.trade_date "
+            "WHERE df.ticker = $1",
+            ticker,
+        )
+        if latest is None:
+            return {"ticker": ticker, "date": None, "rows": []}
+
+        mcols = ", ".join(f'"{m}"' for m in metrics)
+        bcols = ", ".join(f'"bin20_{m}"' for m in metrics)
+
+        latest_vals = await conn.fetchrow(
+            f'SELECT {mcols} FROM daily_features WHERE ticker = $1 AND trade_date = $2',
+            ticker, latest,
+        )
+        latest_bins = await conn.fetchrow(
+            f'SELECT {bcols} FROM is_bins WHERE ticker = $1 AND trade_date = $2',
+            ticker, latest,
+        )
+        # Full history (values only) for percentile — one pass, all metrics.
+        hist = await conn.fetch(
+            f'SELECT {mcols} FROM daily_features WHERE ticker = $1',
+            ticker,
+        )
+
+    if latest_vals is None or latest_bins is None:
+        return {"ticker": ticker, "date": str(latest), "rows": []}
+
+    rows = []
+    for m in metrics:
+        v = latest_vals[m]
+        b = latest_bins[f"bin20_{m}"]
+        if v is None or b is None or int(b) <= 0:
+            continue
+        v = float(v)
+        col = [r[m] for r in hist if r[m] is not None]
+        if not col:
+            continue
+        pct = round(sum(1 for x in col if float(x) <= v) / len(col) * 100, 1)
+        rows.append({
+            "metric": m,
+            "value": round(v, 6),
+            "bin": int(b),
+            "percentile": pct,
+        })
+
+    # Extremes first: farthest from the median bin (10.5).
+    rows.sort(key=lambda r: abs(r["bin"] - 10.5), reverse=True)
+    return {"ticker": ticker, "date": str(latest), "rows": rows}

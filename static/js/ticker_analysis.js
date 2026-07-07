@@ -12,8 +12,9 @@
  *   • dynamic union/dedup stat strip, recomputed client-side
  *   • family-grouped metric dropdowns; "on price" overlays; spike-preserving
  *     (min/max) value-over-time rendering at full span
- * Deferred to later phases: "Today — what's unusual" row (2b), saved named
- * layouts (P3), option-chain section (P4+).
+ *   • "Today — what's unusual" row: per-metric today value / bin / percentile,
+ *     extremes first (from /today-scan); click a cell to add it as a pane
+ * Deferred to later phases: saved named layouts (P3), option-chain (P4+).
  * ==========================================================================*/
 
 /* Forward-return horizons offered in the control bar (brief §3.1).
@@ -90,6 +91,10 @@ document.addEventListener('alpine:init', () => {
     stats: [],                     // [{label, value, cls}] for the stat strip
     statLabel: 'all dates',
 
+    todayScan: [],                 // [{metric, value, bin, percentile}] extremes-first
+    todayScanLoading: false,
+    todayScanError: '',
+
     // ── Lifecycle ────────────────────────────────────────────────────────
     async init() {
       await Promise.all([this.loadTickers(), this.loadMetricOptions()]);
@@ -135,12 +140,40 @@ document.addEventListener('alpine:init', () => {
 
     // ── Ticker / horizon changes ─────────────────────────────────────────
     async loadTicker() {
-      await Promise.all([this.loadPrice(), ...this.panes.map(p => this.loadPaneData(p))]);
+      await Promise.all([
+        this.loadPrice(),
+        this.loadTodayScan(),
+        ...this.panes.map(p => this.loadPaneData(p)),
+      ]);
       this.$nextTick(() => {
         this.renderPrice();
         for (const p of this.panes) this.renderPane(p);
         this.recompute();
       });
+    },
+
+    async loadTodayScan() {
+      if (!this.ticker) return;
+      this.todayScanLoading = true; this.todayScanError = '';
+      try {
+        const r = await fetch(`/api/ticker-analysis/today-scan?ticker=${encodeURIComponent(this.ticker)}`);
+        const j = await r.json();
+        if (j.error) { this.todayScanError = j.error; this.todayScan = []; }
+        else this.todayScan = j.rows || [];
+      } catch (e) {
+        console.error('[ticker-analysis] loadTodayScan failed:', e);
+        this.todayScanError = 'load failed'; this.todayScan = [];
+      } finally {
+        this.todayScanLoading = false;
+      }
+    },
+
+    // Badge tint for a "what's unusual" cell: blue for high bins, pink for
+    // low, intensity scaled by distance from the median bin.
+    scanBadgeStyle(bin) {
+      const d = Math.abs(bin - 10.5) / 9.5;                 // 0 (median) .. 1 (extreme)
+      const base = bin >= 11 ? '52,152,219' : '232,67,147';
+      return `background:rgba(${base},${(0.18 + 0.55 * d).toFixed(2)})`;
     },
 
     async onTickerChange() {

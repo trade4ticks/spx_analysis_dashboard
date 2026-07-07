@@ -124,13 +124,32 @@
     .ta-onprice .ta-swatch { width:9px; height:9px; border-radius:2px; display:inline-block; }
     .ta-pane-err { color:var(--danger); font-size:11px; padding:14px; text-align:center; }
     .ta-pane-loading { color:var(--dim); font-size:11px; padding:14px; text-align:center; }
+
+    /* "Today — what's unusual" row (§3 item 4). Horizontal scroll, extremes
+       at the left. Each cell is clickable to add that metric as a pane. */
+    .ta-scan-row { display:flex; gap:6px; overflow-x:auto; padding:2px 0; }
+    .ta-scan-row::-webkit-scrollbar { height:5px; }
+    .ta-scan-cell {
+      flex:0 0 auto; min-width:118px; max-width:170px;
+      background:var(--bg); border:1px solid var(--border); border-radius:4px;
+      padding:5px 8px; cursor:pointer; transition:border-color .12s;
+    }
+    .ta-scan-cell:hover { border-color:var(--accent); }
+    .ta-scan-metric {
+      font-size:10px; color:var(--muted);
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .ta-scan-val { font-size:13px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums; }
+    .ta-scan-meta { display:flex; align-items:center; gap:6px; margin-top:2px; }
+    .ta-scan-bin { font-size:9px; font-weight:700; padding:1px 5px; border-radius:3px; color:#fff; white-space:nowrap; }
+    .ta-scan-pct { font-size:9px; color:var(--dim); }
   </style>
 
   <!-- Page module (?v= cache-bust, matching the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=5"></script>
+  <script src="/static/js/ticker_analysis.js?v=6"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -245,10 +264,30 @@
     <div class="ta-section">
       <div class="ta-section-hdr">
         <span class="ta-section-title">Today — what's unusual</span>
-        <span class="ta-section-sub">value · 20-bin index · percentile, sorted by distance from median</span>
+        <span class="ta-section-sub" x-text="(todayScan.length ? todayScan.length + ' metrics · ' : '') + 'value · 20-bin index · percentile, extremes first · click to add pane'"></span>
       </div>
       <div class="ta-section-body">
-        <div class="ta-placeholder">Today readout row <span class="ta-phase-tag">Phase 2b</span></div>
+        <template x-if="todayScanError">
+          <div class="ta-pane-err" x-text="todayScanError"></div>
+        </template>
+        <template x-if="!todayScanError && todayScanLoading">
+          <div class="ta-pane-loading">Loading…</div>
+        </template>
+        <template x-if="!todayScanError && !todayScanLoading && !todayScan.length">
+          <div class="ta-placeholder">No binned metrics for today.</div>
+        </template>
+        <div class="ta-scan-row" x-show="todayScan.length">
+          <template x-for="s in todayScan" :key="s.metric">
+            <div class="ta-scan-cell" @click="addPane(s.metric)" :title="'Add ' + s.metric + ' as a pane'">
+              <div class="ta-scan-metric" x-text="s.metric"></div>
+              <div class="ta-scan-val" x-text="s.value"></div>
+              <div class="ta-scan-meta">
+                <span class="ta-scan-bin" :style="scanBadgeStyle(s.bin)" x-text="'bin ' + s.bin"></span>
+                <span class="ta-scan-pct" x-text="s.percentile + '%ile'"></span>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
 
