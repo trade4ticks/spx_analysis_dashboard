@@ -180,13 +180,21 @@
     .ta-hm-cell { height:20px; border-radius:1px; }
     .ta-hm-cell.spot { box-shadow:inset 1px 0 0 rgba(255,255,255,.85); }
     .ta-hm-axis { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:4px; }
+
+    /* Flow-map canvas tooltip. */
+    .ta-flow-tip {
+      position:absolute; display:none; z-index:5; pointer-events:none;
+      background:var(--raised); border:1px solid var(--accent); border-radius:4px;
+      padding:4px 7px; font-size:10px; color:var(--text); white-space:nowrap;
+      box-shadow:0 3px 10px rgba(0,0,0,.5);
+    }
   </style>
 
   <!-- Page module (?v= cache-bust, matching the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=13"></script>
+  <script src="/static/js/ticker_analysis.js?v=14"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -416,6 +424,7 @@
         <div class="seg" style="margin-left:6px;">
           <div class="seg-btn" :class="{on: chainView==='profile'}" @click="setChainView('profile')">OI profile</div>
           <div class="seg-btn" :class="{on: chainView==='strikeDte'}" @click="setChainView('strikeDte')">Strike×DTE</div>
+          <div class="seg-btn" :class="{on: chainView==='flow'}" @click="setChainView('flow')">Flow map</div>
         </div>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='profile'">
           split-adjusted · puts <span style="color:#e84393">left</span> /
@@ -423,6 +432,11 @@
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='strikeDte'">
           rows = DTE buckets · cols = strikes · <span style="color:var(--accent)">sequential blue</span> · spot column marked
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='flow'">
+          rows = strikes · cols = time · spot path ·
+          <span x-show="chainFlowMode==='doi'||chainFlowMode==='dvol'"><span style="color:var(--accent)">+</span>/<span style="color:#e84393">−</span> diverging</span>
+          <span x-show="!(chainFlowMode==='doi'||chainFlowMode==='dvol')"><span style="color:var(--accent)">sequential blue</span></span>
         </span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
         <button class="btn" @click="chainReload(true)" title="Recompute (bypass cache)">↻ Recompute</button>
@@ -451,14 +465,42 @@
               </div>
             </template>
 
-            <!-- DTE range (profile only — the heatmap shows all DTE buckets) -->
-            <template x-if="chainView==='profile'">
+            <!-- Flow mode + window + Δ-N (flow only) -->
+            <template x-if="chainView==='flow'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Mode</span>
+                <div class="seg">
+                  <template x-for="m in [['oi','OI'],['vol','Vol'],['voloi','V/OI'],['doi','ΔOI'],['dvol','ΔVol']]" :key="m[0]">
+                    <div class="seg-btn" :class="{on: chainFlowMode===m[0]}"
+                         @click="chainFlowMode=m[0]; loadChainFlow()" x-text="m[1]"></div>
+                  </template>
+                </div>
+                <template x-if="chainFlowMode==='doi'||chainFlowMode==='dvol'">
+                  <div style="display:contents;">
+                    <span class="ta-lbl">N</span>
+                    <select class="ta-sel" x-model.number="chainFlowN" @change="loadChainFlow()">
+                      <template x-for="nn in [1,5,20]" :key="nn"><option :value="nn" x-text="nn"></option></template>
+                    </select>
+                  </div>
+                </template>
+                <span class="ta-lbl">Window</span>
+                <select class="ta-sel" x-model.number="chainFlowLookback" @change="loadChainFlow()">
+                  <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y'],[504,'2y']]" :key="w[0]">
+                    <option :value="w[0]" x-text="w[1]"></option>
+                  </template>
+                </select>
+              </div>
+            </template>
+
+            <!-- DTE range (profile + flow; the heatmap shows all DTE buckets) -->
+            <template x-if="chainView!=='strikeDte'">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">DTE</span>
-                <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="loadChainProfile()">
+                <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="chainReload()">
                 <span class="ta-hint">to</span>
-                <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="loadChainProfile()">
+                <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="chainReload()">
               </div>
             </template>
 
@@ -476,6 +518,12 @@
             <span class="ta-hint" x-show="chainView==='strikeDte' && chainHeatmap">
               spot <b x-text="chainHeatmap?.spot ?? '—'"></b> ·
               <b x-text="chainHeatmap?.strikes?.length ?? 0"></b> strikes · max <b x-text="(chainHeatmap?.max ?? 0).toLocaleString()"></b>
+            </span>
+            <span class="ta-hint" x-show="chainView==='flow' && chainFlow">
+              spot <b x-text="chainFlow?.spot?.toFixed?.(2) ?? '—'"></b> ·
+              <b x-text="chainFlow?.dates?.length ?? 0"></b> sessions ×
+              <b x-text="chainFlow?.strikes?.length ?? 0"></b> strikes ·
+              <span x-text="chainFlow?.signed ? '±' : 'max'"></span> <b x-text="(chainFlow?.max ?? 0).toLocaleString()"></b>
             </span>
           </div>
 
@@ -520,6 +568,18 @@
                 <span style="color:var(--text)" x-text="'spot ' + (chainHeatmap.spot ?? '—')"></span>
                 <span x-text="'high ' + chainHeatmap.strikes[chainHeatmap.strikes.length-1]"></span>
               </div>
+            </div>
+          </div>
+
+          <!-- Flow map (strike × time) -->
+          <div x-show="chainView==='flow'">
+            <template x-if="!chainLoading && chainFlow && chainFlow.empty">
+              <div class="ta-placeholder">No data for this window / mode / filters.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:420px;"
+                 x-show="!chainLoading && chainFlow && !chainFlow.empty">
+              <canvas id="ta-chain-flow"></canvas>
+              <div id="ta-flow-tip" class="ta-flow-tip"></div>
             </div>
           </div>
         </div>

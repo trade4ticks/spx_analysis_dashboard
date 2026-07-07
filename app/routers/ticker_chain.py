@@ -399,6 +399,200 @@ async def chain_strike_dte(
     return result
 
 
+def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
+                  end_s: str, mode: str, n: int, dte_min: int, dte_max: int,
+                  moneyness: Optional[float], sf_df: pd.DataFrame,
+                  end_spot: Optional[float], need_oi: bool, need_vol: bool) -> dict:
+    """Strike × time (flow map). `window` is the ordered list of session date
+    strings = the columns. Rows = adjusted strikes (high→low), filtered by
+    moneyness vs the end-of-window spot. Modes: oi / vol (level, sequential),
+    voloi (turnover, level), doi / dvol (Δ over n sessions, signed)."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+
+    con = duckdb.connect()
+    oi_map: dict = {}
+    vol_map: dict = {}
+    try:
+        con.register("split_factors", sf_df)
+
+        def _read(paths: list, date_field: str, count_field: str) -> dict:
+            existing = [p for p in paths if os.path.isfile(p)]
+            if not existing:
+                return {}
+            pl = ", ".join("'" + p + "'" for p in existing)
+            sql = f"""
+                WITH adj AS (
+                    SELECT raw.{date_field}                                  AS d,
+                           round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                           raw.{count_field} / COALESCE(sf.adj_factor, 1.0)  AS cnt
+                    FROM (SELECT * FROM read_parquet([{pl}])
+                           WHERE {date_field} BETWEEN DATE '{start_s}' AND DATE '{end_s}') raw
+                    LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                )
+                SELECT d, strike, SUM(cnt) AS v FROM adj GROUP BY d, strike
+            """
+            out: dict = {}
+            for d, strike, v in con.execute(sql).fetchall():
+                out[(str(d), round(float(strike), 2))] = float(v)
+            return out
+
+        if need_oi:
+            oi_map = _read(oi_paths, "trade_date", "open_interest")
+        if need_vol:
+            vol_map = _read(chain_paths, "feature_date", "volume")
+    finally:
+        con.close()
+
+    strikes_set: set = set()
+    if need_oi:
+        strikes_set.update(s for _, s in oi_map)
+    if need_vol:
+        strikes_set.update(s for _, s in vol_map)
+    strikes = sorted(strikes_set, reverse=True)   # high strikes on top
+    if moneyness is not None and end_spot:
+        strikes = [s for s in strikes if abs(s / end_spot - 1) <= moneyness]
+    if not strikes:
+        return {"dates": window, "strikes": [], "matrix": [], "signed": False,
+                "max": 0, "empty": True}
+
+    ncol, nrow = len(window), len(strikes)
+    ridx = {s: i for i, s in enumerate(strikes)}
+    cidx = {d: i for i, d in enumerate(window)}
+
+    def _level(m: dict) -> list:
+        M = [[None] * ncol for _ in range(nrow)]
+        for (d, s), v in m.items():
+            if d in cidx and s in ridx:
+                M[ridx[s]][cidx[d]] = v
+        return M
+
+    signed = False
+    if mode == "oi":
+        M = _level(oi_map)
+    elif mode == "vol":
+        M = _level(vol_map)
+    elif mode == "voloi":
+        oiM, volM = _level(oi_map), _level(vol_map)
+        M = [[None] * ncol for _ in range(nrow)]
+        for r in range(nrow):
+            for c in range(ncol):
+                o, v = oiM[r][c], volM[r][c]
+                M[r][c] = (v / o) if (o and o > 0 and v is not None) else None
+    else:   # doi / dvol — Δ over n sessions
+        signed = True
+        base = _level(oi_map if mode == "doi" else vol_map)
+        M = [[None] * ncol for _ in range(nrow)]
+        for r in range(nrow):
+            for c in range(n, ncol):
+                cur, prev = base[r][c], base[r][c - n]
+                if cur is not None or prev is not None:
+                    M[r][c] = (cur or 0) - (prev or 0)
+
+    if signed:
+        scale = max((abs(v) for row in M for v in row if v is not None), default=0.0)
+        scale = round(scale)
+    else:
+        scale = max((v for row in M for v in row if v is not None), default=0.0)
+        scale = round(scale, 4) if mode == "voloi" else round(scale)
+
+    def _rnd(v):
+        if v is None:
+            return None
+        return round(v, 4) if mode == "voloi" else round(v)
+
+    matrix = [[_rnd(v) for v in row] for row in M]
+    return {"dates": window, "strikes": strikes, "matrix": matrix,
+            "signed": signed, "max": scale, "empty": False}
+
+
+@router.get("/chain/flow")
+async def chain_flow(
+    ticker: str = Query(...),
+    date: str = Query(...),                 # end of the window (slider date)
+    lookback: int = Query(252),             # sessions back from `date`
+    mode: str = Query("oi"),                # oi | vol | voloi | doi | dvol
+    n: int = Query(5),                      # sessions for the Δ modes
+    dte_min: int = Query(0),
+    dte_max: int = Query(3650),
+    moneyness: Optional[float] = Query(None),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """Split-adjusted strike × time flow map."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker):
+        return {"error": "invalid ticker"}
+    if not _DATE_RE.match(date):
+        return {"error": "invalid date"}
+    mode = mode if mode in ("oi", "vol", "voloi", "doi", "dvol") else "oi"
+    lookback = max(5, min(1000, lookback))
+    n = max(1, min(60, n))
+
+    key = (f"flow:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{mode}:"
+           f"{n}:{dte_min}:{dte_max}:{moneyness}")
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d_end = datetime.strptime(date, "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        drows = await conn.fetch(
+            "SELECT trade_date FROM daily_features "
+            "WHERE ticker = $1 AND total_oi IS NOT NULL AND trade_date <= $2 "
+            "ORDER BY trade_date",
+            ticker, d_end,
+        )
+    window = [str(r["trade_date"]) for r in drows][-lookback:]
+    if not window:
+        return {"ticker": ticker, "date": date, "dates": [], "strikes": [],
+                "matrix": [], "empty": True, "mode": mode}
+
+    d_start = datetime.strptime(window[0], "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        srows = await conn.fetch(
+            "SELECT trade_date, close FROM underlying_ohlc "
+            "WHERE ticker = $1 AND trade_date BETWEEN $2 AND $3",
+            ticker, d_start, d_end,
+        )
+    spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
+               for r in srows}
+    end_spot = spot_by.get(window[-1])
+
+    sf_df = await _load_splits_df(pool, ticker)
+    # Factor relation over the whole window (+5-day back buffer so the Vol
+    # path's prior-session rows still match). Factors are a step function, so
+    # covering every calendar day is cheap and exact.
+    span = (d_end - d_start).days + 6
+    sf_rel = make_split_factors(sf_df, [d_start - timedelta(days=5) + timedelta(days=i)
+                                        for i in range(span)])
+
+    need_oi = mode in ("oi", "doi", "voloi")
+    need_vol = mode in ("vol", "dvol", "voloi")
+    years = list(range(d_start.year, d_end.year + 1))
+    oi_paths = [_oi_year_path(ticker, y) for y in years]
+    chain_paths = [_chain_year_path(ticker, y) for y in [years[0] - 1] + years]
+
+    result = await asyncio.to_thread(
+        _compute_flow, oi_paths, chain_paths, window, window[0], window[-1],
+        mode, n, dte_min, dte_max, moneyness, sf_rel, end_spot, need_oi, need_vol,
+    )
+    result["spots"] = [spot_by.get(dd) for dd in result.get("dates", window)]
+    result.update({
+        "ticker": ticker, "date": date, "mode": mode, "n": n,
+        "lookback": lookback, "moneyness": moneyness, "spot": end_spot,
+    })
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
 @router.post("/chain/invalidate")
 async def chain_invalidate(ticker: Optional[str] = Query(None), pool=Depends(get_oi_pool)):
     """Clear the chain cache — all, or just one ticker's rows."""

@@ -102,9 +102,13 @@ document.addEventListener('alpine:init', () => {
     layouts: [],                   // [{id, name, layout, created_at}] saved layouts
     selectedLayoutId: '',          // control-bar layout selector
 
-    // Option chain (§5.4): OI profile (P4a) + strike×DTE heatmap (P4b)
-    chainView: 'profile',          // 'profile' | 'strikeDte'
+    // Option chain (§5.4): OI profile (P4a) + strike×DTE heatmap (P4b) + flow (P4c)
+    chainView: 'profile',          // 'profile' | 'strikeDte' | 'flow'
     chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
+    chainFlowMode: 'oi',           // flow: 'oi'|'vol'|'voloi'|'doi'|'dvol'
+    chainFlowLookback: 252,        // flow window (sessions)
+    chainFlowN: 5,                 // flow Δ window (sessions)
+    chainFlow: null,
     chainDates: [],
     chainDateIdx: 0,
     chainDteMin: 0,
@@ -470,6 +474,7 @@ document.addEventListener('alpine:init', () => {
     // Route the shared controls (date/moneyness/Recompute) to the active view.
     chainReload(force = false) {
       if (this.chainView === 'strikeDte') this.loadChainHeatmap(force);
+      else if (this.chainView === 'flow') this.loadChainFlow(force);
       else this.loadChainProfile(force);
     },
 
@@ -612,6 +617,119 @@ document.addEventListener('alpine:init', () => {
       if (!v) return 'background:transparent';
       const a = 0.06 + 0.9 * (v / max);   // sequential blue (level mode)
       return `background:rgba(52,152,219,${a.toFixed(3)})`;
+    },
+
+    // Flow map — strike × time (P4c) --------------------------------------
+    async loadChainFlow(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/flow?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&mode=${this.chainFlowMode}&lookback=${this.chainFlowLookback}`
+              + `&n=${this.chainFlowN}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainFlow = null; }
+        else this.chainFlow = j;
+      } catch (e) {
+        console.error('[ticker-analysis] loadChainFlow failed:', e);
+        this.chainError = 'load failed'; this.chainFlow = null;
+      } finally {
+        this.chainLoading = false;
+        this.$nextTick(() => this.renderChainFlow());
+      }
+    },
+
+    renderChainFlow() {
+      const cvs = document.getElementById('ta-chain-flow');
+      if (!cvs || !cvs.parentElement) return;
+      const f = this.chainFlow;
+      const wrap = cvs.parentElement;
+      const W = wrap.clientWidth, H = wrap.clientHeight;
+      if (!W || !H) {
+        // Wrap not laid out yet (view just became visible) — retry next frame.
+        if (this.chainView === 'flow') requestAnimationFrame(() => this.renderChainFlow());
+        return;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      cvs.width = W * dpr; cvs.height = H * dpr;
+      cvs.style.width = W + 'px'; cvs.style.height = H + 'px';
+      const ctx = cvs.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      if (!f || !f.strikes.length || !f.dates.length) return;
+
+      const mL = 54, mB = 20, mT = 6, mR = 8;
+      const plotW = W - mL - mR, plotH = H - mT - mB;
+      const nc = f.dates.length, nr = f.strikes.length;
+      const cw = plotW / nc, ch = plotH / nr;
+      const max = f.max || 1;
+
+      for (let r = 0; r < nr; r++) {
+        for (let c = 0; c < nc; c++) {
+          const v = f.matrix[r][c];
+          if (v == null) continue;
+          let color;
+          if (f.signed) {
+            const a = Math.min(1, Math.abs(v) / max);
+            if (a <= 0) continue;
+            color = v >= 0 ? `rgba(52,152,219,${(0.08 + 0.9 * a).toFixed(3)})`
+                           : `rgba(232,67,147,${(0.08 + 0.9 * a).toFixed(3)})`;
+          } else {
+            const a = Math.min(1, v / max);
+            if (a <= 0) continue;
+            color = `rgba(52,152,219,${(0.06 + 0.9 * a).toFixed(3)})`;
+          }
+          ctx.fillStyle = color;
+          ctx.fillRect(mL + c * cw, mT + r * ch, Math.ceil(cw) + 0.5, Math.ceil(ch) + 0.5);
+        }
+      }
+
+      // Spot path across time
+      if (f.spots) {
+        ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        let started = false;
+        for (let c = 0; c < nc; c++) {
+          const sp = f.spots[c];
+          if (sp == null) continue;
+          let best = 0, bd = Infinity;
+          for (let r = 0; r < nr; r++) { const dd = Math.abs(f.strikes[r] - sp); if (dd < bd) { bd = dd; best = r; } }
+          const x = mL + (c + 0.5) * cw, y = mT + (best + 0.5) * ch;
+          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // Axis labels
+      ctx.fillStyle = '#777'; ctx.font = '9px sans-serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      const rowStep = Math.max(1, Math.round(nr / 12));
+      for (let r = 0; r < nr; r += rowStep) ctx.fillText(f.strikes[r], mL - 4, mT + (r + 0.5) * ch);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const colStep = Math.max(1, Math.round(nc / 8));
+      for (let c = 0; c < nc; c += colStep) ctx.fillText(f.dates[c].slice(2), mL + (c + 0.5) * cw, mT + plotH + 3);
+
+      cvs._geo = { mL, mT, cw, ch, nc, nr };
+      cvs.onmousemove = (ev) => {
+        const g = cvs._geo; if (!g) return;
+        const rect = cvs.getBoundingClientRect();
+        const c = Math.floor((ev.clientX - rect.left - g.mL) / g.cw);
+        const r = Math.floor((ev.clientY - rect.top - g.mT) / g.ch);
+        const tip = document.getElementById('ta-flow-tip');
+        if (!tip) return;
+        if (c < 0 || c >= g.nc || r < 0 || r >= g.nr) { tip.style.display = 'none'; return; }
+        const v = f.matrix[r][c];
+        tip.style.display = 'block';
+        tip.style.left = (ev.clientX - rect.left + 12) + 'px';
+        tip.style.top = (ev.clientY - rect.top + 12) + 'px';
+        tip.innerHTML = `${f.dates[c]}<br>strike ${f.strikes[r]}<br>${v == null ? '—' : v.toLocaleString()}`;
+      };
+      cvs.onmouseleave = () => { const tip = document.getElementById('ta-flow-tip'); if (tip) tip.style.display = 'none'; };
     },
 
     // ── Data loads ───────────────────────────────────────────────────────
