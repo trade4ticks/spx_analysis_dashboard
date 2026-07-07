@@ -40,7 +40,7 @@ const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff'
 /* Chart.js instances and heavy per-pane series live OUTSIDE Alpine's
  * reactive proxy — wrapping Chart internals or 1.7k-row arrays in a Proxy
  * breaks rendering and slows selection. Keyed by pane id. */
-const TA_CHARTS = { price: null, bars: {}, series: {}, chain: null };
+const TA_CHARTS = { price: null, bars: {}, series: {}, chain: null, surface: null };
 const TA_DATA = {};   // paneId -> { bins, series, today }
 
 /* Numpy-matching stats, mirroring oi_analysis.js `_rgComputeStats`:
@@ -109,6 +109,9 @@ document.addEventListener('alpine:init', () => {
     chainFlowLookback: 252,        // flow window (sessions)
     chainFlowN: 5,                 // flow Δ window (sessions)
     chainFlow: null,
+    chainSurfaceMetric: 'oi',      // surface: 'oi'|'vol'
+    chainSurfaceLookback: 126,     // surface window (sessions)
+    chainSurface: null,
     chainDates: [],
     chainDateIdx: 0,
     chainDteMin: 0,
@@ -475,11 +478,13 @@ document.addEventListener('alpine:init', () => {
     chainReload(force = false) {
       if (this.chainView === 'strikeDte') this.loadChainHeatmap(force);
       else if (this.chainView === 'flow') this.loadChainFlow(force);
+      else if (this.chainView === 'surface') this.loadChainSurface(force);
       else this.loadChainProfile(force);
     },
 
     setChainView(v) {
       if (this.chainView === v) return;
+      if (this.chainView === 'surface' && v !== 'surface') this.disposeSurface();  // stop the render loop
       this.chainView = v;
       this.chainReload();
     },
@@ -730,6 +735,145 @@ document.addEventListener('alpine:init', () => {
         tip.innerHTML = `${f.dates[c]}<br>strike ${f.strikes[r]}<br>${v == null ? '—' : v.toLocaleString()}`;
       };
       cvs.onmouseleave = () => { const tip = document.getElementById('ta-flow-tip'); if (tip) tip.style.display = 'none'; };
+    },
+
+    // 3D surface — strike × time × signed qty (P4d) -----------------------
+    async loadChainSurface(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/surface?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&metric=${this.chainSurfaceMetric}&lookback=${this.chainSurfaceLookback}`
+              + `&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainSurface = null; }
+        else this.chainSurface = j;
+      } catch (e) {
+        console.error('[ticker-analysis] loadChainSurface failed:', e);
+        this.chainError = 'load failed'; this.chainSurface = null;
+      } finally {
+        this.chainLoading = false;
+        this.$nextTick(() => this.renderChainSurface());
+      }
+    },
+
+    disposeSurface() {
+      const s = TA_CHARTS.surface;
+      if (!s) return;
+      s.alive = false;
+      if (s.animId) cancelAnimationFrame(s.animId);
+      try { if (s.controls) s.controls.dispose(); } catch (e) {}
+      try { if (s.renderer) { s.renderer.dispose(); s.renderer.domElement.remove(); } } catch (e) {}
+      TA_CHARTS.surface = null;
+    },
+
+    renderChainSurface() {
+      const host = document.getElementById('ta-chain-surface');
+      if (!host) return;
+      this.disposeSurface();
+      const f = this.chainSurface;
+      const Wd = host.clientWidth, Hd = host.clientHeight;
+      if (!Wd || !Hd) {
+        if (this.chainView === 'surface') requestAnimationFrame(() => this.renderChainSurface());
+        return;
+      }
+      if (typeof THREE === 'undefined') { this.chainError = 'Three.js not loaded'; return; }
+      if (!f || !f.strikes.length || !f.dates.length) return;
+
+      const nS = f.strikes.length, nD = f.dates.length;
+      const SX = 100, SZ = 100, SY = 42;          // grid extents / height scale
+      const max = f.max || 1;
+      const yAt = (r, c) => { const v = f.matrix[r][c]; return v == null ? 0 : (v / max) * SY; };
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1e1e1e);
+      const camera = new THREE.PerspectiveCamera(55, Wd / Hd, 0.1, 2000);
+      camera.position.set(SX * 1.0, SY * 2.0, SZ * 1.15);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio || 1);
+      renderer.setSize(Wd, Hd);
+      host.appendChild(renderer.domElement);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+      const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+      dir.position.set(1, 2, 1); scene.add(dir);
+
+      // Heightfield: X = strike (rows), Z = date (cols), Y = signed net.
+      const blue = new THREE.Color(0x3498db), pink = new THREE.Color(0xe84393), base = new THREE.Color(0x2d2d2d);
+      const positions = [], colors = [];
+      const px = r => (nS > 1 ? r / (nS - 1) - 0.5 : 0) * SX;
+      const pz = c => (nD > 1 ? c / (nD - 1) - 0.5 : 0) * SZ;
+      for (let r = 0; r < nS; r++) {
+        for (let c = 0; c < nD; c++) {
+          const y = yAt(r, c);
+          positions.push(px(r), y, pz(c));
+          const t = Math.min(1, Math.abs(y) / SY);
+          const col = base.clone().lerp(y >= 0 ? blue : pink, 0.25 + 0.75 * t);
+          colors.push(col.r, col.g, col.b);
+        }
+      }
+      const idx = [];
+      const vi = (r, c) => r * nD + c;
+      for (let r = 0; r < nS - 1; r++) {
+        for (let c = 0; c < nD - 1; c++) {
+          idx.push(vi(r, c), vi(r + 1, c), vi(r, c + 1));
+          idx.push(vi(r + 1, c), vi(r + 1, c + 1), vi(r, c + 1));
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      geo.setIndex(idx);
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+        vertexColors: true, side: THREE.DoubleSide,
+      }));
+      scene.add(mesh);
+
+      // Zero plane (strike axis) + grid.
+      const grid = new THREE.GridHelper(Math.max(SX, SZ), 12, 0x555555, 0x333333);
+      scene.add(grid);
+      const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(SX, SZ),
+        new THREE.MeshBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.06, side: THREE.DoubleSide }));
+      plane.rotation.x = -Math.PI / 2; scene.add(plane);
+
+      // Spot path on the zero plane.
+      if (f.spots) {
+        const pts = [];
+        for (let c = 0; c < nD; c++) {
+          const sp = f.spots[c]; if (sp == null) continue;
+          let best = 0, bd = Infinity;
+          for (let r = 0; r < nS; r++) { const dd = Math.abs(f.strikes[r] - sp); if (dd < bd) { bd = dd; best = r; } }
+          pts.push(new THREE.Vector3(px(best), 0.6, pz(c)));
+        }
+        if (pts.length > 1) {
+          const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(pts),
+            new THREE.LineBasicMaterial({ color: 0xffffff }));
+          scene.add(line);
+        }
+      }
+
+      const controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      controls.enableDamping = true; controls.dampingFactor = 0.08;
+      controls.update();
+
+      const s = { renderer, controls, host, animId: 0, alive: true };
+      TA_CHARTS.surface = s;
+      const animate = () => {
+        if (!s.alive) return;
+        s.animId = requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      };
+      animate();
     },
 
     // ── Data loads ───────────────────────────────────────────────────────

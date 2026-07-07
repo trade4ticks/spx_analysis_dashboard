@@ -13,6 +13,9 @@
   <!-- Hammer.js + zoom plugin (drag-box zoom on the price chart) -->
   <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+  <!-- Three.js (global build r128) + OrbitControls for the 3D chain surface -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 
   <style>
     /* ── Ticker Analysis — page-scoped styles ──────────────────────────────
@@ -181,6 +184,11 @@
     .ta-hm-cell.spot { box-shadow:inset 1px 0 0 rgba(255,255,255,.85); }
     .ta-hm-axis { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:4px; }
 
+    /* 3D surface host (Three.js appends its canvas here). */
+    .ta-surface { width:100%; height:440px; border-radius:4px; overflow:hidden; cursor:grab; }
+    .ta-surface:active { cursor:grabbing; }
+    .ta-surface canvas { display:block; }
+
     /* Flow-map canvas tooltip. */
     .ta-flow-tip {
       position:absolute; display:none; z-index:5; pointer-events:none;
@@ -194,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=14"></script>
+  <script src="/static/js/ticker_analysis.js?v=15"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -425,6 +433,7 @@
           <div class="seg-btn" :class="{on: chainView==='profile'}" @click="setChainView('profile')">OI profile</div>
           <div class="seg-btn" :class="{on: chainView==='strikeDte'}" @click="setChainView('strikeDte')">Strike×DTE</div>
           <div class="seg-btn" :class="{on: chainView==='flow'}" @click="setChainView('flow')">Flow map</div>
+          <div class="seg-btn" :class="{on: chainView==='surface'}" @click="setChainView('surface')">3D surface</div>
         </div>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='profile'">
           split-adjusted · puts <span style="color:#e84393">left</span> /
@@ -437,6 +446,9 @@
           rows = strikes · cols = time · spot path ·
           <span x-show="chainFlowMode==='doi'||chainFlowMode==='dvol'"><span style="color:var(--accent)">+</span>/<span style="color:#e84393">−</span> diverging</span>
           <span x-show="!(chainFlowMode==='doi'||chainFlowMode==='dvol')"><span style="color:var(--accent)">sequential blue</span></span>
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='surface'">
+          X = strike · Z = time · Y = <span style="color:var(--accent)">calls +</span> / <span style="color:#e84393">puts −</span> · drag to orbit · wheel to zoom
         </span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
         <button class="btn" @click="chainReload(true)" title="Recompute (bypass cache)">↻ Recompute</button>
@@ -493,7 +505,25 @@
               </div>
             </template>
 
-            <!-- DTE range (profile + flow; the heatmap shows all DTE buckets) -->
+            <!-- Surface metric + window (surface only) -->
+            <template x-if="chainView==='surface'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Metric</span>
+                <div class="seg">
+                  <div class="seg-btn" :class="{on: chainSurfaceMetric==='oi'}" @click="chainSurfaceMetric='oi'; loadChainSurface()">OI</div>
+                  <div class="seg-btn" :class="{on: chainSurfaceMetric==='vol'}" @click="chainSurfaceMetric='vol'; loadChainSurface()">Vol</div>
+                </div>
+                <span class="ta-lbl">Window</span>
+                <select class="ta-sel" x-model.number="chainSurfaceLookback" @change="loadChainSurface()">
+                  <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y']]" :key="w[0]">
+                    <option :value="w[0]" x-text="w[1]"></option>
+                  </template>
+                </select>
+              </div>
+            </template>
+
+            <!-- DTE range (profile + flow + surface; the heatmap shows all DTE buckets) -->
             <template x-if="chainView!=='strikeDte'">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
@@ -524,6 +554,11 @@
               <b x-text="chainFlow?.dates?.length ?? 0"></b> sessions ×
               <b x-text="chainFlow?.strikes?.length ?? 0"></b> strikes ·
               <span x-text="chainFlow?.signed ? '±' : 'max'"></span> <b x-text="(chainFlow?.max ?? 0).toLocaleString()"></b>
+            </span>
+            <span class="ta-hint" x-show="chainView==='surface' && chainSurface">
+              spot <b x-text="chainSurface?.spot?.toFixed?.(2) ?? '—'"></b> ·
+              <b x-text="chainSurface?.dates?.length ?? 0"></b> sessions ×
+              <b x-text="chainSurface?.strikes?.length ?? 0"></b> strikes · ± <b x-text="(chainSurface?.max ?? 0).toLocaleString()"></b>
             </span>
           </div>
 
@@ -581,6 +616,15 @@
               <canvas id="ta-chain-flow"></canvas>
               <div id="ta-flow-tip" class="ta-flow-tip"></div>
             </div>
+          </div>
+
+          <!-- 3D surface (strike × time × signed qty) -->
+          <div x-show="chainView==='surface'">
+            <template x-if="!chainLoading && chainSurface && chainSurface.empty">
+              <div class="ta-placeholder">No data for this window / metric / filters.</div>
+            </template>
+            <div id="ta-chain-surface" class="ta-surface"
+                 x-show="!chainLoading && chainSurface && !chainSurface.empty"></div>
           </div>
         </div>
       </div>

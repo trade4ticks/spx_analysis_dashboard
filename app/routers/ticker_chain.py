@@ -593,6 +593,147 @@ async def chain_flow(
     return result
 
 
+def _compute_surface(paths: list, window: list, start_s: str, end_s: str,
+                     date_field: str, count_field: str, dte_min: int, dte_max: int,
+                     moneyness: Optional[float], sf_df: pd.DataFrame,
+                     end_spot: Optional[float]) -> dict:
+    """Strike × time surface with SIGNED height: net = calls − puts (adjusted).
+    Rows = adjusted strikes (moneyness-filtered), cols = window sessions. One
+    metric (OI or Vol), aggregated across the DTE band."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+
+    net: dict = {}
+    con = duckdb.connect()
+    try:
+        con.register("split_factors", sf_df)
+        existing = [p for p in paths if os.path.isfile(p)]
+        if existing:
+            pl = ", ".join("'" + p + "'" for p in existing)
+            sql = f"""
+                WITH adj AS (
+                    SELECT raw.{date_field}                                  AS d,
+                           round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                           raw.option_type                                  AS ot,
+                           raw.{count_field} / COALESCE(sf.adj_factor, 1.0) AS cnt
+                    FROM (SELECT * FROM read_parquet([{pl}])
+                           WHERE {date_field} BETWEEN DATE '{start_s}' AND DATE '{end_s}') raw
+                    LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                )
+                SELECT d, strike, ot, SUM(cnt) AS v FROM adj GROUP BY d, strike, ot
+            """
+            for d, strike, ot, v in con.execute(sql).fetchall():
+                k = (str(d), round(float(strike), 2))
+                signed = float(v) if str(ot).upper().startswith("C") else -float(v)
+                net[k] = net.get(k, 0.0) + signed
+    finally:
+        con.close()
+
+    strikes = sorted({s for _, s in net}, reverse=True)
+    if moneyness is not None and end_spot:
+        strikes = [s for s in strikes if abs(s / end_spot - 1) <= moneyness]
+    if not strikes:
+        return {"dates": window, "strikes": [], "matrix": [], "max": 0,
+                "empty": True, "signed": True}
+
+    ncol, nrow = len(window), len(strikes)
+    ridx = {s: i for i, s in enumerate(strikes)}
+    cidx = {d: i for i, d in enumerate(window)}
+    M = [[None] * ncol for _ in range(nrow)]
+    for (d, s), v in net.items():
+        if d in cidx and s in ridx:
+            M[ridx[s]][cidx[d]] = v
+
+    absmax = max((abs(v) for row in M for v in row if v is not None), default=0.0)
+    matrix = [[(round(v) if v is not None else None) for v in row] for row in M]
+    return {"dates": window, "strikes": strikes, "matrix": matrix,
+            "max": round(absmax), "signed": True, "empty": False}
+
+
+@router.get("/chain/surface")
+async def chain_surface(
+    ticker: str = Query(...),
+    date: str = Query(...),
+    lookback: int = Query(126),
+    metric: str = Query("oi"),              # oi | vol
+    dte_min: int = Query(0),
+    dte_max: int = Query(3650),
+    moneyness: Optional[float] = Query(None),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """Split-adjusted signed (calls − puts) strike × time surface."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker):
+        return {"error": "invalid ticker"}
+    if not _DATE_RE.match(date):
+        return {"error": "invalid date"}
+    metric = "vol" if metric == "vol" else "oi"
+    lookback = max(5, min(1000, lookback))
+
+    key = (f"surface:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{metric}:"
+           f"{dte_min}:{dte_max}:{moneyness}")
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d_end = datetime.strptime(date, "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        drows = await conn.fetch(
+            "SELECT trade_date FROM daily_features "
+            "WHERE ticker = $1 AND total_oi IS NOT NULL AND trade_date <= $2 "
+            "ORDER BY trade_date",
+            ticker, d_end,
+        )
+    window = [str(r["trade_date"]) for r in drows][-lookback:]
+    if not window:
+        return {"ticker": ticker, "date": date, "dates": [], "strikes": [],
+                "matrix": [], "empty": True, "metric": metric}
+
+    d_start = datetime.strptime(window[0], "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        srows = await conn.fetch(
+            "SELECT trade_date, close FROM underlying_ohlc "
+            "WHERE ticker = $1 AND trade_date BETWEEN $2 AND $3",
+            ticker, d_start, d_end,
+        )
+    spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
+               for r in srows}
+    end_spot = spot_by.get(window[-1])
+
+    sf_df = await _load_splits_df(pool, ticker)
+    span = (d_end - d_start).days + 6
+    sf_rel = make_split_factors(sf_df, [d_start - timedelta(days=5) + timedelta(days=i)
+                                        for i in range(span)])
+
+    years = list(range(d_start.year, d_end.year + 1))
+    if metric == "vol":
+        paths = [_chain_year_path(ticker, y) for y in [years[0] - 1] + years]
+        date_field, count_field = "feature_date", "volume"
+    else:
+        paths = [_oi_year_path(ticker, y) for y in years]
+        date_field, count_field = "trade_date", "open_interest"
+
+    result = await asyncio.to_thread(
+        _compute_surface, paths, window, window[0], window[-1],
+        date_field, count_field, dte_min, dte_max, moneyness, sf_rel, end_spot,
+    )
+    result["spots"] = [spot_by.get(dd) for dd in result.get("dates", window)]
+    result.update({
+        "ticker": ticker, "date": date, "metric": metric,
+        "lookback": lookback, "moneyness": moneyness, "spot": end_spot,
+    })
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
 @router.post("/chain/invalidate")
 async def chain_invalidate(ticker: Optional[str] = Query(None), pool=Depends(get_oi_pool)):
     """Clear the chain cache — all, or just one ticker's rows."""
