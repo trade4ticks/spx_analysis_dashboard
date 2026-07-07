@@ -38,7 +38,7 @@ const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff'
 /* Chart.js instances and heavy per-pane series live OUTSIDE Alpine's
  * reactive proxy — wrapping Chart internals or 1.7k-row arrays in a Proxy
  * breaks rendering and slows selection. Keyed by pane id. */
-const TA_CHARTS = { price: null, bars: {}, series: {} };
+const TA_CHARTS = { price: null, bars: {}, series: {}, chain: null };
 const TA_DATA = {};   // paneId -> { bins, series, today }
 
 /* Numpy-matching stats, mirroring oi_analysis.js `_rgComputeStats`:
@@ -100,6 +100,17 @@ document.addEventListener('alpine:init', () => {
     layouts: [],                   // [{id, name, layout, created_at}] saved layouts
     selectedLayoutId: '',          // control-bar layout selector
 
+    // Option chain — OI-by-strike profile (§5.4, P4a)
+    chainDates: [],
+    chainDateIdx: 0,
+    chainDteMin: 0,
+    chainDteMax: 3650,
+    chainMoneyness: '',            // '' = off; else ± percent
+    chainProfile: null,
+    chainLoading: false,
+    chainError: '',
+    _chainDebounce: null,
+
     // ── Lifecycle ────────────────────────────────────────────────────────
     async init() {
       await Promise.all([this.loadTickers(), this.loadMetricOptions(), this.loadLayouts()]);
@@ -155,6 +166,9 @@ document.addEventListener('alpine:init', () => {
         for (const p of this.panes) this.renderPane(p);
         this.recompute();
       });
+      // Chain section loads independently (parquet-backed, cached) so it
+      // never delays the metric layer.
+      this.loadChainDates().then(() => this.loadChainProfile());
     },
 
     async loadTodayScan() {
@@ -422,6 +436,114 @@ document.addEventListener('alpine:init', () => {
           this.renderPrice();     // rebuilds overlays from onPrice flags
           this.recompute();
         });
+      });
+    },
+
+    // ── Option chain — OI-by-strike profile (§5.4) ───────────────────────
+    async loadChainDates() {
+      if (!this.ticker) return;
+      try {
+        const r = await fetch(`/api/ticker-analysis/chain/dates?ticker=${encodeURIComponent(this.ticker)}`);
+        const j = await r.json();
+        this.chainDates = j.dates || [];
+        this.chainDateIdx = Math.max(0, this.chainDates.length - 1);   // latest
+      } catch (e) {
+        console.error('[ticker-analysis] loadChainDates failed:', e);
+        this.chainDates = [];
+      }
+    },
+
+    get chainDate() { return this.chainDates[this.chainDateIdx] || ''; },
+
+    chainScrub() {
+      clearTimeout(this._chainDebounce);
+      this._chainDebounce = setTimeout(() => this.loadChainProfile(), 300);
+    },
+
+    async loadChainProfile(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/oi-profile?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url);
+        const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainProfile = null; }
+        else this.chainProfile = j;
+      } catch (e) {
+        console.error('[ticker-analysis] loadChainProfile failed:', e);
+        this.chainError = 'load failed'; this.chainProfile = null;
+      } finally {
+        this.chainLoading = false;
+        this.$nextTick(() => this.renderChainProfile());
+      }
+    },
+
+    renderChainProfile() {
+      const cvs = document.getElementById('ta-chain-profile');
+      if (!cvs) return;
+      if (TA_CHARTS.chain) { TA_CHARTS.chain.destroy(); TA_CHARTS.chain = null; }
+      const p = this.chainProfile;
+      if (!p || !p.strikes || !p.strikes.length) return;
+
+      const labels = p.strikes.map(s => s.strike);
+      const calls = p.strikes.map(s => s.call_oi);       // positive → right (blue)
+      const puts = p.strikes.map(s => -s.put_oi);        // negative → left  (pink)
+      const spot = p.spot;
+
+      TA_CHARTS.chain = new Chart(cvs.getContext('2d'), {
+        type: 'bar',
+        data: { labels, datasets: [
+          { label: 'Puts', data: puts, backgroundColor: 'rgba(232,67,147,.75)' },
+          { label: 'Calls', data: calls, backgroundColor: 'rgba(52,152,219,.75)' },
+        ] },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { stacked: true, grid: { color: 'rgba(255,255,255,.06)' },
+                 ticks: { color: '#777', font: { size: 9 }, callback: v => Math.abs(v) } },
+            y: { stacked: true, reverse: true, grid: { display: false },
+                 ticks: { color: '#777', font: { size: 8 }, autoSkip: true, maxTicksLimit: 26,
+                          callback: (v, i) => labels[i] } },
+          },
+          plugins: {
+            legend: { display: true, position: 'top',
+                      labels: { color: '#c8c8c8', font: { size: 9 }, boxWidth: 10 } },
+            tooltip: { callbacks: {
+              title: items => 'Strike ' + labels[items[0].dataIndex],
+              label: it => `${it.dataset.label}: ${Math.abs(it.parsed.x).toLocaleString()}` } },
+          },
+        },
+        plugins: [{
+          id: 'taSpotLine',
+          afterDatasetsDraw(chart) {
+            if (spot == null) return;
+            const { ctx, chartArea, scales } = chart;
+            const y = scales.y;
+            // Interpolate spot's y-pixel between the two bracketing strike rows.
+            let idx = null;
+            for (let i = 0; i < labels.length - 1; i++) {
+              if (spot >= labels[i] && spot <= labels[i + 1]) {
+                const span = labels[i + 1] - labels[i] || 1;
+                idx = i + (spot - labels[i]) / span; break;
+              }
+            }
+            if (idx == null) idx = spot < labels[0] ? 0 : labels.length - 1;
+            const i0 = Math.floor(idx), i1 = Math.min(labels.length - 1, i0 + 1), f = idx - i0;
+            const py = y.getPixelForValue(i0) + f * (y.getPixelForValue(i1) - y.getPixelForValue(i0));
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(chartArea.left, py); ctx.lineTo(chartArea.right, py); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+            ctx.fillText('spot ' + spot, chartArea.left + 4, py - 3);
+            ctx.restore();
+          },
+        }],
       });
     },
 

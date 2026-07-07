@@ -157,13 +157,20 @@
     .ta-scan-meta { display:flex; align-items:center; gap:6px; margin-top:2px; }
     .ta-scan-bin { font-size:9px; font-weight:700; padding:1px 5px; border-radius:3px; color:#fff; white-space:nowrap; }
     .ta-scan-pct { font-size:9px; color:var(--dim); }
+
+    /* Option chain controls. */
+    .ta-chain-ctrl { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+    .ta-num {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:4px 6px; border-radius:4px; width:66px;
+    }
   </style>
 
   <!-- Page module (?v= cache-bust, matching the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=10"></script>
+  <script src="/static/js/ticker_analysis.js?v=11"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -384,14 +391,59 @@
       </div>
     </div>
 
-    <!-- Option chain section (§5.4) -->
+    <!-- Option chain section (§5.4) — OI-by-strike profile (P4a) -->
     <div class="ta-section">
       <div class="ta-section-hdr">
-        <span class="ta-section-title">Option Chain</span>
-        <span class="ta-section-sub">3D surface · strike×DTE heatmap · flow map · OI profile · IV smile/term</span>
+        <span class="ta-section-title">Option Chain — OI by strike</span>
+        <span class="ta-section-sub">
+          split-adjusted · puts <span style="color:#e84393">left</span> /
+          calls <span style="color:var(--accent)">right</span> · spot line
+        </span>
+        <div class="ta-spacer" style="margin-left:auto;"></div>
+        <button class="btn" @click="loadChainProfile(true)" title="Recompute (bypass cache)">↻ Recompute</button>
       </div>
       <div class="ta-section-body">
-        <div class="ta-placeholder">Option chain views <span class="ta-phase-tag">Phase 4+</span></div>
+        <template x-if="chainError">
+          <div class="ta-pane-err" x-text="chainError"></div>
+        </template>
+        <div x-show="!chainError">
+          <div class="ta-chain-ctrl">
+            <span class="ta-lbl">Date</span>
+            <input type="range" min="0" :max="Math.max(0, chainDates.length - 1)"
+                   x-model.number="chainDateIdx" @input="chainScrub()" style="width:220px;"
+                   :disabled="!chainDates.length">
+            <span class="ta-hint" x-text="chainDate || '—'"></span>
+
+            <div class="ctrl-div"></div>
+            <span class="ta-lbl">DTE</span>
+            <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="loadChainProfile()">
+            <span class="ta-hint">to</span>
+            <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="loadChainProfile()">
+
+            <div class="ctrl-div"></div>
+            <span class="ta-lbl">Moneyness&nbsp;±%</span>
+            <input type="number" class="ta-num" min="0" step="1" placeholder="off"
+                   x-model="chainMoneyness" @change="loadChainProfile()">
+
+            <div class="ta-spacer" style="margin-left:auto;"></div>
+            <span class="ta-hint" x-show="chainProfile">
+              spot <b x-text="chainProfile?.spot ?? '—'"></b> ·
+              adj× <b x-text="chainProfile?.adj_factor ?? '—'"></b> ·
+              <b x-text="chainProfile?.n ?? 0"></b> strikes
+            </span>
+          </div>
+
+          <template x-if="chainLoading">
+            <div class="ta-pane-loading">Loading chain…</div>
+          </template>
+          <template x-if="!chainLoading && chainProfile && chainProfile.empty">
+            <div class="ta-placeholder">No OI for this snapshot / filters.</div>
+          </template>
+          <div class="ta-chart-wrap" style="height:380px;"
+               x-show="!chainLoading && chainProfile && !chainProfile.empty">
+            <canvas id="ta-chain-profile"></canvas>
+          </div>
+        </div>
       </div>
     </div>
 
