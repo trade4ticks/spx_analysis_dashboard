@@ -14,7 +14,8 @@
  *     (min/max) value-over-time rendering at full span
  *   • "Today — what's unusual" row: per-metric today value / bin / percentile,
  *     extremes first (from /today-scan); click a cell to add it as a pane
- * Deferred to later phases: saved named layouts (P3), option-chain (P4+).
+ *   • saved layouts: name/save/apply/delete the pane set (ticker-agnostic)
+ * Deferred to later phases: option-chain section (P4+).
  * ==========================================================================*/
 
 /* Forward-return horizons offered in the control bar (brief §3.1).
@@ -96,9 +97,12 @@ document.addEventListener('alpine:init', () => {
     todayScanLoading: false,
     todayScanError: '',
 
+    layouts: [],                   // [{id, name, layout, created_at}] saved layouts
+    selectedLayoutId: '',          // control-bar layout selector
+
     // ── Lifecycle ────────────────────────────────────────────────────────
     async init() {
-      await Promise.all([this.loadTickers(), this.loadMetricOptions()]);
+      await Promise.all([this.loadTickers(), this.loadMetricOptions(), this.loadLayouts()]);
       if (this.ticker) await this.loadTicker();
     },
 
@@ -341,7 +345,85 @@ document.addEventListener('alpine:init', () => {
       return this.panes.reduce((n, p) => n + p.selectedBins.length, 0);
     },
 
-    saveLayout() { alert('Save layout — coming in Phase 3.'); },
+    // ── Saved layouts (§6) ───────────────────────────────────────────────
+    async loadLayouts() {
+      try {
+        const r = await fetch('/api/ticker-analysis/layouts');
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        this.layouts = await r.json();
+      } catch (e) {
+        console.error('[ticker-analysis] loadLayouts failed:', e);
+        this.layouts = [];
+      }
+    },
+
+    async saveLayout() {
+      const current = this.layouts.find(l => String(l.id) === String(this.selectedLayoutId));
+      const name = prompt('Save layout as:', current ? current.name : '');
+      if (!name || !name.trim()) return;
+      const layout = {
+        panes: this.panes.map(p => ({ metric: p.metric, onPrice: !!p.onPrice })),
+        shadeMode: this.shadeMode,
+        horizon: this.horizon,
+      };
+      try {
+        const r = await fetch('/api/ticker-analysis/layouts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim(), layout }),
+        });
+        const j = await r.json();
+        if (j.error) { alert(j.error); return; }
+        await this.loadLayouts();
+        this.selectedLayoutId = String(j.id);
+      } catch (e) {
+        console.error('[ticker-analysis] saveLayout failed:', e);
+        alert('Save failed');
+      }
+    },
+
+    async deleteLayout() {
+      const lay = this.layouts.find(l => String(l.id) === String(this.selectedLayoutId));
+      if (!lay) return;
+      if (!confirm(`Delete layout "${lay.name}"?`)) return;
+      try {
+        await fetch(`/api/ticker-analysis/layouts/${lay.id}`, { method: 'DELETE' });
+      } catch (e) {
+        console.error('[ticker-analysis] deleteLayout failed:', e);
+      }
+      this.selectedLayoutId = '';
+      await this.loadLayouts();
+    },
+
+    onLayoutSelect() {
+      const lay = this.layouts.find(l => String(l.id) === String(this.selectedLayoutId));
+      if (lay) this.applyLayout(lay.layout);
+    },
+
+    applyLayout(layout) {
+      if (!layout) return;
+      // Tear down current panes/charts.
+      for (const p of this.panes) this.destroyPaneCharts(p.id);
+      for (const p of this.panes) delete TA_DATA[p.id];
+      this.panes = [];
+
+      if (layout.shadeMode) this.shadeMode = layout.shadeMode;
+      if (layout.horizon && this.horizons.includes(layout.horizon)) this.horizon = layout.horizon;
+
+      for (const pd of (layout.panes || [])) {
+        this.addPane(pd.metric, /*render=*/false);
+        this.panes[this.panes.length - 1].onPrice = !!pd.onPrice;
+      }
+
+      if (!this.ticker) return;
+      Promise.all(this.panes.map(p => this.loadPaneData(p))).then(() => {
+        this.$nextTick(() => {
+          for (const p of this.panes) this.renderPane(p);
+          this.renderPrice();     // rebuilds overlays from onPrice flags
+          this.recompute();
+        });
+      });
+    },
 
     // ── Data loads ───────────────────────────────────────────────────────
     async loadPrice() {

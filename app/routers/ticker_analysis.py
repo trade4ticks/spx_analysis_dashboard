@@ -18,13 +18,38 @@ Bins are per-ticker, IN-SAMPLE (is_bins.bin20_{metric}) — decided with the
 user: "extreme for this name," reusing the stored bins verbatim (no
 re-binning). Horizon is any ret_*_fwd_* column.
 """
+import json
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
 from app.db import get_oi_pool
 
 router = APIRouter()
+
+
+async def _ensure_layouts_table(conn) -> None:
+    """Lazily create the saved-layouts table (idempotent).
+
+    A layout is ticker-agnostic (brief §6): it stores the ordered set of
+    panes — each with its metric and "on price" flag — plus the shade mode
+    and horizon. Applying it to any ticker just re-queries for that ticker.
+    """
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticker_analysis_layouts (
+            id          SERIAL PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            layout_json JSONB NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+
+
+def _parse_layout(raw):
+    """asyncpg returns JSONB as a str by default — decode if needed."""
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 async def _table_columns(conn, table: str) -> set:
@@ -288,3 +313,65 @@ async def today_scan(
     # Extremes first: farthest from the median bin (10.5).
     rows.sort(key=lambda r: abs(r["bin"] - 10.5), reverse=True)
     return {"ticker": ticker, "date": str(latest), "rows": rows}
+
+
+# ── Saved layouts (brief §6) ──────────────────────────────────────────────
+
+@router.get("/layouts")
+async def list_layouts(pool=Depends(get_oi_pool)):
+    """All saved layouts, alphabetical. Includes the full layout_json so the
+    client can apply one without a second round-trip."""
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        await _ensure_layouts_table(conn)
+        rows = await conn.fetch(
+            "SELECT id, name, layout_json, created_at "
+            "FROM ticker_analysis_layouts ORDER BY name"
+        )
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "layout": _parse_layout(r["layout_json"]),
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/layouts")
+async def save_layout(payload: dict = Body(...), pool=Depends(get_oi_pool)):
+    """Create or update (by name) a saved layout."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    name = (payload.get("name") or "").strip()
+    layout = payload.get("layout")
+    if not name:
+        return {"error": "name required"}
+    if layout is None:
+        return {"error": "layout required"}
+    async with pool.acquire() as conn:
+        await _ensure_layouts_table(conn)
+        row = await conn.fetchrow(
+            "INSERT INTO ticker_analysis_layouts (name, layout_json) "
+            "VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (name) DO UPDATE "
+            "  SET layout_json = EXCLUDED.layout_json, created_at = now() "
+            "RETURNING id, name, created_at",
+            name, json.dumps(layout),
+        )
+    return {"id": row["id"], "name": row["name"],
+            "created_at": row["created_at"].isoformat()}
+
+
+@router.delete("/layouts/{layout_id}")
+async def delete_layout(layout_id: int, pool=Depends(get_oi_pool)):
+    if not pool:
+        return {"error": "OI database not configured"}
+    async with pool.acquire() as conn:
+        await _ensure_layouts_table(conn)
+        await conn.execute(
+            "DELETE FROM ticker_analysis_layouts WHERE id = $1", layout_id
+        )
+    return {"ok": True}

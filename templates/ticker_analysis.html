@@ -163,7 +163,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=9"></script>
+  <script src="/static/js/ticker_analysis.js?v=10"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -230,8 +230,19 @@
 
       <div class="ta-spacer"></div>
 
+      <span class="ta-lbl">Layout</span>
+      <select class="ta-sel" x-model="selectedLayoutId" @change="onLayoutSelect()" style="min-width:140px;">
+        <option value="">— saved layouts —</option>
+        <template x-for="l in layouts" :key="l.id">
+          <option :value="String(l.id)" x-text="l.name"></option>
+        </template>
+      </select>
+      <button class="btn" @click="saveLayout()">Save</button>
+      <button class="btn" @click="deleteLayout()" :disabled="!selectedLayoutId">Delete</button>
+
+      <div class="ctrl-div"></div>
+
       <button class="btn" @click="clearSelection()" :disabled="selectedBinCount===0">Clear selection</button>
-      <button class="btn" @click="saveLayout()">Save layout</button>
     </div>
 
     <!-- Dynamic stat strip (§4) -->
