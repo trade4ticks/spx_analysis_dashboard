@@ -35,6 +35,7 @@
     .ta-sel {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:12px; padding:5px 8px; border-radius:4px;
+      color-scheme:dark;   /* dark native dropdown arrow, matching Factor Analysis */
     }
     .ta-sel option, .ta-sel optgroup {
       background:var(--raised); color:var(--text);
@@ -163,6 +164,7 @@
     .ta-num {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:12px; padding:4px 6px; border-radius:4px; width:66px;
+      color-scheme:dark;   /* dark native spinner arrows */
     }
   </style>
 
@@ -170,7 +172,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=11"></script>
+  <script src="/static/js/ticker_analysis.js?v=12"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -203,7 +205,8 @@
     <!-- Control bar (§3.1) -->
     <div class="ta-ctrl">
       <span class="ta-lbl">Ticker</span>
-      <select class="ta-sel" x-model="ticker" @change="onTickerChange()" style="min-width:110px;">
+      <select class="ta-sel" x-model="ticker" @change="onTickerChange()" style="min-width:110px;"
+              x-effect="tickers.length && $nextTick(() => $el.value = ticker)">
         <template x-if="!tickers.length">
           <option value="">Loading…</option>
         </template>
@@ -215,7 +218,8 @@
       <div class="ctrl-div"></div>
 
       <span class="ta-lbl">Horizon</span>
-      <select class="ta-sel" x-model="horizon" @change="onHorizonChange()" style="min-width:150px;">
+      <select class="ta-sel" x-model="horizon" @change="onHorizonChange()" style="min-width:150px;"
+              x-init="$nextTick(() => $el.value = horizon)">
         <template x-for="h in horizons" :key="h">
           <option :value="h" x-text="h"></option>
         </template>

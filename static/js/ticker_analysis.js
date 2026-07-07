@@ -122,7 +122,9 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch('/api/ticker-analysis/tickers');
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         this.tickers = await r.json();
-        if (this.tickers.length && !this.ticker) this.ticker = this.tickers[0];
+        if (this.tickers.length && !this.ticker) {
+          this.ticker = this.tickers.includes('AAPL') ? 'AAPL' : this.tickers[0];
+        }
       } catch (e) {
         console.error('[ticker-analysis] loadTickers failed:', e);
         this.tickers = [];
