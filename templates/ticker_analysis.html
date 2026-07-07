@@ -70,8 +70,11 @@
     .ta-pill.accent { background:rgba(52,152,219,.12); border-color:var(--accent); color:var(--accent); }
   </style>
 
-  <!-- Page module (?v= cache-bust, matching the rest of the app) -->
-  <script defer src="/static/js/ticker_analysis.js?v=1"></script>
+  <!-- Page module (?v= cache-bust, matching the rest of the app).
+       NOT deferred: must run before the deferred Alpine bundle so the
+       `alpine:init` listener is registered before Alpine starts (same
+       load order app.js / oi_analysis.js rely on). -->
+  <script src="/static/js/ticker_analysis.js?v=2"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
