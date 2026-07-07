@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Ticker Analysis</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+
+  <!-- Alpine.js (defer keeps it from blocking render) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- Chart.js (used by the metric panes + price chart in Phase 2) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ── Ticker Analysis — page-scoped styles ──────────────────────────────
+       All rules are prefixed `.ta-` so nothing here can leak onto other
+       pages. Colors pull from theme.css tokens (bright-blue --accent for
+       positive/long/above; #e84393 pink for negative/short/below). */
+
+    .ta-body { flex:1; overflow:auto; padding:12px 14px; min-height:0; }
+
+    /* Control bar — reuses .ctrl-strip look but page-local so we can tune
+       spacing without touching the global strip. */
+    .ta-ctrl {
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:8px 12px; margin-bottom:12px;
+    }
+    .ta-ctrl .ta-sel {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:5px 8px; border-radius:4px;
+    }
+    .ta-ctrl .ta-sel option { background:var(--raised); color:var(--text); }
+    .ta-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
+    .ta-spacer { margin-left:auto; }
+
+    /* Section shell — every top-to-bottom block on the page uses this. */
+    .ta-section {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; margin-bottom:12px;
+    }
+    .ta-section-hdr {
+      display:flex; align-items:center; gap:8px;
+      padding:7px 12px; border-bottom:1px solid var(--border);
+      background:var(--raised); border-top-left-radius:6px; border-top-right-radius:6px;
+    }
+    .ta-section-title { font-size:12px; font-weight:700; letter-spacing:.3px; color:var(--text); }
+    .ta-section-sub { font-size:10px; color:var(--dim); }
+    .ta-section-body { padding:12px; }
+
+    /* Placeholder card shown for not-yet-built sections in this phase. */
+    .ta-placeholder {
+      display:flex; align-items:center; justify-content:center;
+      min-height:90px; color:var(--dim); font-size:12px;
+      border:1px dashed var(--border); border-radius:4px;
+      background:rgba(0,0,0,.12); text-align:center; padding:16px;
+    }
+    .ta-phase-tag {
+      font-size:9px; font-weight:700; letter-spacing:.3px; text-transform:uppercase;
+      padding:1px 6px; border-radius:3px; margin-left:6px;
+      background:rgba(52,152,219,.12); color:var(--accent); border:1px solid var(--accent);
+    }
+
+    /* Bins-fixed indicator + selection count pill. */
+    .ta-pill {
+      font-size:10px; font-weight:600; padding:2px 8px; border-radius:10px;
+      background:var(--raised); border:1px solid var(--border); color:var(--muted);
+      white-space:nowrap;
+    }
+    .ta-pill.accent { background:rgba(52,152,219,.12); border-color:var(--accent); color:var(--accent); }
+  </style>
+
+  <!-- Page module (?v= cache-bust, matching the rest of the app) -->
+  <script defer src="/static/js/ticker_analysis.js?v=1"></script>
+</head>
+
+<body x-data="tickerAnalysis" x-init="init()">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    <nav class="topbar-nav">
+      <a class="nav-link" href="/">Dashboard</a>
+      <a class="nav-link" href="/heatmap">Heatmap</a>
+      <a class="nav-link" href="/today">Today</a>
+      <a class="nav-link" href="/factor-analysis">Factor Analysis</a>
+      <a class="nav-link on" href="/ticker-analysis">Ticker Analysis</a>
+      <a class="nav-link" href="/factor-signals">Factor Signals</a>
+      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
+      <a class="nav-link" href="/research">Research</a>
+      <a class="nav-link" href="/research2">Research 2</a>
+      <a class="nav-link" href="/backtest-iv-analysis">Backtest IV</a>
+    </nav>
+    <div class="topbar-right">
+      <span x-text="ticker || '—'"></span>
+      <span style="color:var(--border)"> · </span>
+      <span x-text="'Single-ticker analysis'"></span>
+    </div>
+  </div>
+
+  <!-- ── Page body ──────────────────────────────────────────────────────── -->
+  <div class="ta-body">
+
+    <!-- Control bar (§3.1) -->
+    <div class="ta-ctrl">
+      <span class="ta-lbl">Ticker</span>
+      <select class="ta-sel" x-model="ticker" @change="onTickerChange()" style="min-width:110px;">
+        <template x-if="!tickers.length">
+          <option value="">Loading…</option>
+        </template>
+        <template x-for="t in tickers" :key="t">
+          <option :value="t" x-text="t"></option>
+        </template>
+      </select>
+
+      <div class="ctrl-div"></div>
+
+      <span class="ta-lbl">Horizon</span>
+      <select class="ta-sel" x-model="horizon" @change="onHorizonChange()" style="min-width:140px;">
+        <template x-for="h in horizons" :key="h.value">
+          <option :value="h.value" x-text="h.label"></option>
+        </template>
+      </select>
+
+      <div class="ctrl-div"></div>
+
+      <span class="ta-lbl">Shade</span>
+      <div class="seg">
+        <div class="seg-btn" :class="{on: shadeMode==='confluence'}" @click="shadeMode='confluence'">Confluence</div>
+        <div class="seg-btn" :class="{on: shadeMode==='union'}" @click="shadeMode='union'">Union</div>
+      </div>
+
+      <div class="ctrl-div"></div>
+
+      <span class="ta-pill">Bins <b style="color:var(--text)">20</b> · fixed</span>
+      <span class="ta-pill" :class="{accent: selectedBinCount>0}"
+            x-text="selectedBinCount>0 ? (selectedBinCount + ' bins selected') : 'no bins selected'"></span>
+
+      <div class="ta-spacer"></div>
+
+      <button class="btn" @click="clearSelection()" :disabled="selectedBinCount===0">Clear selection</button>
+      <button class="btn" @click="saveLayout()">Save layout</button>
+    </div>
+
+    <!-- Dynamic stat strip (§4) -->
+    <div class="ta-section">
+      <div class="ta-section-hdr">
+        <span class="ta-section-title">Stat Strip</span>
+        <span class="ta-section-sub" x-text="selectedBinCount>0 ? 'working set = union of selected bins' : 'all dates (no bins selected)'"></span>
+      </div>
+      <div class="ta-section-body">
+        <div class="ta-placeholder">Dynamic stat strip <span class="ta-phase-tag">Phase 2</span></div>
+      </div>
+    </div>
+
+    <!-- Full-width price chart (§5.1) -->
+    <div class="ta-section">
+      <div class="ta-section-hdr">
+        <span class="ta-section-title">Price — full history</span>
+        <span class="ta-section-sub">splits · bin-highlight overlay · metric overlays</span>
+      </div>
+      <div class="ta-section-body">
+        <div class="ta-placeholder" style="min-height:180px;">Full-width price chart <span class="ta-phase-tag">Phase 2</span></div>
+      </div>
+    </div>
+
+    <!-- Today — what's unusual (§3 item 4) -->
+    <div class="ta-section">
+      <div class="ta-section-hdr">
+        <span class="ta-section-title">Today — what's unusual</span>
+        <span class="ta-section-sub">value · 20-bin index · percentile, sorted by distance from median</span>
+      </div>
+      <div class="ta-section-body">
+        <div class="ta-placeholder">Today readout row <span class="ta-phase-tag">Phase 2</span></div>
+      </div>
+    </div>
+
+    <!-- Metric panes grid (§5.2) -->
+    <div class="ta-section">
+      <div class="ta-section-hdr">
+        <span class="ta-section-title">Metric Panes</span>
+        <span class="ta-section-sub">20-bin fwd-P&amp;L bars + value-over-time, per metric</span>
+        <div class="ta-spacer" style="margin-left:auto;"></div>
+        <button class="btn" disabled>+ Add pane</button>
+      </div>
+      <div class="ta-section-body">
+        <div class="ta-placeholder" style="min-height:140px;">Metric panes (add/remove) <span class="ta-phase-tag">Phase 2</span></div>
+      </div>
+    </div>
+
+    <!-- Option chain section (§5.4) -->
+    <div class="ta-section">
+      <div class="ta-section-hdr">
+        <span class="ta-section-title">Option Chain</span>
+        <span class="ta-section-sub">3D surface · strike×DTE heatmap · flow map · OI profile · IV smile/term</span>
+      </div>
+      <div class="ta-section-body">
+        <div class="ta-placeholder">Option chain views <span class="ta-phase-tag">Phase 4+</span></div>
+      </div>
+    </div>
+
+  </div><!-- /.ta-body -->
+
+</body>
+</html>

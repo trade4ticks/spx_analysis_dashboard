@@ -14,7 +14,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis
 
 BASE_DIR = Path(__file__).parent.parent  # project root
 
@@ -47,6 +47,7 @@ app.include_router(oi_signals.router,   prefix="/api/factor-signals")
 app.include_router(oi_analysis.router,  prefix="/api/factor-analysis")
 app.include_router(oi_portfolios.router, prefix="/api/factor-analysis")
 app.include_router(backtest_iv.router,  prefix="/api/backtest-iv")
+app.include_router(ticker_analysis.router, prefix="/api/ticker-analysis")
 
 
 @app.get("/today")
@@ -82,6 +83,11 @@ async def factor_analysis_page():
 @app.get("/factor-signals")
 async def factor_signals_page():
     return FileResponse(str(BASE_DIR / "templates" / "oi_signals.html"))
+
+
+@app.get("/ticker-analysis")
+async def ticker_analysis_page():
+    return FileResponse(str(BASE_DIR / "templates" / "ticker_analysis.html"))
 
 
 @app.get("/backtest-iv-analysis")
