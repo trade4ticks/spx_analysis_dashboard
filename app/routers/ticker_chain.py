@@ -53,7 +53,9 @@ OI_RAW_DIR = os.getenv("OI_RAW_DIR", "/data/oi_raw")
 CHAIN_EOD_DIR = os.getenv("CHAIN_EOD_DIR", "/data/chain_eod")
 
 # Bump to invalidate all cached chain payloads on the next deploy.
-CHAIN_SCHEMA_VERSION = 1
+# v2: spot no longer double-adjusted by adj_factor (was dragging pre-split
+#     spot to 1/N of its value).
+CHAIN_SCHEMA_VERSION = 2
 
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-^]{1,15}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -120,7 +122,10 @@ async def _load_splits_df(pool, ticker: str) -> pd.DataFrame:
     })
 
 
-async def _raw_close(pool, ticker: str, d) -> Optional[float]:
+async def _spot_close(pool, ticker: str, d) -> Optional[float]:
+    """underlying_ohlc.close — ALREADY split-adjusted upstream (yfinance).
+    The adjusted strikes (raw * adj_factor) align with this directly, so it
+    is used as spot with NO further factor applied."""
     async with pool.acquire() as conn:
         v = await conn.fetchval(
             "SELECT close FROM underlying_ohlc WHERE ticker = $1 AND trade_date = $2",
@@ -133,7 +138,7 @@ async def _raw_close(pool, ticker: str, d) -> Optional[float]:
 
 def _compute_oi_profile(path: str, date_str: str, dte_min: int, dte_max: int,
                         moneyness: Optional[float], sf_df: pd.DataFrame,
-                        spot_adj: Optional[float]) -> dict:
+                        spot: Optional[float]) -> dict:
     """Adjusted OI-by-strike for one snapshot. Returns {strikes:[{strike,
     call_oi, put_oi}], ...}. Empty (not an error) when the year file or the
     snapshot date is absent."""
@@ -145,9 +150,10 @@ def _compute_oi_profile(path: str, date_str: str, dte_min: int, dte_max: int,
     con = duckdb.connect()
     try:
         con.register("split_factors", sf_df)
+        # Moneyness compares ADJUSTED strike vs the already-adjusted spot.
         money_clause = ""
-        if moneyness is not None and spot_adj:
-            money_clause = f"WHERE ABS(strike / {spot_adj} - 1) <= {moneyness}"
+        if moneyness is not None and spot:
+            money_clause = f"WHERE ABS(strike / {spot} - 1) <= {moneyness}"
         sql = f"""
             WITH adj AS (
                 SELECT raw.strike * COALESCE(sf.adj_factor, 1.0)        AS strike,
@@ -233,18 +239,20 @@ async def chain_oi_profile(
     d = datetime.strptime(date, "%Y-%m-%d").date()
     sf_df = await _load_splits_df(pool, ticker)
     factor = make_split_factor_map(sf_df, [d]).get(d, 1.0)
-    raw_close = await _raw_close(pool, ticker, d)
-    # Spot in the SAME adjusted units as the strikes (both scaled by adj_factor)
-    # so the spot line lands among the adjusted strike cloud on historical dates.
-    spot_adj = round(raw_close * factor, 4) if raw_close is not None else None
+    # Spot = underlying_ohlc.close, which is ALREADY split-adjusted upstream —
+    # apply NO factor. The adjusted strikes (raw * adj_factor) align with it
+    # directly. adj_factor is returned only as a diagnostic; it must not touch
+    # spot (multiplying here would drag pre-split spot to 1/N of its value).
+    spot = await _spot_close(pool, ticker, d)
+    spot = round(spot, 4) if spot is not None else None
 
     sf_for_date = make_split_factors(sf_df, [d])   # DF(trade_date, adj_factor)
     result = await asyncio.to_thread(
         _compute_oi_profile, _oi_year_path(ticker, d.year), date,
-        dte_min, dte_max, moneyness, sf_for_date, spot_adj,
+        dte_min, dte_max, moneyness, sf_for_date, spot,
     )
     result.update({
-        "ticker": ticker, "date": date, "spot": spot_adj,
+        "ticker": ticker, "date": date, "spot": spot,
         "adj_factor": round(factor, 6),
         "dte_min": dte_min, "dte_max": dte_max, "moneyness": moneyness,
     })
