@@ -1093,12 +1093,20 @@ document.addEventListener('alpine:init', () => {
       const pts = p.points.map(d => {
         const raw = d.oi > 0 ? d.vol / d.oi : (d.vol > 0 ? Infinity : 0);
         const bar = d.oi > 0 ? Math.min(d.vol / d.oi, CAP) : (d.vol > 0 ? CAP : 0);
-        return { strike: d.strike, oi: d.oi, vol: d.vol, raw, bar };
+        return { strike: d.strike, oi: d.oi, vol: d.vol, raw, bar, m: Math.min(d.vol, d.oi) };
       });
       const labels = pts.map(d => d.strike);
       const data = pts.map(d => d.bar);
-      // Accent where volume >= standing OI (fresh / outrunning); else dim.
-      const colors = pts.map(d => (d.raw >= 1 ? 'rgba(52,152,219,.85)' : 'rgba(200,200,200,.4)'));
+      // Length = turnover (vol/OI); OPACITY = magnitude = min(vol,OI) normalized
+      // per-view, so a high ratio built on trivial OI/volume recedes to a ghost
+      // while a real high-turnover near-money strike glows. Color still encodes
+      // vol≥OI (accent) vs below (gray).
+      const maxM = Math.max(1, ...pts.map(d => d.m));
+      const colors = pts.map(d => {
+        const base = d.raw >= 1 ? '52,152,219' : '200,200,200';
+        const a = 0.15 + 0.85 * Math.min(1, d.m / maxM);
+        return `rgba(${base},${a.toFixed(3)})`;
+      });
 
       TA_CHARTS.voloi = new Chart(cvs.getContext('2d'), {
         type: 'bar',
@@ -1107,7 +1115,7 @@ document.addEventListener('alpine:init', () => {
           indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
           scales: {
-            x: { title: { display: true, text: 'volume / OI  (capped at ' + CAP + ')', color: '#888', font: { size: 9 } },
+            x: { title: { display: true, text: 'volume / OI  (capped at ' + CAP + '×, opacity = min(vol,OI))', color: '#888', font: { size: 9 } },
                  min: 0, suggestedMax: CAP, grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
             y: { reverse: true, grid: { display: false }, ticks: { color: '#777', font: { size: 8 }, autoSkip: true, maxTicksLimit: 26, callback: (v, i) => labels[i] } },
           },
@@ -1117,8 +1125,10 @@ document.addEventListener('alpine:init', () => {
               title: it => 'Strike ' + labels[it[0].dataIndex],
               label: it => {
                 const d = pts[it.dataIndex];
-                const r = d.raw === Infinity ? '∞' : d.raw.toFixed(2);
-                return `vol/OI ${r} · vol ${d.vol.toLocaleString()} · OI ${d.oi.toLocaleString()}`;
+                const r = d.raw === Infinity ? '∞ (no prior OI)' : d.raw.toFixed(2);
+                return [`vol/OI ${r}`,
+                        `vol ${d.vol.toLocaleString()} · OI ${d.oi.toLocaleString()}`,
+                        `min(vol,OI) ${d.m.toLocaleString()}`];
               } } },
           },
         },
@@ -1135,6 +1145,25 @@ document.addEventListener('alpine:init', () => {
               ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
               ctx.setLineDash([]); ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
               ctx.fillText('1×', x + 2, chartArea.top + 9);
+              ctx.restore();
+            },
+          },
+          {   // clamp flags at the cap: ∞ (yellow) = no prior OI (new strike);
+              // › (gray) = finite ratio above the cap.
+            id: 'taVolOiCap',
+            afterDatasetsDraw(chart) {
+              const { ctx, chartArea, scales } = chart;
+              const xCap = scales.x.getPixelForValue(CAP);
+              ctx.save();
+              ctx.font = 'bold 10px sans-serif'; ctx.textBaseline = 'middle';
+              for (let i = 0; i < pts.length; i++) {
+                const d = pts[i];
+                if (d.raw <= CAP) continue;
+                const y = scales.y.getPixelForValue(i);
+                if (y < chartArea.top || y > chartArea.bottom) continue;
+                ctx.fillStyle = d.raw === Infinity ? '#f1c40f' : '#aaa';
+                ctx.fillText(d.raw === Infinity ? '∞' : '›', Math.min(xCap + 3, chartArea.right - 8), y);
+              }
               ctx.restore();
             },
           },
