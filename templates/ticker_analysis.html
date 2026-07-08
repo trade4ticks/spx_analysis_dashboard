@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=26"></script>
+  <script src="/static/js/ticker_analysis.js?v=27"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -525,13 +525,6 @@
                     </select>
                   </div>
                 </template>
-                <span class="ta-lbl">Side</span>
-                <div class="seg">
-                  <template x-for="sd in [['all','All'],['call','Calls'],['put','Puts']]" :key="sd[0]">
-                    <div class="seg-btn" :class="{on: chainFlowSide===sd[0]}"
-                         @click="chainFlowSide=sd[0]; loadChainFlow()" x-text="sd[1]"></div>
-                  </template>
-                </div>
                 <span class="ta-lbl">Window</span>
                 <select class="ta-sel" x-model.number="chainFlowLookback" @change="loadChainFlow()"
                         x-init="$nextTick(() => $el.value = chainFlowLookback)">
@@ -593,6 +586,21 @@
                     <option :value="w[0]" x-text="w[1]"></option>
                   </template>
                 </select>
+              </div>
+            </template>
+
+            <!-- Side toggle (All/Calls/Puts) — one shared control across the
+                 strike views that split by option type (S4). -->
+            <template x-if="chainView==='profile' || chainView==='doi' || chainView==='voloi' || chainView==='strikeDte' || chainView==='flow'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Side</span>
+                <div class="seg">
+                  <template x-for="sd in [['all','All'],['call','Calls'],['put','Puts']]" :key="sd[0]">
+                    <div class="seg-btn" :class="{on: chainSide===sd[0]}"
+                         @click="chainSide=sd[0]; chainReload()" x-text="sd[1]"></div>
+                  </template>
+                </div>
               </div>
             </template>
 

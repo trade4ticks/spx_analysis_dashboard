@@ -140,7 +140,7 @@ document.addEventListener('alpine:init', () => {
     chainFullscreen: false,
     chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
     chainFlowMode: 'oi',           // flow: 'oi'|'vol'|'voloi'|'doi'|'dvol'
-    chainFlowSide: 'all',          // flow: 'all'|'call'|'put' (#5)
+    chainSide: 'all',              // All|Calls|Puts, shared across strike views (#5, S4)
     chainFlowLookback: 126,        // flow window (sessions) — 6m
     chainFlowN: 1,                 // flow Δ window (sessions)
     chainFlow: null,
@@ -622,7 +622,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/oi-profile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
+              + `&date=${date}&side=${this.chainSide}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -741,7 +741,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/strike-dte?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&metric=${this.chainMetric}`;
+              + `&date=${date}&metric=${this.chainMetric}&side=${this.chainSide}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -860,7 +860,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/flow?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&mode=${this.chainFlowMode}&side=${this.chainFlowSide}&lookback=${this.chainFlowLookback}`
+              + `&date=${date}&mode=${this.chainFlowMode}&side=${this.chainSide}&lookback=${this.chainFlowLookback}`
               + `&n=${this.chainFlowN}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
@@ -1136,7 +1136,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/doi-profile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&n=${this.chainDoiN}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
+              + `&date=${date}&n=${this.chainDoiN}&side=${this.chainSide}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -1185,7 +1185,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/vol-oi?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
+              + `&date=${date}&side=${this.chainSide}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -1322,7 +1322,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/iv-smile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
+              + `&date=${date}&side=${this.chainSide}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
