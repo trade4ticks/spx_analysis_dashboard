@@ -106,8 +106,11 @@
       display:flex; flex-direction:column;
       box-shadow:0 8px 32px rgba(0,0,0,.7);
     }
-    .ta-section.fs .ta-section-body { flex:1; min-height:0; }
+    .ta-section.fs .ta-section-body { flex:1; min-height:0; overflow:auto; }
     .ta-section.fs .ta-chart-wrap.price { height:100%; }
+    /* Chain views fill the viewport in fullscreen. */
+    .ta-section.fs .ta-chart-wrap:not(.price) { height:calc(100vh - 210px) !important; }
+    .ta-section.fs .ta-surface { height:calc(100vh - 210px) !important; }
 
     .ta-hint { font-size:10px; color:var(--dim); }
 
@@ -182,7 +185,7 @@
     }
 
     /* 3D surface host (Three.js appends its canvas here). */
-    .ta-surface { position:relative; width:100%; height:440px; border-radius:4px; overflow:hidden; cursor:grab; }
+    .ta-surface { position:relative; width:100%; height:760px; border-radius:4px; overflow:hidden; cursor:grab; }
     .ta-surface:active { cursor:grabbing; }
     .ta-surface canvas { display:block; }
 
@@ -199,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=22"></script>
+  <script src="/static/js/ticker_analysis.js?v=23"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -423,7 +426,7 @@
     </div>
 
     <!-- Option chain section (§5.4) — OI profile (P4a) + strike×DTE heatmap (P4b) -->
-    <div class="ta-section">
+    <div class="ta-section" :class="{fs: chainFullscreen}">
       <div class="ta-section-hdr" style="flex-wrap:wrap;">
         <span class="ta-section-title">Option Chain</span>
         <div class="seg" style="margin-left:6px;">
@@ -466,6 +469,8 @@
         </span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
         <button class="btn" @click="chainReload(true)" title="Recompute (bypass cache)">↻ Recompute</button>
+        <button class="btn" @click="toggleChainFullscreen()"
+                x-text="chainFullscreen ? '⤡ Exit' : '⤢ Fullscreen'"></button>
       </div>
       <div class="ta-section-body">
         <template x-if="chainError">
@@ -640,7 +645,7 @@
 
           <!-- OI profile -->
           <div x-show="chainView==='profile'">
-            <div class="ta-chart-wrap" style="height:380px;">
+            <div class="ta-chart-wrap" style="height:760px;">
               <canvas id="ta-chain-profile"></canvas>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
               <div class="ta-chain-overlay" x-show="!chainLoading && chainProfile && chainProfile.empty">No OI for this snapshot / filters.</div>
@@ -649,7 +654,7 @@
 
           <!-- Strike×DTE heatmap (canvas) -->
           <div x-show="chainView==='strikeDte'">
-            <div class="ta-chart-wrap" style="height:300px;">
+            <div class="ta-chart-wrap" style="height:600px;">
               <canvas id="ta-chain-heatmap"></canvas>
               <div id="ta-hm-tip" class="ta-flow-tip"></div>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
@@ -659,7 +664,7 @@
 
           <!-- Flow map (strike × time) -->
           <div x-show="chainView==='flow'">
-            <div class="ta-chart-wrap" style="height:420px;">
+            <div class="ta-chart-wrap" style="height:840px;">
               <canvas id="ta-chain-flow"></canvas>
               <div id="ta-flow-tip" class="ta-flow-tip"></div>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
@@ -677,7 +682,7 @@
 
           <!-- ΔOI-by-strike -->
           <div x-show="chainView==='doi'">
-            <div class="ta-chart-wrap" style="height:380px;">
+            <div class="ta-chart-wrap" style="height:760px;">
               <canvas id="ta-chain-doi"></canvas>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
               <div class="ta-chain-overlay" x-show="!chainLoading && chainDoi && chainDoi.empty">No OI change for this snapshot / filters.</div>
@@ -686,7 +691,7 @@
 
           <!-- Vol-vs-OI scatter -->
           <div x-show="chainView==='voloi'">
-            <div class="ta-chart-wrap" style="height:380px;">
+            <div class="ta-chart-wrap" style="height:760px;">
               <canvas id="ta-chain-voloi"></canvas>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
               <div class="ta-chain-overlay" x-show="!chainLoading && chainVolOi && chainVolOi.empty">No data for this snapshot / filters.</div>
@@ -695,7 +700,7 @@
 
           <!-- IV smile -->
           <div x-show="chainView==='smile'">
-            <div class="ta-chart-wrap" style="height:340px;">
+            <div class="ta-chart-wrap" style="height:680px;">
               <canvas id="ta-chain-smile"></canvas>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
               <div class="ta-chain-overlay" x-show="!chainLoading && chainSmile && chainSmile.empty">No IV for this snapshot / filters.</div>
@@ -704,7 +709,7 @@
 
           <!-- IV term structure -->
           <div x-show="chainView==='ivterm'">
-            <div class="ta-chart-wrap" style="height:340px;">
+            <div class="ta-chart-wrap" style="height:680px;">
               <canvas id="ta-chain-ivterm"></canvas>
               <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
               <div class="ta-chain-overlay" x-show="!chainLoading && chainIvTerm && chainIvTerm.empty">No IV term data for this window.</div>

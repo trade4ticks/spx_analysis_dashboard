@@ -105,6 +105,7 @@ document.addEventListener('alpine:init', () => {
 
     // Option chain (§5.4): OI profile (P4a) + strike×DTE heatmap (P4b) + flow (P4c)
     chainView: 'profile',          // 'profile' | 'strikeDte' | 'flow'
+    chainFullscreen: false,
     chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
     chainFlowMode: 'oi',           // flow: 'oi'|'vol'|'voloi'|'doi'|'dvol'
     chainFlowLookback: 126,        // flow window (sessions) — 6m
@@ -133,6 +134,13 @@ document.addEventListener('alpine:init', () => {
 
     // ── Lifecycle ────────────────────────────────────────────────────────
     async init() {
+      // Re-fit the active chain chart on window resize (WebGL/canvas don't
+      // auto-resize like Chart.js; the 3D surface needs renderer+camera reset).
+      let rt = null;
+      window.addEventListener('resize', () => {
+        clearTimeout(rt);
+        rt = setTimeout(() => this.rerenderActiveChain(), 150);
+      });
       await Promise.all([this.loadTickers(), this.loadMetricOptions(), this.loadLayouts()]);
       if (this.ticker) await this.loadTicker();
     },
@@ -547,6 +555,23 @@ document.addEventListener('alpine:init', () => {
       if (this.chainView === 'surface' && v !== 'surface') this.disposeSurface();  // stop the render loop
       this.chainView = v;
       this.chainReload();
+    },
+
+    // Re-draw the active chain view into its (possibly resized) container,
+    // without re-fetching — used on fullscreen toggle and window resize (G1).
+    rerenderActiveChain() {
+      const fn = {
+        profile: 'renderChainProfile', doi: 'renderChainDoi', voloi: 'renderChainVolOi',
+        strikeDte: 'renderChainHeatmap', flow: 'renderChainFlow', surface: 'renderChainSurface',
+        smile: 'renderChainSmile', ivterm: 'renderChainIvTerm',
+      }[this.chainView];
+      if (fn && this[fn]) this[fn]();
+    },
+
+    toggleChainFullscreen() {
+      this.chainFullscreen = !this.chainFullscreen;
+      // Let the layout settle, then resize the active chart to the new box.
+      this.$nextTick(() => requestAnimationFrame(() => this.rerenderActiveChain()));
     },
 
     async loadChainProfile(force = false) {
