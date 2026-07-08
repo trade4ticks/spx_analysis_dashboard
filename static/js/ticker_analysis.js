@@ -37,6 +37,20 @@ const TA_PINK = '#e84393';   // negative / puts / short / below
  * pink (those carry sign meaning). Assigned by order among overlaid panes. */
 const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff', '#e056fd'];
 
+/* Y-pixel for a strike value on a horizontal (strike-on-y) profile chart —
+ * interpolates between the two bracketing strike rows. */
+function taYForStrike(strike, labels, yScale) {
+  let idx = null;
+  for (let i = 0; i < labels.length - 1; i++) {
+    if ((strike >= labels[i] && strike <= labels[i + 1]) || (strike <= labels[i] && strike >= labels[i + 1])) {
+      const span = labels[i + 1] - labels[i] || 1; idx = i + (strike - labels[i]) / span; break;
+    }
+  }
+  if (idx == null) idx = strike < labels[0] ? 0 : labels.length - 1;
+  const i0 = Math.floor(idx), i1 = Math.min(labels.length - 1, i0 + 1), f = idx - i0;
+  return yScale.getPixelForValue(i0) + f * (yScale.getPixelForValue(i1) - yScale.getPixelForValue(i0));
+}
+
 /* Camera-facing text label for the 3D surface axes (Three.js has no text). */
 function taTextSprite(text, color) {
   const cvs = document.createElement('canvas');
@@ -126,6 +140,7 @@ document.addEventListener('alpine:init', () => {
     chainFullscreen: false,
     chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
     chainFlowMode: 'oi',           // flow: 'oi'|'vol'|'voloi'|'doi'|'dvol'
+    chainFlowSide: 'all',          // flow: 'all'|'call'|'put' (#5)
     chainFlowLookback: 126,        // flow window (sessions) — 6m
     chainFlowN: 1,                 // flow Δ window (sessions)
     chainFlow: null,
@@ -628,6 +643,16 @@ document.addEventListener('alpine:init', () => {
       const puts = p.strikes.map(s => -s.put_oi);        // negative → left  (pink)
       const spot = p.spot;
 
+      // OI-weighted average strike Σ(K·OI)/Σ(OI) for all / calls / puts — over
+      // the DISPLAYED strikes (respects the DTE + moneyness filter). #1
+      let sK = 0, sO = 0, cK = 0, cO = 0, pK = 0, pO = 0;
+      for (const s of p.strikes) {
+        const c = s.call_oi || 0, pu = s.put_oi || 0;
+        cK += s.strike * c; cO += c; pK += s.strike * pu; pO += pu;
+        sK += s.strike * (c + pu); sO += (c + pu);
+      }
+      const wAll = sO > 0 ? sK / sO : null, wCall = cO > 0 ? cK / cO : null, wPut = pO > 0 ? pK / pO : null;
+
       TA_CHARTS.chain = new Chart(cvs.getContext('2d'), {
         type: 'bar',
         data: { labels, datasets: [
@@ -674,6 +699,27 @@ document.addEventListener('alpine:init', () => {
             ctx.beginPath(); ctx.moveTo(chartArea.left, py); ctx.lineTo(chartArea.right, py); ctx.stroke();
             ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
             ctx.fillText('spot ' + spot, chartArea.left + 4, py - 3);
+            ctx.restore();
+          },
+        }, {
+          id: 'taWeightedOi',
+          afterDatasetsDraw(chart) {
+            const { ctx, chartArea, scales } = chart;
+            const marks = [
+              { v: wCall, c: '#3498db', t: 'C̄' },   // OI-weighted call strike
+              { v: wPut, c: '#e84393', t: 'P̄' },    // OI-weighted put strike
+              { v: wAll, c: '#e0e0e0', t: 'Σ̄' },    // OI-weighted all strike
+            ];
+            ctx.save();
+            ctx.font = '9px sans-serif'; ctx.textAlign = 'right';
+            for (const m of marks) {
+              if (m.v == null) continue;
+              const py = taYForStrike(m.v, labels, scales.y);
+              ctx.strokeStyle = m.c; ctx.setLineDash([2, 2]); ctx.lineWidth = 1.5;
+              ctx.beginPath(); ctx.moveTo(chartArea.left, py); ctx.lineTo(chartArea.right, py); ctx.stroke();
+              ctx.setLineDash([]); ctx.fillStyle = m.c;
+              ctx.fillText(m.t + ' ' + m.v.toFixed(1), chartArea.right - 3, py - 2);
+            }
             ctx.restore();
           },
         }],
@@ -804,7 +850,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/flow?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&mode=${this.chainFlowMode}&lookback=${this.chainFlowLookback}`
+              + `&date=${date}&mode=${this.chainFlowMode}&side=${this.chainFlowSide}&lookback=${this.chainFlowLookback}`
               + `&n=${this.chainFlowN}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;

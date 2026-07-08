@@ -443,7 +443,8 @@ async def chain_strike_dte(
 def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
                   end_s: str, mode: str, n: int, dte_clause: str,
                   moneyness: Optional[float], sf_df: pd.DataFrame,
-                  end_spot: Optional[float], need_oi: bool, need_vol: bool) -> dict:
+                  end_spot: Optional[float], need_oi: bool, need_vol: bool,
+                  side: str = "all") -> dict:
     """Strike × time (flow map). `window` is the ordered list of session date
     strings = the columns. Rows = adjusted strikes (high→low), filtered by
     moneyness vs the end-of-window spot. Modes: oi / vol (level, sequential),
@@ -456,6 +457,9 @@ def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
     vol_map: dict = {}
     try:
         con.register("split_factors", sf_df)
+
+        ot = "" if side == "all" else (
+            "AND raw.option_type = 'C'" if side == "call" else "AND raw.option_type = 'P'")
 
         def _read(paths: list, date_field: str, count_field: str) -> dict:
             existing = [p for p in paths if os.path.isfile(p)]
@@ -470,7 +474,7 @@ def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
                     FROM (SELECT * FROM read_parquet([{pl}])
                            WHERE {date_field} BETWEEN DATE '{start_s}' AND DATE '{end_s}') raw
                     LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                    WHERE {dte_clause}
+                    WHERE {dte_clause} {ot}
                 )
                 SELECT d, strike, SUM(cnt) AS v FROM adj GROUP BY d, strike
             """
@@ -555,6 +559,7 @@ async def chain_flow(
     lookback: int = Query(252),             # sessions back from `date`
     mode: str = Query("oi"),                # oi | vol | voloi | doi | dvol
     n: int = Query(5),                      # sessions for the Δ modes
+    side: str = Query("all"),               # all | call | put  (#5)
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
     dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
@@ -573,12 +578,13 @@ async def chain_flow(
     if not _DATE_RE.match(date):
         return {"error": "invalid date"}
     mode = mode if mode in ("oi", "vol", "voloi", "doi", "dvol") else "oi"
+    side = side if side in ("all", "call", "put") else "all"
     lookback = max(5, min(1000, lookback))
     n = max(1, min(60, n))
 
     dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
     dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
-    key = (f"flow:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{mode}:"
+    key = (f"flow:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{mode}:{side}:"
            f"{n}:{dtk}:{moneyness}")
     if not force:
         cached = await _cache_get(pool, key)
@@ -626,11 +632,11 @@ async def chain_flow(
 
     result = await asyncio.to_thread(
         _compute_flow, oi_paths, chain_paths, window, window[0], window[-1],
-        mode, n, dte_clause, moneyness, sf_rel, end_spot, need_oi, need_vol,
+        mode, n, dte_clause, moneyness, sf_rel, end_spot, need_oi, need_vol, side,
     )
     result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
     result.update({
-        "ticker": ticker, "date": date, "mode": mode, "n": n,
+        "ticker": ticker, "date": date, "mode": mode, "n": n, "side": side,
         "lookback": lookback, "moneyness": moneyness, "spot": end_spot,
     })
     if "error" not in result:

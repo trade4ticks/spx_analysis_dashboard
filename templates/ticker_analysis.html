@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=24"></script>
+  <script src="/static/js/ticker_analysis.js?v=25"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -441,7 +441,8 @@
         </div>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='profile'">
           split-adjusted · puts <span style="color:#e84393">left</span> /
-          calls <span style="color:var(--accent)">right</span> · spot line
+          calls <span style="color:var(--accent)">right</span> · spot line ·
+          OI-weighted strike C̄/P̄/Σ̄
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='strikeDte'">
           rows = DTE buckets · cols = strikes · <span style="color:var(--accent)">sequential blue</span> · spot column marked
@@ -524,6 +525,13 @@
                     </select>
                   </div>
                 </template>
+                <span class="ta-lbl">Side</span>
+                <div class="seg">
+                  <template x-for="sd in [['all','All'],['call','Calls'],['put','Puts']]" :key="sd[0]">
+                    <div class="seg-btn" :class="{on: chainFlowSide===sd[0]}"
+                         @click="chainFlowSide=sd[0]; loadChainFlow()" x-text="sd[1]"></div>
+                  </template>
+                </div>
                 <span class="ta-lbl">Window</span>
                 <select class="ta-sel" x-model.number="chainFlowLookback" @change="loadChainFlow()"
                         x-init="$nextTick(() => $el.value = chainFlowLookback)">
