@@ -169,6 +169,9 @@
       font-size:12px; padding:4px 6px; border-radius:4px; width:66px;
       color-scheme:dark;   /* dark native spinner arrows */
     }
+    /* DTE range buttons (G4). */
+    .ta-dte-btns { display:flex; gap:3px; flex-wrap:wrap; align-items:center; }
+    .ta-dte-btns .chip { padding:2px 7px; font-size:10px; }
 
     /* Loading/empty overlay inside a chart wrap (doesn't affect layout height,
        so switching modes never collapses the pane / jumps the scroll). */
@@ -196,7 +199,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=18"></script>
+  <script src="/static/js/ticker_analysis.js?v=19"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -470,9 +473,16 @@
         <div x-show="!chainError">
           <div class="ta-chain-ctrl">
             <span class="ta-lbl">Date</span>
-            <input type="range" min="0" :max="Math.max(0, chainDates.length - 1)"
+            <div class="seg">
+              <div class="seg-btn" :class="{on: chainWinSize===21}"  @click="setChainWinSize(21)">1m</div>
+              <div class="seg-btn" :class="{on: chainWinSize===63}"  @click="setChainWinSize(63)">3m</div>
+              <div class="seg-btn" :class="{on: chainWinSize===126}" @click="setChainWinSize(126)">6m</div>
+            </div>
+            <button class="btn" @click="pageWindow(-1)" :disabled="chainWinStart<=0" title="Earlier window">◀</button>
+            <input type="range" :min="chainWinStart" :max="chainWinHi"
                    x-model.number="chainDateIdx" @input="chainScrub()" style="width:220px;"
                    :disabled="!chainDates.length">
+            <button class="btn" @click="pageWindow(1)" :disabled="chainWinHi>=chainDates.length-1" title="Later window">▶</button>
             <span class="ta-hint" x-text="chainDate || '—'"></span>
 
             <!-- OI/Vol toggle (heatmap only) -->
@@ -562,14 +572,18 @@
               </div>
             </template>
 
-            <!-- DTE range (all snapshot/level views except strike×DTE buckets and IV term) -->
+            <!-- DTE range buttons (all strike views except the strike×DTE
+                 buckets view and IV term). Single-select bucket or All. -->
             <template x-if="chainView!=='strikeDte' && chainView!=='ivterm'">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">DTE</span>
-                <input type="number" class="ta-num" min="0" x-model.number="chainDteMin" @change="chainReload()">
-                <span class="ta-hint">to</span>
-                <input type="number" class="ta-num" min="0" x-model.number="chainDteMax" @change="chainReload()">
+                <div class="ta-dte-btns">
+                  <span class="chip" :class="{on: dteIsAll}" @click="setDteRange(0,3650)">All</span>
+                  <template x-for="b in chainDteBuckets" :key="b[2]">
+                    <span class="chip" :class="{on: dteActive(b[0],b[1])}" @click="setDteRange(b[0],b[1])" x-text="b[2]"></span>
+                  </template>
+                </div>
               </div>
             </template>
 

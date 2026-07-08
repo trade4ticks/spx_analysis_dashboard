@@ -121,6 +121,8 @@ document.addEventListener('alpine:init', () => {
     chainIvTerm: null,
     chainDates: [],
     chainDateIdx: 0,
+    chainWinSize: 63,              // date-slider window (sessions) — 3m, for daily nodes
+    chainWinStart: 0,              // window start index into chainDates
     chainDteMin: 0,
     chainDteMax: 3650,
     chainMoneyness: '',            // '' = off; else ± percent
@@ -468,6 +470,7 @@ document.addEventListener('alpine:init', () => {
         const j = await r.json();
         this.chainDates = j.dates || [];
         this.chainDateIdx = Math.max(0, this.chainDates.length - 1);   // latest
+        this.chainWinStart = Math.max(0, this.chainDates.length - this.chainWinSize);
       } catch (e) {
         console.error('[ticker-analysis] loadChainDates failed:', e);
         this.chainDates = [];
@@ -476,9 +479,50 @@ document.addEventListener('alpine:init', () => {
 
     get chainDate() { return this.chainDates[this.chainDateIdx] || ''; },
 
+    // ── Date-slider window (G3) — daily nodes over a bounded window ───────
+    // The full history can be ~1750 sessions; a raw slider then can't land on
+    // a single day. Restrict the slider to a window (default 3m) so every
+    // step = one trading day, and page the window through history.
+    get chainWinHi() {
+      if (!this.chainDates.length) return 0;
+      return Math.min(this.chainDates.length - 1, this.chainWinStart + this.chainWinSize - 1);
+    },
+    setChainWinSize(sz) {
+      this.chainWinSize = sz;
+      // Keep the current selection visible; anchor the window to end at it.
+      const end = Math.min(this.chainDates.length - 1, this.chainDateIdx);
+      this.chainWinStart = Math.max(0, Math.min(Math.max(0, this.chainDates.length - sz), end - sz + 1));
+    },
+    pageWindow(dir) {
+      const n = this.chainDates.length;
+      const maxStart = Math.max(0, n - this.chainWinSize);
+      this.chainWinStart = Math.max(0, Math.min(maxStart, this.chainWinStart + dir * this.chainWinSize));
+      this.chainDateIdx = this.chainWinHi;   // land on the most recent day of the window
+      this.chainReload();
+    },
+
     chainScrub() {
       clearTimeout(this._chainDebounce);
       this._chainDebounce = setTimeout(() => this.chainReload(), 300);
+    },
+
+    // ── DTE range buttons (G4) ───────────────────────────────────────────
+    // Single-select bucket (or All) → sets dte_min/dte_max, driving every
+    // strike-based view. Buckets match the strike×DTE rows.
+    chainDteBuckets: [
+      [0, 7, '0-7'], [8, 14, '8-14'], [15, 30, '15-30'], [31, 60, '31-60'],
+      [61, 90, '61-90'], [91, 120, '91-120'], [121, 180, '121-180'],
+      [181, 270, '181-270'], [271, 365, '271-365'], [366, 730, '1-2y'], [731, 3650, '2y+'],
+    ],
+    setDteRange(lo, hi) {
+      this.chainDteMin = lo; this.chainDteMax = hi;
+      this.chainReload();
+    },
+    dteActive(lo, hi) {
+      return (this.chainDteMin || 0) === lo && (this.chainDteMax || 3650) === hi;
+    },
+    get dteIsAll() {
+      return (this.chainDteMin || 0) === 0 && (this.chainDteMax || 3650) === 3650;
     },
 
     // Route the shared controls (date/moneyness/Recompute) to the active view.
