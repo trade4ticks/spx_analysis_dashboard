@@ -61,6 +61,17 @@ _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-^]{1,15}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _fill_forward(vals: list) -> list:
+    """Carry the last non-null value forward (for the spot path over sessions
+    where underlying_ohlc is missing). Leading nulls stay null."""
+    out, last = [], None
+    for v in vals:
+        if v is not None:
+            last = v
+        out.append(last)
+    return out
+
+
 def _oi_year_path(ticker: str, year: int) -> str:
     return os.path.join(OI_RAW_DIR, ticker.upper(), f"{year}.parquet")
 
@@ -138,10 +149,17 @@ async def _load_splits_df(pool, ticker: str) -> pd.DataFrame:
 async def _spot_close(pool, ticker: str, d) -> Optional[float]:
     """underlying_ohlc.close — ALREADY split-adjusted upstream (yfinance).
     The adjusted strikes (raw * adj_factor) align with this directly, so it
-    is used as spot with NO further factor applied."""
+    is used as spot with NO further factor applied.
+
+    Uses the most recent close ON OR BEFORE `d` (not an exact match): the
+    default snapshot is the latest OI session, but underlying_ohlc can lag a
+    day — an exact-match query then returned NULL, so the spot line never
+    drew and moneyness had no reference and silently no-op'd."""
     async with pool.acquire() as conn:
         v = await conn.fetchval(
-            "SELECT close FROM underlying_ohlc WHERE ticker = $1 AND trade_date = $2",
+            "SELECT close FROM underlying_ohlc "
+            "WHERE ticker = $1 AND trade_date <= $2 AND close IS NOT NULL "
+            "ORDER BY trade_date DESC LIMIT 1",
             ticker, d,
         )
     return float(v) if v is not None else None
@@ -563,7 +581,9 @@ async def chain_flow(
         )
     spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
                for r in srows}
-    end_spot = spot_by.get(window[-1])
+    # Robust end-of-window spot (most recent close ≤ end) so moneyness always
+    # has a reference even when underlying_ohlc lags the latest OI session.
+    end_spot = await _spot_close(pool, ticker, d_end)
 
     sf_df = await _load_splits_df(pool, ticker)
     # Factor relation over the whole window (+5-day back buffer so the Vol
@@ -583,7 +603,7 @@ async def chain_flow(
         _compute_flow, oi_paths, chain_paths, window, window[0], window[-1],
         mode, n, dte_min, dte_max, moneyness, sf_rel, end_spot, need_oi, need_vol,
     )
-    result["spots"] = [spot_by.get(dd) for dd in result.get("dates", window)]
+    result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
     result.update({
         "ticker": ticker, "date": date, "mode": mode, "n": n,
         "lookback": lookback, "moneyness": moneyness, "spot": end_spot,
@@ -705,7 +725,7 @@ async def chain_surface(
         )
     spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
                for r in srows}
-    end_spot = spot_by.get(window[-1])
+    end_spot = await _spot_close(pool, ticker, d_end)
 
     sf_df = await _load_splits_df(pool, ticker)
     span = (d_end - d_start).days + 6
@@ -724,7 +744,7 @@ async def chain_surface(
         _compute_surface, paths, window, window[0], window[-1],
         date_field, count_field, dte_min, dte_max, moneyness, sf_rel, end_spot,
     )
-    result["spots"] = [spot_by.get(dd) for dd in result.get("dates", window)]
+    result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
     result.update({
         "ticker": ticker, "date": date, "metric": metric,
         "lookback": lookback, "moneyness": moneyness, "spot": end_spot,

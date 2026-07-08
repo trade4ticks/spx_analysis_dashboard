@@ -170,20 +170,6 @@
       color-scheme:dark;   /* dark native spinner arrows */
     }
 
-    /* Strike×DTE heatmap grid. */
-    .ta-hm-scroll { overflow-x:auto; padding-bottom:4px; }
-    .ta-hm-scroll::-webkit-scrollbar { height:6px; }
-    .ta-hm-grid { display:grid; grid-auto-rows:20px; gap:1px; align-items:stretch; }
-    .ta-hm-rowlbl {
-      position:sticky; left:0; z-index:1;
-      background:var(--surface); color:var(--dim);
-      font-size:9px; display:flex; align-items:center; padding-right:6px;
-      justify-content:flex-end; white-space:nowrap;
-    }
-    .ta-hm-cell { height:20px; border-radius:1px; }
-    .ta-hm-cell.spot { box-shadow:inset 1px 0 0 rgba(255,255,255,.85); }
-    .ta-hm-axis { display:flex; justify-content:space-between; font-size:9px; color:var(--dim); margin-top:4px; }
-
     /* 3D surface host (Three.js appends its canvas here). */
     .ta-surface { width:100%; height:440px; border-radius:4px; overflow:hidden; cursor:grab; }
     .ta-surface:active { cursor:grabbing; }
@@ -202,7 +188,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=17"></script>
+  <script src="/static/js/ticker_analysis.js?v=18"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -639,32 +625,15 @@
             </div>
           </div>
 
-          <!-- Strike×DTE heatmap -->
+          <!-- Strike×DTE heatmap (canvas) -->
           <div x-show="chainView==='strikeDte'">
             <template x-if="!chainLoading && chainHeatmap && chainHeatmap.empty">
               <div class="ta-placeholder">No data for this snapshot / metric / filters.</div>
             </template>
-            <div x-show="!chainLoading && chainHeatmap && !chainHeatmap.empty">
-              <div class="ta-hm-scroll">
-                <div class="ta-hm-grid"
-                     :style="`grid-template-columns:64px repeat(${chainHeatmap.strikes.length}, 12px)`">
-                  <template x-for="row in chainHmRows" :key="row.label">
-                    <div style="display:contents;">
-                      <div class="ta-hm-rowlbl" x-text="row.label"></div>
-                      <template x-for="(v, ci) in row.values" :key="ci">
-                        <div class="ta-hm-cell" :class="{spot: ci===chainSpotCol}"
-                             :style="hmCellStyle(v)"
-                             :title="row.label + ' · ' + chainHeatmap.strikes[ci] + ' · ' + (v||0).toLocaleString()"></div>
-                      </template>
-                    </div>
-                  </template>
-                </div>
-              </div>
-              <div class="ta-hm-axis" x-show="chainHeatmap.strikes.length">
-                <span x-text="'low ' + chainHeatmap.strikes[0]"></span>
-                <span style="color:var(--text)" x-text="'spot ' + (chainHeatmap.spot ?? '—')"></span>
-                <span x-text="'high ' + chainHeatmap.strikes[chainHeatmap.strikes.length-1]"></span>
-              </div>
+            <div class="ta-chart-wrap" style="height:300px;"
+                 x-show="!chainLoading && chainHeatmap && !chainHeatmap.empty">
+              <canvas id="ta-chain-heatmap"></canvas>
+              <div id="ta-hm-tip" class="ta-flow-tip"></div>
             </div>
           </div>
 

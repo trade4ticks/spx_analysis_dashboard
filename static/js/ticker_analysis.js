@@ -126,7 +126,6 @@ document.addEventListener('alpine:init', () => {
     chainMoneyness: '',            // '' = off; else ± percent
     chainProfile: null,
     chainHeatmap: null,
-    _hmScale: 1,                   // heatmap color-scale denom (p95, S3)
     chainLoading: false,
     chainError: '',
     _chainDebounce: null,
@@ -602,45 +601,92 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch(url);
         const j = await r.json();
         if (j.error) { this.chainError = j.error; this.chainHeatmap = null; }
-        else {
-          this.chainHeatmap = j;
-          const cells = [];
-          for (const row of (j.rows || [])) for (const v of row) if (v > 0) cells.push(v);
-          this._hmScale = this._percentile(cells, 95) || j.max || 1;
-        }
+        else this.chainHeatmap = j;
       } catch (e) {
         console.error('[ticker-analysis] loadChainHeatmap failed:', e);
         this.chainError = 'load failed'; this.chainHeatmap = null;
       } finally {
         this.chainLoading = false;
+        this.$nextTick(() => this._renderChainWhenReady('ta-chain-heatmap', () => this.renderChainHeatmap()));
       }
     },
 
-    // Non-empty DTE-bucket rows only (skip buckets with no contracts).
-    get chainHmRows() {
+    // Strike×DTE heatmap, canvas-rendered so each cell's color is provably a
+    // function of THAT cell's own value (the DOM-grid version mis-bound styles
+    // across cells via nested x-for). rows = non-empty DTE buckets, cols =
+    // strikes, sequential blue scaled to a p95 ceiling of the displayed cells.
+    renderChainHeatmap() {
+      const cvs = document.getElementById('ta-chain-heatmap');
+      if (!cvs || !cvs.parentElement) return;
       const hm = this.chainHeatmap;
-      if (!hm || !hm.rows) return [];
-      return hm.rows
-        .map((values, i) => ({ label: hm.dte_buckets[i], values }))
-        .filter(r => r.values.some(v => v > 0));
-    },
+      const wrap = cvs.parentElement;
+      const W = wrap.clientWidth, H = wrap.clientHeight;
+      if (!W || !H) { if (this.chainView === 'strikeDte') requestAnimationFrame(() => this.renderChainHeatmap()); return; }
+      const dpr = window.devicePixelRatio || 1;
+      cvs.width = W * dpr; cvs.height = H * dpr; cvs.style.width = W + 'px'; cvs.style.height = H + 'px';
+      const ctx = cvs.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
+      if (!hm || !hm.strikes || !hm.strikes.length) return;
 
-    // Column index of the strike nearest spot (for the vertical spot marker).
-    get chainSpotCol() {
-      const hm = this.chainHeatmap;
-      if (!hm || !hm.strikes || !hm.strikes.length || hm.spot == null) return -1;
-      let best = 0, bd = Infinity;
-      hm.strikes.forEach((s, i) => { const dd = Math.abs(s - hm.spot); if (dd < bd) { bd = dd; best = i; } });
-      return best;
-    },
+      const rowsIdx = [];
+      for (let i = 0; i < hm.rows.length; i++) if (hm.rows[i].some(v => v > 0)) rowsIdx.push(i);
+      const nr = rowsIdx.length, nc = hm.strikes.length;
+      if (!nr) return;
 
-    hmCellStyle(v) {
-      // S3: scale to a per-metric high percentile of the displayed cells so a
-      // single outlier strike can't crush everything else to near-black.
-      const scale = this._hmScale || this.chainHeatmap?.max || 1;
-      if (!v) return 'background:transparent';
-      const a = 0.06 + 0.9 * Math.min(1, v / scale);   // sequential blue (level mode)
-      return `background:rgba(52,152,219,${a.toFixed(3)})`;
+      const cells = [];
+      for (const i of rowsIdx) for (const v of hm.rows[i]) if (v > 0) cells.push(v);
+      const scale = this._percentile(cells, 95) || hm.max || 1;
+
+      const mL = 58, mB = 18, mT = 6, mR = 8;
+      const plotW = W - mL - mR, plotH = H - mT - mB;
+      const cw = plotW / nc, ch = plotH / nr;
+
+      for (let r = 0; r < nr; r++) {
+        const rowvals = hm.rows[rowsIdx[r]];
+        for (let c = 0; c < nc; c++) {
+          const v = rowvals[c];
+          if (!v) continue;
+          const a = 0.06 + 0.9 * Math.min(1, v / scale);   // monotone in this cell's own value
+          ctx.fillStyle = `rgba(52,152,219,${a.toFixed(3)})`;
+          ctx.fillRect(mL + c * cw, mT + r * ch, Math.ceil(cw) + 0.5, Math.ceil(ch) + 0.5);
+        }
+      }
+
+      // Spot vertical line at the nearest strike column.
+      if (hm.spot != null) {
+        let best = 0, bd = Infinity;
+        hm.strikes.forEach((s, i) => { const dd = Math.abs(s - hm.spot); if (dd < bd) { bd = dd; best = i; } });
+        const x = mL + (best + 0.5) * cw;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, mT); ctx.lineTo(x, mT + plotH); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText('spot ' + hm.spot, x, mT + 9);
+        ctx.restore();
+      }
+
+      // Axis labels: DTE buckets (left), strikes (bottom).
+      ctx.fillStyle = '#777'; ctx.font = '9px sans-serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      for (let r = 0; r < nr; r++) ctx.fillText(hm.dte_buckets[rowsIdx[r]], mL - 4, mT + (r + 0.5) * ch);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const colStep = Math.max(1, Math.round(nc / 10));
+      for (let c = 0; c < nc; c += colStep) ctx.fillText(hm.strikes[c], mL + (c + 0.5) * cw, mT + plotH + 3);
+
+      cvs._geo = { mL, mT, cw, ch, nc, nr, rowsIdx };
+      cvs.onmousemove = (ev) => {
+        const g = cvs._geo; if (!g) return;
+        const rect = cvs.getBoundingClientRect();
+        const c = Math.floor((ev.clientX - rect.left - g.mL) / g.cw);
+        const r = Math.floor((ev.clientY - rect.top - g.mT) / g.ch);
+        const tip = document.getElementById('ta-hm-tip'); if (!tip) return;
+        if (c < 0 || c >= g.nc || r < 0 || r >= g.nr) { tip.style.display = 'none'; return; }
+        const v = hm.rows[g.rowsIdx[r]][c];
+        tip.style.display = 'block';
+        tip.style.left = (ev.clientX - rect.left + 12) + 'px';
+        tip.style.top = (ev.clientY - rect.top + 12) + 'px';
+        tip.innerHTML = `DTE ${hm.dte_buckets[g.rowsIdx[r]]}<br>strike ${hm.strikes[c]}<br>${(v || 0).toLocaleString()}`;
+      };
+      cvs.onmouseleave = () => { const tip = document.getElementById('ta-hm-tip'); if (tip) tip.style.display = 'none'; };
     },
 
     // 95th-percentile of an array (color-scale denominator that resists outliers).
