@@ -15,9 +15,9 @@
  *   • "Today — what's unusual" row: per-metric today value / bin / percentile,
  *     extremes first (from /today-scan); click a cell to add it as a pane
  *   • saved layouts: name/save/apply/delete the pane set (ticker-agnostic)
- *   • option chain: OI-by-strike profile + strike×DTE heatmap (OI/Vol),
- *     split-adjusted, date-slider, cached (/chain/* endpoints)
- * Deferred: chain flow map, 3D surface, ΔOI / vol-vs-OI, IV smile/term.
+ *   • option chain (split-adjusted, cached, /chain/* endpoints): OI profile,
+ *     ΔOI-by-strike, vol-vs-OI scatter, strike×DTE heatmap, flow map,
+ *     3D surface (Three.js), IV smile, IV term structure
  * ==========================================================================*/
 
 /* Forward-return horizons offered in the control bar (brief §3.1).
@@ -40,7 +40,8 @@ const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff'
 /* Chart.js instances and heavy per-pane series live OUTSIDE Alpine's
  * reactive proxy — wrapping Chart internals or 1.7k-row arrays in a Proxy
  * breaks rendering and slows selection. Keyed by pane id. */
-const TA_CHARTS = { price: null, bars: {}, series: {}, chain: null, surface: null };
+const TA_CHARTS = { price: null, bars: {}, series: {}, chain: null, surface: null,
+                    doi: null, voloi: null, smile: null, ivterm: null };
 const TA_DATA = {};   // paneId -> { bins, series, today }
 
 /* Numpy-matching stats, mirroring oi_analysis.js `_rgComputeStats`:
@@ -112,6 +113,12 @@ document.addEventListener('alpine:init', () => {
     chainSurfaceMetric: 'oi',      // surface: 'oi'|'vol'
     chainSurfaceLookback: 126,     // surface window (sessions)
     chainSurface: null,
+    chainDoiN: 5,                  // ΔOI window (sessions)
+    chainDoi: null,
+    chainVolOi: null,
+    chainSmile: null,
+    chainIvTermLookback: 252,      // IV-term window (sessions)
+    chainIvTerm: null,
     chainDates: [],
     chainDateIdx: 0,
     chainDteMin: 0,
@@ -479,6 +486,10 @@ document.addEventListener('alpine:init', () => {
       if (this.chainView === 'strikeDte') this.loadChainHeatmap(force);
       else if (this.chainView === 'flow') this.loadChainFlow(force);
       else if (this.chainView === 'surface') this.loadChainSurface(force);
+      else if (this.chainView === 'doi') this.loadChainDoi(force);
+      else if (this.chainView === 'voloi') this.loadChainVolOi(force);
+      else if (this.chainView === 'smile') this.loadChainSmile(force);
+      else if (this.chainView === 'ivterm') this.loadChainIvTerm(force);
       else this.loadChainProfile(force);
     },
 
@@ -874,6 +885,248 @@ document.addEventListener('alpine:init', () => {
         renderer.render(scene, camera);
       };
       animate();
+    },
+
+    // ΔOI-by-strike (P4e) -------------------------------------------------
+    async loadChainDoi(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/doi-profile?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&n=${this.chainDoiN}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url); const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainDoi = null; }
+        else this.chainDoi = j;
+      } catch (e) { console.error('[ticker-analysis] loadChainDoi failed:', e); this.chainError = 'load failed'; this.chainDoi = null; }
+      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainDoi()); }
+    },
+
+    renderChainDoi() {
+      const cvs = document.getElementById('ta-chain-doi');
+      if (!cvs) return;
+      if (TA_CHARTS.doi) { TA_CHARTS.doi.destroy(); TA_CHARTS.doi = null; }
+      const p = this.chainDoi;
+      if (!p || !p.strikes || !p.strikes.length) return;
+      const labels = p.strikes.map(s => s.strike);
+      const vals = p.strikes.map(s => s.doi);   // signed: + build (blue), − unwind (pink)
+      TA_CHARTS.doi = new Chart(cvs.getContext('2d'), {
+        type: 'bar',
+        data: { labels, datasets: [{
+          data: vals,
+          backgroundColor: vals.map(v => v >= 0 ? 'rgba(52,152,219,.8)' : 'rgba(232,67,147,.8)'),
+        }] },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+            y: { reverse: true, grid: { display: false }, ticks: { color: '#777', font: { size: 8 }, autoSkip: true, maxTicksLimit: 26, callback: (v, i) => labels[i] } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { title: it => 'Strike ' + labels[it[0].dataIndex],
+              label: it => 'ΔOI ' + (it.parsed.x >= 0 ? '+' : '') + it.parsed.x.toLocaleString() } },
+          },
+        },
+        plugins: [this._profileSpotPlugin(labels, p.spot)],
+      });
+    },
+
+    // Vol-vs-OI scatter (P4e) ---------------------------------------------
+    async loadChainVolOi(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/vol-oi?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url); const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainVolOi = null; }
+        else this.chainVolOi = j;
+      } catch (e) { console.error('[ticker-analysis] loadChainVolOi failed:', e); this.chainError = 'load failed'; this.chainVolOi = null; }
+      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainVolOi()); }
+    },
+
+    renderChainVolOi() {
+      const cvs = document.getElementById('ta-chain-voloi');
+      if (!cvs) return;
+      if (TA_CHARTS.voloi) { TA_CHARTS.voloi.destroy(); TA_CHARTS.voloi = null; }
+      const p = this.chainVolOi;
+      if (!p || !p.points || !p.points.length) return;
+      const pts = p.points.map(d => ({ x: d.oi, y: d.vol, s: d.strike }));
+      // Fresh activity: volume >= standing OI (vol/OI ≥ 1) → accent; else dim.
+      const colors = pts.map(d => (d.x > 0 && d.y / d.x >= 1) ? '#3498db' : 'rgba(200,200,200,.35)');
+      const maxv = Math.max(1, ...pts.map(d => Math.max(d.x, d.y)));
+      TA_CHARTS.voloi = new Chart(cvs.getContext('2d'), {
+        data: {
+          datasets: [
+            { type: 'line', data: [{ x: 0, y: 0 }, { x: maxv, y: maxv }], borderColor: 'rgba(255,255,255,.25)',
+              borderDash: [4, 4], borderWidth: 1, pointRadius: 0, fill: false },   // vol = OI reference
+            { type: 'scatter', data: pts, pointBackgroundColor: colors, pointRadius: 3, borderWidth: 0 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { title: { display: true, text: 'Open interest', color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+            y: { title: { display: true, text: 'Volume (today)', color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: it => {
+              const d = it.raw; if (d.s == null) return '';
+              const vo = d.x > 0 ? (d.y / d.x).toFixed(2) : '∞';
+              return `K ${d.s} · OI ${d.x.toLocaleString()} · vol ${d.y.toLocaleString()} · v/OI ${vo}`;
+            } } },
+          },
+        },
+      });
+    },
+
+    // Shared spot-line plugin for horizontal (strike-on-y) profiles.
+    _profileSpotPlugin(labels, spot) {
+      return {
+        id: 'taProfileSpot',
+        afterDatasetsDraw(chart) {
+          if (spot == null || !labels.length) return;
+          const { ctx, chartArea, scales } = chart;
+          const y = scales.y;
+          let idx = null;
+          for (let i = 0; i < labels.length - 1; i++) {
+            if ((spot >= labels[i] && spot <= labels[i + 1]) || (spot <= labels[i] && spot >= labels[i + 1])) {
+              const span = labels[i + 1] - labels[i] || 1; idx = i + (spot - labels[i]) / span; break;
+            }
+          }
+          if (idx == null) idx = spot < labels[0] ? 0 : labels.length - 1;
+          const i0 = Math.floor(idx), i1 = Math.min(labels.length - 1, i0 + 1), f = idx - i0;
+          const py = y.getPixelForValue(i0) + f * (y.getPixelForValue(i1) - y.getPixelForValue(i0));
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(chartArea.left, py); ctx.lineTo(chartArea.right, py); ctx.stroke();
+          ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+          ctx.fillText('spot ' + spot, chartArea.left + 4, py - 3);
+          ctx.restore();
+        },
+      };
+    },
+
+    // IV smile (P4e) ------------------------------------------------------
+    async loadChainSmile(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/iv-smile?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+      const mPct = parseFloat(this.chainMoneyness);
+      if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url); const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainSmile = null; }
+        else this.chainSmile = j;
+      } catch (e) { console.error('[ticker-analysis] loadChainSmile failed:', e); this.chainError = 'load failed'; this.chainSmile = null; }
+      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainSmile()); }
+    },
+
+    renderChainSmile() {
+      const cvs = document.getElementById('ta-chain-smile');
+      if (!cvs) return;
+      if (TA_CHARTS.smile) { TA_CHARTS.smile.destroy(); TA_CHARTS.smile = null; }
+      const p = this.chainSmile;
+      if (!p || !p.strikes || !p.strikes.length) return;
+      const calls = p.strikes.map(s => ({ x: s.strike, y: s.call_iv })).filter(d => d.y != null);
+      const puts = p.strikes.map(s => ({ x: s.strike, y: s.put_iv })).filter(d => d.y != null);
+      const spot = p.spot;
+      TA_CHARTS.smile = new Chart(cvs.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [
+          { label: 'Calls', data: calls, borderColor: TA_BLUE, borderWidth: 1.5, pointRadius: 0, tension: 0.15 },
+          { label: 'Puts', data: puts, borderColor: TA_PINK, borderWidth: 1.5, pointRadius: 0, tension: 0.15 },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { type: 'linear', title: { display: true, text: 'Strike', color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+            y: { title: { display: true, text: 'Implied vol', color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 }, callback: v => (v * 100).toFixed(0) + '%' } },
+          },
+          plugins: {
+            legend: { display: true, position: 'top', labels: { color: '#c8c8c8', font: { size: 9 }, boxWidth: 10 } },
+            tooltip: { callbacks: { label: it => `${it.dataset.label}: ${(it.parsed.y * 100).toFixed(1)}% @ ${it.parsed.x}` } },
+          },
+        },
+        plugins: [{
+          id: 'taSmileSpot',
+          afterDatasetsDraw(chart) {
+            if (spot == null) return;
+            const { ctx, chartArea, scales } = chart;
+            const x = scales.x.getPixelForValue(spot);
+            if (x < chartArea.left || x > chartArea.right) return;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
+            ctx.setLineDash([]); ctx.fillStyle = '#fff'; ctx.font = '9px sans-serif';
+            ctx.fillText('spot ' + spot, x + 3, chartArea.top + 9);
+            ctx.restore();
+          },
+        }],
+      });
+    },
+
+    // IV term structure over time (P4e) -----------------------------------
+    async loadChainIvTerm(force = false) {
+      const date = this.chainDate;
+      if (!this.ticker || !date) return;
+      this.chainLoading = true; this.chainError = '';
+      let url = `/api/ticker-analysis/chain/iv-term?ticker=${encodeURIComponent(this.ticker)}`
+              + `&date=${date}&lookback=${this.chainIvTermLookback}`;
+      if (force) url += '&force=1';
+      try {
+        const r = await fetch(url); const j = await r.json();
+        if (j.error) { this.chainError = j.error; this.chainIvTerm = null; }
+        else this.chainIvTerm = j;
+      } catch (e) { console.error('[ticker-analysis] loadChainIvTerm failed:', e); this.chainError = 'load failed'; this.chainIvTerm = null; }
+      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainIvTerm()); }
+    },
+
+    renderChainIvTerm() {
+      const cvs = document.getElementById('ta-chain-ivterm');
+      if (!cvs) return;
+      if (TA_CHARTS.ivterm) { TA_CHARTS.ivterm.destroy(); TA_CHARTS.ivterm = null; }
+      const p = this.chainIvTerm;
+      if (!p || !p.dates || !p.dates.length) return;
+      const tenorColors = { '7': '#1abc9c', '30': '#3498db', '90': '#9b59b6' };
+      const datasets = (p.tenors || [7, 30, 90]).map(t => ({
+        label: t + 'd', data: (p.series[String(t)] || []),
+        borderColor: tenorColors[String(t)] || '#888', borderWidth: 1.2, pointRadius: 0, tension: 0, spanGaps: true,
+      }));
+      TA_CHARTS.ivterm = new Chart(cvs.getContext('2d'), {
+        type: 'line',
+        data: { labels: p.dates, datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,.05)' }, ticks: { color: '#777', font: { size: 9 }, autoSkip: true, maxTicksLimit: 10, maxRotation: 0 } },
+            y: { title: { display: true, text: 'ATM IV', color: '#888', font: { size: 9 } },
+                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 }, callback: v => (v * 100).toFixed(0) + '%' } },
+          },
+          plugins: {
+            legend: { display: true, position: 'top', labels: { color: '#c8c8c8', font: { size: 9 }, boxWidth: 10 } },
+            tooltip: { mode: 'index', intersect: false,
+              callbacks: { label: it => `${it.dataset.label}: ${it.parsed.y == null ? '—' : (it.parsed.y * 100).toFixed(1) + '%'}` } },
+          },
+        },
+      });
     },
 
     // ── Data loads ───────────────────────────────────────────────────────

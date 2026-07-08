@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=15"></script>
+  <script src="/static/js/ticker_analysis.js?v=16"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -427,13 +427,17 @@
 
     <!-- Option chain section (§5.4) — OI profile (P4a) + strike×DTE heatmap (P4b) -->
     <div class="ta-section">
-      <div class="ta-section-hdr">
+      <div class="ta-section-hdr" style="flex-wrap:wrap;">
         <span class="ta-section-title">Option Chain</span>
         <div class="seg" style="margin-left:6px;">
           <div class="seg-btn" :class="{on: chainView==='profile'}" @click="setChainView('profile')">OI profile</div>
+          <div class="seg-btn" :class="{on: chainView==='doi'}" @click="setChainView('doi')">ΔOI</div>
+          <div class="seg-btn" :class="{on: chainView==='voloi'}" @click="setChainView('voloi')">Vol/OI</div>
           <div class="seg-btn" :class="{on: chainView==='strikeDte'}" @click="setChainView('strikeDte')">Strike×DTE</div>
           <div class="seg-btn" :class="{on: chainView==='flow'}" @click="setChainView('flow')">Flow map</div>
           <div class="seg-btn" :class="{on: chainView==='surface'}" @click="setChainView('surface')">3D surface</div>
+          <div class="seg-btn" :class="{on: chainView==='smile'}" @click="setChainView('smile')">IV smile</div>
+          <div class="seg-btn" :class="{on: chainView==='ivterm'}" @click="setChainView('ivterm')">IV term</div>
         </div>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='profile'">
           split-adjusted · puts <span style="color:#e84393">left</span> /
@@ -449,6 +453,18 @@
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='surface'">
           X = strike · Z = time · Y = <span style="color:var(--accent)">calls +</span> / <span style="color:#e84393">puts −</span> · drag to orbit · wheel to zoom
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='doi'">
+          signed ΔOI per strike · <span style="color:var(--accent)">build +</span> / <span style="color:#e84393">unwind −</span> · overnight, N-session
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='voloi'">
+          OI (x) vs today volume (y) · <span style="color:var(--accent)">accent</span> = vol ≥ OI (fresh) · diagonal = vol/OI 1
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='smile'">
+          IV vs strike · <span style="color:var(--accent)">calls</span> / <span style="color:#e84393">puts</span> · spot line
+        </span>
+        <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='ivterm'">
+          ATM IV over time · <span style="color:#1abc9c">7d</span> / <span style="color:var(--accent)">30d</span> / <span style="color:#9b59b6">90d</span>
         </span>
         <div class="ta-spacer" style="margin-left:auto;"></div>
         <button class="btn" @click="chainReload(true)" title="Recompute (bypass cache)">↻ Recompute</button>
@@ -523,8 +539,32 @@
               </div>
             </template>
 
-            <!-- DTE range (profile + flow + surface; the heatmap shows all DTE buckets) -->
-            <template x-if="chainView!=='strikeDte'">
+            <!-- ΔOI N-session window (ΔOI only) -->
+            <template x-if="chainView==='doi'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">N</span>
+                <select class="ta-sel" x-model.number="chainDoiN" @change="loadChainDoi()">
+                  <template x-for="nn in [1,5,20]" :key="nn"><option :value="nn" x-text="nn + 'd'"></option></template>
+                </select>
+              </div>
+            </template>
+
+            <!-- IV-term window (IV term only) -->
+            <template x-if="chainView==='ivterm'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Window</span>
+                <select class="ta-sel" x-model.number="chainIvTermLookback" @change="loadChainIvTerm()">
+                  <template x-for="w in [[126,'6m'],[252,'1y'],[504,'2y']]" :key="w[0]">
+                    <option :value="w[0]" x-text="w[1]"></option>
+                  </template>
+                </select>
+              </div>
+            </template>
+
+            <!-- DTE range (all snapshot/level views except strike×DTE buckets and IV term) -->
+            <template x-if="chainView!=='strikeDte' && chainView!=='ivterm'">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">DTE</span>
@@ -534,10 +574,14 @@
               </div>
             </template>
 
-            <div class="ctrl-div"></div>
-            <span class="ta-lbl">Moneyness&nbsp;±%</span>
-            <input type="number" class="ta-num" min="0" step="1" placeholder="off"
-                   x-model="chainMoneyness" @change="chainReload()">
+            <template x-if="chainView!=='ivterm'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Moneyness&nbsp;±%</span>
+                <input type="number" class="ta-num" min="0" step="1" placeholder="off"
+                       x-model="chainMoneyness" @change="chainReload()">
+              </div>
+            </template>
 
             <div class="ta-spacer" style="margin-left:auto;"></div>
             <span class="ta-hint" x-show="chainView==='profile' && chainProfile">
@@ -559,6 +603,19 @@
               spot <b x-text="chainSurface?.spot?.toFixed?.(2) ?? '—'"></b> ·
               <b x-text="chainSurface?.dates?.length ?? 0"></b> sessions ×
               <b x-text="chainSurface?.strikes?.length ?? 0"></b> strikes · ± <b x-text="(chainSurface?.max ?? 0).toLocaleString()"></b>
+            </span>
+            <span class="ta-hint" x-show="chainView==='doi' && chainDoi">
+              vs <b x-text="chainDoi?.date_prev ?? '—'"></b> · spot <b x-text="chainDoi?.spot ?? '—'"></b> ·
+              <b x-text="chainDoi?.strikes?.length ?? 0"></b> strikes
+            </span>
+            <span class="ta-hint" x-show="chainView==='voloi' && chainVolOi">
+              spot <b x-text="chainVolOi?.spot ?? '—'"></b> · <b x-text="chainVolOi?.points?.length ?? 0"></b> strikes
+            </span>
+            <span class="ta-hint" x-show="chainView==='smile' && chainSmile">
+              spot <b x-text="chainSmile?.spot ?? '—'"></b> · <b x-text="chainSmile?.strikes?.length ?? 0"></b> strikes
+            </span>
+            <span class="ta-hint" x-show="chainView==='ivterm' && chainIvTerm">
+              <b x-text="chainIvTerm?.dates?.length ?? 0"></b> sessions · ATM 7/30/90d
             </span>
           </div>
 
@@ -625,6 +682,46 @@
             </template>
             <div id="ta-chain-surface" class="ta-surface"
                  x-show="!chainLoading && chainSurface && !chainSurface.empty"></div>
+          </div>
+
+          <!-- ΔOI-by-strike -->
+          <div x-show="chainView==='doi'">
+            <template x-if="!chainLoading && chainDoi && chainDoi.empty">
+              <div class="ta-placeholder">No OI change for this snapshot / filters.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:380px;" x-show="!chainLoading && chainDoi && !chainDoi.empty">
+              <canvas id="ta-chain-doi"></canvas>
+            </div>
+          </div>
+
+          <!-- Vol-vs-OI scatter -->
+          <div x-show="chainView==='voloi'">
+            <template x-if="!chainLoading && chainVolOi && chainVolOi.empty">
+              <div class="ta-placeholder">No data for this snapshot / filters.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:380px;" x-show="!chainLoading && chainVolOi && !chainVolOi.empty">
+              <canvas id="ta-chain-voloi"></canvas>
+            </div>
+          </div>
+
+          <!-- IV smile -->
+          <div x-show="chainView==='smile'">
+            <template x-if="!chainLoading && chainSmile && chainSmile.empty">
+              <div class="ta-placeholder">No IV for this snapshot / filters.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:340px;" x-show="!chainLoading && chainSmile && !chainSmile.empty">
+              <canvas id="ta-chain-smile"></canvas>
+            </div>
+          </div>
+
+          <!-- IV term structure -->
+          <div x-show="chainView==='ivterm'">
+            <template x-if="!chainLoading && chainIvTerm && chainIvTerm.empty">
+              <div class="ta-placeholder">No IV term data for this window.</div>
+            </template>
+            <div class="ta-chart-wrap" style="height:340px;" x-show="!chainLoading && chainIvTerm && !chainIvTerm.empty">
+              <canvas id="ta-chain-ivterm"></canvas>
+            </div>
           </div>
         </div>
       </div>

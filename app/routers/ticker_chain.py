@@ -734,6 +734,368 @@ async def chain_surface(
     return result
 
 
+def _compute_doi_profile(paths: list, date_now: str, date_prev: str,
+                         dte_min: int, dte_max: int, moneyness: Optional[float],
+                         sf_df: pd.DataFrame, spot: Optional[float]) -> dict:
+    """Signed ΔOI per strike over an N-session (overnight) window:
+    OI[now] − OI[prev], adjusted, aggregated across the DTE band."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    existing = [p for p in paths if os.path.isfile(p)]
+    if not existing:
+        return {"strikes": [], "empty": True}
+    con = duckdb.connect()
+    try:
+        con.register("split_factors", sf_df)
+        pl = ", ".join("'" + p + "'" for p in existing)
+        sql = f"""
+            WITH adj AS (
+                SELECT raw.trade_date                                    AS d,
+                       round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                       raw.open_interest / COALESCE(sf.adj_factor, 1.0)  AS oi
+                FROM (SELECT * FROM read_parquet([{pl}])
+                       WHERE trade_date IN (DATE '{date_now}', DATE '{date_prev}')) raw
+                LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+            )
+            SELECT d, strike, SUM(oi) AS oi FROM adj GROUP BY d, strike
+        """
+        rows = con.execute(sql).fetchall()
+    finally:
+        con.close()
+    now: dict = {}
+    prev: dict = {}
+    for d, strike, oi in rows:
+        s = round(float(strike), 2)
+        (now if str(d) == date_now else prev)[s] = float(oi)
+    strikes = sorted(set(now) | set(prev))
+    if moneyness is not None and spot:
+        strikes = [s for s in strikes if abs(s / spot - 1) <= moneyness]
+    out = [{"strike": s, "doi": round(now.get(s, 0.0) - prev.get(s, 0.0))} for s in strikes]
+    return {"strikes": out, "empty": len(out) == 0}
+
+
+def _compute_vol_oi(oi_paths: list, chain_paths: list, date: str, dte_min: int,
+                    dte_max: int, moneyness: Optional[float], sf_df: pd.DataFrame,
+                    spot: Optional[float]) -> dict:
+    """Per-strike OI (oi_raw @ trade_date) and today's volume (chain_eod @
+    feature_date), adjusted, aggregated across the DTE band — for the
+    vol-vs-OI scatter."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    con = duckdb.connect()
+    oi_map: dict = {}
+    vol_map: dict = {}
+    try:
+        con.register("split_factors", sf_df)
+
+        def _rd(paths, date_field, count_field):
+            ex = [p for p in paths if os.path.isfile(p)]
+            if not ex:
+                return {}
+            pl = ", ".join("'" + p + "'" for p in ex)
+            sql = f"""
+                WITH adj AS (
+                    SELECT round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                           raw.{count_field} / COALESCE(sf.adj_factor, 1.0)  AS cnt
+                    FROM (SELECT * FROM read_parquet([{pl}])
+                           WHERE {date_field} = DATE '{date}') raw
+                    LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                )
+                SELECT strike, SUM(cnt) AS v FROM adj GROUP BY strike
+            """
+            return {round(float(s), 2): float(v) for s, v in con.execute(sql).fetchall()}
+
+        oi_map = _rd(oi_paths, "trade_date", "open_interest")
+        vol_map = _rd(chain_paths, "feature_date", "volume")
+    finally:
+        con.close()
+    strikes = sorted(set(oi_map) | set(vol_map))
+    if moneyness is not None and spot:
+        strikes = [s for s in strikes if abs(s / spot - 1) <= moneyness]
+    pts = [{"strike": s, "oi": round(oi_map.get(s, 0.0)), "vol": round(vol_map.get(s, 0.0))}
+           for s in strikes]
+    return {"points": pts, "empty": len(pts) == 0}
+
+
+@router.get("/chain/doi-profile")
+async def chain_doi_profile(
+    ticker: str = Query(...),
+    date: str = Query(...),
+    n: int = Query(5),
+    dte_min: int = Query(0),
+    dte_max: int = Query(3650),
+    moneyness: Optional[float] = Query(None),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """Signed ΔOI-by-strike over an N-session overnight window."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
+        return {"error": "invalid ticker/date"}
+    n = max(1, min(60, n))
+
+    key = f"doiprofile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{n}:{dte_min}:{dte_max}:{moneyness}"
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d_end = datetime.strptime(date, "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        drows = await conn.fetch(
+            "SELECT trade_date FROM daily_features "
+            "WHERE ticker = $1 AND total_oi IS NOT NULL AND trade_date <= $2 "
+            "ORDER BY trade_date",
+            ticker, d_end,
+        )
+    dates = [str(r["trade_date"]) for r in drows]
+    if len(dates) < n + 1:
+        return {"ticker": ticker, "date": date, "strikes": [], "empty": True, "n": n}
+    date_prev = dates[-(n + 1)]
+
+    spot = await _spot_close(pool, ticker, d_end)
+    spot = round(spot, 4) if spot is not None else None
+    d_prev = datetime.strptime(date_prev, "%Y-%m-%d").date()
+    sf_df = await _load_splits_df(pool, ticker)
+    sf_rel = make_split_factors(sf_df, [d_prev, d_end])
+
+    years = sorted({d_prev.year, d_end.year})
+    paths = [_oi_year_path(ticker, y) for y in years]
+    result = await asyncio.to_thread(
+        _compute_doi_profile, paths, date, date_prev, dte_min, dte_max,
+        moneyness, sf_rel, spot,
+    )
+    result.update({"ticker": ticker, "date": date, "date_prev": date_prev,
+                   "n": n, "spot": spot, "moneyness": moneyness})
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
+@router.get("/chain/vol-oi")
+async def chain_vol_oi(
+    ticker: str = Query(...),
+    date: str = Query(...),
+    dte_min: int = Query(0),
+    dte_max: int = Query(3650),
+    moneyness: Optional[float] = Query(None),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """Per-strike volume-vs-OI (for the fresh-activity scatter)."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
+        return {"error": "invalid ticker/date"}
+
+    key = f"voloi:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dte_min}:{dte_max}:{moneyness}"
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    spot = await _spot_close(pool, ticker, d)
+    spot = round(spot, 4) if spot is not None else None
+    sf_df = await _load_splits_df(pool, ticker)
+    sf_rel = make_split_factors(sf_df, [d - timedelta(days=i) for i in range(7)])
+    oi_paths = [_oi_year_path(ticker, d.year)]
+    chain_paths = [_chain_year_path(ticker, d.year), _chain_year_path(ticker, d.year - 1)]
+
+    result = await asyncio.to_thread(
+        _compute_vol_oi, oi_paths, chain_paths, date, dte_min, dte_max,
+        moneyness, sf_rel, spot,
+    )
+    result.update({"ticker": ticker, "date": date, "spot": spot, "moneyness": moneyness})
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
+def _compute_iv_smile(chain_paths: list, date: str, dte_min: int, dte_max: int,
+                      moneyness: Optional[float], sf_df: pd.DataFrame,
+                      spot: Optional[float]) -> dict:
+    """IV vs (adjusted) strike at one snapshot — avg implied_vol per
+    (strike, option_type) over the DTE band. call_iv / put_iv per strike."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ex = [p for p in chain_paths if os.path.isfile(p)]
+    if not ex:
+        return {"strikes": [], "empty": True}
+    con = duckdb.connect()
+    try:
+        con.register("split_factors", sf_df)
+        pl = ", ".join("'" + p + "'" for p in ex)
+        sql = f"""
+            WITH adj AS (
+                SELECT round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                       raw.option_type AS ot, raw.implied_vol AS iv
+                FROM (SELECT * FROM read_parquet([{pl}])
+                       WHERE feature_date = DATE '{date}' AND implied_vol IS NOT NULL) raw
+                LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+            )
+            SELECT strike, ot, AVG(iv) AS iv FROM adj GROUP BY strike, ot
+        """
+        rows = con.execute(sql).fetchall()
+    finally:
+        con.close()
+    by: dict = {}
+    for strike, ot, iv in rows:
+        s = round(float(strike), 2)
+        e = by.setdefault(s, {})
+        if str(ot).upper().startswith("C"):
+            e["call_iv"] = round(float(iv), 4)
+        else:
+            e["put_iv"] = round(float(iv), 4)
+    strikes = sorted(by)
+    if moneyness is not None and spot:
+        strikes = [s for s in strikes if abs(s / spot - 1) <= moneyness]
+    out = [{"strike": s, "call_iv": by[s].get("call_iv"), "put_iv": by[s].get("put_iv")}
+           for s in strikes]
+    return {"strikes": out, "empty": len(out) == 0}
+
+
+_IV_TERM_TENORS = [7, 30, 90]
+_IV_TERM_BANDS = {7: (3, 14), 30: (20, 45), 90: (60, 120)}
+
+
+def _compute_iv_term(chain_paths: list, start_s: str, end_s: str, window: list) -> dict:
+    """ATM IV (nearest |delta|→0.5 within each tenor's DTE band) per session,
+    for the 7/30/90-day tenors. No split adjustment needed (IV is a scalar
+    selected by delta/DTE, not by strike)."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ex = [p for p in chain_paths if os.path.isfile(p)]
+    if not ex:
+        return {"dates": window, "tenors": _IV_TERM_TENORS,
+                "series": {str(t): [] for t in _IV_TERM_TENORS}, "empty": True}
+    con = duckdb.connect()
+    series: dict = {t: {} for t in _IV_TERM_TENORS}
+    try:
+        pl = ", ".join("'" + p + "'" for p in ex)
+        for t in _IV_TERM_TENORS:
+            lo, hi = _IV_TERM_BANDS[t]
+            sql = f"""
+                WITH r AS (
+                    SELECT feature_date AS d, implied_vol AS iv,
+                           row_number() OVER (PARTITION BY feature_date
+                                              ORDER BY ABS(ABS(delta) - 0.5)) AS rn
+                    FROM (SELECT * FROM read_parquet([{pl}])
+                           WHERE feature_date BETWEEN DATE '{start_s}' AND DATE '{end_s}'
+                             AND implied_vol IS NOT NULL AND delta IS NOT NULL
+                             AND (expiration - trade_date) BETWEEN {lo} AND {hi}
+                             AND ABS(delta) BETWEEN 0.3 AND 0.7) sub
+                )
+                SELECT d, iv FROM r WHERE rn = 1
+            """
+            for d, iv in con.execute(sql).fetchall():
+                series[t][str(d)] = round(float(iv), 4)
+    finally:
+        con.close()
+    out = {str(t): [series[t].get(dd) for dd in window] for t in _IV_TERM_TENORS}
+    empty = all(all(v is None for v in vals) for vals in out.values())
+    return {"dates": window, "tenors": _IV_TERM_TENORS, "series": out, "empty": empty}
+
+
+@router.get("/chain/iv-smile")
+async def chain_iv_smile(
+    ticker: str = Query(...),
+    date: str = Query(...),
+    dte_min: int = Query(0),
+    dte_max: int = Query(3650),
+    moneyness: Optional[float] = Query(None),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """IV smile (per snapshot)."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
+        return {"error": "invalid ticker/date"}
+
+    key = f"ivsmile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dte_min}:{dte_max}:{moneyness}"
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    spot = await _spot_close(pool, ticker, d)
+    spot = round(spot, 4) if spot is not None else None
+    sf_df = await _load_splits_df(pool, ticker)
+    sf_rel = make_split_factors(sf_df, [d - timedelta(days=i) for i in range(7)])
+    chain_paths = [_chain_year_path(ticker, d.year), _chain_year_path(ticker, d.year - 1)]
+
+    result = await asyncio.to_thread(
+        _compute_iv_smile, chain_paths, date, dte_min, dte_max, moneyness, sf_rel, spot,
+    )
+    result.update({"ticker": ticker, "date": date, "spot": spot, "moneyness": moneyness})
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
+@router.get("/chain/iv-term")
+async def chain_iv_term(
+    ticker: str = Query(...),
+    date: str = Query(...),
+    lookback: int = Query(252),
+    force: int = Query(0),
+    pool=Depends(get_oi_pool),
+):
+    """IV term structure over time — ATM IV at the 7/30/90-day tenors."""
+    if not pool:
+        return {"error": "OI database not configured"}
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    ticker = ticker.upper()
+    if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
+        return {"error": "invalid ticker/date"}
+    lookback = max(5, min(1000, lookback))
+
+    key = f"ivterm:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}"
+    if not force:
+        cached = await _cache_get(pool, key)
+        if cached is not None:
+            return cached
+
+    d_end = datetime.strptime(date, "%Y-%m-%d").date()
+    async with pool.acquire() as conn:
+        drows = await conn.fetch(
+            "SELECT trade_date FROM daily_features "
+            "WHERE ticker = $1 AND total_oi IS NOT NULL AND trade_date <= $2 "
+            "ORDER BY trade_date",
+            ticker, d_end,
+        )
+    window = [str(r["trade_date"]) for r in drows][-lookback:]
+    if not window:
+        return {"ticker": ticker, "date": date, "dates": [], "series": {}, "empty": True}
+    d_start = datetime.strptime(window[0], "%Y-%m-%d").date()
+    years = list(range(d_start.year, d_end.year + 1))
+    chain_paths = [_chain_year_path(ticker, y) for y in [years[0] - 1] + years]
+
+    result = await asyncio.to_thread(
+        _compute_iv_term, chain_paths, window[0], window[-1], window,
+    )
+    result.update({"ticker": ticker, "date": date, "lookback": lookback})
+    if "error" not in result:
+        await _cache_put(pool, key, result)
+    return result
+
+
 @router.post("/chain/invalidate")
 async def chain_invalidate(ticker: Optional[str] = Query(None), pool=Depends(get_oi_pool)):
     """Clear the chain cache — all, or just one ticker's rows."""
