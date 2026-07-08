@@ -696,12 +696,71 @@ def _compute_surface(paths: list, window: list, start_s: str, end_s: str,
             "max": round(absmax), "signed": True, "empty": False}
 
 
+def _compute_surface_dte(paths: list, date: str, date_field: str, count_field: str,
+                         moneyness: Optional[float], sf_df: pd.DataFrame,
+                         spot: Optional[float]) -> dict:
+    """Term-structure surface at ONE snapshot: X = strike, Z = DTE bucket,
+    Y = signed net (calls − puts). All DTE buckets form the Z axis (no DTE
+    filter). Returns the same shape as _compute_surface but zlabels = bucket
+    labels and zkind = 'dte'."""
+    if duckdb is None:
+        return {"error": "duckdb not installed on this server"}
+    labels = [lbl for *_, lbl in DTE_BUCKETS]
+    net: dict = {}   # (strike, bucket_idx) -> signed net
+    con = duckdb.connect()
+    try:
+        con.register("split_factors", sf_df)
+        existing = [p for p in paths if os.path.isfile(p)]
+        if existing:
+            pl = ", ".join("'" + p + "'" for p in existing)
+            sql = f"""
+                WITH adj AS (
+                    SELECT round(raw.strike * COALESCE(sf.adj_factor, 1.0), 2) AS strike,
+                           raw.option_type                                  AS ot,
+                           (raw.expiration - raw.trade_date)                AS dte,
+                           raw.{count_field} / COALESCE(sf.adj_factor, 1.0) AS cnt
+                    FROM (SELECT * FROM read_parquet([{pl}])
+                           WHERE {date_field} = DATE '{date}') raw
+                    LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
+                )
+                SELECT strike, ot, dte, SUM(cnt) AS v FROM adj GROUP BY strike, ot, dte
+            """
+            for strike, ot, dte, v in con.execute(sql).fetchall():
+                di = int(dte)
+                bi = next((i for i, (lo, hi, _) in enumerate(DTE_BUCKETS) if lo <= di <= hi), None)
+                if bi is None:
+                    continue
+                s = round(float(strike), 2)
+                signed = float(v) if str(ot).upper().startswith("C") else -float(v)
+                net[(s, bi)] = net.get((s, bi), 0.0) + signed
+    finally:
+        con.close()
+
+    strikes = sorted({s for (s, _) in net}, reverse=True)
+    if moneyness is not None and spot:
+        strikes = [s for s in strikes if abs(s / spot - 1) <= moneyness]
+    if not strikes:
+        return {"strikes": [], "zlabels": labels, "zkind": "dte", "matrix": [],
+                "max": 0, "signed": True, "empty": True}
+    ncol, nrow = len(DTE_BUCKETS), len(strikes)
+    ridx = {s: i for i, s in enumerate(strikes)}
+    M = [[None] * ncol for _ in range(nrow)]
+    for (s, bi), v in net.items():
+        if s in ridx:
+            M[ridx[s]][bi] = v
+    absmax = max((abs(v) for row in M for v in row if v is not None), default=0.0)
+    matrix = [[(round(v) if v is not None else None) for v in row] for row in M]
+    return {"strikes": strikes, "zlabels": labels, "zkind": "dte", "matrix": matrix,
+            "max": round(absmax), "signed": True, "empty": False}
+
+
 @router.get("/chain/surface")
 async def chain_surface(
     ticker: str = Query(...),
     date: str = Query(...),
     lookback: int = Query(126),
     metric: str = Query("oi"),              # oi | vol
+    zaxis: str = Query("time"),             # time | dte  (#6)
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
     dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
@@ -709,7 +768,8 @@ async def chain_surface(
     force: int = Query(0),
     pool=Depends(get_oi_pool),
 ):
-    """Split-adjusted signed (calls − puts) strike × time surface."""
+    """Split-adjusted signed (calls − puts) surface. Z = trade_date (window)
+    or Z = DTE bucket (term structure at the snapshot date)."""
     if not pool:
         return {"error": "OI database not configured"}
     if duckdb is None:
@@ -720,11 +780,12 @@ async def chain_surface(
     if not _DATE_RE.match(date):
         return {"error": "invalid date"}
     metric = "vol" if metric == "vol" else "oi"
+    zaxis = "dte" if zaxis == "dte" else "time"
     lookback = max(5, min(1000, lookback))
 
     dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
     dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
-    key = (f"surface:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{metric}:"
+    key = (f"surface:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{zaxis}:{lookback}:{metric}:"
            f"{dtk}:{moneyness}")
     if not force:
         cached = await _cache_get(pool, key)
@@ -732,6 +793,29 @@ async def chain_surface(
             return cached
 
     d_end = datetime.strptime(date, "%Y-%m-%d").date()
+
+    # Z = DTE: term structure of positioning at the single snapshot date.
+    if zaxis == "dte":
+        sf_df = await _load_splits_df(pool, ticker)
+        spot = await _spot_pc(pool, ticker, d_end)
+        spot = round(spot, 4) if spot is not None else None
+        sf_rel = make_split_factors(sf_df, [d_end - timedelta(days=i) for i in range(7)])
+        if metric == "vol":
+            paths = [_chain_year_path(ticker, d_end.year), _chain_year_path(ticker, d_end.year - 1)]
+            date_field, count_field = "feature_date", "volume"
+        else:
+            paths = [_oi_year_path(ticker, d_end.year)]
+            date_field, count_field = "trade_date", "open_interest"
+        result = await asyncio.to_thread(
+            _compute_surface_dte, paths, date, date_field, count_field, moneyness, sf_rel, spot,
+        )
+        result["spots"] = [spot] * len(result.get("zlabels", []))   # constant spot across DTE
+        result.update({"ticker": ticker, "date": date, "metric": metric,
+                       "zaxis": "dte", "spot": spot, "moneyness": moneyness})
+        if "error" not in result:
+            await _cache_put(pool, key, result)
+        return result
+
     async with pool.acquire() as conn:
         drows = await conn.fetch(
             "SELECT trade_date FROM daily_features "
@@ -773,8 +857,10 @@ async def chain_surface(
         date_field, count_field, dte_clause, moneyness, sf_rel, end_spot,
     )
     result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
+    result["zkind"] = "time"
+    result["zlabels"] = result.get("dates", window)
     result.update({
-        "ticker": ticker, "date": date, "metric": metric,
+        "ticker": ticker, "date": date, "metric": metric, "zaxis": "time",
         "lookback": lookback, "moneyness": moneyness, "spot": end_spot,
     })
     if "error" not in result:

@@ -37,6 +37,24 @@ const TA_PINK = '#e84393';   // negative / puts / short / below
  * pink (those carry sign meaning). Assigned by order among overlaid panes. */
 const TA_OVERLAY_COLORS = ['#f39c12', '#1abc9c', '#9b59b6', '#e67e22', '#00d2ff', '#e056fd'];
 
+/* Camera-facing text label for the 3D surface axes (Three.js has no text). */
+function taTextSprite(text, color) {
+  const cvs = document.createElement('canvas');
+  const ctx = cvs.getContext('2d');
+  const fs = 48;
+  ctx.font = `bold ${fs}px sans-serif`;
+  cvs.width = Math.ceil(ctx.measureText(text).width) + 16;
+  cvs.height = fs + 16;
+  ctx.font = `bold ${fs}px sans-serif`;
+  ctx.fillStyle = color; ctx.textBaseline = 'middle';
+  ctx.fillText(text, 8, cvs.height / 2);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(cvs), depthTest: false, transparent: true,
+  }));
+  spr.scale.set((cvs.width / cvs.height) * 13, 13, 1);   // ~13 world units tall
+  return spr;
+}
+
 /* Chart.js instances and heavy per-pane series live OUTSIDE Alpine's
  * reactive proxy — wrapping Chart internals or 1.7k-row arrays in a Proxy
  * breaks rendering and slows selection. Keyed by pane id. */
@@ -112,6 +130,7 @@ document.addEventListener('alpine:init', () => {
     chainFlowN: 1,                 // flow Δ window (sessions)
     chainFlow: null,
     chainSurfaceMetric: 'oi',      // surface: 'oi'|'vol'
+    chainSurfaceZ: 'time',         // surface Z axis: 'time'|'dte' (#6)
     chainSurfaceLookback: 126,     // surface window (sessions)
     chainSurface: null,
     chainDoiN: 5,                  // ΔOI window (sessions)
@@ -904,7 +923,8 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/surface?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&metric=${this.chainSurfaceMetric}&lookback=${this.chainSurfaceLookback}`
+              + `&date=${date}&metric=${this.chainSurfaceMetric}&zaxis=${this.chainSurfaceZ}`
+              + `&lookback=${this.chainSurfaceLookback}`
               + `&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
@@ -944,9 +964,11 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       if (typeof THREE === 'undefined') { this.chainError = 'Three.js not loaded'; return; }
-      if (!f || !f.strikes.length || !f.dates.length) return;
+      const zl = (f && (f.zlabels || f.dates)) || [];
+      const zkind = (f && f.zkind) || 'time';
+      if (!f || !f.strikes.length || !zl.length) return;
 
-      const nS = f.strikes.length, nD = f.dates.length;
+      const nS = f.strikes.length, nD = zl.length;
       const SX = 100, SZ = 100, SY = 42;          // grid extents / height scale
       const max = f.max || 1;
       const yAt = (r, c) => { const v = f.matrix[r][c]; return v == null ? 0 : (v / max) * SY; };
@@ -1020,6 +1042,20 @@ document.addEventListener('alpine:init', () => {
           scene.add(line);
         }
       }
+
+      // Axis labels (camera-facing sprites): X = strike, Z = time|DTE,
+      // Y = signed qty (calls + / puts −). Ends labeled with their values.
+      const place = (s, x, y, z) => { s.position.set(x, y, z); return s; };
+      scene.add(place(taTextSprite('calls +', '#3498db'), 0, SY + 12, -SZ * 0.5));
+      scene.add(place(taTextSprite('puts −', '#e84393'), 0, -SY - 12, -SZ * 0.5));
+      scene.add(place(taTextSprite('K ' + f.strikes[0], '#c8c8c8'), px(0), 5, SZ * 0.5 + 10));
+      scene.add(place(taTextSprite('K ' + f.strikes[nS - 1], '#c8c8c8'), px(nS - 1), 5, SZ * 0.5 + 10));
+      scene.add(place(taTextSprite('strike', '#88aacc'), 0, 5, SZ * 0.5 + 24));
+      const zA = zkind === 'dte' ? String(zl[0]) : String(zl[0]).slice(2);
+      const zB = zkind === 'dte' ? String(zl[nD - 1]) : String(zl[nD - 1]).slice(2);
+      scene.add(place(taTextSprite(zA, '#c8c8c8'), SX * 0.5 + 10, 5, pz(0)));
+      scene.add(place(taTextSprite(zB, '#c8c8c8'), SX * 0.5 + 10, 5, pz(nD - 1)));
+      scene.add(place(taTextSprite(zkind === 'dte' ? 'DTE' : 'time', '#88aacc'), SX * 0.5 + 24, 5, 0));
 
       const controls = new THREE.OrbitControls(camera, renderer.domElement);
       controls.target.set(0, 0, 0);

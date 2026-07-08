@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=23"></script>
+  <script src="/static/js/ticker_analysis.js?v=24"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -452,7 +452,8 @@
           <span x-show="!(chainFlowMode==='doi'||chainFlowMode==='dvol')"><span style="color:var(--accent)">sequential blue</span></span>
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='surface'">
-          X = strike · Z = time · Y = <span style="color:var(--accent)">calls +</span> / <span style="color:#e84393">puts −</span> · drag to orbit · wheel to zoom
+          X = strike · Z = <span x-text="chainSurfaceZ==='dte' ? 'DTE' : 'time'"></span> ·
+          Y = <span style="color:var(--accent)">calls +</span> / <span style="color:#e84393">puts −</span> · drag to orbit · wheel to zoom
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='doi'">
           signed ΔOI per strike · <span style="color:var(--accent)">build +</span> / <span style="color:#e84393">unwind −</span> · overnight, N-session
@@ -533,22 +534,31 @@
               </div>
             </template>
 
-            <!-- Surface metric + window (surface only) -->
+            <!-- Surface Z-axis + metric + window (surface only) -->
             <template x-if="chainView==='surface'">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
+                <span class="ta-lbl">Z</span>
+                <div class="seg">
+                  <div class="seg-btn" :class="{on: chainSurfaceZ==='time'}" @click="chainSurfaceZ='time'; loadChainSurface()">Time</div>
+                  <div class="seg-btn" :class="{on: chainSurfaceZ==='dte'}" @click="chainSurfaceZ='dte'; loadChainSurface()">DTE</div>
+                </div>
                 <span class="ta-lbl">Metric</span>
                 <div class="seg">
                   <div class="seg-btn" :class="{on: chainSurfaceMetric==='oi'}" @click="chainSurfaceMetric='oi'; loadChainSurface()">OI</div>
                   <div class="seg-btn" :class="{on: chainSurfaceMetric==='vol'}" @click="chainSurfaceMetric='vol'; loadChainSurface()">Vol</div>
                 </div>
-                <span class="ta-lbl">Window</span>
-                <select class="ta-sel" x-model.number="chainSurfaceLookback" @change="loadChainSurface()"
-                        x-init="$nextTick(() => $el.value = chainSurfaceLookback)">
-                  <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y']]" :key="w[0]">
-                    <option :value="w[0]" x-text="w[1]"></option>
-                  </template>
-                </select>
+                <template x-if="chainSurfaceZ==='time'">
+                  <div style="display:contents;">
+                    <span class="ta-lbl">Window</span>
+                    <select class="ta-sel" x-model.number="chainSurfaceLookback" @change="loadChainSurface()"
+                            x-init="$nextTick(() => $el.value = chainSurfaceLookback)">
+                      <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y']]" :key="w[0]">
+                        <option :value="w[0]" x-text="w[1]"></option>
+                      </template>
+                    </select>
+                  </div>
+                </template>
               </div>
             </template>
 
@@ -578,9 +588,10 @@
               </div>
             </template>
 
-            <!-- DTE range buttons (all strike views except the strike×DTE
-                 buckets view and IV term). Single-select bucket or All. -->
-            <template x-if="chainView!=='strikeDte' && chainView!=='ivterm'">
+            <!-- DTE range buttons — strike views only. Hidden on strike×DTE
+                 (buckets are rows), IV term (no DTE), and the surface's DTE-Z
+                 mode (all DTEs are the Z axis). Multi-select + None/All. -->
+            <template x-if="chainView!=='strikeDte' && chainView!=='ivterm' && !(chainView==='surface' && chainSurfaceZ==='dte')">
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">DTE</span>
