@@ -23,6 +23,7 @@ adding a new cache table or moving a UI pane.
 | `sec_scan_cache` | POST `/api/factor-analysis/secondary-scan` (background) | **"Secondary"** scanner — "Secondary Metrics by Lift" bar chart and drill-down | Inside the primary analyze flow under the Heatmap (line ~2360) | Lift bar empties. Click "Load All Metrics" / "Reload All" to rebuild (~1–3 min). | Y |
 | `analyze_primary_cache` | GET `/api/factor-analysis/analyze` (lazy fill on every Analyze click; LRU-capped at 2 GB) | **All of the primary analyze visuals**: Heatmap, Distribution by Decile, Decile Stats table, Equity by Decile, Yearly bars, Rolling Correlation, Trade Calendar, plus the Secondary nomination chart | Body of OI Analysis page (after Ticker / Metric / Outcome / Analyze) | Next Analyze re-fires; computation takes longer (~3–30 s depending on universe) before charts appear. No functional loss. | Y |
 | `analyze_cache_slim` + `analyze_cache_trade_meta` + `analyze_cache_outcome` (3-table set, cleared together) | GET `/api/factor-analysis/analyze-bundle` and `/analyze-bundle/payload` / `/trade-meta` / `/outcome`; POST `/analyze-bundle/refresh` for ALL-mode background fill | Outcome-switched charts when user picks an outcome ≠ default `ret_5d_fwd_oc`; **Gap Mode** equity charts; flat trade-data table | Driven by the outcome dropdown + Gap Mode toggle in the decile section | Next outcome switch / Gap toggle triggers background bundle compute (~30 s – 2 min for ALL-mode; single-ticker recomputes inline at /analyze and never uses these tables) | Y |
+| `ticker_analysis_chain_cache` (OI DB) | Read-through on GET `/api/ticker-analysis/chain/*` (oi-profile, doi-profile, vol-oi, strike-dte, flow, surface, iv-smile, iv-term); `force=1` rewrites | **Ticker Analysis** page → Option Chain section (all views) | The DuckDB-over-parquet chain views | Chain views recompute from `/data/{oi_raw,chain_eod}` parquet on next open (heavier than the metric layer — seconds). No functional loss. Clear via POST `/api/ticker-analysis/chain/invalidate`. | Y |
 
 ---
 
@@ -44,6 +45,7 @@ adding a new cache table or moving a UI pane.
 | `research_pnl_uploads` | Uploaded P&L CSVs | **N** | User uploads |
 | `research_backtest_uploads` | Uploaded backtest sets | **N** | User uploads |
 | `research_knowledge` | AI Explorer rules | **N** | User-entered |
+| `ticker_analysis_layouts` (OI DB) | Saved Ticker Analysis metric-pane layouts (name, ordered panes: metric + "on price" flag, shade mode, horizon) — ticker-agnostic | **N** | User-entered (Ticker Analysis "Save layout"). Created lazily; upsert by name. |
 
 ---
 
@@ -59,6 +61,7 @@ All return `{"ok": true}` or `{"ok": true, "deleted": N, "scope": "..."}`. No au
 | POST `/api/factor-analysis/analyze-cache/invalidate` | `analyze_cache_slim` + `trade_meta` + `outcome` (cascade) | Optional `?ticker=&metric=` scopes |
 | POST `/api/factor-analysis/ic-batch/invalidate` | `ic_batch_cache` | — |
 | POST `/api/factor-analysis/threshold-drift/invalidate` | in-memory only | — |
+| POST `/api/ticker-analysis/chain/invalidate` | `ticker_analysis_chain_cache` | Optional `?ticker=` scope (matches keys containing `:TICKER:`) |
 
 For corner-scan and 2F-interaction caches, there's no invalidate endpoint — those are rebuilt by re-running the script (`scripts/corner_scan.py`) or hitting the explicit Run/Refresh button in the UI (which writes new rows on top of the existing ones).
 

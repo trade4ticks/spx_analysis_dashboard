@@ -1,4 +1,4 @@
-# System Inventory
+ok, `# System Inventory
 
 Complete traced inventory of databases, tables, scripts, endpoints, data
 flow, and cleanup candidates. Builds on
@@ -33,8 +33,10 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `oi_analysis.py` | `/api/factor-analysis` | OI |
 | `oi_portfolios.py` | `/api/factor-analysis` (shares prefix) | MAIN (portfolios) + OI (aggregate) |
 | `backtest_iv.py` | `/api/backtest-iv` | MAIN (upload metadata) + upload data on disk |
+| `ticker_analysis.py` | `/api/ticker-analysis` | OI (daily_features/is_bins/underlying_ohlc) + layouts table |
+| `ticker_chain.py` | `/api/ticker-analysis` (shares prefix) | OI (spot/splits) + DuckDB over `/data/{oi_raw,chain_eod}` parquet + chain-cache table |
 
-**Total: 41 unique tables across both DBs.**
+**Total: 43 unique tables across both DBs.**
 
 ---
 
@@ -66,7 +68,7 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `research_backtest_staging` | derived-cache | id SERIAL | POST `/research2/upload-backtest` (per-chunk) | POST `/research2/finalize-backtest` (consumes) | internal (transient between upload and finalize) | Y |
 | `research2_results`, `research2_followups`, `research2_charts`, `research2_runs` | annotation | (Research2's mirror of v1) | `research/db.py` v2 path | research2.py endpoints | Research2 page | N |
 
-### 1b. OI DB (`open_interest`) — 19 tables
+### 1b. OI DB (`open_interest`) — 21 tables
 
 | Table | Category | Grain / PK | Populated by | Read by | UI pane / label | Safe to clear? |
 |---|---|---|---|---|---|---|
@@ -91,6 +93,8 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `signals` | annotation (+ cached cols) | id SERIAL + agg_avg_ret, agg_n, per_cell_stats, stats_updated_at | POST `/signals`, PUT `/signals/{id}` (user); POST `/signals/refresh` (stats only) | GET `/signals`; `oi_signals.py` firing checks; `oi_portfolios.py` membership | Saved cell-set/zone defs; Heatmap Save Signal, OI Signals tracked/firing, Portfolio Builder | N (rows); Y (cached cols via `/signals/refresh`) |
 | `tracked_signals` | annotation | signal_id PK | POST `/api/factor-signals/tracked` | `oi_signals.py` `/firing`, `/roster` | OI Signals page — Tracked Signals watchlist | N |
 | `oi_signal_calendar` | annotation | id SERIAL, partial-unique (ticker, outcome, entry_date) | POST `/api/factor-signals/calendar` | `oi_signals.py` `/calendar` | "Open Positions Calendar" (Gantt) on OI Signals page | N |
+| `ticker_analysis_layouts` | annotation | id SERIAL, name UNIQUE | POST `/api/ticker-analysis/layouts` (upsert by name) | GET/DELETE `/api/ticker-analysis/layouts` | Ticker Analysis page — saved metric-pane layouts (metric+onPrice per pane, shade, horizon); ticker-agnostic. Created lazily by `ticker_analysis.py`. | N (user-entered) |
+| `ticker_analysis_chain_cache` | derived-cache | cache_key TEXT PK | read-through on GET `/api/ticker-analysis/chain/*`; force=1 rewrites | same chain GETs | Ticker Analysis option-chain views (profile, ΔOI, vol-oi, strike×DTE, flow, surface, IV smile/term). Created lazily by `ticker_chain.py`; cleared via POST `/chain/invalidate`. | Y |
 
 ### 1c. In-memory only — no Postgres table
 
@@ -324,6 +328,36 @@ All POST endpoints take the upload_id; analytics over the upload data.
 | GET | `/{upload_id}/top-bottom` | `_api('top-bottom')` | S8 pane | active |
 | GET | `/{upload_id}/correlation-overview` | direct fetch | Correlation overview chart | active |
 
+### 3i. Ticker Analysis (`/api/ticker-analysis`) — `ticker_analysis.py` + `ticker_chain.py`
+
+Single-ticker page. Metric layer reads OI DB (Postgres); chain views read
+`/data/{oi_raw,chain_eod}/{TICKER}/{YEAR}.parquet` via DuckDB with split
+adjustment vendored in `app/split_factors.py`, cached in
+`ticker_analysis_chain_cache`. All chain GETs take `force=1` (cache-bust)
+and, where applicable, `dte_bands`/`moneyness`/`side=all|call|put`.
+
+| Method | Path | Tables / source | JS caller | UI | Status |
+|---|---|---|---|---|---|
+| GET | `/tickers` | R: `daily_features` | init | Ticker selector | active |
+| GET | `/price` | R: `underlying_ohlc` | loadPrice | Full-history price chart | active |
+| GET | `/metric` | R: `daily_features`, `is_bins` | loadPaneData | Metric pane (20-bin IS bars + value series + today) | active |
+| GET | `/today-scan` | R: `daily_features`, `is_bins` | loadTodayScan | "Today — what's unusual" row | active |
+| GET | `/layouts` | R: `ticker_analysis_layouts` | loadLayouts | Layout selector | active |
+| POST | `/layouts` | W: `ticker_analysis_layouts` (upsert by name) | saveLayout | Save layout | active |
+| DELETE | `/layouts/{id}` | W: `ticker_analysis_layouts` | deleteLayout | Delete layout | active |
+| GET | `/chain/dates` | R: `daily_features` (total_oi not null) | loadChainDates | Chain date slider | active |
+| GET | `/chain/oi-profile` | parquet `oi_raw`; R/W chain-cache | loadChainProfile | OI-by-strike profile | active |
+| GET | `/chain/doi-profile` | parquet `oi_raw` | loadChainDoi | ΔOI-by-strike | active |
+| GET | `/chain/vol-oi` | parquet `oi_raw`+`chain_eod` | loadChainVolOi | Vol/OI ratio-by-strike | active |
+| GET | `/chain/strike-dte` | parquet `oi_raw`\|`chain_eod` | loadChainHeatmap | Strike×DTE heatmap (OI/Vol) | active |
+| GET | `/chain/flow` | parquet `oi_raw`+`chain_eod` (multi-year) | loadChainFlow | Flow map (strike×time; OI/Vol/V-OI/ΔOI/ΔVol) | active |
+| GET | `/chain/surface` | parquet `oi_raw`\|`chain_eod` | loadChainSurface | 3D surface (Three.js; Z=time\|dte) | active |
+| GET | `/chain/iv-smile` | parquet `chain_eod` | loadChainSmile | IV smile (per snapshot) | active |
+| GET | `/chain/iv-term` | parquet `chain_eod` (multi-year) | loadChainIvTerm | IV term structure (7/30/90d) | active |
+| POST | `/chain/invalidate` | W: `ticker_analysis_chain_cache` | (none) | ops curl (optional `?ticker=`) | internal-only |
+
+New files: `app/split_factors.py` (split factors vendored from Open_Interest/lib/split_factors.py), `app/routers/ticker_chain.py`. Page route `GET /ticker-analysis` → `templates/ticker_analysis.html` (loads Three.js r128 + OrbitControls from CDN for the 3D surface).
+
 ---
 
 ## 4. Data Flow
@@ -418,6 +452,29 @@ POST /research/run or /research2/run
   └──→ heatmap.py, term.py, skew.py, concavity.py, *_slope.py, historical.py, today.py
         └──→ Heatmap page + IV Analysis page + Today page (no cache tables; parquet/SQL direct)
 ```
+
+### 4g. Ticker Analysis side (single-ticker page)
+
+```
+Metric layer (Postgres, OI DB):
+  [daily_features] + [is_bins] + [underlying_ohlc]
+    └──→ ticker_analysis.py (/tickers, /price, /metric, /today-scan)
+          └──→ price chart + metric panes + "what's unusual" + stat strip
+    └──→ ticker_analysis_layouts (annotation)  ← /layouts CRUD
+
+Chain layer (DuckDB over parquet — NOT Postgres):
+  [/data/oi_raw/{TICKER}/{YEAR}.parquet] + [/data/chain_eod/{TICKER}/{YEAR}.parquet]
+    └──→ ticker_chain.py (/chain/*), split-adjusted via app/split_factors.py
+          (vendored from Open_Interest/lib/split_factors.py; splits from
+           underlying_ohlc.splits; spot from daily_features.spot_pc = prior close)
+          └──→ read-through cache: ticker_analysis_chain_cache  (POST /chain/invalidate clears)
+          └──→ OI profile / ΔOI / vol-oi / strike×DTE / flow / 3D surface / IV smile / IV term
+```
+
+The chain parquet stores are the SAME ones the external `build_features`
+pipeline reads (`data/{oi_raw,chain_eod}` there); this page reads them
+directly at runtime on the VPS via `OI_RAW_DIR` / `CHAIN_EOD_DIR` env
+(default `/data/...`).
 
 ---
 
