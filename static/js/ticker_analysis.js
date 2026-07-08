@@ -1079,41 +1079,66 @@ document.addEventListener('alpine:init', () => {
       finally { this.chainLoading = false; this.$nextTick(() => this._renderChainWhenReady('ta-chain-voloi', () => this.renderChainVolOi())); }
     },
 
+    // Vol/OI ratio-by-strike (P4e, reworked): one horizontal bar per strike =
+    // today's volume / standing OI at that strike. Same strike axis as the OI
+    // profile so "where is volume outrunning standing position" reads directly.
     renderChainVolOi() {
       const cvs = document.getElementById('ta-chain-voloi');
       if (!cvs) return;
       if (TA_CHARTS.voloi) { TA_CHARTS.voloi.destroy(); TA_CHARTS.voloi = null; }
       const p = this.chainVolOi;
       if (!p || !p.points || !p.points.length) return;
-      const pts = p.points.map(d => ({ x: d.oi, y: d.vol, s: d.strike }));
-      // Fresh activity: volume >= standing OI (vol/OI ≥ 1) → accent; else dim.
-      const colors = pts.map(d => (d.x > 0 && d.y / d.x >= 1) ? '#3498db' : 'rgba(200,200,200,.35)');
-      const maxv = Math.max(1, ...pts.map(d => Math.max(d.x, d.y)));
+
+      const CAP = 3;   // vol/OI ceiling for readability (fresh vol w/ no OI clamps here)
+      const pts = p.points.map(d => {
+        const raw = d.oi > 0 ? d.vol / d.oi : (d.vol > 0 ? Infinity : 0);
+        const bar = d.oi > 0 ? Math.min(d.vol / d.oi, CAP) : (d.vol > 0 ? CAP : 0);
+        return { strike: d.strike, oi: d.oi, vol: d.vol, raw, bar };
+      });
+      const labels = pts.map(d => d.strike);
+      const data = pts.map(d => d.bar);
+      // Accent where volume >= standing OI (fresh / outrunning); else dim.
+      const colors = pts.map(d => (d.raw >= 1 ? 'rgba(52,152,219,.85)' : 'rgba(200,200,200,.4)'));
+
       TA_CHARTS.voloi = new Chart(cvs.getContext('2d'), {
-        data: {
-          datasets: [
-            { type: 'line', data: [{ x: 0, y: 0 }, { x: maxv, y: maxv }], borderColor: 'rgba(255,255,255,.25)',
-              borderDash: [4, 4], borderWidth: 1, pointRadius: 0, fill: false },   // vol = OI reference
-            { type: 'scatter', data: pts, pointBackgroundColor: colors, pointRadius: 3, borderWidth: 0 },
-          ],
-        },
+        type: 'bar',
+        data: { labels, datasets: [{ data, backgroundColor: colors }] },
         options: {
+          indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
           scales: {
-            x: { title: { display: true, text: 'Open interest', color: '#888', font: { size: 9 } },
-                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
-            y: { title: { display: true, text: 'Volume (today)', color: '#888', font: { size: 9 } },
-                 grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+            x: { title: { display: true, text: 'volume / OI  (capped at ' + CAP + ')', color: '#888', font: { size: 9 } },
+                 min: 0, suggestedMax: CAP, grid: { color: 'rgba(255,255,255,.06)' }, ticks: { color: '#777', font: { size: 9 } } },
+            y: { reverse: true, grid: { display: false }, ticks: { color: '#777', font: { size: 8 }, autoSkip: true, maxTicksLimit: 26, callback: (v, i) => labels[i] } },
           },
           plugins: {
             legend: { display: false },
-            tooltip: { callbacks: { label: it => {
-              const d = it.raw; if (d.s == null) return '';
-              const vo = d.x > 0 ? (d.y / d.x).toFixed(2) : '∞';
-              return `K ${d.s} · OI ${d.x.toLocaleString()} · vol ${d.y.toLocaleString()} · v/OI ${vo}`;
-            } } },
+            tooltip: { callbacks: {
+              title: it => 'Strike ' + labels[it[0].dataIndex],
+              label: it => {
+                const d = pts[it.dataIndex];
+                const r = d.raw === Infinity ? '∞' : d.raw.toFixed(2);
+                return `vol/OI ${r} · vol ${d.vol.toLocaleString()} · OI ${d.oi.toLocaleString()}`;
+              } } },
           },
         },
+        plugins: [
+          this._profileSpotPlugin(labels, p.spot),
+          {   // reference line at vol/OI = 1 (volume matches standing OI)
+            id: 'taVolOiOne',
+            afterDatasetsDraw(chart) {
+              const { ctx, chartArea, scales } = chart;
+              const x = scales.x.getPixelForValue(1);
+              if (x < chartArea.left || x > chartArea.right) return;
+              ctx.save();
+              ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+              ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
+              ctx.setLineDash([]); ctx.fillStyle = '#888'; ctx.font = '9px sans-serif';
+              ctx.fillText('1×', x + 2, chartArea.top + 9);
+              ctx.restore();
+            },
+          },
+        ],
       });
     },
 

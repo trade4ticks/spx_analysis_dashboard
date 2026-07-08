@@ -199,7 +199,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=20"></script>
+  <script src="/static/js/ticker_analysis.js?v=21"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -455,7 +455,7 @@
           signed ΔOI per strike · <span style="color:var(--accent)">build +</span> / <span style="color:#e84393">unwind −</span> · overnight, N-session
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='voloi'">
-          OI (x) vs today volume (y) · <span style="color:var(--accent)">accent</span> = vol ≥ OI (fresh) · diagonal = vol/OI 1
+          vol/OI per strike · <span style="color:var(--accent)">accent</span> = vol ≥ OI (fresh) · line at 1× · spot
         </span>
         <span class="ta-section-sub" style="margin-left:8px;" x-show="chainView==='smile'">
           IV vs strike · <span style="color:var(--accent)">calls</span> / <span style="color:#e84393">puts</span> · spot line
