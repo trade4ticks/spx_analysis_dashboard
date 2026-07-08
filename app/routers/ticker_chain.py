@@ -53,9 +53,10 @@ OI_RAW_DIR = os.getenv("OI_RAW_DIR", "/data/oi_raw")
 CHAIN_EOD_DIR = os.getenv("CHAIN_EOD_DIR", "/data/chain_eod")
 
 # Bump to invalidate all cached chain payloads on the next deploy.
-# v2: spot no longer double-adjusted by adj_factor (was dragging pre-split
-#     spot to 1/N of its value).
-CHAIN_SCHEMA_VERSION = 2
+# v2: spot no longer double-adjusted by adj_factor.
+# v3: spot = daily_features.spot_pc (prior-session close C_{T-1}), matching the
+#     metric layer — replaces the wrong "close ≤ T from underlying_ohlc".
+CHAIN_SCHEMA_VERSION = 3
 
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-^]{1,15}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -146,20 +147,22 @@ async def _load_splits_df(pool, ticker: str) -> pd.DataFrame:
     })
 
 
-async def _spot_close(pool, ticker: str, d) -> Optional[float]:
-    """underlying_ohlc.close — ALREADY split-adjusted upstream (yfinance).
-    The adjusted strikes (raw * adj_factor) align with this directly, so it
-    is used as spot with NO further factor applied.
+async def _spot_pc(pool, ticker: str, d) -> Optional[float]:
+    """Spot = daily_features.spot_pc for (ticker, d) = the PRIOR session's
+    close C_{T-1}, already split-adjusted (derived from underlying_ohlc.close).
 
-    Uses the most recent close ON OR BEFORE `d` (not an exact match): the
-    default snapshot is the latest OI session, but underlying_ohlc can lag a
-    day — an exact-match query then returned NULL, so the spot line never
-    drew and moneyness had no reference and silently no-op'd."""
+    A chain row labeled trade_date T describes the T-1 session (OI/vol as-of
+    T-1's close, knowable at T), and the whole project standardizes on prior
+    close as the analysis spot — the metric layer uses spot_pc too. Reading it
+    directly guarantees the chain views and the metrics share the identical
+    spot by construction. NO split factor is applied (spot_pc is already
+    adjusted). One spot serves both OI and volume views (same T-1 session).
+
+    (The earlier "most recent close ≤ T from underlying_ohlc" was wrong: on a
+    historical date it resolves to T's OWN 4pm close — a lookahead.)"""
     async with pool.acquire() as conn:
         v = await conn.fetchval(
-            "SELECT close FROM underlying_ohlc "
-            "WHERE ticker = $1 AND trade_date <= $2 AND close IS NOT NULL "
-            "ORDER BY trade_date DESC LIMIT 1",
+            "SELECT spot_pc FROM daily_features WHERE ticker = $1 AND trade_date = $2",
             ticker, d,
         )
     return float(v) if v is not None else None
@@ -270,11 +273,9 @@ async def chain_oi_profile(
     d = datetime.strptime(date, "%Y-%m-%d").date()
     sf_df = await _load_splits_df(pool, ticker)
     factor = make_split_factor_map(sf_df, [d]).get(d, 1.0)
-    # Spot = underlying_ohlc.close, which is ALREADY split-adjusted upstream —
-    # apply NO factor. The adjusted strikes (raw * adj_factor) align with it
-    # directly. adj_factor is returned only as a diagnostic; it must not touch
-    # spot (multiplying here would drag pre-split spot to 1/N of its value).
-    spot = await _spot_close(pool, ticker, d)
+    # Spot = daily_features.spot_pc (prior close, already split-adjusted) —
+    # apply NO factor. adj_factor is returned only as a diagnostic.
+    spot = await _spot_pc(pool, ticker, d)
     spot = round(spot, 4) if spot is not None else None
 
     sf_for_date = make_split_factors(sf_df, [d])   # DF(trade_date, adj_factor)
@@ -389,7 +390,7 @@ async def chain_strike_dte(
     d = datetime.strptime(date, "%Y-%m-%d").date()
     sf_df = await _load_splits_df(pool, ticker)
     factor = make_split_factor_map(sf_df, [d]).get(d, 1.0)
-    spot = await _spot_close(pool, ticker, d)
+    spot = await _spot_pc(pool, ticker, d)
     spot = round(spot, 4) if spot is not None else None
 
     # Factor relation over a small back-window so the Vol path (chain rows are
@@ -575,15 +576,14 @@ async def chain_flow(
     d_start = datetime.strptime(window[0], "%Y-%m-%d").date()
     async with pool.acquire() as conn:
         srows = await conn.fetch(
-            "SELECT trade_date, close FROM underlying_ohlc "
+            "SELECT trade_date, spot_pc FROM daily_features "
             "WHERE ticker = $1 AND trade_date BETWEEN $2 AND $3",
             ticker, d_start, d_end,
         )
-    spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
+    spot_by = {str(r["trade_date"]): (float(r["spot_pc"]) if r["spot_pc"] is not None else None)
                for r in srows}
-    # Robust end-of-window spot (most recent close ≤ end) so moneyness always
-    # has a reference even when underlying_ohlc lags the latest OI session.
-    end_spot = await _spot_close(pool, ticker, d_end)
+    # End-of-window spot = daily_features.spot_pc at d_end (prior close).
+    end_spot = await _spot_pc(pool, ticker, d_end)
 
     sf_df = await _load_splits_df(pool, ticker)
     # Factor relation over the whole window (+5-day back buffer so the Vol
@@ -719,13 +719,13 @@ async def chain_surface(
     d_start = datetime.strptime(window[0], "%Y-%m-%d").date()
     async with pool.acquire() as conn:
         srows = await conn.fetch(
-            "SELECT trade_date, close FROM underlying_ohlc "
+            "SELECT trade_date, spot_pc FROM daily_features "
             "WHERE ticker = $1 AND trade_date BETWEEN $2 AND $3",
             ticker, d_start, d_end,
         )
-    spot_by = {str(r["trade_date"]): (float(r["close"]) if r["close"] is not None else None)
+    spot_by = {str(r["trade_date"]): (float(r["spot_pc"]) if r["spot_pc"] is not None else None)
                for r in srows}
-    end_spot = await _spot_close(pool, ticker, d_end)
+    end_spot = await _spot_pc(pool, ticker, d_end)
 
     sf_df = await _load_splits_df(pool, ticker)
     span = (d_end - d_start).days + 6
@@ -879,7 +879,7 @@ async def chain_doi_profile(
         return {"ticker": ticker, "date": date, "strikes": [], "empty": True, "n": n}
     date_prev = dates[-(n + 1)]
 
-    spot = await _spot_close(pool, ticker, d_end)
+    spot = await _spot_pc(pool, ticker, d_end)
     spot = round(spot, 4) if spot is not None else None
     d_prev = datetime.strptime(date_prev, "%Y-%m-%d").date()
     sf_df = await _load_splits_df(pool, ticker)
@@ -924,7 +924,7 @@ async def chain_vol_oi(
             return cached
 
     d = datetime.strptime(date, "%Y-%m-%d").date()
-    spot = await _spot_close(pool, ticker, d)
+    spot = await _spot_pc(pool, ticker, d)
     spot = round(spot, 4) if spot is not None else None
     sf_df = await _load_splits_df(pool, ticker)
     sf_rel = make_split_factors(sf_df, [d - timedelta(days=i) for i in range(7)])
@@ -1053,7 +1053,7 @@ async def chain_iv_smile(
             return cached
 
     d = datetime.strptime(date, "%Y-%m-%d").date()
-    spot = await _spot_close(pool, ticker, d)
+    spot = await _spot_pc(pool, ticker, d)
     spot = round(spot, 4) if spot is not None else None
     sf_df = await _load_splits_df(pool, ticker)
     sf_rel = make_split_factors(sf_df, [d - timedelta(days=i) for i in range(7)])

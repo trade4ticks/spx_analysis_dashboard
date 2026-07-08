@@ -170,8 +170,16 @@
       color-scheme:dark;   /* dark native spinner arrows */
     }
 
+    /* Loading/empty overlay inside a chart wrap (doesn't affect layout height,
+       so switching modes never collapses the pane / jumps the scroll). */
+    .ta-chain-overlay {
+      position:absolute; inset:0; z-index:4; pointer-events:none;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(30,30,30,.45); color:var(--muted); font-size:12px; text-align:center; padding:16px;
+    }
+
     /* 3D surface host (Three.js appends its canvas here). */
-    .ta-surface { width:100%; height:440px; border-radius:4px; overflow:hidden; cursor:grab; }
+    .ta-surface { position:relative; width:100%; height:440px; border-radius:4px; overflow:hidden; cursor:grab; }
     .ta-surface:active { cursor:grabbing; }
     .ta-surface canvas { display:block; }
 
@@ -610,91 +618,80 @@
             </span>
           </div>
 
-          <template x-if="chainLoading">
-            <div class="ta-pane-loading">Loading chain…</div>
-          </template>
+          <!-- Each view keeps a fixed-height wrap while active (loading/empty
+               shown as overlays inside), so switching modes never collapses
+               the section height and scrolls the page. -->
 
           <!-- OI profile -->
           <div x-show="chainView==='profile'">
-            <template x-if="!chainLoading && chainProfile && chainProfile.empty">
-              <div class="ta-placeholder">No OI for this snapshot / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:380px;"
-                 x-show="!chainLoading && chainProfile && !chainProfile.empty">
+            <div class="ta-chart-wrap" style="height:380px;">
               <canvas id="ta-chain-profile"></canvas>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainProfile && chainProfile.empty">No OI for this snapshot / filters.</div>
             </div>
           </div>
 
           <!-- Strike×DTE heatmap (canvas) -->
           <div x-show="chainView==='strikeDte'">
-            <template x-if="!chainLoading && chainHeatmap && chainHeatmap.empty">
-              <div class="ta-placeholder">No data for this snapshot / metric / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:300px;"
-                 x-show="!chainLoading && chainHeatmap && !chainHeatmap.empty">
+            <div class="ta-chart-wrap" style="height:300px;">
               <canvas id="ta-chain-heatmap"></canvas>
               <div id="ta-hm-tip" class="ta-flow-tip"></div>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainHeatmap && chainHeatmap.empty">No data for this snapshot / metric / filters.</div>
             </div>
           </div>
 
           <!-- Flow map (strike × time) -->
           <div x-show="chainView==='flow'">
-            <template x-if="!chainLoading && chainFlow && chainFlow.empty">
-              <div class="ta-placeholder">No data for this window / mode / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:420px;"
-                 x-show="!chainLoading && chainFlow && !chainFlow.empty">
+            <div class="ta-chart-wrap" style="height:420px;">
               <canvas id="ta-chain-flow"></canvas>
               <div id="ta-flow-tip" class="ta-flow-tip"></div>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainFlow && chainFlow.empty">No data for this window / mode / filters.</div>
             </div>
           </div>
 
           <!-- 3D surface (strike × time × signed qty) -->
           <div x-show="chainView==='surface'">
-            <template x-if="!chainLoading && chainSurface && chainSurface.empty">
-              <div class="ta-placeholder">No data for this window / metric / filters.</div>
-            </template>
-            <div id="ta-chain-surface" class="ta-surface"
-                 x-show="!chainLoading && chainSurface && !chainSurface.empty"></div>
+            <div id="ta-chain-surface" class="ta-surface">
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainSurface && chainSurface.empty">No data for this window / metric / filters.</div>
+            </div>
           </div>
 
           <!-- ΔOI-by-strike -->
           <div x-show="chainView==='doi'">
-            <template x-if="!chainLoading && chainDoi && chainDoi.empty">
-              <div class="ta-placeholder">No OI change for this snapshot / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:380px;" x-show="!chainLoading && chainDoi && !chainDoi.empty">
+            <div class="ta-chart-wrap" style="height:380px;">
               <canvas id="ta-chain-doi"></canvas>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainDoi && chainDoi.empty">No OI change for this snapshot / filters.</div>
             </div>
           </div>
 
           <!-- Vol-vs-OI scatter -->
           <div x-show="chainView==='voloi'">
-            <template x-if="!chainLoading && chainVolOi && chainVolOi.empty">
-              <div class="ta-placeholder">No data for this snapshot / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:380px;" x-show="!chainLoading && chainVolOi && !chainVolOi.empty">
+            <div class="ta-chart-wrap" style="height:380px;">
               <canvas id="ta-chain-voloi"></canvas>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainVolOi && chainVolOi.empty">No data for this snapshot / filters.</div>
             </div>
           </div>
 
           <!-- IV smile -->
           <div x-show="chainView==='smile'">
-            <template x-if="!chainLoading && chainSmile && chainSmile.empty">
-              <div class="ta-placeholder">No IV for this snapshot / filters.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:340px;" x-show="!chainLoading && chainSmile && !chainSmile.empty">
+            <div class="ta-chart-wrap" style="height:340px;">
               <canvas id="ta-chain-smile"></canvas>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainSmile && chainSmile.empty">No IV for this snapshot / filters.</div>
             </div>
           </div>
 
           <!-- IV term structure -->
           <div x-show="chainView==='ivterm'">
-            <template x-if="!chainLoading && chainIvTerm && chainIvTerm.empty">
-              <div class="ta-placeholder">No IV term data for this window.</div>
-            </template>
-            <div class="ta-chart-wrap" style="height:340px;" x-show="!chainLoading && chainIvTerm && !chainIvTerm.empty">
+            <div class="ta-chart-wrap" style="height:340px;">
               <canvas id="ta-chain-ivterm"></canvas>
+              <div class="ta-chain-overlay" x-show="chainLoading">Loading…</div>
+              <div class="ta-chain-overlay" x-show="!chainLoading && chainIvTerm && chainIvTerm.empty">No IV term data for this window.</div>
             </div>
           </div>
         </div>
