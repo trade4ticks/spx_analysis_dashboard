@@ -160,6 +160,9 @@ document.addEventListener('alpine:init', () => {
     chainWinStart: 0,              // window start index into chainDates
     chainDteSel: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],   // selected DTE buckets (all = default)
     chainMoneyness: '',            // '' = off; else ± percent
+    chainColorPct: 95,             // color-ramp ceiling percentile (Bug2)
+    chainColorGamma: 1.0,          // color-ramp contrast (gamma exponent)
+    _colorDebounce: null,
     chainProfile: null,
     chainHeatmap: null,
     chainLoading: false,
@@ -547,6 +550,12 @@ document.addEventListener('alpine:init', () => {
       this._chainDebounce = setTimeout(() => this.chainReload(), 300);
     },
 
+    // Color-ramp sliders (Bug2) — re-draw the active view without re-fetching.
+    colorScrub() {
+      clearTimeout(this._colorDebounce);
+      this._colorDebounce = setTimeout(() => this.rerenderActiveChain(), 120);
+    },
+
     // ── DTE range buttons (G4) — multi-select buckets + None/All ─────────
     // The selection is a set of bucket indices sent as dte_bands ("lo-hi,..");
     // the server ORs them. None = empty selection (no contracts). Buckets
@@ -773,7 +782,8 @@ document.addEventListener('alpine:init', () => {
 
       const cells = [];
       for (const i of rowsIdx) for (const v of hm.rows[i]) if (v > 0) cells.push(v);
-      const scale = this._percentile(cells, 95) || hm.max || 1;
+      const scale = this._percentile(cells, this.chainColorPct || 95) || hm.max || 1;
+      const gamma = this.chainColorGamma || 1;
 
       const mL = 58, mB = 18, mT = 6, mR = 8;
       const plotW = W - mL - mR, plotH = H - mT - mB;
@@ -784,7 +794,7 @@ document.addEventListener('alpine:init', () => {
         for (let c = 0; c < nc; c++) {
           const v = rowvals[c];
           if (!v) continue;
-          const a = 0.06 + 0.9 * Math.min(1, v / scale);   // monotone in this cell's own value
+          const a = 0.06 + 0.9 * Math.pow(Math.min(1, v / scale), gamma);   // monotone in this cell's own value
           ctx.fillStyle = `rgba(52,152,219,${a.toFixed(3)})`;
           ctx.fillRect(mL + c * cw, mT + r * ch, Math.ceil(cw) + 0.5, Math.ceil(ch) + 0.5);
         }
@@ -898,7 +908,8 @@ document.addEventListener('alpine:init', () => {
         const v = f.matrix[r][c];
         if (v != null) { const a = f.signed ? Math.abs(v) : v; if (a > 0) cells.push(a); }
       }
-      const max = this._percentile(cells, 95) || f.max || 1;
+      const max = this._percentile(cells, this.chainColorPct || 95) || f.max || 1;
+      const gamma = this.chainColorGamma || 1;
 
       for (let r = 0; r < nr; r++) {
         for (let c = 0; c < nc; c++) {
@@ -906,12 +917,12 @@ document.addEventListener('alpine:init', () => {
           if (v == null) continue;
           let color;
           if (f.signed) {
-            const a = Math.min(1, Math.abs(v) / max);
+            const a = Math.pow(Math.min(1, Math.abs(v) / max), gamma);
             if (a <= 0) continue;
             color = v >= 0 ? `rgba(52,152,219,${(0.08 + 0.9 * a).toFixed(3)})`
                            : `rgba(232,67,147,${(0.08 + 0.9 * a).toFixed(3)})`;
           } else {
-            const a = Math.min(1, v / max);
+            const a = Math.pow(Math.min(1, v / max), gamma);
             if (a <= 0) continue;
             color = `rgba(52,152,219,${(0.06 + 0.9 * a).toFixed(3)})`;
           }

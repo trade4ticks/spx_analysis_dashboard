@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=25"></script>
+  <script src="/static/js/ticker_analysis.js?v=26"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -593,6 +593,19 @@
                     <option :value="w[0]" x-text="w[1]"></option>
                   </template>
                 </select>
+              </div>
+            </template>
+
+            <!-- Color-ramp controls (heatmap + flow) — Bug2 -->
+            <template x-if="chainView==='strikeDte' || chainView==='flow'">
+              <div style="display:contents;">
+                <div class="ctrl-div"></div>
+                <span class="ta-lbl">Ceiling</span>
+                <input type="range" min="50" max="100" step="1" x-model.number="chainColorPct" @input="colorScrub()" style="width:84px;">
+                <span class="ta-hint" x-text="chainColorPct + '%ile'"></span>
+                <span class="ta-lbl">Contrast</span>
+                <input type="range" min="0.4" max="2.5" step="0.1" x-model.number="chainColorGamma" @input="colorScrub()" style="width:84px;">
+                <span class="ta-hint" x-text="Number(chainColorGamma).toFixed(1)"></span>
               </div>
             </template>
 
