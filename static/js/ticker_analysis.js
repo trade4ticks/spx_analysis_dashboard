@@ -107,8 +107,8 @@ document.addEventListener('alpine:init', () => {
     chainView: 'profile',          // 'profile' | 'strikeDte' | 'flow'
     chainMetric: 'oi',             // heatmap: 'oi' | 'vol'
     chainFlowMode: 'oi',           // flow: 'oi'|'vol'|'voloi'|'doi'|'dvol'
-    chainFlowLookback: 252,        // flow window (sessions)
-    chainFlowN: 5,                 // flow Δ window (sessions)
+    chainFlowLookback: 126,        // flow window (sessions) — 6m
+    chainFlowN: 1,                 // flow Δ window (sessions)
     chainFlow: null,
     chainSurfaceMetric: 'oi',      // surface: 'oi'|'vol'
     chainSurfaceLookback: 126,     // surface window (sessions)
@@ -126,6 +126,7 @@ document.addEventListener('alpine:init', () => {
     chainMoneyness: '',            // '' = off; else ± percent
     chainProfile: null,
     chainHeatmap: null,
+    _hmScale: 1,                   // heatmap color-scale denom (p95, S3)
     chainLoading: false,
     chainError: '',
     _chainDebounce: null,
@@ -519,7 +520,7 @@ document.addEventListener('alpine:init', () => {
         this.chainError = 'load failed'; this.chainProfile = null;
       } finally {
         this.chainLoading = false;
-        this.$nextTick(() => this.renderChainProfile());
+        this.$nextTick(() => this._renderChainWhenReady('ta-chain-profile', () => this.renderChainProfile()));
       }
     },
 
@@ -601,7 +602,12 @@ document.addEventListener('alpine:init', () => {
         const r = await fetch(url);
         const j = await r.json();
         if (j.error) { this.chainError = j.error; this.chainHeatmap = null; }
-        else this.chainHeatmap = j;
+        else {
+          this.chainHeatmap = j;
+          const cells = [];
+          for (const row of (j.rows || [])) for (const v of row) if (v > 0) cells.push(v);
+          this._hmScale = this._percentile(cells, 95) || j.max || 1;
+        }
       } catch (e) {
         console.error('[ticker-analysis] loadChainHeatmap failed:', e);
         this.chainError = 'load failed'; this.chainHeatmap = null;
@@ -629,10 +635,28 @@ document.addEventListener('alpine:init', () => {
     },
 
     hmCellStyle(v) {
-      const max = this.chainHeatmap?.max || 1;
+      // S3: scale to a per-metric high percentile of the displayed cells so a
+      // single outlier strike can't crush everything else to near-black.
+      const scale = this._hmScale || this.chainHeatmap?.max || 1;
       if (!v) return 'background:transparent';
-      const a = 0.06 + 0.9 * (v / max);   // sequential blue (level mode)
+      const a = 0.06 + 0.9 * Math.min(1, v / scale);   // sequential blue (level mode)
       return `background:rgba(52,152,219,${a.toFixed(3)})`;
+    },
+
+    // 95th-percentile of an array (color-scale denominator that resists outliers).
+    _percentile(arr, p) {
+      if (!arr || !arr.length) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      const i = Math.min(s.length - 1, Math.floor((p / 100) * s.length));
+      return s[i] || 0;
+    },
+
+    // Run a canvas render only once its element is laid out (visible in the
+    // layout tree), so first-paint / spot-line-on-load is reliable (S2).
+    _renderChainWhenReady(id, fn, tries = 0) {
+      const el = document.getElementById(id);
+      if ((el && el.offsetParent !== null) || tries >= 30) { fn(); return; }
+      requestAnimationFrame(() => this._renderChainWhenReady(id, fn, tries + 1));
     },
 
     // Flow map — strike × time (P4c) --------------------------------------
@@ -683,7 +707,13 @@ document.addEventListener('alpine:init', () => {
       const plotW = W - mL - mR, plotH = H - mT - mB;
       const nc = f.dates.length, nr = f.strikes.length;
       const cw = plotW / nc, ch = plotH / nr;
-      const max = f.max || 1;
+      // S3: color-scale to a high percentile of the displayed cells (per mode).
+      const cells = [];
+      for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) {
+        const v = f.matrix[r][c];
+        if (v != null) { const a = f.signed ? Math.abs(v) : v; if (a > 0) cells.push(a); }
+      }
+      const max = this._percentile(cells, 95) || f.max || 1;
 
       for (let r = 0; r < nr; r++) {
         for (let c = 0; c < nc; c++) {
@@ -902,7 +932,7 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.chainError = j.error; this.chainDoi = null; }
         else this.chainDoi = j;
       } catch (e) { console.error('[ticker-analysis] loadChainDoi failed:', e); this.chainError = 'load failed'; this.chainDoi = null; }
-      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainDoi()); }
+      finally { this.chainLoading = false; this.$nextTick(() => this._renderChainWhenReady('ta-chain-doi', () => this.renderChainDoi())); }
     },
 
     renderChainDoi() {
@@ -951,7 +981,7 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.chainError = j.error; this.chainVolOi = null; }
         else this.chainVolOi = j;
       } catch (e) { console.error('[ticker-analysis] loadChainVolOi failed:', e); this.chainError = 'load failed'; this.chainVolOi = null; }
-      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainVolOi()); }
+      finally { this.chainLoading = false; this.$nextTick(() => this._renderChainWhenReady('ta-chain-voloi', () => this.renderChainVolOi())); }
     },
 
     renderChainVolOi() {
@@ -1034,7 +1064,7 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.chainError = j.error; this.chainSmile = null; }
         else this.chainSmile = j;
       } catch (e) { console.error('[ticker-analysis] loadChainSmile failed:', e); this.chainError = 'load failed'; this.chainSmile = null; }
-      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainSmile()); }
+      finally { this.chainLoading = false; this.$nextTick(() => this._renderChainWhenReady('ta-chain-smile', () => this.renderChainSmile())); }
     },
 
     renderChainSmile() {
@@ -1096,7 +1126,7 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.chainError = j.error; this.chainIvTerm = null; }
         else this.chainIvTerm = j;
       } catch (e) { console.error('[ticker-analysis] loadChainIvTerm failed:', e); this.chainError = 'load failed'; this.chainIvTerm = null; }
-      finally { this.chainLoading = false; this.$nextTick(() => this.renderChainIvTerm()); }
+      finally { this.chainLoading = false; this.$nextTick(() => this._renderChainWhenReady('ta-chain-ivterm', () => this.renderChainIvTerm())); }
     },
 
     renderChainIvTerm() {
@@ -1201,9 +1231,14 @@ document.addEventListener('alpine:init', () => {
         for (const pt of d.series) { if (pt.val < mn) mn = pt.val; if (pt.val > mx) mx = pt.val; }
         const rng = mx > mn ? mx - mn : 1;
         const arr = new Array(labels.length).fill(null);
-        for (const pt of d.series) { const i = idxByDate[pt.date]; if (i != null) arr[i] = (pt.val - mn) / rng; }
+        const rawArr = new Array(labels.length).fill(null);
+        for (const pt of d.series) {
+          const i = idxByDate[pt.date];
+          if (i != null) { arr[i] = (pt.val - mn) / rng; rawArr[i] = pt.val; }   // normalize for y; keep raw for tooltip
+        }
         return {
           label: p.metric, data: arr, yAxisID: 'ovl',
+          rawValues: rawArr, rawRange: [mn, mx],
           borderColor: TA_OVERLAY_COLORS[k % TA_OVERLAY_COLORS.length],
           borderWidth: 1, pointRadius: 0, tension: 0, spanGaps: true,
         };
@@ -1227,9 +1262,12 @@ document.addEventListener('alpine:init', () => {
                         filter: item => item.datasetIndex !== 0 } },
             tooltip: { mode: 'index', intersect: false,
               callbacks: { title: items => labels[items[0].dataIndex],
-                label: it => it.datasetIndex === 0
-                  ? 'close ' + it.parsed.y
-                  : it.dataset.label + ' (norm) ' + (it.parsed.y == null ? '—' : it.parsed.y.toFixed(2)) } },
+                label: it => {
+                  if (it.datasetIndex === 0) return 'close ' + it.parsed.y;
+                  // Show the metric's TRUE raw value (line y-position is normalized only).
+                  const raw = it.dataset.rawValues?.[it.dataIndex];
+                  return it.dataset.label + ': ' + (raw == null ? '—' : (+raw).toPrecision(5));
+                } } },
             // Click-drag a horizontal box to zoom into that date range.
             zoom: {
               zoom: {

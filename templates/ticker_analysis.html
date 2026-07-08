@@ -202,7 +202,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=16"></script>
+  <script src="/static/js/ticker_analysis.js?v=17"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -507,13 +507,15 @@
                 <template x-if="chainFlowMode==='doi'||chainFlowMode==='dvol'">
                   <div style="display:contents;">
                     <span class="ta-lbl">N</span>
-                    <select class="ta-sel" x-model.number="chainFlowN" @change="loadChainFlow()">
+                    <select class="ta-sel" x-model.number="chainFlowN" @change="loadChainFlow()"
+                            x-init="$nextTick(() => $el.value = chainFlowN)">
                       <template x-for="nn in [1,5,20]" :key="nn"><option :value="nn" x-text="nn"></option></template>
                     </select>
                   </div>
                 </template>
                 <span class="ta-lbl">Window</span>
-                <select class="ta-sel" x-model.number="chainFlowLookback" @change="loadChainFlow()">
+                <select class="ta-sel" x-model.number="chainFlowLookback" @change="loadChainFlow()"
+                        x-init="$nextTick(() => $el.value = chainFlowLookback)">
                   <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y'],[504,'2y']]" :key="w[0]">
                     <option :value="w[0]" x-text="w[1]"></option>
                   </template>
@@ -531,7 +533,8 @@
                   <div class="seg-btn" :class="{on: chainSurfaceMetric==='vol'}" @click="chainSurfaceMetric='vol'; loadChainSurface()">Vol</div>
                 </div>
                 <span class="ta-lbl">Window</span>
-                <select class="ta-sel" x-model.number="chainSurfaceLookback" @change="loadChainSurface()">
+                <select class="ta-sel" x-model.number="chainSurfaceLookback" @change="loadChainSurface()"
+                        x-init="$nextTick(() => $el.value = chainSurfaceLookback)">
                   <template x-for="w in [[63,'3m'],[126,'6m'],[252,'1y']]" :key="w[0]">
                     <option :value="w[0]" x-text="w[1]"></option>
                   </template>
@@ -544,7 +547,8 @@
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">N</span>
-                <select class="ta-sel" x-model.number="chainDoiN" @change="loadChainDoi()">
+                <select class="ta-sel" x-model.number="chainDoiN" @change="loadChainDoi()"
+                        x-init="$nextTick(() => $el.value = chainDoiN)">
                   <template x-for="nn in [1,5,20]" :key="nn"><option :value="nn" x-text="nn + 'd'"></option></template>
                 </select>
               </div>
@@ -555,7 +559,8 @@
               <div style="display:contents;">
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">Window</span>
-                <select class="ta-sel" x-model.number="chainIvTermLookback" @change="loadChainIvTerm()">
+                <select class="ta-sel" x-model.number="chainIvTermLookback" @change="loadChainIvTerm()"
+                        x-init="$nextTick(() => $el.value = chainIvTermLookback)">
                   <template x-for="w in [[126,'6m'],[252,'1y'],[504,'2y']]" :key="w[0]">
                     <option :value="w[0]" x-text="w[1]"></option>
                   </template>
