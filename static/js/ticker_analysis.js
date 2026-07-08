@@ -123,8 +123,7 @@ document.addEventListener('alpine:init', () => {
     chainDateIdx: 0,
     chainWinSize: 63,              // date-slider window (sessions) — 3m, for daily nodes
     chainWinStart: 0,              // window start index into chainDates
-    chainDteMin: 0,
-    chainDteMax: 3650,
+    chainDteSel: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],   // selected DTE buckets (all = default)
     chainMoneyness: '',            // '' = off; else ± percent
     chainProfile: null,
     chainHeatmap: null,
@@ -506,23 +505,29 @@ document.addEventListener('alpine:init', () => {
       this._chainDebounce = setTimeout(() => this.chainReload(), 300);
     },
 
-    // ── DTE range buttons (G4) ───────────────────────────────────────────
-    // Single-select bucket (or All) → sets dte_min/dte_max, driving every
-    // strike-based view. Buckets match the strike×DTE rows.
+    // ── DTE range buttons (G4) — multi-select buckets + None/All ─────────
+    // The selection is a set of bucket indices sent as dte_bands ("lo-hi,..");
+    // the server ORs them. None = empty selection (no contracts). Buckets
+    // match the strike×DTE rows. Drives every strike-based view.
     chainDteBuckets: [
       [0, 7, '0-7'], [8, 14, '8-14'], [15, 30, '15-30'], [31, 60, '31-60'],
       [61, 90, '61-90'], [91, 120, '91-120'], [121, 180, '121-180'],
       [181, 270, '181-270'], [271, 365, '271-365'], [366, 730, '1-2y'], [731, 3650, '2y+'],
     ],
-    setDteRange(lo, hi) {
-      this.chainDteMin = lo; this.chainDteMax = hi;
+    dteBucketOn(i) { return this.chainDteSel.includes(i); },
+    toggleDte(i) {
+      const k = this.chainDteSel.indexOf(i);
+      if (k === -1) this.chainDteSel.push(i); else this.chainDteSel.splice(k, 1);
       this.chainReload();
     },
-    dteActive(lo, hi) {
-      return (this.chainDteMin || 0) === lo && (this.chainDteMax || 3650) === hi;
-    },
-    get dteIsAll() {
-      return (this.chainDteMin || 0) === 0 && (this.chainDteMax || 3650) === 3650;
+    setDteAll() { this.chainDteSel = this.chainDteBuckets.map((_, i) => i); this.chainReload(); },
+    setDteNone() { this.chainDteSel = []; this.chainReload(); },
+    get dteAllOn() { return this.chainDteSel.length === this.chainDteBuckets.length; },
+    get dteNoneOn() { return this.chainDteSel.length === 0; },
+    // "lo-hi,lo-hi" for the selected buckets (in bucket order) → dte_bands.
+    dteBandsParam() {
+      return [...this.chainDteSel].sort((a, b) => a - b)
+        .map(i => `${this.chainDteBuckets[i][0]}-${this.chainDteBuckets[i][1]}`).join(',');
     },
 
     // Route the shared controls (date/moneyness/Recompute) to the active view.
@@ -549,7 +554,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/oi-profile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -756,7 +761,7 @@ document.addEventListener('alpine:init', () => {
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/flow?ticker=${encodeURIComponent(this.ticker)}`
               + `&date=${date}&mode=${this.chainFlowMode}&lookback=${this.chainFlowLookback}`
-              + `&n=${this.chainFlowN}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&n=${this.chainFlowN}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -875,7 +880,7 @@ document.addEventListener('alpine:init', () => {
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/surface?ticker=${encodeURIComponent(this.ticker)}`
               + `&date=${date}&metric=${this.chainSurfaceMetric}&lookback=${this.chainSurfaceLookback}`
-              + `&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -1013,7 +1018,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/doi-profile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&n=${this.chainDoiN}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&date=${date}&n=${this.chainDoiN}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -1062,7 +1067,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/vol-oi?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';
@@ -1145,7 +1150,7 @@ document.addEventListener('alpine:init', () => {
       if (!this.ticker || !date) return;
       this.chainLoading = true; this.chainError = '';
       let url = `/api/ticker-analysis/chain/iv-smile?ticker=${encodeURIComponent(this.ticker)}`
-              + `&date=${date}&dte_min=${this.chainDteMin || 0}&dte_max=${this.chainDteMax || 3650}`;
+              + `&date=${date}&dte_bands=${encodeURIComponent(this.dteBandsParam())}`;
       const mPct = parseFloat(this.chainMoneyness);
       if (!isNaN(mPct) && mPct > 0) url += `&moneyness=${mPct / 100}`;
       if (force) url += '&force=1';

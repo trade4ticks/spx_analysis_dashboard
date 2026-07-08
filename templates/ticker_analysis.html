@@ -199,7 +199,7 @@
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=19"></script>
+  <script src="/static/js/ticker_analysis.js?v=20"></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">
@@ -579,9 +579,10 @@
                 <div class="ctrl-div"></div>
                 <span class="ta-lbl">DTE</span>
                 <div class="ta-dte-btns">
-                  <span class="chip" :class="{on: dteIsAll}" @click="setDteRange(0,3650)">All</span>
-                  <template x-for="b in chainDteBuckets" :key="b[2]">
-                    <span class="chip" :class="{on: dteActive(b[0],b[1])}" @click="setDteRange(b[0],b[1])" x-text="b[2]"></span>
+                  <span class="chip" :class="{on: dteAllOn}" @click="setDteAll()">All</span>
+                  <span class="chip" :class="{on: dteNoneOn}" @click="setDteNone()">None</span>
+                  <template x-for="(b, i) in chainDteBuckets" :key="b[2]">
+                    <span class="chip" :class="{on: dteBucketOn(i)}" @click="toggleDte(i)" x-text="b[2]"></span>
                   </template>
                 </div>
               </div>

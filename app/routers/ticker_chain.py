@@ -73,6 +73,25 @@ def _fill_forward(vals: list) -> list:
     return out
 
 
+def _dte_clause(bands: Optional[str], dte_min: int, dte_max: int) -> str:
+    """SQL boolean on (raw.expiration - raw.trade_date) for the DTE filter.
+
+    `bands` (when provided) is a comma-separated 'lo-hi' list — the selected
+    DTE buckets — turned into an OR of BETWEENs (multi-select). An empty /
+    all-invalid list yields 'false' (the "None" selection → no contracts).
+    When `bands` is absent, falls back to a single BETWEEN dte_min..dte_max.
+    Only integer ranges are interpolated, so this is injection-safe."""
+    col = "(raw.expiration - raw.trade_date)"
+    if bands is not None:
+        parts = []
+        for seg in str(bands).split(","):
+            m = re.match(r"^\s*(\d+)-(\d+)\s*$", seg)
+            if m:
+                parts.append(f"{col} BETWEEN {int(m.group(1))} AND {int(m.group(2))}")
+        return "(" + " OR ".join(parts) + ")" if parts else "false"
+    return f"{col} BETWEEN {int(dte_min)} AND {int(dte_max)}"
+
+
 def _oi_year_path(ticker: str, year: int) -> str:
     return os.path.join(OI_RAW_DIR, ticker.upper(), f"{year}.parquet")
 
@@ -170,7 +189,7 @@ async def _spot_pc(pool, ticker: str, d) -> Optional[float]:
 
 # ── DuckDB compute (runs in a worker thread) ──────────────────────────────
 
-def _compute_oi_profile(path: str, date_str: str, dte_min: int, dte_max: int,
+def _compute_oi_profile(path: str, date_str: str, dte_clause: str,
                         moneyness: Optional[float], sf_df: pd.DataFrame,
                         spot: Optional[float]) -> dict:
     """Adjusted OI-by-strike for one snapshot. Returns {strikes:[{strike,
@@ -196,7 +215,7 @@ def _compute_oi_profile(path: str, date_str: str, dte_min: int, dte_max: int,
                 FROM (SELECT * FROM read_parquet('{path}')
                        WHERE trade_date = DATE '{date_str}') raw
                 LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                WHERE {dte_clause}
             )
             SELECT strike, ot, SUM(oi) AS oi
             FROM adj
@@ -248,6 +267,7 @@ async def chain_oi_profile(
     date: str = Query(...),
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -263,8 +283,10 @@ async def chain_oi_profile(
     if not _DATE_RE.match(date):
         return {"error": "invalid date"}
 
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
     key = (f"oiprofile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:"
-           f"{dte_min}:{dte_max}:{moneyness}")
+           f"{dtk}:{moneyness}")
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -281,7 +303,7 @@ async def chain_oi_profile(
     sf_for_date = make_split_factors(sf_df, [d])   # DF(trade_date, adj_factor)
     result = await asyncio.to_thread(
         _compute_oi_profile, _oi_year_path(ticker, d.year), date,
-        dte_min, dte_max, moneyness, sf_for_date, spot,
+        dte_clause, moneyness, sf_for_date, spot,
     )
     result.update({
         "ticker": ticker, "date": date, "spot": spot,
@@ -419,7 +441,7 @@ async def chain_strike_dte(
 
 
 def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
-                  end_s: str, mode: str, n: int, dte_min: int, dte_max: int,
+                  end_s: str, mode: str, n: int, dte_clause: str,
                   moneyness: Optional[float], sf_df: pd.DataFrame,
                   end_spot: Optional[float], need_oi: bool, need_vol: bool) -> dict:
     """Strike × time (flow map). `window` is the ordered list of session date
@@ -448,7 +470,7 @@ def _compute_flow(oi_paths: list, chain_paths: list, window: list, start_s: str,
                     FROM (SELECT * FROM read_parquet([{pl}])
                            WHERE {date_field} BETWEEN DATE '{start_s}' AND DATE '{end_s}') raw
                     LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                    WHERE {dte_clause}
                 )
                 SELECT d, strike, SUM(cnt) AS v FROM adj GROUP BY d, strike
             """
@@ -535,6 +557,7 @@ async def chain_flow(
     n: int = Query(5),                      # sessions for the Δ modes
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -553,8 +576,10 @@ async def chain_flow(
     lookback = max(5, min(1000, lookback))
     n = max(1, min(60, n))
 
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
     key = (f"flow:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{mode}:"
-           f"{n}:{dte_min}:{dte_max}:{moneyness}")
+           f"{n}:{dtk}:{moneyness}")
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -601,7 +626,7 @@ async def chain_flow(
 
     result = await asyncio.to_thread(
         _compute_flow, oi_paths, chain_paths, window, window[0], window[-1],
-        mode, n, dte_min, dte_max, moneyness, sf_rel, end_spot, need_oi, need_vol,
+        mode, n, dte_clause, moneyness, sf_rel, end_spot, need_oi, need_vol,
     )
     result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
     result.update({
@@ -614,7 +639,7 @@ async def chain_flow(
 
 
 def _compute_surface(paths: list, window: list, start_s: str, end_s: str,
-                     date_field: str, count_field: str, dte_min: int, dte_max: int,
+                     date_field: str, count_field: str, dte_clause: str,
                      moneyness: Optional[float], sf_df: pd.DataFrame,
                      end_spot: Optional[float]) -> dict:
     """Strike × time surface with SIGNED height: net = calls − puts (adjusted).
@@ -639,7 +664,7 @@ def _compute_surface(paths: list, window: list, start_s: str, end_s: str,
                     FROM (SELECT * FROM read_parquet([{pl}])
                            WHERE {date_field} BETWEEN DATE '{start_s}' AND DATE '{end_s}') raw
                     LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                    WHERE {dte_clause}
                 )
                 SELECT d, strike, ot, SUM(cnt) AS v FROM adj GROUP BY d, strike, ot
             """
@@ -679,6 +704,7 @@ async def chain_surface(
     metric: str = Query("oi"),              # oi | vol
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -696,8 +722,10 @@ async def chain_surface(
     metric = "vol" if metric == "vol" else "oi"
     lookback = max(5, min(1000, lookback))
 
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
     key = (f"surface:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{lookback}:{metric}:"
-           f"{dte_min}:{dte_max}:{moneyness}")
+           f"{dtk}:{moneyness}")
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -742,7 +770,7 @@ async def chain_surface(
 
     result = await asyncio.to_thread(
         _compute_surface, paths, window, window[0], window[-1],
-        date_field, count_field, dte_min, dte_max, moneyness, sf_rel, end_spot,
+        date_field, count_field, dte_clause, moneyness, sf_rel, end_spot,
     )
     result["spots"] = _fill_forward([spot_by.get(dd) for dd in result.get("dates", window)])
     result.update({
@@ -755,7 +783,7 @@ async def chain_surface(
 
 
 def _compute_doi_profile(paths: list, date_now: str, date_prev: str,
-                         dte_min: int, dte_max: int, moneyness: Optional[float],
+                         dte_clause: str, moneyness: Optional[float],
                          sf_df: pd.DataFrame, spot: Optional[float]) -> dict:
     """Signed ΔOI per strike over an N-session (overnight) window:
     OI[now] − OI[prev], adjusted, aggregated across the DTE band."""
@@ -776,7 +804,7 @@ def _compute_doi_profile(paths: list, date_now: str, date_prev: str,
                 FROM (SELECT * FROM read_parquet([{pl}])
                        WHERE trade_date IN (DATE '{date_now}', DATE '{date_prev}')) raw
                 LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                WHERE {dte_clause}
             )
             SELECT d, strike, SUM(oi) AS oi FROM adj GROUP BY d, strike
         """
@@ -795,8 +823,7 @@ def _compute_doi_profile(paths: list, date_now: str, date_prev: str,
     return {"strikes": out, "empty": len(out) == 0}
 
 
-def _compute_vol_oi(oi_paths: list, chain_paths: list, date: str, dte_min: int,
-                    dte_max: int, moneyness: Optional[float], sf_df: pd.DataFrame,
+def _compute_vol_oi(oi_paths: list, chain_paths: list, date: str, dte_clause: str, moneyness: Optional[float], sf_df: pd.DataFrame,
                     spot: Optional[float]) -> dict:
     """Per-strike OI (oi_raw @ trade_date) and today's volume (chain_eod @
     feature_date), adjusted, aggregated across the DTE band — for the
@@ -821,7 +848,7 @@ def _compute_vol_oi(oi_paths: list, chain_paths: list, date: str, dte_min: int,
                     FROM (SELECT * FROM read_parquet([{pl}])
                            WHERE {date_field} = DATE '{date}') raw
                     LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                    WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                    WHERE {dte_clause}
                 )
                 SELECT strike, SUM(cnt) AS v FROM adj GROUP BY strike
             """
@@ -846,6 +873,7 @@ async def chain_doi_profile(
     n: int = Query(5),
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -860,7 +888,9 @@ async def chain_doi_profile(
         return {"error": "invalid ticker/date"}
     n = max(1, min(60, n))
 
-    key = f"doiprofile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{n}:{dte_min}:{dte_max}:{moneyness}"
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
+    key = f"doiprofile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{n}:{dtk}:{moneyness}"
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -888,7 +918,7 @@ async def chain_doi_profile(
     years = sorted({d_prev.year, d_end.year})
     paths = [_oi_year_path(ticker, y) for y in years]
     result = await asyncio.to_thread(
-        _compute_doi_profile, paths, date, date_prev, dte_min, dte_max,
+        _compute_doi_profile, paths, date, date_prev, dte_clause,
         moneyness, sf_rel, spot,
     )
     result.update({"ticker": ticker, "date": date, "date_prev": date_prev,
@@ -904,6 +934,7 @@ async def chain_vol_oi(
     date: str = Query(...),
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -917,7 +948,9 @@ async def chain_vol_oi(
     if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
         return {"error": "invalid ticker/date"}
 
-    key = f"voloi:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dte_min}:{dte_max}:{moneyness}"
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
+    key = f"voloi:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dtk}:{moneyness}"
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -932,7 +965,7 @@ async def chain_vol_oi(
     chain_paths = [_chain_year_path(ticker, d.year), _chain_year_path(ticker, d.year - 1)]
 
     result = await asyncio.to_thread(
-        _compute_vol_oi, oi_paths, chain_paths, date, dte_min, dte_max,
+        _compute_vol_oi, oi_paths, chain_paths, date, dte_clause,
         moneyness, sf_rel, spot,
     )
     result.update({"ticker": ticker, "date": date, "spot": spot, "moneyness": moneyness})
@@ -941,7 +974,7 @@ async def chain_vol_oi(
     return result
 
 
-def _compute_iv_smile(chain_paths: list, date: str, dte_min: int, dte_max: int,
+def _compute_iv_smile(chain_paths: list, date: str, dte_clause: str,
                       moneyness: Optional[float], sf_df: pd.DataFrame,
                       spot: Optional[float]) -> dict:
     """IV vs (adjusted) strike at one snapshot — avg implied_vol per
@@ -962,7 +995,7 @@ def _compute_iv_smile(chain_paths: list, date: str, dte_min: int, dte_max: int,
                 FROM (SELECT * FROM read_parquet([{pl}])
                        WHERE feature_date = DATE '{date}' AND implied_vol IS NOT NULL) raw
                 LEFT JOIN split_factors sf ON raw.trade_date = sf.trade_date::DATE
-                WHERE (raw.expiration - raw.trade_date) BETWEEN {dte_min} AND {dte_max}
+                WHERE {dte_clause}
             )
             SELECT strike, ot, AVG(iv) AS iv FROM adj GROUP BY strike, ot
         """
@@ -1033,6 +1066,7 @@ async def chain_iv_smile(
     date: str = Query(...),
     dte_min: int = Query(0),
     dte_max: int = Query(3650),
+    dte_bands: Optional[str] = Query(None),   # multi-select DTE buckets "lo-hi,lo-hi"
     moneyness: Optional[float] = Query(None),
     force: int = Query(0),
     pool=Depends(get_oi_pool),
@@ -1046,7 +1080,9 @@ async def chain_iv_smile(
     if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
         return {"error": "invalid ticker/date"}
 
-    key = f"ivsmile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dte_min}:{dte_max}:{moneyness}"
+    dte_clause = _dte_clause(dte_bands, dte_min, dte_max)
+    dtk = dte_bands if dte_bands is not None else f"{dte_min}-{dte_max}"
+    key = f"ivsmile:v{CHAIN_SCHEMA_VERSION}:{ticker}:{date}:{dtk}:{moneyness}"
     if not force:
         cached = await _cache_get(pool, key)
         if cached is not None:
@@ -1060,7 +1096,7 @@ async def chain_iv_smile(
     chain_paths = [_chain_year_path(ticker, d.year), _chain_year_path(ticker, d.year - 1)]
 
     result = await asyncio.to_thread(
-        _compute_iv_smile, chain_paths, date, dte_min, dte_max, moneyness, sf_rel, spot,
+        _compute_iv_smile, chain_paths, date, dte_clause, moneyness, sf_rel, spot,
     )
     result.update({"ticker": ticker, "date": date, "spot": spot, "moneyness": moneyness})
     if "error" not in result:
