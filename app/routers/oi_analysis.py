@@ -206,7 +206,15 @@ _ANALYZE_CACHE_MAX = 20
 # v4 emitted full-series counts in trade_calendar / decile_stats_20
 # under a "TEST PERIOD" subtitle. Per-bin n's shift by ~67% on the
 # ALL TT case (~218k full → ~70k test). Bump invalidates v4 entries.
-# v6 (TT rolling-IC reference fix): the rolling-IC series now spans FULL
+# v7 (TT train-window bin stats): /analyze additionally emits
+# decile_stats_train / decile_stats_20_train — per-bin returns computed over
+# PRE-cutoff rows — consumed only by the quantile bar chart so bins can be
+# picked on the train window's larger sample. Bins are unchanged (tt_bins is
+# IS-frozen-at-cutoff and rules both windows), and decile_stats /
+# decile_stats_20 keep their test-window meaning for the Return Distribution
+# and the equity reconciliation. Bump invalidates v6 entries, which carry
+# neither field and would silently keep showing test-window bars. v6 history
+# (TT rolling-IC reference fix): the rolling-IC series now spans FULL
 # history in train_test mode via its own un-cutoff-filtered fetch
 # (`ic_row_dicts`), restoring the pre-cutoff reference the v5 test-window
 # filter had starved. Pre-fix every TT payload carried reference_ic = 0.0,
@@ -219,7 +227,7 @@ _ANALYZE_CACHE_MAX = 20
 # invalidates v5 TT entries, which would otherwise be served verbatim with
 # the collapsed reference and make the fix invisible. v5 history: TT
 # primary quantile applies the test-window filter at the SQL JOIN.
-_ANALYZE_PRIMARY_SCHEMA_VERSION = 6
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 7
 _ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
 _ANALYZE_PRIMARY_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS analyze_primary_cache (
@@ -759,11 +767,16 @@ async def analyze(
         # still carries the single-ticker and date-range filters.
         #
         # IS/WF alias row_dicts — no extra query, no behaviour change.
+        #
+        # This same full-history row set also feeds the TT train-window bin
+        # stats below (hence bin_20 in the select list); rolling_ic_* ignores
+        # the extra key, so the IC path is unaffected by carrying it.
         ic_row_dicts = row_dicts
         if spec.kind == "train_test":
             ic_sql = (
                 f"SELECT df.ticker, df.trade_date, "
-                f"  df.{metric}, df.{outcome} "
+                f"  df.{metric}, df.{outcome}, "
+                f"  bt.bin20_{metric} AS bin_20 "
                 f"FROM daily_features df "
                 f"JOIN {bin_table} bt USING (ticker, trade_date) "
                 f"WHERE bt.bin20_{metric} > 0 "
@@ -860,6 +873,51 @@ async def analyze(
         wf_dropped = 0  # Group 7 removed the per-request warm-up count
         decile_stats_20 = _compute_bucket_stats(buckets_20_all)
         _tlog('ALL+IS bucket_setup + decile_stats_20')
+
+        # ── TT-only: train-window per-bin stats (quantile bar chart) ───────
+        # The bar chart lets bins be picked on the TRAIN window — larger
+        # sample, clearer shape — while every other pane stays test-window.
+        # The BINS themselves are unchanged: tt_bins is IS-frozen-at-cutoff
+        # and applies that one frozen ruler to both windows, so bin k denotes
+        # the same metric-value range on either side of the cutoff. Only the
+        # RETURNS shown per bin come from pre-cutoff rows here. That's what
+        # makes "select on train, evaluate on test" coherent — the selection
+        # travels as a bin number and the downstream panes resolve it against
+        # each test row's own stored bin20.
+        #
+        # Strictly ADDITIVE. decile_stats / decile_stats_20 keep their
+        # test-window meaning because other panes depend on it: the Return
+        # Distribution reads decile_stats[].returns, and _renderEquity
+        # reconciles Σ(avg_ret × n) from decile_stats_20 against the
+        # test-window equity curve. Repointing either would break them.
+        decile_stats_train: Optional[list] = None
+        decile_stats_20_train: Optional[list] = None
+        if spec.kind == "train_test" and ic_row_dicts:
+            _cut_iso = (spec.cutoff.isoformat()
+                        if hasattr(spec.cutoff, "isoformat") else str(spec.cutoff))
+            _tr_b20: list = [[] for _ in range(20)]
+            _tr_b10: list = [[] for _ in range(10)]
+            for r in ic_row_dicts:
+                if str(r.get("trade_date")) >= _cut_iso:
+                    continue            # test window — excluded here
+                b20 = r.get("bin_20")
+                if b20 is None or b20 <= 0 or b20 > 20:
+                    continue
+                xv, yv = r.get(metric), r.get(outcome)
+                if xv is None or yv is None:
+                    continue
+                try:
+                    xf, yf = float(xv), float(yv)
+                except (ValueError, TypeError):
+                    continue
+                if math.isnan(xf) or math.isnan(yf):
+                    continue
+                _tr_b20[b20 - 1].append((xf, yf))
+                _tr_b10[(b20 - 1) // 2].append((xf, yf))
+            decile_stats_20_train = _compute_bucket_stats(_tr_b20)
+            decile_stats_train    = _compute_bucket_stats(_tr_b10)
+            _tlog(f'TT train-window bin stats '
+                  f'({sum(len(b) for b in _tr_b20)} pre-cutoff rows)')
         # No per-ticker thinning — count every ticker that contributed any
         # valid rows. The legacy `if len(ps) >= 10` filter is removed.
         n_tickers_used = len(by_ticker)
@@ -1476,9 +1534,14 @@ async def analyze(
         "concentration_risk": concentration,
         "half_sample_stable": bool(half_stable),
 
-        # Decile data
+        # Decile data. The *_train pair is TT-only (None elsewhere) and is
+        # consumed ONLY by the quantile bar chart, which shows train-window
+        # returns in TT so bins can be picked on the larger sample. Every
+        # other pane reads the unsuffixed test-window arrays.
         "decile_stats":     decile_stats,
         "decile_stats_20":  decile_stats_20,
+        "decile_stats_train":    decile_stats_train,
+        "decile_stats_20_train": decile_stats_20_train,
         "equity_by_decile": equity_by_decile,
 
         # Time series
@@ -4990,7 +5053,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 14  # v14 (split de-adjustment): trade_meta carries entry_spot_raw_oc / entry_spot_raw_cc and each per_outcome_returns slice carries exit_spots_raw — the AS-TRADED prices, i.e. the adjusted spots divided by their date's split factor (adjusted / adj_factor). The overnight_gap slice gains entry_spots_raw_cc / entry_spots_raw_oc. This bump is MANDATORY, not cosmetic: dollar position sizing divides capital by the entry price, and v13 bundles carry only the back-adjusted spot. On a reverse-split ticker (VXX, UVXY, SQQQ, SOXS and other leveraged/inverse products) the adjusted historical price can exceed the whole per-trade allocation, so floor(alloc / price) yields 0, the 1-share minimum kicks in, and the trade deploys far more capital than intended. Without the bump every cached v13 trade lacks the raw field, the client falls back to the adjusted price, and the fix is silently invisible. v13 history (Group 8 follow-up): bundle's _assignments_from_is_bins now skips pre-cutoff rows when mode == "train_test". Pre-fix v12 TT bundles included full-series rows in trade_meta + per_outcome_returns, which the primary chart consumed verbatim under a "TEST PERIOD" label. Bump invalidates v12. v12 history: TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 15  # v15 (TT train-window bin stats): bundle additionally carries per_bin_train — per-bin {bin, n, avg_ret, median, std, win_rate} computed over PRE-cutoff rows, TT-only, {} elsewhere. Consumed only by the quantile bar chart (Single / Entry / Horizon display modes) so bins can be picked on the train window's larger sample while every other pane stays test-window. Computed as a standalone aggregation off rows + bin20_lookup; _assignments_from_is_bins, trade_meta and per_outcome_returns are untouched, so equity / distribution / yearly / DoW / activity / flat table keep their existing test-window semantics exactly. Rides in the slim layer. Bump invalidates v14 bundles, which lack the field and would silently keep rendering test-window bars. v14 history (split de-adjustment): trade_meta carries entry_spot_raw_oc / entry_spot_raw_cc and each per_outcome_returns slice carries exit_spots_raw — the AS-TRADED prices, i.e. the adjusted spots divided by their date's split factor (adjusted / adj_factor). The overnight_gap slice gains entry_spots_raw_cc / entry_spots_raw_oc. This bump is MANDATORY, not cosmetic: dollar position sizing divides capital by the entry price, and v13 bundles carry only the back-adjusted spot. On a reverse-split ticker (VXX, UVXY, SQQQ, SOXS and other leveraged/inverse products) the adjusted historical price can exceed the whole per-trade allocation, so floor(alloc / price) yields 0, the 1-share minimum kicks in, and the trade deploys far more capital than intended. Without the bump every cached v13 trade lacks the raw field, the client falls back to the adjusted price, and the fix is silently invisible. v13 history (Group 8 follow-up): bundle's _assignments_from_is_bins now skips pre-cutoff rows when mode == "train_test". Pre-fix v12 TT bundles included full-series rows in trade_meta + per_outcome_returns, which the primary chart consumed verbatim under a "TEST PERIOD" label. Bump invalidates v12. v12 history: TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -6277,6 +6340,58 @@ def _compute_analyze_bundle_sync(
                                        "std": None, "win_rate": None})
         per_bin["overnight_gap"] = _bin_stats_gap
 
+    # ── 4b. TT-only: train-window per-bin stats ───────────────────────────
+    # Mirror of per_bin computed over PRE-cutoff rows, for the quantile bar
+    # chart's train-window view (Single / Entry / Horizon display modes).
+    # Same {bin, n, avg_ret, median, std, win_rate} shape so the client can
+    # swap the source without a second code path.
+    #
+    # Deliberately a standalone aggregation straight off `rows` +
+    # `bin20_lookup`: it does NOT touch _assignments_from_is_bins,
+    # trade_meta, or per_outcome_returns, so equity / distribution / yearly /
+    # DoW / activity / the flat table all keep their test-window definitions
+    # untouched. `rows` is full-history (_fetch_analyze_bundle_rows applies
+    # no cutoff filter); the test-window gate lives in the assignments pass.
+    per_bin_train: dict = {}
+    if mode == "train_test" and cutoff_date and bin20_lookup:
+        _tr_vals: dict = {o: [[] for _ in range(n_bins)] for o in outcomes}
+        for r in rows:
+            _d = r.get("trade_date")
+            _d_str = _d.isoformat() if hasattr(_d, "isoformat") else str(_d)
+            if _d_str >= cutoff_date:
+                continue            # test window — excluded here
+            _b20 = bin20_lookup.get((r.get("ticker"), _d_str))
+            if _b20 is None or _b20 <= 0 or _b20 > n_bins:
+                continue
+            for _o in outcomes:
+                _v = r.get(_o)
+                if _v is None:
+                    continue
+                try:
+                    _fv = float(_v)
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(_fv):
+                    continue
+                _tr_vals[_o][_b20 - 1].append(_fv)
+        for _o in outcomes:
+            _stats: list = []
+            for _b_idx in range(n_bins):
+                _arr = np.array(_tr_vals[_o][_b_idx], dtype=np.float64)
+                if _arr.size == 0:
+                    _stats.append({"bin": _b_idx + 1, "n": 0, "avg_ret": None,
+                                   "median": None, "std": None, "win_rate": None})
+                    continue
+                _stats.append({
+                    "bin":      _b_idx + 1,
+                    "n":        int(_arr.size),
+                    "avg_ret":  round(float(_arr.mean()), 6),
+                    "median":   round(float(np.median(_arr)), 6),
+                    "std":      round(float(_arr.std()), 6),
+                    "win_rate": round(float((_arr > 0).mean()), 4),
+                })
+            per_bin_train[_o] = _stats
+
     # ── 5. Bundle ─────────────────────────────────────────────────────────
     return {
         "schema_version":      _ANALYZE_BUNDLE_SCHEMA_VERSION,
@@ -6289,6 +6404,10 @@ def _compute_analyze_bundle_sync(
         "trade_meta":          trade_meta,
         "per_outcome_returns": per_outcome_returns,
         "per_bin":             per_bin,
+        # TT-only; {} in other modes. Quantile bar chart only — see 4b.
+        # Rides in the slim layer (the split pops only trade_meta and
+        # per_outcome_returns), so no storage-layer change is needed.
+        "per_bin_train":       per_bin_train,
         "rolling_ic":          rolling_ic,
         "computed_at":         datetime.utcnow().isoformat() + "Z",
     }

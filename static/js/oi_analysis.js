@@ -833,8 +833,26 @@ document.addEventListener('alpine:init', () => {
     // unified with the existing decile_stats shape downstream (std_dev,
     // sharpe-derived). The chart's 5/10-bin views are produced by
     // _aggregateBin20ToN below, run client-side.
+    // In train_test the quantile bar chart shows TRAIN-window (pre-cutoff)
+    // returns so bins can be picked on the larger sample; every other pane
+    // stays test-window. The bins themselves are identical across both
+    // windows — tt_bins is IS-frozen-at-cutoff and rules train and test
+    // alike — so a bin picked here denotes the same metric-value range when
+    // it filters the test-window equity / count / distribution panes.
+    // Selection travels as a bin NUMBER (selectedBins20) and each row is
+    // matched on its own stored decile20, so nothing about the downstream
+    // filtering has to change.
+    _binsUseTrainWindow() {
+      return this.data?.mode === 'train_test';
+    },
+
     _bundlePerBin20(outcome) {
-      const pb = this.analyzeBundle?.per_bin?.[outcome];
+      const src = this.analyzeBundle || {};
+      // per_bin_train is TT-only and absent on pre-v15 bundles; falling
+      // through to per_bin degrades to the old test-window view rather than
+      // blanking the chart.
+      const pb = (this._binsUseTrainWindow() && src.per_bin_train?.[outcome])
+                 || src.per_bin?.[outcome];
       if (!Array.isArray(pb)) return null;
       return pb.map(r => r ? {
         bucket:   r.bin,
@@ -894,10 +912,17 @@ document.addEventListener('alpine:init', () => {
       // Fall back to /analyze's decile_stats. /analyze always emits
       // decile_stats (10-bin) and decile_stats_20 (20-bin), so 10 and 20
       // views are direct lookups; 5 aggregates from the 20-bin.
-      if (this.decileBins === 10) return (this.data?.decile_stats || []).filter(Boolean);
-      if (this.decileBins === 20) return (this.data?.decile_stats_20 || []).filter(Boolean);
+      // In TT prefer the train-window arrays (absent on pre-v7 payloads,
+      // where this falls through to the test-window ones).
+      const _useTrain = this._binsUseTrainWindow();
+      const _ds10src = (_useTrain && this.data?.decile_stats_train)
+                       || this.data?.decile_stats;
+      const _ds20src = (_useTrain && this.data?.decile_stats_20_train)
+                       || this.data?.decile_stats_20;
+      if (this.decileBins === 10) return (_ds10src || []).filter(Boolean);
+      if (this.decileBins === 20) return (_ds20src || []).filter(Boolean);
       // 5-bin: aggregate the legacy 20-bin payload through the same path
-      const ds20 = (this.data?.decile_stats_20 || []).map(d => d ? {
+      const ds20 = (_ds20src || []).map(d => d ? {
         bucket: d.bucket, n: d.n,
         avg_ret: d.avg_ret, win_rate: d.win_rate,
         median: d.med_ret, std_dev: d.std_dev,
@@ -1726,10 +1751,17 @@ document.addEventListener('alpine:init', () => {
     },
 
     decileChartTitle() {
+      // TT: Single / Entry / Horizon read train-window returns, unlike every
+      // other pane on the page. Say so in the title — an unlabelled chart
+      // whose data window silently differs from its neighbours is a trap.
+      // Gap mode has no train equivalent in the bundle and stays test-window,
+      // so it gets no suffix.
+      const w = (this._binsUseTrainWindow() && this.decileMode !== 'overnight_gap')
+        ? ' · train window' : '';
       if (this.decileMode === 'overnight_gap') return 'Quantile Avg Return — Entry-day overnight gap (CC − OC)';
-      if (this.decileMode === 'entry')         return `Quantile Avg Return — OC vs CC · ${this.decileEntryHorizon}d`;
-      if (this.decileMode === 'horizon')       return `Quantile Avg Return — Horizon Ladder (${this.decileHorizonAnchor.toUpperCase()})`;
-      return `Quantile Avg Return — ${this.decileActiveOutcome}`;
+      if (this.decileMode === 'entry')         return `Quantile Avg Return — OC vs CC · ${this.decileEntryHorizon}d${w}`;
+      if (this.decileMode === 'horizon')       return `Quantile Avg Return — Horizon Ladder (${this.decileHorizonAnchor.toUpperCase()})${w}`;
+      return `Quantile Avg Return — ${this.decileActiveOutcome}${w}`;
     },
 
     // ── P3 breadcrumb + cache timestamp helpers ───────────────────────────
