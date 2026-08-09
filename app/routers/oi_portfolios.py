@@ -30,6 +30,8 @@ from app.routers.oi_analysis import (
     _sec_equity_curve,
     _parse_horizon,
     _fetch_ticker_calendars,
+    _fetch_split_factor_maps,
+    _deadjust,
     _build_enriched_trade,
     _outcome_value,
     _outcome_select_cols,
@@ -1142,8 +1144,10 @@ async def portfolio_lab_candidates(
         n_bins, cell_set, agg_n, agg_avg_ret)
       - Metric family classification (family_num, family_name for both metrics)
       - is_oi_signal flag: true when primary OR secondary metric is in family 3, 4, or 5
-      - trades array: [{ticker, trade_date, spot_entry, ret}] — all IS trades,
-        no date/ticker filter (full history)
+      - trades array: [{ticker, trade_date, spot_entry, spot_entry_raw, ret}]
+        — all IS trades, no date/ticker filter (full history). spot_entry is
+        the back-adjusted price; spot_entry_raw is the as-traded price and is
+        what _computeDollarSeries sizes off.
 
     The client uses this data for the card tray (Stage 1) and later for
     _computeDollarSeries-based parity checking (Stage 2).
@@ -1255,6 +1259,27 @@ async def portfolio_lab_candidates(
                     "ret":        fov,
                 })
             cand["trades"] = trades
+
+        # ── As-traded entry prices (one query covering every candidate) ────
+        # spot_entry above is the vendor back-adjusted price. Dollar sizing
+        # must divide capital by the price the trade could actually have been
+        # filled at, so every trade also carries spot_entry_raw. Collected
+        # across all candidates and de-adjusted in a single pass rather than
+        # one query per candidate. See _fetch_split_factor_maps / _deadjust.
+        _dates_by_tkr: dict = defaultdict(set)
+        for cand in candidates:
+            for t in cand.get("trades") or []:
+                if t.get("ticker") and t.get("trade_date"):
+                    _dates_by_tkr[t["ticker"]].add(t["trade_date"])
+        _factor_maps = await _fetch_split_factor_maps(
+            oi_pool, {k: sorted(v) for k, v in _dates_by_tkr.items()},
+            conn=conn,
+        )
+        for cand in candidates:
+            for t in cand.get("trades") or []:
+                _fm = _factor_maps.get(t.get("ticker")) or {}
+                t["spot_entry_raw"] = _deadjust(
+                    t.get("spot_entry"), _fm.get(t.get("trade_date")))
 
         # Clean up internal keys before serialising
         result = []

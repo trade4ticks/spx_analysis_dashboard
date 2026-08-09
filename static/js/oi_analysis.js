@@ -3179,6 +3179,9 @@ document.addEventListener('alpine:init', () => {
             metric_val: gap.metric_vals[i],
             spot_entry: gap.entry_spots_cc[i],   // close T−1
             spot_exit:  gap.entry_spots_oc[i],   // open T
+            // As-traded prices (v14 bundle); undefined on pre-v14 payloads.
+            spot_entry_raw: gap.entry_spots_raw_cc?.[i],
+            spot_exit_raw:  gap.entry_spots_raw_oc?.[i],
             ret:        gap.ret_pcts[i],         // gap = cc − oc
             exit_date:  gap.trade_dates[i],      // T = OC-anchor exit
             decile20:   gap.bin_20s[i],
@@ -3198,6 +3201,9 @@ document.addEventListener('alpine:init', () => {
       const anchor = this._outcomeAnchor(outcome);
       const dateKey = `entry_date_${anchor}`;
       const spotKey = `entry_spot_${anchor}`;
+      // As-traded entry, same anchor (v14 bundle). Undefined on pre-v14
+      // payloads, which downstream consumers fall back from.
+      const spotRawKey = `entry_spot_raw_${anchor}`;
       const out = [];
       for (let i = 0; i < ret.trade_ids.length; i++) {
         const m = tm[ret.trade_ids[i]];
@@ -3208,6 +3214,8 @@ document.addEventListener('alpine:init', () => {
           metric_val: m.metric_val,
           spot_entry: m[spotKey],
           spot_exit:  ret.exit_spots[i],
+          spot_entry_raw: m[spotRawKey],
+          spot_exit_raw:  ret.exit_spots_raw?.[i],
           ret:        ret.ret_pcts[i],
           exit_date:  ret.exit_dates[i],
           decile20:   m.bin_20,
@@ -3525,15 +3533,25 @@ document.addEventListener('alpine:init', () => {
           const s = String(v);
           return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
         };
+        // spot_entry/spot_exit are back-adjusted; spot_entry_raw/spot_exit_raw
+        // are the as-traded prices — size positions off those. Each leg is
+        // de-adjusted with its own date's split factor, so for a trade whose
+        // window crosses a split, spot_exit_raw/spot_entry_raw - 1 will NOT
+        // reproduce ret_pct; ret_pct stays the source of truth for return.
+        // Column order matches the server (oi_analysis.py get_trades_csv).
         const header = ['date', 'ticker', this.metric || 'metric',
-                        'spot_entry', 'spot_exit', 'ret_pct', 'exit_date', 'bin20'];
+                        'spot_entry', 'spot_entry_raw',
+                        'spot_exit', 'spot_exit_raw',
+                        'ret_pct', 'exit_date', 'bin20'];
         const lines = [header.map(esc).join(',')];
         for (const t of filtered) {
           lines.push([
             t.date, t.ticker,
             t.metric_val ?? '',
             t.spot_entry ?? '',
+            t.spot_entry_raw ?? '',
             t.spot_exit  ?? '',
+            t.spot_exit_raw  ?? '',
             (t.ret != null ? (t.ret * 100).toFixed(6) : ''),
             t.exit_date ?? '',
             t.decile20  ?? '',
@@ -6145,9 +6163,14 @@ document.addEventListener('alpine:init', () => {
       const sig         = this.recallSig || {};
       const prim_metric = sig.primary_metric   || 'primary';
       const sec_metric  = sig.secondary_metric || 'secondary';
+      // *_raw = as-traded prices (adjusted / split factor); size off those.
+      // Each leg uses its own date's factor, so for a trade whose window
+      // crosses a split, spot_exit_raw/spot_entry_raw - 1 will NOT reproduce
+      // ret_pct — ret_pct remains the source of truth for return.
       const header = [
         'ticker', 'trade_date', `${prim_metric}_val`, `${sec_metric}_val`,
-        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+        'spot_entry', 'spot_entry_raw', 'exit_date',
+        'spot_exit', 'spot_exit_raw', 'ret_pct',
       ].join(',');
       const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
       const rows = trades.map(t => [
@@ -6156,8 +6179,10 @@ document.addEventListener('alpine:init', () => {
         fmt(t.primary_val),
         fmt(t.secondary_val),
         fmt(t.spot_entry, 2),
+        fmt(t.spot_entry_raw, 2),
         t.exit_date  || '',
         fmt(t.spot_exit, 2),
+        fmt(t.spot_exit_raw, 2),
         t.ret != null ? (t.ret * 100).toFixed(6) : '',
       ].join(','));
       const safe = (s) => String(s || '').replace(/[^a-z0-9_]/gi, '_');
@@ -6803,9 +6828,14 @@ document.addEventListener('alpine:init', () => {
       if (!trades?.length) return;
       const sec_metric  = this.secSelectedMetric || 'secondary';
       const prim_metric = this.metric             || 'primary';
+      // *_raw = as-traded prices (adjusted / split factor); size off those.
+      // Each leg uses its own date's factor, so for a trade whose window
+      // crosses a split, spot_exit_raw/spot_entry_raw - 1 will NOT reproduce
+      // ret_pct — ret_pct remains the source of truth for return.
       const header = [
         'ticker', 'trade_date', `${prim_metric}_val`, `${sec_metric}_val`,
-        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+        'spot_entry', 'spot_entry_raw', 'exit_date',
+        'spot_exit', 'spot_exit_raw', 'ret_pct',
       ].join(',');
       const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
       const rows = trades.map(t => [
@@ -6814,8 +6844,10 @@ document.addEventListener('alpine:init', () => {
         fmt(t.primary_val),
         fmt(t.secondary_val),
         fmt(t.spot_entry, 2),
+        fmt(t.spot_entry_raw, 2),
         t.exit_date || '',
         fmt(t.spot_exit, 2),
+        fmt(t.spot_exit_raw, 2),
         t.ret != null ? (t.ret * 100).toFixed(6) : '',
       ].join(','));
       this._downloadCsv([header, ...rows].join('\n'),
@@ -7591,10 +7623,15 @@ document.addEventListener('alpine:init', () => {
       const prim = this.metric || 'primary';
       // Selected secondary metrics, in the same order the response uses
       const secMetrics = this.corrResult?.metrics || [];
+      // *_raw = as-traded prices (adjusted / split factor); size off those.
+      // Each leg uses its own date's factor, so for a trade whose window
+      // crosses a split, spot_exit_raw/spot_entry_raw - 1 will NOT reproduce
+      // ret_pct — ret_pct remains the source of truth for return.
       const header = [
         'ticker', 'trade_date', `${prim}_val`,
         ...secMetrics.map(m => `${m}_val`),
-        'spot_entry', 'exit_date', 'spot_exit', 'ret_pct',
+        'spot_entry', 'spot_entry_raw', 'exit_date',
+        'spot_exit', 'spot_exit_raw', 'ret_pct',
       ].join(',');
       const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
       const rows = trades.map(t => {
@@ -7605,8 +7642,10 @@ document.addEventListener('alpine:init', () => {
           fmt(t.primary_val),
           ...secMetrics.map(m => fmt(extras[m])),
           fmt(t.spot_entry, 2),
+          fmt(t.spot_entry_raw, 2),
           t.exit_date || '',
           fmt(t.spot_exit, 2),
+          fmt(t.spot_exit_raw, 2),
           t.ret != null ? (t.ret * 100).toFixed(6) : '',
         ].join(',');
       });
@@ -7982,12 +8021,16 @@ document.addEventListener('alpine:init', () => {
     //       portfolio it's the union-N because the portfolio endpoint
     //       deduplicates combined_trades to one row per (ticker,date).
     //   per_ticker_alloc = min(perTrade, dailyCap / N)
-    //   shares = floor(per_ticker_alloc / spot_entry); bumped to 1
+    //   shares = floor(per_ticker_alloc / spot_entry_raw); bumped to 1
     //       when floor would yield 0 (expensive ticker on busy day).
     //       No redistribution — leftover from floored cheaper tickers
     //       covers the occasional 1-share overage. Deployed daily
     //       total may slightly over- or under-shoot the cap; honest.
-    //   trade_pnl = shares * spot_entry * ret
+    //       spot_entry_raw is the AS-TRADED price (spot_entry divided
+    //       back out by that date's split factor). Sizing off the
+    //       back-adjusted spot_entry silently over-deploys on every
+    //       reverse-split ticker — see the comment in the loop below.
+    //   trade_pnl = shares * spot_entry_raw * ret
     //   day_pnl   = sum(trade_pnl for trades that day)
     //
     // Returns:
@@ -8048,7 +8091,22 @@ document.addEventListener('alpine:init', () => {
         let dayPnl      = 0;
         let dayDeployed = 0;
         for (const t of dayTrades) {
-          const px  = +t.spot_entry;
+          // Size off the AS-TRADED price, not the back-adjusted one.
+          // spot_entry is restated onto today's share scale: forward splits
+          // shrink old prices, reverse splits inflate them. The scale error
+          // normally cancels (floor(alloc/px) * px ≈ alloc), but it stops
+          // cancelling the moment the floor binds — and on a reverse-split
+          // ticker the adjusted price can exceed perTickerAlloc outright, so
+          // floor() yields 0, the 1-share minimum below kicks in, and the
+          // trade deploys the full inflated price instead of the allocation.
+          // spot_entry_raw = spot_entry / adj_factor, supplied by the server.
+          // Fall back to the adjusted price when it's absent (split-free
+          // ticker, where factor is 1.0 and the two are identical, or a
+          // pre-v14 cached payload) so behaviour degrades to the old path
+          // rather than dropping the trade.
+          const pxAdj = +t.spot_entry;
+          const pxRawCand = +t.spot_entry_raw;
+          const px  = (isFinite(pxRawCand) && pxRawCand > 0) ? pxRawCand : pxAdj;
           const ret = +t.ret;
           if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
           let shares = Math.floor(perTickerAlloc / px);
@@ -8821,14 +8879,22 @@ document.addEventListener('alpine:init', () => {
       if (!this.portAggregate) return;
       const trades = this.portAggregate.combined_trades || [];
       if (!trades.length) return;
-      const header = ['ticker', 'trade_date', 'spot_entry', 'exit_date', 'spot_exit', 'ret_pct'].join(',');
+      // *_raw = as-traded prices (adjusted / split factor); size off those.
+      // Each leg uses its own date's factor, so for a trade whose window
+      // crosses a split, spot_exit_raw/spot_entry_raw - 1 will NOT reproduce
+      // ret_pct — ret_pct remains the source of truth for return.
+      const header = ['ticker', 'trade_date',
+                      'spot_entry', 'spot_entry_raw', 'exit_date',
+                      'spot_exit', 'spot_exit_raw', 'ret_pct'].join(',');
       const fmt = (v, d = 6) => v == null ? '' : Number(v).toFixed(d);
       const rows = trades.map(t => [
         t.ticker || '',
         t.trade_date || '',
         fmt(t.spot_entry, 2),
+        fmt(t.spot_entry_raw, 2),
         t.exit_date || '',
         fmt(t.spot_exit, 2),
+        fmt(t.spot_exit_raw, 2),
         t.ret != null ? (t.ret * 100).toFixed(6) : '',
       ].join(','));
       this._downloadCsv([header, ...rows].join('\n'),

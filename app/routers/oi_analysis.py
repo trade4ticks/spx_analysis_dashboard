@@ -7,12 +7,14 @@ from collections import defaultdict
 from typing import List, Optional
 
 import numpy as np
+import pandas as pd
 from scipy import stats as sp_stats
 from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
 from app.metric_filter import get_excluded_metrics, build_feature_cols
+from app.split_factors import make_split_factor_map
 
 # ── Secondary Signal Scanner cache ────────────────────────────────────────────
 _SEC_CACHE: dict = {}          # cache_key -> {rows, features, outcome, data_as_of, ...}
@@ -852,6 +854,12 @@ async def analyze(
         close_by_date  = all_close_by_tkr.get(ticker, {})
         spot_series    = [{"date": d, "value": v} for d, v in sorted(open_by_date.items())]
 
+    # Split factors for de-adjusting entry/exit spots into as-traded prices
+    # (see _deadjust). Built once per request over every ticker's full date
+    # list, so both the ALL and single-ticker paths above are covered.
+    _factor_maps = await _fetch_split_factor_maps(pool, all_dates_list_by_tkr)
+    _tlog(f'split factor maps ({len(_factor_maps)} tickers with splits)')
+
     n = len(pairs)
     if n < 30:
         return {"error": f"Insufficient data: {n} valid rows", "n": n}
@@ -1283,6 +1291,21 @@ async def analyze(
                     detail["exit_date"] = exit_date_str
                     if exit_date_str in close_by_date:
                         detail["spot_exit"] = close_by_date[exit_date_str]
+
+        # As-traded entry/exit for share/dollar sizing. Each leg is
+        # de-adjusted with its OWN date's factor, so a split inside the
+        # holding window leaves the two raws on different share bases and
+        # spot_exit_raw / spot_entry_raw - 1 will not reproduce `ret`.
+        # `ret` is computed off the consistently-adjusted series and stays
+        # the source of truth for return.
+        _tf = _factor_maps.get(tkr) or {}
+        if detail.get("spot_entry") is not None:
+            detail["spot_entry_raw"] = _deadjust(
+                detail["spot_entry"], _tf.get(date_str))
+        _ed_raw = detail.get("exit_date")
+        if detail.get("spot_exit") is not None:
+            detail["spot_exit_raw"] = _deadjust(
+                detail["spot_exit"], _tf.get(_ed_raw) if _ed_raw else None)
         _trade_details.append(detail)
 
     # Build server-side aggregated stats
@@ -1489,7 +1512,20 @@ async def get_trades_csv(
     cutoff_date: Optional[str]  = Query(None),
     decile20:    Optional[List[int]] = Query(None),
 ):
-    """Stream all matching trades as a CSV file attachment."""
+    """Stream all matching trades as a CSV file attachment.
+
+    Columns — spot_entry / spot_exit are the vendor-adjusted (back-adjusted)
+    prices; spot_entry_raw / spot_exit_raw are the as-traded prices for the
+    same legs. Size positions off the *_raw fields: the adjusted price is
+    restated onto today's share scale and on a reverse-split ticker can be
+    orders of magnitude above the price that was actually tradeable.
+
+    CAVEAT — each leg is de-adjusted with its own date's split factor, so for
+    a trade whose window crosses a split date the two raw prices sit on
+    different share bases and spot_exit_raw / spot_entry_raw - 1 will NOT
+    reproduce ret_pct. ret_pct is computed off the consistently-adjusted
+    series and remains the source of truth for return.
+    """
     import csv, io
     from fastapi.responses import Response
     from datetime import date as _date
@@ -1510,7 +1546,9 @@ async def get_trades_csv(
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["date", "ticker", metric or "metric", "spot_entry", "spot_exit",
+    writer.writerow(["date", "ticker", metric or "metric",
+                     "spot_entry", "spot_entry_raw",
+                     "spot_exit", "spot_exit_raw",
                      "ret_pct", "exit_date", "bin20"])
     for t in filtered:
         writer.writerow([
@@ -1518,7 +1556,9 @@ async def get_trades_csv(
             t.get("ticker", ""),
             t.get("metric_val", ""),
             t.get("spot_entry", ""),
+            t.get("spot_entry_raw", ""),
             t.get("spot_exit", ""),
+            t.get("spot_exit_raw", ""),
             f"{t.get('ret', 0) * 100:.6f}",
             t.get("exit_date", ""),
             t.get("decile20") or t.get("decile") or "",
@@ -2692,12 +2732,119 @@ def _sec_score_metrics(
     return results
 
 
+# ── Split factors: de-adjusting vendor-adjusted prices ────────────────────
+#
+# daily_features.spot_co / spot_pc derive from underlying_ohlc.open / close,
+# which yfinance back-adjusts: every historical price is restated onto the
+# CURRENT share scale. That is the right basis for returns — the ret_* columns
+# are computed off it and stay correct — but the wrong basis for anything
+# counting shares or dollars, because an adjusted price is not a price the
+# trade could ever have been filled at.
+#
+#     real_as_traded_price = adjusted_price / adj_factor
+#
+# adj_factor = product of (1/ratio) over every split ON OR AFTER the date,
+# i.e. exactly what app.split_factors.make_split_factors returns. Forward
+# splits give factor < 1 (AAPL 2020-08: 112.50 / 0.25 = 450); reverse splits
+# give factor > 1 (VXX 2020-04: 2880 / 64 = 45). No branch on the ratio's
+# sign — the direction falls out of the arithmetic.
+#
+# Tickers with no split history are omitted from the maps entirely; callers
+# treat a missing ticker or date as factor 1.0, where raw == adjusted.
+
+
+def _deadjust(price, factor):
+    """Adjusted price -> real as-traded price. Missing/zero factor is a no-op."""
+    if price is None:
+        return None
+    if not factor:
+        return price
+    try:
+        return round(float(price) / float(factor), 4)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return price
+
+
+async def _fetch_split_factor_maps(oi_pool, dates_by_ticker: dict,
+                                   conn=None) -> dict:
+    """{ticker: {date_str: adj_factor}} for the given per-ticker date lists.
+
+    One query covers every ticker. Pass `conn` to reuse a caller's existing
+    connection rather than taking a second slot from the pool inside an
+    already-open acquire().
+
+    TYPE DISCIPLINE — make_split_factors bisects the requested dates against
+    the split dates, so BOTH sides must be the same type; mixing `str` and
+    `datetime.date` raises TypeError inside bisect. Everything here is
+    normalised to ISO strings, which order lexicographically exactly as
+    calendar dates do, so bisect_left preserves the pre-split boundary
+    semantics that module documents.
+    """
+    if not dates_by_ticker:
+        return {}
+    tickers = [t for t in dates_by_ticker if t]
+    if not tickers:
+        return {}
+
+    sql = ("SELECT ticker, trade_date, splits FROM underlying_ohlc "
+           "WHERE ticker = ANY($1) AND splits IS NOT NULL AND splits != 0 "
+           "ORDER BY ticker, trade_date")
+    if conn is not None:
+        rows = await conn.fetch(sql, tickers)
+    else:
+        async with oi_pool.acquire() as _c:
+            rows = await _c.fetch(sql, tickers)
+
+    splits_by_tkr: dict = defaultdict(list)
+    for r in rows:
+        try:
+            ratio = float(r["splits"])
+        except (TypeError, ValueError):
+            continue
+        if ratio <= 0:
+            continue    # 1/ratio would divide by zero or flip the sign
+        splits_by_tkr[r["ticker"]].append((str(r["trade_date"]), ratio))
+
+    out: dict = {}
+    for tkr, dates in dates_by_ticker.items():
+        pairs = splits_by_tkr.get(tkr)
+        if not pairs or not dates:
+            continue    # no split history -> factor 1.0 everywhere; omit
+        sdf = pd.DataFrame({
+            "trade_date": [p[0] for p in pairs],
+            "splits":     [p[1] for p in pairs],
+        })
+        out[tkr] = make_split_factor_map(sdf, [str(d) for d in dates])
+    return out
+
+
+def _dates_by_ticker_from_rows(rows: list) -> dict:
+    """{ticker: [sorted ISO date strings]} from raw daily_features rows.
+
+    Mirrors the `by_tkr_dates` construction inside
+    _compute_analyze_bundle_sync (str() on trade_date) so factor-map keys
+    line up with the chronologies that consume them.
+    """
+    acc: dict = defaultdict(set)
+    for r in rows:
+        tkr = r.get("ticker")
+        d   = r.get("trade_date")
+        if tkr and d is not None:
+            acc[tkr].add(str(d))
+    return {t: sorted(ds) for t, ds in acc.items()}
+
+
 async def _fetch_ticker_calendars(oi_pool, tickers: list) -> dict:
     """Per-ticker trading-day calendar with open/close lookups.
 
     Returns {ticker: {dates: [sorted ISO dates], date_idx: {date: i},
-                      open: {date: spot_co}, close: {date: close_price}}}.
+                      open: {date: spot_co}, close: {date: close_price},
+                      factor: {date: adj_factor}}}.
     close[d] = spot_pc of the NEXT trading day (= close of d).
+
+    `factor` carries the split adjustment factor per date so consumers can
+    recover as-traded prices (see _deadjust). Tickers with no split history
+    get an empty map, which _deadjust treats as a no-op.
     """
     if not tickers:
         return {}
@@ -2737,7 +2884,15 @@ async def _fetch_ticker_calendars(oi_pool, tickers: list) -> dict:
             "date_idx": {d: i for i, d in enumerate(dates)},
             "open":     open_by_date,
             "close":    close_by_date,
+            "factor":   {},   # filled below in one batched query
         }
+
+    factor_maps = await _fetch_split_factor_maps(
+        oi_pool, {t: c["dates"] for t, c in out.items()},
+    )
+    for tkr, fmap in factor_maps.items():
+        if tkr in out:
+            out[tkr]["factor"] = fmap
     return out
 
 
@@ -2770,6 +2925,11 @@ def _build_enriched_trade(row: dict, calendars: dict, horizon: int,
     Includes ticker, trade_date, primary_val (when primary_metric given),
     optional secondary_val (single) or extra metric values (dict), entry/exit
     spot prices, exit_date, and ret. Missing fields stay None.
+
+    Also emits spot_entry_raw / spot_exit_raw — the as-traded prices, i.e.
+    the adjusted spots divided back out by their date's split factor (see
+    _deadjust). These are what share-count and dollar sizing must use; the
+    adjusted spots remain for continuity with the return series.
     """
     def _f(v):
         if v is None:
@@ -2790,14 +2950,25 @@ def _build_enriched_trade(row: dict, calendars: dict, horizon: int,
     if spot_entry is None:
         spot_entry = cal.get("open", {}).get(date_s)
 
+    # As-traded prices. Entry and exit are de-adjusted with their OWN dates'
+    # factors, so for a trade whose window crosses a split date the two raws
+    # sit on different share bases and spot_exit_raw / spot_entry_raw - 1 will
+    # NOT reproduce `ret`. That is expected: `ret` is computed off the
+    # consistently-adjusted series and stays the source of truth for return.
+    _factors       = cal.get("factor") or {}
+    spot_entry_raw = _deadjust(spot_entry, _factors.get(date_s))
+    spot_exit_raw  = _deadjust(spot_exit, _factors.get(exit_d) if exit_d else None)
+
     rec = {
         "ticker":     tkr,
         "trade_date": date_s,
         "primary_val":  _f(row.get(primary_metric)) if primary_metric else None,
         "secondary_val": _f(row.get(secondary_metric)) if secondary_metric else None,
         "spot_entry": spot_entry,
+        "spot_entry_raw": spot_entry_raw,
         "exit_date":  exit_d,
         "spot_exit":  spot_exit,
+        "spot_exit_raw":  spot_exit_raw,
         "ret":        _f(row.get(outcome_col)),
     }
     if extra_metrics:
@@ -4732,7 +4903,7 @@ _ANALYZE_BUNDLE_CACHE_MAX_BYTES = 5 * 1024**3   # 5 GB cap (LRU eviction)
 # changed, etc.) without a code edit. The discovered list is recorded
 # on the bundle in the `outcomes` field — consumers MUST iterate that
 # field rather than assuming a fixed set.
-_ANALYZE_BUNDLE_SCHEMA_VERSION = 13  # v13 (Group 8 follow-up): bundle's _assignments_from_is_bins now skips pre-cutoff rows when mode == "train_test". Pre-fix v12 TT bundles included full-series rows in trade_meta + per_outcome_returns, which the primary chart consumed verbatim under a "TEST PERIOD" label. Bump invalidates v12. v12 history: TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
+_ANALYZE_BUNDLE_SCHEMA_VERSION = 14  # v14 (split de-adjustment): trade_meta carries entry_spot_raw_oc / entry_spot_raw_cc and each per_outcome_returns slice carries exit_spots_raw — the AS-TRADED prices, i.e. the adjusted spots divided by their date's split factor (adjusted / adj_factor). The overnight_gap slice gains entry_spots_raw_cc / entry_spots_raw_oc. This bump is MANDATORY, not cosmetic: dollar position sizing divides capital by the entry price, and v13 bundles carry only the back-adjusted spot. On a reverse-split ticker (VXX, UVXY, SQQQ, SOXS and other leveraged/inverse products) the adjusted historical price can exceed the whole per-trade allocation, so floor(alloc / price) yields 0, the 1-share minimum kicks in, and the trade deploys far more capital than intended. Without the bump every cached v13 trade lacks the raw field, the client falls back to the adjusted price, and the fix is silently invisible. v13 history (Group 8 follow-up): bundle's _assignments_from_is_bins now skips pre-cutoff rows when mode == "train_test". Pre-fix v12 TT bundles included full-series rows in trade_meta + per_outcome_returns, which the primary chart consumed verbatim under a "TEST PERIOD" label. Bump invalidates v12. v12 history: TT+ALL bundle compute now reads tt_bins.bin20_{metric}. TT methodology shifted from on-the-fly walk-forward-frozen to stored in-sample-frozen-at-cutoff. v11 TT cache_keys carry the old methodology and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v11 history: WF+ALL bundle compute now reads wf_bins.bin20_{metric} via _fetch_wfbin20_by_metric — same shape as v9's is_bins migration for IS+ALL, applied to the walk-forward mode. v10 cache_keys carry on-the-fly WF bins and are unreachable on read; one-time recompute per (ticker, metric, mode, cutoff) on first read. v10 history: /analyze-bundle no longer applies the read-time per-ticker thinning gate that was removed alongside the same gate in /analyze and /global-metric-bins. Cached v9 bundles are unreachable on read (different salt); first read after deploy triggers a one-time recompute per (ticker, metric, mode, cutoff). v9 (Group 3b) history: for IS+ALL the bundle's bin_20 now comes from is_bins.bin20_{metric} (read at bundle-compute time and threaded into _compute_analyze_bundle_sync) instead of the on-the-fly InSampleAssigner. This is the consistency-by-construction shift — same stored bin reaches the bundle's per_bin / trade_meta / per_outcome_returns as reaches /heatmap, /metric-bins, and /analyze (Group 3a). WF and TT stay on the Assigner path for this round (deferred to Groups 7–8). v8 cache_keys are unreachable on read; one-time recompute on first read of each (ticker, metric, mode, cutoff) after deploy. v8 history (kept for context): bumped from 7 — gap outcome carries flat-table fields inline so Gap-mode flat trade table no longer triggers the 56 MB trade_meta + 1d_cc + 1d_oc fetch path.
 
 
 async def _ensure_analyze_bundle_table(pool) -> None:
@@ -5402,6 +5573,7 @@ def _compute_analyze_bundle_sync(
     _measure: bool = False,
     _parallel_rolling_ic: bool = False,
     bin20_lookup: Optional[dict] = None,
+    split_factors: Optional[dict] = None,
 ) -> dict:
     """Pure-sync compute. Off-loaded via asyncio.to_thread by the caller.
 
@@ -5423,6 +5595,14 @@ def _compute_analyze_bundle_sync(
         outcome_value) — mode-aware reference (full-history mean for
         in_sample/walk_forward, pre-cutoff mean for train_test); ε is
         mode-aware (single_ticker vs cross_sectional, horizon-corrected).
+
+    `split_factors` is {ticker: {date: adj_factor}} from
+    _fetch_split_factor_maps. It adds the as-traded price fields
+    (entry_spot_raw_oc / entry_spot_raw_cc on trade_meta, exit_spots_raw on
+    each outcome slice) alongside the existing adjusted spots. Those are what
+    share/dollar sizing must divide by; the adjusted spots stay for continuity
+    with the return series. Omitting it leaves the raw fields equal to the
+    adjusted ones (factor 1.0), which is correct for split-free tickers.
 
     Returns a dict that JSON-serializes to the analyze_cache payload
     shape (see _ANALYZE_BUNDLE_SCHEMA_VERSION for the contract).
@@ -5562,6 +5742,15 @@ def _compute_analyze_bundle_sync(
                 if _es_cc is not None:
                     entry_spot_cc = round(float(_es_cc), 2)
 
+        # As-traded entry prices. Each anchor uses its OWN entry date's
+        # factor (OC enters on T, CC on T-1), so a split between the two
+        # puts them on different share bases — which is correct, since they
+        # are genuinely different sessions.
+        _sf_tkr = (split_factors or {}).get(tkr) or {}
+        entry_spot_raw_oc = _deadjust(entry_spot_oc, _sf_tkr.get(entry_date_oc))
+        entry_spot_raw_cc = _deadjust(
+            entry_spot_cc, _sf_tkr.get(entry_date_cc) if entry_date_cc else None)
+
         tid = len(trade_meta)
         trade_id_by_key[key] = tid
         trade_meta.append({
@@ -5571,8 +5760,10 @@ def _compute_analyze_bundle_sync(
             "metric_val":    round(float(a.metric_value), 6),
             "entry_date_oc": entry_date_oc,
             "entry_spot_oc": entry_spot_oc,
+            "entry_spot_raw_oc": entry_spot_raw_oc,
             "entry_date_cc": entry_date_cc,
             "entry_spot_cc": entry_spot_cc,
+            "entry_spot_raw_cc": entry_spot_raw_cc,
             "bin_20":        a.bin,    # 1..20; client aggregates pairs/quartets for 10/5 views
         })
 
@@ -5610,17 +5801,24 @@ def _compute_analyze_bundle_sync(
     ticker_to_offset: dict = {}
     flat_dates_list:  list = []
     flat_closes_list: list = []
+    flat_factors_list: list = []
     _off = 0
     for tkr in sorted(by_tkr_dates.keys()):
         ticker_to_offset[tkr] = _off
         dates = by_tkr_dates[tkr]
+        _sf_t = (split_factors or {}).get(tkr) or {}
         flat_dates_list.extend(dates)
         flat_closes_list.extend(
             close_by_tkr_date.get((tkr, d), np.nan) for d in dates
         )
+        # Split factor per date, parallel to flat_closes. 1.0 (no-op) for any
+        # ticker/date without split history, so the raw exit spot below
+        # collapses to the adjusted one.
+        flat_factors_list.extend(_sf_t.get(d, 1.0) or 1.0 for d in dates)
         _off += len(dates)
-    flat_dates  = np.array(flat_dates_list,  dtype=object)
-    flat_closes = np.array(flat_closes_list, dtype=np.float64)
+    flat_dates   = np.array(flat_dates_list,   dtype=object)
+    flat_closes  = np.array(flat_closes_list,  dtype=np.float64)
+    flat_factors = np.array(flat_factors_list, dtype=np.float64)
     ticker_to_length: dict = {t: len(d) for t, d in by_tkr_dates.items()}
     tm_ticker_offset = np.fromiter(
         (ticker_to_offset[t] for t in tm_ticker), dtype=np.int64, count=N,
@@ -5665,6 +5863,7 @@ def _compute_analyze_bundle_sync(
     unique_horizons = sorted({_horizon_from_outcome(o) for o in outcomes})
     exit_date_by_horizon: dict = {}
     exit_spot_by_horizon: dict = {}
+    exit_spot_raw_by_horizon: dict = {}
     for h in unique_horizons:
         exit_idx_h  = tm_entry_idx + max(h - 1, 0)
         valid_exit  = (tm_entry_idx >= 0) & (exit_idx_h >= 0) & (exit_idx_h < tm_ticker_length)
@@ -5673,14 +5872,21 @@ def _compute_analyze_bundle_sync(
         safe_pos    = np.where(valid_exit, tm_ticker_offset + exit_idx_h, 0)
         raw_dates   = flat_dates[safe_pos]
         raw_closes  = flat_closes[safe_pos]
+        raw_factors = flat_factors[safe_pos]
         # exit_date: string where valid_exit, None otherwise.
         exit_dates_h = np.where(valid_exit, raw_dates, None)
         # exit_spot: round(close, 2) where valid_exit, NaN otherwise. NaN-to-
         # None conversion happens per-outcome at output-list build time.
         rounded_closes = np.round(raw_closes, 2)
         exit_spots_h = np.where(valid_exit, rounded_closes, np.nan)
+        # exit_spot_raw: the as-traded close at that exit date. Factors are
+        # strictly positive (the loader drops ratio <= 0) and default to 1.0,
+        # so this division is safe.
+        rounded_raw = np.round(raw_closes / raw_factors, 4)
+        exit_spots_raw_h = np.where(valid_exit, rounded_raw, np.nan)
         exit_date_by_horizon[h] = exit_dates_h
         exit_spot_by_horizon[h] = exit_spots_h
+        exit_spot_raw_by_horizon[h] = exit_spots_raw_h
     if _measure:
         print(f"[SHARED] exit_arrays_build={_tick() - _t_exit:.3f}s  "
               f"(unique_horizons={unique_horizons})")
@@ -5725,17 +5931,21 @@ def _compute_analyze_bundle_sync(
         out_ret_pcts   = np.round(yf_raw, 6).tolist()
         exit_dates_h   = exit_date_by_horizon[horizon]
         exit_spots_h   = exit_spot_by_horizon[horizon]
+        exit_spots_raw_h = exit_spot_raw_by_horizon[horizon]
         out_exit_dates = exit_dates_h[valid].tolist()
         # NaN → None for JSON-safety. Use the NaN!=NaN idiom on the Python
         # list (faster than per-element np.isnan calls here).
         _spots = exit_spots_h[valid].tolist()
         out_exit_spots = [None if v != v else v for v in _spots]
+        _spots_raw = exit_spots_raw_h[valid].tolist()
+        out_exit_spots_raw = [None if v != v else v for v in _spots_raw]
 
         per_outcome_returns[outcome] = {
             "trade_ids":  out_trade_ids,
             "ret_pcts":   out_ret_pcts,
             "exit_dates": out_exit_dates,
             "exit_spots": out_exit_spots,
+            "exit_spots_raw": out_exit_spots_raw,
         }
 
         # bin_buckets equivalent: group yf_raw by tm_bin20[valid]
@@ -5919,6 +6129,8 @@ def _compute_analyze_bundle_sync(
         _gap_entry_dates_cc: list = []
         _gap_entry_spots_cc: list = []
         _gap_entry_spots_oc: list = []
+        _gap_entry_spots_raw_cc: list = []
+        _gap_entry_spots_raw_oc: list = []
         _gap_metric_vals:    list = []
         for _i, _tid in enumerate(_cc_data["trade_ids"]):
             if _tid not in _oc_by_tid:
@@ -5933,6 +6145,8 @@ def _compute_analyze_bundle_sync(
             _gap_entry_dates_cc.append(_m["entry_date_cc"])
             _gap_entry_spots_cc.append(_m["entry_spot_cc"])
             _gap_entry_spots_oc.append(_m["entry_spot_oc"])
+            _gap_entry_spots_raw_cc.append(_m["entry_spot_raw_cc"])
+            _gap_entry_spots_raw_oc.append(_m["entry_spot_raw_oc"])
             _gap_metric_vals.append(_m["metric_val"])
         per_outcome_returns["overnight_gap"] = {
             "ret_pcts":       _gap_ret_pcts,
@@ -5942,6 +6156,8 @@ def _compute_analyze_bundle_sync(
             "entry_dates_cc": _gap_entry_dates_cc,
             "entry_spots_cc": _gap_entry_spots_cc,
             "entry_spots_oc": _gap_entry_spots_oc,
+            "entry_spots_raw_cc": _gap_entry_spots_raw_cc,
+            "entry_spots_raw_oc": _gap_entry_spots_raw_oc,
             "metric_vals":    _gap_metric_vals,
         }
         # Per-bin aggregates for gap. Same numpy bin_stats shape as real
@@ -6053,10 +6269,14 @@ async def _compute_analyze_bundle_bg(
                     d = r['trade_date']
                     d_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
                     bin20_lookup[(r['ticker'], d_str)] = r['bin_20']
+        _split_factors = await _fetch_split_factor_maps(
+            pool, _dates_by_ticker_from_rows(rows),
+        )
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
             bin20_lookup=bin20_lookup,
+            split_factors=_split_factors,
         )
 
         # Split the bundle into the 3 storage layers. trade_meta and
@@ -6229,10 +6449,14 @@ async def analyze_bundle_get(
             _lk = _by_metric.get(metric, {})
             if _lk:
                 bin20_lookup = _lk
+        _split_factors = await _fetch_split_factor_maps(
+            pool, _dates_by_ticker_from_rows(rows),
+        )
         bundle = await asyncio.to_thread(
             _compute_analyze_bundle_sync,
             rows, metric, ticker, mode, cutoff_date, outcomes,
             bin20_lookup=bin20_lookup,
+            split_factors=_split_factors,
         )
         return {"status": "ready", "bundle": bundle}
 

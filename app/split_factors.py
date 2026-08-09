@@ -37,6 +37,24 @@ def make_split_factors(splits_df: pd.DataFrame, dates: list) -> pd.DataFrame:
                          trade_date >  split_date -> no adjustment (already past it).
     Handles forward (ratio>1) and reverse (ratio<1) splits uniformly.
     Tickers with no splits get adj_factor = 1.0 for every date (no-op).
+
+    DIRECTION — the two cases move opposite ways, and this surprises people:
+      - Forward split (e.g. 4:1, ratio = 4.0) -> adj_factor = 0.25 for prior
+        dates. Historical prices/strikes are scaled DOWN (AAPL's real ~$450 in
+        Aug 2020 appears as ~$112).
+      - Reverse split (e.g. 1:4, ratio = 0.25) -> adj_factor = 4.0 for prior
+        dates. Historical prices/strikes are scaled UP. This is correct, not a
+        bug: VXX's real ~$45 in Apr 2020 appears as ~$2,880 after three
+        subsequent 1:4 reverse splits (45 x 4^3). Reverse-split-heavy names
+        (VXX, UVXY, SQQQ, SOXS and other leveraged/inverse products) therefore
+        show very large historical prices in any back-adjusted series.
+    Both fall out of the same `suffix / ratio` arithmetic — there is no branch
+    on the sign of the ratio, and none is needed.
+
+    Because back-adjustment restates history onto TODAY's share scale, an
+    adjusted price is NOT the price actually traded on that date. To recover
+    the as-traded price, divide it back out: real_price = adjusted / adj_factor.
+    That matters for anything sizing a position in shares or dollars.
     """
     if splits_df.empty:
         return pd.DataFrame({"trade_date": dates,

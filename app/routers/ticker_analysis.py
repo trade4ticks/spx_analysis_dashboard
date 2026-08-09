@@ -88,8 +88,17 @@ async def price(
 ):
     """Full-history close line + split markers (brief §5.1).
 
-    Uses underlying_ohlc.close (unadjusted) and flags rows where
-    `splits` is a real ratio (not 0 / 1) so the chart can mark them.
+    Uses underlying_ohlc.close, which is SPLIT-ADJUSTED by the vendor
+    (yfinance) though not dividend-adjusted — see the data dictionary's
+    "Data-source notes". An earlier version of this docstring called it
+    "unadjusted", which is wrong and has misled at least one investigation.
+
+    Because the series is back-adjusted onto today's share scale, historical
+    values are not as-traded prices: forward splits make old prices look
+    smaller (AAPL pre-2020-08-31 shows ~$112, not ~$450) and reverse splits
+    make them look much larger (VXX in 2020 shows thousands of dollars). Both
+    are correct. Rows where `splits` is a real ratio (not 0 / 1) are flagged
+    so the chart can mark them.
     """
     if not pool:
         return {"error": "OI database not configured"}
