@@ -206,7 +206,20 @@ _ANALYZE_CACHE_MAX = 20
 # v4 emitted full-series counts in trade_calendar / decile_stats_20
 # under a "TEST PERIOD" subtitle. Per-bin n's shift by ~67% on the
 # ALL TT case (~218k full → ~70k test). Bump invalidates v4 entries.
-_ANALYZE_PRIMARY_SCHEMA_VERSION = 5
+# v6 (TT rolling-IC reference fix): the rolling-IC series now spans FULL
+# history in train_test mode via its own un-cutoff-filtered fetch
+# (`ic_row_dicts`), restoring the pre-cutoff reference the v5 test-window
+# filter had starved. Pre-fix every TT payload carried reference_ic = 0.0,
+# a 100%-neutral (uniformly grey) series, and a suppressed stability
+# readout — the mode advertised as the honest one supplied no reference at
+# all. Sign-stability in TT is additionally now scoped to POST-cutoff
+# windows only (judging out-of-sample against the frozen bar) rather than
+# the full series, which had counted the reference's own training windows
+# toward its stability. IS/WF are unaffected in both respects. Bump
+# invalidates v5 TT entries, which would otherwise be served verbatim with
+# the collapsed reference and make the fix invisible. v5 history: TT
+# primary quantile applies the test-window filter at the SQL JOIN.
+_ANALYZE_PRIMARY_SCHEMA_VERSION = 6
 _ANALYZE_PRIMARY_CACHE_MAX_BYTES = 2 * 1024**3   # 2 GB LRU cap
 _ANALYZE_PRIMARY_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS analyze_primary_cache (
@@ -727,6 +740,45 @@ async def analyze(
             _max_trade_date = str(max(r['trade_date'] for r in row_dicts))
         _tlog(f'ALL+{spec.kind} {bin_table} JOIN fetch ({len(row_dicts)} rows)')
 
+        # ── Rolling-IC row set (full history in EVERY mode) ────────────────
+        # The rolling-IC series is contractually full-history — see the block
+        # comment at the rolling-IC section below. The fetch above is
+        # deliberately test-window-only in TT (Group 8: decile_stats /
+        # trade_calendar / equity must report out-of-sample only), and that
+        # starved the pre-cutoff reference: with no rows before the cutoff,
+        # the pre-cutoff mean at the reference computation matched nothing,
+        # reference_ic collapsed to 0.0, and since |0| < ε every window
+        # classified "neutral" — a uniformly grey line and a suppressed
+        # stability readout for every TT ticker.
+        #
+        # So TT gets its own full-history row set for the IC path ALONE.
+        # Same JOIN, same bin table (tt_bins carries pre-cutoff rows — the
+        # heatmap's TT train grid reads them from it), same eligibility
+        # filters, same ordering; only the tt_extra_where cutoff clause is
+        # dropped, hence *params without tt_extra_params. date_conditions
+        # still carries the single-ticker and date-range filters.
+        #
+        # IS/WF alias row_dicts — no extra query, no behaviour change.
+        ic_row_dicts = row_dicts
+        if spec.kind == "train_test":
+            ic_sql = (
+                f"SELECT df.ticker, df.trade_date, "
+                f"  df.{metric}, df.{outcome} "
+                f"FROM daily_features df "
+                f"JOIN {bin_table} bt USING (ticker, trade_date) "
+                f"WHERE bt.bin20_{metric} > 0 "
+                f"  AND df.{outcome} IS NOT NULL"
+                f"{date_conditions} "
+                f"ORDER BY df.ticker, df.trade_date"
+            )
+            try:
+                async with pool.acquire() as conn:
+                    _ic_rows_full = await conn.fetch(ic_sql, *params)
+            except Exception:
+                _ic_rows_full = []   # null-by-design metric: no bin20 column
+            ic_row_dicts = [dict(r) for r in _ic_rows_full]
+            _tlog(f'TT full-history IC fetch ({len(ic_row_dicts)} rows)')
+
         # Build by_ticker + spot lookup + bin20 lookup in one pass.
         # Same null/NaN guards as the legacy ALL path.
         by_ticker: dict = defaultdict(list)
@@ -1115,10 +1167,18 @@ async def analyze(
 
     # ── Rolling IC + sign-stability (Steps IC.2 + IC.3) ───────────────────
     # Routes through `ic_compute` primitives. The rolling-IC series is always
-    # FULL HISTORY (mode-independent), built from the raw `row_dicts`. Only
-    # the *reference IC* used for sign-classification depends on the spec:
+    # FULL HISTORY (mode-independent), built from `ic_row_dicts` — which is
+    # `row_dicts` in IS/WF and a separate un-cutoff-filtered fetch in TT (see
+    # the "Rolling-IC row set" block at the fetch above; row_dicts itself is
+    # test-window-only in TT and cannot serve this contract).
+    #
+    # Only the *reference IC* used for sign-classification depends on the spec:
     #   in_sample / walk_forward → reference = mean of all windows
     #   train_test               → reference = mean of pre-cutoff windows
+    #                              (the frozen training-period bar)
+    #
+    # Sign-stability scope also depends on the spec — see the comment at the
+    # stability computation below.
     #
     # Two different computations under the same payload shape:
     #   single-ticker (is_all=False) — rolling Spearman of one ticker's
@@ -1137,12 +1197,12 @@ async def analyze(
 
     _IC_WINDOW = 252
     rolling_ic_payload: Optional[dict] = None
-    if row_dicts:
+    if ic_row_dicts:
         horizon = _horizon_from_outcome(outcome)
 
         if is_all:
             ic_series = rolling_ic_cross_sectional(
-                row_dicts, metric, outcome, window=_IC_WINDOW,
+                ic_row_dicts, metric, outcome, window=_IC_WINDOW,
             )
             # ε for cross-sectional needs a K (cross-section size). Use the
             # median n across rolled points (each IcPoint.n is the median
@@ -1156,7 +1216,7 @@ async def analyze(
             ic_mode = "cross_sectional"
         else:
             ic_series = rolling_ic_single_ticker(
-                row_dicts, metric, outcome, window=_IC_WINDOW,
+                ic_row_dicts, metric, outcome, window=_IC_WINDOW,
             )
             epsilon = noise_floor_epsilon(
                 "single_ticker", window=_IC_WINDOW, horizon=horizon,
@@ -1180,15 +1240,35 @@ async def analyze(
         _IC_SHORT_WINDOW = 21
         if is_all:
             short_ic_series = rolling_ic_cross_sectional(
-                row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
+                ic_row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
             )
         else:
             short_ic_series = rolling_ic_single_ticker(
-                row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
+                ic_row_dicts, metric, outcome, window=_IC_SHORT_WINDOW,
             )
 
         classified = classified_rolling_ic(ic_series, reference_ic, epsilon)
-        stability = sign_stability_from_rolling(ic_series, reference_ic, epsilon)
+
+        # Sign-stability scope. In train_test the reference is FROZEN on the
+        # pre-cutoff window, so counting pre-cutoff windows toward stability
+        # is circular: those windows are the ones that produced the
+        # reference, and they agree with it near-tautologically, biasing the
+        # readout high. The honest TT statistic is "how often does an
+        # OUT-OF-SAMPLE window agree with the frozen training-period bar",
+        # so TT judges post-cutoff windows only.
+        #
+        # IS/WF have no cutoff and pass the full series exactly as before —
+        # byte-identical. `classified` (the per-window colouring) still spans
+        # the whole series in every mode; only the stability COUNTS are
+        # scoped, so the chart still shows the pre-cutoff line coloured
+        # against the reference it was built from.
+        if spec.kind == "train_test":
+            _stab_series   = [p for p in ic_series if str(p.date) >= cutoff_s]
+            stability_scope = "post_cutoff"
+        else:
+            _stab_series   = ic_series
+            stability_scope = "all_windows"
+        stability = sign_stability_from_rolling(_stab_series, reference_ic, epsilon)
 
         rolling_ic_payload = {
             "series": [
@@ -1207,6 +1287,13 @@ async def analyze(
             "ic_mode":       ic_mode,
             "cutoff_date":   (spec.cutoff.isoformat()
                               if spec.kind == "train_test" else None),
+            # Which windows the sign_stability counts below were computed
+            # over: "post_cutoff" (TT — out-of-sample only, judged against
+            # the frozen pre-cutoff reference) or "all_windows" (IS/WF).
+            # Surfaced so the subtitle can say so — a stability number that
+            # silently changes denominator is exactly the kind of quiet
+            # meaning-shift this pane exists to avoid.
+            "stability_scope": stability_scope,
             "sign_stability": {
                 "stability": (round(stability.stability, 4)
                               if stability.stability is not None else None),

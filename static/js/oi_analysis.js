@@ -2936,17 +2936,24 @@ document.addEventListener('alpine:init', () => {
       // which computation produced this chart — the ticker selector usually
       // suffices, but having it in the subtitle makes the data lineage explicit.
       const modeTxt = p.ic_mode === 'cross_sectional' ? 'cross-sectional' : 'single-ticker';
-      const refTxt = `ref ${(p.reference_ic ?? 0).toFixed(3)}`;
+      // train_test: the reference is frozen on the pre-cutoff window and
+      // stability counts ONLY post-cutoff (out-of-sample) windows. Label
+      // both — a stability % whose denominator silently changes between
+      // modes is worse than no number at all.
+      const isTT    = p.stability_scope === 'post_cutoff';
+      const stabLbl = isTT ? 'Stability (test window)' : 'Stability';
+      const refTxt = `ref ${(p.reference_ic ?? 0).toFixed(3)}`
+                   + (isTT ? ' (frozen pre-cutoff)' : '');
       const epsTxt = `ε ${(p.epsilon ?? 0).toFixed(3)}`;
       if (ss.suppressed) {
         const reason = ss.suppression_reason === 'reference_below_noise'
           ? 'reference below noise floor'
           : (ss.suppression_reason || 'no decisive windows');
-        return `[${modeTxt}] Stability: — (${reason}) · ${refTxt} · ${epsTxt}`;
+        return `[${modeTxt}] ${stabLbl}: — (${reason}) · ${refTxt} · ${epsTxt}`;
       }
       const stab    = (ss.stability == null) ? '—' : `${(ss.stability * 100).toFixed(1)}%`;
       const neutPct = ss.n_total ? (100 * ss.n_neutral / ss.n_total).toFixed(1) : '0.0';
-      return `[${modeTxt}] Stability: ${stab} · ${neutPct}% neutral · ${refTxt} · ${epsTxt}`;
+      return `[${modeTxt}] ${stabLbl}: ${stab} · ${neutPct}% neutral · ${refTxt} · ${epsTxt}`;
     },
 
     // ── Return distribution (histogram with background) ─────────────────
