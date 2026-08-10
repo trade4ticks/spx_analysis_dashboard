@@ -145,7 +145,9 @@ document.addEventListener('alpine:init', () => {
 
     // All-Ticker Metric Bins (top-of-page browser, independent of analysis)
     // Bucket A step 4: local mode state per the per-pane independence rule.
-    // Pane reads topBinsMode / topBinsCutoffDate, NOT this.pageMode.
+    // Pane reads topBinsMode (and topBinsTicker), NOT this.pageMode. The TT
+    // cutoff is the one exception to per-pane independence: it is read from
+    // the shared frozen this.cutoffDate on purpose — see below.
     // topBinsDataByMode holds per-mode slots; switching topBinsMode swaps
     // which slot is displayed (in-memory only). Outcome dropdown and
     // cutoff input changes also do NOT auto-fetch — only ⟳ Refresh
@@ -155,7 +157,20 @@ document.addEventListener('alpine:init', () => {
     topBinsData:     null,
     topBinsOutcome:  'ret_5d_fwd_oc',
     topBinsMode:        'in_sample',
-    topBinsCutoffDate:  '2024-01-01',
+    // Ticker scope for the wall. 'ALL' = the existing aggregate (per-ticker
+    // frozen bins pooled); any single ticker repaints the wall for that
+    // ticker alone. Both are the SAME binning — stored per-ticker bin20 —
+    // differing only by a row filter server-side, so they cannot disagree.
+    topBinsTicker: 'ALL',
+    // Survivor-border magnitude threshold, in percent. TT only. Evaluated
+    // client-side from the payload, so changing it re-borders instantly
+    // with no refetch.
+    topBinsThreshold: 0.50,
+    // NOTE: there is deliberately no topBinsCutoffDate. TT reads the single
+    // frozen split from tt_bins (this.cutoffDate, discovered via /tt-cutoff),
+    // exactly as the Analyze pane does. A free-form cutoff here could make
+    // the wall describe a different train/test split from every other TT
+    // pane — bins frozen at one date, returns filtered from another.
     topBinsDataByMode: {
       in_sample:    null,  // most-recent topBinsData dict for this mode; null = never loaded
       walk_forward: null,
@@ -7301,9 +7316,66 @@ document.addEventListener('alpine:init', () => {
       this.topBinsMode = m;
       this._topBinsSwapDisplayFromSlot();
     },
-    setTopBinsCutoffDate(d) {
-      this.topBinsCutoffDate = d;
+    // setTopBinsCutoffDate removed with the free-form date input — TT reads
+    // the frozen split from tt_bins (this.cutoffDate). See the state comment.
+    setTopBinsTicker(t) {
+      // No auto-fetch, consistent with the mode / outcome selectors: the
+      // user clicks ⟳ Refresh to repaint the wall for the new scope.
+      this.topBinsTicker = t || 'ALL';
     },
+    setTopBinsThreshold(v) {
+      // Borders are evaluated client-side from the loaded payload, so this
+      // re-borders immediately with no network round trip.
+      const n = parseFloat(v);
+      this.topBinsThreshold = Number.isFinite(n) ? n : 0;
+    },
+
+    // n-weighted mean over bins [lo, hi). Per-bin values are already pooled
+    // means, so weighting by n recovers the pooled mean of the combined
+    // bins — the same n-weighted convention every other ALL-ticker bin view
+    // uses. Returns null when the range is empty.
+    _tbWeightedMean(bins, ns, lo, hi) {
+      let num = 0, den = 0;
+      for (let i = lo; i < hi; i++) {
+        const n = ns?.[i] ?? 0;
+        if (!n) continue;
+        num += (bins?.[i] ?? 0) * n;
+        den += n;
+      }
+      return den ? num / den : null;
+    },
+
+    // Survivor border (TT only): does this metric show a tradeable edge that
+    // holds out-of-sample? Threshold is a percent magnitude (default 0.50).
+    //   long  survivor: bottom-2 avg >= +thr in BOTH train and test
+    //   short survivor: top-2    avg <= -thr in BOTH train and test
+    // Fails in either window -> no border. No minimum-n gate by design —
+    // per-bar test opacity already conveys sample size.
+    topBinsIsSurvivor(m) {
+      if (this.topBinsMode !== 'train_test' || !m || !Array.isArray(m.bins_train)) return false;
+      const thr = (parseFloat(this.topBinsThreshold) || 0) / 100;
+      if (!(thr > 0)) return false;
+      const nb = (m.bins || []).length;
+      if (nb < 4) return false;
+      const trBot = this._tbWeightedMean(m.bins_train, m.bin_ns_train, 0, 2);
+      const teBot = this._tbWeightedMean(m.bins,       m.bin_ns,       0, 2);
+      const trTop = this._tbWeightedMean(m.bins_train, m.bin_ns_train, nb - 2, nb);
+      const teTop = this._tbWeightedMean(m.bins,       m.bin_ns,       nb - 2, nb);
+      const longOk  = trBot != null && teBot != null && trBot >=  thr && teBot >=  thr;
+      const shortOk = trTop != null && teTop != null && trTop <= -thr && teTop <= -thr;
+      return longOk || shortOk;
+    },
+
+    // Test-bar alpha from that bar's own n, normalised against this metric's
+    // busiest test bin. Faint bar = thin sample. `base` is the sign colour's
+    // full alpha so positive/negative keep their existing relative weights.
+    topBinsTestAlpha(m, i, base) {
+      const mx = m?._maxTestN || 0;
+      if (!mx) return base;
+      const f = Math.min(1, (m.bin_ns?.[i] ?? 0) / mx);
+      return (0.15 + 0.85 * f) * base;
+    },
+
     setTopBinsOutcome(o) {
       // No auto-fetch. The displayed slot may still carry the prior
       // outcome's bins until the user clicks ⟳ Refresh; the dropdown
@@ -7353,12 +7425,17 @@ document.addEventListener('alpine:init', () => {
       try {
         const params = new URLSearchParams({
           outcome:      this.topBinsOutcome || 'ret_5d_fwd_oc',
-          ticker:       'ALL',
-          n_bins:       '20',
+          ticker:       this.topBinsTicker || 'ALL',
+          // TT halves the resolution to 10 so two charts fit the cell that
+          // one 20-bin chart occupied. IS/WF keep 20, unchanged.
+          n_bins:       m === 'train_test' ? '10' : '20',
           walk_forward: m === 'walk_forward' ? '1' : '0',
           force:        forceRefresh ? '1' : '0',
         });
-        if (m === 'train_test') params.set('cutoff_date', this.topBinsCutoffDate);
+        // Frozen split from tt_bins (same source as the Analyze pane). Acts
+        // as the TT mode flag; the server re-resolves it from tt_bins anyway,
+        // so a stale client value cannot desync the wall from other TT panes.
+        if (m === 'train_test') params.set('cutoff_date', this.cutoffDate);
         const r = await fetch('/api/factor-analysis/global-metric-bins?' + params);
         if (!r.ok) {
           const txt = await r.text().catch(() => '');
@@ -7371,11 +7448,20 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         // Compute _zeroTopPct + _total per metric for the diverging-bar layout
         // (same pattern the corr explorer uses for its mini charts).
+        // In TT the scale spans train AND test so the two charts share one
+        // y-axis — without that the shapes would not be visually comparable,
+        // which is the whole point of the side-by-side wall.
         for (const m_ of (d.metrics || [])) {
-          const maxPos = Math.max(0, ...m_.bins);
-          const maxNeg = Math.abs(Math.min(0, ...m_.bins));
+          const hasTrain = Array.isArray(m_.bins_train);
+          const all = hasTrain ? [...m_.bins, ...m_.bins_train] : m_.bins;
+          const maxPos = Math.max(0, ...all);
+          const maxNeg = Math.abs(Math.min(0, ...all));
           m_._total      = Math.max(0.0001, (maxPos + maxNeg) * 1.06);
           m_._zeroTopPct = (maxPos / m_._total * 100).toFixed(2);
+          // Per-bar test opacity normalises against this metric's own
+          // busiest test bin. Train bins are equal-count by construction,
+          // so they carry no sample-size signal and stay full opacity.
+          if (hasTrain) m_._maxTestN = Math.max(0, ...(m_.bin_ns || [0]));
         }
         this._topBinsStoreSlot(d);
       } catch (e) {

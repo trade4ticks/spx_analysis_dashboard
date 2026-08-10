@@ -509,6 +509,66 @@ def _compute_bucket_stats(buckets: list) -> list:
     return result
 
 
+def _split_bins_by_cutoff(rows: list, bin_key: str, outcome_key: str,
+                          cutoff_iso: str, n_bins: int,
+                          value_key: Optional[str] = None) -> tuple:
+    """Bucket rows into n_bins by their STORED bin20, split on the cutoff.
+
+    The single shared primitive behind every train-vs-test per-bin surface:
+    /analyze's decile_stats_train and the All-Ticker Metric Bins TT grid both
+    route through it, so their numbers agree by construction rather than by
+    review. Do not add a parallel binning path — extend this one.
+
+    Bins are NOT computed here. They are read from the stored bin20 column
+    (is_bins / wf_bins / tt_bins), whose edges the external pipeline freezes;
+    this only collapses bin20 to n_bins and partitions rows by date, using
+    the canonical collapse every stored-bin surface in this file uses:
+
+        bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+
+    Returns (train_buckets, test_buckets), each a list of n_bins lists.
+    Element type depends on `value_key`:
+      None -> float outcome values           (grid: means + counts)
+      set  -> (metric_value, outcome) tuples (/analyze: _compute_bucket_stats
+              needs the x value for min_val / max_val)
+
+    train = trade_date < cutoff_iso, test = everything else. Sentinel
+    bin20 <= 0 (warm-up / null-metric) and NaN values are dropped.
+    """
+    train: list = [[] for _ in range(n_bins)]
+    test:  list = [[] for _ in range(n_bins)]
+    for r in rows:
+        b20 = r.get(bin_key)
+        if not b20 or b20 <= 0:
+            continue
+        yv = r.get(outcome_key)
+        if yv is None:
+            continue
+        try:
+            yf = float(yv)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(yf):
+            continue
+        if value_key is not None:
+            xv = r.get(value_key)
+            if xv is None:
+                continue
+            try:
+                xf = float(xv)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(xf):
+                continue
+            item = (xf, yf)
+        else:
+            item = yf
+        bn = min(((b20 - 1) * n_bins) // 20, n_bins - 1)
+        bucket = train if str(r.get("trade_date")) < cutoff_iso else test
+        bucket[bn].append(item)
+    return train, test
+
+
 def _parse_horizon(col_name: str) -> int:
     import re
     m = re.search(r'(\d+)d', col_name)
@@ -895,25 +955,12 @@ async def analyze(
         if spec.kind == "train_test" and ic_row_dicts:
             _cut_iso = (spec.cutoff.isoformat()
                         if hasattr(spec.cutoff, "isoformat") else str(spec.cutoff))
-            _tr_b20: list = [[] for _ in range(20)]
-            _tr_b10: list = [[] for _ in range(10)]
-            for r in ic_row_dicts:
-                if str(r.get("trade_date")) >= _cut_iso:
-                    continue            # test window — excluded here
-                b20 = r.get("bin_20")
-                if b20 is None or b20 <= 0 or b20 > 20:
-                    continue
-                xv, yv = r.get(metric), r.get(outcome)
-                if xv is None or yv is None:
-                    continue
-                try:
-                    xf, yf = float(xv), float(yv)
-                except (ValueError, TypeError):
-                    continue
-                if math.isnan(xf) or math.isnan(yf):
-                    continue
-                _tr_b20[b20 - 1].append((xf, yf))
-                _tr_b10[(b20 - 1) // 2].append((xf, yf))
+            # Shared primitive — the All-Ticker Metric Bins TT grid calls the
+            # same function, so the two surfaces cannot drift apart.
+            _tr_b20, _ = _split_bins_by_cutoff(
+                ic_row_dicts, "bin_20", outcome, _cut_iso, 20, value_key=metric)
+            _tr_b10, _ = _split_bins_by_cutoff(
+                ic_row_dicts, "bin_20", outcome, _cut_iso, 10, value_key=metric)
             decile_stats_20_train = _compute_bucket_stats(_tr_b20)
             decile_stats_train    = _compute_bucket_stats(_tr_b10)
             _tlog(f'TT train-window bin stats '
@@ -4576,7 +4623,7 @@ async def secondary_correlation(req: CorrReq, pool=Depends(get_oi_pool)):
 #   Date filters now apply to OUTCOME ROWS only; bin assignments are
 #   full-history stored values unaffected by the date window.  Metrics
 #   with no bin20_{metric} column produce no entry (no fallback).
-_GLOBAL_BINS_SCHEMA_VERSION = 5  # bumped: family-filter exclusion applied to available_metrics
+_GLOBAL_BINS_SCHEMA_VERSION = 6  # v6: train_test payloads add bins_train / bin_ns_train (pre-cutoff per-bin returns) alongside the existing test-window bins / bin_ns, for the side-by-side train-vs-test triage wall. TT also stops filtering the fetch to the test window (both windows are needed) and resolves cutoff_date from tt_bins via _get_tt_cutoff, ignoring any caller-supplied value — so the cache key is salted with the real frozen split. v5 entries carry neither field and would render an empty train chart. v5 history: family-filter exclusion applied to available_metrics
 
 _GLOBAL_BINS_CACHE: dict = {}
 _GLOBAL_BINS_TABLE_DDL = """\
@@ -4629,6 +4676,15 @@ async def global_metric_bins(
 
     For `ticker = ALL` each ticker is independently ranked into n_bins then
     pooled (per-ticker rank normalization). For a single ticker, flat rank.
+    Because bins are read from the stored per-ticker bin20, ALL vs a single
+    ticker differ only by a row filter — the binning is identical, so the
+    two paths cannot disagree.
+
+    train_test additionally returns `bins_train` / `bin_ns_train`: the same
+    frozen bins aggregated over PRE-cutoff rows, so the client can render
+    train and test shapes side by side. `bins` / `bin_ns` keep their
+    test-window meaning. `cutoff_date` is a mode flag only — the value used
+    is always the frozen split read from tt_bins.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -4639,6 +4695,20 @@ async def global_metric_bins(
     # prefix is the schema-version salt (see _GLOBAL_BINS_SCHEMA_VERSION
     # at the top of this section); bumping the constant auto-invalidates
     # every stale cached payload on next read.
+    #
+    # TT cutoff is NOT caller-chosen. tt_bins is built with ONE frozen split;
+    # a caller-supplied cutoff_date acts only as the train_test MODE FLAG and
+    # its value is replaced by the frozen one read from tt_bins — the same
+    # source the Analyze pane uses (_get_tt_cutoff → /tt-cutoff → the client's
+    # this.cutoffDate). This is what stops the grid describing a different
+    # split from every other TT pane; the pane's free-form date input was
+    # removed for the same reason. Resolved BEFORE the cache key so the key
+    # is salted with the real split, not with whatever the client sent.
+    if cutoff_date:
+        _frozen_cut = await _get_tt_cutoff(pool)
+        if _frozen_cut:
+            cutoff_date = _frozen_cut
+
     if cutoff_date:
         mode_tag = f"tt:{cutoff_date}"
     elif walk_forward:
@@ -4761,10 +4831,11 @@ async def global_metric_bins(
     if date_to:
         where.append(f"df.trade_date <= ${p}")
         params.append(_date.fromisoformat(date_to)); p += 1
-    if cutoff_date:
-        # TT: aggregate outcomes from the test window only
-        where.append(f"df.trade_date >= ${p}")
-        params.append(_date.fromisoformat(cutoff_date)); p += 1
+    # TT deliberately does NOT filter to the test window here: the grid shows
+    # train and test bin shapes side by side, so both windows are fetched and
+    # partitioned in Python by _split_bins_by_cutoff below. (Pre-grid, this
+    # branch appended `df.trade_date >= cutoff` and the payload's `bins` was
+    # test-only. `bins` still means test-window — see the aggregation.)
 
     try:
         async with pool.acquire() as conn:
@@ -4796,6 +4867,27 @@ async def global_metric_bins(
         metrics_out: list = []
         for metric in available_metrics:
             col = f"bin20_{metric}"
+            if mode == "train_test":
+                # Shared primitive — the same function /analyze uses for
+                # decile_stats_train, so the grid's numbers and the Analyze
+                # pane's cannot drift. `bins` stays test-window (unchanged
+                # meaning from before the grid); `bins_train` is net-new.
+                #
+                # Per-bin means are pooled over rows, so the ALL aggregate is
+                # n-weighted across tickers by construction — matching every
+                # other ALL-ticker bin view.
+                tr_b, te_b = _split_bins_by_cutoff(
+                    rows, col, outcome, cutoff_date, n_bins)
+                metrics_out.append({
+                    "name":         metric,
+                    "bins":         [round(float(np.mean(b)), 6) if b else 0.0
+                                     for b in te_b],
+                    "bin_ns":       [len(b) for b in te_b],
+                    "bins_train":   [round(float(np.mean(b)), 6) if b else 0.0
+                                     for b in tr_b],
+                    "bin_ns_train": [len(b) for b in tr_b],
+                })
+                continue
             buckets: list = [[] for _ in range(n_bins)]
             for r in rows:
                 b20 = r.get(col)
