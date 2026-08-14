@@ -1,43 +1,49 @@
 #!/usr/bin/env python3
-"""Characterise the train_test rows that have only ONE window populated.
+"""Characterise the train_test corners that have only ONE window populated.
+
+THE UNIT IS THE CORNER, NOT THE ROW.  Every corner (P, S, direction) emits
+13 rows, one per outcome, and corner membership depends on BINS, not on the
+outcome — so when a corner is empty in a window it is empty for all 13
+outcomes at once.  Counting rows therefore multiplies every finding by ~13
+and makes any per-outcome breakdown mechanically flat.  Everything below
+counts distinct corners.
+
+Two corner identities are reported:
+  (P, S, direction)   — as stored; each logical corner appears twice
+  unordered           — (A, B, dir) and (B, A, reversed dir) collapsed,
+                        since they name the same set of trade-dates
 
 A corner with zero qualifying rows in a window is not automatically a bug.
-With bin edges frozen at the cutoff and a test period shorter than the
-train period, a thin corner can genuinely have no test observations, and
-that is correct behaviour rather than something to "fix".
+With edges frozen at the cutoff and a shorter test period, a thin corner
+can genuinely have no test observations.  Three things share the symptom:
 
-But three OTHER things produce the same symptom, and they are real
-problems.  This script separates them:
+  (a) THIN TAIL — expected.  Small n, spread across many pairs, and
+      TRAIN-populated / TEST-empty: the test window is shorter, so it is
+      the side that runs out.
 
-  (a) THIN TAIL — expected.
-      Small n on the populated side, spread across many metric pairs, and
-      skewed toward long forward horizons (a 20-day forward return is
-      undefined for the last ~20 trading days, so the test window loses
-      its tail).  Nothing to do but let the check allow it.
+  (b) THIN TRAIN COVERAGE — a data problem.  corner_scan.py's usable-bin
+      guard drops a metric only at ZERO usable rows in a window; a metric
+      with a handful of usable train rows clears it and then produces
+      train-empty corners against every partner.
 
-  (b) STALE METRIC — a data problem.
-      corner_scan.py's usable-bin guard drops a metric only when it has
-      ZERO usable rows in a window.  A metric with, say, 5 usable train
-      rows passes that guard and then produces train-thin corners against
-      every partner.  Symptom: the one-window rows CONCENTRATE on one or
-      two metrics instead of spreading out.
+  (c) ROWS BEING LOST — a code problem.  Substantial n on the populated
+      side with a genuinely empty other side is not a thin corner.
 
-  (c) COMPUTATION ARTIFACT — a code problem.
-      Substantial n on the populated side with a genuinely empty other
-      side is not a thin corner; it means rows are being lost.  Symptom:
-      large n on the populated side, and the independent SQL recount
-      disagreeing with the stored zero.
+TEST-ONLY corners are the direction that needs explaining.  Bin edges are
+quantiles OF THE TRAIN WINDOW, so by construction each bin20 holds ~5% of
+each ticker's train rows and every extreme has a healthy train marginal.
+For the JOINT to be empty in train while populated in test, one of these
+must hold — section 6 measures which:
 
-Reports, in order:
-  1. direction split (train-only vs test-only)
-  2. n distribution on the populated side
-  3. concentration by metric        -> discriminates (b)
-  4. concentration by outcome       -> confirms (a)'s expected skew
-  5. independent SQL recount of the EMPTY side on a sample -> rules out (c)
+    * genuine anti-correlation: both train marginals healthy, joint 0,
+      and the pair only co-occurs at the extremes after some regime shift
+    * thin train coverage:      a train marginal is tiny (case b)
+    * late-universe tickers:    the test rows come from tickers that have
+      no train history at all, so they could not contribute a train row
 
 Usage (VPS, project root, venv active):
     python scripts/corner_scan_tt_onewindow.py
-    python scripts/corner_scan_tt_onewindow.py --sample 40 --substantial 100
+    python scripts/corner_scan_tt_onewindow.py --sample 15 --substantial 300
 
 Exit status is non-zero if anything looks like (b) or (c).
 """
@@ -60,34 +66,108 @@ load_dotenv(_ROOT / ".env")
 import asyncpg  # noqa: E402
 
 
+# One-window rows, tagged with both corner identities.  Reused by every
+# section below so the corner definition can never drift between them.
+_OW_CTE = """
+WITH ow AS (
+    SELECT primary_metric, secondary_metric, corner_direction, outcome,
+           d_train_n, d_test_n,
+           COALESCE(d_train_n, d_test_n) AS pop_n,
+           CASE WHEN d_test_n IS NULL THEN 'train_only'
+                ELSE 'test_only' END     AS side,
+           CASE WHEN primary_metric <= secondary_metric
+                THEN primary_metric ELSE secondary_metric END AS m1,
+           CASE WHEN primary_metric <= secondary_metric
+                THEN secondary_metric ELSE primary_metric END AS m2,
+           CASE WHEN primary_metric <= secondary_metric
+                THEN corner_direction
+                ELSE CASE corner_direction
+                       WHEN 'low-high' THEN 'high-low'
+                       WHEN 'high-low' THEN 'low-high'
+                       ELSE corner_direction END END          AS udir
+    FROM corner_scan_2f
+    WHERE mode = 'train_test'
+      AND (d_train_n IS NULL) <> (d_test_n IS NULL)
+)
+"""
+
+
 def _outcome_expr(outcome: str) -> str:
     if outcome == "overnight_gap":
         return "(df.spot_co / NULLIF(df.spot_pc, 0) - 1.0)"
     return f'df."{outcome}"'
 
 
-async def _sql_count(conn, p, s, direction, outcome, n_bins, window, cutoff):
-    """Independent recount of one corner in one window, straight from SQL."""
+def _edge_vals(direction: str, n_bins: int) -> tuple[int, int]:
     p_lbl, s_lbl = direction.split("-")
-    p_edge = 1 if p_lbl == "low" else n_bins
-    s_edge = 1 if s_lbl == "low" else n_bins
+    return (1 if p_lbl == "low" else n_bins,
+            1 if s_lbl == "low" else n_bins)
+
+
+async def _joint_count(conn, p, s, direction, outcome, n_bins, window, cutoff):
+    """Independent SQL recount of one corner in one window."""
+    p_edge, s_edge = _edge_vals(direction, n_bins)
     conds = [
         f'bt."bin20_{p}" > 0',
         f'bt."bin20_{s}" > 0',
         f'((bt."bin20_{p}" - 1) * {n_bins}) / 20 + 1 = {p_edge}',
         f'((bt."bin20_{s}" - 1) * {n_bins}) / 20 + 1 = {s_edge}',
+        "bt.trade_date < $1" if window == "train" else "bt.trade_date >= $1",
     ]
-    params: list = [cutoff]
-    conds.append("bt.trade_date < $1" if window == "train"
-                 else "bt.trade_date >= $1")
     expr = _outcome_expr(outcome)
-    sql = (
+    return int(await conn.fetchval(
         f"SELECT COUNT({expr}) AS n FROM tt_bins bt "
         f"JOIN daily_features df "
         f"  ON bt.ticker = df.ticker AND bt.trade_date = df.trade_date "
-        f"WHERE {' AND '.join(conds)}"
-    )
-    return int(await conn.fetchval(sql, *params) or 0)
+        f"WHERE {' AND '.join(conds)}",
+        cutoff) or 0)
+
+
+async def _anatomy(conn, p, s, direction, cutoff):
+    """Marginals + ticker coverage for a corner, to explain a test-only case."""
+    p_edge, s_edge = _edge_vals(direction, 10)
+
+    def bin_expr(m, edge):
+        return (f'(bt."bin20_{m}" > 0 AND '
+                f'((bt."bin20_{m}" - 1) * 10) / 20 + 1 = {edge})')
+
+    row = await conn.fetchrow(
+        f"""SELECT
+              COUNT(*) FILTER (WHERE bt.trade_date <  $1
+                                 AND bt."bin20_{p}" > 0) AS p_usable_train,
+              COUNT(*) FILTER (WHERE bt.trade_date <  $1
+                                 AND bt."bin20_{s}" > 0) AS s_usable_train,
+              COUNT(*) FILTER (WHERE bt.trade_date <  $1
+                                 AND {bin_expr(p, p_edge)}) AS p_edge_train,
+              COUNT(*) FILTER (WHERE bt.trade_date <  $1
+                                 AND {bin_expr(s, s_edge)}) AS s_edge_train,
+              COUNT(*) FILTER (WHERE bt.trade_date <  $1
+                                 AND {bin_expr(p, p_edge)}
+                                 AND {bin_expr(s, s_edge)}) AS joint_train,
+              COUNT(*) FILTER (WHERE bt.trade_date >= $1
+                                 AND {bin_expr(p, p_edge)}
+                                 AND {bin_expr(s, s_edge)}) AS joint_test
+            FROM tt_bins bt""",
+        cutoff)
+
+    # Which tickers supply the test-side rows, and do they have ANY train
+    # history?  A ticker added to the universe after the cutoff cannot
+    # contribute a train row no matter how common the corner is.
+    tk = await conn.fetchrow(
+        f"""WITH test_tk AS (
+                SELECT DISTINCT bt.ticker FROM tt_bins bt
+                WHERE bt.trade_date >= $1
+                  AND {bin_expr(p, p_edge)} AND {bin_expr(s, s_edge)}
+            ),
+            train_tk AS (
+                SELECT DISTINCT ticker FROM tt_bins WHERE trade_date < $1
+            )
+            SELECT (SELECT COUNT(*) FROM test_tk) AS n_test_tk,
+                   (SELECT COUNT(*) FROM test_tk
+                      WHERE ticker NOT IN (SELECT ticker FROM train_tk))
+                       AS n_late_tk""",
+        cutoff)
+    return dict(row), dict(tk)
 
 
 async def run(args) -> None:
@@ -101,186 +181,298 @@ async def run(args) -> None:
         cutoff = await conn.fetchval("SELECT MAX(cutoff_date) FROM tt_bins")
         print(f"Frozen TT cutoff: {cutoff}")
 
-        total = await conn.fetchval(
-            "SELECT COUNT(*) FROM corner_scan_2f WHERE mode = 'train_test'")
-        one_win = await conn.fetchval(
-            """SELECT COUNT(*) FROM corner_scan_2f
-               WHERE mode = 'train_test'
-                 AND (d_train_n IS NULL) <> (d_test_n IS NULL)""")
-        print(f"TT rows total: {total:,}")
-        print(f"One-window rows: {one_win:,} "
-              f"({100.0 * one_win / total:.3f}% of the table)\n")
-        if one_win == 0:
-            print("Nothing to characterise.")
+        totals = await conn.fetchrow(f"""
+            {_OW_CTE}
+            SELECT (SELECT COUNT(*) FROM corner_scan_2f
+                     WHERE mode='train_test')                  AS all_rows,
+                   (SELECT COUNT(DISTINCT (primary_metric, secondary_metric,
+                                           corner_direction))
+                      FROM corner_scan_2f WHERE mode='train_test')
+                                                               AS all_corners,
+                   (SELECT COUNT(*) FROM ow)                   AS ow_rows,
+                   (SELECT COUNT(DISTINCT (primary_metric, secondary_metric,
+                                           corner_direction)) FROM ow)
+                                                               AS ow_corners,
+                   (SELECT COUNT(DISTINCT (m1, m2, udir)) FROM ow)
+                                                               AS ow_unordered
+        """)
+        ow_corners = int(totals["ow_corners"])
+        print(f"TT rows total          : {int(totals['all_rows']):>9,}")
+        print(f"TT corners total       : {int(totals['all_corners']):>9,}")
+        print(f"one-window rows        : {int(totals['ow_rows']):>9,}")
+        print(f"one-window CORNERS     : {ow_corners:>9,}"
+              f"   ({100.0 * ow_corners / max(int(totals['all_corners']), 1):.3f}%"
+              f" of all corners)")
+        print(f"  unordered (dedup'd)  : {int(totals['ow_unordered']):>9,}"
+              f"   <- logical corners; each appears in both orientations")
+        if ow_corners == 0:
+            print("\nNothing to characterise.")
             return
 
-        # ── 1. Direction split ───────────────────────────────────────────────
-        print("═" * 74)
-        print("1. DIRECTION SPLIT")
-        print("═" * 74)
-        row = await conn.fetchrow(
-            """SELECT
-                 COUNT(*) FILTER (WHERE d_train_n IS NOT NULL
-                                    AND d_test_n IS NULL) AS train_only,
-                 COUNT(*) FILTER (WHERE d_test_n IS NOT NULL
-                                    AND d_train_n IS NULL) AS test_only
-               FROM corner_scan_2f
-               WHERE mode = 'train_test'
-                 AND (d_train_n IS NULL) <> (d_test_n IS NULL)""")
-        tr_only, te_only = int(row["train_only"]), int(row["test_only"])
-        print(f"  train populated, test EMPTY : {tr_only:>7,}"
-              f"   ({100.0 * tr_only / one_win:5.1f}%)")
-        print(f"  test populated, train EMPTY : {te_only:>7,}"
-              f"   ({100.0 * te_only / one_win:5.1f}%)")
-        print("\n  Expected: overwhelmingly train-populated/test-empty. The")
-        print("  test window is shorter, so it is the side that runs out of")
-        print("  observations first. A large test-only share would instead")
-        print("  suggest metrics whose bins only exist late in the sample.")
-
-        # ── 2. n distribution on the populated side ──────────────────────────
+        # ── 1. Direction split, BY CORNER ────────────────────────────────────
         print("\n" + "═" * 74)
-        print("2. n DISTRIBUTION ON THE POPULATED SIDE")
+        print("1. DIRECTION SPLIT  (distinct corners)")
         print("═" * 74)
-        dist = await conn.fetchrow(
-            f"""SELECT COUNT(*) AS n_rows,
-                       MIN(pop_n) AS min_n,
-                       PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY pop_n) AS p25,
-                       PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY pop_n) AS p50,
-                       PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY pop_n) AS p75,
-                       PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY pop_n) AS p90,
-                       PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY pop_n) AS p99,
-                       MAX(pop_n) AS max_n,
-                       COUNT(*) FILTER (WHERE pop_n >= 30)  AS ge_30,
-                       COUNT(*) FILTER (WHERE pop_n >= 100) AS ge_100,
-                       COUNT(*) FILTER (WHERE pop_n >= $1)  AS ge_sub
-                FROM (
-                    SELECT COALESCE(d_train_n, d_test_n) AS pop_n
-                    FROM corner_scan_2f
-                    WHERE mode = 'train_test'
-                      AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-                ) t""",
-            args.substantial)
+        d = await conn.fetchrow(f"""
+            {_OW_CTE}
+            SELECT COUNT(DISTINCT (primary_metric, secondary_metric,
+                                   corner_direction))
+                     FILTER (WHERE side='train_only') AS train_only,
+                   COUNT(DISTINCT (primary_metric, secondary_metric,
+                                   corner_direction))
+                     FILTER (WHERE side='test_only')  AS test_only,
+                   COUNT(DISTINCT (m1, m2, udir))
+                     FILTER (WHERE side='train_only') AS u_train_only,
+                   COUNT(DISTINCT (m1, m2, udir))
+                     FILTER (WHERE side='test_only')  AS u_test_only
+            FROM ow
+        """)
+        tr_o, te_o = int(d["train_only"]), int(d["test_only"])
+        tot = max(tr_o + te_o, 1)
+        print(f"  train populated, test EMPTY : {tr_o:>6,} corners"
+              f"  ({100.0 * tr_o / tot:5.1f}%)"
+              f"   unordered {int(d['u_train_only']):>5,}")
+        print(f"  test populated, train EMPTY : {te_o:>6,} corners"
+              f"  ({100.0 * te_o / tot:5.1f}%)"
+              f"   unordered {int(d['u_test_only']):>5,}")
+        print("\n  train-only is the EXPECTED direction: the test window is")
+        print("  shorter, so it runs out of observations first.")
+        print("  test-only is the ODD direction. Bin edges are quantiles of")
+        print("  the TRAIN window, so every extreme has a healthy train")
+        print("  marginal by construction — an empty train JOINT needs an")
+        print("  explanation. Section 6 measures which one applies.")
+
+        # ── 2. n distribution, BY CORNER ─────────────────────────────────────
+        print("\n" + "═" * 74)
+        print("2. n DISTRIBUTION ON THE POPULATED SIDE  (per corner)")
+        print("═" * 74)
+        print("  A corner's n is MAX(n) across its 13 outcomes — the largest")
+        print("  outcome coverage, i.e. closest to raw bin membership.\n")
+        dist = await conn.fetchrow(f"""
+            {_OW_CTE},
+            per_corner AS (
+                SELECT primary_metric, secondary_metric, corner_direction,
+                       MAX(pop_n) AS corner_n
+                FROM ow
+                GROUP BY primary_metric, secondary_metric, corner_direction
+            )
+            SELECT COUNT(*) AS n_corners,
+                   MIN(corner_n) AS min_n,
+                   PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY corner_n) AS p25,
+                   PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY corner_n) AS p50,
+                   PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY corner_n) AS p75,
+                   PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY corner_n) AS p90,
+                   MAX(corner_n) AS max_n,
+                   COUNT(*) FILTER (WHERE corner_n >= 30)  AS ge_30,
+                   COUNT(*) FILTER (WHERE corner_n >= 100) AS ge_100,
+                   COUNT(*) FILTER (WHERE corner_n >= $1)  AS ge_sub
+            FROM per_corner
+        """, args.substantial)
         for label, key in (("min", "min_n"), ("p25", "p25"), ("median", "p50"),
-                           ("p75", "p75"), ("p90", "p90"), ("p99", "p99"),
-                           ("max", "max_n")):
+                           ("p75", "p75"), ("p90", "p90"), ("max", "max_n")):
             v = dist[key]
-            print(f"  {label:>6}: {float(v):>10,.0f}" if v is not None
-                  else f"  {label:>6}:          —")
-        print(f"\n  n >= 30           : {int(dist['ge_30']):>7,}")
-        print(f"  n >= 100          : {int(dist['ge_100']):>7,}")
-        print(f"  n >= {args.substantial:<13}: {int(dist['ge_sub']):>7,}"
-              f"   <- 'substantial' threshold")
+            print(f"  {label:>6}: {float(v):>9,.0f}" if v is not None
+                  else f"  {label:>6}:         —")
         substantial = int(dist["ge_sub"])
+        print(f"\n  corners with n >= 30        : {int(dist['ge_30']):>5,}")
+        print(f"  corners with n >= 100       : {int(dist['ge_100']):>5,}")
+        print(f"  corners with n >= {args.substantial:<9}: {substantial:>5,}"
+              f"   <- 'substantial'")
 
-        # ── 3. Concentration by metric ───────────────────────────────────────
+        # ── 3. Metric concentration, BY CORNER ───────────────────────────────
         print("\n" + "═" * 74)
-        print("3. CONCENTRATION BY METRIC  (stale-metric detector)")
+        print("3. METRIC CONCENTRATION  (distinct corners per metric)")
         print("═" * 74)
-        conc = await conn.fetch(
-            """SELECT m, COUNT(*) AS n FROM (
-                   SELECT primary_metric AS m FROM corner_scan_2f
-                   WHERE mode='train_test'
-                     AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-                   UNION ALL
-                   SELECT secondary_metric AS m FROM corner_scan_2f
-                   WHERE mode='train_test'
-                     AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-               ) t GROUP BY m ORDER BY n DESC LIMIT 12""")
-        n_metrics_involved = await conn.fetchval(
-            """SELECT COUNT(DISTINCT m) FROM (
-                   SELECT primary_metric AS m FROM corner_scan_2f
-                   WHERE mode='train_test'
-                     AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-                   UNION ALL
-                   SELECT secondary_metric AS m FROM corner_scan_2f
-                   WHERE mode='train_test'
-                     AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-               ) t""")
-        top_share = (100.0 * int(conc[0]["n"]) / (2 * one_win)) if conc else 0.0
-        print(f"  distinct metrics involved: {n_metrics_involved}")
-        print(f"  {'metric':<46} {'appearances':>12}")
-        print(f"  {'-'*46} {'-'*12}")
+        conc = await conn.fetch(f"""
+            {_OW_CTE},
+            corners AS (
+                SELECT DISTINCT primary_metric, secondary_metric,
+                       corner_direction, side
+                FROM ow
+            ),
+            slots AS (
+                SELECT primary_metric AS m, side FROM corners
+                UNION ALL
+                SELECT secondary_metric AS m, side FROM corners
+            )
+            SELECT m,
+                   COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE side='test_only') AS n_test_only
+            FROM slots GROUP BY m ORDER BY n DESC LIMIT 12
+        """)
+        n_metrics = await conn.fetchval(f"""
+            {_OW_CTE},
+            corners AS (SELECT DISTINCT primary_metric, secondary_metric,
+                               corner_direction FROM ow)
+            SELECT COUNT(DISTINCT m) FROM (
+                SELECT primary_metric AS m FROM corners
+                UNION ALL SELECT secondary_metric AS m FROM corners) t
+        """)
+        total_slots = 2 * ow_corners
+        top_share = (100.0 * int(conc[0]["n"]) / total_slots) if conc else 0.0
+        print(f"  distinct metrics involved: {int(n_metrics)}")
+        print(f"  {'metric':<44} {'corners':>8} {'test-only':>10}")
+        print(f"  {'-'*44} {'-'*8} {'-'*10}")
         for r in conc:
-            print(f"  {r['m']:<46} {int(r['n']):>12,}")
-        print(f"\n  top metric accounts for {top_share:.1f}% of all slots.")
-        print("  Spread across many metrics -> thin tail (expected).")
-        print("  Concentrated on one or two -> that metric's bins are stale")
-        print("  in one window; rebuild tt_bins upstream.")
+            print(f"  {r['m']:<44} {int(r['n']):>8,} {int(r['n_test_only']):>10,}")
+        print(f"\n  top metric holds {top_share:.1f}% of corner slots "
+              f"({total_slots:,} total).")
+        print("  Spread out -> thin tail. Concentrated -> that metric's bins")
+        print("  are thin in one window; check it upstream.")
 
-        # ── 4. Concentration by outcome ──────────────────────────────────────
+        # ── 4. Corners per outcome (interpretable form) ──────────────────────
         print("\n" + "═" * 74)
-        print("4. CONCENTRATION BY OUTCOME  (expected-skew confirmation)")
+        print("4. CORNERS PER OUTCOME")
         print("═" * 74)
-        by_out = await conn.fetch(
-            """SELECT outcome, COUNT(*) AS n FROM corner_scan_2f
-               WHERE mode='train_test'
-                 AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-               GROUP BY outcome ORDER BY n DESC""")
-        for r in by_out:
-            print(f"  {r['outcome']:<20} {int(r['n']):>8,}")
-        print("\n  Expected skew: LONG horizons (10d, 20d) dominate. A forward")
-        print("  return is undefined for the last N trading days, so the test")
-        print("  window loses its tail and long-horizon corners empty out")
-        print("  first. Flat across horizons would be less consistent with a")
-        print("  pure thin-tail explanation.")
+        print("  Corner membership is bin-driven, so a corner empty in a")
+        print("  window is empty for ALL its outcomes. Counts here should be")
+        print("  near-identical across outcomes; the informative number is")
+        print("  the split below, not the per-outcome list.\n")
+        full_split = await conn.fetchrow(f"""
+            {_OW_CTE},
+            per_corner AS (
+                SELECT primary_metric, secondary_metric, corner_direction,
+                       COUNT(*) AS n_outcomes
+                FROM ow
+                GROUP BY primary_metric, secondary_metric, corner_direction
+            )
+            SELECT COUNT(*) FILTER (WHERE n_outcomes = 13) AS all13,
+                   COUNT(*) FILTER (WHERE n_outcomes <  13) AS partial,
+                   MIN(n_outcomes) AS min_o
+            FROM per_corner
+        """)
+        print(f"  one-window for ALL 13 outcomes : "
+              f"{int(full_split['all13']):>5,}"
+              f"   <- pure bin emptiness (expected)")
+        print(f"  one-window for SOME outcomes   : "
+              f"{int(full_split['partial']):>5,}"
+              f"   <- outcome-specific; see note")
+        print(f"  fewest outcomes on any corner  : {int(full_split['min_o']):>5,}")
+        print("\n  A PARTIAL corner is not necessarily wrong: CC outcomes are")
+        print("  excluded when a MORNING metric is on either axis, and a long")
+        print("  forward return is undefined for the last N trading days, so")
+        print("  a corner whose few test rows sit at the very end can empty")
+        print("  out for 20d while surviving for 1d.")
 
-        # ── 5. Independent SQL recount of the EMPTY side ─────────────────────
+        # ── 5. SQL recount of the empty side (per corner, deduped) ───────────
         print("\n" + "═" * 74)
-        print(f"5. SQL RECOUNT OF THE EMPTY SIDE  (sample of {args.sample},")
-        print("   largest populated-n first — the most suspicious ones)")
+        print(f"5. SQL RECOUNT OF THE EMPTY SIDE  ({args.sample} corners,")
+        print("   largest populated n first)")
         print("═" * 74)
-        sample = await conn.fetch(
-            """SELECT primary_metric, secondary_metric, corner_direction,
-                      outcome, d_train_n, d_test_n
-               FROM corner_scan_2f
-               WHERE mode='train_test'
-                 AND (d_train_n IS NULL) <> (d_test_n IS NULL)
-               ORDER BY COALESCE(d_train_n, d_test_n) DESC
-               LIMIT $1""",
-            args.sample)
+        sample = await conn.fetch(f"""
+            {_OW_CTE},
+            per_corner AS (
+                -- side is paired with top_outcome via the same ordering, so
+                -- the recount always asks about the window that is actually
+                -- empty FOR THAT OUTCOME. A corner can in principle be
+                -- train_only for one outcome and test_only for another when
+                -- an outcome is NULL across a whole window.
+                SELECT primary_metric, secondary_metric, corner_direction,
+                       (ARRAY_AGG(side    ORDER BY pop_n DESC))[1] AS side,
+                       MAX(pop_n) AS corner_n,
+                       (ARRAY_AGG(outcome ORDER BY pop_n DESC))[1] AS top_outcome
+                FROM ow
+                GROUP BY primary_metric, secondary_metric, corner_direction
+            )
+            SELECT * FROM per_corner ORDER BY corner_n DESC LIMIT $1
+        """, args.sample)
         mismatches = 0
-        print(f"  {'corner':<58} {'pop n':>8} {'empty side (SQL)':>17}")
-        print(f"  {'-'*58} {'-'*8} {'-'*17}")
+        print(f"  {'corner':<52} {'pop n':>7} {'empty side':>16}")
+        print(f"  {'-'*52} {'-'*7} {'-'*16}")
         for r in sample:
-            empty_win = "test" if r["d_test_n"] is None else "train"
-            pop_n = r["d_train_n"] if r["d_test_n"] is None else r["d_test_n"]
-            sql_n = await _sql_count(
+            empty_win = "test" if r["side"] == "train_only" else "train"
+            sql_n = await _joint_count(
                 conn, r["primary_metric"], r["secondary_metric"],
-                r["corner_direction"], r["outcome"], 10, empty_win, cutoff)
-            flag = "" if sql_n == 0 else f"  <- MISMATCH (stored 0)"
+                r["corner_direction"], r["top_outcome"], 10, empty_win, cutoff)
             if sql_n != 0:
                 mismatches += 1
+            flag = "" if sql_n == 0 else "  <- MISMATCH"
             name = (f"{r['primary_metric']}x{r['secondary_metric']} "
-                    f"[{r['corner_direction']}] {r['outcome']}")
-            print(f"  {name[:58]:<58} {int(pop_n):>8,} "
-                  f"{empty_win}={sql_n:<12}{flag}")
+                    f"[{r['corner_direction']}]")
+            print(f"  {name[:52]:<52} {int(r['corner_n']):>7,} "
+                  f"{empty_win}={sql_n:<9}{flag}")
+
+        # ── 6. Anatomy of TEST-ONLY corners ─────────────────────────────────
+        print("\n" + "═" * 74)
+        print("6. ANATOMY OF TEST-ONLY CORNERS  (the odd direction)")
+        print("═" * 74)
+        test_only = await conn.fetch(f"""
+            {_OW_CTE},
+            per_corner AS (
+                SELECT primary_metric, secondary_metric, corner_direction,
+                       MAX(pop_n) AS corner_n
+                FROM ow WHERE side = 'test_only'
+                GROUP BY primary_metric, secondary_metric, corner_direction
+            )
+            SELECT * FROM per_corner ORDER BY corner_n DESC LIMIT $1
+        """, args.sample)
+        thin_train = late_tickers = anti_corr = 0
+        if not test_only:
+            print("  none — every one-window corner is train-populated,")
+            print("  which is the expected direction. Nothing to explain.")
+        else:
+            print("  train marginals are ~5% of train rows per bin20 BY")
+            print("  CONSTRUCTION, so a healthy marginal with a zero joint is")
+            print("  genuine anti-correlation; a tiny marginal is thin data.\n")
+            for r in test_only:
+                a, tk = await _anatomy(
+                    conn, r["primary_metric"], r["secondary_metric"],
+                    r["corner_direction"], cutoff)
+                pm, sm = int(a["p_edge_train"]), int(a["s_edge_train"])
+                if tk["n_late_tk"] and tk["n_late_tk"] == tk["n_test_tk"]:
+                    verdict = "LATE-UNIVERSE TICKERS"
+                    late_tickers += 1
+                elif min(pm, sm) < args.thin_marginal:
+                    verdict = "THIN TRAIN MARGINAL"
+                    thin_train += 1
+                else:
+                    verdict = "anti-correlated (ok)"
+                    anti_corr += 1
+                print(f"  {r['primary_metric']}x{r['secondary_metric']} "
+                      f"[{r['corner_direction']}]  test n={int(r['corner_n']):,}")
+                print(f"      train marginals: P-edge={pm:,}  S-edge={sm:,}"
+                      f"   joint_train={int(a['joint_train']):,}"
+                      f"  joint_test={int(a['joint_test']):,}")
+                print(f"      test tickers={int(tk['n_test_tk'])}"
+                      f"  of which no train history={int(tk['n_late_tk'])}"
+                      f"   -> {verdict}")
 
         # ── Verdict ──────────────────────────────────────────────────────────
         print("\n" + "═" * 74)
-        print("VERDICT")
+        print("VERDICT  (corner units)")
         print("═" * 74)
         problems = []
         if mismatches:
             problems.append(
-                f"(c) {mismatches} sampled row(s) have a NON-ZERO SQL count on "
-                f"the side stored as empty — rows are being lost.")
+                f"(c) {mismatches} sampled corner(s) have a NON-ZERO SQL count "
+                f"on the side stored as empty — rows are being lost.")
         if substantial:
             problems.append(
-                f"(c?) {substantial} row(s) have n >= {args.substantial} on the "
-                f"populated side with the other side empty — verify those.")
+                f"(c?) {substantial} corner(s) have n >= {args.substantial} on "
+                f"the populated side with the other side empty.")
         if top_share > 25.0:
             problems.append(
-                f"(b) one metric accounts for {top_share:.1f}% of slots — "
-                f"looks like a stale metric, not a thin tail.")
+                f"(b) one metric holds {top_share:.1f}% of corner slots — "
+                f"looks like thin bin coverage, not a thin tail.")
+        if thin_train:
+            problems.append(
+                f"(b) {thin_train} test-only corner(s) have a train marginal "
+                f"below {args.thin_marginal} — thin train data, not "
+                f"anti-correlation.")
+        if late_tickers:
+            problems.append(
+                f"(info) {late_tickers} test-only corner(s) are driven purely "
+                f"by tickers with no train history.")
         if problems:
             for p in problems:
                 print("  ✗ " + p)
             print("\n  Do NOT relax the batch self-check yet.")
             sys.exit(1)
-        print("  ✓ Spread across metrics, small n on the populated side, and")
-        print("    every sampled empty side independently confirms as zero.")
-        print("    Consistent with a genuine thin tail under frozen edges.")
-        print("    Safe to let the self-check allow one-window rows.")
+        print("  ✓ Spread across metrics, small n per corner, every sampled")
+        print("    empty side independently confirms as zero, and any")
+        print("    test-only corners are explained. Consistent with a genuine")
+        print("    thin tail under frozen edges — safe to allow one-window")
+        print("    corners in the self-check.")
     finally:
         await conn.close()
 
@@ -289,11 +481,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sample", type=int, default=25,
-                    help="How many corners to SQL-recount (default 25)")
+    ap.add_argument("--sample", type=int, default=15,
+                    help="Corners to SQL-recount / dissect (default 15)")
     ap.add_argument("--substantial", type=int, default=300,
-                    help="n on the populated side that counts as "
-                         "'substantial' and warrants suspicion (default 300)")
+                    help="Populated-side n per CORNER that warrants "
+                         "suspicion (default 300)")
+    ap.add_argument("--thin-marginal", type=int, default=200,
+                    help="Train-window extreme-bin marginal below which a "
+                         "test-only corner is called thin data rather than "
+                         "anti-correlation (default 200)")
     asyncio.run(run(ap.parse_args()))
 
 
