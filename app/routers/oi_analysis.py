@@ -8596,8 +8596,27 @@ async def corner_scan_2f_endpoint(
     # The COUNT query uses the same conds without aliasing (no JOIN
     # there), which is fine because `cs` is just a stripped alias and
     # Postgres tolerates it when the FROM only has corner_scan_2f.
-    conds:  list[str] = [f"cs.{n_gate_col} >= $1", "cs.mode = $2"]
-    params: list      = [min_d_n, mode]
+    # n gate.  For TT the column is NULLABLE: a corner with zero qualifying
+    # rows in the test window stores NULL, not 0.  A bare `d_test_n >= $1`
+    # evaluates to NULL there and drops the row — including when min n is 0,
+    # where the user has explicitly asked to see everything.  COALESCE makes
+    # "no test observations" behave as the zero it is, so:
+    #   min n >= 1  → NULL-test rows excluded (unchanged: they cannot clear
+    #                 a positive threshold anyway)
+    #   min n == 0  → NULL-test rows shown, rendering as train stats with a
+    #                 dim em-dash in the test columns
+    # The second condition keeps rows that carry nothing at all out of the
+    # min-n-0 view; without it "show everything" fills the page with corners
+    # that have no observations in either window.
+    if is_tt:
+        conds = [
+            f"COALESCE(cs.{n_gate_col}, 0) >= $1",
+            "(cs.d_train_n IS NOT NULL OR cs.d_test_n IS NOT NULL)",
+            "cs.mode = $2",
+        ]
+    else:
+        conds = [f"cs.{n_gate_col} >= $1", "cs.mode = $2"]
+    params: list = [min_d_n, mode]
     p = 3
 
     if primary_metric:
