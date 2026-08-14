@@ -8175,7 +8175,13 @@ def _cs_live_2f(
                  n_bins_S, sums_ref, cnts_ref, p_ei) in pe_configs:
                 pe_rows = np.where(p_col == p_edge_val)[0]
                 n_pe    = len(pe_rows)
-                if n_pe < 2:
+                # Skip only a genuinely empty P-edge. `n_pe < 2` silently
+                # dropped a ticker's entire contribution whenever it had
+                # exactly one row at the P extreme in the window, which made
+                # results orientation-dependent — (A×B) and (B×A) name the
+                # same symmetric corner but dropped different tickers.
+                # Kept in sync with the same fix in scripts/corner_scan.py.
+                if n_pe == 0:
                     continue
                 S_bins  = S_bin_mat[pe_rows, :]
                 out_pe  = out_t[pe_rows, :]

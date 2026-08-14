@@ -654,7 +654,10 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                     windows = ((W_TRAIN, s, e),)
 
                 for w_idx, lo, hi in windows:
-                    if hi - lo < 2:
+                    # Skip only an EMPTY window. A 1-row window is real data
+                    # and must be counted — same reasoning as the n_pe guard
+                    # below, which this used to mask.
+                    if hi <= lo:
                         continue
                     bd_t  = bins_d_full[lo:hi, :]  # (N_w, F) stored deciles
                     bq_t  = bins_q_full[lo:hi, :]  # (N_w, F) stored quintiles
@@ -676,7 +679,24 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                     for p_col, p_edge_val, S_bin_mat, n_bins_S, sums_ref, cnts_ref, p_ei in pe_configs:
                         pe_rows = np.where(p_col == p_edge_val)[0]
                         n_pe    = len(pe_rows)
-                        if n_pe < 2:
+                        # Skip only a GENUINELY EMPTY P-edge. This used to be
+                        # `n_pe < 2`, which silently discarded a ticker's whole
+                        # contribution to every corner whenever that ticker had
+                        # exactly ONE row at the P extreme in this window.
+                        #
+                        # That made the scan orientation-dependent: the guard
+                        # keys on P, so (A×B) and (B×A) — the same symmetric
+                        # corner — dropped different tickers and returned
+                        # different counts. The loss accumulates across
+                        # tickers (it is NOT bounded at one row) and grows as
+                        # the window shrinks, which is why it showed up in the
+                        # TT test window while train matched SQL exactly.
+                        #
+                        # There is no numerical reason for the old threshold:
+                        # an (F,1)@(1,O) matmul is well-defined, and sums and
+                        # counts are linear. Empty is skipped purely as an
+                        # optimisation.
+                        if n_pe == 0:
                             continue
 
                         S_bins  = S_bin_mat[pe_rows, :]    # (n_pe, F) stored bins
@@ -866,6 +886,33 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                  (SELECT as_of                          FROM corner_scan_2f WHERE mode=$1 LIMIT 1) AS as_of""",
             mode,
         )
+        # Orientation symmetry (all modes).  (A, B, "low-high") and
+        # (B, A, "high-low") name the SAME set of trade-dates, so their
+        # counts must be identical.  They diverged when a per-ticker guard
+        # keyed on P dropped tickers asymmetrically; this check exists so
+        # that class of bug can never return silently.
+        n_col = "d_test_n" if is_tt else "d_n"
+        asym = await conn.fetchrow(
+            f"""SELECT COUNT(*) AS n_bad,
+                       COALESCE(MAX(ABS(a.{n_col} - b.{n_col})), 0) AS max_diff
+                FROM corner_scan_2f a
+                JOIN corner_scan_2f b
+                  ON  b.mode             = a.mode
+                  AND b.primary_metric   = a.secondary_metric
+                  AND b.secondary_metric = a.primary_metric
+                  AND b.outcome          = a.outcome
+                  AND b.corner_direction = CASE a.corner_direction
+                        WHEN 'low-high' THEN 'high-low'
+                        WHEN 'high-low' THEN 'low-high'
+                        ELSE a.corner_direction END
+                WHERE a.mode = $1
+                  AND a.{n_col} IS DISTINCT FROM b.{n_col}""",
+            mode,
+        )
+        mark = "✓" if asym["n_bad"] == 0 else "✗ FAIL"
+        print(f"  {mark}  Orientation-asymmetric corners [{mode}]: "
+              f"{asym['n_bad']} (must be 0; max row diff {asym['max_diff']})")
+
         # TT-only: every stored row must carry both a train and a test stat.
         # A row with one side NULL means the split dropped a window somewhere.
         if is_tt:
@@ -898,7 +945,8 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         print(f"  Phase 6 runtime:         {phase6_secs:.0f}s")
 
         all_ok = (cc_bad == 0 and inelig_bad == 0
-                  and half_rows == 0 and stale_cutoff == 0)
+                  and half_rows == 0 and stale_cutoff == 0
+                  and asym["n_bad"] == 0)
         print(
             "\n── "
             + ("All self-checks PASSED ✓" if all_ok
