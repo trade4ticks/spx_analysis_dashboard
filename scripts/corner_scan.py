@@ -183,6 +183,75 @@ def _rpd(avg: float | None, days: int | None) -> float | None:
     return float(avg / days)
 
 
+# How many one-window corners the batch re-counts in SQL before trusting
+# them.  Ordered by populated-side n, so the sample is the corners where a
+# lost-rows bug would show up most clearly rather than a random draw.
+_RECOUNT_SAMPLE = 25
+
+
+def _cs_outcome_expr(outcome: str) -> str:
+    """SQL for an outcome column, including the derived overnight gap."""
+    if outcome == "overnight_gap":
+        return "(df.spot_co / NULLIF(df.spot_pc, 0) - 1.0)"
+    return f'df."{outcome}"'
+
+
+async def _recount_empty_sides(conn, cutoff, limit: int) -> list[str]:
+    """Re-count, straight from tt_bins, the window each corner stored as empty.
+
+    A one-window corner is legitimate only if the empty side really is empty.
+    This recomputes it in SQL — a path that shares no code with the numpy
+    aggregation — and returns a description for every corner where the two
+    disagree.  Empty list means every sampled corner checks out.
+    """
+    rows = await conn.fetch(
+        """SELECT primary_metric, secondary_metric, corner_direction,
+                  (ARRAY_AGG(side    ORDER BY pop_n DESC))[1] AS side,
+                  (ARRAY_AGG(outcome ORDER BY pop_n DESC))[1] AS outcome,
+                  MAX(pop_n) AS corner_n
+           FROM (
+               SELECT primary_metric, secondary_metric, corner_direction,
+                      outcome,
+                      COALESCE(d_train_n, d_test_n) AS pop_n,
+                      CASE WHEN d_test_n IS NULL THEN 'train_only'
+                           ELSE 'test_only' END     AS side
+               FROM corner_scan_2f
+               WHERE mode = 'train_test'
+                 AND (d_train_n IS NULL) <> (d_test_n IS NULL)
+           ) t
+           GROUP BY primary_metric, secondary_metric, corner_direction
+           ORDER BY MAX(pop_n) DESC
+           LIMIT $1""",
+        limit,
+    )
+    bad: list[str] = []
+    for r in rows:
+        p, s = r["primary_metric"], r["secondary_metric"]
+        p_lbl, s_lbl = r["corner_direction"].split("-")
+        p_edge = 1 if p_lbl == "low" else 10
+        s_edge = 1 if s_lbl == "low" else 10
+        empty_win = "test" if r["side"] == "train_only" else "train"
+        date_cond = ("bt.trade_date < $1" if empty_win == "train"
+                     else "bt.trade_date >= $1")
+        expr = _cs_outcome_expr(r["outcome"])
+        n = await conn.fetchval(
+            f"""SELECT COUNT({expr}) FROM tt_bins bt
+                JOIN daily_features df
+                  ON bt.ticker = df.ticker AND bt.trade_date = df.trade_date
+                WHERE bt."bin20_{p}" > 0 AND bt."bin20_{s}" > 0
+                  AND ((bt."bin20_{p}" - 1) * 10) / 20 + 1 = {p_edge}
+                  AND ((bt."bin20_{s}" - 1) * 10) / 20 + 1 = {s_edge}
+                  AND {date_cond}""",
+            cutoff,
+        )
+        if int(n or 0) != 0:
+            bad.append(
+                f"{p} x {s} [{r['corner_direction']}] {r['outcome']}: "
+                f"stored {empty_win} empty, SQL says {int(n):,}"
+            )
+    return bad
+
+
 def _print_skipped_summary(
     skipped: list, bin_table: str, is_tt: bool, cutoff_iso: str
 ) -> None:
@@ -913,18 +982,62 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         print(f"  {mark}  Orientation-asymmetric corners [{mode}]: "
               f"{asym['n_bad']} (must be 0; max row diff {asym['max_diff']})")
 
-        # TT-only: every stored row must carry both a train and a test stat.
-        # A row with one side NULL means the split dropped a window somewhere.
+        # TT-only checks.
         if is_tt:
-            half_rows = await conn.fetchval(
-                """SELECT COUNT(*) FROM corner_scan_2f
+            # (i) One-window corners are ALLOWED and merely reported.
+            #
+            # This used to fail the batch.  It shouldn't: with edges frozen at
+            # the cutoff and a shorter test period, a thin corner can genuinely
+            # have zero qualifying rows in one window, and a corner that is
+            # structurally impossible in the test era is correct behaviour, not
+            # a defect.  (The confirmed example: near the 52-week low AND the
+            # 52-week high at once needs a compressed 52-week range — common
+            # 2019-2023, absent in a 2024-2026 melt-up.)  Such a corner should
+            # render as train stats plus a NULL test, so it is counted here in
+            # CORNER units — a corner emits 13 rows, one per outcome, and
+            # emptiness is bin-driven, so it empties for all of them at once.
+            ow = await conn.fetchrow(
+                """SELECT COUNT(*) AS n_rows,
+                          COUNT(DISTINCT (primary_metric, secondary_metric,
+                                          corner_direction)) AS n_corners
+                   FROM corner_scan_2f
                    WHERE mode = 'train_test'
                      AND (d_train_n IS NULL) <> (d_test_n IS NULL)""",
             )
-            mark = "✓" if half_rows == 0 else "✗ FAIL"
-            print(f"  {mark}  TT rows with only one window populated: "
-                  f"{half_rows} (must be 0)")
+            print(f"  ·  TT one-window corners: {int(ow['n_corners']):,} "
+                  f"({int(ow['n_rows']):,} rows) — allowed; inspect with "
+                  f"scripts/corner_scan_tt_onewindow.py")
 
+            # (ii) FAILS: a window that is internally inconsistent.  Within a
+            # window the average and the count must both be present or both be
+            # NULL.  One without the other means the aggregation lost track of
+            # a window, which is the real defect the old check was groping at.
+            incons = await conn.fetchval(
+                """SELECT COUNT(*) FROM corner_scan_2f
+                   WHERE mode = 'train_test'
+                     AND ( (d_train_avg_ret IS NULL) <> (d_train_n IS NULL)
+                        OR (d_test_avg_ret  IS NULL) <> (d_test_n  IS NULL)
+                        OR (q_train_avg_ret IS NULL) <> (q_train_n IS NULL)
+                        OR (q_test_avg_ret  IS NULL) <> (q_test_n  IS NULL) )""",
+            )
+            mark = "✓" if incons == 0 else "✗ FAIL"
+            print(f"  {mark}  TT rows with avg/n disagreeing within a window: "
+                  f"{incons} (must be 0)")
+
+            # (iii) FAILS: an "empty" side that SQL says is not empty.  Bounded
+            # to the corners with the largest populated-side n — the ones where
+            # a lost-rows bug would be most visible — so this stays cheap.
+            recount_bad = await _recount_empty_sides(
+                conn, cutoff_date, limit=_RECOUNT_SAMPLE
+            )
+            mark = "✓" if not recount_bad else "✗ FAIL"
+            print(f"  {mark}  TT empty sides contradicted by SQL "
+                  f"(top {_RECOUNT_SAMPLE} by n): {len(recount_bad)} (must be 0)")
+            for desc in recount_bad[:5]:
+                print(f"        {desc}")
+
+            # (iv) FAILS: every TT row must carry the cutoff actually frozen
+            # in tt_bins, so a row can never be read against the wrong split.
             stale_cutoff = await conn.fetchval(
                 """SELECT COUNT(*) FROM corner_scan_2f
                    WHERE mode = 'train_test' AND cutoff_date IS DISTINCT FROM $1""",
@@ -934,7 +1047,9 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
             print(f"  {mark}  TT rows not stamped with the frozen cutoff "
                   f"{cutoff_iso}: {stale_cutoff} (must be 0)")
         else:
-            half_rows = stale_cutoff = 0
+            incons       = 0
+            recount_bad  = []
+            stale_cutoff = 0
 
         print(f"\n  corner_scan_2f [{mode}]:  {totals['n_2f']:>10,} rows")
         print(f"  corner_scan_1f [{mode}]:  {totals['n_1f']:>10,} rows")
@@ -945,7 +1060,8 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         print(f"  Phase 6 runtime:         {phase6_secs:.0f}s")
 
         all_ok = (cc_bad == 0 and inelig_bad == 0
-                  and half_rows == 0 and stale_cutoff == 0
+                  and incons == 0 and not recount_bad
+                  and stale_cutoff == 0
                   and asym["n_bad"] == 0)
         print(
             "\n── "
