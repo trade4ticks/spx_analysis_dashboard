@@ -967,10 +967,21 @@
             <span :class="{'on-wf': cs2fMode==='walk_forward'}" @click="setCs2fMode('walk_forward')">WF</span>
             <span :class="{'on-tt': cs2fMode==='train_test'}"   @click="setCs2fMode('train_test')">TT</span>
           </div>
-          <input type="date" x-show="cs2fMode==='train_test'"
-                 :value="cs2fCutoffDate"
-                 @change="setCs2fCutoffDate($event.target.value)"
-                 class="bucketA-cutoff-input">
+          <!-- TT split: READ-ONLY. tt_bins is built with one frozen cutoff
+               (build_bin_tables.py --build-tt-bins, upstream) and the server
+               reads it from the table; nothing here is sent back as a
+               parameter. This replaced an editable date input that looked
+               live but was about to be ignored — a control that pretends to
+               do something is worse than no control. -->
+          <span x-show="cs2fMode==='train_test'"
+                title="Frozen train/test split, read from tt_bins. Not selectable — the bin edges were computed for this date and are never re-derived."
+                style="font-size:11px;color:var(--dim);padding:3px 8px;background:var(--raised);
+                       border:1px solid var(--border);border-radius:4px;white-space:nowrap">
+            split
+            <span style="color:var(--text);font-family:monospace"
+                  x-text="cs2fCutoffDate || '—'"></span>
+            <span style="opacity:.6">(frozen)</span>
+          </span>
           <select x-model="cs2fFilterP"
                   style="font-size:11px;padding:3px 6px;background:var(--raised);
                          border:1px solid var(--border);border-radius:4px;color:var(--text);max-width:160px">
@@ -1022,35 +1033,42 @@
             <option value="ret_20d_fwd_cc">ret_20d_fwd_cc</option>
             <option value="overnight_gap">overnight_gap</option>
           </select>
-          <span style="font-size:11px;color:var(--dim)">from:</span>
-          <input type="date" x-model="cs2fDateFrom"
+          <!-- Date window is hidden in TT: the train/test split IS the
+               window. A caller-picked range stacked on a frozen cutoff is
+               ambiguous, so the server drops these params in TT mode too. -->
+          <span x-show="!cs2fIsTT()" style="font-size:11px;color:var(--dim)">from:</span>
+          <input type="date" x-model="cs2fDateFrom" x-show="!cs2fIsTT()"
                  style="font-size:11px;padding:3px 6px;width:130px;
                         background:var(--raised);border:1px solid var(--border);
                         border-radius:4px;color:var(--text)"
                  title="Date filter from (leave blank for full-history stored results)">
-          <span style="font-size:11px;color:var(--dim)">to:</span>
-          <input type="date" x-model="cs2fDateTo"
+          <span x-show="!cs2fIsTT()" style="font-size:11px;color:var(--dim)">to:</span>
+          <input type="date" x-model="cs2fDateTo" x-show="!cs2fIsTT()"
                  style="font-size:11px;padding:3px 6px;width:130px;
                         background:var(--raised);border:1px solid var(--border);
                         border-radius:4px;color:var(--text)"
                  title="Date filter to (leave blank for full-history stored results)">
-          <span style="font-size:11px;color:var(--dim)">min n:</span>
+          <span style="font-size:11px;color:var(--dim)"
+                x-text="cs2fIsTT() ? 'min test n:' : 'min n:'"></span>
           <input type="number" x-model.number="cs2fMinN" min="0" step="50"
+                 :title="cs2fIsTT()
+                   ? 'Minimum TEST-window decile n. Test n is the sample that decides whether a corner is trustworthy.'
+                   : 'Minimum decile n'"
                  style="width:70px;font-size:11px;padding:3px 6px;
                         background:var(--raised);border:1px solid var(--border);
                         border-radius:4px;color:var(--text)">
           <button @click="loadCs2f()"
-                  :disabled="!cs2fCanRefresh() || cs2fLoading"
-                  :style="{ opacity: (cs2fCanRefresh() && !cs2fLoading) ? 1 : 0.5,
-                            cursor:  (cs2fCanRefresh() && !cs2fLoading) ? 'pointer' : 'not-allowed' }"
-                  :title="(cs2fDateFrom || cs2fDateTo)
-                    ? 'Live windowed recompute for the selected date range (30–90 s)'
-                    : cs2fCanRefresh()
-                      ? 'Re-read corner_scan_2f for the active mode (fast — does not trigger the batch job)'
-                      : 'Refresh disabled — corner-scan batch for this mode pending'"
+                  :disabled="cs2fLoading"
+                  :style="{ opacity: cs2fLoading ? 0.5 : 1,
+                            cursor:  cs2fLoading ? 'not-allowed' : 'pointer' }"
+                  :title="cs2fIsTT()
+                    ? 'Re-read corner_scan_2f train-test rows (fast — does not trigger the batch job)'
+                    : (cs2fDateFrom || cs2fDateTo)
+                      ? 'Live windowed recompute for the selected date range (30–90 s)'
+                      : 'Re-read corner_scan_2f for the active mode (fast — does not trigger the batch job)'"
                   style="background:rgba(52,152,219,.15);border:1px solid rgba(52,152,219,.3);
                          color:#3498db;font-size:12px;padding:4px 14px;border-radius:4px;font-weight:700">
-            <span x-text="(cs2fDateFrom || cs2fDateTo) ? '⟳ Compute' : '⟳ Refresh'"></span>
+            <span x-text="(!cs2fIsTT() && (cs2fDateFrom || cs2fDateTo)) ? '⟳ Compute' : '⟳ Refresh'"></span>
           </button>
         </div>
       </div>
@@ -1058,8 +1076,80 @@
         <div style="padding:0 12px 12px">
           <div style="font-size:11px;color:var(--dim);margin-bottom:6px"
                x-text="'Showing ' + cs2fRows.length.toLocaleString() + ' of ' + cs2fTotal.toLocaleString() + ' matched · sorted ' + cs2fSortKey + ' ' + cs2fSortDir + ' · decile resolution'"></div>
+          <!-- TT note: uneven train vs test bin counts are EXPECTED. The bin
+               edges were frozen at the split before the test window existed;
+               matching counts would require hindsight. -->
+          <div x-show="cs2fIsTT()" style="font-size:11px;color:var(--dim);margin-bottom:6px">
+            Train selects, test judges — sorted on a test column by default.
+            Bin edges are frozen at the split, so train and test n differ by design.
+          </div>
           <div style="overflow-x:auto">
-            <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <!-- ── TT table: fixed 10-column train/test layout ───────────── -->
+            <table x-show="cs2fIsTT()" style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border)">
+                  <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">P Metric<span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">S Metric<span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Dir<span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('outcome')"          style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Outcome<span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <th @click="cs2fSort('d_train_avg_ret')" title="Decile corner, TRAIN window — confirms the corner qualified in-sample"
+                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='d_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D train%</th>
+                  <th @click="cs2fSort('d_test_avg_ret')"  title="Decile corner, TEST window — this is the number that judges the corner"
+                      style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace"><span x-text="cs2fSortKey==='d_test_avg_ret'  ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D test%</th>
+                  <th @click="cs2fSort('d_test_n')"        title="Decile TEST-window observation count — the noise guard"
+                      style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='d_test_n'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D n</th>
+                  <th @click="cs2fSort('q_train_avg_ret')" title="Quintile corner, TRAIN window"
+                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='q_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q train%</th>
+                  <th @click="cs2fSort('q_test_avg_ret')"  title="Quintile corner, TEST window"
+                      style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace"><span x-text="cs2fSortKey==='q_test_avg_ret'  ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q test%</th>
+                  <th @click="cs2fSort('q_test_n')"        title="Quintile TEST-window observation count"
+                      style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='q_test_n'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q n</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-if="cs2fRows.length === 0 && !cs2fLoading">
+                  <tr><td colspan="10" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
+                    <span x-show="(cs2fMeta?.count_2f || 0) > 0">No rows — try lowering min test n or clearing filters.</span>
+                    <span x-show="!(cs2fMeta?.count_2f || 0)">
+                      No train-test rows stored yet — run
+                      <code style="font-family:monospace">python scripts/corner_scan.py --mode train_test</code>
+                      on the VPS.
+                    </span>
+                  </td></tr>
+                </template>
+                <template x-for="row in cs2fRows" :key="'tt-'+row.primary_metric+'|'+row.secondary_metric+'|'+row.corner_direction+'|'+row.outcome">
+                  <tr style="border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer"
+                      @click="recallFromCornerScan(row)"
+                      @mouseenter="$el.style.background='rgba(52,152,219,.06)'"
+                      @mouseleave="$el.style.background=''"
+                      :title="'Open in Recall — 20×20 with this corner pre-selected (~10s)'">
+                    <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.primary_metric"></td>
+                    <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.secondary_metric"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
+                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
+                    <!-- Train is dimmed, test is full-strength: the eye should
+                         land on the test number when scanning down a column. -->
+                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;opacity:.72;border-left:1px solid var(--border)"
+                        :style="{ color: row.d_train_avg_ret != null ? (row.d_train_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
+                        x-text="row.d_train_avg_ret != null ? (row.d_train_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700"
+                        :style="{ color: row.d_test_avg_ret != null ? (row.d_test_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
+                        x-text="row.d_test_avg_ret != null ? (row.d_test_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_test_n != null ? row.d_test_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;opacity:.72;border-left:1px solid var(--border)"
+                        :style="{ color: row.q_train_avg_ret != null ? (row.q_train_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
+                        x-text="row.q_train_avg_ret != null ? (row.q_train_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700"
+                        :style="{ color: row.q_test_avg_ret != null ? (row.q_test_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
+                        x-text="row.q_test_avg_ret != null ? (row.q_test_avg_ret*100).toFixed(3)+'%' : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_test_n != null ? row.q_test_n.toLocaleString() : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+
+            <!-- ── IS / WF table: unchanged 13-column layout ─────────────── -->
+            <table x-show="!cs2fIsTT()" style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
                 <tr style="border-bottom:1px solid var(--border)">
                   <th @click="cs2fSort('primary_metric')"   style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">P Metric<span x-text="cs2fSortKey==='primary_metric'   ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
@@ -1093,16 +1183,7 @@
               <tbody>
                 <template x-if="cs2fRows.length === 0 && !cs2fLoading">
                   <tr><td colspan="13" style="padding:16px 8px;text-align:center;color:var(--dim);font-style:italic">
-                    <template x-if="cs2fMode !== 'train_test'">
-                      <span>No rows — try lowering min n or clearing filters.</span>
-                    </template>
-                    <template x-if="cs2fMode === 'train_test'">
-                      <span>
-                        Corner Scan 2-Factor not yet available for
-                        <strong x-text="_cornerScanModeLabel(cs2fMode)"></strong>
-                        — pending train-test build.
-                      </span>
-                    </template>
+                    <span>No rows — try lowering min n or clearing filters.</span>
                   </td></tr>
                 </template>
                 <template x-for="row in cs2fRows" :key="row.primary_metric+'|'+row.secondary_metric+'|'+row.corner_direction+'|'+row.outcome">

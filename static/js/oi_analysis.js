@@ -3884,8 +3884,15 @@ document.addEventListener('alpine:init', () => {
     // NOT this.pageMode. Per-mode slot cache holds meta + rows + total
     // independently for each binning mode. Mode-pill swap is in-memory
     // only. Refresh fetches for the active local mode and writes the
-    // slot. Refresh is DISABLED for IS/TT until the in-sample / train-
-    // test corner-scan batch job exists (a future task).
+    // slot. All three modes (WF / IS / TT) are now built.
+    //
+    // TT renders a DIFFERENT, FIXED column set (train% / test% / n at both
+    // decile and quintile resolution) — see the cs2fIsTT() branch in the
+    // template. The IS/WF column set is unchanged. There is deliberately no
+    // per-column toggling inside TT: the point of the view is that scanning
+    // down a row shows decay ("3.2% train → 1.1% test") against persistence
+    // ("2.8% train → 2.5% test") at a glance, and that only works if the
+    // columns are always in the same place.
     csMetrics: [],   // sorted distinct eligible metrics — populated from /corner-scan/meta; shared by cs2f + cs1f dropdowns
     cs2fExpanded: false, cs2fLoading: false, cs2fMeta: null, cs2fRows: [], cs2fTotal: 0,
     cs2fPage: 1,  // current page (50 rows/page, server-side)
@@ -3893,7 +3900,11 @@ document.addEventListener('alpine:init', () => {
     cs2fFilterP: '', cs2fFilterS: '', cs2fFilterDir: '', cs2fFilterOutcome: '', cs2fMinN: 300,
     cs2fDateFrom: '', cs2fDateTo: '',   // windowed live recompute (empty = full-history DB query)
     cs2fMode:       'in_sample',
-    cs2fCutoffDate: '2024-01-01',
+    // Frozen TT split, read from tt_bins via the /corner-scan/{meta,2f}
+    // response. Display only — never sent back as a request parameter.
+    // (Group 8 removed user-chosen cutoffs everywhere else on this page;
+    // the 2F pane was the last place still offering an editable one.)
+    cs2fCutoffDate: null,
     cs2fDataByMode: {
       walk_forward: null,  // { meta, rows, total, page }
       in_sample:    null,
@@ -4299,11 +4310,16 @@ document.addEventListener('alpine:init', () => {
     cs2fBreadcrumb() {
       const label = this._cornerScanModeLabel(this.cs2fMode);
       const meta = this.cs2fMeta;
+      // TT appends the frozen split so the window being reported is always
+      // visible next to the timestamp — it is not selectable, so stating it
+      // is the only way to know which split produced these numbers.
+      const cut = (this.cs2fIsTT() && this.cs2fCutoffDate)
+        ? ` · split ${this.cs2fCutoffDate}` : '';
       if (!meta || !meta.scanned_at_2f) {
-        return `no data yet · ${label}`;
+        return `no data yet · ${label}${cut}`;
       }
       const ts = this._fmtCacheTs(meta.scanned_at_2f);
-      return `last: ${ts} · ${label}`;
+      return `last: ${ts} · ${label}${cut}`;
     },
     cs1fBreadcrumb() {
       const label = this._cornerScanModeLabel(this.cs1fMode);
@@ -4315,14 +4331,36 @@ document.addEventListener('alpine:init', () => {
       return `last: ${ts} · ${label}`;
     },
 
-    // Mode-pill / cutoff setters — in-memory swap only. Never auto-fetch.
+    // Is the 2F pane showing the train/test column set?
+    cs2fIsTT() { return this.cs2fMode === 'train_test'; },
+
+    // Default sort per mode. TT defaults to a TEST column — train is for
+    // selection, test is for truth. d_ret_per_day doesn't exist on TT rows
+    // (the %/day columns are dropped there), so carrying it across the
+    // switch would sort the page by a column that is NULL on every row.
+    _cs2fDefaultSort(m) {
+      return m === 'train_test' ? 'd_test_avg_ret' : 'd_ret_per_day';
+    },
+    // Columns that only exist in one of the two views.
+    _CS2F_TT_ONLY: ['d_train_avg_ret', 'd_train_n', 'd_test_avg_ret', 'd_test_n',
+                    'q_train_avg_ret', 'q_train_n', 'q_test_avg_ret', 'q_test_n'],
+    _CS2F_STD_ONLY: ['d_avg_ret', 'd_ret_per_day', 'd_n',
+                     'q_avg_ret', 'q_ret_per_day', 'q_n'],
+
+    // Mode-pill setter — in-memory swap only. Never auto-fetch.
     setCs2fMode(m) {
-      if (m === this.cs2fMode && m !== 'train_test') return;
+      if (m === this.cs2fMode) return;
+      // Carry the sort key across the switch when it still exists in the
+      // target view (the identity columns do); otherwise fall back to that
+      // view's default. The server applies the same rule, so a stale key
+      // can't slip through via a hand-edited URL either.
+      const wrongMode = m === 'train_test' ? this._CS2F_STD_ONLY : this._CS2F_TT_ONLY;
+      if (wrongMode.includes(this.cs2fSortKey)) {
+        this.cs2fSortKey = this._cs2fDefaultSort(m);
+        this.cs2fSortDir = 'desc';
+      }
       this.cs2fMode = m;
       this._cs2fSwapDisplayFromSlot();
-    },
-    setCs2fCutoffDate(d) {
-      this.cs2fCutoffDate = d;
     },
     setCs1fMode(m) {
       if (m === this.cs1fMode && m !== 'train_test') return;
@@ -4333,9 +4371,12 @@ document.addEventListener('alpine:init', () => {
       this.cs1fCutoffDate = d;
     },
 
-    // Refresh is supported for walk_forward and in_sample (both built).
-    // train_test corner-scan batch does not exist yet — kept disabled.
-    cs2fCanRefresh() { return this.cs2fMode !== 'train_test'; },
+    // 2F: all three modes are built (TT rows come from
+    // `corner_scan.py --mode train_test`), so refresh is always allowed.
+    cs2fCanRefresh() { return true; },
+    // 1F: train_test is still unbuilt — the TT scan deliberately writes no
+    // corner_scan_1f rows, so this stays disabled rather than showing an
+    // empty pane that looks like "no corners found".
     cs1fCanRefresh() { return this.cs1fMode !== 'train_test'; },
 
     // Pull the active mode's slot into the top-level rows/meta/total
@@ -4381,8 +4422,7 @@ document.addEventListener('alpine:init', () => {
 
     async toggleCs2f() {
       this.cs2fExpanded = !this.cs2fExpanded;
-      // First-expand auto-load for any mode with data (WF + IS).
-      // TT skips because cs2fCanRefresh() returns false for it.
+      // First-expand auto-load for any mode with data — all three now.
       if (this.cs2fExpanded
           && !this.cs2fDataByMode[this.cs2fMode]
           && this.cs2fCanRefresh()) {
@@ -4395,15 +4435,23 @@ document.addEventListener('alpine:init', () => {
       if (!this.cs2fCanRefresh()) return;
       if (resetPage) this.cs2fPage = 1;
       this.cs2fLoading = true;
-      const isWindowed = !!(this.cs2fDateFrom || this.cs2fDateTo);
-      const cutoffQ = this.cs2fMode === 'train_test'
-        ? `&cutoff_date=${encodeURIComponent(this.cs2fCutoffDate)}` : '';
+      const isTT = this.cs2fIsTT();
+      // TT ignores the date window: the train/test split IS the window, and
+      // stacking a caller-picked range on top of a frozen cutoff is
+      // ambiguous. The inputs are hidden in TT and the server drops the
+      // params regardless.
+      const isWindowed = !isTT && !!(this.cs2fDateFrom || this.cs2fDateTo);
       // Meta: counts + scanned_at for the breadcrumb. Always re-fetched
       // on Refresh so the timestamp reflects the latest scan.
       let meta = null;
       try {
-        const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs2fMode}${cutoffQ}`);
-        if (r.ok) { meta = await r.json(); if (meta?.metrics?.length) this.csMetrics = meta.metrics; }
+        const r = await fetch(`/api/factor-analysis/corner-scan/meta?mode=${this.cs2fMode}`);
+        if (r.ok) {
+          meta = await r.json();
+          if (meta?.metrics?.length) this.csMetrics = meta.metrics;
+          // Frozen split, read from tt_bins server-side. Display only.
+          if (isTT && meta?.cutoff_date) this.cs2fCutoffDate = meta.cutoff_date;
+        }
       } catch (_) {}
       const p = new URLSearchParams({
         sort_key: this.cs2fSortKey, sort_dir: this.cs2fSortDir,
@@ -4411,17 +4459,23 @@ document.addEventListener('alpine:init', () => {
         offset:   (this.cs2fPage - 1) * 50,
         mode:     this.cs2fMode,
       });
-      if (this.cs2fMode === 'train_test') p.set('cutoff_date', this.cs2fCutoffDate);
+      // NOTE: cutoff_date is never sent. tt_bins was built against exactly
+      // one split and the server reads it from there; a caller-supplied
+      // value would be a control that looks live but is ignored.
       if (this.cs2fFilterP)       p.set('primary_metric',   this.cs2fFilterP);
       if (this.cs2fFilterS)       p.set('secondary_metric', this.cs2fFilterS);
       if (this.cs2fFilterDir)     p.set('corner_direction', this.cs2fFilterDir);
       if (this.cs2fFilterOutcome) p.set('outcome',          this.cs2fFilterOutcome);
-      if (this.cs2fDateFrom)      p.set('date_from',        this.cs2fDateFrom);
-      if (this.cs2fDateTo)        p.set('date_to',          this.cs2fDateTo);
+      if (!isTT && this.cs2fDateFrom) p.set('date_from', this.cs2fDateFrom);
+      if (!isTT && this.cs2fDateTo)   p.set('date_to',   this.cs2fDateTo);
       let rows = [], total = 0;
       try {
         const r = await fetch('/api/factor-analysis/corner-scan/2f?' + p);
-        if (r.ok) { const d = await r.json(); rows = d.rows || []; total = d.total || 0; }
+        if (r.ok) {
+          const d = await r.json();
+          rows = d.rows || []; total = d.total || 0;
+          if (isTT && d.cutoff_date) this.cs2fCutoffDate = d.cutoff_date;
+        }
       } catch (_) {}
       if (isWindowed) {
         // Windowed results are ephemeral (tied to this specific date range).

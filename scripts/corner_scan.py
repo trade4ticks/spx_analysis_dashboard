@@ -14,16 +14,45 @@ Output tables (OI DB):
   corner_scan_2f  — metric-pair corners  (PK: P, S, direction, outcome, mode)
   corner_scan_1f  — single-metric extremes (PK: metric, extreme, outcome, mode)
 
-Both tables are mode-partitioned.  WF rows and IS rows coexist; running one
-mode never touches the other mode's rows.
+Both tables are mode-partitioned.  WF, IS and TT rows coexist; running one
+mode never touches another mode's rows.
+
+TRAIN-TEST MODE
+---------------
+`--mode train_test` reads tt_bins and splits the SAME corners into a train
+window and a test window.  The corner definition is unchanged from IS/WF:
+P and S are binned independently over the full population, exactly as the
+2D heatmap bins them, so a scan row still points at the heatmap cell you
+would open to define a zone.  Only the window differs.
+
+Bin edges are frozen upstream.  tt_bins is built by build_bin_tables.py
+--build-tt-bins in the Open_Interest data project, with edges fixed at
+TT_CUTOFF_DATE and never re-derived — each rebuild only classifies rows
+against those fixed thresholds.  This script READS tt_bins; it never
+computes or refreshes an edge.  The cutoff is read back from the table
+(MAX(cutoff_date)) and is NOT a command-line parameter, so there is no way
+to evaluate against a split the bins were not built for.
+
+Uneven bin counts between train and test are EXPECTED and correct.  Even
+counts would require hindsight — the edges were fixed before the test
+window existed.  Do not "fix" this.
+
+TT writes corner_scan_2f only.  Phase 5 (1F) is skipped: the 1F pane's TT
+toggle is still disabled, and writing rows behind a toggle that refuses to
+load them is worse than writing nothing.
 
 Run monthly on the VPS (project root, venv active):
     python scripts/corner_scan.py --mode walk_forward [--force] [--dry-run]
     python scripts/corner_scan.py --mode in_sample    [--force] [--dry-run]
+    python scripts/corner_scan.py --mode train_test   [--force] [--dry-run]
 
-    --mode     walk_forward reads wf_bins; in_sample reads is_bins  (required)
+    --mode     walk_forward reads wf_bins; in_sample reads is_bins;
+               train_test reads tt_bins                             (required)
     --force    re-run even if this mode's rows were already written today
     --dry-run  compute and print row counts; do not write to DB
+
+Exit status: non-zero if any metric was skipped for having no usable bins,
+so a wrapper can notice a stale tt_bins column without reading the log.
 """
 from __future__ import annotations
 
@@ -91,11 +120,36 @@ CREATE TABLE IF NOT EXISTS corner_scan_2f (
     q_avg_ret         DOUBLE PRECISION,
     q_ret_per_day     DOUBLE PRECISION,
     q_n               INTEGER,
+    d_train_avg_ret   DOUBLE PRECISION,
+    d_train_n         INTEGER,
+    d_test_avg_ret    DOUBLE PRECISION,
+    d_test_n          INTEGER,
+    q_train_avg_ret   DOUBLE PRECISION,
+    q_train_n         INTEGER,
+    q_test_avg_ret    DOUBLE PRECISION,
+    q_test_n          INTEGER,
+    cutoff_date       DATE,
     as_of             DATE        NOT NULL,
     mode              TEXT        NOT NULL DEFAULT 'walk_forward',
     scanned_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (primary_metric, secondary_metric, corner_direction, outcome, mode)
 );
+"""
+
+# Migration for tables created before the train-test columns existed.
+# Mirrors _DDL_CORNER_2F_MIGRATE_TT in app/routers/oi_analysis.py — keep
+# the two in sync.  Idempotent.
+_DDL_2F_MIGRATE_TT = """
+ALTER TABLE corner_scan_2f
+    ADD COLUMN IF NOT EXISTS d_train_avg_ret DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS d_train_n       INTEGER,
+    ADD COLUMN IF NOT EXISTS d_test_avg_ret  DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS d_test_n        INTEGER,
+    ADD COLUMN IF NOT EXISTS q_train_avg_ret DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS q_train_n       INTEGER,
+    ADD COLUMN IF NOT EXISTS q_test_avg_ret  DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS q_test_n        INTEGER,
+    ADD COLUMN IF NOT EXISTS cutoff_date     DATE;
 """
 
 _DDL_1F = """
@@ -129,6 +183,42 @@ def _rpd(avg: float | None, days: int | None) -> float | None:
     return float(avg / days)
 
 
+def _print_skipped_summary(
+    skipped: list, bin_table: str, is_tt: bool, cutoff_iso: str
+) -> None:
+    """Restate the skipped-metric list at the very END of the run.
+
+    Phase 0 has scrolled far off screen by the time a batch finishes, so the
+    list is printed twice on purpose: once where it is discovered, once here
+    where it is actually read.  Callers exit non-zero when this is non-empty.
+    """
+    print("\n── Skipped metrics ─────────────────────────────────────────────")
+    if not skipped:
+        print(f"  none — every eligible metric had usable bins in {bin_table}.")
+        return
+    print(
+        f"  ⚠ {len(skipped)} metric(s) had NO usable bins in {bin_table} and "
+        f"were excluded\n"
+        f"    from the scan entirely (no rows written for any pair involving "
+        f"them).\n"
+        f"    Most likely cause: the column was added to {bin_table} after the "
+        f"last full\n"
+        f"    build, so bin20_<metric> exists but every row is NULL. Rebuild "
+        f"{bin_table}\n"
+        f"    upstream, then re-run this scan."
+    )
+    if is_tt:
+        print(f"    Window split at the frozen cutoff {cutoff_iso}.")
+    print()
+    hdr = ("train rows / test rows" if is_tt else "usable rows")
+    print(f"    {'metric':<48} {hdr}")
+    print(f"    {'-' * 48} {'-' * len(hdr)}")
+    for m_name, tr, te in skipped:
+        detail = f"{tr:,} / {te:,}" if is_tt else f"{tr:,}"
+        print(f"    {m_name:<48} {detail}")
+    print("\n  Exit status will be non-zero because of the above.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def run(mode: str, dry_run: bool, force: bool) -> None:
@@ -137,14 +227,40 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         print("ERROR: OI_DATABASE_URL not set (check .env or environment).")
         sys.exit(1)
 
-    bin_table = "wf_bins" if mode == "walk_forward" else "is_bins"
+    bin_table = {
+        "walk_forward": "wf_bins",
+        "in_sample":    "is_bins",
+        "train_test":   "tt_bins",
+    }[mode]
+    is_tt = mode == "train_test"
 
     t_total = time.perf_counter()
     conn = await asyncpg.connect(dsn=oi_dsn)
 
     try:
         await conn.execute(_DDL_2F)
+        await conn.execute(_DDL_2F_MIGRATE_TT)
         await conn.execute(_DDL_1F)
+
+        # ── TT: read the frozen cutoff from tt_bins ───────────────────────────
+        # Same source as _get_tt_cutoff() in the router.  Never a CLI param:
+        # the bins were built against exactly one split, and evaluating them
+        # against any other split would silently mix train rows into test.
+        cutoff_date: "_date | None" = None
+        cutoff_iso  = ""
+        if is_tt:
+            cutoff_date = await conn.fetchval(
+                "SELECT MAX(cutoff_date) FROM tt_bins"
+            )
+            if cutoff_date is None:
+                print(
+                    "ERROR: tt_bins has no cutoff_date. Rebuild it with\n"
+                    "       build_bin_tables.py --build-tt-bins in the "
+                    "Open_Interest project first."
+                )
+                sys.exit(1)
+            cutoff_iso = cutoff_date.isoformat()
+            print(f"TT frozen cutoff (from tt_bins): {cutoff_iso}")
 
         # Guard: skip if already run today FOR THIS MODE, unless --force.
         # Mode-aware: a WF run today does not block an IS run today.
@@ -301,6 +417,89 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
 
         del raw_bin20_full  # free memory; no longer needed
 
+        # ── Train/test row mask ──────────────────────────────────────────────
+        # Same rule as _split_bins_by_cutoff() in app/routers/oi_analysis.py:
+        #   train = trade_date <  cutoff,  test = everything else.
+        # That helper is the canonical splitter for every per-bin train-vs-test
+        # surface, but it is row-dict shaped and handles one metric × one
+        # outcome per call; this scan is an (N,F)×(N,O) matmul over every pair,
+        # so we port the rule rather than the function.  The bin collapse
+        # already agrees: its  bn = min(((b20-1)*n)//20, n-1)  is this file's
+        # bins_d/bins_q minus one (0-indexed vs 1-indexed), so its D1/D10 are
+        # our 1/10 exactly.
+        if is_tt:
+            is_train_full = np.fromiter(
+                (r["trade_date"] < cutoff_date for r in db_rows),
+                dtype=bool, count=N_total,
+            )
+        else:
+            # Non-TT modes have no split; a single "all rows" window keeps
+            # the Phase 6 loop uniform across modes.
+            is_train_full = np.zeros(N_total, dtype=bool)
+
+        # ── Usable-bin guard (question B) ────────────────────────────────────
+        # A metric added to the bin table after the last full build has its
+        # bin20_<m> column present but every row NULL.  Phase 0 discovers
+        # eligibility from information_schema, so such a metric PASSES —
+        # then maps to all-zero sentinels, matches no extreme, and emits a
+        # full set of corners with NULL stats and NULL n.  Those rows are
+        # then invisible in the UI (NULL >= min_n is never true), so the
+        # batch looks successful and the pane looks empty for no stated
+        # reason.  Skip and report instead: drop the metric before the pair
+        # loop (which also shrinks F), list it in the FINAL summary, and
+        # exit non-zero so a wrapper notices.
+        usable_all = mask_valid.sum(axis=0)                      # (F,)
+        if is_tt:
+            usable_train = mask_valid[is_train_full].sum(axis=0)
+            usable_test  = mask_valid[~is_train_full].sum(axis=0)
+        else:
+            usable_train = usable_all
+            usable_test  = usable_all
+
+        skipped_metrics: list[tuple[str, int, int]] = []
+        keep_idx: list[int] = []
+        for f_idx, m_name in enumerate(eligible_metrics):
+            tr, te = int(usable_train[f_idx]), int(usable_test[f_idx])
+            # TT needs bins in BOTH windows — a metric with train rows but no
+            # test rows can produce a train number with nothing to check it
+            # against, which is exactly the misleading half-result we are
+            # avoiding.
+            if tr == 0 or te == 0:
+                skipped_metrics.append((m_name, tr, te))
+            else:
+                keep_idx.append(f_idx)
+
+        if skipped_metrics:
+            print(
+                f"\n  ⚠ SKIPPED {len(skipped_metrics)} metric(s) with no usable "
+                f"bins in {bin_table} — excluded from the scan:"
+            )
+            for m_name, tr, te in skipped_metrics:
+                detail = (f"train={tr:,} test={te:,}" if is_tt
+                          else f"usable rows={tr:,}")
+                print(f"      {m_name:<48} {detail}")
+
+        if not keep_idx:
+            print(
+                f"\nERROR: no metric in {bin_table} has usable bins. "
+                f"The bin table is empty or was never populated."
+            )
+            sys.exit(1)
+
+        if len(keep_idx) != F:
+            keep_arr        = np.array(keep_idx, dtype=np.intp)
+            bins_d_full     = bins_d_full[:, keep_arr]
+            bins_q_full     = bins_q_full[:, keep_arr]
+            eligible_metrics = [eligible_metrics[i] for i in keep_idx]
+            F               = len(eligible_metrics)
+            metric_tier     = {m: metric_tier[m] for m in eligible_metrics}
+            morning_set     = frozenset(
+                m for m, t in metric_tier.items() if t == "MORNING"
+            )
+            print(f"  Metrics after usable-bin filter: {F}")
+
+        del mask_valid
+
         # Outcome matrix: 12 fwd-return cols + overnight gap.
         for o_idx, o_name in enumerate(_FWDRET_OUTCOMES):
             for i, row in enumerate(db_rows):
@@ -345,94 +544,158 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
               f"{time.perf_counter() - t2:.1f}s")
 
         # ── Phase 5: 1-factor scan ───────────────────────────────────────────
-        print("\nPhase 5: 1-factor scan…")
-        t5          = time.perf_counter()
+        # Skipped for train_test: the 1F pane's TT toggle is still disabled,
+        # so rows written here would sit behind a control that refuses to
+        # load them.  corner_scan_1f is left completely untouched in TT mode
+        # (Phase 7's mode-scoped DELETE is skipped too).
         as_of       = _date.today()
         scanned_now = datetime.now(tz=timezone.utc)
         rows_1f: list[tuple] = []
 
-        for f_idx, m_name in enumerate(eligible_metrics):
-            for extreme, d_edge, q_edge in [("low", 1, 1), ("high", 10, 5)]:
-                d_mask = bins_d_full[:, f_idx] == d_edge  # (N_total,) bool
-                q_mask = bins_q_full[:, f_idx] == q_edge
+        if is_tt:
+            print("\nPhase 5: 1-factor scan… SKIPPED (train_test writes 2F only)")
+        else:
+            print("\nPhase 5: 1-factor scan…")
+            t5 = time.perf_counter()
 
-                for o_idx, o_name in enumerate(_OUTCOME_LIST):
-                    d_vals = out_full[d_mask, o_idx]
-                    d_vals = d_vals[~np.isnan(d_vals)]
-                    q_vals = out_full[q_mask, o_idx]
-                    q_vals = q_vals[~np.isnan(q_vals)]
+            for f_idx, m_name in enumerate(eligible_metrics):
+                for extreme, d_edge, q_edge in [("low", 1, 1), ("high", 10, 5)]:
+                    d_mask = bins_d_full[:, f_idx] == d_edge  # (N_total,) bool
+                    q_mask = bins_q_full[:, f_idx] == q_edge
 
-                    d_n   = len(d_vals)
-                    q_n   = len(q_vals)
-                    d_avg = float(np.mean(d_vals)) if d_n else None
-                    q_avg = float(np.mean(q_vals)) if q_n else None
-                    days  = _HOLDING_DAYS[o_name]
+                    for o_idx, o_name in enumerate(_OUTCOME_LIST):
+                        d_vals = out_full[d_mask, o_idx]
+                        d_vals = d_vals[~np.isnan(d_vals)]
+                        q_vals = out_full[q_mask, o_idx]
+                        q_vals = q_vals[~np.isnan(q_vals)]
 
-                    rows_1f.append((
-                        m_name, extreme, o_name,
-                        d_avg,  _rpd(d_avg, days), d_n or None,
-                        q_avg,  _rpd(q_avg, days), q_n or None,
-                        as_of, mode, scanned_now,
-                    ))
+                        d_n   = len(d_vals)
+                        q_n   = len(q_vals)
+                        d_avg = float(np.mean(d_vals)) if d_n else None
+                        q_avg = float(np.mean(q_vals)) if q_n else None
+                        days  = _HOLDING_DAYS[o_name]
 
-        print(f"  {len(rows_1f):,} rows in {time.perf_counter() - t5:.1f}s")
+                        rows_1f.append((
+                            m_name, extreme, o_name,
+                            d_avg,  _rpd(d_avg, days), d_n or None,
+                            q_avg,  _rpd(q_avg, days), q_n or None,
+                            as_of, mode, scanned_now,
+                        ))
+
+            print(f"  {len(rows_1f):,} rows in {time.perf_counter() - t5:.1f}s")
 
         # ── Phase 6: 2-factor scan ───────────────────────────────────────────
         print(f"\nPhase 6: 2-factor scan ({F} P-metric outer loop)…")
         t6      = time.perf_counter()
         rows_2f: list[tuple] = []
 
+        # Window axis.  Non-TT modes run a single window ("all rows") so the
+        # loop below is identical across modes; TT runs two.  The corner
+        # DEFINITION is the same in both cases — P and S are binned
+        # independently over the full population, exactly as the 2D heatmap
+        # bins them, so a scan row still points at the heatmap cell you would
+        # open to define a zone.  Only which rows are averaged differs.
+        #
+        # W_TRAIN / W_TEST index the leading axis of the accumulators.
+        W_TRAIN, W_TEST = 0, 1
+        n_win = 2 if is_tt else 1
+
+        # Per-ticker split BOUNDARY, computed once.
+        # Phase 1 selects ORDER BY ticker, trade_date, so within a ticker's
+        # slice the dates ascend and the train window (trade_date < cutoff)
+        # is a contiguous PREFIX.  That means the split is a single index and
+        # both windows stay plain slice views — no boolean indexing, no
+        # per-(P, ticker) copies.  Keeps the TT path's memory profile the
+        # same as the single-window path it extends.
+        split_at: dict[str, int] = {}
+        if is_tt:
+            for tkr in tickers_order:
+                s, e = ticker_slices[tkr]
+                # Counting the Trues gives the boundary directly, PROVIDED
+                # the prefix property actually holds.  Verify it rather than
+                # trust it: if the ORDER BY in Phase 1 ever changed, this
+                # would misassign rows between train and test silently, which
+                # is the worst possible failure for this table.
+                w = is_train_full[s:e]
+                cut = s + int(w.sum())
+                if w.size and not (w[:cut - s].all() and not w[cut - s:].any()):
+                    print(
+                        f"ERROR: train rows are not a contiguous prefix for "
+                        f"{tkr}. Phase 1 must SELECT ... ORDER BY ticker, "
+                        f"trade_date for the train/test split to be valid."
+                    )
+                    sys.exit(1)
+                split_at[tkr] = cut
+
         for p_idx, p_name in enumerate(eligible_metrics):
             # Per-P accumulators:
-            # axes: [p_edge (0=low,1=high), s_edge (0=low,1=high), S_idx, outcome]
+            # axes: [window, p_edge (0=low,1=high), s_edge (0=low,1=high),
+            #        S_idx, outcome]
             # d_ = decile resolution,  q_ = quintile resolution
-            d_sums = np.zeros((2, 2, F, _O), dtype=np.float64)
-            d_cnts = np.zeros((2, 2, F, _O), dtype=np.int32)
-            q_sums = np.zeros((2, 2, F, _O), dtype=np.float64)
-            q_cnts = np.zeros((2, 2, F, _O), dtype=np.int32)
+            d_sums = np.zeros((n_win, 2, 2, F, _O), dtype=np.float64)
+            d_cnts = np.zeros((n_win, 2, 2, F, _O), dtype=np.int32)
+            q_sums = np.zeros((n_win, 2, 2, F, _O), dtype=np.float64)
+            q_cnts = np.zeros((n_win, 2, 2, F, _O), dtype=np.int32)
 
             for tkr in tickers_order:
-                s, e    = ticker_slices[tkr]
-                bd_t    = bins_d_full[s:e, :]   # (N_t, F) stored-bin deciles
-                bq_t    = bins_q_full[s:e, :]   # (N_t, F) stored-bin quintiles
-                out_t   = out_full[s:e, :]      # (N_t, O)
-                vld_t   = vld_full[s:e, :]      # (N_t, O) bool
+                s, e = ticker_slices[tkr]
 
-                # Four P-edge configurations: D-low, D-high, Q-low, Q-high.
-                # S-bin matrix for D configs is bd_t (decile 1..10);
-                # for Q configs it's bq_t (quintile 1..5).
-                # bin_d/q = 0 rows (sentinel) are excluded naturally —
-                # 0 ≠ 1 and 0 ≠ 10/5, so they never enter a P or S edge mask.
-                pe_configs = [
-                    (bd_t[:, p_idx],  1, bd_t, 10, d_sums, d_cnts, 0),  # D-low
-                    (bd_t[:, p_idx], 10, bd_t, 10, d_sums, d_cnts, 1),  # D-high
-                    (bq_t[:, p_idx],  1, bq_t,  5, q_sums, q_cnts, 0),  # Q-low
-                    (bq_t[:, p_idx],  5, bq_t,  5, q_sums, q_cnts, 1),  # Q-high
-                ]
+                # Windows for this ticker as (accumulator index, lo, hi) row
+                # ranges.  TT: train = [s, split), test = [split, e) — the
+                # same rule _split_bins_by_cutoff() applies, expressed as a
+                # boundary because the rows are date-sorted.  Uneven
+                # train/test bin counts are expected: the edges were frozen
+                # before the test window existed, so matching counts would
+                # require hindsight.
+                if is_tt:
+                    cut     = split_at[tkr]
+                    windows = ((W_TRAIN, s, cut), (W_TEST, cut, e))
+                else:
+                    windows = ((W_TRAIN, s, e),)
 
-                for p_col, p_edge_val, S_bin_mat, n_bins_S, sums_ref, cnts_ref, p_ei in pe_configs:
-                    pe_rows = np.where(p_col == p_edge_val)[0]
-                    n_pe    = len(pe_rows)
-                    if n_pe < 2:
+                for w_idx, lo, hi in windows:
+                    if hi - lo < 2:
                         continue
+                    bd_t  = bins_d_full[lo:hi, :]  # (N_w, F) stored deciles
+                    bq_t  = bins_q_full[lo:hi, :]  # (N_w, F) stored quintiles
+                    out_t = out_full[lo:hi, :]     # (N_w, O)
+                    vld_t = vld_full[lo:hi, :]     # (N_w, O) bool
 
-                    S_bins  = S_bin_mat[pe_rows, :]    # (n_pe, F) stored bins
-                    out_pe  = out_t[pe_rows, :]         # (n_pe, O)
-                    vld_pe  = vld_t[pe_rows, :]         # (n_pe, O) bool
+                    # Four P-edge configurations: D-low, D-high, Q-low, Q-high.
+                    # S-bin matrix for D configs is bd_t (decile 1..10);
+                    # for Q configs it's bq_t (quintile 1..5).
+                    # bin_d/q = 0 rows (sentinel) are excluded naturally —
+                    # 0 ≠ 1 and 0 ≠ 10/5, so they never enter a P or S edge mask.
+                    pe_configs = [
+                        (bd_t[:, p_idx],  1, bd_t, 10, d_sums, d_cnts, 0),  # D-low
+                        (bd_t[:, p_idx], 10, bd_t, 10, d_sums, d_cnts, 1),  # D-high
+                        (bq_t[:, p_idx],  1, bq_t,  5, q_sums, q_cnts, 0),  # Q-low
+                        (bq_t[:, p_idx],  5, bq_t,  5, q_sums, q_cnts, 1),  # Q-high
+                    ]
 
-                    # NaN outcomes → 0 so matmul sums correctly; vld_pe tracks counts.
-                    out_cln = np.where(vld_pe, out_pe, 0.0)  # (n_pe, O)
+                    for p_col, p_edge_val, S_bin_mat, n_bins_S, sums_ref, cnts_ref, p_ei in pe_configs:
+                        pe_rows = np.where(p_col == p_edge_val)[0]
+                        n_pe    = len(pe_rows)
+                        if n_pe < 2:
+                            continue
 
-                    S_low_f  = (S_bins == 1       ).astype(np.float64)  # (n_pe, F)
-                    S_high_f = (S_bins == n_bins_S).astype(np.float64)  # (n_pe, F)
-                    vld_f    = vld_pe.astype(np.float64)                  # (n_pe, O)
+                        S_bins  = S_bin_mat[pe_rows, :]    # (n_pe, F) stored bins
+                        out_pe  = out_t[pe_rows, :]         # (n_pe, O)
+                        vld_pe  = vld_t[pe_rows, :]         # (n_pe, O) bool
 
-                    # Vectorised aggregation over all (S_metric, outcome) at once.
-                    # S_low_f.T: (F, n_pe) @ (n_pe, O) → (F, O)
-                    sums_ref[p_ei, 0] += S_low_f.T  @ out_cln
-                    cnts_ref[p_ei, 0] += (S_low_f.T  @ vld_f).astype(np.int32)
-                    sums_ref[p_ei, 1] += S_high_f.T @ out_cln
-                    cnts_ref[p_ei, 1] += (S_high_f.T @ vld_f).astype(np.int32)
+                        # NaN outcomes → 0 so matmul sums correctly; vld_pe tracks counts.
+                        out_cln = np.where(vld_pe, out_pe, 0.0)  # (n_pe, O)
+
+                        S_low_f  = (S_bins == 1       ).astype(np.float64)  # (n_pe, F)
+                        S_high_f = (S_bins == n_bins_S).astype(np.float64)  # (n_pe, F)
+                        vld_f    = vld_pe.astype(np.float64)                  # (n_pe, O)
+
+                        # Vectorised aggregation over all (S_metric, outcome) at once.
+                        # S_low_f.T: (F, n_pe) @ (n_pe, O) → (F, O)
+                        sums_ref[w_idx, p_ei, 0] += S_low_f.T  @ out_cln
+                        cnts_ref[w_idx, p_ei, 0] += (S_low_f.T  @ vld_f).astype(np.int32)
+                        sums_ref[w_idx, p_ei, 1] += S_high_f.T @ out_cln
+                        cnts_ref[w_idx, p_ei, 1] += (S_high_f.T @ vld_f).astype(np.int32)
 
             # Emit rows for all (S, direction, outcome) combos for this P.
             for s_idx, s_name in enumerate(eligible_metrics):
@@ -445,21 +708,51 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                             if excluded(p_name, s_name, o_name):
                                 continue
 
-                            d_n   = int(d_cnts[p_ei, s_ej, s_idx, o_idx])
-                            q_n   = int(q_cnts[p_ei, s_ej, s_idx, o_idx])
-                            d_avg = _avg_or_none(
-                                float(d_sums[p_ei, s_ej, s_idx, o_idx]), d_n
-                            )
-                            q_avg = _avg_or_none(
-                                float(q_sums[p_ei, s_ej, s_idx, o_idx]), q_n
-                            )
-                            days  = _HOLDING_DAYS[o_name]
-                            rows_2f.append((
-                                p_name, s_name, direction, o_name,
-                                d_avg,  _rpd(d_avg, days), d_n or None,
-                                q_avg,  _rpd(q_avg, days), q_n or None,
-                                as_of, mode, scanned_now,
-                            ))
+                            if is_tt:
+                                # TT row: train + test stats side by side, the
+                                # single-window columns left NULL.  Both n's
+                                # are stored even though the pane shows test n
+                                # only — it costs nothing and turns a future
+                                # "show me train n too" into a display change
+                                # rather than a re-scan.
+                                d_tr_n = int(d_cnts[W_TRAIN, p_ei, s_ej, s_idx, o_idx])
+                                d_te_n = int(d_cnts[W_TEST,  p_ei, s_ej, s_idx, o_idx])
+                                q_tr_n = int(q_cnts[W_TRAIN, p_ei, s_ej, s_idx, o_idx])
+                                q_te_n = int(q_cnts[W_TEST,  p_ei, s_ej, s_idx, o_idx])
+                                rows_2f.append((
+                                    p_name, s_name, direction, o_name,
+                                    None, None, None,          # d_avg / d_rpd / d_n
+                                    None, None, None,          # q_avg / q_rpd / q_n
+                                    _avg_or_none(float(d_sums[W_TRAIN, p_ei, s_ej, s_idx, o_idx]), d_tr_n),
+                                    d_tr_n or None,
+                                    _avg_or_none(float(d_sums[W_TEST,  p_ei, s_ej, s_idx, o_idx]), d_te_n),
+                                    d_te_n or None,
+                                    _avg_or_none(float(q_sums[W_TRAIN, p_ei, s_ej, s_idx, o_idx]), q_tr_n),
+                                    q_tr_n or None,
+                                    _avg_or_none(float(q_sums[W_TEST,  p_ei, s_ej, s_idx, o_idx]), q_te_n),
+                                    q_te_n or None,
+                                    cutoff_date,
+                                    as_of, mode, scanned_now,
+                                ))
+                            else:
+                                d_n   = int(d_cnts[W_TRAIN, p_ei, s_ej, s_idx, o_idx])
+                                q_n   = int(q_cnts[W_TRAIN, p_ei, s_ej, s_idx, o_idx])
+                                d_avg = _avg_or_none(
+                                    float(d_sums[W_TRAIN, p_ei, s_ej, s_idx, o_idx]), d_n
+                                )
+                                q_avg = _avg_or_none(
+                                    float(q_sums[W_TRAIN, p_ei, s_ej, s_idx, o_idx]), q_n
+                                )
+                                days  = _HOLDING_DAYS[o_name]
+                                rows_2f.append((
+                                    p_name, s_name, direction, o_name,
+                                    d_avg,  _rpd(d_avg, days), d_n or None,
+                                    q_avg,  _rpd(q_avg, days), q_n or None,
+                                    None, None, None, None,    # d_train/test
+                                    None, None, None, None,    # q_train/test
+                                    None,                      # cutoff_date
+                                    as_of, mode, scanned_now,
+                                ))
 
             # Progress print every 10 P-metrics.
             if (p_idx + 1) % 10 == 0 or p_idx == F - 1:
@@ -477,11 +770,20 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         )
 
         # ── Phase 7: Write to DB (or dry-run summary) ────────────────────────
+        phase6_secs = time.perf_counter() - t6
+
         if dry_run:
             print(f"\n── DRY RUN — no DB changes ──────────────────────────────")
-            print(f"  corner_scan_1f would write: {len(rows_1f):,} rows  (mode={mode})")
+            if is_tt:
+                print(f"  corner_scan_1f would write: 0 rows  (skipped in train_test)")
+            else:
+                print(f"  corner_scan_1f would write: {len(rows_1f):,} rows  (mode={mode})")
             print(f"  corner_scan_2f would write: {len(rows_2f):,} rows  (mode={mode})")
-            print(f"  Total elapsed: {time.perf_counter() - t_total:.0f}s")
+            print(f"  Phase 6 runtime: {phase6_secs:.0f}s")
+            print(f"  Total elapsed:   {time.perf_counter() - t_total:.0f}s")
+            _print_skipped_summary(skipped_metrics, bin_table, is_tt, cutoff_iso)
+            if skipped_metrics:
+                sys.exit(1)
             return
 
         print(f"\nPhase 7: Writing to DB (mode={mode})…")
@@ -490,19 +792,24 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
         async with conn.transaction():
             # Mode-scoped DELETE: remove only rows for the current mode.
             # Other modes' rows (e.g. IS rows when running WF) are preserved.
-            await conn.execute(
-                "DELETE FROM corner_scan_1f WHERE mode = $1", mode
-            )
-            await conn.executemany(
-                """INSERT INTO corner_scan_1f
-                   (metric, extreme, outcome,
-                    d_avg_ret, d_ret_per_day, d_n,
-                    q_avg_ret, q_ret_per_day, q_n,
-                    as_of, mode, scanned_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
-                rows_1f,
-            )
-            print(f"  corner_scan_1f: {len(rows_1f):,} rows written.")
+            # TT skips corner_scan_1f entirely — no DELETE, no INSERT — so a
+            # TT run cannot disturb the WF/IS 1F rows the pane does serve.
+            if is_tt:
+                print("  corner_scan_1f: skipped (train_test writes 2F only).")
+            else:
+                await conn.execute(
+                    "DELETE FROM corner_scan_1f WHERE mode = $1", mode
+                )
+                await conn.executemany(
+                    """INSERT INTO corner_scan_1f
+                       (metric, extreme, outcome,
+                        d_avg_ret, d_ret_per_day, d_n,
+                        q_avg_ret, q_ret_per_day, q_n,
+                        as_of, mode, scanned_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)""",
+                    rows_1f,
+                )
+                print(f"  corner_scan_1f: {len(rows_1f):,} rows written.")
 
             await conn.execute(
                 "DELETE FROM corner_scan_2f WHERE mode = $1", mode
@@ -512,8 +819,13 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                    (primary_metric, secondary_metric, corner_direction, outcome,
                     d_avg_ret, d_ret_per_day, d_n,
                     q_avg_ret, q_ret_per_day, q_n,
+                    d_train_avg_ret, d_train_n, d_test_avg_ret, d_test_n,
+                    q_train_avg_ret, q_train_n, q_test_avg_ret, q_test_n,
+                    cutoff_date,
                     as_of, mode, scanned_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                           $11,$12,$13,$14,$15,$16,$17,$18,$19,
+                           $20,$21,$22)""",
                 rows_2f,
             )
             print(f"  corner_scan_2f: {len(rows_2f):,} rows written.")
@@ -554,22 +866,60 @@ async def run(mode: str, dry_run: bool, force: bool) -> None:
                  (SELECT as_of                          FROM corner_scan_2f WHERE mode=$1 LIMIT 1) AS as_of""",
             mode,
         )
+        # TT-only: every stored row must carry both a train and a test stat.
+        # A row with one side NULL means the split dropped a window somewhere.
+        if is_tt:
+            half_rows = await conn.fetchval(
+                """SELECT COUNT(*) FROM corner_scan_2f
+                   WHERE mode = 'train_test'
+                     AND (d_train_n IS NULL) <> (d_test_n IS NULL)""",
+            )
+            mark = "✓" if half_rows == 0 else "✗ FAIL"
+            print(f"  {mark}  TT rows with only one window populated: "
+                  f"{half_rows} (must be 0)")
+
+            stale_cutoff = await conn.fetchval(
+                """SELECT COUNT(*) FROM corner_scan_2f
+                   WHERE mode = 'train_test' AND cutoff_date IS DISTINCT FROM $1""",
+                cutoff_date,
+            )
+            mark = "✓" if stale_cutoff == 0 else "✗ FAIL"
+            print(f"  {mark}  TT rows not stamped with the frozen cutoff "
+                  f"{cutoff_iso}: {stale_cutoff} (must be 0)")
+        else:
+            half_rows = stale_cutoff = 0
+
         print(f"\n  corner_scan_2f [{mode}]:  {totals['n_2f']:>10,} rows")
         print(f"  corner_scan_1f [{mode}]:  {totals['n_1f']:>10,} rows")
         print(f"  Distinct primaries:      {totals['n_p']}")
         print(f"  as_of:                   {totals['as_of']}")
+        if is_tt:
+            print(f"  frozen cutoff:           {cutoff_iso}")
+        print(f"  Phase 6 runtime:         {phase6_secs:.0f}s")
 
-        all_ok = cc_bad == 0 and inelig_bad == 0
+        all_ok = (cc_bad == 0 and inelig_bad == 0
+                  and half_rows == 0 and stale_cutoff == 0)
         print(
             "\n── "
             + ("All self-checks PASSED ✓" if all_ok
                else "FAILURES detected ✗ — review above")
             + " ──"
         )
-        if not all_ok:
-            sys.exit(1)
+
+        # Skipped-metric report lives HERE, in the final summary — Phase 0 is
+        # long gone by the time anyone reads the tail of this log.
+        _print_skipped_summary(skipped_metrics, bin_table, is_tt, cutoff_iso)
 
         print(f"\nTotal elapsed: {time.perf_counter() - t_total:.0f}s")
+
+        # Non-zero on a hard failure OR on any skipped metric, so a wrapper
+        # can notice a stale bin column without parsing the log.  A skip is a
+        # warning, not a stop: one stale column must not block the batch, and
+        # the rows that were computed are correct and already committed.
+        if not all_ok:
+            sys.exit(1)
+        if skipped_metrics:
+            sys.exit(1)
 
     finally:
         await conn.close()
@@ -582,11 +932,14 @@ def main() -> None:
     )
     p.add_argument(
         "--mode",
-        choices=["walk_forward", "in_sample"],
+        choices=["walk_forward", "in_sample", "train_test"],
         required=True,
         help=(
-            "Bin mode to scan: 'walk_forward' reads from wf_bins, "
-            "'in_sample' reads from is_bins"
+            "Bin mode to scan: 'walk_forward' reads wf_bins, "
+            "'in_sample' reads is_bins, 'train_test' reads tt_bins and "
+            "splits on the cutoff frozen in that table. There is "
+            "deliberately no --cutoff flag: the split is whatever the "
+            "upstream build froze."
         ),
     )
     p.add_argument(

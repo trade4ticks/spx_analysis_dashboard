@@ -1,4 +1,4 @@
-ok, `# System Inventory
+ok, `git pu# System Inventory
 
 Complete traced inventory of databases, tables, scripts, endpoints, data
 flow, and cleanup candidates. Builds on
@@ -87,7 +87,7 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `analyze_cache_outcome` | derived-cache | (cache_key, outcome) | same txn as slim | GET `/analyze-bundle/outcome` | Per-outcome returns for the 12-outcome bundle | Y |
 | `global_bins_cache` | derived-cache | cache_key TEXT PK | GET `/global-metric-bins` (lazy); POST `/global-metric-bins/invalidate` clears | GET `/global-metric-bins` (read-through) | **"All-Ticker Metric Bins"** — fourth OI Analysis pane (line 1306) | Y |
 | `ic_batch_cache` | derived-cache | cache_key TEXT PK | `scripts/precompute_ic_all.py` (ALL); GET `/ic-batch` lazy single-ticker; POST `/ic-batch/refresh` | GET `/ic-batch`, `/ic-decomp` | **"Signal Survey"** — fifth OI Analysis pane (line 1422) | Y |
-| `corner_scan_2f` | derived-scan | (P, S, dir, outcome, mode) PK | `scripts/corner_scan.py --mode {wf\|is}` | GET `/corner-scan/2f` | **"Corner Scan — 2-Factor"** — second top-level pane (line 902) | Y |
+| `corner_scan_2f` | derived-scan | (P, S, dir, outcome, mode) PK | `scripts/corner_scan.py --mode {wf\|is\|tt}` | GET `/corner-scan/2f` | **"Corner Scan — 2-Factor"** — second top-level pane (line 902). TT rows use the `*_train_*` / `*_test_*` columns and a fixed 10-column view; WF/IS use `d_`/`q_` and the 13-column view | Y |
 | `corner_scan_1f` | derived-scan | (metric, extreme, outcome, mode) PK | `scripts/corner_scan.py` Phase 5 | GET `/corner-scan/1f` | **"Corner Scan — 1-Factor"** — third top-level pane (line 1135) | Y |
 | `corner_scan_notes` | annotation | (P, S, dir, outcome) PK | POST `/corner-scan/notes` | LEFT JOIN in GET `/corner-scan/2f` | Note/reviewed/saved flags in 2F Corner Scan pane | N |
 | `signals` | annotation (+ cached cols) | id SERIAL + agg_avg_ret, agg_n, per_cell_stats, stats_updated_at | POST `/signals`, PUT `/signals/{id}` (user); POST `/signals/refresh` (stats only) | GET `/signals`; `oi_signals.py` firing checks; `oi_portfolios.py` membership | Saved cell-set/zone defs; Heatmap Save Signal, OI Signals tracked/firing, Portfolio Builder | N (rows); Y (cached cols via `/signals/refresh`) |
@@ -122,7 +122,7 @@ The `oi_*` table-name prefix is historical naming — it does **not** mean the t
 | `run.py` | Launches FastAPI app via uvicorn on HOST/PORT | `.env` | — | Manual: `python run.py` on VPS (per deployment memory) | active |
 | `run_research.py` | CLI runner for the research-agent workflow | MAIN DB + OI DB + `research_config.yaml` | MAIN DB (`research_runs`, results, charts) | Manual CLI | active |
 | `export_report.py` | Loads a completed research run; exports a PDF | MAIN DB (`research_runs`, results, charts) | `reports/<name>.pdf` | Manual CLI | active |
-| `scripts/corner_scan.py` | Offline corner-scan: emits 1F + 2F extreme-corner stats | OI DB (`metric_classification`, `wf_bins`/`is_bins`, `daily_features`) | OI DB (`corner_scan_1f`, `corner_scan_2f`, mode-partitioned) | Manual: `python scripts/corner_scan.py --mode {walk_forward\|in_sample} [--force] [--dry-run]`. No cron found. | active |
+| `scripts/corner_scan.py` | Offline corner-scan: emits 1F + 2F extreme-corner stats. TT emits 2F only | OI DB (`metric_classification`, `wf_bins`/`is_bins`/`tt_bins`, `daily_features`) | OI DB (`corner_scan_1f`, `corner_scan_2f`, mode-partitioned) | Manual: `python scripts/corner_scan.py --mode {walk_forward\|in_sample\|train_test} [--force] [--dry-run]`. TT reads the frozen cutoff from `tt_bins` — no `--cutoff` flag. Exits non-zero if any metric was skipped for having no usable bins. No cron found. | active |
 | `scripts/precompute_ic_all.py` | Pre-computes ALL-mode IC batch one metric at a time (avoids OOM that killed live ALL-mode path) | OI DB (`daily_features` one metric/outcome at a time; `metric_classification`) | OI DB (`ic_batch_cache`, key `ic_batch:ALL:<outcome>:<window>:<mode>:s<stride>`) | Manual: `python scripts/precompute_ic_all.py [--force] [--cutoff-date YYYY-MM-DD]` | active |
 | `scripts/load_metric_classification.py` | Parses data dictionary; upserts `metric_classification` | `daily_features_data_dictionary.md` | OI DB (`metric_classification`) | Manual; recovery plan in `dashboard_tables_to_ui.md` | active |
 | `scripts/regression_check.py` | Refactor harness: capture JSON snapshots of API output, diff two dirs, train_test_check property tests | Live dashboard HTTP | `regression_snapshots/<tag>/*.json` | Manual during refactor steps; snapshot dirs already present (`step1-baseline`, `step2-after`, …, `step7k`) | active (refactor tool) |

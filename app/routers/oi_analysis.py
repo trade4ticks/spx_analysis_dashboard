@@ -7704,6 +7704,15 @@ CREATE TABLE IF NOT EXISTS corner_scan_2f (
     q_avg_ret         DOUBLE PRECISION,
     q_ret_per_day     DOUBLE PRECISION,
     q_n               INTEGER,
+    d_train_avg_ret   DOUBLE PRECISION,
+    d_train_n         INTEGER,
+    d_test_avg_ret    DOUBLE PRECISION,
+    d_test_n          INTEGER,
+    q_train_avg_ret   DOUBLE PRECISION,
+    q_train_n         INTEGER,
+    q_test_avg_ret    DOUBLE PRECISION,
+    q_test_n          INTEGER,
+    cutoff_date       DATE,
     as_of             DATE        NOT NULL,
     mode              TEXT        NOT NULL DEFAULT 'walk_forward',
     scanned_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -7766,6 +7775,30 @@ BEGIN
 END $$;
 """
 
+# Train-test columns.  Nullable by design and sparse by design: a
+# train_test row populates these and leaves d_avg_ret / q_avg_ret /
+# *_ret_per_day / d_n / q_n NULL, while walk_forward and in_sample rows do
+# the reverse.  `mode` stays the discriminator and the PK is unchanged, so
+# the corner_scan_notes LEFT JOIN and the signal-match lookup keep working
+# on the same four-column identity tuple for every mode.
+#
+# cutoff_date is provenance only — NOT part of the PK.  tt_bins is built
+# with exactly ONE frozen cutoff (see _get_tt_cutoff), so there is only
+# ever one TT row set at a time.  If the upstream build ever ships multiple
+# cutoffs simultaneously this becomes a PK change; we don't pre-pay for it.
+_DDL_CORNER_2F_MIGRATE_TT = (
+    "ALTER TABLE corner_scan_2f "
+    "ADD COLUMN IF NOT EXISTS d_train_avg_ret DOUBLE PRECISION, "
+    "ADD COLUMN IF NOT EXISTS d_train_n       INTEGER, "
+    "ADD COLUMN IF NOT EXISTS d_test_avg_ret  DOUBLE PRECISION, "
+    "ADD COLUMN IF NOT EXISTS d_test_n        INTEGER, "
+    "ADD COLUMN IF NOT EXISTS q_train_avg_ret DOUBLE PRECISION, "
+    "ADD COLUMN IF NOT EXISTS q_train_n       INTEGER, "
+    "ADD COLUMN IF NOT EXISTS q_test_avg_ret  DOUBLE PRECISION, "
+    "ADD COLUMN IF NOT EXISTS q_test_n        INTEGER, "
+    "ADD COLUMN IF NOT EXISTS cutoff_date     DATE"
+)
+
 _DDL_CORNER_1F_MIGRATE_COLS = (
     "ALTER TABLE corner_scan_1f "
     "ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'walk_forward'"
@@ -7800,7 +7833,49 @@ _CS_2F_SORT_WHITELIST: frozenset = frozenset({
     "primary_metric", "secondary_metric", "corner_direction", "outcome",
     "d_avg_ret", "d_ret_per_day", "d_n",
     "q_avg_ret", "q_ret_per_day", "q_n",
+    # train_test columns
+    "d_train_avg_ret", "d_train_n", "d_test_avg_ret", "d_test_n",
+    "q_train_avg_ret", "q_train_n", "q_test_avg_ret", "q_test_n",
 })
+
+# Default sort per mode.  TT defaults to a TEST column: train is for
+# selection, test is for truth.  d_ret_per_day does not exist on TT rows
+# (the %/day columns are dropped from that view), so it cannot be the
+# fallback there.
+_CS_2F_DEFAULT_SORT: dict = {
+    "train_test": "d_test_avg_ret",
+}
+_CS_2F_DEFAULT_SORT_OTHER = "d_ret_per_day"
+
+# Columns that are meaningful for each mode.  Used to reject a sort key
+# carried over from the other view (e.g. switching IS→TT with sort_key
+# still set to d_ret_per_day, which is NULL on every TT row and would
+# sort the whole page arbitrarily).
+_CS_2F_TT_COLS: frozenset = frozenset({
+    "d_train_avg_ret", "d_train_n", "d_test_avg_ret", "d_test_n",
+    "q_train_avg_ret", "q_train_n", "q_test_avg_ret", "q_test_n",
+})
+_CS_2F_STD_COLS: frozenset = frozenset({
+    "d_avg_ret", "d_ret_per_day", "d_n",
+    "q_avg_ret", "q_ret_per_day", "q_n",
+})
+
+
+def _cs_2f_resolve_sort(sort_key: str, mode: str) -> str:
+    """Whitelist the sort key AND keep it inside the active mode's columns.
+
+    A stat column belonging to the other mode is always NULL on this
+    mode's rows, so honouring it would produce a page ordered by nothing.
+    Identity columns (metric names, direction, outcome) are shared and
+    pass through for either mode.
+    """
+    default = (_CS_2F_DEFAULT_SORT.get(mode) or _CS_2F_DEFAULT_SORT_OTHER)
+    if sort_key not in _CS_2F_SORT_WHITELIST:
+        return default
+    wrong_mode_cols = _CS_2F_STD_COLS if mode == "train_test" else _CS_2F_TT_COLS
+    if sort_key in wrong_mode_cols:
+        return default
+    return sort_key
 _CS_1F_SORT_WHITELIST: frozenset = frozenset({
     "metric", "extreme", "outcome",
     "d_avg_ret", "d_ret_per_day", "d_n",
@@ -8257,6 +8332,7 @@ async def _ensure_corner_scan_tables(pool) -> None:
         await conn.execute(_DDL_CORNER_2F_MIGRATE_COLS)
         await conn.execute(_DDL_CORNER_2F_MIGRATE_TS)
         await conn.execute(_DDL_CORNER_2F_MIGRATE_PK)
+        await conn.execute(_DDL_CORNER_2F_MIGRATE_TT)
         await conn.execute(_DDL_CORNER_1F_MIGRATE_COLS)
         await conn.execute(_DDL_CORNER_1F_MIGRATE_TS)
         await conn.execute(_DDL_CORNER_1F_MIGRATE_PK)
@@ -8328,9 +8404,38 @@ async def corner_scan_meta(
                 mode,
             )
         metrics_list = [r["metric"] for r in metric_rows]
+
+        # Fallback: train_test deliberately writes no corner_scan_1f rows
+        # (the 1F pane's TT toggle is still disabled, and data behind a
+        # toggle that refuses to load it is worse than no data).  The list
+        # above is therefore empty for TT, which would leave the 2F P/S
+        # filter dropdowns blank whenever TT is the first mode loaded.
+        # Source it from corner_scan_2f instead, with the same display-only
+        # family exclusion.
+        if not metrics_list:
+            if mc_exists:
+                metric_rows = await conn.fetch(
+                    """SELECT DISTINCT primary_metric AS metric
+                       FROM corner_scan_2f
+                       WHERE mode = $1
+                         AND primary_metric NOT IN (
+                             SELECT metric FROM metric_classification
+                             WHERE family_num = 2
+                                OR (family_num IN (4,5) AND RIGHT(metric,3) = '_pc')
+                         )
+                       ORDER BY metric""",
+                    mode,
+                )
+            else:
+                metric_rows = await conn.fetch(
+                    """SELECT DISTINCT primary_metric AS metric
+                       FROM corner_scan_2f WHERE mode = $1 ORDER BY metric""",
+                    mode,
+                )
+            metrics_list = [r["metric"] for r in metric_rows]
     def _iso(v):
         return v.isoformat() if v is not None else None
-    return {
+    resp = {
         "mode":          mode,
         "count_2f":      int(row["count_2f"]),
         "as_of_2f":      _iso(row["as_of_2f"]),
@@ -8341,6 +8446,9 @@ async def corner_scan_meta(
         "n_metrics":     int(row["n_metrics"]),
         "metrics":       metrics_list,
     }
+    if mode == "train_test":
+        resp["cutoff_date"] = await _get_tt_cutoff(pool)
+    return resp
 
 
 async def _cs_2f_attach_signal_matches(pool, rows: list) -> list:
@@ -8415,8 +8523,29 @@ async def corner_scan_2f_endpoint(
         return {"rows": [], "total": 0, "mode": mode, "status": "no_db"}
     await _ensure_corner_scan_tables(pool)
 
-    if sort_key not in _CS_2F_SORT_WHITELIST:
-        sort_key = "d_ret_per_day"
+    is_tt    = mode == "train_test"
+    sort_key = _cs_2f_resolve_sort(sort_key, mode)
+
+    # ── Train-test: the split IS the window ──────────────────────────────────
+    # TT rows are batch-written by scripts/corner_scan.py --mode train_test
+    # against tt_bins, whose edges are frozen at the cutoff by the external
+    # build.  Two things are therefore refused here rather than honoured:
+    #
+    #   date_from / date_to — a caller-picked window stacked on top of the
+    #     frozen train/test split is ambiguous, so it is ignored (the
+    #     frontend also hides the inputs in TT mode).
+    #   cutoff_date        — never accepted as a parameter in any form.  The
+    #     cutoff is whatever the build froze into tt_bins; it is read back
+    #     via _get_tt_cutoff and returned for display only.
+    #
+    # The n gate moves to d_test_n: d_n is NULL on every TT row, and test n
+    # is the sample that decides whether a corner is trustworthy.
+    if is_tt:
+        date_from = None
+        date_to   = None
+        n_gate_col = "d_test_n"
+    else:
+        n_gate_col = "d_n"
 
     # ── Live windowed path: date_from or date_to set → in-memory recompute ────
     # Reads stored bins (wf_bins / is_bins) + daily_features for the date window,
@@ -8461,7 +8590,7 @@ async def corner_scan_2f_endpoint(
     # The COUNT query uses the same conds without aliasing (no JOIN
     # there), which is fine because `cs` is just a stripped alias and
     # Postgres tolerates it when the FROM only has corner_scan_2f.
-    conds:  list[str] = ["cs.d_n >= $1", "cs.mode = $2"]
+    conds:  list[str] = [f"cs.{n_gate_col} >= $1", "cs.mode = $2"]
     params: list      = [min_d_n, mode]
     p = 3
 
@@ -8509,6 +8638,11 @@ async def corner_scan_2f_endpoint(
             f"""SELECT cs.primary_metric, cs.secondary_metric, cs.corner_direction, cs.outcome,
                        cs.d_avg_ret, cs.d_ret_per_day, cs.d_n,
                        cs.q_avg_ret, cs.q_ret_per_day, cs.q_n,
+                       cs.d_train_avg_ret, cs.d_train_n,
+                       cs.d_test_avg_ret,  cs.d_test_n,
+                       cs.q_train_avg_ret, cs.q_train_n,
+                       cs.q_test_avg_ret,  cs.q_test_n,
+                       cs.cutoff_date,
                        cs.as_of, cs.scanned_at, cs.mode,
                        COALESCE(n.note,     '')    AS note,
                        COALESCE(n.reviewed, FALSE) AS reviewed,
@@ -8529,12 +8663,17 @@ async def corner_scan_2f_endpoint(
     # rows whose (primary, secondary, corner_direction, outcome)
     # tuple has no tagged saved signal.
     row_dicts = await _cs_2f_attach_signal_matches(pool, row_dicts)
-    return {
+    resp = {
         "rows":   row_dicts,
         "total":  int(total),
         "mode":   mode,
         "status": "ok" if int(total) > 0 else "no_data",
     }
+    if is_tt:
+        # Frozen split, read from tt_bins — never echoed back from a caller
+        # parameter.  The pane renders this read-only next to the TT pill.
+        resp["cutoff_date"] = await _get_tt_cutoff(pool)
+    return resp
 
 
 class CornerNoteIn(BaseModel):
