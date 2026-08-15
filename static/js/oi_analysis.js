@@ -51,6 +51,11 @@ document.addEventListener('alpine:init', () => {
     // sane string so the initial render before the fetch resolves doesn't
     // emit `undefined` in URLs; gets overwritten by the actual value.
     cutoffDate: '2024-01-01',
+    // Opt-in for FactorCharts._cutoffPlugin. cutoffDate itself is populated
+    // on every page load regardless of mode, so it cannot gate the marker:
+    // keying off it would draw a train/test line across in-sample Recall
+    // charts. Only train_test mode wants it.
+    get cutoffLineDate() { return this.pageMode === 'train_test' ? this.cutoffDate : ''; },
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'

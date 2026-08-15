@@ -60,6 +60,11 @@ def _component_members(src: str) -> set[str]:
     component in this codebase declares them.
     """
     out = set(re.findall(r"^    (_?[A-Za-z][\w]*)\s*\(", src, re.M))
+    # ES getters/setters are declarations too. Without this a component that
+    # exposes a derived field as `get name()` reads as not declaring it at
+    # all -- a false failure that would push someone to add a redundant
+    # plain field alongside the getter.
+    out |= set(re.findall(r"^    (?:get|set)\s+(_?[A-Za-z][\w]*)\s*\(", src, re.M))
     # Declarations are not always alone on a line -- `ticker: '', metric: '',`
     # is one line declaring three fields -- so scan every 4-space-indented
     # line for name: pairs rather than anchoring to line start.
