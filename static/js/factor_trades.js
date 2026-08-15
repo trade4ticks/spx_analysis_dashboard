@@ -21,7 +21,7 @@ document.addEventListener('alpine:init', () => {
     loading: false, error: '',
     runs: [], currentIdx: -1, lockedIdx: -1,
     runData: null, lockedRun: null, zoneData: null, lockedZone: null,
-    gridView: 'edited', showDD: true,
+    gridView: 'edited', showDD: true, fsId: null, _fsHome: null,
     selectedCells: [],            // [[bp, bs], ...]
 
     // ── FactorCharts contract ────────────────────────────────────────────
@@ -81,6 +81,27 @@ document.addEventListener('alpine:init', () => {
       else this.selected[f.family] = f.rules[0]?.rule_key;
       this.selected = { ...this.selected };
     },
+    // Full screen: MOVE the canvas into the overlay and back again, so the
+    // Chart.js instance survives and only needs a resize. Re-creating it
+    // would mean re-deriving the dollar series for a resize.
+    openFs(id) {
+      const c = document.getElementById(id);
+      if (!c) return;
+      this._fsHome = c.parentElement;
+      this.fsId = id;
+      this.$nextTick(() => {
+        const body = document.getElementById('ft-ov-body');
+        if (body) { body.appendChild(c); this._charts[id]?.resize(); }
+      });
+    },
+    closeFs() {
+      const id = this.fsId, home = this._fsHome;
+      const c = id && document.getElementById(id);
+      if (c && home) home.appendChild(c);   // move back BEFORE clearing state
+      this.fsId = null; this._fsHome = null;
+      this.$nextTick(() => this._charts[id]?.resize());
+    },
+
     setActivityMode(m) {
       this.activityMode = { ft: m, sec: m, port: m };
       this.renderCharts();

@@ -493,3 +493,17 @@ input[type=range]::-webkit-slider-thumb {
 .stat-item { background:var(--surface); padding:10px 12px; }
 .stat-label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
 .stat-value { font-size:15px; font-weight:700; }
+
+/* Chart pane shell. Was duplicated in two pages' inline <style>
+   blocks -- flagged last round as a drift risk. Added, not moved:
+   each page's inline copy follows the <link> and still wins, so
+   both render unchanged; new pages inherit instead of re-declaring. */
+.chart-box {
+      background:var(--surface); border:1px solid var(--border); border-radius:6px;
+      padding:10px 10px 2px; min-height:280px;
+    }
+.chart-title {
+      font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px;
+      display:flex; align-items:center; gap:8px;
+    }
+.chart-canvas { height:240px; position:relative; }

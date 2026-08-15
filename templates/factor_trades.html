@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Factor Trades</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=1">
+  <link rel="stylesheet" href="/static/css/theme.css?v=2">
   <style>
     /* Left rail is fixed so the active configuration is always in view —
        the page is driven by iterating on it. */
@@ -31,13 +31,26 @@
        a value dropdown side by side, and the value has to be visible —
        "atr_stop" alone does not say which of the five ATR multiples is
        selected. */
-    .ft-rule     { margin-bottom:7px; }
-    .ft-rule-top { display:flex; align-items:center; gap:6px; margin-bottom:2px; }
-    .ft-rule-top input[type=checkbox] { flex:0 0 auto; width:auto; margin:0; }
-    .ft-rule-top span { font-size:11px; color:var(--muted); font-family:monospace;
-                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .ft-rule select { width:100%; }
-    .ft-rule select:disabled { opacity:.45; }
+    /* One row per rule: switch, name, dropdown. The two-line form wasted
+       vertical space in a rail that has ~20 rules in it. */
+    .ft-rule { display:flex; align-items:center; gap:7px; padding:3px 5px;
+               margin-bottom:2px; border-radius:3px; border:1px solid transparent; }
+    .ft-rule.on { background:rgba(52,152,219,.10); border-color:rgba(52,152,219,.35); }
+    .ft-rule-name { flex:1; min-width:0; font-size:11px; color:var(--muted);
+                    font-family:monospace; white-space:nowrap; overflow:hidden;
+                    text-overflow:ellipsis; }
+    .ft-rule.on .ft-rule-name { color:var(--text); }
+    .ft-rule select { flex:0 0 88px; width:88px; padding:2px 4px; font-size:11px; }
+    .ft-rule select:disabled { opacity:.4; }
+    /* Toggle switch, in the project blue — not the browser default green. */
+    .ft-sw { flex:0 0 26px; width:26px; height:15px; border-radius:8px; cursor:pointer;
+             background:var(--raised); border:1px solid var(--border);
+             position:relative; transition:background .12s, border-color .12s; }
+    .ft-sw::after { content:''; position:absolute; top:1px; left:1px; width:11px;
+                    height:11px; border-radius:50%; background:var(--dim);
+                    transition:transform .12s, background .12s; }
+    .ft-sw.on { background:rgba(52,152,219,.30); border-color:#3498db; }
+    .ft-sw.on::after { transform:translateX(11px); background:#3498db; }
     .ft-btn { width:100%; margin-top:10px; padding:6px; border-radius:3px; cursor:pointer;
               border:1px solid var(--border); background:var(--raised);
               color:var(--text); font-size:12px; font-weight:600; }
@@ -74,13 +87,21 @@
                  border-radius:4px; padding:8px; margin-bottom:12px; }
     .chart-title { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; }
     .chart-canvas { height:220px; position:relative; }
+    .ft-grid2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; }
+    .ft-fs { float:right; background:none; border:1px solid var(--border);
+             color:var(--dim); cursor:pointer; border-radius:3px; font-size:11px;
+             line-height:1; padding:2px 5px; }
+    .ft-fs:hover { color:var(--text); border-color:var(--muted); }
+    .ft-ov { position:fixed; inset:0; background:var(--bg); z-index:9999;
+             display:flex; flex-direction:column; padding:12px; }
+    .ft-ov-body { flex:1; min-height:0; position:relative; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
     .ft-tt   { font-size:10px; color:#c8c8c8; font-weight:400; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=7"></script>
-  <script src="/static/js/factor_trades.js?v=11"></script>
+  <script src="/static/js/factor_trades.js?v=13"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -147,12 +168,10 @@
           <div style="margin-bottom:8px">
             <div class="ft-sec-h" style="color:var(--muted)" x-text="g.title"></div>
             <template x-for="f in g.families" :key="'f-'+g.side+'-'+f.family">
-              <div class="ft-rule">
-                <div class="ft-rule-top">
-                  <input type="checkbox" :checked="!!selected[f.family]"
-                         @change="toggleFamily(f)">
-                  <span :title="f.family" x-text="f.family"></span>
-                </div>
+              <div class="ft-rule" :class="{on: !!selected[f.family]}">
+                <div class="ft-sw" :class="{on: !!selected[f.family]}"
+                     @click="toggleFamily(f)" :title="f.family"></div>
+                <div class="ft-rule-name" :title="f.family" x-text="f.family"></div>
                 <select :disabled="!selected[f.family]"
                         :value="selected[f.family] || (f.rules[0] && f.rules[0].rule_key)"
                         @change="selected[f.family] = $event.target.value">
@@ -268,62 +287,77 @@
         </div>
       </template>
 
-      <!-- 4. Charts. Locked overlays in faint grey, edited in Recall colours.
-           Equity+DD and annual P&L share a pane; activity and ticker
-           breakdown get separate panes per run. -->
+      <!-- 4. Charts. Equity full width; the rest in a 2x2. Locked variants
+           sit beneath their edited counterpart in the same cell, so the grid
+           stays 2x2 rather than gaining a fifth pane to balance it. -->
       <div class="chart-box" x-show="zoneData">
-        <div class="chart-title">Equity &amp; drawdown <span class="ft-note">[train + test]</span>
-          <span class="ft-note">— locked grey, edited colour</span>
-          <span style="float:right"><label class="ft-note"><input type="checkbox" x-model="showDD"> DD</label></span>
+        <div class="chart-title">Equity &amp; drawdown
+          <span class="ft-note">[train + test] — locked grey, edited colour</span>
+          <label class="ft-note" style="margin-left:8px"><input type="checkbox" x-model="showDD"> DD</label>
+          <button class="ft-fs" @click="openFs('ft-equity')" title="Full screen">⛶</button>
         </div>
         <div class="chart-canvas"><canvas id="ft-equity"></canvas></div>
       </div>
 
-      <div class="chart-box" x-show="zoneData">
-        <div class="chart-title">Annual P&amp;L <span class="ft-note">— grey locked, blue edited</span></div>
-        <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
-      </div>
-
-      <div class="chart-box" x-show="zoneData">
-        <div class="chart-title">Exit reasons <span class="ft-note">[train window]</span>
-          <span class="ft-note">— which rule actually closed each trade</span>
+      <div class="ft-grid2" x-show="zoneData">
+        <div class="chart-box">
+          <div class="chart-title">Annual P&amp;L <span class="ft-note">[train + test] — grey locked, blue edited</span>
+            <button class="ft-fs" @click="openFs('ft-yearly')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
-        <div class="chart-canvas" style="height:180px"><canvas id="ft-reasons"></canvas></div>
-      </div>
-
-      <div style="display:flex;gap:12px">
-        <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
-          <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span>Trade activity</span>
-            <span class="ft-note">[train + test] — edited</span>
-            <!-- Open Trades counts what is carried OVERNIGHT, once per
-                 session at the close; a same-session round trip shows in
-                 Entered but never in Open. -->
-            <div class="ft-toggle">
-              <span :class="{on: activityMode.ft === 'trades'}"
-                    @click="setActivityMode('trades')">Count</span>
-              <span :class="{on: activityMode.ft === 'capital'}"
-                    @click="setActivityMode('capital')">Capital</span>
+        <div class="chart-box">
+          <div class="chart-title">Exit reasons <span class="ft-note">[train window] — which rule closed each trade</span>
+            <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
+        </div>
+        <div>
+        <div class="chart-box">
+          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — edited</span>
+            <div class="ft-toggle" style="margin-left:8px">
+              <span :class="{on: activityMode.ft === 'trades'}" @click="setActivityMode('trades')">Count</span>
+              <span :class="{on: activityMode.ft === 'capital'}" @click="setActivityMode('capital')">Capital</span>
             </div>
+            <button class="ft-fs" @click="openFs('ft-activity-edited')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-activity-edited"></canvas></div>
         </div>
-        <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
-          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — locked</span></div>
+          <div x-show="lockedZone">
+        <div class="chart-box">
+          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — locked</span>
+            <button class="ft-fs" @click="openFs('ft-activity-locked')" title="Full screen">⛶</button>
+          </div>
           <div class="chart-canvas"><canvas id="ft-activity-locked"></canvas></div>
+        </div>
+          </div>
+        </div>
+        <div>
+        <div class="chart-box">
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — edited</span>
+            <button class="ft-fs" @click="openFs('ft-bubble-edited')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
+        </div>
+          <div x-show="lockedZone">
+        <div class="chart-box">
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — locked</span>
+            <button class="ft-fs" @click="openFs('ft-bubble-locked')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>
+        </div>
+          </div>
         </div>
       </div>
 
-      <div style="display:flex;gap:12px">
-        <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — edited</span></div>
-          <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
+      <!-- 8: full-screen overlay. The canvas is MOVED here and moved back on
+           close, so the Chart.js instance survives and only needs a resize. -->
+      <template x-if="fsId">
+        <div class="ft-ov" @keydown.escape.window="closeFs()">
+          <div style="margin-bottom:8px"><button class="ft-btn" style="width:auto;padding:4px 12px" @click="closeFs()">✕ Close</button></div>
+          <div class="ft-ov-body" id="ft-ov-body"></div>
         </div>
-        <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — locked</span></div>
-          <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>
-        </div>
-      </div>
+      </template>
 
       <button class="ft-btn" style="width:auto;padding:6px 14px" @click="exportCsv()"
               x-show="zoneData">Export CSV</button>
