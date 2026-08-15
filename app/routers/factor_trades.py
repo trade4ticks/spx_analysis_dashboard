@@ -564,7 +564,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         span = ((max(w[3]) - min(w[3])).days if len(w[3]) > 1 else 1)
         return _window_stats(w[0], w[1], w[2], span)
 
-    tot_train = tot["train"][0] or 1
+    tot_test = tot["test"][0] or 1
     breakdown = []
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
