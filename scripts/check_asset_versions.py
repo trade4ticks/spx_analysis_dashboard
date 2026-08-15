@@ -70,8 +70,30 @@ def check(before: str, after: str | None, changed: list[str]) -> int:
         name = Path(path).name
         old = _versions_at(before, name)
         new = _versions_at(after, name)
+
+        # Checked unconditionally, not just when NO template versions the file.
+        # A file versioned in ten templates and bare in one is the worse case:
+        # it looks cache-busted everywhere you happen to look. The first
+        # version of this check only ran when `new` was empty and would have
+        # missed exactly that.
+        unversioned = [t.name for t in sorted(TPL.glob("*.html"))
+                       if re.search(rf'(?:href|src)="/static/[^"?]*{re.escape(name)}"',
+                                    t.read_text(encoding="utf-8"))]
+        if unversioned:
+            bad += 1
+            print(f"  {name:26s} CHANGED and referenced with NO ?v= in: "
+                  + ", ".join(unversioned))
+
         if not new:
-            print(f"  {name:26s} changed, referenced by no template — not checked")
+            # Distinguish "no template references it" (fine — shared modules
+            # can load by other means) from "referenced with NO ?v= at all",
+            # which is strictly worse than a stale buster: there is no URL
+            # change possible, so the browser keeps its copy forever, through
+            # hard-refresh included. theme.css was in exactly this state and
+            # the earlier version of this gate could not see it, because it
+            # only compared version numbers that existed.
+            if not unversioned:
+                print(f"  {name:26s} changed, referenced by no template — not checked")
             continue
         misses = [t for t, v in new.items() if old.get(t, -1) >= v]
         if misses:
@@ -86,7 +108,9 @@ def check(before: str, after: str | None, changed: list[str]) -> int:
 
     print()
     if bad:
-        print(f"{bad} changed asset(s) NOT bumped — browsers will keep the cached copy")
+        print(f"{bad} changed asset(s) not cache-busted — browsers will keep the "
+              f"cached copy (an absent ?v= is worse than a stale one: no URL "
+              f"change is possible at all)")
     else:
         print("every changed asset was bumped")
     return 1 if bad else 0

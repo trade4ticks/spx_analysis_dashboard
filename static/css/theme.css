@@ -482,3 +482,14 @@ input[type=range]::-webkit-slider-thumb {
    on any other page. */
 .stat-value.pos { color:#3498db; }
 .stat-value.neg { color:#e84393; }
+
+/* stat_box macro base styles. These lived only in page-level inline
+   <style> blocks, so the shared macro rendered unstyled on any page
+   that did not happen to redefine them -- most visibly .stat-label,
+   which factor_trades.html never defined at all. A shared macro
+   cannot depend on a style that is not in the shared sheet.
+   Added, not moved: each page's inline <style> follows the <link>,
+   so existing inline copies still win and those pages are unchanged. */
+.stat-item { background:var(--surface); padding:10px 12px; }
+.stat-label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+.stat-value { font-size:15px; font-weight:700; }
