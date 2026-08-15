@@ -350,7 +350,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     # Exit-reason breakdown. A user-selected max_days and the auto-appended
     # backstop are the SAME column with opposite meanings, so the backstop is
     # labelled as such ONLY when it was auto-added.
-    tot_train = tot["train"][0] or 1
+    tot_test = tot["test"][0] or 1
     breakdown = []
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
@@ -363,7 +363,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                             else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
             "is_backstop": is_backstop,
             "n":           n,
-            "frac":        n / tot_train,
+            "frac":        n / tot_test,
         })
 
     return {
@@ -512,7 +512,10 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         d = r["trade_date"].isoformat()
         t = tot[win]
         t[0] += 1; t[1] += ret; t[2] += hold
-        if win == "train":
+        # Exit reasons and the ticker breakdown are TEST-window surfaces:
+        # they answer "what happened out of sample", so counting train trades
+        # in them would dilute exactly the thing being judged.
+        if win == "test":
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
         za = zacc[win]
         za[0].append(ret); za[1].append(hold); za[2].add(r["ticker"]); za[3].append(r["trade_date"])
@@ -538,7 +541,8 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             "spot_entry_raw": float(_px) if _px is not None else None,
         })
         dates.append(d)
-        by_ticker.setdefault(r["ticker"], []).append(ret)
+        if win == "test":
+            by_ticker.setdefault(r["ticker"], []).append(ret)
 
     eq = _sec_equity_curve(trades, "ret")
 
@@ -569,7 +573,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
             "label": ("backstop — no selected rule fired" if is_backstop
                       else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
-            "is_backstop": is_backstop, "n": n, "frac": n / tot_train,
+            "is_backstop": is_backstop, "n": n, "frac": n / tot_test,
         })
 
     return {

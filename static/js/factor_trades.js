@@ -252,7 +252,7 @@ document.addEventListener('alpine:init', () => {
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
       const ds = window.FactorCharts._computeDollarSeries(
-        this, this.zoneData.combined_trades || [],
+        this, (this.zoneData.combined_trades || []).filter(t => t.window === 'test'),
         this.perTrade, this.dailyCap, this.maxStrike);
       this.dollarStats = this._dollarStats(ds);
       try {
@@ -313,15 +313,18 @@ document.addEventListener('alpine:init', () => {
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };
+      // The stat bar is always the TEST window: it is the verdict, and a
+      // number that silently switched windows would be the worst kind of
+      // wrong. Selection happens on the heatmap, which is train.
       const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current',
-                        { ...src.train, ...(this.dollarStats || {}) }, 'train');
+                        { ...src.test, ...(this.dollarStats || {}) }, 'test');
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', 'Locked', lockedSrc.train, 'train');
+      const locked = mk('locked', 'Locked', lockedSrc.test, 'test');
       const d = (a, b) => (a ?? 0) - (b ?? 0);
-      const st = src.train, lt = lockedSrc.train;
+      const st = src.test, lt = lockedSrc.test;
       const diff = (locked && edited) ? {
-        key: 'change', label: 'Change', window: 'train',
+        key: 'change', label: 'Change', window: 'test',
         nTickers: d(st?.n_tickers, lt?.n_tickers).toLocaleString(),
         n: d(st?.n, lt?.n).toLocaleString(),
         avgRet: pct(d(st?.avg_ret, lt?.avg_ret)), avgRetRaw: d(st?.avg_ret, lt?.avg_ret),

@@ -101,7 +101,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=7"></script>
-  <script src="/static/js/factor_trades.js?v=13"></script>
+  <script src="/static/js/factor_trades.js?v=14"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -307,7 +307,7 @@
           <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Exit reasons <span class="ft-note">[train window] — which rule closed each trade</span>
+          <div class="chart-title">Exit reasons <span class="ft-note">[TEST window] — which rule closed each trade</span>
             <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
@@ -334,14 +334,14 @@
         </div>
         <div>
         <div class="chart-box">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — edited</span>
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[TEST window] — edited</span>
             <button class="ft-fs" @click="openFs('ft-bubble-edited')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
         </div>
           <div x-show="lockedZone">
         <div class="chart-box">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — locked</span>
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[TEST window] — locked</span>
             <button class="ft-fs" @click="openFs('ft-bubble-locked')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>
