@@ -481,9 +481,15 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 {combine_sql}
         )
         SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule,
+               tp.entry_price,
                (c.trade_date < $2::date) AS is_train
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
+        -- entry_price is not exposed by build_combine_sql's outer SELECT, and
+        -- the vendored function is not the place to add it. Rejoining
+        -- trade_paths on its primary key is cheap and leaves the combine
+        -- untouched.
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
         WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}
         ORDER BY c.trade_date, c.ticker
         """
@@ -509,10 +515,26 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
         za = zacc[win]
         za[0].append(ret); za[1].append(hold); za[2].add(r["ticker"]); za[3].append(r["trade_date"])
+        # trade_paths.entry_price is stored AS-TRADED (the store is
+        # adjusted=false), so it is already the price a fill would have
+        # happened at. That makes it exactly what the sizing path wants:
+        # _computeDollarSeries divides capital by spot_entry_raw and only
+        # falls back to the adjusted spot_entry when raw is missing.
+        #
+        # spot_entry (the split-adjusted basis) is deliberately NOT emitted.
+        # Deriving it would mean re-applying split factors here, and
+        # build_trade_paths already owns that via make_split_factors with
+        # inclusive=False -- a second derivation is how the two drift apart.
+        # Nothing on this page needs the adjusted basis: returns come from
+        # exit_return, and sizing and the max-strike filter both want the
+        # as-traded price.
+        _px = r["entry_price"]
         trades.append({
             "ticker": r["ticker"], "trade_date": d,
             "ret": ret, "exit_bar": hold, "exit_rule": r["exit_rule"],
             "window": win,
+            "entry_price":    float(_px) if _px is not None else None,
+            "spot_entry_raw": float(_px) if _px is not None else None,
         })
         dates.append(d)
         by_ticker.setdefault(r["ticker"], []).append(ret)

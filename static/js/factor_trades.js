@@ -320,9 +320,10 @@ document.addEventListener('alpine:init', () => {
     exportCsv() {
       const t = this.zoneData?.combined_trades || [];
       if (!t.length) return;
-      const head = ['ticker', 'trade_date', 'ret_pct', 'exit_bar', 'exit_rule', 'window'];
+      const head = ['ticker', 'trade_date', 'entry_price', 'ret_pct', 'exit_bar', 'exit_rule', 'window'];
       const rows = t.map(x => [x.ticker, x.trade_date,
-        (x.ret * 100).toFixed(6), x.exit_bar, x.exit_rule, x.window].join(','));
+        x.entry_price ?? '', (x.ret * 100).toFixed(6), x.exit_bar,
+        x.exit_rule, x.window].join(','));
       const blob = new Blob([[head.join(','), ...rows].join(String.fromCharCode(10))],
                             { type: 'text/csv' });
       const a = document.createElement('a');
