@@ -310,3 +310,186 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "tie_break_order":     combine_meta["tie_break_order"],
         "label":               req.label,
     }
+
+
+class ZoneReq(RunReq):
+    """A run plus the selected cells. Cells are [bp, bs] pairs at the run's
+    n_bins resolution (bs is ignored in single-metric mode)."""
+    cells: list[list[int]] = []
+
+
+@router.post("/zone")
+async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
+    """Per-trade payloads for the selected cells, under the run's exit policy.
+
+    Separate from /run on purpose. These series only mean anything once a
+    zone is chosen, and computing them for all 400 cells on every parameter
+    tweak is exactly the cost that would make iteration unusable.
+
+    The payload deliberately matches the contracts the Recall charts already
+    consume, so Factor Trades renders through the SAME functions rather than
+    a second implementation:
+      equity_primary / equity_combined / combined_trades -> _renderSecEquity
+      combined_trades                                    -> _renderZoneYearly
+      combined_trades + combined_trade_dates + horizon
+        + trading_days                                   -> _renderSecActivity
+      tickers                                            -> _renderSecBubble
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.cells:
+        return {"error": "no cells selected"}
+
+    from app.routers.oi_analysis import _get_tt_cutoff, _sec_equity_curve
+
+    async with pool.acquire() as conn:
+        rules = await _load_rules(conn)
+        if not rules:
+            return {"error": "trade_path_rules is empty"}
+        by_key = by_key_from_rows(rules)
+        meta_by_key = {r["rule_key"]: r for r in rules}
+
+        bin_cols = await _bin_columns(conn)
+        p_col = f"bin20_{req.primary_metric}"
+        if p_col not in bin_cols:
+            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
+        two_factor = bool(req.secondary_metric)
+        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
+        if two_factor and s_col not in bin_cols:
+            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
+
+        try:
+            combine_sql, combine_meta = build_combine_sql(
+                req.rule_keys, by_key, include_exit_rule=True)
+        except CombineError as e:
+            return {"error": str(e)}
+
+        cutoff_iso = await _get_tt_cutoff(pool)
+        if not cutoff_iso:
+            return {"error": "tt_bins has no cutoff_date"}
+        try:
+            cutoff_d = _date.fromisoformat(cutoff_iso)
+        except (TypeError, ValueError):
+            return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
+
+        n_bins = max(2, min(20, int(req.n_bins)))
+
+        def _collapse(col: str) -> str:
+            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+
+        # Cells arrive as ints from the client but are interpolated into SQL,
+        # so they are coerced and range-checked here rather than trusted.
+        bps, bss = [], []
+        for c in req.cells:
+            if not c:
+                continue
+            bp = int(c[0])
+            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
+            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
+                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
+            bps.append(bp); bss.append(bs)
+        if not bps:
+            return {"error": "no valid cells"}
+
+        if two_factor:
+            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
+                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
+            args = [req.entry_anchor, cutoff_d, bps, bss]
+        else:
+            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
+            args = [req.entry_anchor, cutoff_d, bps]
+
+        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+
+        sql = f"""
+        WITH c AS (
+{combine_sql}
+        )
+        SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule,
+               (c.trade_date < $2::date) AS is_train
+        FROM c
+        JOIN tt_bins bt USING (ticker, trade_date)
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}
+        ORDER BY c.trade_date, c.ticker
+        """
+        rows = await conn.fetch(sql, *args)
+
+        td_rows = await conn.fetch(
+            "SELECT DISTINCT trade_date FROM tt_bins ORDER BY trade_date")
+        trading_days = [r["trade_date"].isoformat() for r in td_rows]
+
+    # ── Fold into the Recall chart contracts ──────────────────────────────
+    trades, dates, reasons = [], [], {}
+    by_ticker: dict[str, list] = {}
+    tot = {"train": [0, 0.0, 0.0], "test": [0, 0.0, 0.0]}
+    for r in rows:
+        win = "train" if r["is_train"] else "test"
+        ret = float(r["exit_return"] or 0.0)
+        hold = float(r["exit_bar"] or 0.0)
+        d = r["trade_date"].isoformat()
+        t = tot[win]
+        t[0] += 1; t[1] += ret; t[2] += hold
+        if win == "train":
+            reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
+        trades.append({
+            "ticker": r["ticker"], "trade_date": d,
+            "ret": ret, "exit_bar": hold, "exit_rule": r["exit_rule"],
+            "window": win,
+        })
+        dates.append(d)
+        by_ticker.setdefault(r["ticker"], []).append(ret)
+
+    eq = _sec_equity_curve(trades, "ret")
+
+    total_pnl = sum(sum(v) for v in by_ticker.values())
+    tickers_out = []
+    for tkr, rets in by_ticker.items():
+        n = len(rets)
+        s = sum(rets)
+        tickers_out.append({
+            "ticker": tkr, "n": n,
+            "avg_ret":  round(s / n, 6) if n else 0.0,
+            "win_rate": round(sum(1 for x in rets if x > 0) / n, 4) if n else 0.0,
+            "contrib_pct": round(s / total_pnl * 100, 2) if total_pnl else 0.0,
+        })
+    tickers_out.sort(key=lambda x: -x["n"])
+
+    def _stats(win: str) -> dict:
+        n, s, h = tot[win]
+        return {"n": n, "avg_ret": (s / n) if n else 0.0,
+                "avg_hold": (h / n) if n else 0.0}
+
+    tot_train = tot["train"][0] or 1
+    breakdown = []
+    for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+        m = meta_by_key.get(rk, {})
+        is_backstop = (rk == HORIZON_RULE_KEY and combine_meta["horizon_auto_added"])
+        breakdown.append({
+            "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
+            "label": ("backstop — no selected rule fired" if is_backstop
+                      else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
+            "is_backstop": is_backstop, "n": n, "frac": n / tot_train,
+        })
+
+    return {
+        "cells": req.cells,
+        "entry_anchor": req.entry_anchor,
+        "cutoff_date": cutoff_iso,
+        # Recall chart contracts — same field names, same shapes.
+        "combined_trades": trades,
+        "combined_trade_dates": dates,
+        "equity_primary": eq,
+        "equity_combined": eq,
+        "tickers": tickers_out,
+        "trading_days": trading_days,
+        "horizon": 1,
+        # Factor Trades additions.
+        "train": _stats("train"),
+        "test": _stats("test"),
+        "exit_reasons": breakdown,
+        "rules": combine_meta["rules"],
+        "horizon_rule": combine_meta["horizon_rule"],
+        "horizon_auto_added": combine_meta["horizon_auto_added"],
+        "excludes_unresolved": combine_meta["excludes_unresolved"],
+        "label": req.label,
+    }

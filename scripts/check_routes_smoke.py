@@ -128,7 +128,71 @@ def main() -> int:
 
     print()
     print(f"page routes healthy: {ok}/{ok + bad}")
-    return 1 if bad else 0
+
+    api_bad = _check_factor_trades(app)
+    return 1 if (bad or api_bad) else 0
+
+
+def _check_factor_trades(app) -> int:
+    """Exercise the factor-trades API, which the page sweep above cannot see.
+
+    That sweep only covers GET routes defined in app.main, so /api/* has had
+    no gate at all -- which is how a str-vs-date parameter bug reached
+    production in an endpoint that 500'd on every call. These are POST
+    endpoints needing a real DB, so they SKIP cleanly when OI_DATABASE_URL is
+    unset (dev boxes) and actually run on the VPS, which is where it matters.
+
+    The assertion is deliberately weak: 200 with a JSON body, or a clean
+    {"error": ...} payload. It is not checking numbers -- it is checking that
+    the endpoint executes end to end instead of raising.
+    """
+    import os
+    from fastapi.testclient import TestClient
+
+    if not os.getenv("OI_DATABASE_URL"):
+        print()
+        print("factor-trades API: SKIPPED (no OI_DATABASE_URL) — run this on the VPS")
+        return 0
+
+    print()
+    bad = 0
+    with TestClient(app) as client:
+        r = client.get("/api/factor-trades/rules")
+        if r.status_code != 200:
+            print(f"  /rules  HTTP {r.status_code}  {r.text[:160]}")
+            bad += 1
+        else:
+            body = r.json()
+            groups = body.get("groups") or []
+            print(f"  /rules  200  {len(groups)} groups, {body.get('n_rules', 0)} rules"
+                  + (f"  ERROR: {body['error']}" if body.get("error") else ""))
+            # First rule key of the first family, to drive the POSTs below.
+            key = None
+            for g in groups:
+                for fam in g.get("families", []):
+                    for rule in fam.get("rules", []):
+                        key = key or rule.get("rule_key")
+            metric = os.getenv("SMOKE_METRIC", "")
+            if not key or not metric:
+                print("  /run /zone  SKIPPED (need a rule key and SMOKE_METRIC=<binned metric>)")
+                return bad
+            payload = {"primary_metric": metric, "entry_anchor": "open",
+                       "rule_keys": [key], "n_bins": 20}
+            for path, extra in (("/api/factor-trades/run", {}),
+                                ("/api/factor-trades/zone", {"cells": [[0]]})):
+                rr = client.post(path, json={**payload, **extra})
+                if rr.status_code != 200:
+                    print(f"  {path:28s} HTTP {rr.status_code}  {rr.text[:160]}")
+                    bad += 1
+                    continue
+                b = rr.json()
+                if b.get("error"):
+                    print(f"  {path:28s} 200 but error: {b['error'][:110]}")
+                    bad += 1
+                    continue
+                print(f"  {path:28s} 200  keys={len(b)}  "
+                      f"horizon_auto_added={b.get('horizon_auto_added')}")
+    return bad
 
 
 if __name__ == "__main__":
