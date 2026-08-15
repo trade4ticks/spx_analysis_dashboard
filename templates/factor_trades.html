@@ -79,8 +79,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=6"></script>
-  <script src="/static/js/factor_trades.js?v=10"></script>
+  <script src="/static/js/factor_charts.js?v=7"></script>
+  <script src="/static/js/factor_trades.js?v=11"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -300,9 +300,9 @@
                  session at the close; a same-session round trip shows in
                  Entered but never in Open. -->
             <div class="ft-toggle">
-              <span :class="{on: activityMode.sec === 'trades'}"
+              <span :class="{on: activityMode.ft === 'trades'}"
                     @click="setActivityMode('trades')">Count</span>
-              <span :class="{on: activityMode.sec === 'capital'}"
+              <span :class="{on: activityMode.ft === 'capital'}"
                     @click="setActivityMode('capital')">Capital</span>
             </div>
           </div>

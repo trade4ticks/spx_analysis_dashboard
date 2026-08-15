@@ -119,9 +119,10 @@ def _window_stats(rets: list, holds: list, tickers: set, span_days: float) -> di
         "avg_win":  float(wins.mean()) if wins.size else 0.0,
         "avg_loss": float(losses.mean()) if losses.size else 0.0,
         "trades_per_year": n / years,
-        # Calmar is undefined without a drawdown; None renders as "—" rather
-        # than as a spurious infinity.
-        "calmar":   (total / abs(max_dd)) if max_dd < 0 else None,
+        # Calmar is ANNUALISED return over max drawdown, so the numerator is
+        # total/years, not total. Undefined without a drawdown; None renders
+        # as "—" rather than as a spurious infinity.
+        "calmar":   ((total / years) / abs(max_dd)) if max_dd < 0 else None,
         "max_dd":   max_dd,
         "avg_hold": (float(np.mean(holds)) / BARS_PER_SESSION) if holds else 0.0,
     }

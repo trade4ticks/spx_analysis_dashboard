@@ -800,6 +800,10 @@ window.FactorCharts = {
 
   _equityModeKey(cmp, canvasId) {
     const c = canvasId || '';
+    // Factor Trades needs its own key: every ft-* canvas would otherwise fall
+    // through to 'sec', and 'sec' is explicitly barred from dollar mode by
+    // the isDollar checks, so the page could never show dollar axes.
+    if (c.includes('ft-'))    return 'ft';
     if (c.includes('zone'))   return 'zone';
     if (c.includes('recall')) return 'recall';
     if (c.includes('port'))   return 'port';

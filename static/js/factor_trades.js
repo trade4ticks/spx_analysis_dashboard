@@ -38,7 +38,7 @@ document.addEventListener('alpine:init', () => {
     // Keyed by section, because FactorCharts reads
     // cmp.activityMode?.[sectionKey] — a bare string silently
     // reads undefined and pins the chart to Count.
-    activityMode: { sec: 'trades', port: 'trades' },
+    activityMode: { ft: 'trades', sec: 'trades', port: 'trades' },
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
     secBubbleMinN: 0,
     // 'ft' is this page's key (FactorCharts._equityModeKey maps ft-*
@@ -82,7 +82,7 @@ document.addEventListener('alpine:init', () => {
       this.selected = { ...this.selected };
     },
     setActivityMode(m) {
-      this.activityMode = { sec: m, port: m };
+      this.activityMode = { ft: m, sec: m, port: m };
       this.renderCharts();
     },
 
@@ -211,9 +211,14 @@ document.addEventListener('alpine:init', () => {
                             maxDD = Math.min(maxDD, p.value - peak); }
       const d0 = new Date(eq[0].date), d1 = new Date(eq[eq.length - 1].date);
       const years = Math.max((d1 - d0) / 31557600000, 1e-9);
-      return { total_ret_usd: total, avg_annual_usd: total / years,
+      const annual = total / years;
+      // Calmar is ANNUALISED return over max drawdown. Using total return
+      // overstates it by the length of the window -- roughly 7.5x over a
+      // 7.5-year sample -- and makes it incomparable with any published
+      // Calmar figure.
+      return { total_ret_usd: total, avg_annual_usd: annual,
                max_dd_usd: maxDD,
-               calmar: maxDD < 0 ? (total / Math.abs(maxDD)) : null };
+               calmar: maxDD < 0 ? (annual / Math.abs(maxDD)) : null };
     },
 
     renderCharts() {
