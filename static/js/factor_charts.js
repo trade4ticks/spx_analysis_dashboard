@@ -395,6 +395,8 @@ window.FactorCharts = {
     // view. Single windowing function runs over a weights-by-date
     // map — same H, same boundaries in both views.
     let weightByDate;
+    // null in count mode -> every trade weighs 1; a Map in capital mode.
+    let tradeWeight = null;
     if (isCapital) {
       const params = cmp.equityDollarParams[sectionKey] || { perTrade: 2000, dailyCap: 10000 };
       // Run the dollar series over the dedupe-filtered trade list
@@ -404,10 +406,16 @@ window.FactorCharts = {
       // day, so the same windowing loop below sums it over H days
       // to get rolling deployed capital — identical math to the
       // count path, dollar weights instead of unit weights.
-      const { dayDeployedByDate } = window.FactorCharts._computeDollarSeries(cmp, 
-        kept, params.perTrade, params.dailyCap,
-      );
+      const { dayDeployedByDate, tradeDollarSizes } =
+        window.FactorCharts._computeDollarSeries(cmp,
+          kept, params.perTrade, params.dailyCap,
+        );
       weightByDate = dayDeployedByDate;
+      // Per-TRADE dollar size, needed because open positions are now walked
+      // per trade rather than summed from a per-day aggregate. Keyed on
+      // (ticker, trade_date), which is unique within a trade list.
+      tradeWeight = new Map(
+        tradeDollarSizes.map(x => [x.ticker + '|' + x.trade_date, x.dollar_size]));
     } else {
       weightByDate = new Map();
       for (const t of kept) {
@@ -418,15 +426,44 @@ window.FactorCharts = {
 
     const entered = tradingDays.map(d => weightByDate.get(d) || 0);
 
-    // Open positions on day i = sum of weights in the H-trading-day
-    // window [i-H+1 .. i]. Same window/boundary as the count view —
-    // only the per-day weight differs (count vs dollar size).
-    const open = tradingDays.map((_, i) => {
-      const start = Math.max(0, i - horizon + 1);
-      let s = 0;
-      for (let j = start; j <= i; j++) s += weightByDate.get(tradingDays[j]) || 0;
-      return s;
-    });
+    // Open positions = what is carried OVERNIGHT, counted once per session at
+    // the close. Intraday churn is noise for a multi-day system; the question
+    // is what is being held and what capital it ties up.
+    //
+    // Per-trade hold when the trade carries one, fixed horizon when it does
+    // not. exit_bar counts 1-minute bars over the regular session, so
+    // sessions = exit_bar / 390 and the number of closes the position is
+    // carried through is ceil(sessions) - 1:
+    //
+    //   exit_bar 390  -> 1.00 sessions -> 0 nights  (opened and closed same
+    //                    session: counts in Entered, contributes nothing to
+    //                    Open, and occupies no later day)
+    //   exit_bar 558  -> 1.43 sessions -> 1 night
+    //
+    // A naive ceil() would give that same-session trade a night it never had,
+    // overstating concurrency and — once the sizing cap is live — wrongly
+    // blocking other entries.
+    //
+    // Trades WITHOUT exit_bar fall back to `horizon` nights, which reproduces
+    // the previous fixed-window behaviour exactly. That is what keeps Recall,
+    // Zone and Portfolio byte-identical: they pass a real fixed horizon and
+    // their trades carry no exit_bar, so every trade takes the fallback and
+    // the resulting window is the old [i-H+1 .. i] sum.
+    const BARS_PER_SESSION = 390;
+    const dayIndex = new Map(tradingDays.map((d, i) => [d, i]));
+    const open = new Array(tradingDays.length).fill(0);
+    for (const t of kept) {
+      const d = t.trade_date || t.date;
+      const i = dayIndex.get(d);
+      if (i === undefined) continue;
+      const nights = (t.exit_bar != null && isFinite(+t.exit_bar))
+        ? Math.max(0, Math.ceil((+t.exit_bar) / BARS_PER_SESSION) - 1)
+        : horizon;
+      const w = tradeWeight
+        ? (tradeWeight.get((t.ticker || '') + '|' + d) || 0)
+        : 1;
+      for (let j = i; j < Math.min(i + nights, tradingDays.length); j++) open[j] += w;
+    }
 
     const fmt$ = v => {
       const abs = Math.abs(v);

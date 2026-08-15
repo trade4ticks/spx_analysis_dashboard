@@ -35,7 +35,10 @@ document.addEventListener('alpine:init', () => {
     // read these; _hmRange is recomputed from the grid whenever it changes.
     heatmapData: null, _hmRange: null, hmMinSampleN: 0,
     metric: '', secSelectedMetric: '',
-    activityMode: 'trades',
+    // Keyed by section, because FactorCharts reads
+    // cmp.activityMode?.[sectionKey] — a bare string silently
+    // reads undefined and pins the chart to Count.
+    activityMode: { sec: 'trades', port: 'trades' },
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
     secBubbleMinN: 0,
     equityAggMode:      { zone: 'dollar_capped', sec: 'daily', recall: 'dollar_capped', port: 'dollar_capped' },
@@ -73,6 +76,11 @@ document.addEventListener('alpine:init', () => {
       else this.selected[f.family] = f.rules[0]?.rule_key;
       this.selected = { ...this.selected };
     },
+    setActivityMode(m) {
+      this.activityMode = { sec: m, port: m };
+      this.renderCharts();
+    },
+
     clearAll() {
       this.selected = {};
       this.selectedCells = [];

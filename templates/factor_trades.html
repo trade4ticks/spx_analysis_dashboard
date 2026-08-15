@@ -79,8 +79,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=3"></script>
-  <script src="/static/js/factor_trades.js?v=6"></script>
+  <script src="/static/js/factor_charts.js?v=4"></script>
+  <script src="/static/js/factor_trades.js?v=7"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -291,7 +291,19 @@
 
       <div style="display:flex;gap:12px">
         <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
-          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — edited</span></div>
+          <div class="chart-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span>Trade activity</span>
+            <span class="ft-note">[train + test] — edited</span>
+            <!-- Open Trades counts what is carried OVERNIGHT, once per
+                 session at the close; a same-session round trip shows in
+                 Entered but never in Open. -->
+            <div class="ft-toggle">
+              <span :class="{on: activityMode.sec === 'trades'}"
+                    @click="setActivityMode('trades')">Count</span>
+              <span :class="{on: activityMode.sec === 'capital'}"
+                    @click="setActivityMode('capital')">Capital</span>
+            </div>
+          </div>
           <div class="chart-canvas"><canvas id="ft-activity-edited"></canvas></div>
         </div>
         <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
