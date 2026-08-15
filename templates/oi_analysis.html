@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+{% import "_macros.html" as m %}﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -400,18 +400,7 @@
 
   <div class="topbar">
     <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
-    <nav class="topbar-nav">
-      <a class="nav-link" href="/">Dashboard</a>
-      <a class="nav-link" href="/heatmap">Heatmap</a>
-      <a class="nav-link" href="/today">Today</a>
-      <a class="nav-link on" href="/factor-analysis">Factor Analysis</a>
-      <a class="nav-link" href="/ticker-analysis">Ticker Analysis</a>
-      <a class="nav-link" href="/factor-signals">Factor Signals</a>
-      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
-      <a class="nav-link" href="/research">Research</a>
-      <a class="nav-link" href="/research2">Research 2</a>
-      <a class="nav-link" href="/backtest-iv-analysis">Backtest IV</a>
-    </nav>
+    {% set nav_active = "/factor-analysis" %}{% include "_nav.html" %}
   </div>
 
   <!-- Fullscreen overlay -->
@@ -3285,71 +3274,13 @@
                   <!-- Train heatmap (pre-cutoff, frozen thresholds) -->
                   <div style="flex:1;min-width:0;overflow-x:auto">
                     <div style="font-size:10px;font-weight:700;color:#e6a23c;margin-bottom:4px">▣ Train (pre-cutoff)</div>
-                    <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
-                      <thead>
-                        <tr>
-                          <th style="text-align:right;color:#444;padding:3px 6px;font-weight:600;font-size:10px">Y↓ / X→</th>
-                          <template x-for="(la, ix) in heatmapData.x_labels" :key="'trxh-'+ix">
-                            <th x-text="la" style="padding:3px 6px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
-                          </template>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <template x-for="(row, iy) in heatmapData.train_grid" :key="'trrow-'+iy">
-                          <tr>
-                            <th x-text="heatmapData.y_labels[iy]"
-                                style="text-align:right;padding:3px 6px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
-                            <template x-for="(cell, ix) in row" :key="'trcell-'+iy+'-'+ix">
-                              <td :style="'background:' + hmCellBg(cell) + ';width:72px;height:46px;text-align:center;vertical-align:middle;border:1px solid #111;padding:3px;transition:opacity .1s'"
-                                  :title="_hmCellTitle(cell, ix, iy)">
-                                <template x-if="cell && cell.n > 0">
-                                  <div>
-                                    <span style="font-size:12px;font-weight:700;display:block;color:#fff"
-                                          x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                                    <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
-                                  </div>
-                                </template>
-                              </td>
-                            </template>
-                          </tr>
-                        </template>
-                      </tbody>
-                    </table>
+                    {{ m.heatmap_grid('heatmapData.train_grid', 'heatmapData', 'tr', 'compact') | indent(20) | safe }}
                   </div>
 
                   <!-- Test heatmap (post-cutoff, bins ranked against frozen thresholds) -->
                   <div style="flex:1;min-width:0;overflow-x:auto">
                     <div style="font-size:10px;font-weight:700;color:#3498db;margin-bottom:4px">▣ Test (post-cutoff)</div>
-                    <table style="border-collapse:collapse;font-size:11px;font-family:monospace">
-                      <thead>
-                        <tr>
-                          <th style="text-align:right;color:#444;padding:3px 6px;font-weight:600;font-size:10px">Y↓ / X→</th>
-                          <template x-for="(la, ix) in heatmapData.x_labels" :key="'texh-'+ix">
-                            <th x-text="la" style="padding:3px 6px;color:#666;font-weight:600;text-align:center;font-size:10px;white-space:nowrap"></th>
-                          </template>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <template x-for="(row, iy) in heatmapData.test_grid" :key="'terow-'+iy">
-                          <tr>
-                            <th x-text="heatmapData.y_labels[iy]"
-                                style="text-align:right;padding:3px 6px;color:#666;font-weight:600;font-size:10px;white-space:nowrap"></th>
-                            <template x-for="(cell, ix) in row" :key="'tecell-'+iy+'-'+ix">
-                              <td :style="'background:' + hmCellBg(cell) + ';width:72px;height:46px;text-align:center;vertical-align:middle;border:1px solid #111;padding:3px;transition:opacity .1s'"
-                                  :title="_hmCellTitle(cell, ix, iy)">
-                                <template x-if="cell && cell.n > 0">
-                                  <div>
-                                    <span style="font-size:12px;font-weight:700;display:block;color:#fff"
-                                          x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                                    <span style="font-size:10px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
-                                  </div>
-                                </template>
-                              </td>
-                            </template>
-                          </tr>
-                        </template>
-                      </tbody>
-                    </table>
+                    {{ m.heatmap_grid('heatmapData.test_grid', 'heatmapData', 'te', 'compact') | indent(20) | safe }}
                   </div>
 
                 </div>
@@ -3388,38 +3319,9 @@
               <!-- 2D heatmap table — full width, scrolls horizontally
                    at high bin counts (mirrors Recall sizing). -->
               <div style="padding-top:2px;overflow-x:auto">
-                  <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
-                    <thead>
-                      <tr>
-                        <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:11px">Y↓ / X→</th>
-                        <template x-for="(la, ix) in heatmapData.x_labels" :key="'hmxh-'+ix">
-                          <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:11px;white-space:nowrap"></th>
-                        </template>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <template x-for="(row, iy) in heatmapData.grid" :key="'hmrow-'+iy">
-                        <tr>
-                          <th x-text="heatmapData.y_labels[iy]"
-                              style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
-                          <template x-for="(cell, ix) in row" :key="'hmcell-'+iy+'-'+ix">
-                            <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
-                                :class="pageMode === 'in_sample' ? ('hm-cell-selectable' + (isHmCellSelected(ix, iy) ? ' hm-cell-selected' : '')) : ''"
-                                :title="_hmCellTitle(cell, ix, iy)"
-                                @click="toggleHmCell(ix, iy)">
-                              <template x-if="cell && cell.n > 0">
-                                <div>
-                                  <span style="font-size:13px;font-weight:700;display:block;color:#fff"
-                                        x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                                  <span style="font-size:11px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
-                                </div>
-                              </template>
-                            </td>
-                          </template>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
+                  {{ m.heatmap_grid('heatmapData.grid', 'heatmapData', 'hm', 'full',
+                       cls_expr="pageMode === 'in_sample' ? ('hm-cell-selectable' + (isHmCellSelected(ix, iy) ? ' hm-cell-selected' : '')) : ''",
+                       click_expr='toggleHmCell(ix, iy)') | indent(18) | safe }}
                 </div>
 
                 <!-- 1D bin charts row, BELOW the heatmap. Side by side
@@ -4759,38 +4661,9 @@
               <div style="font-size:11px;color:var(--dim);margin-bottom:4px">
                 Heatmap — click cells to edit; <b x-text="recallSelectedCells.size"></b> selected
               </div>
-              <table style="border-collapse:collapse;font-size:12px;font-family:monospace">
-                <thead>
-                  <tr>
-                    <th style="text-align:right;color:#444;padding:4px 8px;font-weight:600;font-size:11px">Y↓ / X→</th>
-                    <template x-for="(la, ix) in recallHeatmapData.x_labels" :key="'rcxh-'+ix">
-                      <th x-text="la" style="padding:4px 8px;color:#666;font-weight:600;text-align:center;font-size:11px;white-space:nowrap"></th>
-                    </template>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-for="(row, iy) in recallHeatmapData.grid" :key="'rcrow-'+iy">
-                    <tr>
-                      <th x-text="recallHeatmapData.y_labels[iy]"
-                          style="text-align:right;padding:4px 8px;color:#666;font-weight:600;font-size:11px;white-space:nowrap"></th>
-                      <template x-for="(cell, ix) in row" :key="'rccell-'+iy+'-'+ix">
-                        <td :style="'background:' + hmCellBg(cell) + ';width:86px;height:54px;text-align:center;vertical-align:middle;border:1px solid #111;padding:4px;transition:opacity .1s'"
-                            :class="'hm-cell-selectable' + (isRecallCellSelected(ix, iy) ? ' hm-cell-selected' : '')"
-                            :title="_hmCellTitle(cell, ix, iy)"
-                            @click="toggleRecallCell(ix, iy)">
-                          <template x-if="cell && cell.n > 0">
-                            <div>
-                              <span style="font-size:13px;font-weight:700;display:block;color:#fff"
-                                    x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
-                              <span style="font-size:11px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
-                            </div>
-                          </template>
-                        </td>
-                      </template>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
+              {{ m.heatmap_grid('recallHeatmapData.grid', 'recallHeatmapData', 'rc', 'full',
+                   cls_expr="'hm-cell-selectable' + (isRecallCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
+                   click_expr='toggleRecallCell(ix, iy)') | indent(14) | safe }}
             </div>
           </template>
 

@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.db import init_pool, close_pool
 
@@ -30,6 +31,23 @@ app = FastAPI(title="SPX IV Dashboard", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+# HTML pages render through Jinja so shared chrome (_nav.html) and repeated
+# markup (_macros.html) live in ONE place instead of being hand-copied per
+# page. Previously these were FileResponse — a `templates/` directory in name
+# only, with zero Jinja tags in it.
+#
+# keep_trailing_newline is load-bearing: Jinja strips the final newline by
+# default, which would make every rendered page differ from its source file by
+# one byte. With it set, rendering is byte-identical to the raw file for a
+# template that uses no Jinja tags — which is how the conversion was verified
+# (see scripts/check_template_render.py; run it after ANY template edit).
+#
+# StaticFiles above is a separate ASGI mount and is unaffected: /static/* JS
+# and CSS keep their ETag / Last-Modified caching. Only the HTML loses ETag,
+# which makes the ?v=NNN cache-buster on JS strictly more reliable.
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates.env.keep_trailing_newline = True
+
 app.include_router(meta.router,       prefix="/api/meta")
 app.include_router(skew.router,       prefix="/api/skew")
 app.include_router(term.router,       prefix="/api/term")
@@ -52,50 +70,50 @@ app.include_router(ticker_chain.router,    prefix="/api/ticker-analysis")
 
 
 @app.get("/today")
-async def today_page():
-    return FileResponse(str(BASE_DIR / "templates" / "today.html"))
+async def today_page(request: Request):
+    return templates.TemplateResponse("today.html", {"request": request})
 
 
 @app.get("/heatmap")
-async def heatmap_page():
-    return FileResponse(str(BASE_DIR / "templates" / "heatmap.html"))
+async def heatmap_page(request: Request):
+    return templates.TemplateResponse("heatmap.html", {"request": request})
 
 
 @app.get("/ai-explorer")
-async def ai_explorer_page():
-    return FileResponse(str(BASE_DIR / "templates" / "ai_explorer.html"))
+async def ai_explorer_page(request: Request):
+    return templates.TemplateResponse("ai_explorer.html", {"request": request})
 
 
 @app.get("/research")
-async def research_page():
-    return FileResponse(str(BASE_DIR / "templates" / "research.html"))
+async def research_page(request: Request):
+    return templates.TemplateResponse("research.html", {"request": request})
 
 
 @app.get("/research2")
-async def research2_page():
-    return FileResponse(str(BASE_DIR / "templates" / "research2.html"))
+async def research2_page(request: Request):
+    return templates.TemplateResponse("research2.html", {"request": request})
 
 
 @app.get("/factor-analysis")
-async def factor_analysis_page():
-    return FileResponse(str(BASE_DIR / "templates" / "oi_analysis.html"))
+async def factor_analysis_page(request: Request):
+    return templates.TemplateResponse("oi_analysis.html", {"request": request})
 
 
 @app.get("/factor-signals")
-async def factor_signals_page():
-    return FileResponse(str(BASE_DIR / "templates" / "oi_signals.html"))
+async def factor_signals_page(request: Request):
+    return templates.TemplateResponse("oi_signals.html", {"request": request})
 
 
 @app.get("/ticker-analysis")
-async def ticker_analysis_page():
-    return FileResponse(str(BASE_DIR / "templates" / "ticker_analysis.html"))
+async def ticker_analysis_page(request: Request):
+    return templates.TemplateResponse("ticker_analysis.html", {"request": request})
 
 
 @app.get("/backtest-iv-analysis")
-async def backtest_iv_page():
-    return FileResponse(str(BASE_DIR / "templates" / "backtest_iv_analysis.html"))
+async def backtest_iv_page(request: Request):
+    return templates.TemplateResponse("backtest_iv_analysis.html", {"request": request})
 
 
 @app.get("/")
-async def index():
-    return FileResponse(str(BASE_DIR / "templates" / "index.html"))
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})

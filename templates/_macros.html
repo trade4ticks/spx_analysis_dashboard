@@ -1,0 +1,130 @@
+{#-
+  Shared markup macros. Included with:
+
+      {% import "_macros.html" as m %}
+
+  BYTE-SENSITIVE. Every macro here replaced hand-copied markup, and the
+  conversion is verified by scripts/check_template_render.py rendering each
+  page byte-for-byte against a pre-refactor baseline. Re-run that gate after
+  ANY edit in this file.
+
+  Two Jinja details that bite here:
+    * autoescape is ON, so any Alpine/JS expression passed in as a string
+      must be emitted with the safe filter or its quotes become entities and
+      the expression breaks silently in the browser.
+    * call sites use the indent filter, which indents every line EXCEPT the
+      first. So each macro emits its block at ZERO base indent; the call site
+      supplies the first line's indent literally and the filter supplies the
+      rest. See the call examples on each macro.
+
+  Do not write a Jinja comment-close sequence inside a comment; it ends the
+  comment early and dumps the remaining text into the page.
+-#}
+
+{#-
+  ── heatmap_grid ──────────────────────────────────────────────────────────
+  The 20x20 avg-return grid. Was copy-pasted four times (TT train, TT test,
+  main, Recall).
+
+  Colour and the min-n hatching are NOT here: they live in hmCellBg(cell),
+  which was already shared and is the part most likely to drift. What this
+  centralises is the geometry and typography, which previously existed as
+  two hand-maintained variants:
+
+      size="compact"  72x46 cells, 11px table  — the TT side-by-side pair
+      size="full"     86x54 cells, 12px table  — main and Recall
+
+  Params:
+    grid_expr   Alpine expression for the row array   e.g. "heatmapData.grid"
+    obj         Alpine object holding x_labels/y_labels e.g. "heatmapData"
+    key         :key prefix, unique per grid on a page  e.g. "hm"
+    size        "compact" | "full"
+    cls_expr    optional :class expression (selectable/selected styling)
+    click_expr  optional @click expression
+  Omitting cls_expr/click_expr omits those attributes entirely, which is how
+  the TT pair renders as read-only.
+
+  Call:
+      {{ m.heatmap_grid('heatmapData.grid', 'heatmapData', 'hm', 'full',
+                        cls_expr="...", click_expr='toggleHmCell(ix, iy)')
+         | indent(18) | safe }}
+-#}
+{% macro heatmap_grid(grid_expr, obj, key, size, cls_expr=None, click_expr=None) -%}
+{%- set S = {
+      'compact': {'tbl': 11, 'thpad': '3px 6px', 'thf': 10,
+                  'w': 72, 'h': 46, 'pad': 3, 'valf': 12, 'nf': 10},
+      'full':    {'tbl': 12, 'thpad': '4px 8px', 'thf': 11,
+                  'w': 86, 'h': 54, 'pad': 4, 'valf': 13, 'nf': 11},
+    }[size] -%}
+<table style="border-collapse:collapse;font-size:{{ S.tbl }}px;font-family:monospace">
+  <thead>
+    <tr>
+      <th style="text-align:right;color:#444;padding:{{ S.thpad }};font-weight:600;font-size:{{ S.thf }}px">Y↓ / X→</th>
+      <template x-for="(la, ix) in {{ obj|safe }}.x_labels" :key="'{{ key }}xh-'+ix">
+        <th x-text="la" style="padding:{{ S.thpad }};color:#666;font-weight:600;text-align:center;font-size:{{ S.thf }}px;white-space:nowrap"></th>
+      </template>
+    </tr>
+  </thead>
+  <tbody>
+    <template x-for="(row, iy) in {{ grid_expr|safe }}" :key="'{{ key }}row-'+iy">
+      <tr>
+        <th x-text="{{ obj|safe }}.y_labels[iy]"
+            style="text-align:right;padding:{{ S.thpad }};color:#666;font-weight:600;font-size:{{ S.thf }}px;white-space:nowrap"></th>
+        <template x-for="(cell, ix) in row" :key="'{{ key }}cell-'+iy+'-'+ix">
+          <td :style="'background:' + hmCellBg(cell) + ';width:{{ S.w }}px;height:{{ S.h }}px;text-align:center;vertical-align:middle;border:1px solid #111;padding:{{ S.pad }}px;transition:opacity .1s'"
+              {%- if cls_expr %}
+              :class="{{ cls_expr|safe }}"
+              {%- endif %}
+              :title="_hmCellTitle(cell, ix, iy)"
+              {%- if click_expr %}
+              @click="{{ click_expr|safe }}"
+              {%- endif %}>
+            <template x-if="cell && cell.n > 0">
+              <div>
+                <span style="font-size:{{ S.valf }}px;font-weight:700;display:block;color:#fff"
+                      x-text="((cell.avg_ret||0)*100).toFixed(2) + '%'"></span>
+                <span style="font-size:{{ S.nf }}px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+              </div>
+            </template>
+          </td>
+        </template>
+      </tr>
+    </template>
+  </tbody>
+</table>
+{%- endmacro %}
+
+
+{#-
+  ── stat_box ──────────────────────────────────────────────────────────────
+  One box in a stat bar. The visual styling already lives in theme.css
+  (.stat-item / .stat-label / .stat-value), so this does NOT centralise
+  colours or fonts — those were never duplicated. It exists so a stat row
+  can be written as a loop instead of N hand-copied 5-line blocks.
+
+  The existing ~74 boxes are deliberately NOT retrofitted: they carry
+  per-box conditional expressions and retrofitting them would be a large
+  diff with no drift benefit, since the styling is already shared. Use this
+  for new stat rows.
+
+  Params:
+    label      literal text for the label line
+    value_expr Alpine expression producing the displayed string
+    sign_expr  optional Alpine expression; when given, the value takes
+               .pos / .neg colouring based on its sign
+
+  Call:
+      {{ m.stat_box('Avg Ret', "fmtPct(row.avg_ret)", sign_expr='row.avg_ret')
+         | indent(10) | safe }}
+-#}
+{% macro stat_box(label, value_expr, sign_expr=None) -%}
+<div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
+  <div class="stat-label">{{ label }}</div>
+  {%- if sign_expr %}
+  <div :class="({{ sign_expr|safe }} ?? 0) >= 0 ? 'stat-value pos' : 'stat-value neg'"
+       x-text="{{ value_expr|safe }}"></div>
+  {%- else %}
+  <div class="stat-value" x-text="{{ value_expr|safe }}"></div>
+  {%- endif %}
+</div>
+{%- endmacro %}

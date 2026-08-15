@@ -217,18 +217,7 @@
   <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
   <div class="topbar">
     <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
-    <nav class="topbar-nav">
-      <a class="nav-link" href="/">Dashboard</a>
-      <a class="nav-link" href="/heatmap">Heatmap</a>
-      <a class="nav-link" href="/today">Today</a>
-      <a class="nav-link" href="/factor-analysis">Factor Analysis</a>
-      <a class="nav-link" href="/ticker-analysis">Ticker Analysis</a>
-      <a class="nav-link" href="/factor-signals">Factor Signals</a>
-      <a class="nav-link" href="/ai-explorer">AI Explorer</a>
-      <a class="nav-link" href="/research">Research</a>
-      <a class="nav-link on" href="/research2">Research 2</a>
-      <a class="nav-link" href="/backtest-iv-analysis">Backtest IV</a>
-    </nav>
+    {% set nav_active = "/research2" %}{% include "_nav.html" %}
     <div class="topbar-right" style="color:#2ecc71;font-size:11px;font-weight:700">
       ⚡ Orchestrated
     </div>

@@ -1,0 +1,37 @@
+{#-
+  Shared topbar nav. Included by every page, which sets its own href first:
+
+      {% set nav_active = "/factor-analysis" %}{% include "_nav.html" %}
+
+  Before this partial the same 10 links were hand-copied into all 10 page
+  templates (verified identical apart from which link carried "on"), so
+  adding or renaming an entry meant 10 edits and a missed copy drifted
+  silently.
+
+  WHITESPACE CONTRACT - this file is byte-sensitive:
+    * the comment above closes with the whitespace-trimming marker, so
+      output begins exactly at the nav tag, at column 0. The including
+      page supplies the leading indent.
+    * inner lines carry their own literal indent (6 spaces for links,
+      4 for the closing tag), matching the markup this replaced.
+    * NO trailing newline after the closing tag - the page supplies it.
+
+  Do not write a Jinja comment-close sequence inside this comment; it ends
+  the comment early and dumps the rest of the text into the page.
+  Re-run scripts/check_template_render.py after touching this file.
+-#}<nav class="topbar-nav">
+{%- for href, label in [
+      ("/",                     "Dashboard"),
+      ("/heatmap",              "Heatmap"),
+      ("/today",                "Today"),
+      ("/factor-analysis",      "Factor Analysis"),
+      ("/ticker-analysis",      "Ticker Analysis"),
+      ("/factor-signals",       "Factor Signals"),
+      ("/ai-explorer",          "AI Explorer"),
+      ("/research",             "Research"),
+      ("/research2",            "Research 2"),
+      ("/backtest-iv-analysis", "Backtest IV"),
+    ] %}
+      <a class="nav-link{% if href == nav_active %} on{% endif %}" href="{{ href }}">{{ label }}</a>
+{%- endfor %}
+    </nav>
