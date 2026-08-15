@@ -79,8 +79,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=5"></script>
-  <script src="/static/js/factor_trades.js?v=8"></script>
+  <script src="/static/js/factor_charts.js?v=6"></script>
+  <script src="/static/js/factor_trades.js?v=9"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -173,8 +173,10 @@
         <input type="number" x-model.number="perTrade" step="500">
         <label>Daily cap</label>
         <input type="number" x-model.number="dailyCap" step="1000">
-        <label>Max concurrent</label>
-        <input type="number" x-model.number="maxConcurrent" step="1">
+        <!-- Max strike: a trade on a ticker priced above this is not taken
+             at all. Default $1,000. -->
+        <label>Max strike ($)</label>
+        <input type="number" x-model.number="maxStrike" step="50">
       </div>
 
       <button class="ft-btn" @click="clearAll()">Clear all</button>
