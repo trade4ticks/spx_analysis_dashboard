@@ -15,6 +15,8 @@ document.addEventListener('alpine:init', () => {
     // metric -> {family_num, family_name}; drives the <optgroup>
     // grouping so this page's dropdowns read like Factor Analysis'.
     metricFamilyLookup: {},
+    // Every pane here is train/test, so the cutoff marker is always wanted.
+    get cutoffLineDate() { return this.cutoffDate; },
     mode: '2f', primaryMetric: '', secondaryMetric: '', entryAnchor: 'open',
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,

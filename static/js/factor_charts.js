@@ -63,6 +63,7 @@ window.FactorCharts = {
         return sign + '$' + abs.toFixed(0);
       };
       cmp._charts[_key] = new Chart(ctx, {
+        plugins: window.FactorCharts._cutoffPlugin(cmp, 'time'),
         type: 'line',
         data: { datasets: [
           { label: 'Equity ($)', data: eqPxy, borderColor: '#3498db',
@@ -195,6 +196,7 @@ window.FactorCharts = {
     });
 
     cmp._charts[_key] = new Chart(ctx, {
+        plugins: window.FactorCharts._cutoffPlugin(cmp, 'time'),
       type: 'line',
       data: { datasets },   // no labels — points carry their own x
       options: {
@@ -303,6 +305,7 @@ window.FactorCharts = {
     };
     const ctx = canvas.getContext('2d');
     cmp._charts[chartKey] = new Chart(ctx, {
+      plugins: window.FactorCharts._cutoffPlugin(cmp, 'cat', yearly.map(y => y.year)),
       type: 'bar',
       data: {
         labels:   yearly.map(y => y.year),
@@ -475,6 +478,7 @@ window.FactorCharts = {
 
     const ctx = canvas.getContext('2d');
     cmp._charts[_key] = new Chart(ctx, {
+      plugins: window.FactorCharts._cutoffPlugin(cmp, 'cat', tradingDays),
       type: 'bar',
       data: {
         labels: tradingDays.map(d => d.slice(0, 7)),
@@ -592,6 +596,52 @@ window.FactorCharts = {
         },
       },
     });
+  },
+
+  // Faint vertical marker at the train/test cutoff, for panes that plot the
+  // FULL series. Lives here because the three panes that need it sit on two
+  // different scale types: equity is a linear axis of epoch-ms (deliberately,
+  // so a gap occupies its real width), while annual P&L and activity are
+  // CATEGORY axes indexed by label. One plugin, two conversions.
+  //
+  // Returns [] when cmp.cutoffDate is unset, so pages without a train/test
+  // split are unaffected and this can be spread into any plugins array.
+  _cutoffPlugin(cmp, kind, labels) {
+    // Deliberately NOT cmp.cutoffDate. On Factor Analysis that field is
+    // populated from /tt-cutoff on every page load regardless of mode, so
+    // keying off it would draw a train/test marker on in-sample Recall
+    // charts. cutoffLineDate is the explicit opt-in: a page returns a date
+    // only when it actually wants the line.
+    const iso = cmp.cutoffLineDate;
+    if (!iso) return [];
+    return [{
+      id: 'ftCutoff',
+      afterDatasetsDraw(chart) {
+        const xs = chart.scales.x, ys = chart.scales.y;
+        if (!xs || !ys) return;
+        let px = null;
+        if (kind === 'time') {
+          px = xs.getPixelForValue(new Date(iso).getTime());
+        } else {
+          // Category axis: first label at or after the cutoff. Labels may be
+          // truncated for display (YYYY-MM on activity, YYYY on annual), so
+          // compare on the same prefix length rather than assuming full ISO.
+          const L = (labels || []).map(String);
+          const n = L.length ? L[0].length : 10;
+          const key = iso.slice(0, n);
+          const i = L.findIndex(d => d >= key);
+          if (i >= 0) px = xs.getPixelForValue(i);
+        }
+        if (px == null || !isFinite(px)) return;
+        const c = chart.ctx;
+        c.save();
+        c.strokeStyle = 'rgba(200,200,200,0.35)';
+        c.setLineDash([4, 4]);
+        c.lineWidth = 1;
+        c.beginPath(); c.moveTo(px, ys.top); c.lineTo(px, ys.bottom); c.stroke();
+        c.restore();
+      },
+    }];
   },
 
   _avgRetLinePlugin(cmp, avgPct, label) {
