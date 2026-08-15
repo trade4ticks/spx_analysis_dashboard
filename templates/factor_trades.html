@@ -80,7 +80,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=3"></script>
-  <script src="/static/js/factor_trades.js?v=5"></script>
+  <script src="/static/js/factor_trades.js?v=6"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -209,6 +209,7 @@
                  x-text="'+ backstop auto-added'"></div>
             <div class="p warn" x-show="r.excludes_unresolved"
                  title="Rows with path_status <> 'ok' were dropped: their horizon extends past available data, so their exit is genuinely unknown.">unresolved excluded</div>
+            <div class="p" x-text="'hold ' + (r.train?.avg_hold ?? 0).toFixed(2) + ' sess'"></div>
             <div class="p" x-text="'n ' + (r.train?.n ?? 0) + ' / ' + (r.test?.n ?? 0)"></div>
           </div>
         </template>
@@ -248,26 +249,20 @@
             <span style="display:block;color:#e0b066;font-size:9px"
                   x-text="row.window"></span>
           </div>
-          {{ m.stat_box('Tickers', 'row.nTickers') | indent(10) | safe }}
           {{ m.stat_box('N', 'row.n') | indent(10) | safe }}
+          {{ m.stat_box('Tickers', 'row.nTickers') | indent(10) | safe }}
           {{ m.stat_box('Avg Ret', 'row.avgRet', sign_expr='row.avgRetRaw') | indent(10) | safe }}
           {{ m.stat_box('Median', 'row.median', sign_expr='row.medianRaw') | indent(10) | safe }}
           {{ m.stat_box('Std Dev', 'row.stdDev') | indent(10) | safe }}
-          {{ m.stat_box('P5', 'row.p5', sign_expr='row.p5Raw') | indent(10) | safe }}
-          {{ m.stat_box('P95', 'row.p95', sign_expr='row.p95Raw') | indent(10) | safe }}
           {{ m.stat_box('Win %', 'row.winRate') | indent(10) | safe }}
           {{ m.stat_box('# Win', 'row.nWin') | indent(10) | safe }}
           {{ m.stat_box('Avg Win', 'row.avgWin', sign_expr='row.avgWinRaw') | indent(10) | safe }}
           {{ m.stat_box('Avg Loss', 'row.avgLoss', sign_expr='row.avgLossRaw') | indent(10) | safe }}
           {{ m.stat_box('Trd/Yr', 'row.trdYr') | indent(10) | safe }}
-          {{ m.stat_box('Calmar', 'row.calmar', sign_expr='row.calmarRaw') | indent(10) | safe }}
+          {{ m.stat_box('Total Ret', 'row.totalRet', sign_expr='row.totalRetRaw') | indent(10) | safe }}
+          {{ m.stat_box('Avg Annual Ret', 'row.avgAnnRet', sign_expr='row.avgAnnRetRaw') | indent(10) | safe }}
           {{ m.stat_box('Max DD', 'row.maxDD', sign_expr='row.maxDDRaw') | indent(10) | safe }}
-          {{ m.stat_box('Avg Hold', 'row.avgHold') | indent(10) | safe }}
-          {{ m.stat_box('Avg Ret',  'row.avgRet',  sign_expr='row.avgRetRaw')  | indent(10) | safe }}
-          {{ m.stat_box('Win %',    'row.winRate') | indent(10) | safe }}
-          {{ m.stat_box('Calmar',   'row.calmar',  sign_expr='row.calmarRaw')  | indent(10) | safe }}
-          {{ m.stat_box('Max DD',   'row.maxDD',   sign_expr='row.maxDDRaw')   | indent(10) | safe }}
-          {{ m.stat_box('Avg Hold', 'row.avgHold') | indent(10) | safe }}
+          {{ m.stat_box('Calmar', 'row.calmar', sign_expr='row.calmarRaw') | indent(10) | safe }}
         </div>
       </template>
 

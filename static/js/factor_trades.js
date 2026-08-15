@@ -212,6 +212,13 @@ document.addEventListener('alpine:init', () => {
       const src = this.zoneData || this.runData;
       if (!src) return [];
       const pct = v => v == null ? '—' : (v * 100).toFixed(3) + '%';
+      const fmt$ = v => {
+        if (v == null) return '—';
+        const a = Math.abs(v), sg = v < 0 ? '-' : '';
+        if (a >= 1e6) return sg + '$' + (a / 1e6).toFixed(2) + 'M';
+        if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
+        return sg + '$' + a.toFixed(0);
+      };
       const mk = (key, label, s, win) => {
         if (!s) return null;
         return {
@@ -231,7 +238,16 @@ document.addEventListener('alpine:init', () => {
           // Calmar is null when there is no drawdown — render "—" rather
           // than an infinity dressed up as a great number.
           calmar: s.calmar != null ? s.calmar.toFixed(2) : '—', calmarRaw: s.calmar ?? 0,
-          maxDD: pct(s.max_dd), maxDDRaw: s.max_dd ?? 0,
+          // Dollar figures come from the sizing controls via
+          // _computeDollarSeries. Until that path is wired these read "—"
+          // rather than a percent mislabelled as dollars, which is what made
+          // Max DD render as -1826.885%.
+          totalRet: s.total_ret_usd != null ? fmt$(s.total_ret_usd) : '—',
+          totalRetRaw: s.total_ret_usd ?? 0,
+          avgAnnRet: s.avg_annual_usd != null ? fmt$(s.avg_annual_usd) : '—',
+          avgAnnRetRaw: s.avg_annual_usd ?? 0,
+          maxDD: s.max_dd_usd != null ? fmt$(s.max_dd_usd) : '—',
+          maxDDRaw: s.max_dd_usd ?? 0,
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };
@@ -258,8 +274,8 @@ document.addEventListener('alpine:init', () => {
         calmar: (st?.calmar != null && lt?.calmar != null)
                 ? d(st.calmar, lt.calmar).toFixed(2) : '—',
         calmarRaw: d(st?.calmar, lt?.calmar),
-        maxDD: pct(d(st?.max_dd, lt?.max_dd)), maxDDRaw: d(st?.max_dd, lt?.max_dd),
-        avgHold: d(st?.avg_hold, lt?.avg_hold).toFixed(2) + ' sess',
+        totalRet: '—', totalRetRaw: 0, avgAnnRet: '—', avgAnnRetRaw: 0,
+        maxDD: '—', maxDDRaw: 0,
       } : null;
       return [locked, edited, diff].filter(Boolean);
     },

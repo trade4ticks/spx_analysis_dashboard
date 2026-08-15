@@ -476,3 +476,9 @@ input[type=range]::-webkit-slider-thumb {
    selections on any other page. */
 .hm-cell-selected { outline:2px solid #00d2ff !important; outline-offset:-2px; z-index:1; position:relative; }
 .hm-cell-selectable { cursor:crosshair; }
+
+/* Stat-bar sign colours. Lived only in oi_analysis.html's inline
+   <style>, so the shared stat_box macro rendered every value white
+   on any other page. */
+.stat-value.pos { color:#3498db; }
+.stat-value.neg { color:#e84393; }
