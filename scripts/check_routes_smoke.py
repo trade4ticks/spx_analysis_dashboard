@@ -49,14 +49,34 @@ async def _noop() -> None:
     return None
 
 
+def _db_env() -> tuple[bool, str]:
+    """(can_use_real_db, why_not).
+
+    The API checks need a REAL pool. The page sweep does not, and used to
+    patch init_pool out unconditionally -- which meant get_oi_pool() returned
+    None and the factor-trades endpoints could only ever answer "OI database
+    not configured". So the pool is patched ONLY when the DB is unavailable.
+
+    init_pool reads DATABASE_URL with os.environ[...] (required, not
+    optional), so both vars must be present to let the real lifespan run.
+    """
+    import os
+    missing = [v for v in ("DATABASE_URL", "OI_DATABASE_URL") if not os.getenv(v)]
+    if missing:
+        return False, "not set: " + ", ".join(missing)
+    return True, ""
+
+
 def main() -> int:
     import app.main as main_mod
 
-    # Neutralise the DB before the lifespan runs. main.py does
-    # `from app.db import init_pool, close_pool`, so the names to patch are
-    # the ones bound in app.main, not the originals in app.db.
-    main_mod.init_pool = _noop
-    main_mod.close_pool = _noop
+    real_db, why_not = _db_env()
+    if not real_db:
+        # No DB: neutralise the lifespan so the page sweep still runs. main.py
+        # does `from app.db import init_pool, close_pool`, so the names to
+        # patch are the ones bound in app.main, not the originals in app.db.
+        main_mod.init_pool = _noop
+        main_mod.close_pool = _noop
 
     from fastapi.testclient import TestClient
 
@@ -129,11 +149,11 @@ def main() -> int:
     print()
     print(f"page routes healthy: {ok}/{ok + bad}")
 
-    api_bad = _check_factor_trades(app)
+    api_bad = _check_factor_trades(app, real_db, why_not)
     return 1 if (bad or api_bad) else 0
 
 
-def _check_factor_trades(app) -> int:
+def _check_factor_trades(app, real_db: bool, why_not: str) -> int:
     """Exercise the factor-trades API, which the page sweep above cannot see.
 
     That sweep only covers GET routes defined in app.main, so /api/* has had
@@ -149,12 +169,15 @@ def _check_factor_trades(app) -> int:
     import os
     from fastapi.testclient import TestClient
 
-    if not os.getenv("OI_DATABASE_URL"):
-        print()
-        print("factor-trades API: SKIPPED (no OI_DATABASE_URL) — run this on the VPS")
+    print()
+    if not real_db:
+        print(f"factor-trades API: SKIPPED — {why_not}.")
+        print("  This check needs BOTH DATABASE_URL and OI_DATABASE_URL, because")
+        print("  app.db.init_pool requires the former and the endpoints need the")
+        print("  latter. With either missing the pool is stubbed out and every")
+        print("  endpoint would answer 'OI database not configured'.")
         return 0
 
-    print()
     bad = 0
     with TestClient(app) as client:
         r = client.get("/api/factor-trades/rules")
@@ -164,8 +187,16 @@ def _check_factor_trades(app) -> int:
         else:
             body = r.json()
             groups = body.get("groups") or []
-            print(f"  /rules  200  {len(groups)} groups, {body.get('n_rules', 0)} rules"
-                  + (f"  ERROR: {body['error']}" if body.get("error") else ""))
+            # 200 with an empty catalog is the silent-empty failure mode: it
+            # reads as success while telling you nothing works. Fail loudly.
+            if body.get("error"):
+                print(f"  /rules  200 but error: {body['error']}")
+                return bad + 1
+            if not groups or not body.get("n_rules"):
+                print("  /rules  200 but EMPTY catalog — trade_path_rules has no rows, "
+                      "or the pool is not connected")
+                return bad + 1
+            print(f"  /rules  200  {len(groups)} groups, {body.get('n_rules', 0)} rules")
             # First rule key of the first family, to drive the POSTs below.
             key = None
             for g in groups:
@@ -173,8 +204,13 @@ def _check_factor_trades(app) -> int:
                     for rule in fam.get("rules", []):
                         key = key or rule.get("rule_key")
             metric = os.getenv("SMOKE_METRIC", "")
-            if not key or not metric:
-                print("  /run /zone  SKIPPED (need a rule key and SMOKE_METRIC=<binned metric>)")
+            if not metric:
+                print("  /run /zone  SKIPPED — set SMOKE_METRIC to a metric that has a")
+                print("      bin20_<metric> column in tt_bins (not merely a daily_features")
+                print("      column); /run rejects anything else with 'no stored bins'.")
+                return bad
+            if not key:
+                print("  /run /zone  SKIPPED — /rules returned no rule_key to drive them")
                 return bad
             payload = {"primary_metric": metric, "entry_anchor": "open",
                        "rule_keys": [key], "n_bins": 20}

@@ -17,15 +17,27 @@
                 letter-spacing:.4px; margin-bottom:6px; font-weight:700; }
     .ft-rail label { display:block; font-size:10px; color:var(--dim);
                 text-transform:uppercase; letter-spacing:.3px; margin:8px 0 3px; }
-    .ft-rail select, .ft-rail input {
+    /* :not([type=checkbox]) is load-bearing. Without it this rule gives the
+       checkbox width:100%, and the flex:0 0 auto below then takes its basis
+       from that width — the checkbox claims the whole row, the family label
+       collapses to one character, and the parameter dropdown is pushed out
+       of view entirely. */
+    .ft-rail select, .ft-rail input:not([type=checkbox]) {
       width:100%; background:var(--raised); border:1px solid var(--border);
       color:var(--text); font-size:12px; padding:4px 6px; border-radius:3px;
     }
-    .ft-rule    { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
-    .ft-rule input[type=checkbox] { flex:0 0 auto; margin:0; }
-    .ft-rule span { font-size:11px; color:var(--muted); flex:0 0 92px;
-                    font-family:monospace; overflow:hidden; text-overflow:ellipsis; }
-    .ft-rule select { flex:1; min-width:0; }
+    /* Two lines per rule: toggle + family name, then the parameter select
+       full width beneath. A 290px rail cannot fit a readable family name and
+       a value dropdown side by side, and the value has to be visible —
+       "atr_stop" alone does not say which of the five ATR multiples is
+       selected. */
+    .ft-rule     { margin-bottom:7px; }
+    .ft-rule-top { display:flex; align-items:center; gap:6px; margin-bottom:2px; }
+    .ft-rule-top input[type=checkbox] { flex:0 0 auto; width:auto; margin:0; }
+    .ft-rule-top span { font-size:11px; color:var(--muted); font-family:monospace;
+                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .ft-rule select { width:100%; }
+    .ft-rule select:disabled { opacity:.45; }
     .ft-btn { width:100%; margin-top:10px; padding:6px; border-radius:3px; cursor:pointer;
               border:1px solid var(--border); background:var(--raised);
               color:var(--text); font-size:12px; font-weight:600; }
@@ -46,9 +58,14 @@
                  overflow:hidden; text-overflow:ellipsis; line-height:1.5; }
     .ft-run .warn { color:#e0b066; }
 
-    .ft-statrow  { display:flex; gap:6px; margin-bottom:6px; }
+    /* Wraps rather than clips: six boxes plus a label do not fit one line at
+       narrower widths, and a stat that runs off the edge is worse than a
+       stat on a second line. */
+    .ft-statrow  { display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; }
     .ft-statlbl  { flex:0 0 62px; font-size:10px; color:var(--dim); align-self:center;
                    text-transform:uppercase; letter-spacing:.3px; }
+    .ft-statrow .stat-item  { flex:1 1 104px; min-width:104px; padding:6px 8px; }
+    .ft-statrow .stat-value { font-size:13px; }
     .ft-toggle   { display:inline-flex; border:1px solid var(--border); border-radius:3px;
                    overflow:hidden; }
     .ft-toggle span { padding:3px 10px; font-size:11px; cursor:pointer; color:var(--dim); }
@@ -117,10 +134,13 @@
             <div class="ft-sec-h" style="color:var(--muted)" x-text="g.title"></div>
             <template x-for="f in g.families" :key="'f-'+g.side+'-'+f.family">
               <div class="ft-rule">
-                <input type="checkbox" :checked="!!selected[f.family]"
-                       @change="toggleFamily(f)">
-                <span :title="f.family" x-text="f.family"></span>
+                <div class="ft-rule-top">
+                  <input type="checkbox" :checked="!!selected[f.family]"
+                         @change="toggleFamily(f)">
+                  <span :title="f.family" x-text="f.family"></span>
+                </div>
                 <select :disabled="!selected[f.family]"
+                        :value="selected[f.family] || (f.rules[0] && f.rules[0].rule_key)"
                         @change="selected[f.family] = $event.target.value">
                   <template x-for="r in f.rules" :key="r.rule_key">
                     <option :value="r.rule_key"
