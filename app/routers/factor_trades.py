@@ -20,6 +20,7 @@ cutoff.
 from __future__ import annotations
 
 import json
+from datetime import date as _date
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -189,9 +190,18 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         except CombineError as e:
             return {"error": str(e)}
 
-        cutoff = await _get_tt_cutoff(pool)
-        if not cutoff:
+        # _get_tt_cutoff returns an ISO STRING by contract. asyncpg does not
+        # coerce str -> date for a DATE parameter; it raises DataError
+        # ("'str' object has no attribute 'toordinal'") at query time. Keep
+        # the two forms explicitly named: *_iso for JSON and cache keys,
+        # *_d for anything handed to conn.fetch.
+        cutoff_iso = await _get_tt_cutoff(pool)
+        if not cutoff_iso:
             return {"error": "tt_bins has no cutoff_date — cannot split train/test"}
+        try:
+            cutoff_d = _date.fromisoformat(cutoff_iso)
+        except (TypeError, ValueError):
+            return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
         n_bins = max(2, min(20, int(req.n_bins)))
         # Canonical bin20 collapse, identical to every other stored-bin
@@ -224,7 +234,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         WHERE c.entry_anchor = $1 AND {where_bins}
         GROUP BY {grp}, c.exit_rule, is_train
         """
-        rows = await conn.fetch(sql, req.entry_anchor, cutoff)
+        rows = await conn.fetch(sql, req.entry_anchor, cutoff_d)
 
     # ── Fold into grid + breakdown ────────────────────────────────────────
     grid = [[None] * n_bins for _ in range(n_bins if two_factor else 1)]
@@ -286,7 +296,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "secondary_metric": req.secondary_metric,
         "entry_anchor":     req.entry_anchor,
         "n_bins":           n_bins,
-        "cutoff_date":      str(cutoff),
+        "cutoff_date":      cutoff_iso,
         "grid":             grid,
         "train":            _stats("train"),
         "test":             _stats("test"),
