@@ -1,0 +1,272 @@
+{% import "_macros.html" as m %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SPX IV — Factor Trades</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    /* Left rail is fixed so the active configuration is always in view —
+       the page is driven by iterating on it. */
+    .ft-wrap  { display:flex; height:calc(100vh - 52px); overflow:hidden; }
+    .ft-rail  { width:290px; flex:0 0 290px; overflow-y:auto; padding:12px;
+                border-right:1px solid var(--border); background:rgba(255,255,255,.02); }
+    .ft-main  { flex:1; min-width:0; overflow-y:auto; padding:14px 16px; }
+    .ft-sec   { margin-bottom:14px; }
+    .ft-sec-h { font-size:10px; color:var(--dim); text-transform:uppercase;
+                letter-spacing:.4px; margin-bottom:6px; font-weight:700; }
+    .ft-rail label { display:block; font-size:10px; color:var(--dim);
+                text-transform:uppercase; letter-spacing:.3px; margin:8px 0 3px; }
+    .ft-rail select, .ft-rail input {
+      width:100%; background:var(--raised); border:1px solid var(--border);
+      color:var(--text); font-size:12px; padding:4px 6px; border-radius:3px;
+    }
+    .ft-rule    { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+    .ft-rule input[type=checkbox] { flex:0 0 auto; margin:0; }
+    .ft-rule span { font-size:11px; color:var(--muted); flex:0 0 92px;
+                    font-family:monospace; overflow:hidden; text-overflow:ellipsis; }
+    .ft-rule select { flex:1; min-width:0; }
+    .ft-btn { width:100%; margin-top:10px; padding:6px; border-radius:3px; cursor:pointer;
+              border:1px solid var(--border); background:var(--raised);
+              color:var(--text); font-size:12px; font-weight:600; }
+    .ft-btn.primary { background:#2a5a82; border-color:#3a7ab0; }
+    .ft-btn:disabled { opacity:.5; cursor:not-allowed; }
+
+    /* Run history — one card per run, params stacked vertically so what is
+       in each is readable at a glance. Entry anchor is on the card because
+       open and t1000 runs are not comparable. */
+    .ft-runs { display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; margin-bottom:12px; }
+    .ft-run  { flex:0 0 168px; border:1px solid var(--border); border-radius:4px;
+               padding:7px 8px; background:var(--surface); cursor:pointer; font-size:10px; }
+    .ft-run.locked  { border-color:var(--muted); }
+    .ft-run.current { border-color:#3498db; }
+    .ft-run .ft-run-t { font-size:10px; font-weight:700; letter-spacing:.4px;
+                        margin-bottom:4px; text-transform:uppercase; }
+    .ft-run .p { color:var(--muted); font-family:monospace; white-space:nowrap;
+                 overflow:hidden; text-overflow:ellipsis; line-height:1.5; }
+    .ft-run .warn { color:#e0b066; }
+
+    .ft-statrow  { display:flex; gap:6px; margin-bottom:6px; }
+    .ft-statlbl  { flex:0 0 62px; font-size:10px; color:var(--dim); align-self:center;
+                   text-transform:uppercase; letter-spacing:.3px; }
+    .ft-toggle   { display:inline-flex; border:1px solid var(--border); border-radius:3px;
+                   overflow:hidden; }
+    .ft-toggle span { padding:3px 10px; font-size:11px; cursor:pointer; color:var(--dim); }
+    .ft-toggle span.on { background:var(--raised); color:var(--text); font-weight:600; }
+    .chart-box { background:var(--surface); border:1px solid var(--border);
+                 border-radius:4px; padding:8px; margin-bottom:12px; }
+    .chart-title { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; }
+    .chart-canvas { height:220px; position:relative; }
+    .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="/static/js/factor_trades.js?v=1"></script>
+</head>
+
+<body x-data="factorTrades" x-init="init()">
+
+  <div class="topbar">
+    <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
+    {% set nav_active = "/factor-trades" %}{% include "_nav.html" %}
+    <div class="topbar-div"></div>
+    <div class="topbar-right" style="font-size:11px;color:var(--dim)"
+         x-text="cutoffDate ? ('TT cutoff ' + cutoffDate + ' (frozen)') : ''"></div>
+  </div>
+
+  <div class="ft-wrap">
+
+    <!-- ── Left rail: the configuration, always in view ────────────────── -->
+    <div class="ft-rail">
+      <div class="ft-sec">
+        <div class="ft-sec-h">Mode</div>
+        <div class="ft-toggle">
+          <span :class="{on: mode==='2f'}" @click="mode='2f'">2-factor</span>
+          <span :class="{on: mode==='1f'}" @click="mode='1f'">single</span>
+        </div>
+        <label>Primary metric</label>
+        <select x-model="primaryMetric">
+          <template x-for="mm in metrics" :key="'p-'+mm"><option :value="mm" x-text="mm"></option></template>
+        </select>
+        <template x-if="mode==='2f'">
+          <div>
+            <label>Secondary metric</label>
+            <select x-model="secondaryMetric">
+              <template x-for="mm in metrics" :key="'s-'+mm"><option :value="mm" x-text="mm"></option></template>
+            </select>
+          </div>
+        </template>
+        <label>Entry anchor</label>
+        <select x-model="entryAnchor">
+          <option value="open">open</option>
+          <option value="t1000">t1000</option>
+        </select>
+      </div>
+
+      <!-- Exit rules. Four groups driven by `side`; trailing and breakeven
+           sit inside Stops because a trailing stop is a stop. Each rule is a
+           toggle plus a single-select of PRECOMPUTED values — there are no
+           free-text parameters, only columns that exist. -->
+      <div class="ft-sec">
+        <div class="ft-sec-h">Exit rules</div>
+        <template x-if="!ruleGroups.length">
+          <div class="ft-note">loading rules…</div>
+        </template>
+        <template x-for="g in ruleGroups" :key="'g-'+g.side">
+          <div style="margin-bottom:8px">
+            <div class="ft-sec-h" style="color:var(--muted)" x-text="g.title"></div>
+            <template x-for="f in g.families" :key="'f-'+g.side+'-'+f.family">
+              <div class="ft-rule">
+                <input type="checkbox" :checked="!!selected[f.family]"
+                       @change="toggleFamily(f)">
+                <span :title="f.family" x-text="f.family"></span>
+                <select :disabled="!selected[f.family]"
+                        @change="selected[f.family] = $event.target.value">
+                  <template x-for="r in f.rules" :key="r.rule_key">
+                    <option :value="r.rule_key"
+                            x-text="r.label + (r.is_horizon ? ' (backstop value)' : '')"></option>
+                  </template>
+                </select>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <div class="ft-sec">
+        <div class="ft-sec-h">Sizing</div>
+        <label>$ / trade</label>
+        <input type="number" x-model.number="perTrade" step="500">
+        <label>Daily cap</label>
+        <input type="number" x-model.number="dailyCap" step="1000">
+        <label>Max concurrent</label>
+        <input type="number" x-model.number="maxConcurrent" step="1">
+      </div>
+
+      <button class="ft-btn primary" @click="run()" :disabled="loading"
+              x-text="loading ? 'Running…' : 'Run'"></button>
+      <button class="ft-btn" @click="run(true)" :disabled="loading"
+              title="Same exit policy against randomly selected entries from the same universe and date distribution — the control for whether a policy is signal-specific or just helping any long position">
+        Run with random entries
+      </button>
+      <div class="ft-note" x-show="error" style="margin-top:8px;color:#e84393"
+           x-text="error"></div>
+    </div>
+
+    <!-- ── Main ────────────────────────────────────────────────────────── -->
+    <div class="ft-main">
+
+      <!-- 1. Run history. Click a card to lock it. -->
+      <div class="ft-runs" x-show="runs.length">
+        <template x-for="(r, i) in runs" :key="'run-'+i">
+          <div class="ft-run" :class="{locked: lockedIdx===i, current: currentIdx===i}"
+               @click="lockRun(i)">
+            <div class="ft-run-t"
+                 :style="lockedIdx===i ? 'color:var(--muted)' : (currentIdx===i ? 'color:#3498db' : 'color:var(--dim)')"
+                 x-text="lockedIdx===i ? 'LOCKED' : (currentIdx===i ? 'CURRENT' : 'run ' + (i+1))"></div>
+            <div class="p" x-text="r.primary_metric"></div>
+            <div class="p" x-text="r.secondary_metric || '(single)'"></div>
+            <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
+            <template x-for="k in (r.rules || [])" :key="'rk-'+k"><div class="p" x-text="k"></div></template>
+            <!-- Provenance that silently changes what the numbers mean. -->
+            <div class="p warn" x-show="r.horizon_auto_added"
+                 title="No selected rule fired for these trades — the 20-day horizon backstop did. That is your stops and targets failing to fire, not a time policy working."
+                 x-text="'+ backstop auto-added'"></div>
+            <div class="p warn" x-show="r.excludes_unresolved"
+                 title="Rows with path_status <> 'ok' were dropped: their horizon extends past available data, so their exit is genuinely unknown.">unresolved excluded</div>
+            <div class="p" x-text="'n ' + (r.train?.n ?? 0) + ' / ' + (r.test?.n ?? 0)"></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 2. Stat rows. One row until a run is locked, then three. -->
+      <template x-for="row in statRows()" :key="'sr-'+row.key">
+        <div class="ft-statrow">
+          <div class="ft-statlbl" x-text="row.label"></div>
+          {{ m.stat_box('N',        'row.n')        | indent(10) | safe }}
+          {{ m.stat_box('Avg Ret',  'row.avgRet',  sign_expr='row.avgRetRaw')  | indent(10) | safe }}
+          {{ m.stat_box('Win %',    'row.winRate') | indent(10) | safe }}
+          {{ m.stat_box('Calmar',   'row.calmar',  sign_expr='row.calmarRaw')  | indent(10) | safe }}
+          {{ m.stat_box('Max DD',   'row.maxDD',   sign_expr='row.maxDDRaw')   | indent(10) | safe }}
+          {{ m.stat_box('Avg Hold', 'row.avgHold') | indent(10) | safe }}
+        </div>
+      </template>
+
+      <!-- 3. Heatmap. ONE grid, three-way toggle. Header names the policy —
+           these cells are avg return UNDER THAT POLICY, not the fixed-horizon
+           return the Factor Analysis heatmap shows. Same grid, different
+           meaning. -->
+      <div class="chart-box" x-show="runData">
+        <div class="chart-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span>Zone grid</span>
+          <div class="ft-toggle">
+            <span :class="{on: gridView==='locked'}"  @click="gridView='locked'">Locked</span>
+            <span :class="{on: gridView==='edited'}"  @click="gridView='edited'">Edited</span>
+            <span :class="{on: gridView==='change'}"  @click="gridView='change'">Change</span>
+          </div>
+          <span class="ft-note" x-text="policyLabel()"></span>
+          <span class="ft-note">· train window · avg return under policy</span>
+        </div>
+        <div style="overflow-x:auto">
+          {{ m.heatmap_grid('gridRows', 'gridMeta', 'ft', 'full',
+                            cls_expr="'hm-cell-selectable' + (isCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
+                            click_expr='toggleCell(ix, iy)') | indent(10) | safe }}
+        </div>
+      </div>
+
+      <!-- 4. Charts. Locked overlays in faint grey, edited in Recall colours.
+           Equity+DD and annual P&L share a pane; activity and ticker
+           breakdown get separate panes per run. -->
+      <div class="chart-box" x-show="zoneData">
+        <div class="chart-title">Equity &amp; drawdown
+          <span class="ft-note">— locked grey, edited colour</span>
+          <span style="float:right"><label class="ft-note"><input type="checkbox" x-model="showDD"> DD</label></span>
+        </div>
+        <div class="chart-canvas"><canvas id="ft-equity"></canvas></div>
+      </div>
+
+      <div class="chart-box" x-show="zoneData">
+        <div class="chart-title">Annual P&amp;L <span class="ft-note">— grey locked, blue edited</span></div>
+        <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
+      </div>
+
+      <div class="chart-box" x-show="zoneData">
+        <div class="chart-title">Exit reasons
+          <span class="ft-note">— which rule actually closed each trade</span>
+        </div>
+        <div class="chart-canvas" style="height:180px"><canvas id="ft-reasons"></canvas></div>
+      </div>
+
+      <div style="display:flex;gap:12px">
+        <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
+          <div class="chart-title">Trade activity <span class="ft-note">— edited</span></div>
+          <div class="chart-canvas"><canvas id="ft-activity-edited"></canvas></div>
+        </div>
+        <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
+          <div class="chart-title">Trade activity <span class="ft-note">— locked</span></div>
+          <div class="chart-canvas"><canvas id="ft-activity-locked"></canvas></div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px">
+        <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
+          <div class="chart-title">Ticker breakdown <span class="ft-note">— edited</span></div>
+          <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
+        </div>
+        <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
+          <div class="chart-title">Ticker breakdown <span class="ft-note">— locked</span></div>
+          <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>
+        </div>
+      </div>
+
+      <button class="ft-btn" style="width:auto;padding:6px 14px" @click="exportCsv()"
+              x-show="zoneData">Export CSV</button>
+
+      <div class="ft-note" x-show="!runData" style="padding:24px 0">
+        Pick metrics and an exit policy in the rail, then Run.
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

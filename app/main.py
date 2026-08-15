@@ -110,6 +110,11 @@ async def factor_signals_page(request: Request):
     return templates.TemplateResponse(request, "oi_signals.html")
 
 
+@app.get("/factor-trades")
+async def factor_trades_page(request: Request):
+    return templates.TemplateResponse(request, "factor_trades.html")
+
+
 @app.get("/ticker-analysis")
 async def ticker_analysis_page(request: Request):
     return templates.TemplateResponse(request, "ticker_analysis.html")
