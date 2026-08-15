@@ -41,8 +41,13 @@ document.addEventListener('alpine:init', () => {
     activityMode: { sec: 'trades', port: 'trades' },
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
     secBubbleMinN: 0,
-    equityAggMode:      { zone: 'dollar_capped', sec: 'daily', recall: 'dollar_capped', port: 'dollar_capped' },
-    equityDollarParams: { zone: { perTrade: 2000, dailyCap: 10000 },
+    // 'ft' is this page's key (FactorCharts._equityModeKey maps ft-*
+    // canvases to it). Dollar mode is the point of this page: every
+    // axis is dollars derived from the rail's sizing controls.
+    equityAggMode:      { ft: 'dollar_capped', zone: 'dollar_capped', sec: 'daily',
+                          recall: 'dollar_capped', port: 'dollar_capped' },
+    equityDollarParams: { ft:   { perTrade: 2000, dailyCap: 10000, maxConcurrent: 5 },
+                          zone: { perTrade: 2000, dailyCap: 10000 },
                           sec:  { perTrade: 2000, dailyCap: 10000 },
                           recall: { perTrade: 2000, dailyCap: 10000 },
                           port: { perTrade: 2000, dailyCap: 10000 } },
@@ -195,12 +200,35 @@ document.addEventListener('alpine:init', () => {
 
     // Sizing from the rail feeds the shared dollar-capped equity path, so the
     // $/trade and daily-cap inputs drive the same maths Recall uses.
+    // Total / annualised / max-DD in dollars, off the same capped series the
+    // equity pane draws — so the stat bar and the chart cannot disagree.
+    _dollarStats(ds) {
+      const eq = ds.equity || [];
+      if (!eq.length) return null;
+      const total = eq[eq.length - 1].value;
+      let peak = 0, maxDD = 0;
+      for (const p of eq) { if (p.value > peak) peak = p.value;
+                            maxDD = Math.min(maxDD, p.value - peak); }
+      const d0 = new Date(eq[0].date), d1 = new Date(eq[eq.length - 1].date);
+      const years = Math.max((d1 - d0) / 31557600000, 1e-9);
+      return { total_ret_usd: total, avg_annual_usd: total / years,
+               max_dd_usd: maxDD,
+               calmar: maxDD < 0 ? (total / Math.abs(maxDD)) : null };
+    },
+
     renderCharts() {
       const FC = window.FactorCharts;
       if (!FC || !this.zoneData) return;
-      for (const k of Object.keys(this.equityDollarParams)) {
-        this.equityDollarParams[k] = { perTrade: this.perTrade, dailyCap: this.dailyCap };
-      }
+      this.equityDollarParams.ft = {
+        perTrade: this.perTrade, dailyCap: this.dailyCap,
+        maxConcurrent: this.maxConcurrent,
+      };
+      // Dollar stats for the three boxes that cannot come from the backend:
+      // they depend on the rail's sizing, which is a client-side control.
+      const ds = window.FactorCharts._computeDollarSeries(
+        this, this.zoneData.combined_trades || [],
+        this.perTrade, this.dailyCap, this.maxConcurrent);
+      this.dollarStats = this._dollarStats(ds);
       try {
         FC._renderSecEquity(this, 'ft-equity', this.zoneData, true);
         FC._renderZoneYearly(this, 'ft-yearly', this.zoneData);
@@ -259,7 +287,8 @@ document.addEventListener('alpine:init', () => {
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };
-      const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current', src.train, 'train');
+      const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current',
+                        { ...src.train, ...(this.dollarStats || {}) }, 'train');
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
       const locked = mk('locked', 'Locked', lockedSrc.train, 'train');

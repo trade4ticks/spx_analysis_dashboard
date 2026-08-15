@@ -48,7 +48,7 @@ window.FactorCharts = {
     if (isDollar) {
       const params  = cmp.equityDollarParams[modeKey] || { perTrade: 2000, dailyCap: 10000 };
       const trades  = detail.combined_trades || [];
-      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
+      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.maxConcurrent);
       if (!dollarS.equity.length) return;
       const toMs = d => new Date(d).getTime();
       const eqPxy = dollarS.equity.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
@@ -408,7 +408,7 @@ window.FactorCharts = {
       // count path, dollar weights instead of unit weights.
       const { dayDeployedByDate, tradeDollarSizes } =
         window.FactorCharts._computeDollarSeries(cmp,
-          kept, params.perTrade, params.dailyCap,
+          kept, params.perTrade, params.dailyCap, params.maxConcurrent,
         );
       weightByDate = dayDeployedByDate;
       // Per-TRADE dollar size, needed because open positions are now walked
@@ -625,7 +625,7 @@ window.FactorCharts = {
     };
   },
 
-  _computeDollarSeries(cmp, trades, perTrade, dailyCap) {
+  _computeDollarSeries(cmp, trades, perTrade, dailyCap, maxConcurrent) {
     // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
     // _labDsCallsThisHover is set to 0 by the hover/leave handlers before
     // they call anything; we count every _computeDollarSeries invocation
@@ -662,9 +662,41 @@ window.FactorCharts = {
     const tradeDollarSizes  = [];
     const equity = [];
     let cum = 0;
+    // Concurrency gate. Evaluated AT ENTRY against positions held as of the
+    // prior close, so it decides whether a trade is taken at all -- not how
+    // it is sized. Capping deployed capital after the fact would change the
+    // dollars without changing which trades happened, which is a different
+    // and less honest thing.
+    //
+    // Nights carried uses the same arithmetic as the activity chart:
+    // ceil(exit_bar / 390) - 1. A trade opened and closed inside one session
+    // is never held overnight, so it consumes no slot on any later day --
+    // it can always be taken, and never blocks anything.
+    const BARS_PER_SESSION = 390;
+    const heldUntil = new Map();   // date index -> positions still open that day
+    const dayPos = new Map(dates.map((d, i) => [d, i]));
+    const releaseAt = new Array(dates.length + 1).fill(0);
+    let heldNow = 0;
+
     for (const d of dates) {
-      const dayTrades = tradesByDate.get(d);
-      const N = Math.max(1, tickersByDate.get(d).size);
+      // Release positions whose last carried session was yesterday.
+      heldNow -= releaseAt[dayPos.get(d)] || 0;
+      let dayTrades = tradesByDate.get(d);
+      if (maxConcurrent && maxConcurrent > 0) {
+        const slots = Math.max(0, maxConcurrent - heldNow);
+        if (dayTrades.length > slots) dayTrades = dayTrades.slice(0, slots);
+      }
+      for (const t of dayTrades) {
+        const bars = +t.exit_bar;
+        const nights = (isFinite(bars))
+          ? Math.max(0, Math.ceil(bars / BARS_PER_SESSION) - 1) : 0;
+        if (nights > 0) {
+          heldNow += 1;
+          const end = Math.min(dayPos.get(d) + nights, dates.length);
+          releaseAt[end] = (releaseAt[end] || 0) + 1;
+        }
+      }
+      const N = Math.max(1, new Set(dayTrades.map(t => t.ticker).filter(Boolean)).size);
       const perTickerAlloc = Math.min(perTrade, dailyCap / N);
       let dayPnl      = 0;
       let dayDeployed = 0;
@@ -825,7 +857,7 @@ window.FactorCharts = {
       // SAME dayPnlByDate the equity curve does — guarantees
       // reconciliation (sum of bars = endpoint of curve).
       const params = dollarParams || { perTrade: 2000, dailyCap: 10000 };
-      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
+      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.maxConcurrent);
       const yearPnl = new Map();
       const yearN   = new Map();
       for (const [d, pnl] of dayPnlByDate.entries()) {
