@@ -6179,31 +6179,7 @@ document.addEventListener('alpine:init', () => {
     // keepOrder=false  → groups sorted by family_num (default; use for static lists).
     // keepOrder=true   → groups appear in first-occurrence order from `list`
     //                    (use for score-sorted lists so hottest family appears first).
-    groupMetricsByFamily(list, keepOrder = false) {
-      const groups = new Map();  // family_num → {family_num, family_name, metrics:[]}
-      for (const m of (list || [])) {
-        const fam = this.metricFamilyLookup[m];
-        const key = fam ? fam.family_num : 999;
-        const label = fam ? fam.family_name : 'Other';
-        if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
-        groups.get(key).metrics.push(m);
-      }
-      // Sort metrics alphabetically within each family group.
-      // Use explicit localeCompare so the sort is unambiguous regardless of
-      // whether Alpine's reactivity layer has wrapped the string elements.
-      if (!keepOrder) for (const g of groups.values())
-        g.metrics.sort((a, b) => String(a).localeCompare(String(b)));
-      // DIAG: unconditional — fires on every call to confirm function is reached
-      // and to expose what keys the Map holds (number vs string) and whether F3
-      // metrics land in key 3 or somewhere else.
-      console.log('[DIAG groupMetricsByFamily] called — list.length:', (list||[]).length,
-        '| keepOrder:', keepOrder,
-        '| groupKeys:', [...groups.keys()],
-        '| F3 metrics:', groups.get(3)?.metrics?.slice(0,5));
-      const result = [...groups.values()];
-      if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
-      return result;
-    },
+    groupMetricsByFamily(...a) { return window.FactorCharts.groupMetricsByFamily(this, ...a); },
 
     // Returns secMetricsForBar() regrouped by family for <optgroup> rendering.
     // Preserves score-sort order: families appear in order of their highest-ranked

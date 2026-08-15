@@ -78,8 +78,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=1"></script>
-  <script src="/static/js/factor_trades.js?v=3"></script>
+  <script src="/static/js/factor_charts.js?v=3"></script>
+  <script src="/static/js/factor_trades.js?v=4"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -115,7 +115,13 @@
         </div>
         <label>Primary metric</label>
         <select x-model="primaryMetric">
-          <template x-for="mm in metrics" :key="'p-'+mm"><option :value="mm" x-text="mm"></option></template>
+          <template x-for="grp in groupMetricsByFamily(metrics)" :key="'pg-'+grp.family_num">
+            <optgroup :label="'F' + grp.family_num + ' – ' + grp.family_name">
+              <template x-for="mm in grp.metrics" :key="'p-'+mm">
+                <option :value="mm" x-text="mm"></option>
+              </template>
+            </optgroup>
+          </template>
         </select>
         <template x-if="mode==='2f'">
           <div>

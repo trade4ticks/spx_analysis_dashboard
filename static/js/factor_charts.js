@@ -894,4 +894,23 @@ window.FactorCharts = {
     cmp._hmRange = max || 0.01;
   },
 
+  groupMetricsByFamily(cmp, list, keepOrder = false) {
+    const groups = new Map();  // family_num → {family_num, family_name, metrics:[]}
+    for (const m of (list || [])) {
+      const fam = cmp.metricFamilyLookup[m];
+      const key = fam ? fam.family_num : 999;
+      const label = fam ? fam.family_name : 'Other';
+      if (!groups.has(key)) groups.set(key, { family_num: key, family_name: label, metrics: [] });
+      groups.get(key).metrics.push(m);
+    }
+    // Sort metrics alphabetically within each family group.
+    // Use explicit localeCompare so the sort is unambiguous regardless of
+    // whether Alpine's reactivity layer has wrapped the string elements.
+    if (!keepOrder) for (const g of groups.values())
+      g.metrics.sort((a, b) => String(a).localeCompare(String(b)));
+    const result = [...groups.values()];
+    if (!keepOrder) result.sort((a, b) => a.family_num - b.family_num);
+    return result;
+  },
+
 };

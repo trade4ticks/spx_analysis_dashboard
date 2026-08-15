@@ -12,6 +12,9 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('factorTrades', () => ({
     metrics: [], ruleGroups: [], cutoffDate: '',
+    // metric -> {family_num, family_name}; drives the <optgroup>
+    // grouping so this page's dropdowns read like Factor Analysis'.
+    metricFamilyLookup: {},
     mode: '2f', primaryMetric: '', secondaryMetric: '', entryAnchor: 'open',
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxConcurrent: 5,
@@ -49,6 +52,12 @@ document.addEventListener('alpine:init', () => {
           fetch('/api/factor-analysis/tt-cutoff').then(r => r.ok ? r.json() : null),
         ]);
         this.metrics = cols?.features || [];
+        for (const g of (cols?.feature_families || [])) {
+          for (const mm of g.metrics) {
+            this.metricFamilyLookup[mm] = { family_num: g.family_num,
+                                            family_name: g.family_name };
+          }
+        }
         this.primaryMetric   = this.metrics[0] || '';
         this.secondaryMetric = this.metrics[1] || '';
         this.ruleGroups = rules?.groups || [];
@@ -133,6 +142,7 @@ document.addEventListener('alpine:init', () => {
     },
     // The heatmap macro calls these in Alpine scope. Delegating keeps the
     // gradient and the tooltip identical to every other heatmap on the site.
+    groupMetricsByFamily(...a) { return window.FactorCharts.groupMetricsByFamily(this, ...a); },
     hmCellBg(...a)     { return window.FactorCharts.hmCellBg(this, ...a); },
     _hmCellTitle(...a) { return window.FactorCharts._hmCellTitle(this, ...a); },
 
