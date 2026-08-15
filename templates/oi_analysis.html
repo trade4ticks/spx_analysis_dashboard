@@ -1092,14 +1092,16 @@
                   <th @click="cs2fSort('secondary_metric')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">S Metric<span x-text="cs2fSortKey==='secondary_metric' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
                   <th @click="cs2fSort('corner_direction')" style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Dir<span x-text="cs2fSortKey==='corner_direction' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
                   <th @click="cs2fSort('outcome')"          style="text-align:left;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600">Outcome<span x-text="cs2fSortKey==='outcome'          ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span></th>
+                  <!-- Train headers match test: same color and weight, so the
+                       two windows read as equal partners in the comparison. -->
                   <th @click="cs2fSort('d_train_avg_ret')" title="Decile corner, TRAIN window — confirms the corner qualified in-sample"
-                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='d_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D train%</th>
+                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='d_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D train%</th>
                   <th @click="cs2fSort('d_test_avg_ret')"  title="Decile corner, TEST window — this is the number that judges the corner"
                       style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace"><span x-text="cs2fSortKey==='d_test_avg_ret'  ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D test%</th>
                   <th @click="cs2fSort('d_test_n')"        title="Decile TEST-window observation count — the noise guard"
                       style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace"><span x-text="cs2fSortKey==='d_test_n'        ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>D n</th>
                   <th @click="cs2fSort('q_train_avg_ret')" title="Quintile corner, TRAIN window"
-                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--dim);font-size:11px;font-weight:600;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='q_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q train%</th>
+                      style="text-align:right;padding:3px 8px 3px 16px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace;border-left:1px solid var(--border)"><span x-text="cs2fSortKey==='q_train_avg_ret' ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q train%</th>
                   <th @click="cs2fSort('q_test_avg_ret')"  title="Quintile corner, TEST window"
                       style="text-align:right;padding:3px 8px;cursor:pointer;white-space:nowrap;color:var(--text);font-size:11px;font-weight:700;font-family:monospace"><span x-text="cs2fSortKey==='q_test_avg_ret'  ? (cs2fSortDir==='desc'?'▾':'▴') : ''"></span>Q test%</th>
                   <th @click="cs2fSort('q_test_n')"        title="Quintile TEST-window observation count"
@@ -1125,24 +1127,31 @@
                       :title="'Open in Recall — 20×20 with this corner pre-selected (~10s)'">
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.primary_metric"></td>
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.secondary_metric"></td>
-                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
-                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
-                    <!-- Train is dimmed, test is full-strength: the eye should
-                         land on the test number when scanning down a column. -->
-                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;opacity:.72;border-left:1px solid var(--border)"
+                    <!-- Dir / Outcome sit one step above --dim (#777) but stay
+                         below --muted (#c8c8c8): still visibly secondary to the
+                         metric names, but legible at 11px. Same treatment on the
+                         n columns below. -->
+                    <td style="padding:3px 8px;color:#9a9a9a;white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
+                    <td style="padding:3px 8px;color:#9a9a9a;white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
+                    <!-- Train renders at the SAME strength as test. The point
+                         of TT here is comparing the two windows, not skimming
+                         test alone — a great test number over a flat train is
+                         exactly what needs to be visible. The border-left and
+                         the "train"/"test" headers carry the distinction. -->
+                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700;border-left:1px solid var(--border)"
                         :style="{ color: row.d_train_avg_ret != null ? (row.d_train_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_train_avg_ret != null ? (row.d_train_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700"
                         :style="{ color: row.d_test_avg_ret != null ? (row.d_test_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_test_avg_ret != null ? (row.d_test_avg_ret*100).toFixed(3)+'%' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_test_n != null ? row.d_test_n.toLocaleString() : '—'"></td>
-                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;opacity:.72;border-left:1px solid var(--border)"
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.d_test_n != null ? row.d_test_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px 3px 16px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700;border-left:1px solid var(--border)"
                         :style="{ color: row.q_train_avg_ret != null ? (row.q_train_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_train_avg_ret != null ? (row.q_train_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px;font-weight:700"
                         :style="{ color: row.q_test_avg_ret != null ? (row.q_test_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_test_avg_ret != null ? (row.q_test_avg_ret*100).toFixed(3)+'%' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_test_n != null ? row.q_test_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.q_test_n != null ? row.q_test_n.toLocaleString() : '—'"></td>
                   </tr>
                 </template>
               </tbody>
@@ -1194,22 +1203,26 @@
                       :title="'Open in Recall — 20×20 with this corner pre-selected (~10s)'">
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.primary_metric"></td>
                     <td style="padding:3px 8px;color:var(--text);white-space:nowrap;font-size:11px" x-text="row.secondary_metric"></td>
-                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
-                    <td style="padding:3px 8px;color:var(--dim);white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
+                    <!-- Dir / Outcome sit one step above --dim (#777) but stay
+                         below --muted (#c8c8c8): still visibly secondary to the
+                         metric names, but legible at 11px. Same treatment on the
+                         n columns below. -->
+                    <td style="padding:3px 8px;color:#9a9a9a;white-space:nowrap;font-size:11px"  x-text="row.corner_direction"></td>
+                    <td style="padding:3px 8px;color:#9a9a9a;white-space:nowrap;font-size:11px"  x-text="row.outcome"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.d_avg_ret != null ? (row.d_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_avg_ret != null ? (row.d_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.q_avg_ret != null ? (row.q_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
                     <!-- Reviewed checkbox + Note input. @click.stop on
                          both <td>s so clicking inside them doesn't
                          bubble to the row's recallFromCornerScan
@@ -1428,14 +1441,14 @@
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.d_ret_per_day != null ? (row.d_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.d_ret_per_day != null ? (row.d_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.d_n != null ? row.d_n.toLocaleString() : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.q_avg_ret != null ? (row.q_avg_ret > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_avg_ret != null ? (row.q_avg_ret*100).toFixed(3)+'%' : '—'"></td>
                     <td style="padding:3px 8px;text-align:right;font-family:monospace;white-space:nowrap;font-size:11px"
                         :style="{ color: row.q_ret_per_day != null ? (row.q_ret_per_day > 0 ? '#3498db' : '#e84393') : 'var(--dim)' }"
                         x-text="row.q_ret_per_day != null ? (row.q_ret_per_day*10000).toFixed(2)+'bp' : '—'"></td>
-                    <td style="padding:3px 8px;text-align:right;color:var(--dim);font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
+                    <td style="padding:3px 8px;text-align:right;color:#9a9a9a;font-family:monospace;font-size:11px" x-text="row.q_n != null ? row.q_n.toLocaleString() : '—'"></td>
                   </tr>
                 </template>
               </tbody>
