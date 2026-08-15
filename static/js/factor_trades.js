@@ -2,15 +2,12 @@
 
 // Factor Trades — exit-policy lab.
 //
-// Charts are NOT rendered here yet. The four panes this page needs
-// (equity+DD, annual P&L, activity, ticker breakdown) already exist as
-// _renderSecEquity / _renderZoneYearly / _renderSecActivity /
-// _renderSecBubble, but they are METHODS on the oiAnalysis Alpine component
-// in oi_analysis.js — parameterized on (canvasId, data), yet not reachable
-// from another page. Copying them here is the drift this project has been
-// avoiding, so they get extracted into a shared window.* module first,
-// following the static/js/signal_thumbnail.js precedent. Until then the
-// canvases stay empty and everything else works.
+// The four shared panes (equity+DD, annual P&L, activity, ticker breakdown)
+// render through window.FactorCharts, the SAME code Recall/Zone/Portfolio
+// use — not a copy. Those functions take the component as their first
+// argument and read state off it by name, so this component declares the
+// same field names they expect (see the "FactorCharts contract" block
+// below). Anything cosmetic about these charts changes in one place.
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('factorTrades', () => ({
@@ -23,6 +20,22 @@ document.addEventListener('alpine:init', () => {
     runData: null, lockedRun: null, zoneData: null, lockedZone: null,
     gridView: 'edited', showDD: true,
     selectedCells: [],            // [[bp, bs], ...]
+
+    // ── FactorCharts contract ────────────────────────────────────────────
+    // window.FactorCharts.* reads these off the component by name. They must
+    // keep these exact names; renaming any of them silently breaks a chart
+    // rather than raising. Defaults mirror Recall's so the panes look and
+    // behave identically out of the box.
+    _charts: {},
+    secDetail: null, zoneData_: null, data: null,
+    activityMode: 'trades',
+    dedupeConc: { primary: false, sec: false, corr: false, port: false },
+    secBubbleMinN: 0,
+    equityAggMode:      { zone: 'dollar_capped', sec: 'daily', recall: 'dollar_capped', port: 'dollar_capped' },
+    equityDollarParams: { zone: { perTrade: 2000, dailyCap: 10000 },
+                          sec:  { perTrade: 2000, dailyCap: 10000 },
+                          recall: { perTrade: 2000, dailyCap: 10000 },
+                          port: { perTrade: 2000, dailyCap: 10000 } },
 
     async init() {
       try {
@@ -137,7 +150,29 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
         this.zoneData = d;
+        this.secDetail = d;   // FactorCharts reads secDetail for defaults
+        this.$nextTick(() => this.renderCharts());
       } catch (e) { this.error = String(e); }
+    },
+
+    // Sizing from the rail feeds the shared dollar-capped equity path, so the
+    // $/trade and daily-cap inputs drive the same maths Recall uses.
+    renderCharts() {
+      const FC = window.FactorCharts;
+      if (!FC || !this.zoneData) return;
+      for (const k of Object.keys(this.equityDollarParams)) {
+        this.equityDollarParams[k] = { perTrade: this.perTrade, dailyCap: this.dailyCap };
+      }
+      try {
+        FC._renderSecEquity(this, 'ft-equity', this.zoneData, true);
+        FC._renderZoneYearly(this, 'ft-yearly', this.zoneData);
+        FC._renderSecActivity(this, 'ft-activity-edited', this.zoneData);
+        FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData);
+        if (this.lockedZone) {
+          FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone);
+          FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone);
+        }
+      } catch (e) { console.error('FactorCharts render failed', e); }
     },
 
     // ── Stat rows ────────────────────────────────────────────────────────
