@@ -35,7 +35,7 @@ window.FactorCharts = {
     if (cmp._charts[_key]) { cmp._charts[_key].destroy(); delete cmp._charts[_key]; }
     // Per-pane mode: each of the four single-line equity views
     // (zone / sec / recall / port) carries its own toggle state.
-    const modeKey = cmp._equityModeKey(canvasId);
+    const modeKey = window.FactorCharts._equityModeKey(cmp, canvasId);
     const mode    = (cmp.equityAggMode && cmp.equityAggMode[modeKey]) || 'daily';
 
     // Dollar-capped branch — zone/recall/port only. Secondary is
@@ -48,11 +48,11 @@ window.FactorCharts = {
     if (isDollar) {
       const params  = cmp.equityDollarParams[modeKey] || { perTrade: 2000, dailyCap: 10000 };
       const trades  = detail.combined_trades || [];
-      const dollarS = cmp._computeDollarSeries(trades, params.perTrade, params.dailyCap);
+      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
       if (!dollarS.equity.length) return;
       const toMs = d => new Date(d).getTime();
       const eqPxy = dollarS.equity.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
-      const dd    = cmp._drawdownFromDollarEquity(dollarS.equity);
+      const dd    = window.FactorCharts._drawdownFromDollarEquity(cmp, dollarS.equity);
       const ddxy  = dd.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
       const ctx   = canvas.getContext('2d');
       const fmt$  = v => {
@@ -105,8 +105,8 @@ window.FactorCharts = {
       return;
     }
 
-    const eqP = cmp._equityForMode(detail.equity_primary  || [], mode);
-    const eqC = cmp._equityForMode(detail.equity_combined || [], mode);
+    const eqP = window.FactorCharts._equityForMode(cmp, detail.equity_primary  || [], mode);
+    const eqC = window.FactorCharts._equityForMode(cmp, detail.equity_combined || [], mode);
     if (!eqP.length) return;
 
     // Real time x-axis: each point carries its ACTUAL DATE as an
@@ -123,7 +123,7 @@ window.FactorCharts = {
     const toMs    = d => new Date(d).getTime();
     const eqPxy   = eqP.map(p => ({ x: toMs(p.date), y: +(p.value * 100).toFixed(4) }));
     const eqCxy   = eqC.map(p => ({ x: toMs(p.date), y: +(p.value * 100).toFixed(4) }));
-    const drawdown = cmp._drawdownFromEquity(eqP);
+    const drawdown = window.FactorCharts._drawdownFromEquity(cmp, eqP);
     const ddxy    = drawdown.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(3) }));
 
     const ctx = canvas.getContext('2d');
@@ -279,10 +279,10 @@ window.FactorCharts = {
     // (combined_trades) and recompute — the backend's `yearly` field
     // is per-trade-mean only, so we can't trust it once the toggle
     // is on a different mode.
-    const modeKey = cmp._equityModeKey(canvasId);
+    const modeKey = window.FactorCharts._equityModeKey(cmp, canvasId);
     const mode    = (cmp.equityAggMode && cmp.equityAggMode[modeKey]) || 'daily';
     const dollarParams = cmp.equityDollarParams[modeKey];
-    const yearly = cmp._yearlyForMode(src.combined_trades || [], mode, dollarParams);
+    const yearly = window.FactorCharts._yearlyForMode(cmp, src.combined_trades || [], mode, dollarParams);
     if (!yearly.length) return;
 
     const isDollar = (mode === 'dollar_capped');
@@ -380,13 +380,13 @@ window.FactorCharts = {
     // Derive dedupeConc key from canvasId: chart-port-activity → 'port', else 'sec'
     const _dedupeKey = canvasId.includes('port') ? 'port' : 'sec';
     const kept = cmp.dedupeConc[_dedupeKey]
-      ? cmp._dedupeConcurrent(trades, tradingDays, horizon)
+      ? window.FactorCharts._dedupeConcurrent(cmp, trades, tradingDays, horizon)
       : trades;
 
     // Section key for activity-mode lookup. Secondary stays on
     // count-only (no dollar mode available); all others can switch
     // to capital when their equity toggle is on dollar-capped.
-    const sectionKey = cmp._equityModeKey(canvasId);
+    const sectionKey = window.FactorCharts._equityModeKey(cmp, canvasId);
     const isDollarEquity = (cmp.equityAggMode?.[sectionKey] === 'dollar_capped');
     const wantsCapital   = (cmp.activityMode?.[sectionKey] === 'capital');
     const isCapital      = isDollarEquity && wantsCapital && sectionKey !== 'sec';
@@ -404,7 +404,7 @@ window.FactorCharts = {
       // day, so the same windowing loop below sums it over H days
       // to get rolling deployed capital — identical math to the
       // count path, dollar weights instead of unit weights.
-      const { dayDeployedByDate } = cmp._computeDollarSeries(
+      const { dayDeployedByDate } = window.FactorCharts._computeDollarSeries(cmp, 
         kept, params.perTrade, params.dailyCap,
       );
       weightByDate = dayDeployedByDate;
@@ -477,16 +477,16 @@ window.FactorCharts = {
           },
         },
         scales: {
-          ...cmp._darkScales(),
-          x: { ...cmp._darkScales().x, ticks: { ...cmp._darkScales().x.ticks, maxTicksLimit: 12 } },
+          ...window.FactorCharts._darkScales(cmp),
+          x: { ...window.FactorCharts._darkScales(cmp).x, ticks: { ...window.FactorCharts._darkScales(cmp).x.ticks, maxTicksLimit: 12 } },
           y: isCapital ? {
-            ...cmp._darkScales().y,
+            ...window.FactorCharts._darkScales(cmp).y,
             title: { display: true, text: 'Capital ($)', color: '#888', font: { size: 9 } },
-            ticks: { ...cmp._darkScales().y.ticks, callback: fmt$ },
+            ticks: { ...window.FactorCharts._darkScales(cmp).y.ticks, callback: fmt$ },
           } : {
-            ...cmp._darkScales().y,
+            ...window.FactorCharts._darkScales(cmp).y,
             title: { display: true, text: 'Count', color: '#888', font: { size: 9 } },
-            ticks: { ...cmp._darkScales().y.ticks, stepSize: 1 },
+            ticks: { ...window.FactorCharts._darkScales(cmp).y.ticks, stepSize: 1 },
           },
         },
       },
@@ -531,7 +531,7 @@ window.FactorCharts = {
     cmp._charts[_key] = new Chart(canvas.getContext('2d'), {
       type: 'bubble',
       data: { datasets },
-      plugins: [cmp._avgRetLinePlugin(avgPct, 'avg')],
+      plugins: [window.FactorCharts._avgRetLinePlugin(cmp, avgPct, 'avg')],
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
         plugins: {
@@ -547,10 +547,10 @@ window.FactorCharts = {
           },
         },
         scales: {
-          ...cmp._darkScales(),
-          x: { ...cmp._darkScales().x,
+          ...window.FactorCharts._darkScales(cmp),
+          x: { ...window.FactorCharts._darkScales(cmp).x,
                title: { display: true, text: 'Trade Count', color: '#888', font: { size: 9 } } },
-          y: { ...cmp._darkScales().y,
+          y: { ...window.FactorCharts._darkScales(cmp).y,
                title: { display: true, text: 'Avg Return %', color: '#888', font: { size: 9 } } },
         },
       },
@@ -788,7 +788,7 @@ window.FactorCharts = {
       // SAME dayPnlByDate the equity curve does — guarantees
       // reconciliation (sum of bars = endpoint of curve).
       const params = dollarParams || { perTrade: 2000, dailyCap: 10000 };
-      const { dayPnlByDate } = cmp._computeDollarSeries(trades, params.perTrade, params.dailyCap);
+      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
       const yearPnl = new Map();
       const yearN   = new Map();
       for (const [d, pnl] of dayPnlByDate.entries()) {
@@ -836,6 +836,62 @@ window.FactorCharts = {
         win_rate: ys.filter(r => r > 0).length / ys.length,
       };
     });
+  },
+
+  hmCellBg(cmp, cell) {
+    // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
+    // same number determines hatching AND gradient inclusion. Critical
+    // invariant: a cell rendered with a gradient color is also in the
+    // population whose min/max defined that gradient. If a low-n cell
+    // with a wild return stayed in the scale, every real cell would
+    // collapse to near-uniform shade by relativity — the user-stated
+    // reason for keeping hatch and scale on the same threshold.
+    if (!cell || !cell.n) return 'rgba(40,40,40,0.5)';   // n=0: empty
+    const n = cell.n;
+    const minN = cmp.hmMinSampleN || 0;
+    // Tier 2: 0 < n < threshold — hatched gray, no gradient color.
+    // Pattern matches the Regime Heatmap style for visual consistency.
+    if (n < minN) {
+      return 'repeating-linear-gradient(45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+           + 'repeating-linear-gradient(-45deg, #2e2e2e 0 4px, transparent 4px 8px),'
+           + '#1c1c1c';
+    }
+    // Tier 3: n >= threshold — gradient, scaled across visible cells only.
+    const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (cmp._hmRange || 0.01)));
+    if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
+    return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
+  },
+
+  _hmCellTitle(cmp, cell, ix, iy) {
+    if (!cell || !cell.n) return 'n=0';
+    let s = `n=${cell.n}  avg=${((cell.avg_ret||0)*100).toFixed(3)}%  wr=${((cell.win_rate||0)*100).toFixed(1)}%`;
+    const xt = cmp.heatmapData?.x_thresholds;
+    const yt = cmp.heatmapData?.y_thresholds;
+    if (xt && yt) {
+      const fmt = v => v !== undefined ? v.toFixed(4) : '?';
+      s += `\nX (${cmp.metric}): ${fmt(xt[ix])} – ${fmt(xt[ix+1])}`;
+      s += `\nY (${cmp.secSelectedMetric}): ${fmt(yt[iy])} – ${fmt(yt[iy+1])}`;
+    }
+    return s;
+  },
+
+  _hmRecomputeRange(cmp) {
+    if (!cmp.heatmapData) { cmp._hmRange = null; return; }
+    const minN = cmp.hmMinSampleN || 0;
+    const grids = [
+      ...(cmp.heatmapData.grid || []),
+      ...(cmp.heatmapData.train_grid || []),
+      ...(cmp.heatmapData.test_grid || []),
+    ];
+    let max = 0;
+    for (const row of grids) {
+      for (const c of row) {
+        if (c && (c.n || 0) >= minN) {
+          max = Math.max(max, Math.abs(c.avg_ret || 0));
+        }
+      }
+    }
+    cmp._hmRange = max || 0.01;
   },
 
 };

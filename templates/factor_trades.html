@@ -79,7 +79,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=1"></script>
-  <script src="/static/js/factor_trades.js?v=2"></script>
+  <script src="/static/js/factor_trades.js?v=3"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -90,6 +90,17 @@
     <div class="topbar-div"></div>
     <div class="topbar-right" style="font-size:11px;color:var(--dim)"
          x-text="cutoffDate ? ('TT cutoff ' + cutoffDate + ' (frozen)') : ''"></div>
+  </div>
+
+  <!-- The whole page is train/test. Factor Analysis' Recall is in-sample, so
+       numbers here are NOT comparable with numbers there; say so once at the
+       top and again per surface, rather than leaving it to be inferred. -->
+  <div style="padding:6px 16px;background:rgba(224,176,102,.10);
+              border-bottom:1px solid var(--border);font-size:11px;color:#e0b066">
+    <b>Train/test mode</b> — bins are frozen at the cutoff
+    <span x-text="cutoffDate || '…'"></span>.
+    Selection happens on the <b>train</b> window; <b>test</b> is the verdict.
+    Not comparable with Recall, which is in-sample.
   </div>
 
   <div class="ft-wrap">
@@ -203,7 +214,11 @@
       <!-- 2. Stat rows. One row until a run is locked, then three. -->
       <template x-for="row in statRows()" :key="'sr-'+row.key">
         <div class="ft-statrow">
-          <div class="ft-statlbl" x-text="row.label"></div>
+          <div class="ft-statlbl">
+            <span x-text="row.label"></span>
+            <span style="display:block;color:#e0b066;font-size:9px"
+                  x-text="row.window"></span>
+          </div>
           {{ m.stat_box('N',        'row.n')        | indent(10) | safe }}
           {{ m.stat_box('Avg Ret',  'row.avgRet',  sign_expr='row.avgRetRaw')  | indent(10) | safe }}
           {{ m.stat_box('Win %',    'row.winRate') | indent(10) | safe }}
@@ -239,7 +254,7 @@
            Equity+DD and annual P&L share a pane; activity and ticker
            breakdown get separate panes per run. -->
       <div class="chart-box" x-show="zoneData">
-        <div class="chart-title">Equity &amp; drawdown
+        <div class="chart-title">Equity &amp; drawdown <span class="ft-note">[train + test]</span>
           <span class="ft-note">— locked grey, edited colour</span>
           <span style="float:right"><label class="ft-note"><input type="checkbox" x-model="showDD"> DD</label></span>
         </div>
@@ -252,7 +267,7 @@
       </div>
 
       <div class="chart-box" x-show="zoneData">
-        <div class="chart-title">Exit reasons
+        <div class="chart-title">Exit reasons <span class="ft-note">[train window]</span>
           <span class="ft-note">— which rule actually closed each trade</span>
         </div>
         <div class="chart-canvas" style="height:180px"><canvas id="ft-reasons"></canvas></div>
@@ -260,22 +275,22 @@
 
       <div style="display:flex;gap:12px">
         <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
-          <div class="chart-title">Trade activity <span class="ft-note">— edited</span></div>
+          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — edited</span></div>
           <div class="chart-canvas"><canvas id="ft-activity-edited"></canvas></div>
         </div>
         <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
-          <div class="chart-title">Trade activity <span class="ft-note">— locked</span></div>
+          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — locked</span></div>
           <div class="chart-canvas"><canvas id="ft-activity-locked"></canvas></div>
         </div>
       </div>
 
       <div style="display:flex;gap:12px">
         <div class="chart-box" style="flex:1;min-width:0" x-show="zoneData">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">— edited</span></div>
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — edited</span></div>
           <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
         </div>
         <div class="chart-box" style="flex:1;min-width:0" x-show="lockedZone">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">— locked</span></div>
+          <div class="chart-title">Ticker breakdown <span class="ft-note">[train + test] — locked</span></div>
           <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>
         </div>
       </div>

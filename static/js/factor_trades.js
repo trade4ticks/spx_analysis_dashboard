@@ -27,7 +27,11 @@ document.addEventListener('alpine:init', () => {
     // rather than raising. Defaults mirror Recall's so the panes look and
     // behave identically out of the box.
     _charts: {},
-    secDetail: null, zoneData_: null, data: null,
+    secDetail: null, data: null,
+    // Heatmap colour scale. hmCellBg/_hmCellTitle live in FactorCharts and
+    // read these; _hmRange is recomputed from the grid whenever it changes.
+    heatmapData: null, _hmRange: null, hmMinSampleN: 0,
+    metric: '', secSelectedMetric: '',
     activityMode: 'trades',
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
     secBubbleMinN: 0,
@@ -86,6 +90,11 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
         this.runData = d;
+        this.metric = d.primary_metric;
+        this.secSelectedMetric = d.secondary_metric || '';
+        // FactorCharts.hmCellBg reads heatmapData + _hmRange for the gradient.
+        this.heatmapData = { grid: this.gridRows };
+        window.FactorCharts._hmRecomputeRange(this);
         this.runs.push(d);
         this.currentIdx = this.runs.length - 1;
         this.selectedCells = [];
@@ -122,6 +131,11 @@ document.addEventListener('alpine:init', () => {
                  n: Math.min(c.n || 0, l.n || 0) };
       }));
     },
+    // The heatmap macro calls these in Alpine scope. Delegating keeps the
+    // gradient and the tooltip identical to every other heatmap on the site.
+    hmCellBg(...a)     { return window.FactorCharts.hmCellBg(this, ...a); },
+    _hmCellTitle(...a) { return window.FactorCharts._hmCellTitle(this, ...a); },
+
     isCellSelected(ix, iy) {
       return this.selectedCells.some(c => c[0] === ix && c[1] === iy);
     },
@@ -181,11 +195,11 @@ document.addEventListener('alpine:init', () => {
     statRows() {
       const src = this.zoneData || this.runData;
       if (!src) return [];
-      const mk = (key, label, s) => {
+      const mk = (key, label, s, win) => {
         if (!s) return null;
         const dd = s.max_dd ?? null, cal = s.calmar ?? null;
         return {
-          key, label,
+          key, label, window: win,
           n: (s.n ?? 0).toLocaleString(),
           avgRet: ((s.avg_ret ?? 0) * 100).toFixed(3) + '%', avgRetRaw: s.avg_ret ?? 0,
           winRate: s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—',
@@ -194,12 +208,12 @@ document.addEventListener('alpine:init', () => {
           avgHold: (s.avg_hold ?? 0).toFixed(1) + 'd',
         };
       };
-      const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current', src.train);
+      const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current', src.train, 'train');
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', 'Locked', lockedSrc.train);
+      const locked = mk('locked', 'Locked', lockedSrc.train, 'train');
       const diff = (locked && edited) ? {
-        key: 'change', label: 'Change',
+        key: 'change', label: 'Change', window: 'train',
         n: ((src.train?.n ?? 0) - (lockedSrc.train?.n ?? 0)).toLocaleString(),
         avgRet: (((src.train?.avg_ret ?? 0) - (lockedSrc.train?.avg_ret ?? 0)) * 100).toFixed(3) + '%',
         avgRetRaw: (src.train?.avg_ret ?? 0) - (lockedSrc.train?.avg_ret ?? 0),
