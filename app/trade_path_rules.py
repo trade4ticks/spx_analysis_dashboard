@@ -24,6 +24,27 @@ metadata from its module-global `BY_KEY`, and this takes an explicit
 the horizon backstop, tie-break ordering, path_status filtering, the emitted
 SQL shape — is unchanged.
 
+LOCAL ADDITION, not present upstream
+------------------------------------
+`include_exit_rule=True` emits one extra column, `exit_rule`, naming which
+rule won. Default False, so by default the emitted SQL is byte-identical to
+the source's.
+
+It exists because the exit-reason breakdown has to tell a user-selected
+`max_days` apart from the auto-appended backstop. Those can be the SAME
+column with opposite meanings: exits on `max_days__20` are the user's policy
+working when they picked it, and their stops and targets failing to fire when
+they did not. The distinction is `horizon_auto_added`, which the caller
+already gets in `meta` — but only if it also knows which rule fired per row,
+which the source's CASE (returning the return, not the rule) cannot say.
+
+Deriving it outside this function would mean re-deriving the winner, i.e.
+duplicating the combine — the exact thing vendoring is meant to prevent. So
+the attribution CASE is emitted here, from the same `ordered` list, and is
+guaranteed to agree with the return CASE on ties by construction.
+
+Worth pushing upstream on the next sync.
+
 Column names come from the table's `exit_bar_col` / `exit_return_col` and are
 never constructed from the rule key.
 """
@@ -72,7 +93,8 @@ def by_key_from_rows(rows) -> dict[str, RuleMeta]:
 
 def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
                       table: str = "trade_paths",
-                      include_unresolved: bool = False) -> tuple[str, dict[str, Any]]:
+                      include_unresolved: bool = False,
+                      include_exit_rule: bool = False) -> tuple[str, dict[str, Any]]:
     """SQL selecting the winning exit across `rule_keys`, plus metadata.
 
     THE HORIZON BACKSTOP IS STRUCTURAL, NOT A CONVENTION.
@@ -143,6 +165,16 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
     )
     where = "" if include_unresolved else "\n    WHERE path_status = 'ok'"
 
+    # LOCAL ADDITION (see module docstring). Same `ordered` list as the return
+    # CASE above, so the two cannot disagree about which rule won a tie.
+    rule_case = ""
+    if include_exit_rule:
+        rule_whens = "\n".join(
+            f"        WHEN {by_key[k].bar_col} = w.exit_bar THEN '{k}'"
+            for k in ordered
+        )
+        rule_case = f",\n    CASE\n{rule_whens}\n    END AS exit_rule"
+
     sql = (
         f"WITH w AS (\n"
         f"    SELECT ticker, trade_date, entry_anchor,\n"
@@ -152,7 +184,7 @@ def build_combine_sql(rule_keys, by_key: Mapping[str, RuleMeta],
         f")\n"
         f"SELECT ticker, trade_date, entry_anchor, exit_bar,\n"
         f"    CASE\n{cases}\n"
-        f"    END AS exit_return\n"
+        f"    END AS exit_return{rule_case}\n"
         f"FROM w"
     )
 
