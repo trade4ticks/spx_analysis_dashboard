@@ -45,6 +45,11 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 # StaticFiles above is a separate ASGI mount and is unaffected: /static/* JS
 # and CSS keep their ETag / Last-Modified caching. Only the HTML loses ETag,
 # which makes the ?v=NNN cache-buster on JS strictly more reliable.
+# Starlette >= 1.0 removed the legacy TemplateResponse(name, {"request": ...})
+# signature; request comes FIRST now. The old form raises
+# "TypeError: unhashable type: dict" at request time, not import time, so
+# it cannot be caught by a template-rendering check — see
+# scripts/check_routes_smoke.py, which exercises the real route layer.
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.keep_trailing_newline = True
 
@@ -71,49 +76,49 @@ app.include_router(ticker_chain.router,    prefix="/api/ticker-analysis")
 
 @app.get("/today")
 async def today_page(request: Request):
-    return templates.TemplateResponse("today.html", {"request": request})
+    return templates.TemplateResponse(request, "today.html")
 
 
 @app.get("/heatmap")
 async def heatmap_page(request: Request):
-    return templates.TemplateResponse("heatmap.html", {"request": request})
+    return templates.TemplateResponse(request, "heatmap.html")
 
 
 @app.get("/ai-explorer")
 async def ai_explorer_page(request: Request):
-    return templates.TemplateResponse("ai_explorer.html", {"request": request})
+    return templates.TemplateResponse(request, "ai_explorer.html")
 
 
 @app.get("/research")
 async def research_page(request: Request):
-    return templates.TemplateResponse("research.html", {"request": request})
+    return templates.TemplateResponse(request, "research.html")
 
 
 @app.get("/research2")
 async def research2_page(request: Request):
-    return templates.TemplateResponse("research2.html", {"request": request})
+    return templates.TemplateResponse(request, "research2.html")
 
 
 @app.get("/factor-analysis")
 async def factor_analysis_page(request: Request):
-    return templates.TemplateResponse("oi_analysis.html", {"request": request})
+    return templates.TemplateResponse(request, "oi_analysis.html")
 
 
 @app.get("/factor-signals")
 async def factor_signals_page(request: Request):
-    return templates.TemplateResponse("oi_signals.html", {"request": request})
+    return templates.TemplateResponse(request, "oi_signals.html")
 
 
 @app.get("/ticker-analysis")
 async def ticker_analysis_page(request: Request):
-    return templates.TemplateResponse("ticker_analysis.html", {"request": request})
+    return templates.TemplateResponse(request, "ticker_analysis.html")
 
 
 @app.get("/backtest-iv-analysis")
 async def backtest_iv_page(request: Request):
-    return templates.TemplateResponse("backtest_iv_analysis.html", {"request": request})
+    return templates.TemplateResponse(request, "backtest_iv_analysis.html")
 
 
 @app.get("/")
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
