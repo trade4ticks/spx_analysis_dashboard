@@ -23,6 +23,8 @@ import json
 from datetime import date as _date
 from typing import Any, Optional
 
+import numpy as np
+
 from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
@@ -35,6 +37,12 @@ from app.trade_path_rules import (
 )
 
 router = APIRouter(tags=["factor_trades"])
+
+# trade_paths.exit_bar counts BARS, not days. The paths are built on 1-minute
+# bars over the regular US session, so one session is 390 bars. Displaying the
+# raw count reads as "558.3d" for what is really ~1.4 sessions, which is why
+# this conversion belongs server-side rather than in each consumer.
+BARS_PER_SESSION = 390.0
 
 # side -> display group. Four groups, not five: `trail` and `breakeven` live
 # under 'stop' in the registry, and that is honest — a trailing stop is a
@@ -73,6 +81,50 @@ def _rule_label(family: str, params: Any) -> str:
     if not params:
         return family
     return ", ".join(f"{a}={b}" for a, b in sorted(params.items()))
+
+
+def _window_stats(rets: list, holds: list, tickers: set, span_days: float) -> dict:
+    """Full stat set for one window. Matches Recall's box set plus the three
+    this page needs (Calmar, Max DD, Avg Hold).
+
+    max_dd is peak-to-trough on the ADDITIVE cumulative return curve, the same
+    convention the equity panes use; Calmar is total return over |max_dd|.
+    Hold is converted bars -> sessions here so no consumer has to know the
+    bar size.
+    """
+    n = len(rets)
+    if not n:
+        return {"n": 0, "n_tickers": len(tickers), "avg_ret": 0.0, "median": 0.0,
+                "std_dev": 0.0, "p5": 0.0, "p95": 0.0, "win_rate": 0.0, "n_win": 0,
+                "avg_win": 0.0, "avg_loss": 0.0, "trades_per_year": 0.0,
+                "calmar": None, "max_dd": 0.0, "avg_hold": 0.0}
+    a = np.asarray(rets, dtype=np.float64)
+    wins, losses = a[a > 0], a[a <= 0]
+    cum = np.cumsum(a)
+    peak = np.maximum.accumulate(cum)
+    dd = cum - peak
+    max_dd = float(dd.min()) if dd.size else 0.0
+    total = float(cum[-1])
+    years = max(span_days / 365.25, 1e-9)
+    return {
+        "n": n,
+        "n_tickers": len(tickers),
+        "avg_ret":  float(a.mean()),
+        "median":   float(np.median(a)),
+        "std_dev":  float(a.std()),
+        "p5":       float(np.percentile(a, 5)),
+        "p95":      float(np.percentile(a, 95)),
+        "win_rate": float((a > 0).mean()),
+        "n_win":    int((a > 0).sum()),
+        "avg_win":  float(wins.mean()) if wins.size else 0.0,
+        "avg_loss": float(losses.mean()) if losses.size else 0.0,
+        "trades_per_year": n / years,
+        # Calmar is undefined without a drawdown; None renders as "—" rather
+        # than as a spurious infinity.
+        "calmar":   (total / abs(max_dd)) if max_dd < 0 else None,
+        "max_dd":   max_dd,
+        "avg_hold": (float(np.mean(holds)) / BARS_PER_SESSION) if holds else 0.0,
+    }
 
 
 async def _load_rules(conn) -> list[dict]:
@@ -236,6 +288,22 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         """
         rows = await conn.fetch(sql, req.entry_anchor, cutoff_d)
 
+        # Median / percentiles / max-DD cannot be derived from the grouped
+        # aggregate above, so the overall stat set comes from a second pass
+        # that returns per-trade returns without the 400-way bin grouping.
+        stat_sql = f"""
+        WITH c AS (
+{combine_sql}
+        )
+        SELECT c.ticker, c.trade_date, c.exit_return, c.exit_bar,
+               (c.trade_date < $2::date) AS is_train
+        FROM c
+        JOIN tt_bins bt USING (ticker, trade_date)
+        WHERE c.entry_anchor = $1 AND {where_bins}
+        ORDER BY c.trade_date
+        """
+        srows = await conn.fetch(stat_sql, req.entry_anchor, cutoff_d)
+
     # ── Fold into grid + breakdown ────────────────────────────────────────
     grid = [[None] * n_bins for _ in range(n_bins if two_factor else 1)]
     acc: dict = {}
@@ -265,11 +333,18 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                 "test_avg":   (te_s / te_n) if te_n else 0.0,
             }
 
+    acc2 = {"train": ([], [], set(), []), "test": ([], [], set(), [])}
+    for r in srows:
+        w = "train" if r["is_train"] else "test"
+        rets, holds, tks, dates = acc2[w]
+        rets.append(float(r["exit_return"] or 0.0))
+        holds.append(float(r["exit_bar"] or 0.0))
+        tks.add(r["ticker"]); dates.append(r["trade_date"])
+
     def _stats(win: str) -> dict:
-        n, s, h = tot[win]
-        return {"n": n,
-                "avg_ret":  (s / n) if n else 0.0,
-                "avg_hold": (h / n) if n else 0.0}
+        rets, holds, tks, dates = acc2[win]
+        span = ((max(dates) - min(dates)).days if len(dates) > 1 else 1)
+        return _window_stats(rets, holds, tks, span)
 
     # Exit-reason breakdown. A user-selected max_days and the auto-appended
     # backstop are the SAME column with opposite meanings, so the backstop is
@@ -420,6 +495,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     # ── Fold into the Recall chart contracts ──────────────────────────────
     trades, dates, reasons = [], [], {}
+    zacc = {"train": ([], [], set(), []), "test": ([], [], set(), [])}
     by_ticker: dict[str, list] = {}
     tot = {"train": [0, 0.0, 0.0], "test": [0, 0.0, 0.0]}
     for r in rows:
@@ -431,6 +507,8 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         t[0] += 1; t[1] += ret; t[2] += hold
         if win == "train":
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
+        za = zacc[win]
+        za[0].append(ret); za[1].append(hold); za[2].add(r["ticker"]); za[3].append(r["trade_date"])
         trades.append({
             "ticker": r["ticker"], "trade_date": d,
             "ret": ret, "exit_bar": hold, "exit_rule": r["exit_rule"],
@@ -455,9 +533,9 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
     tickers_out.sort(key=lambda x: -x["n"])
 
     def _stats(win: str) -> dict:
-        n, s, h = tot[win]
-        return {"n": n, "avg_ret": (s / n) if n else 0.0,
-                "avg_hold": (h / n) if n else 0.0}
+        w = zacc[win]
+        span = ((max(w[3]) - min(w[3])).days if len(w[3]) > 1 else 1)
+        return _window_stats(w[0], w[1], w[2], span)
 
     tot_train = tot["train"][0] or 1
     breakdown = []

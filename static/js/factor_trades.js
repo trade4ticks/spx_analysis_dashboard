@@ -73,6 +73,12 @@ document.addEventListener('alpine:init', () => {
       else this.selected[f.family] = f.rules[0]?.rule_key;
       this.selected = { ...this.selected };
     },
+    clearAll() {
+      this.selected = {};
+      this.selectedCells = [];
+      this.zoneData = null; this.lockedZone = null;
+      this.error = '';
+    },
     ruleKeys() { return Object.values(this.selected).filter(Boolean); },
 
     policyLabel() {
@@ -205,30 +211,55 @@ document.addEventListener('alpine:init', () => {
     statRows() {
       const src = this.zoneData || this.runData;
       if (!src) return [];
+      const pct = v => v == null ? '—' : (v * 100).toFixed(3) + '%';
       const mk = (key, label, s, win) => {
         if (!s) return null;
-        const dd = s.max_dd ?? null, cal = s.calmar ?? null;
         return {
           key, label, window: win,
+          nTickers: (s.n_tickers ?? 0).toLocaleString(),
           n: (s.n ?? 0).toLocaleString(),
-          avgRet: ((s.avg_ret ?? 0) * 100).toFixed(3) + '%', avgRetRaw: s.avg_ret ?? 0,
+          avgRet: pct(s.avg_ret), avgRetRaw: s.avg_ret ?? 0,
+          median: pct(s.median),  medianRaw: s.median ?? 0,
+          stdDev: pct(s.std_dev),
+          p5: pct(s.p5),   p5Raw: s.p5 ?? 0,
+          p95: pct(s.p95), p95Raw: s.p95 ?? 0,
           winRate: s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—',
-          calmar: cal != null ? cal.toFixed(2) : '—', calmarRaw: cal ?? 0,
-          maxDD: dd != null ? (dd * 100).toFixed(2) + '%' : '—', maxDDRaw: dd ?? 0,
-          avgHold: (s.avg_hold ?? 0).toFixed(1) + 'd',
+          nWin: (s.n_win ?? 0).toLocaleString(),
+          avgWin: pct(s.avg_win),   avgWinRaw: s.avg_win ?? 0,
+          avgLoss: pct(s.avg_loss), avgLossRaw: s.avg_loss ?? 0,
+          trdYr: (s.trades_per_year ?? 0).toFixed(1),
+          // Calmar is null when there is no drawdown — render "—" rather
+          // than an infinity dressed up as a great number.
+          calmar: s.calmar != null ? s.calmar.toFixed(2) : '—', calmarRaw: s.calmar ?? 0,
+          maxDD: pct(s.max_dd), maxDDRaw: s.max_dd ?? 0,
+          avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };
       const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current', src.train, 'train');
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
       const locked = mk('locked', 'Locked', lockedSrc.train, 'train');
+      const d = (a, b) => (a ?? 0) - (b ?? 0);
+      const st = src.train, lt = lockedSrc.train;
       const diff = (locked && edited) ? {
         key: 'change', label: 'Change', window: 'train',
-        n: ((src.train?.n ?? 0) - (lockedSrc.train?.n ?? 0)).toLocaleString(),
-        avgRet: (((src.train?.avg_ret ?? 0) - (lockedSrc.train?.avg_ret ?? 0)) * 100).toFixed(3) + '%',
-        avgRetRaw: (src.train?.avg_ret ?? 0) - (lockedSrc.train?.avg_ret ?? 0),
-        winRate: '—', calmar: '—', calmarRaw: 0, maxDD: '—', maxDDRaw: 0,
-        avgHold: (((src.train?.avg_hold ?? 0) - (lockedSrc.train?.avg_hold ?? 0))).toFixed(1) + 'd',
+        nTickers: d(st?.n_tickers, lt?.n_tickers).toLocaleString(),
+        n: d(st?.n, lt?.n).toLocaleString(),
+        avgRet: pct(d(st?.avg_ret, lt?.avg_ret)), avgRetRaw: d(st?.avg_ret, lt?.avg_ret),
+        median: pct(d(st?.median, lt?.median)), medianRaw: d(st?.median, lt?.median),
+        stdDev: pct(d(st?.std_dev, lt?.std_dev)),
+        p5: pct(d(st?.p5, lt?.p5)), p5Raw: d(st?.p5, lt?.p5),
+        p95: pct(d(st?.p95, lt?.p95)), p95Raw: d(st?.p95, lt?.p95),
+        winRate: (d(st?.win_rate, lt?.win_rate) * 100).toFixed(1) + '%',
+        nWin: d(st?.n_win, lt?.n_win).toLocaleString(),
+        avgWin: pct(d(st?.avg_win, lt?.avg_win)), avgWinRaw: d(st?.avg_win, lt?.avg_win),
+        avgLoss: pct(d(st?.avg_loss, lt?.avg_loss)), avgLossRaw: d(st?.avg_loss, lt?.avg_loss),
+        trdYr: d(st?.trades_per_year, lt?.trades_per_year).toFixed(1),
+        calmar: (st?.calmar != null && lt?.calmar != null)
+                ? d(st.calmar, lt.calmar).toFixed(2) : '—',
+        calmarRaw: d(st?.calmar, lt?.calmar),
+        maxDD: pct(d(st?.max_dd, lt?.max_dd)), maxDDRaw: d(st?.max_dd, lt?.max_dd),
+        avgHold: d(st?.avg_hold, lt?.avg_hold).toFixed(2) + ' sess',
       } : null;
       return [locked, edited, diff].filter(Boolean);
     },
