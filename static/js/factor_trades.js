@@ -48,7 +48,7 @@ document.addEventListener('alpine:init', () => {
     // axis is dollars derived from the rail's sizing controls.
     equityAggMode:      { ft: 'dollar_capped', zone: 'dollar_capped', sec: 'daily',
                           recall: 'dollar_capped', port: 'dollar_capped' },
-    equityDollarParams: { ft:   { perTrade: 2000, dailyCap: 10000, maxStrike: 1000 },
+    equityDollarParams: { ft:   { perTrade: 2000, dailyCap: 10000 },
                           zone: { perTrade: 2000, dailyCap: 10000 },
                           sec:  { perTrade: 2000, dailyCap: 10000 },
                           recall: { perTrade: 2000, dailyCap: 10000 },
@@ -174,6 +174,7 @@ document.addEventListener('alpine:init', () => {
           entry_anchor: this.entryAnchor,
           rule_keys: this.ruleKeys(),
           n_bins: 20,
+          max_strike: this.maxStrike,
           label: random ? 'random entries' : null,
         };
         const r = await fetch('/api/factor-trades/run', {
@@ -249,6 +250,8 @@ document.addEventListener('alpine:init', () => {
           entry_anchor: this.runData.entry_anchor,
           rule_keys: this.runData.rules,
           n_bins: this.runData.n_bins,
+          // Must match the run's population or the zone is a different trade set.
+          max_strike: this.runData.max_strike ?? this.maxStrike,
           cells: this.selectedCells,
         };
         const r = await fetch('/api/factor-trades/zone', {
@@ -408,13 +411,12 @@ document.addEventListener('alpine:init', () => {
       if (!FC || !this.zoneData) return;
       this.equityDollarParams.ft = {
         perTrade: this.perTrade, dailyCap: this.dailyCap,
-        maxStrike: this.maxStrike,
       };
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
       const ds = window.FactorCharts._computeDollarSeries(
         this, (this.zoneData.combined_trades || []).filter(t => t.window === 'test'),
-        this.perTrade, this.dailyCap, this.maxStrike);
+        this.perTrade, this.dailyCap);
       this.dollarStats = this._dollarStats(ds);
       try {
         FC._renderSecEquity(this, 'ft-equity', this.zoneData, true);

@@ -209,6 +209,14 @@ class RunReq(BaseModel):
     entry_anchor:     str = "open"
     rule_keys:        list[str] = []
     n_bins:           int = 20
+    # Filters the TRADE POPULATION, so it must be applied here rather than in
+    # the client's sizing pass. A trade above this price is not taken, and
+    # nothing downstream -- grid, stats, exit reasons, ticker breakdown --
+    # should ever see it. Applying it client-side made the stat bar report N
+    # over the full set while Total Ret covered a filtered subset, two numbers
+    # that cannot be reconciled and no way to tell which population a given
+    # box covered.
+    max_strike:       Optional[float] = None
     label:            Optional[str] = None
 
 
@@ -267,6 +275,13 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         except (TypeError, ValueError):
             return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
 
+        # Applied to entry_price, which trade_paths stores AS-TRADED -- the
+        # price a fill would actually have happened at.
+        strike_pred, strike_args = "", []
+        if req.max_strike and req.max_strike > 0:
+            strike_pred = " AND tp.entry_price <= $3"
+            strike_args = [float(req.max_strike)]
+
         n_bins = max(2, min(20, int(req.n_bins)))
         # Canonical bin20 collapse, identical to every other stored-bin
         # surface in this codebase.
@@ -295,10 +310,11 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                AVG(c.exit_bar)     AS avg_hold
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        WHERE c.entry_anchor = $1 AND {where_bins}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        WHERE c.entry_anchor = $1 AND {where_bins}{strike_pred}
         GROUP BY {grp}, c.exit_rule, is_train
         """
-        rows = await conn.fetch(sql, req.entry_anchor, cutoff_d)
+        rows = await conn.fetch(sql, req.entry_anchor, cutoff_d, *strike_args)
 
         # Median / percentiles / max-DD cannot be derived from the grouped
         # aggregate above, so the overall stat set comes from a second pass
@@ -311,10 +327,11 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                (c.trade_date < $2::date) AS is_train
         FROM c
         JOIN tt_bins bt USING (ticker, trade_date)
-        WHERE c.entry_anchor = $1 AND {where_bins}
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        WHERE c.entry_anchor = $1 AND {where_bins}{strike_pred}
         ORDER BY c.trade_date
         """
-        srows = await conn.fetch(stat_sql, req.entry_anchor, cutoff_d)
+        srows = await conn.fetch(stat_sql, req.entry_anchor, cutoff_d, *strike_args)
 
     # ── Fold into grid + breakdown ────────────────────────────────────────
     grid = [[None] * n_bins for _ in range(n_bins if two_factor else 1)]
@@ -382,6 +399,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "primary_metric":   req.primary_metric,
         "secondary_metric": req.secondary_metric,
         "entry_anchor":     req.entry_anchor,
+        "max_strike":       req.max_strike,
         "n_bins":           n_bins,
         "cutoff_date":      cutoff_iso,
         "grid":             grid,
@@ -488,6 +506,14 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
         where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
 
+        # Same population filter as /run. The placeholder index depends on how
+        # many args the cell predicate already consumed, so it is computed
+        # rather than hardcoded.
+        strike_pred = ""
+        if req.max_strike and req.max_strike > 0:
+            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
+            args = args + [float(req.max_strike)]
+
         sql = f"""
         WITH c AS (
 {combine_sql}
@@ -502,7 +528,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         -- trade_paths on its primary key is cheap and leaves the combine
         -- untouched.
         JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
         ORDER BY c.trade_date, c.ticker
         """
         rows = await conn.fetch(sql, *args)

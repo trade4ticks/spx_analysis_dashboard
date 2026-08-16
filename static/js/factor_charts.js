@@ -48,7 +48,7 @@ window.FactorCharts = {
     if (isDollar) {
       const params  = cmp.equityDollarParams[modeKey] || { perTrade: 2000, dailyCap: 10000 };
       const trades  = detail.combined_trades || [];
-      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.maxStrike);
+      const dollarS = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
       if (!dollarS.equity.length) return;
       const toMs = d => new Date(d).getTime();
       const eqPxy = dollarS.equity.map(p => ({ x: toMs(p.date), y: +p.value.toFixed(2) }));
@@ -411,7 +411,7 @@ window.FactorCharts = {
       // count path, dollar weights instead of unit weights.
       const { dayDeployedByDate, tradeDollarSizes } =
         window.FactorCharts._computeDollarSeries(cmp,
-          kept, params.perTrade, params.dailyCap, params.maxStrike,
+          kept, params.perTrade, params.dailyCap,
         );
       weightByDate = dayDeployedByDate;
       // Per-TRADE dollar size, needed because open positions are now walked
@@ -675,7 +675,7 @@ window.FactorCharts = {
     };
   },
 
-  _computeDollarSeries(cmp, trades, perTrade, dailyCap, maxStrike) {
+  _computeDollarSeries(cmp, trades, perTrade, dailyCap) {
     // ── HOVER-LAG INSTRUMENTATION (Lab.diag) ─────────────────────────────
     // _labDsCallsThisHover is set to 0 by the hover/leave handlers before
     // they call anything; we count every _computeDollarSeries invocation
@@ -737,13 +737,6 @@ window.FactorCharts = {
         const px  = (isFinite(pxRawCand) && pxRawCand > 0) ? pxRawCand : pxAdj;
         const ret = +t.ret;
         if (!isFinite(px) || px <= 0 || !isFinite(ret)) continue;
-        // Max strike: above it the trade is NOT TAKEN — no shares, no
-        // deployed capital, no P&L, as if it had never fired. Tested against
-        // the as-traded price for the same reason sizing is: the
-        // back-adjusted price is not what you would have paid. Undefined
-        // means no limit, which is what leaves Recall, Zone and Portfolio
-        // unchanged.
-        if (maxStrike && maxStrike > 0 && px > maxStrike) continue;
         let shares = Math.floor(perTickerAlloc / px);
         if (shares < 1) shares = 1;   // 1-share min, no redistribution
         const dollarSize = shares * px;
@@ -886,7 +879,7 @@ window.FactorCharts = {
       // SAME dayPnlByDate the equity curve does — guarantees
       // reconciliation (sum of bars = endpoint of curve).
       const params = dollarParams || { perTrade: 2000, dailyCap: 10000 };
-      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap, params.maxStrike);
+      const { dayPnlByDate } = window.FactorCharts._computeDollarSeries(cmp, trades, params.perTrade, params.dailyCap);
       const yearPnl = new Map();
       const yearN   = new Map();
       for (const [d, pnl] of dayPnlByDate.entries()) {

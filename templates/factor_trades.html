@@ -102,8 +102,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=9"></script>
-  <script src="/static/js/factor_trades.js?v=18"></script>
+  <script src="/static/js/factor_charts.js?v=10"></script>
+  <script src="/static/js/factor_trades.js?v=19"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -243,6 +243,9 @@
             <div class="p" x-text="r.primary_metric"></div>
             <div class="p" x-text="r.secondary_metric || '(single)'"></div>
             <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
+            <div class="p" x-show="r.max_strike"
+                 title="Trades on tickers priced above this were excluded from the whole run — grid, stats and every chart."
+                 x-text="'max strike $' + r.max_strike"></div>
             <template x-for="k in (r.rules || [])" :key="'rk-'+k"><div class="p" x-text="k"></div></template>
             <!-- Provenance that silently changes what the numbers mean. -->
             <div class="p warn" x-show="r.horizon_auto_added"
