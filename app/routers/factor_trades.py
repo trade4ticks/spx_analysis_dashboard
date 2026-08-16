@@ -552,6 +552,159 @@ class ZoneReq(RunReq):
     # long position under these exits look like this".
     randomize: bool = False
     seed: Optional[int] = None
+    # "entry"      random ticker, real exit policy  — does the metric pick
+    #              better names than chance on the same days?
+    # "entry_exit" random ticker AND a holding period drawn from the policy's
+    #              own distribution — do the exit rules add anything over
+    #              being in the market for a similar duration?
+    baseline_kind: str = "entry"
+
+
+def _maxdays_rules(rules: list[dict]) -> list[tuple[int, str]]:
+    """[(n_sessions, exit_return_col)] for the max_days family, ascending.
+
+    Read from the catalog, never constructed: the available holding periods
+    are whatever was precomputed, and assuming 1..20 would silently produce
+    a CASE arm referencing a column that does not exist.
+
+    max_days is in TRADING DAYS -- N exits at the close of the (N-1)th
+    session after entry, so max_days=1 is a one-session hold.
+    """
+    out: list[tuple[int, str]] = []
+    for r in rules:
+        if r.get("family") != "max_days":
+            continue
+        pr = r.get("params")
+        if isinstance(pr, str):
+            try:
+                pr = json.loads(pr)
+            except (ValueError, TypeError):
+                pr = {}
+        pr = pr or {}
+        n = pr.get("n") or pr.get("days") or pr.get("bars")
+        col = r.get("exit_return_col")
+        if n is None or not col:
+            continue
+        out.append((int(n), col))
+    out.sort()
+    return out
+
+
+def _hold_cdf(sess_counts: dict[int, int],
+              avail: list[int]) -> tuple[list[int], list[float], list[float]]:
+    """Empirical holding-period distribution, snapped to available max_days.
+
+    Returns (n_days, lo, hi) as parallel arrays forming a half-open inverse
+    CDF over [0, 1), so a uniform draw picks a holding period with the same
+    frequency the real policy produced it.
+
+    Snapping is to the NEAREST available N rather than the floor: with a
+    coarse catalog, flooring would bias every hold downward and the baseline
+    would systematically under-hold relative to the policy it is standing in
+    for -- which is the one thing this baseline must not do, since holding
+    period is exactly what it is controlling for.
+    """
+    if not avail:
+        return [], [], []
+    weights: dict[int, int] = {}
+    for sess, cnt in sess_counts.items():
+        near = min(avail, key=lambda a: (abs(a - sess), a))
+        weights[near] = weights.get(near, 0) + cnt
+    total = float(sum(weights.values()))
+    if total <= 0:
+        return [], [], []
+    ns, los, his = [], [], []
+    acc = 0.0
+    for n in sorted(weights):
+        lo = acc / total
+        acc += weights[n]
+        ns.append(n); los.append(lo); his.append(acc / total)
+    # The top bucket is closed at just over 1.0 so a draw of exactly 1.0
+    # cannot fall through every half-open interval and lose its trade.
+    his[-1] = 1.0000001
+    return ns, los, his
+
+
+# Seed suffixes. The ENTRY ordering hash is deliberately identical to the
+# entry-only baseline's, so both baselines pick the SAME tickers on the same
+# dates from the same seed. Their difference is then purely the exit rule,
+# which is what decomposes signal selection from exit policy -- the whole
+# reason this second baseline exists. The exit draw takes its own suffix so
+# it is independent of the entry draw rather than a function of it.
+_EXIT_SALT = "|exit"
+
+
+def _u01(expr: str) -> str:
+    """A uniform [0,1) draw from a text expression, deterministic per seed.
+
+    md5 -> first 8 hex -> bit(32) -> bigint, masked to 31 bits because the
+    signed cast makes the top bit negative and a negative u would fall
+    outside every CDF interval.
+    """
+    return (f"((('x' || substr(md5({expr}), 1, 8))::bit(32)::bigint)"
+            f" & 2147483647)::float8 / 2147483647.0")
+
+
+def _random_exit_zone_sql(combine_sql: str, ret_case: str, strike_pred: str) -> str:
+    """Random entry AND random exit: the layer beneath the entry baseline.
+
+    The entry-only baseline holds timing and exit policy constant and
+    randomises ticker, so it isolates "does the metric pick better names
+    than chance on the same days". This one additionally replaces the exit
+    rules with a holding period drawn from the distribution the real policy
+    produces, so the difference between the two baselines isolates whether
+    the exit rules add anything over simply being in the market for a
+    similar duration. Those two effects are confounded without it.
+
+    exit_bar is written as n_days * BARS_PER_SESSION so avg DIT, the
+    activity pane and the capital-tied series all stay in the same units as
+    a real run rather than needing a special case downstream.
+    """
+    return f"""
+    WITH c AS (
+{combine_sql}
+    ),
+    want AS (
+        SELECT * FROM unnest($3::date[], $4::int[]) AS t(trade_date, k)
+    ),
+    cdf AS (
+        SELECT * FROM unnest($6::int[], $7::float8[], $8::float8[])
+                     AS t(n_days, lo, hi)
+    ),
+    elig AS (
+        SELECT c.ticker, c.trade_date, tp.entry_price,
+               row_number() OVER (
+                   PARTITION BY c.trade_date
+                   ORDER BY md5(c.ticker || '|' || c.trade_date::text
+                                || '|' || $5::text)
+               ) AS rn,
+               {_u01("c.ticker || '|' || c.trade_date::text || '|' || $5::text"
+                     " || '" + _EXIT_SALT + "'")} AS u
+        FROM c
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        JOIN want w ON w.trade_date = c.trade_date
+        WHERE c.entry_anchor = $1{strike_pred}
+    ),
+    picked AS (
+        SELECT e.* FROM elig e
+        JOIN want w ON w.trade_date = e.trade_date
+        WHERE e.rn <= w.k
+    )
+    SELECT p.ticker, p.trade_date,
+           (d.n_days * {BARS_PER_SESSION})::float8 AS exit_bar,
+           {ret_case} AS exit_return,
+           'max_days__' || d.n_days::text AS exit_rule,
+           p.entry_price,
+           (p.trade_date < $2::date) AS is_train
+    FROM picked p
+    JOIN cdf d ON p.u >= d.lo AND p.u < d.hi
+    -- Rejoined for the return columns: the sampled holding period is not
+    -- known until the cdf join, so the CASE cannot be evaluated earlier.
+    JOIN trade_paths t2 ON t2.ticker = p.ticker
+                       AND t2.trade_date = p.trade_date
+                       AND t2.entry_anchor = $1
+    ORDER BY p.trade_date, p.ticker
+    """
 
 
 def _zone_count_sql(combine_sql: str, where_bins: str,
@@ -769,13 +922,77 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             # Placeholders are fixed at $1..$5 in _random_zone_sql, so the
             # optional strike filter takes $6 -- it cannot reuse the zone
             # query's computed index, which counted a different arg list.
-            r_strike, r_args = "", []
-            if req.max_strike and req.max_strike > 0:
-                r_strike = " AND tp.entry_price <= $6"
-                r_args = [float(req.max_strike)]
-            rows = await conn.fetch(
-                _random_zone_sql(combine_sql, r_strike),
-                req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *r_args)
+            kind = (req.baseline_kind or "entry").strip()
+            if kind not in ("entry", "entry_exit"):
+                return {"error": f"unknown baseline_kind {req.baseline_kind!r}"}
+
+            if kind == "entry":
+                r_strike, r_args = "", []
+                if req.max_strike and req.max_strike > 0:
+                    r_strike = " AND tp.entry_price <= $6"
+                    r_args = [float(req.max_strike)]
+                rows = await conn.fetch(
+                    _random_zone_sql(combine_sql, r_strike),
+                    req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *r_args)
+                hold_note = None
+            else:
+                avail = _maxdays_rules(rules)
+                if not avail:
+                    return {"error": "no max_days rules in trade_path_rules — a "
+                                     "random-exit baseline has no holding "
+                                     "periods to draw from"}
+                # Step 2: the holding-period distribution to match, measured
+                # off the REAL zone under the REAL policy. Sessions, so it is
+                # in the same unit as max_days and as Avg DIT.
+                h_rows = await conn.fetch(f"""
+                WITH c AS (
+{combine_sql}
+                )
+                SELECT GREATEST(1, CEIL(c.exit_bar / {BARS_PER_SESSION}))::int AS sess,
+                       COUNT(*) AS n
+                FROM c
+                JOIN tt_bins bt USING (ticker, trade_date)
+                JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+                WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
+                      AND {where_bins} AND {cell_pred}{strike_pred}
+                GROUP BY 1
+                """, *args)
+                sess_counts = {int(r["sess"]): int(r["n"]) for r in h_rows}
+                ns, los, his = _hold_cdf(sess_counts, [n for n, _ in avail])
+                if not ns:
+                    return {"error": "could not build a holding-period "
+                                     "distribution for the selected zone"}
+                col_by_n = dict(avail)
+                # CASE arms come from the catalog's own column names. Only the
+                # periods the CDF can actually draw get an arm, so a missing
+                # arm is impossible by construction rather than by review.
+                ret_case = ("CASE d.n_days\n"
+                            + "\n".join(f"               WHEN {n} THEN t2.{col_by_n[n]}"
+                                        for n in ns)
+                            + "\n           END")
+                r_strike, r_args = "", []
+                if req.max_strike and req.max_strike > 0:
+                    r_strike = " AND tp.entry_price <= $9"
+                    r_args = [float(req.max_strike)]
+                rows = await conn.fetch(
+                    _random_exit_zone_sql(combine_sql, ret_case, r_strike),
+                    req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed),
+                    ns, los, his, *r_args)
+                # A resolved path has every max_days column populated, so a
+                # NULL return here means that assumption is wrong. Reported
+                # rather than silently averaged as zero, which would drag the
+                # baseline toward flat and look like a real finding.
+                nulls = sum(1 for r in rows if r["exit_return"] is None)
+                if nulls:
+                    return {"error": f"random-exit baseline: {nulls} of "
+                                     f"{len(rows)} sampled trades have no "
+                                     f"return at their drawn holding period"}
+                hold_note = {
+                    "periods": ns,
+                    "weights": [round(h - l, 6) for l, h in zip(los, his)],
+                    "avg_sessions": round(
+                        sum(n * (h - l) for n, l, h in zip(ns, los, his)), 2),
+                }
 
             # The count is a guarantee, not a hope (see _random_zone_sql), so
             # a mismatch is a bug in that reasoning and is reported as one
@@ -783,8 +1000,11 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             got = len(rows)
             wanted = sum(want_ks)
             baseline = {
-                "seed": seed, "dates": len(want_dates),
+                "kind": kind, "seed": seed, "dates": len(want_dates),
                 "requested": wanted, "delivered": got,
+                # None for an entry-only baseline; the drawn holding-period
+                # distribution for a random-exit one.
+                "hold": hold_note,
             }
             if got != wanted:
                 short = {}

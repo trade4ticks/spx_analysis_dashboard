@@ -254,7 +254,7 @@ document.addEventListener('alpine:init', () => {
       // -- switching window must re-scope the baseline, never re-roll it.
       if (this.runData.randomize) {
         if (this.runData.seed != null) this.baselineSeed = this.runData.seed;
-        this.runBaseline(false);
+        this.runBaseline(false, this.runData.baseline_kind || 'entry');
       } else {
         this.run();
       }
@@ -285,7 +285,18 @@ document.addEventListener('alpine:init', () => {
     // It needs a zone to exist, because the zone IS the distribution being
     // matched. Without one there is no shape to sample against.
     baselineSeed: null,       // null => the server's fixed default
-    async runBaseline(resample = false) {
+    // Two baseline types, deliberately sharing the SAME entry draw for a
+    // given seed. Their difference is then purely the exit rule, which is
+    // what separates "does the metric pick better names than chance" from
+    // "do the exit rules beat simply being in the market that long".
+    // Confounded until you can run both.
+    BASELINE_KINDS: {
+      entry:      { label: 'random entries', card: 'RANDOM ENTRIES',
+                    row: 'rand entry',      colour: '#3498db' },
+      entry_exit: { label: 'random entries + exits', card: 'RANDOM ENTRIES + EXITS',
+                    row: 'rand entry+exit', colour: '#1abc9c' },
+    },
+    async runBaseline(resample = false, kind = 'entry') {
       if (!this.runData) { this.error = 'run a policy first'; return; }
       if (!this.selectedCells.length) {
         this.error = 'select a zone first — the baseline matches its trade '
@@ -306,7 +317,7 @@ document.addEventListener('alpine:init', () => {
           entry_anchor: src.entry_anchor, rule_keys: src.rules,
           n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
           window: this.window, cells: this.selectedCells,
-          randomize: true, seed: this.baselineSeed,
+          randomize: true, seed: this.baselineSeed, baseline_kind: kind,
         };
         const r = await fetch('/api/factor-trades/zone', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -321,11 +332,12 @@ document.addEventListener('alpine:init', () => {
         const card = {
           ...src, grid: null,
           randomize: true, seed: d.baseline?.seed ?? this.baselineSeed,
+          baseline_kind: d.baseline?.kind || kind,
           baseline: d.baseline || null,
           window: d.window,
           train: d.train, test: d.test,
           exit_reasons: d.exit_reasons,
-          label: 'baseline — random entries',
+          label: 'baseline — ' + (this.BASELINE_KINDS[kind]?.label || kind),
         };
         this.runs.push(card);
         this.currentIdx = this.runs.length - 1;
@@ -428,6 +440,7 @@ document.addEventListener('alpine:init', () => {
             // sample, so the LOCKED column is the draw that was on screen
             // when it was locked, not a fresh one.
             randomize: !!r.randomize, seed: r.seed ?? null,
+            baseline_kind: r.baseline_kind || 'entry',
           }),
         });
         const d = await resp.json();
@@ -501,6 +514,7 @@ document.addEventListener('alpine:init', () => {
           // back into a real-entry run under the same card.
           randomize: !!this.runData.randomize,
           seed: this.runData.seed ?? null,
+          baseline_kind: this.runData.baseline_kind || 'entry',
         };
         const r = await fetch('/api/factor-trades/zone', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -900,15 +914,19 @@ document.addEventListener('alpine:init', () => {
       // most important row on the page unlabelled, and random-entry numbers
       // read exactly like real ones. The window banner covers crossing
       // train/test; nothing covered crossing real/random until here.
-      const bMark = (base, name) => (base ? name + ' (baseline)' : name);
+      const bMark = (run, name) => {
+        if (!run?.randomize) return name;
+        const k = this.BASELINE_KINDS[run.baseline_kind || 'entry'];
+        return name + ' (' + (k?.row || 'baseline') + ')';
+      };
       const editedIsBase = !!this.runData?.randomize;
       const lockedIsBase = !!this.lockedRun?.randomize;
       const edited = mk('edited',
-                        bMark(editedIsBase, this.lockedRun ? 'Edited' : 'Current'),
+                        bMark(this.runData, this.lockedRun ? 'Edited' : 'Current'),
                         src[this.window], this.dollarStats, this.window);
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', bMark(lockedIsBase, 'Locked'),
+      const locked = mk('locked', bMark(this.lockedRun, 'Locked'),
                         lockedSrc[this.window], this.lockedDollarStats, this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
       const E = this.dollarStats, L = this.lockedDollarStats;

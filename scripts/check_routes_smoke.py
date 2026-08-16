@@ -211,6 +211,11 @@ def _check_sql_placeholders() -> int:
         # always $6 regardless of metric mode.
         ("_random_zone_sql",            ft._random_zone_sql("SELECT 1", "")),
         ("_random_zone_sql +strike",    ft._random_zone_sql("SELECT 1", " AND tp.entry_price <= $6")),
+        # The random-exit sampler fixes $1..$8 (adding the holding-period
+        # CDF arrays), so its strike filter is $9.
+        ("_random_exit_zone_sql",         ft._random_exit_zone_sql("SELECT 1", "t2.r1", "")),
+        ("_random_exit_zone_sql +strike", ft._random_exit_zone_sql("SELECT 1", "t2.r1",
+                                                                   " AND tp.entry_price <= $9")),
     ]
 
     bad = 0

@@ -116,7 +116,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=33"></script>
+  <script src="/static/js/factor_trades.js?v=34"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -251,9 +251,20 @@
       <button class="ft-btn" @click="clearAll()">Clear all</button>
       <button class="ft-btn primary" @click="run()" :disabled="loading"
               x-text="loading ? 'Running…' : 'Run'"></button>
-      <button class="ft-btn" @click="runBaseline(false)" :disabled="loading || !selectedCells.length"
-              title="Same exit policy, same anchor, same max strike, same window and the same per-date trade counts — against randomly chosen tickers. The control for whether a policy is signal-specific or just helping any long position. Needs a selected zone, because the zone is the distribution being matched.">
-        Run with random entries
+      <button class="ft-btn" @click="runBaseline(false, 'entry')" :disabled="loading || !selectedCells.length"
+              style="border-left:3px solid #3498db"
+              title="Same exit policy, same anchor, same max strike, same window and the same per-date trade counts — against randomly chosen tickers. Isolates one thing: does the metric pick better names than chance on the same days. Needs a selected zone, because the zone is the distribution being matched.">
+        Random entries
+      </button>
+      {#- The layer beneath: also replaces the exit rules with a holding
+          period drawn from the distribution the real policy produces. Run
+          both and the pair decomposes signal selection from exit rules,
+          which are otherwise confounded — the two share the same entry draw
+          for a given seed, so their difference IS the exit rules. -#}
+      <button class="ft-btn" @click="runBaseline(false, 'entry_exit')" :disabled="loading || !selectedCells.length"
+              style="border-left:3px solid #1abc9c"
+              title="Random tickers AND a random holding period drawn from your policy's own distribution, instead of applying the exit rules. Isolates whether the exit rules add anything over simply being in the market for a similar duration. Shares its entry draw with the random-entries baseline at the same seed, so the difference between the two is the exit rules alone.">
+        Random entries + exits
       </button>
       {#- Re-sample is deliberately separate from Run. The default seed is
           fixed so the baseline does not move while exit rules are being
@@ -294,12 +305,19 @@
             </div>
             {#- A baseline card must be unmistakable: its trades were not
                 drawn from the zone the metric names describe. -#}
-            <div class="p" x-show="r.randomize"
-                 style="color:#3498db;font-weight:700"
-                 title="Randomly chosen tickers, matched to the zone on trade count and date distribution. Not the zone's own entries.">RANDOM-ENTRY BASELINE</div>
+            <div class="p" x-show="r.randomize" style="font-weight:700"
+                 :style="'color:' + (BASELINE_KINDS[r.baseline_kind||'entry']?.colour || '#3498db')"
+                 title="Randomly chosen tickers, matched to the zone on trade count and date distribution. Not the zone's own entries."
+                 x-text="BASELINE_KINDS[r.baseline_kind||'entry']?.card || 'RANDOM ENTRIES'"></div>
             <div class="p" x-show="r.randomize"
                  title="The draw this baseline came from. A fixed seed means re-running gives the same baseline; ↻ Re-sample changes it."
                  x-text="'seed ' + (r.seed ?? 'default') + ' · ' + (r.baseline?.dates ?? 0) + ' dates'"></div>
+            {#- The drawn holding-period distribution is the defining
+                parameter of a random-exit baseline, the way the rule list is
+                for a policy run, so it belongs on the card. -#}
+            <div class="p" x-show="r.baseline?.hold"
+                 title="Holding period drawn per trade from your policy's own distribution, snapped to the max_days periods that exist in the catalog."
+                 x-text="'hold ~' + (r.baseline?.hold?.avg_sessions ?? 0) + ' sess drawn'"></div>
             <div class="p" x-text="r.primary_metric"></div>
             <div class="p" x-text="r.secondary_metric || '(single)'"></div>
             <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
