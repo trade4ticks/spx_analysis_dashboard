@@ -240,7 +240,24 @@ document.addEventListener('alpine:init', () => {
       this._refreshGrid();
       // Both the run and the zone are window-scoped server-side, so the
       // whole page has to be refetched rather than re-filtered client-side.
-      if (this.runData) this.run();
+      if (!this.runData) return;
+      // A BASELINE MUST STAY A BASELINE across a window switch. run() is the
+      // real-entry path; calling it here replaced the baseline with an
+      // ordinary run and nothing on screen said the baseline had been
+      // dropped -- you would be reading real-entry numbers having asked for
+      // random ones.
+      //
+      // Re-running is the right answer rather than clearing, and it is
+      // cheap: the sample is drawn per DATE across the zone's whole history
+      // with no window filter, so train and test are two reports of the SAME
+      // draw. Pinning the seed to the card being re-scoped guarantees that
+      // -- switching window must re-scope the baseline, never re-roll it.
+      if (this.runData.randomize) {
+        if (this.runData.seed != null) this.baselineSeed = this.runData.seed;
+        this.runBaseline(false);
+      } else {
+        this.run();
+      }
     },
 
     clearAll() {
@@ -878,11 +895,20 @@ document.addEventListener('alpine:init', () => {
       // The stat bar is always the TEST window: it is the verdict, and a
       // number that silently switched windows would be the worst kind of
       // wrong. Selection happens on the heatmap, which is train.
-      const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current',
+      // A baseline against a real run is the comparison this page exists
+      // for, so it must NOT warn -- but 'Locked' with no qualifier leaves the
+      // most important row on the page unlabelled, and random-entry numbers
+      // read exactly like real ones. The window banner covers crossing
+      // train/test; nothing covered crossing real/random until here.
+      const bMark = (base, name) => (base ? name + ' (baseline)' : name);
+      const editedIsBase = !!this.runData?.randomize;
+      const lockedIsBase = !!this.lockedRun?.randomize;
+      const edited = mk('edited',
+                        bMark(editedIsBase, this.lockedRun ? 'Edited' : 'Current'),
                         src[this.window], this.dollarStats, this.window);
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', 'Locked',
+      const locked = mk('locked', bMark(lockedIsBase, 'Locked'),
                         lockedSrc[this.window], this.lockedDollarStats, this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
       const E = this.dollarStats, L = this.lockedDollarStats;
@@ -890,7 +916,11 @@ document.addEventListener('alpine:init', () => {
       const cE = calmarRawOf(E), cL = calmarRawOf(L);
       const st = src[this.window], lt = lockedSrc[this.window];
       const diff = (locked && edited) ? {
-        key: 'change', label: 'Change', window: this.window,
+        key: 'change',
+        // Exactly one side random makes this row the signal-vs-random delta
+        // -- the actual output of the baseline -- rather than a policy delta.
+        label: (editedIsBase !== lockedIsBase) ? 'vs baseline' : 'Change',
+        window: this.window,
         nTickers: d(st?.n_tickers, lt?.n_tickers).toLocaleString(),
         effTickers: d(st?.eff_tickers, lt?.eff_tickers).toFixed(1),
         n: d(st?.n, lt?.n).toLocaleString(),
