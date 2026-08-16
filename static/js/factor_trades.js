@@ -397,13 +397,31 @@ document.addEventListener('alpine:init', () => {
       if (!el || !rows.length) return;
       const labels = rows.map(r => r.label);
       const data   = rows.map(r => +(r.frac * 100).toFixed(2));
+      // Colour by side: targets blue, stops pink, time grey, trend teal.
+      // The backstop keeps amber and overrides its side, because it means
+      // the opposite of a rule working -- nothing fired and the horizon
+      // caught the trade.
+      const SIDE_COLOR = {
+        target: 'rgba(52,152,219,0.78)',
+        stop:   'rgba(232,67,147,0.72)',
+        time:   'rgba(150,150,150,0.60)',
+        trend:  'rgba(26,188,156,0.70)',
+      };
       const colors = rows.map(r => r.is_backstop
-        ? 'rgba(224,176,102,0.75)'          // backstop — nothing fired
-        : 'rgba(52,152,219,0.75)');         // a selected rule did its job
+        ? 'rgba(224,176,102,0.80)'
+        : (SIDE_COLOR[r.side] || 'rgba(150,150,150,0.60)'));
       this._charts['ft-reasons'] = new Chart(el.getContext('2d'), {
         type: 'bar',
-        data: { labels, datasets: [{ data, backgroundColor: colors,
-                                     borderColor: colors, borderWidth: 1 }] },
+        data: { labels, datasets: [
+          { data, backgroundColor: colors, borderColor: colors, borderWidth: 1,
+            xAxisID: 'x' },
+          // Avg hold per reason, on its own axis in the same pane -- a stop
+          // firing at 1.2 sessions against a backstop at 20 is the shape
+          // worth seeing next to the share.
+          { data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
+            backgroundColor: 'rgba(200,200,200,0.30)',
+            borderColor: 'rgba(200,200,200,0.45)', borderWidth: 1, xAxisID: 'x2' },
+        ] },
         options: {
           indexAxis: 'y',
           responsive: true, maintainAspectRatio: false, animation: false,
@@ -414,7 +432,8 @@ document.addEventListener('alpine:init', () => {
               callbacks: {
                 label: (c) => {
                   const r = rows[c.dataIndex];
-                  return [`${r.frac != null ? (r.frac * 100).toFixed(1) : '—'}% of test trades`,
+                  return [`${r.frac != null ? (r.frac * 100).toFixed(1) : '—'}% of trades`,
+                          `avg hold ${(r.avg_hold ?? 0).toFixed(2)} sess`,
                           `n = ${(r.n ?? 0).toLocaleString()}`,
                           r.is_backstop
                             ? 'backstop — no selected rule fired'
@@ -424,9 +443,11 @@ document.addEventListener('alpine:init', () => {
             },
           },
           scales: {
-            x: { ticks: { color: '#888', font: { size: 9 },
-                          callback: v => v + '%' },
-                 grid: { color: '#222' }, beginAtZero: true },
+            x:  { stack: 'a', ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
+                  grid: { color: '#222' }, beginAtZero: true },
+            x2: { stack: 'b', position: 'top', beginAtZero: true,
+                  ticks: { color: '#999', font: { size: 9 }, callback: v => v + 'd' },
+                  grid: { display: false } },
             y: { ticks: { color: '#aaa', font: { size: 10 } },
                  grid: { display: false } },
           },
@@ -442,6 +463,33 @@ document.addEventListener('alpine:init', () => {
     // the data cannot answer it.
     _priceBuckets: [[0,25],[25,50],[50,100],[100,150],[150,200],[200,300],
                     [300,400],[400,500],[500,750],[750,1000],[1000,Infinity]],
+    // Distribution of trades by P&L bucket. Server-computed from
+    // window_trades for the same reason the price bins are.
+    _renderPnlDist() {
+      const el = document.getElementById('ft-pnldist');
+      if (this._charts['ft-pnldist']) { this._charts['ft-pnldist'].destroy(); delete this._charts['ft-pnldist']; }
+      const b = this.zoneData?.pnl_dist || [];
+      if (!el || !b.length) return;
+      this._charts['ft-pnldist'] = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: { labels: b.map(x => x.label), datasets: [{
+          data: b.map(x => x.n),
+          backgroundColor: b.map(x => x.lo < 0 ? 'rgba(232,67,147,.7)' : 'rgba(52,152,219,.75)'),
+          borderWidth: 0,
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false },
+            tooltip: { backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { label: (c) => `${c.raw.toLocaleString()} trades` } } },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 }, maxRotation: 60 }, grid: { display: false } },
+            y: { ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' }, beginAtZero: true },
+          },
+        },
+      });
+    },
+
     _renderPriceBins() {
       const el = document.getElementById('ft-pricebins');
       if (this._charts['ft-pricebins']) { this._charts['ft-pricebins'].destroy(); delete this._charts['ft-pricebins']; }
@@ -455,8 +503,15 @@ document.addEventListener('alpine:init', () => {
         type: 'bar',
         data: { labels: lbl, datasets: [{
           data: avg,
-          backgroundColor: avg.map(v => v == null ? 'rgba(120,120,120,.25)'
-                                     : (v >= 0 ? 'rgba(52,152,219,.75)' : 'rgba(232,67,147,.7)')),
+          // Alpha by n, like Annual P&L: a bucket built on eight trades
+          // should not look as solid as one built on eight hundred.
+          backgroundColor: avg.map((v, i) => {
+            if (v == null) return 'rgba(120,120,120,.25)';
+            const ns = bins.map(b => b.n), mx = Math.max(...ns, 1);
+            const a = 0.22 + 0.56 * Math.min(1, (bins[i].n || 0) / mx);
+            return v >= 0 ? `rgba(52,152,219,${a.toFixed(3)})`
+                          : `rgba(232,67,147,${a.toFixed(3)})`;
+          }),
           borderWidth: 0,
         }] },
         options: {
@@ -541,6 +596,7 @@ document.addEventListener('alpine:init', () => {
         ['ticker breakdown',() => FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData)],
         ['exit reasons',    () => this._renderExitReasons()],
         ['price bins',      () => this._renderPriceBins()],
+        ['P&L distribution',() => this._renderPnlDist()],
       ];
       if (this.lockedZone) {
         panes.push(['activity (locked)', () => FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone)]);
@@ -576,7 +632,13 @@ document.addEventListener('alpine:init', () => {
         if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
         return sg + '$' + a.toFixed(0);
       };
-      const mk = (key, label, s, win) => {
+      // Two explicit sources rather than a spread. A merge silently supplies
+      // whatever the right-hand side happens not to define -- which is how a
+      // server-side percent Calmar ended up displayed beside blank dollar
+      // boxes. Server stats and dollar stats are now read from their own
+      // argument, so a missing dollar figure reads blank instead of
+      // inheriting a different definition of the same name.
+      const mk = (key, label, s, $d, win) => {
         if (!s) return null;
         return {
           key, label, window: win,
@@ -600,17 +662,17 @@ document.addEventListener('alpine:init', () => {
           // different definitions, and falling back to the other one produced
           // a populated Calmar sitting next to a blank Max DD -- a number
           // whose stated inputs were empty, which is worse than no number.
-          calmar: calmarOf(s), calmarRaw: calmarRawOf(s),
+          calmar: calmarOf($d), calmarRaw: calmarRawOf($d),
           // Dollar figures come from the sizing controls via
           // _computeDollarSeries. Until that path is wired these read "—"
           // rather than a percent mislabelled as dollars, which is what made
           // Max DD render as -1826.885%.
-          totalRet: s.total_ret_usd != null ? fmt$(s.total_ret_usd) : '—',
-          totalRetRaw: s.total_ret_usd ?? 0,
-          avgAnnRet: s.avg_annual_usd != null ? fmt$(s.avg_annual_usd) : '—',
-          avgAnnRetRaw: s.avg_annual_usd ?? 0,
-          maxDD: s.max_dd_usd != null ? fmt$(s.max_dd_usd) : '—',
-          maxDDRaw: s.max_dd_usd ?? 0,
+          totalRet: $d?.total_ret_usd != null ? fmt$($d.total_ret_usd) : '—',
+          totalRetRaw: $d?.total_ret_usd ?? 0,
+          avgAnnRet: $d?.avg_annual_usd != null ? fmt$($d.avg_annual_usd) : '—',
+          avgAnnRetRaw: $d?.avg_annual_usd ?? 0,
+          maxDD: $d?.max_dd_usd != null ? fmt$($d.max_dd_usd) : '—',
+          maxDDRaw: $d?.max_dd_usd ?? 0,
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
           // Same figure as Avg Hold, kept on the bar as well as the run
           // card: it is the one stat you check against every policy tweak.
@@ -621,12 +683,11 @@ document.addEventListener('alpine:init', () => {
       // number that silently switched windows would be the worst kind of
       // wrong. Selection happens on the heatmap, which is train.
       const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current',
-                        { ...src[this.window], ...(this.dollarStats || {}) }, this.window);
+                        src[this.window], this.dollarStats, this.window);
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
       const locked = mk('locked', 'Locked',
-                        { ...lockedSrc[this.window], ...(this.lockedDollarStats || {}) },
-                        this.window);
+                        lockedSrc[this.window], this.lockedDollarStats, this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
       const E = this.dollarStats, L = this.lockedDollarStats;
       const dd = (k) => (E?.[k] != null && L?.[k] != null) ? (E[k] - L[k]) : null;

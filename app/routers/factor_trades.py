@@ -132,6 +132,39 @@ def _price_bins(trades: list) -> list:
     return out
 
 
+PNL_BUCKETS = [(-1e9, -0.10), (-0.10, -0.05), (-0.05, -0.02), (-0.02, -0.01),
+               (-0.01, 0.0), (0.0, 0.01), (0.01, 0.02), (0.02, 0.05),
+               (0.05, 0.10), (0.10, 1e9)]
+
+
+def _pnl_dist(trades: list) -> list:
+    """Trade counts by P&L bucket, over ONE population.
+
+    Server-side for the same reason the price bins are: computed in the
+    client from a trade list it would pick up whichever population that list
+    held. Fixed buckets so the axis is stable across runs.
+    """
+    counts = [0] * len(PNL_BUCKETS)
+    for t in trades:
+        r = t.get("ret")
+        if r is None:
+            continue
+        for i, (lo, hi) in enumerate(PNL_BUCKETS):
+            if lo <= r < hi:
+                counts[i] += 1
+                break
+
+    def _lab(lo, hi):
+        if lo <= -1e8:
+            return "< -10%"
+        if hi >= 1e8:
+            return "10%+"
+        return f"{lo * 100:g} to {hi * 100:g}%"
+
+    return [{"label": _lab(lo, hi), "n": n, "lo": lo}
+            for (lo, hi), n in zip(PNL_BUCKETS, counts)]
+
+
 def _window_stats(rets: list, holds: list, tickers, span_days: float) -> dict:
     """Full stat set for one window. Matches Recall's box set plus the three
     this page needs (Calmar, Max DD, Avg Hold).
@@ -618,6 +651,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     # ── Fold into the Recall chart contracts ──────────────────────────────
     trades, dates, reasons = [], [], {}
+    hold_by_rule: dict = {}
     series_trades: list = []
     from collections import Counter as _Ctr
     zacc = {"train": ([], [], _Ctr(), []), "test": ([], [], _Ctr(), [])}
@@ -645,6 +679,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         # in them would dilute exactly the thing being judged.
         if win == active:
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
+            hold_by_rule.setdefault(r["exit_rule"], []).append(hold)
         if win == active:
             za = zacc[win]
             za[0].append(ret); za[1].append(hold)
@@ -704,7 +739,11 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
         is_backstop = (rk == HORIZON_RULE_KEY and combine_meta["horizon_auto_added"])
+        _hb = hold_by_rule.get(rk) or []
         breakdown.append({
+            # Sessions, same conversion as Avg DIT, so "a stop fires at 1.2
+            # sessions and the backstop at 20" reads directly.
+            "avg_hold": (sum(_hb) / len(_hb) / BARS_PER_SESSION) if _hb else 0.0,
             "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
             "label": ("backstop — no selected rule fired" if is_backstop
                       else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
@@ -725,6 +764,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "series_trades":  series_trades,
         "combined_trades": trades,
         "price_bins":     _price_bins(trades),
+        "pnl_dist":       _pnl_dist(trades),
         "combined_trade_dates": dates,
         "equity_primary": eq,
         "equity_combined": eq,
