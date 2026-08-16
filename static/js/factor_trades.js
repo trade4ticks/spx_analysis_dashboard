@@ -152,35 +152,50 @@ document.addEventListener('alpine:init', () => {
         const body = document.getElementById('ft-ov-body');
         if (!body) return;
         body.style.display = ids.length > 1 ? 'flex' : '';
-        body.style.gap = ids.length > 1 ? '14px' : '';
+        // BUILD THE WHOLE LAYOUT FIRST, RESIZE AFTERWARDS. Resizing inside
+        // the append loop measured chart 0 while its cell was still the
+        // only child of the overlay, so Chart.js sized that canvas to the
+        // FULL overlay width and wrote it to the canvas' inline style.
+        // Appending cell 1 then halved cell 0's box, but nothing resized
+        // chart 0 again -- so the left canvas kept its full-width style and
+        // drew straight across the right-hand chart. That is what produced
+        // the share axis' "50%" ticks colliding with the hold axis' "40d"
+        // and share gridlines running through the max_days bar. Any future
+        // DOM mutation here must stay ahead of the resize pass.
         els.forEach((c, k) => {
-          let host = body;
-          if (ids.length > 1) {
-            // Each canvas needs its OWN positioned, sized box; Chart.js
-            // measures the offset parent, and two canvases sharing one
-            // would both size to the full width and overlap.
-            const cell = document.createElement('div');
-            cell.className = 'ft-ov-cell';
-            cell.style.cssText = 'flex:1 1 0;min-width:0;display:flex;flex-direction:column';
-            // The header travels with the chart. Full screen is where the
-            // two halves sit furthest apart, so it is where an unlabelled
-            // sub-chart is hardest to attribute.
-            const h = document.createElement('div');
-            // Styled inline, not via .ft-subhead: that rule styles its
-            // CHILDREN, and this header is a leaf.
-            h.style.cssText = 'flex:0 0 auto;text-align:center;font-size:11px;'
-                            + 'font-weight:700;letter-spacing:.4px;padding-bottom:4px;'
-                            + 'text-transform:uppercase;color:var(--muted)';
-            h.textContent = this._FS_LABEL[ids[k]] || '';
-            cell.appendChild(h);
-            host = document.createElement('div');
-            host.style.cssText = 'flex:1;min-height:0;position:relative';
-            cell.appendChild(host);
-            body.appendChild(cell);
-          }
+          if (ids.length === 1) { body.appendChild(c); return; }
+          // Each canvas needs its OWN positioned, sized box; Chart.js
+          // measures the offset parent, and two canvases sharing one
+          // would both size to the full width and overlap.
+          const cell = document.createElement('div');
+          cell.className = 'ft-ov-cell';
+          // A rule between the panels, with real gutter either side. With
+          // only a small gap the two charts read as one wide chart with a
+          // seam in it, which is the confusion the split was made to fix.
+          const last = k === els.length - 1;
+          cell.style.cssText = 'flex:1 1 0;min-width:0;display:flex;flex-direction:column'
+            + (k ? ';border-left:1px solid var(--border);padding-left:22px' : '')
+            + (last ? '' : ';padding-right:22px');
+          // The header travels with the chart. Full screen is where the
+          // two halves sit furthest apart, so it is where an unlabelled
+          // sub-chart is hardest to attribute.
+          const h = document.createElement('div');
+          // Styled inline, not via .ft-subhead: that rule styles its
+          // CHILDREN, and this header is a leaf.
+          h.style.cssText = 'flex:0 0 auto;text-align:center;font-size:11px;'
+                          + 'font-weight:700;letter-spacing:.4px;padding-bottom:6px;'
+                          + 'text-transform:uppercase;color:var(--muted)';
+          h.textContent = this._FS_LABEL[ids[k]] || '';
+          const host = document.createElement('div');
+          host.style.cssText = 'flex:1;min-height:0;position:relative';
           host.appendChild(c);
-          this._charts[ids[k]]?.resize();
+          cell.appendChild(h);
+          cell.appendChild(host);
+          body.appendChild(cell);
         });
+        // Every cell is in place and the flex boxes have settled; only now
+        // does each chart measure a box that will not change under it.
+        ids.forEach(i => this._charts[i]?.resize());
       });
     },
     closeFs() {
@@ -195,7 +210,7 @@ document.addEventListener('alpine:init', () => {
       const body = document.getElementById('ft-ov-body');
       if (body) {
         body.querySelectorAll('.ft-ov-cell').forEach(n => n.remove());
-        body.style.display = ''; body.style.gap = '';
+        body.style.display = '';
       }
       this.fsId = null; this._fsHome = null;
       this.$nextTick(() => ids.forEach(i => this._charts[i]?.resize()));
@@ -460,10 +475,17 @@ document.addEventListener('alpine:init', () => {
       };
       // The backstop still overrides its side -- it means the opposite of a
       // rule working, since nothing fired and the horizon caught the trade
-      // -- but it does that OUTLINED rather than in amber. The page is
-      // strictly blue/pink/grey and a tan bar read as a fifth category
-      // rather than as a caveat on the time-exit grey it belongs beside.
-      const BACKSTOP = { fill: 'rgba(120,120,120,0.14)', line: 'rgba(205,205,205,0.95)', w: 2 };
+      // -- but it does that OUTLINED rather than in a colour of its own.
+      //
+      // Both values are the time-exit grey, because the backstop IS a time
+      // exit: same hue, faint fill, and the theme's --muted for the border,
+      // read from the stylesheet rather than hand-picked so a theme change
+      // carries here. A light neutral next to saturated blue reads warm by
+      // simultaneous contrast, so "looks grey in isolation" is not the test
+      // -- being literally the same channel values as the bar beside it is.
+      const muted = (getComputedStyle(document.documentElement)
+                       .getPropertyValue('--muted') || '').trim() || '#c8c8c8';
+      const BACKSTOP = { fill: 'rgba(150,150,150,0.16)', line: muted, w: 2 };
       const fills = rows.map(r => r.is_backstop ? BACKSTOP.fill
         : (SIDE_COLOR[r.side] || 'rgba(150,150,150,0.60)'));
       const lines = rows.map((r, i) => r.is_backstop ? BACKSTOP.line : fills[i]);
