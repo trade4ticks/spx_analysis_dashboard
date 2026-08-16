@@ -119,18 +119,22 @@
                    font-weight:700; font-size:10px; text-transform:uppercase;
                    letter-spacing:.3px; border-bottom:1px solid var(--border);
                    white-space:nowrap; }
-    .ft-suite td { text-align:center; padding:5px 8px; color:var(--text);
+    .ft-suite td { text-align:center; padding:7px 10px; color:var(--text);
                    border-bottom:1px solid rgba(255,255,255,.05);
                    vertical-align:top; white-space:nowrap; }
     .ft-suite tr.policy td { background:rgba(52,152,219,.08); font-weight:600; }
-    .ft-suite .sv { display:block; font-family:monospace; font-size:12px; }
-    .ft-suite .sd { display:block; font-size:9px; color:var(--dim);
-                    font-family:monospace; }
-    .ft-suite .sb { display:block; font-size:10px; font-weight:700;
-                    color:var(--dim); }
-    /* Green only on a clean sweep — "beats 9 of 10" is one draw from
-       ambiguous and must not read as a result. */
-    .ft-suite .sb.sb-win  { color:#1abc9c; }
+    /* Sized to be read, not to fit. Four stacked figures per cell tempted a
+       9px supporting line; that is a number nobody checks. */
+    .ft-suite .sv { display:block; font-family:monospace; font-size:15px;
+                    line-height:1.35; }
+    .ft-suite .sd { display:block; font-size:12px; color:var(--muted);
+                    font-family:monospace; line-height:1.35; }
+    .ft-suite .sb { display:block; font-size:13px; font-weight:700;
+                    color:var(--muted); line-height:1.4; margin-bottom:1px; }
+    /* Called out only on a clean sweep — "beats 9 of 10" is one draw from
+       ambiguous and must not read as a result. Page blue, the same one the
+       policy row and every positive bar use. */
+    .ft-suite .sb.sb-win  { color:#3498db; }
     .ft-suite .sb.sb-loss { color:#e84393; }
     .ft-suite .sb.sb-mid  { color:#c8c8c8; }
     .ft-units { font-size:10px; color:#c8c8c8; margin-bottom:8px; padding:5px 9px;
