@@ -110,7 +110,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=14"></script>
-  <script src="/static/js/factor_trades.js?v=27"></script>
+  <script src="/static/js/factor_trades.js?v=28"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -374,7 +374,7 @@
           <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — which rule closed each trade</span>
+          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — share (coloured by side) + avg hold (grey)</span>
             <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
@@ -387,7 +387,7 @@
         </div>
       </div>
 
-      <div class="ft-grid2" x-show="zoneData">
+      <div class="ft-grid3" x-show="zoneData">
         <div>
         <div class="chart-box">
           <div class="chart-title">Trade activity <span class="ft-note"><span x-text="window.toUpperCase()"></span> — edited</span>
@@ -407,6 +407,12 @@
           <div class="chart-canvas"><canvas id="ft-activity-locked"></canvas></div>
         </div>
           </div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">P&amp;L distribution <span class="ft-note">[<span x-text="window.toUpperCase()"></span> window]</span>
+            <button class="ft-fs" @click="openFs('ft-pnldist')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-pnldist"></canvas></div>
         </div>
         <div>
         <div class="chart-box">
