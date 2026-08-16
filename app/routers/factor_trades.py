@@ -1416,6 +1416,7 @@ def _policy_sql(combine_sql: str, where_bins: str,
 {combine_sql}
     )
     SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return,
+           tp.entry_price,
            (c.trade_date < $2::date) AS is_train
     FROM c
     JOIN tt_bins bt USING (ticker, trade_date)
@@ -1484,6 +1485,7 @@ async def _run_variant(pool, ctx, v: dict) -> dict:
     st = _stats_by_window(rows)
     return {**out, "rule_keys": list(rule_keys),
             "train": st["train"], "test": st["test"],
+            "rows": rows,
             "horizon_auto_added": meta["horizon_auto_added"]}
 
 
@@ -1535,28 +1537,22 @@ async def run_batch(pool, ctx, variants: list,
 # across sixty numbers -- the same failure as a percent Calmar sitting
 # beside a blank dollar Max DD, at forty times the scale.
 SUITE_METRICS = [
-    ("avg_ret",    "Avg Ret"),
-    ("total_ret",  "Total Ret (return units)"),
-    ("avg_annual", "Avg Annual Ret (return units)"),
-    ("max_dd",     "Max DD (return units)"),
-    ("calmar",     "Calmar (return units)"),
+    ("avg_ret",    "Avg Ret",        "pct"),
+    ("total_ret",  "Total Ret",      "usd"),
+    ("avg_annual", "Avg Annual Ret", "usd"),
+    ("max_dd",     "Max DD",         "usd"),
+    ("calmar",     "Calmar",         "ratio"),
 ]
 
 # Stated on the panel and repeated in the CSV, not left to the column
 # labels alone.
 SUITE_UNITS_NOTE = (
-    "Return units, not dollars: additive per-trade returns, independent of "
-    "the $/trade and daily-cap sizing. These will NOT match the stat bar's "
-    "Total Ret / Avg Annual / Max DD / Calmar, which are dollar-sized. "
-    "Sizing is constant across draws, so it cannot affect which draws the "
-    "policy beats."
+    "Total Ret, Avg Annual, Max DD and Calmar are DOLLARS, sized by the "
+    "rail's $/trade and daily cap and derived in the browser by the same "
+    "function that fills the stat bar — so the policy row equals the stat "
+    "bar exactly. Avg Ret stays a per-trade percentage; the daily cap "
+    "cannot affect a per-trade mean."
 )
-
-# Higher is better for every metric except max_dd, which is negative and
-# where closer to zero wins. Getting this wrong would invert the headline
-# "beats N of M" number on one column and read as a finding.
-SUITE_HIGHER_IS_BETTER = {"avg_ret": True, "total_ret": True,
-                          "avg_annual": True, "max_dd": True, "calmar": True}
 
 SUITE_GROUPS = [
     ("policy",     "Policy (signal entries + rule exits)", None),
@@ -1564,6 +1560,20 @@ SUITE_GROUPS = [
     ("exit",       "Signal entries + random exits",        "exit"),
     ("entry_exit", "Random entries + random exits",        "entry_exit"),
 ]
+
+
+def _split_pack(rows, pack):
+    """Pack one variant's rows per window.
+
+    Windows are packed SEPARATELY because they are sized separately: the
+    stat bar's dollar figures come from the active window's trades alone,
+    with equity starting at zero in that window. Packing them together and
+    splitting client-side would invite a caller to size the pair as one
+    continuous account, which is not what any box on this page shows.
+    """
+    tr = [r for r in rows if r["is_train"]]
+    te = [r for r in rows if not r["is_train"]]
+    return {"train": pack(tr), "test": pack(te)}
 
 
 def _suite_seeds(n: int, base: int) -> list[int]:
@@ -1574,19 +1584,6 @@ def _suite_seeds(n: int, base: int) -> list[int]:
     cannot be checked. Re-sampling the suite means passing a different base.
     """
     return [base + 1000003 * i for i in range(max(1, n))]
-
-
-def _suite_summary(values: list) -> dict:
-    """mean / sd / min / max over the draws of one run type and metric."""
-    v = [float(x) for x in values if x is not None]
-    if not v:
-        return {"n": 0, "mean": None, "sd": None, "min": None, "max": None}
-    a = np.asarray(v, dtype=np.float64)
-    return {"n": len(v), "mean": float(a.mean()),
-            # Population sd: these ARE all the draws taken, not a sample of
-            # some larger set of draws.
-            "sd": float(a.std()) if len(v) > 1 else 0.0,
-            "min": float(a.min()), "max": float(a.max())}
 
 
 class SuiteReq(ZoneReq):
@@ -1689,13 +1686,66 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
 
     results = await run_batch(pool, ctx, variants, req.concurrency)
 
+    # ── Columnar packing ─────────────────────────────────────────────────
+    #
+    # The four portfolio metrics -- Total Ret, Avg Annual, Max DD, Calmar --
+    # are NOT computed here. They depend on $/trade sizing and the daily
+    # cap, and a return-unit version of them describes a system with
+    # unlimited capital that nobody trades: with a $10k daily cap, a day
+    # firing 40 names cannot take them all, and drawdown accrues against
+    # deployed capital rather than a sum of per-trade returns. The earlier
+    # claim that sizing is "constant across draws" was wrong -- the cap
+    # interacts with the trade distribution, so a draw holding different
+    # durations or different prices meets a different cap.
+    #
+    # So this ships the per-trade rows and the CLIENT derives dollars
+    # through the SAME _computeDollarSeries that produces the stat bar.
+    # That is not merely one implementation instead of two: it makes
+    # agreement definitional rather than something a gate has to keep
+    # proving on whichever zones it happens to be run against.
+    #
+    # Columnar with shared ticker and date tables, because the naive
+    # array-of-objects form is ~3x the bytes for the same information and
+    # every baseline shares the policy's dates by construction.
+    tick_ix: dict = {}
+    date_ix: dict = {}
+    tickers: list = []
+    dates: list = []
+
+    def _ix(v, table, out):
+        i = table.get(v)
+        if i is None:
+            i = len(out)
+            table[v] = i
+            out.append(v)
+        return i
+
+    def _pack(rows):
+        t, d, r, px = [], [], [], []
+        for row in rows:
+            ret = row["exit_return"]
+            if ret is None:
+                continue
+            t.append(_ix(row["ticker"], tick_ix, tickers))
+            d.append(_ix(row["trade_date"].isoformat(), date_ix, dates))
+            r.append(round(float(ret), 8))
+            # trade_paths.entry_price is stored AS-TRADED, which is exactly
+            # what sizing wants: _computeDollarSeries divides the allocation
+            # by spot_entry_raw. Shipped under that name so the client can
+            # hand these rows to the existing function untouched.
+            _p = row["entry_price"]
+            px.append(round(float(_p), 4) if _p is not None else None)
+        return {"t": t, "d": d, "r": r, "p": px}
+
     by_group: dict = {}
     errors = []
     policy = None
+    total_rows = 0
     for r in results:
         if r.get("error"):
             errors.append({"key": r["key"], "error": r["error"]})
             continue
+        total_rows += len(r.get("rows") or [])
         if r["group"] == "policy":
             policy = r
         else:
@@ -1705,38 +1755,32 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         return {"error": "the policy run failed, so nothing can be compared "
                          "against it", "errors": errors}
 
-    rows = []
+    # An honest ceiling rather than a browser that dies silently. ~400k
+    # trades is ~10MB packed; past that the answer is a smaller N, and
+    # saying so beats shipping it and hoping.
+    if total_rows > 400_000:
+        return {"error": f"this suite would ship {total_rows:,} trades "
+                         f"({len(variants)} runs). Lower the draw count — "
+                         f"dollar figures are derived per-trade in the "
+                         f"browser, so the payload scales with N."}
+
+    out_rows = []
     for gkey, label, kind in SUITE_GROUPS:
-        if kind is None:
-            rows.append({
-                "key": gkey, "label": label, "kind": None, "draws": 1,
-                "train": {m: {"value": policy["train"].get(m)} for m, _ in SUITE_METRICS},
-                "test":  {m: {"value": policy["test"].get(m)}  for m, _ in SUITE_METRICS},
-            })
-            continue
-        got = by_group.get(gkey, [])
-        row = {"key": gkey, "label": label, "kind": kind, "draws": len(got)}
-        for win in ("train", "test"):
-            cells = {}
-            for m, _ in SUITE_METRICS:
-                vals = [g[win].get(m) for g in got]
-                summ = _suite_summary(vals)
-                pv = policy[win].get(m)
-                # BEATS: draws the POLICY beat. Counted only over draws that
-                # produced a value, and reported with that denominator, so a
-                # failed draw cannot inflate the score.
-                comparable = [float(x) for x in vals if x is not None]
-                if pv is None or not comparable:
-                    summ["beats"] = None
-                    summ["of"] = len(comparable)
-                else:
-                    hib = SUITE_HIGHER_IS_BETTER.get(m, True)
-                    summ["beats"] = sum(1 for x in comparable
-                                        if ((pv > x) if hib else (pv < x)))
-                    summ["of"] = len(comparable)
-                cells[m] = summ
-            row[win] = cells
-        rows.append(row)
+        src = [policy] if kind is None else by_group.get(gkey, [])
+        out_rows.append({
+            "key": gkey, "label": label, "kind": kind, "draws": len(src),
+            "runs": [{
+                "seed": g.get("seed"),
+                # Sizing-independent, so it stays server-side: a per-trade
+                # mean is not a portfolio quantity and the daily cap cannot
+                # touch it.
+                "avg_ret": {w: g[w].get("avg_ret") for w in ("train", "test")},
+                "n":       {w: g[w].get("n") for w in ("train", "test")},
+                "null_returns": {w: g[w].get("null_returns", 0)
+                                 for w in ("train", "test")},
+                "trades":  _split_pack(g.get("rows") or [], _pack),
+            } for g in src],
+        })
 
     return {
         "n_draws": n, "base_seed": base_seed, "seeds": seeds,
@@ -1745,14 +1789,16 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         "rule_keys": list(req.rule_keys),
         "entry_anchor": req.entry_anchor,
         "max_strike": req.max_strike,
-        "metrics": [{"key": k, "label": l} for k, l in SUITE_METRICS],
-        "rows": rows,
+        "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in SUITE_METRICS],
+        "rows": out_rows,
+        "tickers": tickers,
+        "dates": dates,
         "hold": ctx.hold,
         "n_variants": len(variants),
+        "n_trades": total_rows,
         "concurrency": max(1, min(int(req.concurrency), BATCH_MAX_CONCURRENCY)),
         # Surfaced, never swallowed: a suite missing draws is a different
-        # table from a suite where every draw ran.
+        # table from one where every draw ran.
         "errors": errors,
-        "units": "return",
         "units_note": SUITE_UNITS_NOTE,
     }

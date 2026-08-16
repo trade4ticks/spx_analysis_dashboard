@@ -346,10 +346,136 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
         this.suiteData = d;
+        this.$nextTick(() => this._suiteVerifyAgainstStatBar());
       } catch (e) { this.error = String(e); }
       finally {
         this.suiteRunning = false;
         if (this._suiteTimer) { clearInterval(this._suiteTimer); this._suiteTimer = null; }
+      }
+    },
+
+    // Higher is better for every metric, INCLUDING max_dd — it is negative,
+    // so closer to zero wins. Backwards would invert one column and read as
+    // a finding rather than a bug.
+    SUITE_HIGHER_IS_BETTER: { avg_ret: true, total_ret: true,
+                              avg_annual: true, max_dd: true, calmar: true },
+
+    // Unpack one packed window into the shape _computeDollarSeries wants.
+    // Field names are the ones that function reads; nothing is renamed on
+    // the way through, because a rename is where the two could diverge.
+    _suiteTrades(d, packed) {
+      const out = [];
+      const T = d.tickers, D = d.dates;
+      for (let i = 0; i < packed.r.length; i++) {
+        out.push({
+          ticker: T[packed.t[i]],
+          trade_date: D[packed.d[i]],
+          ret: packed.r[i],
+          spot_entry_raw: packed.p[i],
+        });
+      }
+      return out;
+    },
+
+    // THE POINT OF ALL THIS: dollars come from the SAME function that fills
+    // the stat bar, with the SAME rail sizing. Not a port, not a re-derivation
+    // — the identical call. A return-unit Calmar would describe a system with
+    // unlimited capital; with a $10k daily cap a day firing 40 names cannot
+    // take them all, and drawdown accrues against deployed capital.
+    _suiteRunStats(d, run, win) {
+      const packed = run.trades?.[win];
+      const base = { avg_ret: run.avg_ret?.[win] ?? null, n: run.n?.[win] ?? 0 };
+      if (!packed || !packed.r.length) {
+        return { ...base, total_ret: null, avg_annual: null,
+                 max_dd: null, calmar: null };
+      }
+      const ds = window.FactorCharts._computeDollarSeries(
+        this, this._suiteTrades(d, packed), this.perTrade, this.dailyCap);
+      const $d = this._dollarStats(ds);
+      return { ...base,
+               total_ret:  $d?.total_ret_usd ?? null,
+               avg_annual: $d?.avg_annual_usd ?? null,
+               max_dd:     $d?.max_dd_usd ?? null,
+               calmar:     $d?.calmar ?? null };
+    },
+
+    _suiteSummary(values) {
+      const v = values.filter(x => x != null).map(Number).filter(Number.isFinite);
+      if (!v.length) return { n: 0, mean: null, sd: null, min: null, max: null };
+      const mean = v.reduce((a, b) => a + b, 0) / v.length;
+      // Population sd: these ARE all the draws taken, not a sample of a
+      // larger set of draws.
+      const sd = v.length > 1
+        ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / v.length) : 0;
+      return { n: v.length, mean, sd, min: Math.min(...v), max: Math.max(...v) };
+    },
+
+    // Derived, not stored: sizing lives in the rail, so changing $/trade or
+    // the daily cap must re-price a suite already on screen rather than
+    // leave it showing figures from the previous sizing.
+    get suiteTable() {
+      const d = this.suiteData;
+      if (!d) return null;
+      const metrics = d.metrics || [];
+      const policyRow = (d.rows || []).find(r => r.kind === null);
+      const polStats = {};
+      for (const win of ['train', 'test']) {
+        const run = policyRow?.runs?.[0];
+        polStats[win] = run ? this._suiteRunStats(d, run, win) : null;
+      }
+      const rows = (d.rows || []).map(row => {
+        const cells = {};
+        for (const win of ['train', 'test']) {
+          const per = (row.runs || []).map(r => this._suiteRunStats(d, r, win));
+          const c = {};
+          for (const m of metrics) {
+            const vals = per.map(x => x[m.key]);
+            if (row.kind === null) {
+              c[m.key] = { value: vals[0] ?? null };
+              continue;
+            }
+            const s = this._suiteSummary(vals);
+            const pv = polStats[win]?.[m.key];
+            const cmp = vals.filter(x => x != null).map(Number);
+            if (pv == null || !cmp.length) {
+              s.beats = null; s.of = cmp.length;
+            } else {
+              const hib = this.SUITE_HIGHER_IS_BETTER[m.key] !== false;
+              // Counted only over draws that produced a value, and reported
+              // with THAT denominator, so a failed draw cannot inflate it.
+              s.beats = cmp.filter(x => hib ? pv > x : pv < x).length;
+              s.of = cmp.length;
+            }
+            c[m.key] = s;
+          }
+          cells[win] = c;
+        }
+        return { ...row, train: cells.train, test: cells.test };
+      });
+      return { rows, policy: polStats };
+    },
+
+    // The check the port-to-server option could only ever approximate: the
+    // suite's policy row and the stat bar are the same function over the
+    // same trades, so they must agree to the cent. Logged on both outcomes
+    // — a silent pass proves nothing ran.
+    _suiteVerifyAgainstStatBar() {
+      const t = this.suiteTable, sb = this.dollarStats;
+      if (!t || !sb) return;
+      const p = t.policy?.[this.window];
+      if (!p) return;
+      const pairs = [['total_ret', 'total_ret_usd'], ['avg_annual', 'avg_annual_usd'],
+                     ['max_dd', 'max_dd_usd']];
+      const bad = pairs.filter(([a, b]) =>
+        p[a] != null && sb[b] != null && Math.abs(p[a] - sb[b]) > 0.01);
+      if (bad.length) {
+        console.error('[factor-trades] SUITE POLICY ROW != STAT BAR — same '
+          + 'function, same sizing, so this means the two are seeing different '
+          + 'trade sets:', bad.map(([a, b]) => `${a} ${p[a]} vs ${sb[b]}`).join(' | '));
+      } else {
+        console.log('[factor-trades] suite policy row matches the stat bar '
+          + `(${this.window}): total ${(p.total_ret ?? 0).toFixed(2)}, `
+          + `maxDD ${(p.max_dd ?? 0).toFixed(2)}`);
       }
     },
 
@@ -361,10 +487,19 @@ document.addEventListener('alpine:init', () => {
       return Math.round(q * 1.4 / c);
     },
 
-    // Formatters. Return units throughout — see suiteData.units_note.
+    // One formatter, driven by the unit the server declares per metric.
+    // Avg Ret is a per-trade percentage; the three portfolio figures are
+    // dollars; Calmar is a ratio OF dollars.
     suiteFmt(metric, v) {
       if (v == null) return '—';
-      if (metric === 'calmar') return (+v).toFixed(2);
+      const unit = (this.suiteData?.metrics || []).find(m => m.key === metric)?.unit;
+      if (unit === 'ratio') return (+v).toFixed(2);
+      if (unit === 'usd') {
+        const a = Math.abs(+v), sg = (+v) < 0 ? '-' : '';
+        if (a >= 1e6) return sg + '$' + (a / 1e6).toFixed(2) + 'M';
+        if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
+        return sg + '$' + a.toFixed(0);
+      }
       return ((+v) * 100).toFixed(2) + '%';
     },
     // The headline. "beats 0 of 10" answers the question directly where two
@@ -395,26 +530,29 @@ document.addEventListener('alpine:init', () => {
       out.push(['# cells', JSON.stringify(d.cells)]);
       out.push(['# rules', (d.rule_keys || []).join(' | ')]);
       out.push(['# draws', d.n_draws, 'base_seed', d.base_seed]);
+      // Dollar figures are meaningless without the sizing that produced
+      // them — a suite exported at $2k/$10k is not comparable to one at
+      // $5k/$25k, and nothing else in the file would say which it was.
+      out.push(['# sizing', '$' + this.perTrade + '/trade',
+                '$' + this.dailyCap + '/day cap']);
       out.push(['# seeds', (d.seeds || []).join(' ')]);
       if (d.hold) out.push(['# drawn hold (sessions)', d.hold.avg_sessions]);
       for (const e of (d.errors || [])) out.push(['# FAILED', e.key, e.error]);
       out.push([]);
-      out.push(['window', 'run type', 'metric', 'draws',
+      out.push(['window', 'run type', 'metric', 'unit', 'draws',
                 'policy', 'mean', 'sd', 'min', 'max', 'policy beats', 'of']);
+      const t = this.suiteTable;
       for (const win of ['train', 'test']) {
-        const pol = (d.rows || []).find(r => r.kind === null);
-        for (const row of (d.rows || [])) {
+        for (const row of (t.rows || [])) {
           for (const m of (d.metrics || [])) {
             const c = row[win]?.[m.key] || {};
-            const pv = pol?.[win]?.[m.key]?.value;
-            out.push([win, row.label, m.label, row.draws,
-                      row.kind === null ? (c.value ?? '') : (pv ?? ''),
-                      row.kind === null ? '' : (c.mean ?? ''),
-                      row.kind === null ? '' : (c.sd ?? ''),
-                      row.kind === null ? '' : (c.min ?? ''),
-                      row.kind === null ? '' : (c.max ?? ''),
-                      row.kind === null ? '' : (c.beats ?? ''),
-                      row.kind === null ? '' : (c.of ?? '')]);
+            const pv = t.policy?.[win]?.[m.key];
+            const isPol = row.kind === null;
+            out.push([win, row.label, m.label, m.unit, row.draws,
+                      isPol ? (c.value ?? '') : (pv ?? ''),
+                      isPol ? '' : (c.mean ?? ''), isPol ? '' : (c.sd ?? ''),
+                      isPol ? '' : (c.min ?? ''), isPol ? '' : (c.max ?? ''),
+                      isPol ? '' : (c.beats ?? ''), isPol ? '' : (c.of ?? '')]);
           }
         }
       }

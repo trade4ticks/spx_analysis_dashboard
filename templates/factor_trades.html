@@ -141,7 +141,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=36"></script>
+  <script src="/static/js/factor_trades.js?v=37"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -438,7 +438,7 @@
           ~<span x-text="suiteEstimate() + 's'"></span> expected.
         </div>
 
-        <template x-if="suiteData">
+        <template x-if="suiteData && suiteTable">
           <div>
             <!-- Stated, not left to the column labels alone. Two numbers
                  called Calmar on one page is the failure this prevents. -->
@@ -467,7 +467,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <template x-for="row in suiteData.rows" :key="'sr-' + win + row.key">
+                      <template x-for="row in suiteTable.rows" :key="'sr-' + win + row.key">
                         <tr :class="row.kind === null ? 'policy' : ''">
                           <td style="text-align:left">
                             <span x-text="row.label"></span>
