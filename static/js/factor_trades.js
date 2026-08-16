@@ -390,10 +390,17 @@ document.addEventListener('alpine:init', () => {
     // while a bar for the auto-appended max_days__20 is every selected rule
     // FAILING to fire and the horizon catching the trade by default. Same
     // chart, opposite readings — see horizon_auto_added on the run card.
+    // Two sub-charts, not one dual-axis pane. The shared-axis version put
+    // grey avg-hold bars on the same rows as the coloured share bars with
+    // scales at opposite edges, and there was no way to tell by looking
+    // which scale a given bar was drawn against.
     _renderExitReasons() {
-      const el = document.getElementById('ft-reasons');
+      const el   = document.getElementById('ft-reasons');
+      const elH  = document.getElementById('ft-hold');
       const rows = this.zoneData?.exit_reasons || [];
-      if (this._charts['ft-reasons']) { this._charts['ft-reasons'].destroy(); delete this._charts['ft-reasons']; }
+      for (const k of ['ft-reasons', 'ft-hold']) {
+        if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
+      }
       if (!el || !rows.length) return;
       const labels = rows.map(r => r.label);
       const data   = rows.map(r => +(r.frac * 100).toFixed(2));
@@ -413,14 +420,7 @@ document.addEventListener('alpine:init', () => {
       this._charts['ft-reasons'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels, datasets: [
-          { data, backgroundColor: colors, borderColor: colors, borderWidth: 1,
-            xAxisID: 'x' },
-          // Avg hold per reason, on its own axis in the same pane -- a stop
-          // firing at 1.2 sessions against a backstop at 20 is the shape
-          // worth seeing next to the share.
-          { data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
-            backgroundColor: 'rgba(200,200,200,0.30)',
-            borderColor: 'rgba(200,200,200,0.45)', borderWidth: 1, xAxisID: 'x2' },
+          { data, backgroundColor: colors, borderColor: colors, borderWidth: 1 },
         ] },
         options: {
           indexAxis: 'y',
@@ -443,11 +443,48 @@ document.addEventListener('alpine:init', () => {
             },
           },
           scales: {
-            x:  { stack: 'a', ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
-                  grid: { color: '#222' }, beginAtZero: true },
-            x2: { stack: 'b', position: 'top', beginAtZero: true,
-                  ticks: { color: '#999', font: { size: 9 }, callback: v => v + 'd' },
-                  grid: { display: false } },
+            x: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
+                 grid: { color: '#222' }, beginAtZero: true },
+            y: { ticks: { color: '#aaa', font: { size: 10 } },
+                 grid: { display: false } },
+          },
+        },
+      });
+
+      // Avg hold, same rows in the same order. Labels are repeated rather
+      // than shared down a gutter so this chart is readable on its own --
+      // a stop firing at 1.2 sessions against a backstop at 20 is the
+      // shape worth seeing, and it should not need a row-count across the
+      // pane to attribute it.
+      if (!elH) return;
+      this._charts['ft-hold'] = new Chart(elH.getContext('2d'), {
+        type: 'bar',
+        data: { labels, datasets: [{
+          data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
+          // Same side colours, held back to a wash so the eye reads this
+          // pane as the quieter companion to the share pane.
+          backgroundColor: colors.map(c => c.replace(/[\d.]+\)$/, '0.34)')),
+          borderColor: colors, borderWidth: 1,
+        }] },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: (c) => {
+                  const r = rows[c.dataIndex];
+                  return [`avg hold ${(r.avg_hold ?? 0).toFixed(2)} sessions`,
+                          `n = ${(r.n ?? 0).toLocaleString()}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + 'd' },
+                 grid: { color: '#222' }, beginAtZero: true },
             y: { ticks: { color: '#aaa', font: { size: 10 } },
                  grid: { display: false } },
           },
@@ -470,12 +507,21 @@ document.addEventListener('alpine:init', () => {
       if (this._charts['ft-pnldist']) { this._charts['ft-pnldist'].destroy(); delete this._charts['ft-pnldist']; }
       const b = this.zoneData?.pnl_dist || [];
       if (!el || !b.length) return;
+      // Same bar language as Annual P&L and the price bins: alpha = n.
+      // This pane is single-window by construction (server-computed from
+      // window_trades), so nothing here is ever hatched.
+      const FC = window.FactorCharts;
+      const mx = Math.max(...b.map(x => x.n), 1);
+      const paints = b.map(x => FC._barPaint(
+        FC._barRgb(x.n ? (x.lo < 0 ? 'neg' : 'pos') : 'none'),
+        (x.n || 0) / mx, false));
       this._charts['ft-pnldist'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels: b.map(x => x.label), datasets: [{
           data: b.map(x => x.n),
-          backgroundColor: b.map(x => x.lo < 0 ? 'rgba(232,67,147,.7)' : 'rgba(52,152,219,.75)'),
-          borderWidth: 0,
+          backgroundColor: paints.map(p => p.background),
+          borderColor:     paints.map(p => p.border),
+          borderWidth:     paints.map(p => p.borderWidth),
         }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
@@ -499,20 +545,20 @@ document.addEventListener('alpine:init', () => {
       if (!el || !bins.length) return;
       const lbl = bins.map(b => b.label);
       const avg = bins.map(b => b.avg_ret == null ? null : +(b.avg_ret * 100).toFixed(3));
+      // Same bar language as Annual P&L: alpha = n, borders on every bar.
+      // Single-window pane, so nothing is hatched.
+      const FC = window.FactorCharts;
+      const mx = Math.max(...bins.map(b => b.n), 1);
+      const paints = avg.map((v, i) => FC._barPaint(
+        FC._barRgb(v == null ? 'none' : (v >= 0 ? 'pos' : 'neg')),
+        (bins[i].n || 0) / mx, false));
       this._charts['ft-pricebins'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels: lbl, datasets: [{
           data: avg,
-          // Alpha by n, like Annual P&L: a bucket built on eight trades
-          // should not look as solid as one built on eight hundred.
-          backgroundColor: avg.map((v, i) => {
-            if (v == null) return 'rgba(120,120,120,.25)';
-            const ns = bins.map(b => b.n), mx = Math.max(...ns, 1);
-            const a = 0.22 + 0.56 * Math.min(1, (bins[i].n || 0) / mx);
-            return v >= 0 ? `rgba(52,152,219,${a.toFixed(3)})`
-                          : `rgba(232,67,147,${a.toFixed(3)})`;
-          }),
-          borderWidth: 0,
+          backgroundColor: paints.map(p => p.background),
+          borderColor:     paints.map(p => p.border),
+          borderWidth:     paints.map(p => p.borderWidth),
         }] },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,

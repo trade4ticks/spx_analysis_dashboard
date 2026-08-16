@@ -109,8 +109,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=14"></script>
-  <script src="/static/js/factor_trades.js?v=28"></script>
+  <script src="/static/js/factor_charts.js?v=15"></script>
+  <script src="/static/js/factor_trades.js?v=29"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -374,10 +374,18 @@
           <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — share (coloured by side) + avg hold (grey)</span>
+          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — share of trades | avg hold</span>
             <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
           </div>
-          <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
+          {#- Two sub-charts rather than one dual-axis chart. Sharing a pane
+              with a top axis made the grey hold bars dominate the coloured
+              share bars and left no way to tell which scale a bar belonged
+              to. Split, each has one axis and one meaning. Labels repeat on
+              both so a row is readable without counting across the gutter. -#}
+          <div class="chart-canvas" style="display:flex;gap:6px">
+            <div style="flex:1 1 58%;min-width:0;position:relative"><canvas id="ft-reasons"></canvas></div>
+            <div style="flex:1 1 42%;min-width:0;position:relative"><canvas id="ft-hold"></canvas></div>
+          </div>
         </div>
         <div class="chart-box">
           <div class="chart-title">Avg return by entry price <span class="ft-note"><span x-text="window.toUpperCase()"></span> window</span>

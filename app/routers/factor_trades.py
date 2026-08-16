@@ -132,9 +132,14 @@ def _price_bins(trades: list) -> list:
     return out
 
 
-PNL_BUCKETS = [(-1e9, -0.10), (-0.10, -0.05), (-0.05, -0.02), (-0.02, -0.01),
-               (-0.01, 0.0), (0.0, 0.01), (0.01, 0.02), (0.02, 0.05),
-               (0.05, 0.10), (0.10, 1e9)]
+PNL_BUCKETS = [
+    (-1e9, -0.20), (-0.2, -0.15), (-0.15, -0.1),
+    (-0.1, -0.07), (-0.07, -0.05), (-0.05, -0.03),
+    (-0.03, -0.02), (-0.02, -0.01), (-0.01, 0.0),
+    (0.0, 0.01), (0.01, 0.02), (0.02, 0.03),
+    (0.03, 0.05), (0.05, 0.07), (0.07, 0.1),
+    (0.1, 0.15), (0.15, 0.2), (0.20, 1e9),
+]
 
 
 def _pnl_dist(trades: list) -> list:
@@ -155,10 +160,13 @@ def _pnl_dist(trades: list) -> list:
                 break
 
     def _lab(lo, hi):
+        # Symmetric edges so the two tails can be compared by eye -- a stop
+        # should truncate the left tail and leave the right one alone, and
+        # that is only readable if the buckets mirror.
         if lo <= -1e8:
-            return "< -10%"
+            return "< -20%"
         if hi >= 1e8:
-            return "10%+"
+            return "> 20%"
         return f"{lo * 100:g} to {hi * 100:g}%"
 
     return [{"label": _lab(lo, hi), "n": n, "lo": lo}
