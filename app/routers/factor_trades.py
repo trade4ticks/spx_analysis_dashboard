@@ -19,7 +19,9 @@ cutoff.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from datetime import date as _date
 from typing import Any, Optional
 
@@ -214,6 +216,11 @@ def _window_stats(rets: list, holds: list, tickers, span_days: float) -> dict:
         "avg_win":  float(wins.mean()) if wins.size else 0.0,
         "avg_loss": float(losses.mean()) if losses.size else 0.0,
         "trades_per_year": n / years,
+        # Additive total and its annualisation, in RETURN units. Both were
+        # already computed here for Calmar; returning them lets the batch
+        # runner report Total / Avg Annual without a second derivation.
+        "total_ret":  total,
+        "avg_annual": total / years,
         # Calmar is ANNUALISED return over max drawdown, so the numerator is
         # total/years, not total. Undefined without a drawdown; None renders
         # as "—" rather than as a spurious infinity.
@@ -1236,4 +1243,516 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "horizon_auto_added": combine_meta["horizon_auto_added"],
         "excludes_unresolved": combine_meta["excludes_unresolved"],
         "label": req.label,
+    }
+
+
+# ── Shared batch runner ───────────────────────────────────────────────────
+#
+# ONE batch path, not two. The baseline suite and the parameter grid are the
+# same tool: run the same query N times varying ONE input, aggregate, and
+# report a matrix instead of a point. The suite varies the SEED and holds the
+# exit parameters fixed; the grid varies the EXIT PARAMETERS and holds the
+# seed fixed. Everything else -- the zone, the anchor, the max strike, the
+# windows, the concurrency, the fold into stats -- is identical, so it lives
+# here and both features are thin layers on top.
+#
+# A variant is a dict:
+#   key            identity in the result matrix
+#   group          which row of the matrix it aggregates into
+#   rule_keys      exit policy            (the GRID varies this)
+#   baseline_kind  None = the policy itself (real entries, real exits),
+#                  else "entry" | "exit" | "entry_exit"
+#   seed           draw identity          (the SUITE varies this)
+
+# The OI pool is min_size=2, max_size=10. Five leaves headroom, so a batch
+# cannot starve the page's own requests -- a suite that makes the UI it is
+# rendering into unresponsive is not an improvement on doing it by hand.
+BATCH_MAX_CONCURRENCY = 5
+
+
+def _stats_by_window(rows) -> dict:
+    """Train AND test stats from one variant's rows.
+
+    Deliberately not /zone's fold. That one is window-scoped by design: it
+    accumulates only the active window because every surface it feeds is
+    single-window. A batch reports both windows for every variant in one
+    pass, so this is a different aggregation rather than a second copy of
+    the same one.
+    """
+    from collections import Counter as _C
+    acc = {"train": ([], [], _C(), []), "test": ([], [], _C(), [])}
+    nulls = {"train": 0, "test": 0}
+    for r in rows:
+        w = "train" if r["is_train"] else "test"
+        rets, holds, tks, dates = acc[w]
+        ret = r["exit_return"]
+        if ret is None:
+            # Skipped, not zero-filled: a missing return is not a flat
+            # trade, and averaging it in as one drags the row toward zero.
+            # Counted and surfaced, because on the policy path the combine
+            # should always produce a value -- if these appear, that is news
+            # rather than housekeeping.
+            nulls[w] += 1
+            continue
+        rets.append(float(ret))
+        holds.append(float(r["exit_bar"] or 0.0))
+        tks[r["ticker"]] += 1
+        dates.append(r["trade_date"])
+    out = {}
+    for w, (rets, holds, tks, dates) in acc.items():
+        span = ((max(dates) - min(dates)).days if len(dates) > 1 else 1)
+        out[w] = _window_stats(rets, holds, tks, span)
+        out[w]["null_returns"] = nulls[w]
+    return out
+
+
+class BatchCtx:
+    """Everything a batch shares across its variants, resolved once.
+
+    Built from the base request, so a variant supplies only what it varies.
+    The per-date counts and the holding-period CDF resolve lazily: the grid
+    never randomises, and making it pay for two queries it will not read
+    would be a real cost at grid sizes.
+    """
+
+    def __init__(self, req, rules, by_key, cutoff_d, cutoff_iso, args,
+                 where_bins, cell_pred, strike_pred):
+        self.req = req
+        self.rules = rules
+        self.by_key = by_key
+        self.cutoff_d = cutoff_d
+        self.cutoff_iso = cutoff_iso
+        self.args = args
+        self.where_bins = where_bins
+        self.cell_pred = cell_pred
+        self.strike_pred = strike_pred
+        self.want_dates = None
+        self.want_ks = None
+        self.cdf = None          # (ns, los, his)
+        self.ret_case = None
+        self.hold = None
+        # Resolved ONCE, under a lock. Without it the guard in ensure_random
+        # is a race with teeth: want_dates is assigned before cdf, so a
+        # second variant could see the shape already resolved, return
+        # immediately, and unpack cdf while it was still None. It fires only
+        # under concurrency -- which is the only way this is ever called --
+        # and would read as a data problem rather than a lock problem.
+        self._lock = asyncio.Lock()
+        self._resolved = False
+        self._resolve_err = None
+
+    def combine(self, rule_keys):
+        return build_combine_sql(rule_keys, self.by_key, include_exit_rule=True)
+
+    async def ensure_random(self, conn):
+        """Resolve the entry shape and the holding-period distribution.
+
+        Both are measured off the BASE policy under the BASE rules, once.
+        Every baseline in a suite matches the same real zone, so deriving
+        them per variant would be the same two queries thirty times -- and
+        worse, would let two variants disagree about what they are matching.
+
+        Returns an error string or None. Not raising, because a batch
+        reports per-variant failures rather than dying.
+        """
+        async with self._lock:
+            if self._resolved:
+                return self._resolve_err
+            self._resolve_err = await self._resolve(conn)
+            self._resolved = True
+            return self._resolve_err
+
+    async def _resolve(self, conn):
+        combine_sql, _ = self.combine(self.req.rule_keys)
+        cnt = await conn.fetch(
+            _zone_count_sql(combine_sql, self.where_bins,
+                            self.cell_pred, self.strike_pred), *self.args)
+        if not cnt:
+            return "the selected zone has no trades — nothing to match against"
+        self.want_dates = [r["trade_date"] for r in cnt]
+        self.want_ks = [int(r["k"]) for r in cnt]
+
+        avail = _maxdays_rules(self.rules)
+        if not avail:
+            return "no max_days rules in trade_path_rules"
+        h = await conn.fetch(f"""
+        WITH c AS (
+{combine_sql}
+        )
+        SELECT GREATEST(1, CEIL(c.exit_bar / {BARS_PER_SESSION}))::int AS sess,
+               COUNT(*) AS n
+        FROM c
+        JOIN tt_bins bt USING (ticker, trade_date)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
+              AND {self.where_bins} AND {self.cell_pred}{self.strike_pred}
+        GROUP BY 1
+        """, *self.args)
+        ns, los, his = _hold_cdf({int(r["sess"]): int(r["n"]) for r in h},
+                                 [n for n, _ in avail])
+        if not ns:
+            return "could not build a holding-period distribution"
+        col_by_n = dict(avail)
+        self.cdf = (ns, los, his)
+        self.ret_case = ("CASE d.n_days\n"
+                         + "\n".join(f"               WHEN {n} THEN t2.{col_by_n[n]}"
+                                     for n in ns)
+                         + "\n           END")
+        self.hold = {"periods": ns,
+                     "avg_sessions": round(
+                         sum(n * (b - a) for n, a, b in zip(ns, los, his)), 2)}
+        return None
+
+
+def _policy_sql(combine_sql: str, where_bins: str,
+                cell_pred: str, strike_pred: str) -> str:
+    """The zone's own trades under one exit policy -- no randomisation.
+
+    $2 is cast for the same reason _zone_count_sql casts it: it is the only
+    typed context the parameter gets in this statement.
+    """
+    return f"""
+    WITH c AS (
+{combine_sql}
+    )
+    SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return,
+           (c.trade_date < $2::date) AS is_train
+    FROM c
+    JOIN tt_bins bt USING (ticker, trade_date)
+    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+    WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+    -- NOT optional. max_dd is a running peak-to-trough over np.cumsum, so
+    -- it depends on the order rows arrive in; without this the policy row's
+    -- Max DD and Calmar would be computed over whatever order the planner
+    -- happened to emit, and would not match the stat bar. The three random
+    -- samplers already order by the same key.
+    ORDER BY c.trade_date, c.ticker
+    """
+
+
+async def _run_variant(pool, ctx, v: dict) -> dict:
+    """One variant, on its own pooled connection."""
+    rule_keys = v.get("rule_keys") or ctx.req.rule_keys
+    kind = v.get("baseline_kind")
+    seed = v.get("seed")
+    out = {"key": v["key"], "group": v.get("group"), "seed": seed, "kind": kind}
+    async with pool.acquire() as conn:
+        try:
+            combine_sql, meta = ctx.combine(rule_keys)
+        except CombineError as e:
+            return {**out, "error": str(e)}
+
+        ns = los = his = None
+        if kind:
+            err = await ctx.ensure_random(conn)
+            if err:
+                return {**out, "error": err}
+            ns, los, his = ctx.cdf
+
+        if not kind:
+            rows = await conn.fetch(
+                _policy_sql(combine_sql, ctx.where_bins, ctx.cell_pred,
+                            ctx.strike_pred), *ctx.args)
+        elif kind == "entry":
+            r_strike, r_args = "", []
+            if ctx.req.max_strike and ctx.req.max_strike > 0:
+                r_strike = " AND tp.entry_price <= $6"
+                r_args = [float(ctx.req.max_strike)]
+            rows = await conn.fetch(
+                _random_zone_sql(combine_sql, r_strike),
+                ctx.req.entry_anchor, ctx.cutoff_d, ctx.want_dates, ctx.want_ks,
+                str(seed), *r_args)
+        elif kind == "entry_exit":
+            r_strike, r_args = "", []
+            if ctx.req.max_strike and ctx.req.max_strike > 0:
+                r_strike = " AND tp.entry_price <= $9"
+                r_args = [float(ctx.req.max_strike)]
+            rows = await conn.fetch(
+                _random_exit_zone_sql(combine_sql, ctx.ret_case, r_strike),
+                ctx.req.entry_anchor, ctx.cutoff_d, ctx.want_dates, ctx.want_ks,
+                str(seed), ns, los, his, *r_args)
+        elif kind == "exit":
+            base_n = len(ctx.args)
+            rows = await conn.fetch(
+                _random_exit_only_sql(combine_sql, ctx.where_bins, ctx.cell_pred,
+                                      ctx.strike_pred, ctx.ret_case,
+                                      base_n + 1, base_n + 2, base_n + 3, base_n + 4),
+                *ctx.args, str(seed), ns, los, his)
+        else:
+            return {**out, "error": f"unknown baseline_kind {kind!r}"}
+
+    st = _stats_by_window(rows)
+    return {**out, "rule_keys": list(rule_keys),
+            "train": st["train"], "test": st["test"],
+            "horizon_auto_added": meta["horizon_auto_added"]}
+
+
+async def run_batch(pool, ctx, variants: list,
+                    concurrency: int = BATCH_MAX_CONCURRENCY) -> list:
+    """Run every variant concurrently against the same zone.
+
+    A semaphore rather than an unbounded gather: sixty simultaneous acquires
+    on a ten-connection pool would queue anyway, but they would ALSO hold
+    every other request on the page behind them.
+
+    A variant that raises returns an error entry instead of taking the batch
+    down. One bad parameter set in a grid should cost that cell, not the
+    whole surface -- and at 60+ variants, losing the batch to the last one
+    is losing 90 seconds.
+    """
+    sem = asyncio.Semaphore(max(1, min(int(concurrency), BATCH_MAX_CONCURRENCY)))
+
+    async def one(v):
+        async with sem:
+            try:
+                return await _run_variant(pool, ctx, v)
+            except Exception as e:
+                logging.exception("factor-trades batch variant failed: %s", v.get("key"))
+                return {"key": v["key"], "group": v.get("group"),
+                        "error": f"{type(e).__name__}: {e}"}
+
+    return await asyncio.gather(*[one(v) for v in variants])
+
+
+# ── Baseline suite ────────────────────────────────────────────────────────
+
+# Metrics reported per run type. All are RETURN-unit (additive), which is
+# what _window_stats computes -- NOT the dollar-sized figures the stat bar
+# shows for Total / Avg Annual / Max DD / Calmar.
+#
+# That difference is deliberate and has to be labelled in the UI, because
+# two definitions of "Calmar" on one page is exactly the confusion that was
+# fixed once already. The dollar figures are derived client-side by
+# _computeDollarSeries from per-trade rows; reproducing that server-side
+# would be a second implementation of sizing, and shipping ~100k trades to
+# the browser so the existing one could be reused would cost more than the
+# queries do. Return units are also the right unit for THIS table: they are
+# sizing-independent, so a seed comparison is not partly a comparison of
+# how capital happened to be deployed.
+#
+# The labels carry the unit. "Calmar" alone on a page whose stat bar also
+# says "Calmar" is two definitions of one word to be reconciled by hand
+# across sixty numbers -- the same failure as a percent Calmar sitting
+# beside a blank dollar Max DD, at forty times the scale.
+SUITE_METRICS = [
+    ("avg_ret",    "Avg Ret"),
+    ("total_ret",  "Total Ret (return units)"),
+    ("avg_annual", "Avg Annual Ret (return units)"),
+    ("max_dd",     "Max DD (return units)"),
+    ("calmar",     "Calmar (return units)"),
+]
+
+# Stated on the panel and repeated in the CSV, not left to the column
+# labels alone.
+SUITE_UNITS_NOTE = (
+    "Return units, not dollars: additive per-trade returns, independent of "
+    "the $/trade and daily-cap sizing. These will NOT match the stat bar's "
+    "Total Ret / Avg Annual / Max DD / Calmar, which are dollar-sized. "
+    "Sizing is constant across draws, so it cannot affect which draws the "
+    "policy beats."
+)
+
+# Higher is better for every metric except max_dd, which is negative and
+# where closer to zero wins. Getting this wrong would invert the headline
+# "beats N of M" number on one column and read as a finding.
+SUITE_HIGHER_IS_BETTER = {"avg_ret": True, "total_ret": True,
+                          "avg_annual": True, "max_dd": True, "calmar": True}
+
+SUITE_GROUPS = [
+    ("policy",     "Policy (signal entries + rule exits)", None),
+    ("entry",      "Random entries + rule exits",          "entry"),
+    ("exit",       "Signal entries + random exits",        "exit"),
+    ("entry_exit", "Random entries + random exits",        "entry_exit"),
+]
+
+
+def _suite_seeds(n: int, base: int) -> list[int]:
+    """Deterministic seed list, so a suite is reproducible.
+
+    Derived from the base seed rather than drawn randomly: re-running a
+    suite on the same zone must give the same table, or "beats 0 of 10"
+    cannot be checked. Re-sampling the suite means passing a different base.
+    """
+    return [base + 1000003 * i for i in range(max(1, n))]
+
+
+def _suite_summary(values: list) -> dict:
+    """mean / sd / min / max over the draws of one run type and metric."""
+    v = [float(x) for x in values if x is not None]
+    if not v:
+        return {"n": 0, "mean": None, "sd": None, "min": None, "max": None}
+    a = np.asarray(v, dtype=np.float64)
+    return {"n": len(v), "mean": float(a.mean()),
+            # Population sd: these ARE all the draws taken, not a sample of
+            # some larger set of draws.
+            "sd": float(a.std()) if len(v) > 1 else 0.0,
+            "min": float(a.min()), "max": float(a.max())}
+
+
+class SuiteReq(ZoneReq):
+    n_draws: int = 10
+    concurrency: int = BATCH_MAX_CONCURRENCY
+
+
+@router.post("/suite")
+async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
+    """Policy + three baseline types x N seeds, train and test, in one batch.
+
+    A thin layer on run_batch. The parameter grid will be another one: it
+    varies rule_keys where this varies seed, and reads the same matrix.
+
+    The headline number is BEATS: how many of the N draws the policy beat on
+    each metric. "Signal beats 0 of 10" answers the question directly, where
+    two means require the reader to hold a distribution in their head.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.cells:
+        return {"error": "no cells selected"}
+
+    from app.routers.oi_analysis import _get_tt_cutoff
+
+    n = max(1, min(50, int(req.n_draws)))
+
+    async with pool.acquire() as conn:
+        rules = await _load_rules(conn)
+        if not rules:
+            return {"error": "trade_path_rules is empty"}
+        by_key = by_key_from_rows(rules)
+
+        bin_cols = await _bin_columns(conn)
+        p_col = f"bin20_{req.primary_metric}"
+        if p_col not in bin_cols:
+            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
+        two_factor = bool(req.secondary_metric)
+        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
+        if two_factor and s_col not in bin_cols:
+            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
+
+        cutoff_iso = await _get_tt_cutoff(pool)
+        if not cutoff_iso:
+            return {"error": "tt_bins has no cutoff_date"}
+        try:
+            cutoff_d = _date.fromisoformat(cutoff_iso)
+        except (TypeError, ValueError):
+            return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
+
+        n_bins = max(2, min(20, int(req.n_bins)))
+
+        def _collapse(col: str) -> str:
+            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+
+        bps, bss = [], []
+        for c in req.cells:
+            if not c:
+                continue
+            bp = int(c[0])
+            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
+            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
+                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
+            bps.append(bp); bss.append(bs)
+        if not bps:
+            return {"error": "no valid cells"}
+
+        if two_factor:
+            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
+                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
+            args = [req.entry_anchor, cutoff_d, bps, bss]
+        else:
+            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
+            args = [req.entry_anchor, cutoff_d, bps]
+
+        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+
+        strike_pred = ""
+        if req.max_strike and req.max_strike > 0:
+            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
+            args = args + [float(req.max_strike)]
+
+    ctx = BatchCtx(req, rules, by_key, cutoff_d, cutoff_iso, args,
+                   where_bins, cell_pred, strike_pred)
+
+    base_seed = DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)
+    seeds = _suite_seeds(n, base_seed)
+
+    # The policy row is generated by the SAME code path as the baselines --
+    # one variant among the rest, folded by the same _stats_by_window. A row
+    # transcribed from a previous run is a row that can silently be from a
+    # different population.
+    variants = [{"key": "policy", "group": "policy", "baseline_kind": None}]
+    for gkey, _label, kind in SUITE_GROUPS:
+        if kind is None:
+            continue
+        for s in seeds:
+            variants.append({"key": f"{gkey}:{s}", "group": gkey,
+                             "baseline_kind": kind, "seed": s})
+
+    results = await run_batch(pool, ctx, variants, req.concurrency)
+
+    by_group: dict = {}
+    errors = []
+    policy = None
+    for r in results:
+        if r.get("error"):
+            errors.append({"key": r["key"], "error": r["error"]})
+            continue
+        if r["group"] == "policy":
+            policy = r
+        else:
+            by_group.setdefault(r["group"], []).append(r)
+
+    if policy is None:
+        return {"error": "the policy run failed, so nothing can be compared "
+                         "against it", "errors": errors}
+
+    rows = []
+    for gkey, label, kind in SUITE_GROUPS:
+        if kind is None:
+            rows.append({
+                "key": gkey, "label": label, "kind": None, "draws": 1,
+                "train": {m: {"value": policy["train"].get(m)} for m, _ in SUITE_METRICS},
+                "test":  {m: {"value": policy["test"].get(m)}  for m, _ in SUITE_METRICS},
+            })
+            continue
+        got = by_group.get(gkey, [])
+        row = {"key": gkey, "label": label, "kind": kind, "draws": len(got)}
+        for win in ("train", "test"):
+            cells = {}
+            for m, _ in SUITE_METRICS:
+                vals = [g[win].get(m) for g in got]
+                summ = _suite_summary(vals)
+                pv = policy[win].get(m)
+                # BEATS: draws the POLICY beat. Counted only over draws that
+                # produced a value, and reported with that denominator, so a
+                # failed draw cannot inflate the score.
+                comparable = [float(x) for x in vals if x is not None]
+                if pv is None or not comparable:
+                    summ["beats"] = None
+                    summ["of"] = len(comparable)
+                else:
+                    hib = SUITE_HIGHER_IS_BETTER.get(m, True)
+                    summ["beats"] = sum(1 for x in comparable
+                                        if ((pv > x) if hib else (pv < x)))
+                    summ["of"] = len(comparable)
+                cells[m] = summ
+            row[win] = cells
+        rows.append(row)
+
+    return {
+        "n_draws": n, "base_seed": base_seed, "seeds": seeds,
+        "cutoff_date": cutoff_iso,
+        "cells": req.cells,
+        "rule_keys": list(req.rule_keys),
+        "entry_anchor": req.entry_anchor,
+        "max_strike": req.max_strike,
+        "metrics": [{"key": k, "label": l} for k, l in SUITE_METRICS],
+        "rows": rows,
+        "hold": ctx.hold,
+        "n_variants": len(variants),
+        "concurrency": max(1, min(int(req.concurrency), BATCH_MAX_CONCURRENCY)),
+        # Surfaced, never swallowed: a suite missing draws is a different
+        # table from a suite where every draw ran.
+        "errors": errors,
+        "units": "return",
+        "units_note": SUITE_UNITS_NOTE,
     }

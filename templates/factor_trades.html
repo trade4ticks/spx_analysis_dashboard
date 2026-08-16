@@ -111,12 +111,37 @@
     .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
     .ft-win span.on.test { background:rgba(232,67,147,.25); color:#e84393; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
+    /* Suite table. Each cell stacks the headline (how many draws the policy
+       beat) over the supporting distribution, because the headline is the
+       number being read and the rest is why. */
+    .ft-suite { border-collapse:collapse; font-size:11px; width:100%; }
+    .ft-suite th { text-align:center; padding:4px 8px; color:var(--muted);
+                   font-weight:700; font-size:10px; text-transform:uppercase;
+                   letter-spacing:.3px; border-bottom:1px solid var(--border);
+                   white-space:nowrap; }
+    .ft-suite td { text-align:center; padding:5px 8px; color:var(--text);
+                   border-bottom:1px solid rgba(255,255,255,.05);
+                   vertical-align:top; white-space:nowrap; }
+    .ft-suite tr.policy td { background:rgba(52,152,219,.08); font-weight:600; }
+    .ft-suite .sv { display:block; font-family:monospace; font-size:12px; }
+    .ft-suite .sd { display:block; font-size:9px; color:var(--dim);
+                    font-family:monospace; }
+    .ft-suite .sb { display:block; font-size:10px; font-weight:700;
+                    color:var(--dim); }
+    /* Green only on a clean sweep — "beats 9 of 10" is one draw from
+       ambiguous and must not read as a result. */
+    .ft-suite .sb.sb-win  { color:#1abc9c; }
+    .ft-suite .sb.sb-loss { color:#e84393; }
+    .ft-suite .sb.sb-mid  { color:#c8c8c8; }
+    .ft-units { font-size:10px; color:#c8c8c8; margin-bottom:8px; padding:5px 9px;
+                border-radius:3px; background:rgba(255,255,255,.04);
+                border:1px solid var(--border); line-height:1.5; }
     .ft-tt   { font-size:10px; color:#c8c8c8; font-weight:400; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=35"></script>
+  <script src="/static/js/factor_trades.js?v=36"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -293,6 +318,21 @@
       <div class="ft-note" x-show="!selectedCells.length" style="margin-top:4px">
         Baseline needs a selected zone.
       </div>
+
+      <div class="ft-sec-h" style="margin-top:12px">Baseline suite</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="margin:0;flex:0 0 auto">Draws</label>
+        <input type="number" min="1" max="50" step="1" x-model.number="suiteN"
+               style="flex:1;min-width:0">
+      </div>
+      {#- One batch instead of re-sampling by hand: policy + three baseline
+          types x N seeds, both windows. Not interactive while it runs --
+          6N+2 queries is a batch, and a partial table would look finished. -#}
+      <button class="ft-btn primary" @click="runSuite()"
+              :disabled="suiteRunning || loading || !selectedCells.length"
+              title="Policy plus all three baseline types, N seeds each, train and test, in one batch. Reports mean / sd / min / max per run type and — the number that answers the question — how many of the N draws the policy beat."
+              x-text="suiteRunning ? ('Running… ' + suiteElapsed + 's')
+                                   : ('Run baseline suite (' + (3 * (+suiteN || 10) + 1) + ' queries)')"></button>
       <div class="ft-note" x-show="error" style="margin-top:8px;color:#e84393"
            x-text="error"></div>
     </div>
@@ -375,6 +415,104 @@
                             cls_expr="'hm-cell-selectable' + (isCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
                             click_expr='toggleCell(ix, iy)') | indent(10) | safe }}
         </div>
+      </div>
+
+
+      <!-- 1b. Baseline suite. Policy + three baseline types x N seeds, both
+           windows, in one batch — the loop that was being run by hand and
+           transcribed into a spreadsheet. -->
+      <div class="chart-box" x-show="suiteData || suiteRunning">
+        <div class="chart-title">
+          Baseline suite
+          <span class="ft-note" x-show="suiteData"
+                x-text="'' + (suiteData?.n_draws ?? 0) + ' draws per type · base seed '
+                        + (suiteData?.base_seed ?? '') + ' · ' + (suiteData?.n_variants ?? 0)
+                        + ' runs at ' + (suiteData?.concurrency ?? 0) + '-way concurrency'"></span>
+          <button class="ft-fs" @click="suiteCsv()" x-show="suiteData"
+                  style="float:right;margin-left:6px" title="Export the whole table">CSV</button>
+        </div>
+
+        <div x-show="suiteRunning" class="ft-note" style="padding:14px 2px">
+          Running <span x-text="3 * (+suiteN || 10) + 1"></span> queries…
+          <span x-text="suiteElapsed + 's'"></span> elapsed,
+          ~<span x-text="suiteEstimate() + 's'"></span> expected.
+        </div>
+
+        <template x-if="suiteData">
+          <div>
+            <!-- Stated, not left to the column labels alone. Two numbers
+                 called Calmar on one page is the failure this prevents. -->
+            <div class="ft-units" x-text="suiteData.units_note"></div>
+
+            <div class="ft-note" x-show="(suiteData.errors || []).length"
+                 style="color:#e84393;margin-bottom:6px">
+              <span x-text="(suiteData.errors || []).length"></span> draw(s) failed —
+              the mean and the beats count below cover only the draws that ran.
+            </div>
+
+            <template x-for="win in ['train', 'test']" :key="'sw-' + win">
+              <div style="margin-bottom:12px">
+                <div class="ft-subhead" style="justify-content:flex-start;margin-bottom:4px">
+                  <div :style="win === 'test' ? 'color:#e84393' : 'color:#3498db'"
+                       x-text="win.toUpperCase() + ' window'"></div>
+                </div>
+                <div style="overflow-x:auto">
+                  <table class="ft-suite">
+                    <thead>
+                      <tr>
+                        <th style="text-align:left">Run type</th>
+                        <template x-for="m in suiteData.metrics" :key="'sh-' + win + m.key">
+                          <th x-text="m.label"></th>
+                        </template>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="row in suiteData.rows" :key="'sr-' + win + row.key">
+                        <tr :class="row.kind === null ? 'policy' : ''">
+                          <td style="text-align:left">
+                            <span x-text="row.label"></span>
+                            <span class="ft-note" x-show="row.kind !== null"
+                                  x-text="' · ' + row.draws + ' draws'"></span>
+                          </td>
+                          <template x-for="m in suiteData.metrics" :key="'sc-' + win + row.key + m.key">
+                            <td>
+                              <!-- Policy row: one number, no distribution. -->
+                              <template x-if="row.kind === null">
+                                <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].value)"></span>
+                              </template>
+                              <template x-if="row.kind !== null">
+                                <div>
+                                  <!-- The headline first: how many draws the
+                                       policy beat. Everything under it is
+                                       the supporting distribution. -->
+                                  <span class="sb" :class="suiteBeatsClass(row[win][m.key])"
+                                        x-text="row[win][m.key].beats == null ? '—'
+                                                : ('beats ' + row[win][m.key].beats
+                                                   + ' of ' + row[win][m.key].of)"></span>
+                                  <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].mean)"></span>
+                                  <span class="sd"
+                                        x-text="'sd ' + suiteFmt(m.key, row[win][m.key].sd)"></span>
+                                  <span class="sd"
+                                        x-text="suiteFmt(m.key, row[win][m.key].min) + ' … '
+                                                + suiteFmt(m.key, row[win][m.key].max)"></span>
+                                </div>
+                              </template>
+                            </td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+
+            <div class="ft-note" x-show="suiteData.hold"
+                 x-text="'Random-exit rows drew holding periods averaging '
+                         + (suiteData.hold?.avg_sessions ?? 0)
+                         + ' sessions, from the policy\'s own distribution.'"></div>
+          </div>
+        </template>
       </div>
 
       <div x-show="lockedRun && (lockedRun.window||'train') !== window"

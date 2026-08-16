@@ -307,6 +307,126 @@ document.addEventListener('alpine:init', () => {
       entry_exit: { label: 'random entries + exits', card: 'RANDOM ENTRIES + EXITS',
                     row: 'rand entry+exit', colour: '#1abc9c' },
     },
+    // ── Baseline suite ───────────────────────────────────────────────────
+    // One batch: the policy plus three baseline types x N seeds, train and
+    // test. Replaces re-sampling by hand and transcribing into a spreadsheet.
+    //
+    // Deliberately NOT interactive while it runs -- 6N+2 queries is a batch,
+    // and pretending otherwise would mean partial tables that look finished.
+    suiteN: 10,
+    suiteData: null,
+    suiteRunning: false,
+    suiteElapsed: 0,
+    _suiteTimer: null,
+
+    async runSuite() {
+      if (!this.runData) { this.error = 'run a policy first'; return; }
+      if (!this.selectedCells.length) {
+        this.error = 'select a zone first — the suite matches every baseline '
+                   + 'to its trade count and date distribution';
+        return;
+      }
+      const src = this.runData;
+      this.suiteRunning = true; this.error = ''; this.suiteElapsed = 0;
+      // A wall clock rather than a percentage: the server returns one
+      // response at the end, so any progress bar would be invented. Elapsed
+      // seconds against a stated estimate is the honest version.
+      this._suiteTimer = setInterval(() => { this.suiteElapsed += 1; }, 1000);
+      try {
+        const r = await fetch('/api/factor-trades/suite', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+            entry_anchor: src.entry_anchor, rule_keys: src.rules,
+            n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
+            window: this.window, cells: this.selectedCells,
+            seed: this.baselineSeed, n_draws: +this.suiteN || 10,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        this.suiteData = d;
+      } catch (e) { this.error = String(e); }
+      finally {
+        this.suiteRunning = false;
+        if (this._suiteTimer) { clearInterval(this._suiteTimer); this._suiteTimer = null; }
+      }
+    },
+
+    suiteEstimate() {
+      // 6N+2 queries at ~1.4s, divided by the server's concurrency cap.
+      const n = +this.suiteN || 10;
+      const q = 3 * n + 1;
+      const c = this.suiteData?.concurrency || 5;
+      return Math.round(q * 1.4 / c);
+    },
+
+    // Formatters. Return units throughout — see suiteData.units_note.
+    suiteFmt(metric, v) {
+      if (v == null) return '—';
+      if (metric === 'calmar') return (+v).toFixed(2);
+      return ((+v) * 100).toFixed(2) + '%';
+    },
+    // The headline. "beats 0 of 10" answers the question directly where two
+    // means ask the reader to hold a distribution in their head.
+    suiteBeatsClass(cell) {
+      if (!cell || cell.beats == null || !cell.of) return '';
+      const f = cell.beats / cell.of;
+      // Green only at a clean sweep: "beat 9 of 10" is one draw away from
+      // ambiguous and should not read as a result.
+      return f >= 1 ? 'sb-win' : (f === 0 ? 'sb-loss' : 'sb-mid');
+    },
+
+    suiteCsv() {
+      const d = this.suiteData;
+      if (!d) return;
+      const esc = (x) => {
+        const s = String(x ?? '');
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const out = [];
+      // Provenance first: a table of sixty numbers with no record of which
+      // zone, policy and seeds produced it is not reusable a week later.
+      out.push(['# Factor Trades — baseline suite']);
+      out.push(['# units', d.units_note]);
+      out.push(['# cutoff', d.cutoff_date]);
+      out.push(['# entry_anchor', d.entry_anchor]);
+      out.push(['# max_strike', d.max_strike ?? '']);
+      out.push(['# cells', JSON.stringify(d.cells)]);
+      out.push(['# rules', (d.rule_keys || []).join(' | ')]);
+      out.push(['# draws', d.n_draws, 'base_seed', d.base_seed]);
+      out.push(['# seeds', (d.seeds || []).join(' ')]);
+      if (d.hold) out.push(['# drawn hold (sessions)', d.hold.avg_sessions]);
+      for (const e of (d.errors || [])) out.push(['# FAILED', e.key, e.error]);
+      out.push([]);
+      out.push(['window', 'run type', 'metric', 'draws',
+                'policy', 'mean', 'sd', 'min', 'max', 'policy beats', 'of']);
+      for (const win of ['train', 'test']) {
+        const pol = (d.rows || []).find(r => r.kind === null);
+        for (const row of (d.rows || [])) {
+          for (const m of (d.metrics || [])) {
+            const c = row[win]?.[m.key] || {};
+            const pv = pol?.[win]?.[m.key]?.value;
+            out.push([win, row.label, m.label, row.draws,
+                      row.kind === null ? (c.value ?? '') : (pv ?? ''),
+                      row.kind === null ? '' : (c.mean ?? ''),
+                      row.kind === null ? '' : (c.sd ?? ''),
+                      row.kind === null ? '' : (c.min ?? ''),
+                      row.kind === null ? '' : (c.max ?? ''),
+                      row.kind === null ? '' : (c.beats ?? ''),
+                      row.kind === null ? '' : (c.of ?? '')]);
+          }
+        }
+      }
+      const blob = new Blob([out.map(r => r.map(esc).join(',')).join('\n')],
+                            { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `factor_trades_suite_${d.n_draws}x_${d.base_seed}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+
     async runBaseline(resample = false, kind = 'entry') {
       if (!this.runData) { this.error = 'run a policy first'; return; }
       if (!this.selectedCells.length) {
