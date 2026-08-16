@@ -72,6 +72,7 @@ def main() -> int:
     # need a live database, and it catches the class the others cannot.
     static_bad = _check_undefined_names()
     static_bad += _check_alpine_templates()
+    static_bad += _check_sql_placeholders()
 
     import app.main as main_mod
 
@@ -156,6 +157,80 @@ def main() -> int:
 
     api_bad = _check_factor_trades(app, real_db, why_not)
     return 1 if (bad or api_bad or static_bad) else 0
+
+
+def _check_sql_placeholders() -> int:
+    """Gate: does every $N a query is GIVEN actually appear in that query?
+
+    Why this exists
+    ---------------
+    asyncpg sends every argument it is handed. If a parameter appears
+    NOWHERE in the statement, Postgres has no typed context for it and
+    raises, at query time:
+
+        IndeterminateDatatypeError: could not determine data type of
+        parameter $2
+
+    That is not a "harmless unused argument". It is a 500.
+
+    It happened on the random-entry baseline: the per-date COUNT query
+    reuses the zone query's arg list verbatim (its cell and strike
+    predicates are that query's own fragments, with placeholder numbers
+    computed against it), but dropped the SELECT expression that was $2's
+    only appearance. Nothing in the source looked wrong -- the arg list was
+    correct and deliberate -- and the check that would have caught it is
+    simply "is every index from 1 to the highest one referenced".
+
+    Applies to the SQL builder functions, which is why those queries were
+    extracted from their call sites: an f-string built inline cannot be
+    inspected without executing the endpoint.
+    """
+    from app.routers import factor_trades as ft
+
+    # (label, sql) for every builder, exercised BOTH with and without the
+    # optional filters -- a placeholder can be present in one shape of the
+    # query and absent in the other.
+    # These mirror the FOUR shapes zone() actually builds. The single-metric
+    # cell predicate consumes $3 and the two-factor one consumes $3 and $4,
+    # so the optional strike filter lands on $4 or $5 respectively -- zone()
+    # computes that index from len(args) rather than hardcoding it. Pairing a
+    # 1f predicate with the 2f strike index produces a query that IS broken,
+    # which this gate correctly flags; getting the stubs wrong therefore
+    # reports a bug in the test rather than in the code, so they are spelled
+    # out per shape instead of looped over one predicate.
+    CELL_1F = "y = ANY($3::int[])"
+    CELL_2F = "(y, z) IN (SELECT * FROM unnest($3::int[], $4::int[]))"
+    cases = [
+        ("_zone_count_sql 1f",          ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_1F, "")),
+        ("_zone_count_sql 1f +strike",  ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_1F,
+                                                           " AND tp.entry_price <= $4")),
+        ("_zone_count_sql 2f",          ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_2F, "")),
+        ("_zone_count_sql 2f +strike",  ft._zone_count_sql("SELECT 1", "bt.x > 0", CELL_2F,
+                                                           " AND tp.entry_price <= $5")),
+        # The random sampler fixes $1..$5 itself, so the strike filter is
+        # always $6 regardless of metric mode.
+        ("_random_zone_sql",            ft._random_zone_sql("SELECT 1", "")),
+        ("_random_zone_sql +strike",    ft._random_zone_sql("SELECT 1", " AND tp.entry_price <= $6")),
+    ]
+
+    bad = 0
+    for label, sql in cases:
+        used = {int(x) for x in re.findall(r"\$(\d+)", sql)}
+        if not used:
+            continue
+        missing = [i for i in range(1, max(used) + 1) if i not in used]
+        if missing:
+            bad += 1
+            print(f"  {label}: takes ${max(used)} but never references "
+                  + ", ".join(f"${i}" for i in missing)
+                  + "  — IndeterminateDatatypeError at query time")
+        else:
+            print(f"  {label}: ${'{'}1..{max(used)}{'}'} all referenced")
+
+    print("sql placeholders: OK" if not bad
+          else f"sql placeholders: {bad} QUERY(S) WITH AN UNREFERENCED PARAMETER")
+    print()
+    return bad
 
 
 def _check_undefined_names() -> int:

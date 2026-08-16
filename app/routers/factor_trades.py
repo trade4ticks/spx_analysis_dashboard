@@ -554,6 +554,36 @@ class ZoneReq(RunReq):
     seed: Optional[int] = None
 
 
+def _zone_count_sql(combine_sql: str, where_bins: str,
+                    cell_pred: str, strike_pred: str) -> str:
+    """Per-date trade counts for the real zone -- the shape a baseline matches.
+
+    Takes the ZONE QUERY'S OWN arg list unchanged, because cell_pred and
+    strike_pred are that query's fragments and their placeholder numbers are
+    computed against it. Renumbering them for a shorter list is exactly how
+    the two populations would drift apart, so the list stays identical and
+    this query simply does not need $2.
+
+    A parameter that appears NOWHERE in a statement has no typed context at
+    all, and Postgres raises IndeterminateDatatypeError ("could not determine
+    data type of parameter $2") rather than ignoring it. The zone query gets
+    $2's type from `(c.trade_date < $2::date) AS is_train` in its SELECT; that
+    expression is gone here, so the cast has to be stated explicitly.
+    """
+    return f"""
+    WITH c AS (
+{combine_sql}
+    )
+    SELECT c.trade_date, COUNT(*) AS k
+    FROM c
+    JOIN tt_bins bt USING (ticker, trade_date)
+    JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+    WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
+          AND {where_bins} AND {cell_pred}{strike_pred}
+    GROUP BY c.trade_date
+    """
+
+
 def _random_zone_sql(combine_sql: str, strike_pred: str) -> str:
     """Sample the SAME NUMBER of trades per date as the real zone, at random.
 
@@ -726,17 +756,9 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             # re-derivation of it. Both windows are counted; the active
             # window filter runs downstream on the random rows exactly as it
             # does on real ones, so TRAIN and TEST both stay matched.
-            cnt_rows = await conn.fetch(f"""
-            WITH c AS (
-{combine_sql}
-            )
-            SELECT c.trade_date, COUNT(*) AS k
-            FROM c
-            JOIN tt_bins bt USING (ticker, trade_date)
-            JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
-            WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
-            GROUP BY c.trade_date
-            """, *args)
+            cnt_rows = await conn.fetch(
+                _zone_count_sql(combine_sql, where_bins, cell_pred, strike_pred),
+                *args)
             if not cnt_rows:
                 return {"error": "the selected zone has no trades — nothing to "
                                  "match a random baseline against"}
