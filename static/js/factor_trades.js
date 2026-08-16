@@ -493,6 +493,13 @@ document.addEventListener('alpine:init', () => {
         this, this.zoneData.window_trades || [],
         this.perTrade, this.dailyCap);
       this.dollarStats = this._dollarStats(ds);
+      // The locked row's dollar boxes were blank because these were only ever
+      // computed for the edited zone. Same function, same sizing inputs, the
+      // locked population.
+      this.lockedDollarStats = this.lockedZone
+        ? this._dollarStats(window.FactorCharts._computeDollarSeries(
+            this, this.lockedZone.window_trades || [], this.perTrade, this.dailyCap))
+        : null;
       // In TRAIN the two populations are identical by construction, so the
       // equity curve's endpoint must equal Total Ret. If it does not, the
       // arrays have been crossed somewhere. Console-loud rather than silent:
@@ -552,6 +559,16 @@ document.addEventListener('alpine:init', () => {
       const src = this.zoneData || this.runData;
       if (!src) return [];
       const pct = v => v == null ? '—' : (v * 100).toFixed(3) + '%';
+      // Annualised dollar return over dollar max drawdown. Blank unless BOTH
+      // inputs are present, so Calmar can never appear beside empty boxes.
+      const calmarRawOf = (s) => {
+        const a = s?.avg_annual_usd, d = s?.max_dd_usd;
+        return (a != null && d != null && d < 0) ? (a / Math.abs(d)) : null;
+      };
+      const calmarOf = (s) => {
+        const v = calmarRawOf(s);
+        return v == null ? '—' : v.toFixed(2);
+      };
       const fmt$ = v => {
         if (v == null) return '—';
         const a = Math.abs(v), sg = v < 0 ? '-' : '';
@@ -578,7 +595,12 @@ document.addEventListener('alpine:init', () => {
           trdYr: (s.trades_per_year ?? 0).toFixed(1),
           // Calmar is null when there is no drawdown — render "—" rather
           // than an infinity dressed up as a great number.
-          calmar: s.calmar != null ? s.calmar.toFixed(2) : '—', calmarRaw: s.calmar ?? 0,
+          // Calmar is derived HERE from the dollar figures shown beside it,
+          // never from the server's percent-based calmar. Those are two
+          // different definitions, and falling back to the other one produced
+          // a populated Calmar sitting next to a blank Max DD -- a number
+          // whose stated inputs were empty, which is worse than no number.
+          calmar: calmarOf(s), calmarRaw: calmarRawOf(s),
           // Dollar figures come from the sizing controls via
           // _computeDollarSeries. Until that path is wired these read "—"
           // rather than a percent mislabelled as dollars, which is what made
@@ -602,8 +624,13 @@ document.addEventListener('alpine:init', () => {
                         { ...src[this.window], ...(this.dollarStats || {}) }, this.window);
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', 'Locked', lockedSrc[this.window], this.window);
+      const locked = mk('locked', 'Locked',
+                        { ...lockedSrc[this.window], ...(this.lockedDollarStats || {}) },
+                        this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
+      const E = this.dollarStats, L = this.lockedDollarStats;
+      const dd = (k) => (E?.[k] != null && L?.[k] != null) ? (E[k] - L[k]) : null;
+      const cE = calmarRawOf(E), cL = calmarRawOf(L);
       const st = src[this.window], lt = lockedSrc[this.window];
       const diff = (locked && edited) ? {
         key: 'change', label: 'Change', window: this.window,
@@ -620,11 +647,12 @@ document.addEventListener('alpine:init', () => {
         avgWin: pct(d(st?.avg_win, lt?.avg_win)), avgWinRaw: d(st?.avg_win, lt?.avg_win),
         avgLoss: pct(d(st?.avg_loss, lt?.avg_loss)), avgLossRaw: d(st?.avg_loss, lt?.avg_loss),
         trdYr: d(st?.trades_per_year, lt?.trades_per_year).toFixed(1),
-        calmar: (st?.calmar != null && lt?.calmar != null)
-                ? d(st.calmar, lt.calmar).toFixed(2) : '—',
-        calmarRaw: d(st?.calmar, lt?.calmar),
-        totalRet: '—', totalRetRaw: 0, avgAnnRet: '—', avgAnnRetRaw: 0,
-        maxDD: '—', maxDDRaw: 0,
+        // Dollar deltas, and a Calmar delta only when both sides have one.
+        totalRet: fmt$(dd('total_ret_usd')), totalRetRaw: dd('total_ret_usd') ?? 0,
+        avgAnnRet: fmt$(dd('avg_annual_usd')), avgAnnRetRaw: dd('avg_annual_usd') ?? 0,
+        maxDD: fmt$(dd('max_dd_usd')), maxDDRaw: dd('max_dd_usd') ?? 0,
+        calmar: (cE != null && cL != null) ? (cE - cL).toFixed(2) : '—',
+        calmarRaw: (cE != null && cL != null) ? (cE - cL) : 0,
         avgDit: d(st?.avg_hold, lt?.avg_hold).toFixed(2) + ' sess',
       } : null;
       return [locked, edited, diff].filter(Boolean);
