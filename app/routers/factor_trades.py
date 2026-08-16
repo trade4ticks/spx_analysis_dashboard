@@ -626,7 +626,11 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         # Trades outside the active window are not returned at all. That is
         # what makes the time-series panes stop at the cutoff in train mode
         # rather than drawing test data the user has chosen not to look at.
-        if win != active:
+        # TRAIN never draws test data at all; TEST draws the full history, so
+        # only the train-mode skip happens before _rec is built. The
+        # single-window filter is applied AFTER series_trades has taken its
+        # copy -- doing it here is what made TEST equity start at the cutoff.
+        if active == "train" and win != "train":
             continue
         ret = float(r["exit_return"] or 0.0)
         hold = float(r["exit_bar"] or 0.0)

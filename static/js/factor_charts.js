@@ -296,7 +296,11 @@ window.FactorCharts = {
     if (_ax) {
       const have = new Set(yearly.map(y => +y.year));
       for (let y = _ax.fromYear; y <= _ax.toYear; y++) {
-        if (!have.has(y)) yearly.push({ year: y, n: 0, value: null, avg_ret: null });
+        // Must match _yearlyForMode's shape exactly. An earlier version
+        // omitted win_rate, which threw inside the colour callback -- and
+        // because every renderer shared one try/catch, that single throw
+        // blanked five panes.
+        if (!have.has(y)) yearly.push({ year: y, value: 0, n: 0, win_rate: 0 });
       }
       yearly.sort((a, b) => (+a.year) - (+b.year));
     }

@@ -454,6 +454,12 @@ document.addEventListener('alpine:init', () => {
           console.error('[factor-trades] TRAIN invariant violated: equity endpoint',
             endPt, '!= Total Ret', this.dollarStats.total_ret_usd,
             '- series_trades and window_trades have been crossed');
+        } else {
+          // Logged on success too. A silent assertion is indistinguishable
+          // from one that never ran, and "these two numbers look close
+          // enough" is exactly the judgement it exists to replace.
+          console.info('[factor-trades] TRAIN invariant ok: equity endpoint',
+            endPt.toFixed(2), '== Total Ret', this.dollarStats.total_ret_usd.toFixed(2));
         }
       }
       // THE one place the two populations meet. The three time-series panes
@@ -464,18 +470,26 @@ document.addEventListener('alpine:init', () => {
       const seriesView = { ...this.zoneData,
                            combined_trades: this.zoneData.series_trades
                                             || this.zoneData.window_trades || [] };
-      try {
-        FC._renderSecEquity(this, 'ft-equity', seriesView, true);
-        FC._renderZoneYearly(this, 'ft-yearly', seriesView);
-        FC._renderSecActivity(this, 'ft-activity-edited', seriesView);
-        FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData);
-        this._renderExitReasons();
-        this._renderPriceBins();
-        if (this.lockedZone) {
-          FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone);
-          FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone);
-        }
-      } catch (e) { console.error('FactorCharts render failed', e); }
+      // Each pane in its own try. One shared try/catch meant a throw in the
+      // second renderer silently blanked the four after it -- one bug
+      // presenting as five broken panes, with nothing to say which was the
+      // cause. Now a failure costs exactly its own pane and names itself.
+      const panes = [
+        ['equity',          () => FC._renderSecEquity(this, 'ft-equity', seriesView, true)],
+        ['annual P&L',      () => FC._renderZoneYearly(this, 'ft-yearly', seriesView)],
+        ['activity',        () => FC._renderSecActivity(this, 'ft-activity-edited', seriesView)],
+        ['ticker breakdown',() => FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData)],
+        ['exit reasons',    () => this._renderExitReasons()],
+        ['price bins',      () => this._renderPriceBins()],
+      ];
+      if (this.lockedZone) {
+        panes.push(['activity (locked)', () => FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone)]);
+        panes.push(['ticker (locked)',   () => FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone)]);
+      }
+      for (const [name, fn] of panes) {
+        try { fn(); }
+        catch (e) { console.error(`[factor-trades] ${name} pane failed to render`, e); }
+      }
     },
 
     // ── Stat rows ────────────────────────────────────────────────────────
