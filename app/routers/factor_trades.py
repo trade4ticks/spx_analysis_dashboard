@@ -707,6 +707,67 @@ def _random_exit_zone_sql(combine_sql: str, ret_case: str, strike_pred: str) -> 
     """
 
 
+def _random_exit_only_sql(combine_sql: str, where_bins: str, cell_pred: str,
+                          strike_pred: str, ret_case: str,
+                          p_seed: int, p_ns: int, p_lo: int, p_hi: int) -> str:
+    """The signal's REAL entries with a randomly drawn holding period.
+
+    Completes the 2x2. With policy = signal entries + rule exits:
+
+        policy   vs  exit-only    -> do my exit rules add value ON MY TRADES
+        policy   vs  entry-only   -> does my selection beat chance
+        both     vs  entry+exit   -> the combined effect over the floor
+
+    Exit-only is the more direct question about exit rules than entry+exit
+    is, because it asks it against the trades actually being taken rather
+    than against random ones.
+
+    Uses the SAME exit salt as _random_exit_zone_sql, so a given
+    (ticker, date) draws the same holding period in both and the two
+    random-exit runs differ only by entry selection -- the same principle as
+    sharing the entry draw between the two random-entry runs. Note what that
+    does and does not claim: the two runs hold different TRADES, so their
+    drawn periods are not trade-for-trade identical; what is identical is the
+    drawing rule and the distribution, so no part of the gap between them is
+    a different exit draw.
+
+    Placeholder positions are passed in because this query reuses the zone
+    query's own cell and strike predicates, whose numbers are computed
+    against that arg list. The new parameters are APPENDED after it rather
+    than renumbering those fragments.
+    """
+    u = _u01(f"c.ticker || '|' || c.trade_date::text || '|' || ${p_seed}::text"
+             f" || '{_EXIT_SALT}'")
+    return f"""
+    WITH c AS (
+{combine_sql}
+    ),
+    cdf AS (
+        SELECT * FROM unnest(${p_ns}::int[], ${p_lo}::float8[], ${p_hi}::float8[])
+                     AS t(n_days, lo, hi)
+    ),
+    base AS (
+        SELECT c.ticker, c.trade_date, tp.entry_price, {u} AS u
+        FROM c
+        JOIN tt_bins bt USING (ticker, trade_date)
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+    )
+    SELECT b.ticker, b.trade_date,
+           (d.n_days * {BARS_PER_SESSION})::float8 AS exit_bar,
+           {ret_case} AS exit_return,
+           'max_days__' || d.n_days::text AS exit_rule,
+           b.entry_price,
+           (b.trade_date < $2::date) AS is_train
+    FROM base b
+    JOIN cdf d ON b.u >= d.lo AND b.u < d.hi
+    JOIN trade_paths t2 ON t2.ticker = b.ticker
+                       AND t2.trade_date = b.trade_date
+                       AND t2.entry_anchor = $1
+    ORDER BY b.trade_date, b.ticker
+    """
+
+
 def _zone_count_sql(combine_sql: str, where_bins: str,
                     cell_pred: str, strike_pred: str) -> str:
     """Per-date trade counts for the real zone -- the shape a baseline matches.
@@ -923,7 +984,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             # optional strike filter takes $6 -- it cannot reuse the zone
             # query's computed index, which counted a different arg list.
             kind = (req.baseline_kind or "entry").strip()
-            if kind not in ("entry", "entry_exit"):
+            if kind not in ("entry", "exit", "entry_exit"):
                 return {"error": f"unknown baseline_kind {req.baseline_kind!r}"}
 
             if kind == "entry":
@@ -936,6 +997,10 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
                     req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *r_args)
                 hold_note = None
             else:
+                # Both random-exit kinds. One CDF, one CASE, built once and
+                # used by whichever sampler runs -- two constructions is how
+                # "the same holding-period distribution" would stop being
+                # true without anything failing.
                 avail = _maxdays_rules(rules)
                 if not avail:
                     return {"error": "no max_days rules in trade_path_rules — a "
@@ -970,14 +1035,26 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
                             + "\n".join(f"               WHEN {n} THEN t2.{col_by_n[n]}"
                                         for n in ns)
                             + "\n           END")
-                r_strike, r_args = "", []
-                if req.max_strike and req.max_strike > 0:
-                    r_strike = " AND tp.entry_price <= $9"
-                    r_args = [float(req.max_strike)]
-                rows = await conn.fetch(
-                    _random_exit_zone_sql(combine_sql, ret_case, r_strike),
-                    req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed),
-                    ns, los, his, *r_args)
+                if kind == "entry_exit":
+                    r_strike, r_args = "", []
+                    if req.max_strike and req.max_strike > 0:
+                        r_strike = " AND tp.entry_price <= $9"
+                        r_args = [float(req.max_strike)]
+                    rows = await conn.fetch(
+                        _random_exit_zone_sql(combine_sql, ret_case, r_strike),
+                        req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed),
+                        ns, los, his, *r_args)
+                else:
+                    # exit-only: the REAL entries, so it reuses the zone
+                    # query's own predicates and arg list, and appends its
+                    # four new parameters after them rather than renumbering
+                    # the shared fragments.
+                    base_n = len(args)
+                    rows = await conn.fetch(
+                        _random_exit_only_sql(
+                            combine_sql, where_bins, cell_pred, strike_pred,
+                            ret_case, base_n + 1, base_n + 2, base_n + 3, base_n + 4),
+                        *args, str(seed), ns, los, his)
                 # A resolved path has every max_days column populated, so a
                 # NULL return here means that assumption is wrong. Reported
                 # rather than silently averaged as zero, which would drag the

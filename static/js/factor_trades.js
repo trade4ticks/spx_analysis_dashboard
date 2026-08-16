@@ -290,9 +290,20 @@ document.addEventListener('alpine:init', () => {
     // what separates "does the metric pick better names than chance" from
     // "do the exit rules beat simply being in the market that long".
     // Confounded until you can run both.
+    //
+    // Three baselines complete the 2x2 against the policy run:
+    //   policy      signal entries + rule   exits
+    //   entry       random entries + rule   exits   -> selection vs chance
+    //   exit        signal entries + random exits   -> exit rules ON MY TRADES
+    //   entry_exit  random entries + random exits   -> the floor
+    // The two random-EXIT kinds share an exit salt, and the two random-ENTRY
+    // kinds share an entry ordering hash, so any pair differs by exactly one
+    // factor. RE-SAMPLING RE-ROLLS BOTH DRAWS: they derive from one seed.
     BASELINE_KINDS: {
       entry:      { label: 'random entries', card: 'RANDOM ENTRIES',
                     row: 'rand entry',      colour: '#3498db' },
+      exit:       { label: 'random exits', card: 'RANDOM EXITS',
+                    row: 'rand exit',       colour: '#e84393' },
       entry_exit: { label: 'random entries + exits', card: 'RANDOM ENTRIES + EXITS',
                     row: 'rand entry+exit', colour: '#1abc9c' },
     },

@@ -216,6 +216,18 @@ def _check_sql_placeholders() -> int:
         ("_random_exit_zone_sql",         ft._random_exit_zone_sql("SELECT 1", "t2.r1", "")),
         ("_random_exit_zone_sql +strike", ft._random_exit_zone_sql("SELECT 1", "t2.r1",
                                                                    " AND tp.entry_price <= $9")),
+        # exit-only reuses the ZONE query's arg list and appends four
+        # parameters after it, so its placeholder numbers are dynamic. These
+        # four cases are the four real arg-list lengths: 1f=3, 1f+strike=4,
+        # 2f=4, 2f+strike=5.
+        ("_random_exit_only_sql 1f",         ft._random_exit_only_sql(
+            "SELECT 1", "bt.x > 0", CELL_1F, "", "t2.r1", 4, 5, 6, 7)),
+        ("_random_exit_only_sql 1f +strike", ft._random_exit_only_sql(
+            "SELECT 1", "bt.x > 0", CELL_1F, " AND tp.entry_price <= $4", "t2.r1", 5, 6, 7, 8)),
+        ("_random_exit_only_sql 2f",         ft._random_exit_only_sql(
+            "SELECT 1", "bt.x > 0", CELL_2F, "", "t2.r1", 5, 6, 7, 8)),
+        ("_random_exit_only_sql 2f +strike", ft._random_exit_only_sql(
+            "SELECT 1", "bt.x > 0", CELL_2F, " AND tp.entry_price <= $5", "t2.r1", 6, 7, 8, 9)),
     ]
 
     bad = 0

@@ -116,7 +116,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=34"></script>
+  <script src="/static/js/factor_trades.js?v=35"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -261,6 +261,15 @@
           both and the pair decomposes signal selection from exit rules,
           which are otherwise confounded — the two share the same entry draw
           for a given seed, so their difference IS the exit rules. -#}
+      {#- Signal entries, random exits. The more direct question about exit
+          rules than entry+exit is, because it asks it against the trades
+          actually being taken. Shares its exit salt with entry+exit, so the
+          only difference between those two runs is entry selection. -#}
+      <button class="ft-btn" @click="runBaseline(false, 'exit')" :disabled="loading || !selectedCells.length"
+              style="border-left:3px solid #e84393"
+              title="Your real zone entries, but the exit rules replaced by a holding period drawn from your policy's own distribution. Isolates whether your exit rules add value on your actual trade selection. Draws from the same rule as the random entries + exits baseline, so those two differ only by entry selection.">
+        Random exits
+      </button>
       <button class="ft-btn" @click="runBaseline(false, 'entry_exit')" :disabled="loading || !selectedCells.length"
               style="border-left:3px solid #1abc9c"
               title="Random tickers AND a random holding period drawn from your policy's own distribution, instead of applying the exit rules. Isolates whether the exit rules add anything over simply being in the market for a similar duration. Shares its entry draw with the random-entries baseline at the same seed, so the difference between the two is the exit rules alone.">
@@ -271,10 +280,15 @@
           tweaked; re-sampling is how the baseline's OWN sampling variance
           gets looked at, which is a different question and should take a
           different click. -#}
-      <button class="ft-btn" @click="runBaseline(true)" :disabled="loading || !selectedCells.length"
+      {#- Re-rolls BOTH draws, because both derive from the one seed: the
+          entry hash is md5(ticker|date|seed) and the exit hash is
+          md5(ticker|date|seed|exit). Said on the button rather than left to
+          be inferred from the fact that they share a seed. -#}
+      <button class="ft-btn" @click="runBaseline(true, runData?.baseline_kind || 'entry')"
+              :disabled="loading || !selectedCells.length"
               style="margin-top:4px;font-size:11px"
-              title="Same zone, a new random draw. Shows how much of the baseline's numbers are sampling noise.">
-        ↻ Re-sample baseline
+              title="New seed for the active baseline — re-rolls BOTH the entry draw and the exit draw, since both derive from the one seed. Shows how much of the baseline's numbers are sampling noise.">
+        ↻ Re-sample (re-rolls entry + exit draws)
       </button>
       <div class="ft-note" x-show="!selectedCells.length" style="margin-top:4px">
         Baseline needs a selected zone.
