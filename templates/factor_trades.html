@@ -123,6 +123,10 @@
                    border-bottom:1px solid rgba(255,255,255,.05);
                    vertical-align:top; white-space:nowrap; }
     .ft-suite tr.policy td { background:rgba(52,152,219,.08); font-weight:600; }
+    /* The row label names what the whole row IS, so it cannot be the
+       smallest thing in it — it was left at the table's 11px base while the
+       figures grew to 15px. */
+    .ft-suite td.rowlab { font-size:14px; font-weight:600; }
     /* Sized to be read, not to fit. Four stacked figures per cell tempted a
        9px supporting line; that is a number nobody checks. */
     .ft-suite .sv { display:block; font-family:monospace; font-size:15px;
@@ -145,7 +149,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=37"></script>
+  <script src="/static/js/factor_trades.js?v=38"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -236,12 +240,13 @@
                 <div style="padding:0 5px 4px 33px">
                   <template x-for="dim in famDims(f)" :key="f.family+'-'+dim">
                     <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
-                      <span class="ft-note" style="flex:0 0 58px" x-text="dim"></span>
+                      <span class="ft-note" style="flex:0 0 58px"
+                            :title="famDimHint(dim)" x-text="dim"></span>
                       <select style="flex:1;min-width:0" :disabled="!selected[f.family]"
                               :value="famSel(f, dim)"
                               @change="setFamDim(f, dim, $event.target.value)">
                         <template x-for="v in famVals(f, dim)" :key="f.family+dim+v">
-                          <option :value="v" x-text="v"></option>
+                          <option :value="v" x-text="famValLabel(dim, v)"></option>
                         </template>
                       </select>
                     </div>
@@ -422,103 +427,6 @@
       </div>
 
 
-      <!-- 1b. Baseline suite. Policy + three baseline types x N seeds, both
-           windows, in one batch — the loop that was being run by hand and
-           transcribed into a spreadsheet. -->
-      <div class="chart-box" x-show="suiteData || suiteRunning">
-        <div class="chart-title">
-          Baseline suite
-          <span class="ft-note" x-show="suiteData"
-                x-text="'' + (suiteData?.n_draws ?? 0) + ' draws per type · base seed '
-                        + (suiteData?.base_seed ?? '') + ' · ' + (suiteData?.n_variants ?? 0)
-                        + ' runs at ' + (suiteData?.concurrency ?? 0) + '-way concurrency'"></span>
-          <button class="ft-fs" @click="suiteCsv()" x-show="suiteData"
-                  style="float:right;margin-left:6px" title="Export the whole table">CSV</button>
-        </div>
-
-        <div x-show="suiteRunning" class="ft-note" style="padding:14px 2px">
-          Running <span x-text="3 * (+suiteN || 10) + 1"></span> queries…
-          <span x-text="suiteElapsed + 's'"></span> elapsed,
-          ~<span x-text="suiteEstimate() + 's'"></span> expected.
-        </div>
-
-        <template x-if="suiteData && suiteTable">
-          <div>
-            <!-- Stated, not left to the column labels alone. Two numbers
-                 called Calmar on one page is the failure this prevents. -->
-            <div class="ft-units" x-text="suiteData.units_note"></div>
-
-            <div class="ft-note" x-show="(suiteData.errors || []).length"
-                 style="color:#e84393;margin-bottom:6px">
-              <span x-text="(suiteData.errors || []).length"></span> draw(s) failed —
-              the mean and the beats count below cover only the draws that ran.
-            </div>
-
-            <template x-for="win in ['train', 'test']" :key="'sw-' + win">
-              <div style="margin-bottom:12px">
-                <div class="ft-subhead" style="justify-content:flex-start;margin-bottom:4px">
-                  <div :style="win === 'test' ? 'color:#e84393' : 'color:#3498db'"
-                       x-text="win.toUpperCase() + ' window'"></div>
-                </div>
-                <div style="overflow-x:auto">
-                  <table class="ft-suite">
-                    <thead>
-                      <tr>
-                        <th style="text-align:left">Run type</th>
-                        <template x-for="m in suiteData.metrics" :key="'sh-' + win + m.key">
-                          <th x-text="m.label"></th>
-                        </template>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <template x-for="row in suiteTable.rows" :key="'sr-' + win + row.key">
-                        <tr :class="row.kind === null ? 'policy' : ''">
-                          <td style="text-align:left">
-                            <span x-text="row.label"></span>
-                            <span class="ft-note" x-show="row.kind !== null"
-                                  x-text="' · ' + row.draws + ' draws'"></span>
-                          </td>
-                          <template x-for="m in suiteData.metrics" :key="'sc-' + win + row.key + m.key">
-                            <td>
-                              <!-- Policy row: one number, no distribution. -->
-                              <template x-if="row.kind === null">
-                                <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].value)"></span>
-                              </template>
-                              <template x-if="row.kind !== null">
-                                <div>
-                                  <!-- The headline first: how many draws the
-                                       policy beat. Everything under it is
-                                       the supporting distribution. -->
-                                  <span class="sb" :class="suiteBeatsClass(row[win][m.key])"
-                                        x-text="row[win][m.key].beats == null ? '—'
-                                                : ('beats ' + row[win][m.key].beats
-                                                   + ' of ' + row[win][m.key].of)"></span>
-                                  <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].mean)"></span>
-                                  <span class="sd"
-                                        x-text="'sd ' + suiteFmt(m.key, row[win][m.key].sd)"></span>
-                                  <span class="sd"
-                                        x-text="suiteFmt(m.key, row[win][m.key].min) + ' … '
-                                                + suiteFmt(m.key, row[win][m.key].max)"></span>
-                                </div>
-                              </template>
-                            </td>
-                          </template>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </template>
-
-            <div class="ft-note" x-show="suiteData.hold"
-                 x-text="'Random-exit rows drew holding periods averaging '
-                         + (suiteData.hold?.avg_sessions ?? 0)
-                         + ' sessions, from the policy\'s own distribution.'"></div>
-          </div>
-        </template>
-      </div>
-
       <div x-show="lockedRun && (lockedRun.window||'train') !== window"
            style="margin-bottom:8px;padding:5px 9px;border-radius:3px;font-size:11px;
                   background:rgba(232,67,147,.10);border:1px solid rgba(232,67,147,.35);color:#e84393">
@@ -649,6 +557,108 @@
         </div>
           </div>
         </div>
+      </div>
+
+      <!-- 7. Baseline suite (LAST ON PURPOSE). Policy + three baseline types x N seeds, both
+           windows, in one batch — the loop that was being run by hand and
+           transcribed into a spreadsheet. -->
+      <div class="chart-box" x-show="suiteData || suiteRunning">
+        <div class="chart-title" style="cursor:pointer" @click="suiteOpen = !suiteOpen">
+          <span x-text="suiteOpen ? '▾' : '▸'" style="display:inline-block;width:12px"></span>
+          Baseline suite
+          <span class="ft-note" x-show="suiteData"
+                x-text="'' + (suiteData?.n_draws ?? 0) + ' draws per type · base seed '
+                        + (suiteData?.base_seed ?? '') + ' · ' + (suiteData?.n_variants ?? 0)
+                        + ' runs at ' + (suiteData?.concurrency ?? 0) + '-way concurrency'"></span>
+          <button class="ft-fs" @click.stop="suiteCsv()" x-show="suiteData"
+                  style="float:right;margin-left:6px" title="Export the whole table">CSV</button>
+        </div>
+
+        <div x-show="suiteData && !suiteOpen" class="ft-note" style="padding:2px">
+          Collapsed — the table is still here, click the title to expand.
+        </div>
+
+        <div x-show="suiteRunning" class="ft-note" style="padding:14px 2px">
+          Running <span x-text="3 * (+suiteN || 10) + 1"></span> queries…
+          <span x-text="suiteElapsed + 's'"></span> elapsed,
+          ~<span x-text="suiteEstimate() + 's'"></span> expected.
+        </div>
+
+        <template x-if="suiteData && suiteTable && suiteOpen">
+          <div>
+            <!-- Stated, not left to the column labels alone. Two numbers
+                 called Calmar on one page is the failure this prevents. -->
+            <div class="ft-units" x-text="suiteData.units_note"></div>
+
+            <div class="ft-note" x-show="(suiteData.errors || []).length"
+                 style="color:#e84393;margin-bottom:6px">
+              <span x-text="(suiteData.errors || []).length"></span> draw(s) failed —
+              the mean and the beats count below cover only the draws that ran.
+            </div>
+
+            <template x-for="win in ['train', 'test']" :key="'sw-' + win">
+              <div style="margin-bottom:12px">
+                <div class="ft-subhead" style="justify-content:flex-start;margin-bottom:4px">
+                  <div :style="win === 'test' ? 'color:#e84393' : 'color:#3498db'"
+                       x-text="win.toUpperCase() + ' window'"></div>
+                </div>
+                <div style="overflow-x:auto">
+                  <table class="ft-suite">
+                    <thead>
+                      <tr>
+                        <th style="text-align:left">Run type</th>
+                        <template x-for="m in suiteData.metrics" :key="'sh-' + win + m.key">
+                          <th x-text="m.label"></th>
+                        </template>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="row in suiteTable.rows" :key="'sr-' + win + row.key">
+                        <tr :class="row.kind === null ? 'policy' : ''">
+                          <td class="rowlab" style="text-align:left">
+                            <span x-text="row.label"></span>
+                            <span class="ft-note" x-show="row.kind !== null"
+                                  x-text="' · ' + row.draws + ' draws'"></span>
+                          </td>
+                          <template x-for="m in suiteData.metrics" :key="'sc-' + win + row.key + m.key">
+                            <td>
+                              <!-- Policy row: one number, no distribution. -->
+                              <template x-if="row.kind === null">
+                                <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].value)"></span>
+                              </template>
+                              <template x-if="row.kind !== null">
+                                <div>
+                                  <!-- The headline first: how many draws the
+                                       policy beat. Everything under it is
+                                       the supporting distribution. -->
+                                  <span class="sb" :class="suiteBeatsClass(row[win][m.key])"
+                                        x-text="row[win][m.key].beats == null ? '—'
+                                                : ('beats ' + row[win][m.key].beats
+                                                   + ' of ' + row[win][m.key].of)"></span>
+                                  <span class="sv" x-text="suiteFmt(m.key, row[win][m.key].mean)"></span>
+                                  <span class="sd"
+                                        x-text="'sd ' + suiteFmt(m.key, row[win][m.key].sd)"></span>
+                                  <span class="sd"
+                                        x-text="suiteFmt(m.key, row[win][m.key].min) + ' … '
+                                                + suiteFmt(m.key, row[win][m.key].max)"></span>
+                                </div>
+                              </template>
+                            </td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+
+            <div class="ft-note" x-show="suiteData.hold"
+                 x-text="'Random-exit rows drew holding periods averaging '
+                         + (suiteData.hold?.avg_sessions ?? 0)
+                         + ' sessions, from the policy\'s own distribution.'"></div>
+          </div>
+        </template>
       </div>
 
       <!-- 8: full-screen overlay. The canvas is MOVED here and moved back on

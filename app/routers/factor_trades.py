@@ -79,10 +79,40 @@ def _rule_label(family: str, params: Any) -> str:
     if k is not None:
         return f"{float(k):g}x ATR"
     if n is not None:
-        return f"{int(n)}d"
+        # Bare number, no "d". The family name beside the control already
+        # says these are days, and the suffix made the values look like
+        # strings to sort as strings.
+        return f"{int(n)}"
     if not params:
         return family
     return ", ".join(f"{a}={b}" for a, b in sorted(params.items()))
+
+
+def _rule_sort_key(params: Any) -> tuple:
+    """Numeric sort key for a family's options.
+
+    The catalog is read ORDER BY rule_key, which is a STRING sort: max_days
+    came out 1, 10, 15, 20, 3, 5, 7. Dropping the "d" from the label does
+    not fix that -- the ordering never came from the label -- so the options
+    are sorted here on the numeric parameter instead.
+
+    Falls back to (1, 0.0) for a rule with no numeric parameter, which sorts
+    those after the numeric ones rather than interleaving them.
+    """
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except (ValueError, TypeError):
+            params = {}
+    params = params or {}
+    for k in ("pct", "k", "n", "days", "bars"):
+        v = params.get(k)
+        if v is not None:
+            try:
+                return (0, float(v))
+            except (TypeError, ValueError):
+                pass
+    return (1, 0.0)
 
 
 def _effective_tickers(counts) -> float:
@@ -275,6 +305,13 @@ async def list_rules(pool=Depends(get_oi_pool)):
             # scan and makes holding one side constant awkward.
             "params":     _pr or {},
         })
+
+    # Numeric order within every family, for every family -- not special-
+    # cased to max_days, because any family whose options are numbers has
+    # the same problem the moment it grows a two-digit value.
+    for fams in by_side.values():
+        for rs in fams.values():
+            rs.sort(key=lambda r: _rule_sort_key(r["params"]))
 
     groups = []
     for side, title in SIDE_GROUPS:

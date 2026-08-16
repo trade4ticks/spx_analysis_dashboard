@@ -101,6 +101,33 @@ document.addEventListener('alpine:init', () => {
       return [...keys].sort();
     },
     isSplitFamily(f) { return this.famDims(f).length >= 2; },
+    // A bare "2" in a trail dropdown does not say 2 percent, 2 ATRs or 2
+    // days. The unit is inferred from the PARAMETER NAME using the same
+    // conventions _rule_label uses server-side, so the two cannot drift to
+    // different answers for the same key. An unrecognised name renders the
+    // raw value rather than guessing a unit onto it -- the dim name beside
+    // the control is then the only claim being made.
+    _dimUnit(dim) {
+      const d = String(dim || '').toLowerCase();
+      if (d.includes('pct') || d.includes('percent')) return 'pct';
+      if (d === 'k' || d.includes('atr')) return 'atr';
+      if (d === 'n' || d === 'days' || d === 'bars' || d.includes('day')) return 'day';
+      return null;
+    },
+    famValLabel(dim, v) {
+      const u = this._dimUnit(dim);
+      if (u === 'pct') return v + '%';
+      if (u === 'atr') return v + 'x ATR';
+      if (u === 'day') return v + 'd';
+      return String(v);
+    },
+    famDimHint(dim) {
+      const u = this._dimUnit(dim);
+      return u === 'pct' ? `${dim} — percent`
+           : u === 'atr' ? `${dim} — multiples of ATR`
+           : u === 'day' ? `${dim} — trading days`
+           : `${dim} — unit not declared by the rule catalog; values shown raw`;
+    },
     // Distinct values for one dimension, in numeric order.
     famVals(f, dim) {
       const vs = new Set();
@@ -314,6 +341,10 @@ document.addEventListener('alpine:init', () => {
     // Deliberately NOT interactive while it runs -- 6N+2 queries is a batch,
     // and pretending otherwise would mean partial tables that look finished.
     suiteN: 10,
+    // Collapsed by default and re-opened by a run: the pane is consulted
+    // occasionally, but an expanded table pushes the charts -- the things
+    // watched while iterating -- down the page on every node change.
+    suiteOpen: false,
     suiteData: null,
     suiteRunning: false,
     suiteElapsed: 0,
@@ -346,6 +377,7 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
         this.suiteData = d;
+        this.suiteOpen = true;
         this.$nextTick(() => this._suiteVerifyAgainstStatBar());
       } catch (e) { this.error = String(e); }
       finally {
@@ -913,12 +945,13 @@ document.addEventListener('alpine:init', () => {
         type: 'bar',
         data: { labels, datasets: [{
           data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
-          // Same side colours, held back to a wash so the eye reads this
-          // pane as the quieter companion to the share pane. The backstop
-          // stays outlined here too, so the two halves agree on what it is.
-          backgroundColor: fills.map((c, i) => rows[i].is_backstop ? c
-                                    : c.replace(/[\d.]+\)$/, '0.34)')),
-          borderColor: lines, borderWidth: widths,
+          // IDENTICAL paint to the share half. The wash that used to be
+          // applied here made the same rule two different greys across the
+          // two sub-charts -- max_days 20d read lighter on the left than on
+          // the right -- and a colour that means "this rule" cannot also
+          // mean "this is the quieter pane". The headers already say which
+          // half is which; that was never colour's job.
+          backgroundColor: fills, borderColor: lines, borderWidth: widths,
         }] },
         options: {
           indexAxis: 'y',
