@@ -30,6 +30,10 @@ document.addEventListener('alpine:init', () => {
     // train and treat switching to test as a decision, not a default view.
     window: 'train',
     gridView: 'edited', showDD: true, fsId: null, _fsHome: null,
+    // Synced crosshair (FactorCharts._crosshairPlugin). ON here: the whole
+    // page is one policy read across panes, so lining up a date across
+    // equity and activity is the normal question.
+    crosshairSync: true, crosshairDate: null,
     selectedCells: [],            // [[bp, bs], ...]
 
     // ── FactorCharts contract ────────────────────────────────────────────
@@ -253,7 +257,73 @@ document.addEventListener('alpine:init', () => {
       return ks.join(' + ');
     },
 
+    // ── Random-entry baseline ────────────────────────────────────────────
+    // Not a /run: the heatmap is a binning of the REAL population and has no
+    // meaning for randomly-chosen entries. A baseline is a /zone with the
+    // same policy, same anchor, same max strike, same window and the same
+    // per-date trade counts, drawn from random tickers -- so it answers "is
+    // this policy signal-specific, or would any long position under these
+    // exits look like this".
+    //
+    // It needs a zone to exist, because the zone IS the distribution being
+    // matched. Without one there is no shape to sample against.
+    baselineSeed: null,       // null => the server's fixed default
+    async runBaseline(resample = false) {
+      if (!this.runData) { this.error = 'run a policy first'; return; }
+      if (!this.selectedCells.length) {
+        this.error = 'select a zone first — the baseline matches its trade '
+                   + 'count and date distribution, so it needs one to match';
+        return;
+      }
+      // Fixed by default so the baseline does NOT move under you while you
+      // iterate on exit rules -- otherwise a change in the numbers could be
+      // the policy or could be a different draw, and there is no way to tell
+      // which. Re-sample is the deliberate opposite: same zone, new draw,
+      // which is how you see the baseline's own sampling variance.
+      if (resample) this.baselineSeed = Math.floor(Math.random() * 2147483647);
+      this.loading = true; this.error = '';
+      try {
+        const src = this.runData;
+        const body = {
+          primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+          entry_anchor: src.entry_anchor, rule_keys: src.rules,
+          n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
+          window: this.window, cells: this.selectedCells,
+          randomize: true, seed: this.baselineSeed,
+        };
+        const r = await fetch('/api/factor-trades/zone', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        // A run card built from the policy that produced it, so the strip
+        // shows what was actually run. grid is null on purpose: showing the
+        // real run's grid beside a random-entry card would claim a zone
+        // selection that these trades were not drawn from.
+        const card = {
+          ...src, grid: null,
+          randomize: true, seed: d.baseline?.seed ?? this.baselineSeed,
+          baseline: d.baseline || null,
+          window: d.window,
+          train: d.train, test: d.test,
+          exit_reasons: d.exit_reasons,
+          label: 'baseline — random entries',
+        };
+        this.runs.push(card);
+        this.currentIdx = this.runs.length - 1;
+        this.runData = card;
+        this.zoneData = d;
+        this.secDetail = d;
+        this._refreshGrid();
+        this.$nextTick(() => { this._scrollRunsRight(); this.renderCharts(); });
+      } catch (e) { this.error = String(e); }
+      finally { this.loading = false; }
+    },
+
     async run(random = false) {
+      // Kept for the old call signature; the baseline is its own path now.
+      if (random) return this.runBaseline(false);
       this.loading = true; this.error = '';
       const prev = this.runData;
       try {
@@ -337,6 +407,10 @@ document.addEventListener('alpine:init', () => {
             entry_anchor: r.entry_anchor, rule_keys: r.rules,
             n_bins: r.n_bins, max_strike: r.max_strike,
             window: r.window || 'train', cells: this.selectedCells,
+            // Deterministic seed: locking a baseline refetches the identical
+            // sample, so the LOCKED column is the draw that was on screen
+            // when it was locked, not a fresh one.
+            randomize: !!r.randomize, seed: r.seed ?? null,
           }),
         });
         const d = await resp.json();
@@ -405,6 +479,11 @@ document.addEventListener('alpine:init', () => {
           max_strike: this.runData.max_strike ?? this.maxStrike,
           window: this.window,
           cells: this.selectedCells,
+          // A baseline run stays a baseline when the zone is refetched --
+          // clicking a cell or switching window must not silently turn it
+          // back into a real-entry run under the same card.
+          randomize: !!this.runData.randomize,
+          seed: this.runData.seed ?? null,
         };
         const r = await fetch('/api/factor-trades/zone', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },

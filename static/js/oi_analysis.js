@@ -112,6 +112,12 @@ document.addEventListener('alpine:init', () => {
     secBinCount: 10,
     secSelectedSecBins: [10],
     secBubbleMinN: 1,
+    // Synced crosshair (FactorCharts._crosshairPlugin). OFF: Recall / Zone /
+    // Portfolio keep their current behaviour until this page opts in
+    // deliberately. Declared anyway because the module reads both names on
+    // every render — the contract gate requires the declaration, not the
+    // feature.
+    crosshairSync: false, crosshairDate: null,
     secScanMeta: null,
     secScanKey: null,
     secPolling: false,

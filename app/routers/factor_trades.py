@@ -537,10 +537,75 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     }
 
 
+# Fixed by default so a baseline does not move under the user while they
+# iterate on exit rules. See the seed discussion in _random_zone_sql.
+DEFAULT_BASELINE_SEED = 20240701
+
+
 class ZoneReq(RunReq):
     """A run plus the selected cells. Cells are [bp, bs] pairs at the run's
     n_bins resolution (bs is ignored in single-metric mode)."""
     cells: list[list[int]] = []
+    # Random-entry baseline: run this exact exit policy against randomly
+    # chosen entries instead of the zone's, matched on count and on date
+    # distribution. Answers "is this policy signal-specific, or would any
+    # long position under these exits look like this".
+    randomize: bool = False
+    seed: Optional[int] = None
+
+
+def _random_zone_sql(combine_sql: str, strike_pred: str) -> str:
+    """Sample the SAME NUMBER of trades per date as the real zone, at random.
+
+    Matching on the date distribution is the whole point. Sampling uniformly
+    across the window would draw a different market-exposure profile -- a
+    zone that fires 40 times in March 2020 and 3 times in July 2021 has to be
+    compared against a random set with that same shape, or the comparison is
+    between two different markets rather than between two entry choices.
+
+    Ticker is deliberately NOT matched: it is the thing being randomised.
+
+    THE COUNT IS EXACT, NOT BEST-EFFORT. The eligible universe on a date is
+    (combine JOIN trade_paths); the real zone is that same set intersected
+    with tt_bins bins-present and the selected cells. The zone is therefore a
+    SUBSET of the universe on every date it appears on, so k picks always
+    exist. The caller still verifies the total rather than trusting the
+    argument.
+
+    Ordering is md5(ticker | date | seed) rather than random(): random()
+    would need setseed() on a pooled connection, which is per-session state
+    that another request can clobber. The hash is deterministic, needs no
+    session state, and has a useful property -- changing k re-uses the same
+    ordering, so a bigger zone's sample is a superset of a smaller one's
+    rather than an unrelated draw.
+    """
+    return f"""
+    WITH c AS (
+{combine_sql}
+    ),
+    want AS (
+        SELECT * FROM unnest($3::date[], $4::int[]) AS t(trade_date, k)
+    ),
+    elig AS (
+        SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule,
+               tp.entry_price,
+               row_number() OVER (
+                   PARTITION BY c.trade_date
+                   ORDER BY md5(c.ticker || '|' || c.trade_date::text
+                                || '|' || $5::text)
+               ) AS rn
+        FROM c
+        JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+        JOIN want w ON w.trade_date = c.trade_date
+        WHERE c.entry_anchor = $1{strike_pred}
+    )
+    SELECT e.ticker, e.trade_date, e.exit_bar, e.exit_return, e.exit_rule,
+           e.entry_price, (e.trade_date < $2::date) AS is_train
+    FROM elig e
+    JOIN want w ON w.trade_date = e.trade_date
+    WHERE e.rn <= w.k
+    ORDER BY e.trade_date, e.ticker
+    """
 
 
 @router.post("/zone")
@@ -651,7 +716,67 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
         ORDER BY c.trade_date, c.ticker
         """
-        rows = await conn.fetch(sql, *args)
+        baseline = None
+        if not req.randomize:
+            rows = await conn.fetch(sql, *args)
+        else:
+            # Step 1: the SHAPE to match -- how many trades the real zone
+            # fires on each date. Counted with the identical predicate, so
+            # the target is the real zone's own distribution and not a
+            # re-derivation of it. Both windows are counted; the active
+            # window filter runs downstream on the random rows exactly as it
+            # does on real ones, so TRAIN and TEST both stay matched.
+            cnt_rows = await conn.fetch(f"""
+            WITH c AS (
+{combine_sql}
+            )
+            SELECT c.trade_date, COUNT(*) AS k
+            FROM c
+            JOIN tt_bins bt USING (ticker, trade_date)
+            JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+            WHERE c.entry_anchor = $1 AND {where_bins} AND {cell_pred}{strike_pred}
+            GROUP BY c.trade_date
+            """, *args)
+            if not cnt_rows:
+                return {"error": "the selected zone has no trades — nothing to "
+                                 "match a random baseline against"}
+            want_dates = [r["trade_date"] for r in cnt_rows]
+            want_ks    = [int(r["k"]) for r in cnt_rows]
+            seed = DEFAULT_BASELINE_SEED if req.seed is None else int(req.seed)
+
+            # Placeholders are fixed at $1..$5 in _random_zone_sql, so the
+            # optional strike filter takes $6 -- it cannot reuse the zone
+            # query's computed index, which counted a different arg list.
+            r_strike, r_args = "", []
+            if req.max_strike and req.max_strike > 0:
+                r_strike = " AND tp.entry_price <= $6"
+                r_args = [float(req.max_strike)]
+            rows = await conn.fetch(
+                _random_zone_sql(combine_sql, r_strike),
+                req.entry_anchor, cutoff_d, want_dates, want_ks, str(seed), *r_args)
+
+            # The count is a guarantee, not a hope (see _random_zone_sql), so
+            # a mismatch is a bug in that reasoning and is reported as one
+            # rather than being smoothed over into a quietly smaller baseline.
+            got = len(rows)
+            wanted = sum(want_ks)
+            baseline = {
+                "seed": seed, "dates": len(want_dates),
+                "requested": wanted, "delivered": got,
+            }
+            if got != wanted:
+                short = {}
+                by_d: dict = {}
+                for r in rows:
+                    by_d[r["trade_date"]] = by_d.get(r["trade_date"], 0) + 1
+                for d_, k_ in zip(want_dates, want_ks):
+                    if by_d.get(d_, 0) < k_:
+                        short[d_.isoformat()] = [by_d.get(d_, 0), k_]
+                return {"error": f"random baseline could not be matched: got "
+                                 f"{got} of {wanted} trades. The eligible "
+                                 f"universe was smaller than the zone on "
+                                 f"{len(short)} date(s).",
+                        "baseline_shortfall": dict(list(short.items())[:20])}
 
         td_rows = await conn.fetch(
             "SELECT DISTINCT trade_date FROM tt_bins ORDER BY trade_date")
@@ -761,6 +886,10 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
     return {
         "cells": req.cells,
         "window": active,
+        # Present only on a baseline run, so the client can label the card
+        # with the draw it came from and refetch the SAME draw on lock.
+        "randomize": req.randomize,
+        "baseline": baseline,
         "entry_anchor": req.entry_anchor,
         "cutoff_date": cutoff_iso,
         # Recall chart contracts — same field names, same shapes.

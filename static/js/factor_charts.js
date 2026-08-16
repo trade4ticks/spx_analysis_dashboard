@@ -63,7 +63,8 @@ window.FactorCharts = {
         return sign + '$' + abs.toFixed(0);
       };
       cmp._charts[_key] = new Chart(ctx, {
-        plugins: window.FactorCharts._cutoffPlugin(cmp, 'time'),
+        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time'),
+                  ...window.FactorCharts._crosshairPlugin(cmp, 'time')],
         type: 'line',
         data: { datasets: [
           { label: 'Equity ($)', data: eqPxy, borderColor: '#3498db',
@@ -197,7 +198,8 @@ window.FactorCharts = {
     });
 
     cmp._charts[_key] = new Chart(ctx, {
-        plugins: window.FactorCharts._cutoffPlugin(cmp, 'time'),
+        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time'),
+                  ...window.FactorCharts._crosshairPlugin(cmp, 'time')],
       type: 'line',
       data: { datasets },   // no labels — points carry their own x
       options: {
@@ -497,7 +499,8 @@ window.FactorCharts = {
 
     const ctx = canvas.getContext('2d');
     cmp._charts[_key] = new Chart(ctx, {
-      plugins: window.FactorCharts._cutoffPlugin(cmp, 'cat', tradingDays),
+      plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'cat', tradingDays),
+                ...window.FactorCharts._crosshairPlugin(cmp, 'cat', tradingDays)],
       type: 'bar',
       data: {
         labels: tradingDays.map(d => d.slice(0, 7)),
@@ -731,6 +734,121 @@ window.FactorCharts = {
         c.setLineDash([4, 4]);
         c.lineWidth = 1;
         c.beginPath(); c.moveTo(px, ys.top); c.lineTo(px, ys.bottom); c.stroke();
+        c.restore();
+      },
+    }];
+  },
+
+  // ── Synced crosshair ─────────────────────────────────────────────────
+  // Hovering one participating pane draws a vertical line at the SAME DATE
+  // on every other participating pane. Line only, no readout.
+  //
+  // OPT-IN: nothing draws unless cmp.crosshairSync is true, so Recall, Zone
+  // and Portfolio are untouched until a page turns it on.
+  //
+  // SYNC IS ON THE DATE VALUE, NEVER THE INDEX. Equity is a linear epoch-ms
+  // axis carrying one point per trade date; activity is a category axis
+  // carrying every session. Index n is a different date in each, so an
+  // index-synced line would drift further apart the more sessions passed
+  // without a trade. Each chart converts pixel -> its own nearest date on
+  // the way out and date -> its own nearest position on the way in, which
+  // is what makes the match work in both directions between two axes that
+  // do not share a domain.
+  //
+  // Visually it must not read as the cutoff line: the cutoff is part of the
+  // chart (dashed, dim, fixed), the crosshair is a pointer (solid, bright,
+  // capped, follows the mouse).
+  _crosshairPlugin(cmp, kind, dates) {
+    if (!cmp.crosshairSync) return [];
+
+    // ms values of a time chart's points, read off the chart rather than
+    // passed in, so the two equity call sites do not have to hand over a
+    // parallel array that could fall out of step with what they plot.
+    const timePos = (chart) => {
+      const ds = chart.data?.datasets?.[0]?.data || [];
+      return ds.map(p => (p && typeof p === 'object') ? p.x : null)
+               .filter(v => Number.isFinite(v));
+    };
+    const nearestNum = (arr, v) => {
+      let best = null, bd = Infinity;
+      for (const a of arr) { const d = Math.abs(a - v); if (d < bd) { bd = d; best = a; } }
+      return best;
+    };
+    const isoOfMs = (ms) => new Date(ms).toISOString().slice(0, 10);
+    const nearestIdx = (isoArr, iso) => {
+      const t = new Date(iso).getTime();
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < isoArr.length; i++) {
+        const d = Math.abs(new Date(isoArr[i]).getTime() - t);
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    };
+
+    return [{
+      id: 'ftCrosshair',
+      // Marks the chart as a participant so a hover on one can redraw the
+      // others without a registry the caller has to maintain.
+      install(chart) { chart.$ftCrosshair = true; },
+      afterEvent(chart, a) {
+        const t = a.event?.type;
+        if (t !== 'mousemove' && t !== 'mouseout') return;
+        const xs = chart.scales.x;
+        if (!xs) return;
+        let next = null;
+        if (t === 'mousemove') {
+          const px = a.event.x;
+          if (px >= xs.left && px <= xs.right) {
+            const v = xs.getValueForPixel(px);
+            if (kind === 'cat') {
+              const i = Math.max(0, Math.min((dates || []).length - 1, Math.round(v)));
+              next = (dates || [])[i] || null;
+            } else {
+              const ms = nearestNum(timePos(chart), v);
+              next = ms == null ? null : isoOfMs(ms);
+            }
+          }
+        }
+        if (next === cmp.crosshairDate) return;
+        cmp.crosshairDate = next;
+        // Redraw the OTHER participants. draw() clears and repaints from
+        // cached data -- no re-derivation of the dollar series, which is
+        // what makes this cheap enough to run on every mousemove.
+        for (const c of Object.values(cmp._charts || {})) {
+          if (c && c !== chart && c.$ftCrosshair) { try { c.draw(); } catch (e) { /* chart torn down mid-hover */ } }
+        }
+        a.changed = true;               // repaint the chart under the cursor
+      },
+      afterDatasetsDraw(chart) {
+        const iso = cmp.crosshairDate;
+        if (!iso) return;
+        const xs = chart.scales.x, ys = chart.scales.y;
+        if (!xs || !ys) return;
+        let px = null;
+        if (kind === 'cat') {
+          const i = nearestIdx(dates || [], iso);
+          if (i < 0) return;
+          px = xs.getPixelForValue(i);
+        } else {
+          const ms = nearestNum(timePos(chart), new Date(iso).getTime());
+          if (ms == null) return;
+          px = xs.getPixelForValue(ms);
+        }
+        if (px == null || !isFinite(px)) return;
+        const c = chart.ctx;
+        c.save();
+        // Solid and bright against the cutoff's dashed rgba(200,200,200,.35):
+        // different line style AND different weight, so the two never have to
+        // be told apart by colour alone.
+        c.strokeStyle = 'rgba(255,255,255,0.55)';
+        c.lineWidth = 1;
+        c.setLineDash([]);
+        c.beginPath(); c.moveTo(px, ys.top); c.lineTo(px, ys.bottom); c.stroke();
+        // A cap at the top reads as a pointer rather than a chart feature.
+        c.fillStyle = 'rgba(255,255,255,0.75)';
+        c.beginPath();
+        c.moveTo(px - 4, ys.top); c.lineTo(px + 4, ys.top); c.lineTo(px, ys.top + 5);
+        c.closePath(); c.fill();
         c.restore();
       },
     }];

@@ -115,8 +115,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=16"></script>
-  <script src="/static/js/factor_trades.js?v=31"></script>
+  <script src="/static/js/factor_charts.js?v=17"></script>
+  <script src="/static/js/factor_trades.js?v=32"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -251,10 +251,23 @@
       <button class="ft-btn" @click="clearAll()">Clear all</button>
       <button class="ft-btn primary" @click="run()" :disabled="loading"
               x-text="loading ? 'Running…' : 'Run'"></button>
-      <button class="ft-btn" @click="run(true)" :disabled="loading"
-              title="Same exit policy against randomly selected entries from the same universe and date distribution — the control for whether a policy is signal-specific or just helping any long position">
+      <button class="ft-btn" @click="runBaseline(false)" :disabled="loading || !selectedCells.length"
+              title="Same exit policy, same anchor, same max strike, same window and the same per-date trade counts — against randomly chosen tickers. The control for whether a policy is signal-specific or just helping any long position. Needs a selected zone, because the zone is the distribution being matched.">
         Run with random entries
       </button>
+      {#- Re-sample is deliberately separate from Run. The default seed is
+          fixed so the baseline does not move while exit rules are being
+          tweaked; re-sampling is how the baseline's OWN sampling variance
+          gets looked at, which is a different question and should take a
+          different click. -#}
+      <button class="ft-btn" @click="runBaseline(true)" :disabled="loading || !selectedCells.length"
+              style="margin-top:4px;font-size:11px"
+              title="Same zone, a new random draw. Shows how much of the baseline's numbers are sampling noise.">
+        ↻ Re-sample baseline
+      </button>
+      <div class="ft-note" x-show="!selectedCells.length" style="margin-top:4px">
+        Baseline needs a selected zone.
+      </div>
       <div class="ft-note" x-show="error" style="margin-top:8px;color:#e84393"
            x-text="error"></div>
     </div>
@@ -279,6 +292,14 @@
               <span @click.stop="deleteRun(i)" title="Remove this run"
                     style="cursor:pointer;color:var(--dim);font-size:12px;line-height:1;padding:0 2px">✕</span>
             </div>
+            {#- A baseline card must be unmistakable: its trades were not
+                drawn from the zone the metric names describe. -#}
+            <div class="p" x-show="r.randomize"
+                 style="color:#3498db;font-weight:700"
+                 title="Randomly chosen tickers, matched to the zone on trade count and date distribution. Not the zone's own entries.">RANDOM-ENTRY BASELINE</div>
+            <div class="p" x-show="r.randomize"
+                 title="The draw this baseline came from. A fixed seed means re-running gives the same baseline; ↻ Re-sample changes it."
+                 x-text="'seed ' + (r.seed ?? 'default') + ' · ' + (r.baseline?.dates ?? 0) + ' dates'"></div>
             <div class="p" x-text="r.primary_metric"></div>
             <div class="p" x-text="r.secondary_metric || '(single)'"></div>
             <div class="p" x-text="'anchor: ' + r.entry_anchor"></div>
