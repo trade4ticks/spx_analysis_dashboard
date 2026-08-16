@@ -157,10 +157,21 @@ async def list_rules(pool=Depends(get_oi_pool)):
     by_side: dict[str, dict[str, list]] = {}
     for r in rules:
         fam = by_side.setdefault(r["side"], {}).setdefault(r["family"], [])
+        _pr = r["params"]
+        if isinstance(_pr, str):
+            try:
+                _pr = json.loads(_pr)
+            except (ValueError, TypeError):
+                _pr = {}
         fam.append({
             "rule_key":   r["rule_key"],
             "label":      _rule_label(r["family"], r["params"]),
             "is_horizon": bool(r["is_horizon"]),
+            # Raw params so the rail can split a family whose rules are
+            # PAIRS (trail: activation x trail distance) into one dropdown
+            # per dimension. A single combined list of every pair is hard to
+            # scan and makes holding one side constant awkward.
+            "params":     _pr or {},
         })
 
     groups = []

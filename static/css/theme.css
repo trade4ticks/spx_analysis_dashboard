@@ -491,7 +491,9 @@ input[type=range]::-webkit-slider-thumb {
    Added, not moved: each page's inline <style> follows the <link>,
    so existing inline copies still win and those pages are unchanged. */
 .stat-item { background:var(--surface); padding:10px 12px; }
-.stat-label { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
+/* One notch above --dim: these are read constantly and #777 at 10px
+   uppercase is hard work. */
+.stat-label { font-size:10px; color:#9a9a9a; text-transform:uppercase; letter-spacing:.3px; margin-bottom:2px; }
 .stat-value { font-size:15px; font-weight:700; }
 
 /* Chart pane shell. Was duplicated in two pages' inline <style>

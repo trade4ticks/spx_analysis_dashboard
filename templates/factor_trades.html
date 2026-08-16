@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Factor Trades</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=2">
+  <link rel="stylesheet" href="/static/css/theme.css?v=3">
   <style>
     /* Left rail is fixed so the active configuration is always in view —
        the page is driven by iterating on it. */
@@ -88,6 +88,8 @@
     .chart-title { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; }
     .chart-canvas { height:220px; position:relative; }
     .ft-grid2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; }
+    .ft-grid3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px;
+                margin-bottom:12px; }
     .ft-fs { float:right; background:none; border:1px solid var(--border);
              color:var(--dim); cursor:pointer; border-radius:3px; font-size:11px;
              line-height:1; padding:2px 5px; }
@@ -101,7 +103,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=9"></script>
-  <script src="/static/js/factor_trades.js?v=16"></script>
+  <script src="/static/js/factor_trades.js?v=18"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -172,15 +174,33 @@
                 <div class="ft-sw" :class="{on: !!selected[f.family]}"
                      @click="toggleFamily(f)" :title="f.family"></div>
                 <div class="ft-rule-name" :title="f.family" x-text="f.family"></div>
-                <select :disabled="!selected[f.family]"
-                        :value="selected[f.family] || (f.rules[0] && f.rules[0].rule_key)"
-                        @change="selected[f.family] = $event.target.value">
-                  <template x-for="r in f.rules" :key="r.rule_key">
-                    <option :value="r.rule_key"
-                            x-text="r.label + (r.is_horizon ? ' (backstop value)' : '')"></option>
-                  </template>
-                </select>
+                <template x-if="!isSplitFamily(f)">
+                  <select :disabled="!selected[f.family]"
+                          :value="selected[f.family] || (f.rules[0] && f.rules[0].rule_key)"
+                          @change="selected[f.family] = $event.target.value">
+                    <template x-for="r in f.rules" :key="r.rule_key">
+                      <option :value="r.rule_key"
+                              x-text="r.label + (r.is_horizon ? ' (backstop value)' : '')"></option>
+                    </template>
+                  </select>
+                </template>
               </div>
+              <template x-if="isSplitFamily(f)">
+                <div style="padding:0 5px 4px 33px">
+                  <template x-for="dim in famDims(f)" :key="f.family+'-'+dim">
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+                      <span class="ft-note" style="flex:0 0 58px" x-text="dim"></span>
+                      <select style="flex:1;min-width:0" :disabled="!selected[f.family]"
+                              :value="famSel(f, dim)"
+                              @change="setFamDim(f, dim, $event.target.value)">
+                        <template x-for="v in famVals(f, dim)" :key="f.family+dim+v">
+                          <option :value="v" x-text="v"></option>
+                        </template>
+                      </select>
+                    </div>
+                  </template>
+                </div>
+              </template>
             </template>
           </div>
         </template>
@@ -284,6 +304,7 @@
           {{ m.stat_box('Avg Annual Ret', 'row.avgAnnRet', sign_expr='row.avgAnnRetRaw') | indent(10) | safe }}
           {{ m.stat_box('Max DD', 'row.maxDD', sign_expr='row.maxDDRaw') | indent(10) | safe }}
           {{ m.stat_box('Calmar', 'row.calmar', sign_expr='row.calmarRaw') | indent(10) | safe }}
+          {{ m.stat_box('Avg DIT', 'row.avgDit') | indent(10) | safe }}
         </div>
       </template>
 
@@ -299,7 +320,7 @@
         <div class="chart-canvas"><canvas id="ft-equity"></canvas></div>
       </div>
 
-      <div class="ft-grid2" x-show="zoneData">
+      <div class="ft-grid3" x-show="zoneData">
         <div class="chart-box">
           <div class="chart-title">Annual P&amp;L <span class="ft-note">[train + test] — grey locked, blue edited</span>
             <button class="ft-fs" @click="openFs('ft-yearly')" title="Full screen">⛶</button>
@@ -312,6 +333,15 @@
           </div>
           <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
         </div>
+        <div class="chart-box">
+          <div class="chart-title">Avg return by entry price <span class="ft-note">[TEST window]</span>
+            <button class="ft-fs" @click="openFs('ft-pricebins')" title="Full screen">⛶</button>
+          </div>
+          <div class="chart-canvas"><canvas id="ft-pricebins"></canvas></div>
+        </div>
+      </div>
+
+      <div class="ft-grid2" x-show="zoneData">
         <div>
         <div class="chart-box">
           <div class="chart-title">Trade activity <span class="ft-note">[train + test] — edited</span>

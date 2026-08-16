@@ -78,6 +78,48 @@ document.addEventListener('alpine:init', () => {
 
     // A family is on when it has a chosen rule_key. Toggling on defaults to
     // that family's first precomputed value.
+
+    // A family whose rules carry TWO parameters (trail: activation x trail
+    // distance) renders as two stacked dropdowns instead of one list of every
+    // pair. Derived from the params, not hardcoded to `trail`, so any family
+    // the registry grows with two dimensions splits automatically.
+    famDims(f) {
+      const keys = new Set();
+      for (const r of f.rules || []) for (const k of Object.keys(r.params || {})) keys.add(k);
+      return [...keys].sort();
+    },
+    isSplitFamily(f) { return this.famDims(f).length >= 2; },
+    // Distinct values for one dimension, in numeric order.
+    famVals(f, dim) {
+      const vs = new Set();
+      for (const r of f.rules || []) {
+        const v = (r.params || {})[dim];
+        if (v != null) vs.add(v);
+      }
+      return [...vs].sort((a, b) => (+a) - (+b));
+    },
+    // Which value of `dim` the currently-selected rule uses.
+    famSel(f, dim) {
+      const key = this.selected[f.family];
+      const r = (f.rules || []).find(x => x.rule_key === key);
+      return r ? (r.params || {})[dim] : null;
+    },
+    // Pick the rule matching the requested value on `dim`, holding every
+    // other dimension at its current value where possible — that is the
+    // whole point of splitting the control.
+    setFamDim(f, dim, val) {
+      const dims = this.famDims(f);
+      const cur = {};
+      for (const d of dims) cur[d] = this.famSel(f, d);
+      cur[dim] = val;
+      let hit = (f.rules || []).find(r =>
+        dims.every(d => String((r.params || {})[d]) === String(cur[d])));
+      // No exact pair exists (the grid is not always complete) — fall back to
+      // matching the dimension the user just changed.
+      if (!hit) hit = (f.rules || []).find(r => String((r.params || {})[dim]) === String(val));
+      if (hit) { this.selected[f.family] = hit.rule_key; this.selected = { ...this.selected }; }
+    },
+
     toggleFamily(f) {
       if (this.selected[f.family]) delete this.selected[f.family];
       else this.selected[f.family] = f.rules[0]?.rule_key;
@@ -299,6 +341,68 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+
+    // Avg return bucketed by ENTRY PRICE. Test window only, matching the
+    // pane title. Buckets are fixed rather than quantile-derived so the
+    // x-axis means the same thing across runs — the question is "does this
+    // edge live in cheap or expensive names", and a bucket that moves with
+    // the data cannot answer it.
+    _priceBuckets: [[0,25],[25,50],[50,100],[100,150],[150,200],[200,300],
+                    [300,400],[400,500],[500,750],[750,1000],[1000,Infinity]],
+    _renderPriceBins() {
+      const el = document.getElementById('ft-pricebins');
+      if (this._charts['ft-pricebins']) { this._charts['ft-pricebins'].destroy(); delete this._charts['ft-pricebins']; }
+      const trades = (this.zoneData?.combined_trades || [])
+        .filter(t => t.window === 'test' && t.entry_price != null);
+      if (!el || !trades.length) return;
+      const B = this._priceBuckets;
+      const acc = B.map(() => ({ n: 0, sum: 0 }));
+      for (const t of trades) {
+        const px = +t.entry_price;
+        if (!isFinite(px)) continue;
+        const i = B.findIndex(([lo, hi]) => px >= lo && px < hi);
+        if (i < 0) continue;
+        acc[i].n += 1; acc[i].sum += (+t.ret || 0);
+      }
+      const lbl = B.map(([lo, hi]) => hi === Infinity ? `$${lo}+` : `$${lo}-${hi}`);
+      const avg = acc.map(a => a.n ? +(a.sum / a.n * 100).toFixed(3) : null);
+      this._charts['ft-pricebins'] = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: { labels: lbl, datasets: [{
+          data: avg,
+          backgroundColor: avg.map(v => v == null ? 'rgba(120,120,120,.25)'
+                                     : (v >= 0 ? 'rgba(52,152,219,.75)' : 'rgba(232,67,147,.7)')),
+          borderWidth: 0,
+        }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: (c) => {
+                  const a = acc[c.dataIndex];
+                  return a.n ? [`avg ${(a.sum / a.n * 100).toFixed(3)}%`,
+                                `n = ${a.n.toLocaleString()}`]
+                             : ['no trades in this bucket'];
+                },
+              },
+            },
+          },
+          scales: {
+            // n is on the bar itself so an impressive average over three
+            // trades cannot be mistaken for a result.
+            x: { ticks: { color: '#888', font: { size: 9 }, maxRotation: 60,
+                          callback: (v, i) => lbl[i] + (acc[i].n ? `  n=${acc[i].n}` : '') },
+                 grid: { display: false } },
+            y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
+                 grid: { color: '#222' } },
+          },
+        },
+      });
+    },
+
     renderCharts() {
       const FC = window.FactorCharts;
       if (!FC || !this.zoneData) return;
@@ -318,6 +422,7 @@ document.addEventListener('alpine:init', () => {
         FC._renderSecActivity(this, 'ft-activity-edited', this.zoneData);
         FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData);
         this._renderExitReasons();
+        this._renderPriceBins();
         if (this.lockedZone) {
           FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone);
           FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone);
@@ -369,6 +474,9 @@ document.addEventListener('alpine:init', () => {
           maxDD: s.max_dd_usd != null ? fmt$(s.max_dd_usd) : '—',
           maxDDRaw: s.max_dd_usd ?? 0,
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
+          // Same figure as Avg Hold, kept on the bar as well as the run
+          // card: it is the one stat you check against every policy tweak.
+          avgDit: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };
       // The stat bar is always the TEST window: it is the verdict, and a
@@ -400,6 +508,7 @@ document.addEventListener('alpine:init', () => {
         calmarRaw: d(st?.calmar, lt?.calmar),
         totalRet: '—', totalRetRaw: 0, avgAnnRet: '—', avgAnnRetRaw: 0,
         maxDD: '—', maxDDRaw: 0,
+        avgDit: d(st?.avg_hold, lt?.avg_hold).toFixed(2) + ' sess',
       } : null;
       return [locked, edited, diff].filter(Boolean);
     },
