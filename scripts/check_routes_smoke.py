@@ -68,6 +68,10 @@ def _db_env() -> tuple[bool, str]:
 
 
 def main() -> int:
+    # DB-free static pass first: it is the only check here that does not
+    # need a live database, and it catches the class the others cannot.
+    static_bad = _check_undefined_names()
+
     import app.main as main_mod
 
     real_db, why_not = _db_env()
@@ -150,7 +154,84 @@ def main() -> int:
     print(f"page routes healthy: {ok}/{ok + bad}")
 
     api_bad = _check_factor_trades(app, real_db, why_not)
-    return 1 if (bad or api_bad) else 0
+    return 1 if (bad or api_bad or static_bad) else 0
+
+
+def _check_undefined_names() -> int:
+    """Static scan for names that would raise NameError when a path runs.
+
+    Closes a gap the other checks structurally cannot. py_compile accepts a
+    NameError without complaint -- it is a runtime lookup, not a syntax
+    error -- and the API smoke check below needs a live DB, so it skips on
+    any machine without one. A /zone endpoint that 500'd on every call
+    passed both.
+
+    Scope-aware by design: a nested function legitimately reads its
+    enclosing function's locals, so each function inherits the names
+    assigned by its ancestors. A flat per-function scan reports every such
+    closure as undefined, which is noise that would get the whole check
+    ignored.
+
+    Conservative in the other direction: names assigned anywhere within a
+    function count as available throughout it, so a use-before-assignment is
+    NOT reported. This catches genuinely absent names -- a missing import, a
+    renamed variable whose definition was not renamed with it.
+    """
+    import ast
+    import builtins
+
+    # Module dunders are bound by the interpreter, not by any statement.
+    EXTRA = {"__file__", "__name__", "__doc__", "__package__", "__spec__",
+             "__loader__", "__builtins__", "__debug__"}
+    KNOWN = set(dir(builtins)) | EXTRA
+    findings: list[tuple[str, int, str, str]] = []
+
+    def bound_in(node) -> set[str]:
+        """Every name bound anywhere inside `node`, nested scopes included.
+
+        Deliberately flat. Counting a nested function's locals as available
+        to its parent makes the check CONSERVATIVE -- it can miss a bug, but
+        it will not invent one, and a check that cries wolf is a check that
+        gets ignored.
+        """
+        out: set[str] = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.arg):
+                out.add(n.arg)                      # def and lambda parameters
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                out.add(n.id)                       # assignment, for, with, comprehension
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                out.add(n.name)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    out.add((a.asname or a.name).split(".")[0])
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                out.add(n.name)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                out.update(n.names)
+        return out
+
+    for py in sorted((ROOT / "app").rglob("*.py")):
+        rel = str(py.relative_to(ROOT)).replace("\\", "/")
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        module_names = bound_in(tree)
+        for fn in [n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            # module_names already includes every enclosing function's locals,
+            # so a closure reading an outer variable resolves cleanly.
+            scope = module_names | bound_in(fn) | KNOWN
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)                         and n.id not in scope:
+                    findings.append((rel, n.lineno, n.id, fn.name))
+
+    if findings:
+        print("undefined names — these raise NameError when the path runs:")
+        for f, ln, name, where in findings:
+            print(f"  {f}:{ln}  {name!r} in {where}()")
+    else:
+        print("undefined names: none")
+    print()
+    return 1 if findings else 0
 
 
 def _check_factor_trades(app, real_db: bool, why_not: str) -> int:
