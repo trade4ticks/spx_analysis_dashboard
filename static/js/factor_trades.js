@@ -17,6 +17,9 @@ document.addEventListener('alpine:init', () => {
     metricFamilyLookup: {},
     // Every pane here is train/test, so the cutoff marker is always wanted.
     get cutoffLineDate() { return this.cutoffDate; },
+    // Fixed x-domain for the three time-series panes, both windows. Read by
+    // FactorCharts._seriesAxis; pages that omit it keep data-driven bounds.
+    seriesAxis: { from: '2019-01-01', to: null },
     mode: '2f', primaryMetric: '', secondaryMetric: '', entryAnchor: 'open',
     selected: {},                 // family -> rule_key (absent = family off)
     perTrade: 2000, dailyCap: 10000, maxStrike: 1000,

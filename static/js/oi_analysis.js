@@ -56,6 +56,10 @@ document.addEventListener('alpine:init', () => {
     // keying off it would draw a train/test line across in-sample Recall
     // charts. Only train_test mode wants it.
     get cutoffLineDate() { return this.pageMode === 'train_test' ? this.cutoffDate : ''; },
+    // Opted OUT of the fixed time-series x-domain: Recall's panes size to
+    // their own data, and pinning them to a fixed span would change existing
+    // charts. null keeps the data-driven bounds.
+    seriesAxis: null,
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'

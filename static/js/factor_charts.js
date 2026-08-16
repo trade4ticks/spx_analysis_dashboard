@@ -90,7 +90,8 @@ window.FactorCharts = {
           scales: {
             x: {
               type: 'linear',
-              min: eqPxy[0].x, max: eqPxy[eqPxy.length - 1].x,
+              min: (window.FactorCharts._seriesAxis(cmp) || {}).fromMs ?? eqPxy[0].x,
+              max: (window.FactorCharts._seriesAxis(cmp) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
               ticks: { color: '#888', font: { size: 9 }, maxTicksLimit: 10,
                 autoSkip: true, autoSkipPadding: 16,
                 callback: val => new Date(val).toISOString().slice(0, 7) },
@@ -233,8 +234,8 @@ window.FactorCharts = {
             // bounds:'data' Chart.js still pads to "nice" tick
             // boundaries, so set min/max explicitly to the first
             // and last data points.
-            min: eqPxy[0].x,
-            max: eqPxy[eqPxy.length - 1].x,
+            min: (window.FactorCharts._seriesAxis(cmp) || {}).fromMs ?? eqPxy[0].x,
+            max: (window.FactorCharts._seriesAxis(cmp) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
             ticks: {
               color: '#888', font: { size: 9 },
               maxTicksLimit: 10,
@@ -286,6 +287,19 @@ window.FactorCharts = {
     const dollarParams = cmp.equityDollarParams[modeKey];
     const yearly = window.FactorCharts._yearlyForMode(cmp, src.combined_trades || [], mode, dollarParams);
     if (!yearly.length) return;
+
+    // Pad to the fixed domain so TRAIN shows empty 2024-2026 slots rather
+    // than a shorter axis. Padding here, not in _yearlyForMode, keeps the
+    // aggregation honest -- these are placeholders with n=0, not years with
+    // zero return.
+    const _ax = window.FactorCharts._seriesAxis(cmp);
+    if (_ax) {
+      const have = new Set(yearly.map(y => +y.year));
+      for (let y = _ax.fromYear; y <= _ax.toYear; y++) {
+        if (!have.has(y)) yearly.push({ year: y, n: 0, value: null, avg_ret: null });
+      }
+      yearly.sort((a, b) => (+a.year) - (+b.year));
+    }
 
     const isDollar = (mode === 'dollar_capped');
     // n-count gradient: dim bars for thin years, vivid for well-populated ones
@@ -620,6 +634,20 @@ window.FactorCharts = {
   // endpoint deliberately will NOT equal Total Ret. Making the pre-cutoff
   // stretch visibly different is what stops that being rediscovered as a bug
   // months later. Returns the full colour when there is no cutoff.
+  // Fixed x-domain for the time-series panes, when the page asks for one.
+  // Without it the axis rescales on every toggle and you have to read the
+  // tick labels to know which window you are in. Pinned, the shape alone
+  // says it -- half-filled is train, full is test -- and the cutoff line
+  // stays in the same place on screen. Returns null when unset, so pages
+  // that do not opt in keep data-driven bounds.
+  _seriesAxis(cmp) {
+    const a = cmp.seriesAxis;
+    if (!a || !a.from) return null;
+    const to = a.to || new Date().toISOString().slice(0, 10);
+    return { fromMs: new Date(a.from).getTime(), toMs: new Date(to).getTime(),
+             fromYear: +a.from.slice(0, 4), toYear: +to.slice(0, 4) };
+  },
+
   _preCutoffFade(cmp, dates, full, muted) {
     const iso = cmp.cutoffLineDate;
     if (!iso) return full;
