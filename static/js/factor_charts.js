@@ -312,7 +312,13 @@ window.FactorCharts = {
         datasets: [{
           label:           isDollar ? 'Annual P&L' : 'Avg Ret',
           data:            yearly.map(y => isDollar ? +y.value.toFixed(2) : +(y.value * 100).toFixed(3)),
-          backgroundColor: yearly.map(bgColor),
+          // Pre-cutoff years muted; see _preCutoffFade.
+          backgroundColor: yearly.map((y, i) => {
+            const c = bgColor(y, i);
+            if (!cmp.cutoffLineDate) return c;
+            return String(y.year) < cmp.cutoffLineDate.slice(0, 4)
+              ? String(c).replace(/[\d.]+\)$/, '0.18)') : c;
+          }),
           borderColor:     yearly.map(borderColor),
           borderWidth:     1,
         }],
@@ -488,7 +494,8 @@ window.FactorCharts = {
             label: isCapital ? 'Deployed (rolling)' : 'Open Trades',
             data: open,
             borderColor: 'rgba(46,204,113,0.6)',
-            backgroundColor: 'rgba(46,204,113,0.08)',
+            backgroundColor: window.FactorCharts._preCutoffFade(
+              cmp, tradingDays, 'rgba(46,204,113,0.08)', 'rgba(46,204,113,0.03)'),
             fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5,
             order: 1,
           },
@@ -496,7 +503,8 @@ window.FactorCharts = {
             type: 'bar',
             label: isCapital ? 'Deployed' : 'Entered',
             data: entered,
-            backgroundColor: 'rgba(52,152,219,0.7)',
+            backgroundColor: window.FactorCharts._preCutoffFade(
+              cmp, tradingDays, 'rgba(52,152,219,0.7)', 'rgba(52,152,219,0.22)'),
             barThickness: 2,
             order: 2,
           },
@@ -606,6 +614,18 @@ window.FactorCharts = {
   //
   // Returns [] when cmp.cutoffDate is unset, so pages without a train/test
   // split are unaffected and this can be spread into any plugins array.
+  // Pre-cutoff points render muted, post-cutoff full strength, on all three
+  // time-series panes. In TEST mode those panes span the full history while
+  // every single-window number beside them covers test only -- so the equity
+  // endpoint deliberately will NOT equal Total Ret. Making the pre-cutoff
+  // stretch visibly different is what stops that being rediscovered as a bug
+  // months later. Returns the full colour when there is no cutoff.
+  _preCutoffFade(cmp, dates, full, muted) {
+    const iso = cmp.cutoffLineDate;
+    if (!iso) return full;
+    return (dates || []).map(d => (String(d) < iso ? muted : full));
+  },
+
   _cutoffPlugin(cmp, kind, labels) {
     // Deliberately NOT cmp.cutoffDate. On Factor Analysis that field is
     // populated from /tt-cutoff on every page load regardless of mode, so

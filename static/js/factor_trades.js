@@ -389,20 +389,12 @@ document.addEventListener('alpine:init', () => {
     _renderPriceBins() {
       const el = document.getElementById('ft-pricebins');
       if (this._charts['ft-pricebins']) { this._charts['ft-pricebins'].destroy(); delete this._charts['ft-pricebins']; }
-      const trades = (this.zoneData?.combined_trades || [])
-        .filter(t => t.window === this.window && t.entry_price != null);
-      if (!el || !trades.length) return;
-      const B = this._priceBuckets;
-      const acc = B.map(() => ({ n: 0, sum: 0 }));
-      for (const t of trades) {
-        const px = +t.entry_price;
-        if (!isFinite(px)) continue;
-        const i = B.findIndex(([lo, hi]) => px >= lo && px < hi);
-        if (i < 0) continue;
-        acc[i].n += 1; acc[i].sum += (+t.ret || 0);
-      }
-      const lbl = B.map(([lo, hi]) => hi === Infinity ? `$${lo}+` : `$${lo}-${hi}`);
-      const avg = acc.map(a => a.n ? +(a.sum / a.n * 100).toFixed(3) : null);
+      // Server-computed from window_trades, so this pane cannot pick up the
+      // wider series population by accident.
+      const bins = this.zoneData?.price_bins || [];
+      if (!el || !bins.length) return;
+      const lbl = bins.map(b => b.label);
+      const avg = bins.map(b => b.avg_ret == null ? null : +(b.avg_ret * 100).toFixed(3));
       this._charts['ft-pricebins'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels: lbl, datasets: [{
@@ -415,23 +407,16 @@ document.addEventListener('alpine:init', () => {
           responsive: true, maintainAspectRatio: false, animation: false,
           plugins: {
             legend: { display: false },
-            tooltip: {
-              backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
-              callbacks: {
-                label: (c) => {
-                  const a = acc[c.dataIndex];
-                  return a.n ? [`avg ${(a.sum / a.n * 100).toFixed(3)}%`,
-                                `n = ${a.n.toLocaleString()}`]
-                             : ['no trades in this bucket'];
-                },
-              },
-            },
+            tooltip: { backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: { label: (c) => {
+                const b = bins[c.dataIndex];
+                return b.n ? [`avg ${(b.avg_ret * 100).toFixed(3)}%`, `n = ${b.n.toLocaleString()}`]
+                           : ['no trades in this bucket'];
+              } } },
           },
           scales: {
-            // n is on the bar itself so an impressive average over three
-            // trades cannot be mistaken for a result.
             x: { ticks: { color: '#888', font: { size: 9 }, maxRotation: 60,
-                          callback: (v, i) => lbl[i] + (acc[i].n ? `  n=${acc[i].n}` : '') },
+                          callback: (v, i) => lbl[i] + (bins[i].n ? `  n=${bins[i].n}` : '') },
                  grid: { display: false } },
             y: { ticks: { color: '#888', font: { size: 9 }, callback: v => v + '%' },
                  grid: { color: '#222' } },
@@ -449,13 +434,37 @@ document.addEventListener('alpine:init', () => {
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
       const ds = window.FactorCharts._computeDollarSeries(
-        this, (this.zoneData.combined_trades || []).filter(t => t.window === this.window),
+        this, this.zoneData.window_trades || [],
         this.perTrade, this.dailyCap);
       this.dollarStats = this._dollarStats(ds);
+      // In TRAIN the two populations are identical by construction, so the
+      // equity curve's endpoint must equal Total Ret. If it does not, the
+      // arrays have been crossed somewhere. Console-loud rather than silent:
+      // a mismatch here is a data-integrity bug, not a rounding artefact.
+      if (this.window === 'train' && this.dollarStats) {
+        const seriesDs = window.FactorCharts._computeDollarSeries(
+          this, this.zoneData.series_trades || [], this.perTrade, this.dailyCap);
+        const endPt = seriesDs.equity.length
+          ? seriesDs.equity[seriesDs.equity.length - 1].value : 0;
+        const diff = Math.abs(endPt - this.dollarStats.total_ret_usd);
+        if (diff > 0.01) {
+          console.error('[factor-trades] TRAIN invariant violated: equity endpoint',
+            endPt, '!= Total Ret', this.dollarStats.total_ret_usd,
+            '- series_trades and window_trades have been crossed');
+        }
+      }
+      // THE one place the two populations meet. The three time-series panes
+      // get series_trades under the name FactorCharts expects; every other
+      // consumer reads a server-computed single-window aggregate and never
+      // sees a trade list at all. One line to audit instead of a convention
+      // to remember.
+      const seriesView = { ...this.zoneData,
+                           combined_trades: this.zoneData.series_trades
+                                            || this.zoneData.window_trades || [] };
       try {
-        FC._renderSecEquity(this, 'ft-equity', this.zoneData, true);
-        FC._renderZoneYearly(this, 'ft-yearly', this.zoneData);
-        FC._renderSecActivity(this, 'ft-activity-edited', this.zoneData);
+        FC._renderSecEquity(this, 'ft-equity', seriesView, true);
+        FC._renderZoneYearly(this, 'ft-yearly', seriesView);
+        FC._renderSecActivity(this, 'ft-activity-edited', seriesView);
         FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData);
         this._renderExitReasons();
         this._renderPriceBins();

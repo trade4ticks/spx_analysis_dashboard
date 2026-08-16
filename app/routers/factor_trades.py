@@ -97,6 +97,41 @@ def _effective_tickers(counts) -> float:
     return (tot * tot) / float(sum(x * x for x in c))
 
 
+PRICE_BUCKETS = [(0, 25), (25, 50), (50, 100), (100, 150), (150, 200),
+                 (200, 300), (300, 400), (400, 500), (500, 750),
+                 (750, 1000), (1000, float("inf"))]
+
+
+def _price_bins(trades: list) -> list:
+    """Avg return by entry-price bucket, over ONE population.
+
+    Server-side precisely because it is a single-window aggregate: computed
+    in the client from a trade list, it would silently pick up whichever
+    population that list happened to hold. Buckets are FIXED rather than
+    quantile-derived so the axis means the same thing across runs.
+    """
+    acc = [[0, 0.0] for _ in PRICE_BUCKETS]
+    for t in trades:
+        px = t.get("entry_price")
+        if px is None:
+            continue
+        for i, (lo, hi) in enumerate(PRICE_BUCKETS):
+            if lo <= px < hi:
+                acc[i][0] += 1
+                acc[i][1] += t.get("ret") or 0.0
+                break
+    out = []
+    for (lo, hi), (n, tot) in zip(PRICE_BUCKETS, acc):
+        out.append({
+            "label":   f"${lo}+" if hi == float("inf") else f"${lo}-{hi}",
+            "n":       n,
+            # None, not 0.0 -- an empty bucket is "no trades here", which must
+            # not render as a flat zero-return bar.
+            "avg_ret": (tot / n) if n else None,
+        })
+    return out
+
+
 def _window_stats(rets: list, holds: list, tickers, span_days: float) -> dict:
     """Full stat set for one window. Matches Recall's box set plus the three
     this page needs (Calmar, Max DD, Avg Hold).
@@ -363,13 +398,24 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     reasons: dict = {}
     tot = {"train": [0, 0.0, 0.0], "test": [0, 0.0, 0.0]}   # n, sum_ret, sum_hold
     active = "train" if (req.window or "train") == "train" else "test"
+    # TWO POPULATIONS, named by purpose so they cannot be confused:
+    #
+    #   window_trades  strictly the active window. Every single-window number
+    #                  is computed FROM IT SERVER-SIDE and shipped as a
+    #                  finished aggregate -- stats, exit reasons, ticker
+    #                  breakdown, effective tickers, price bins. No client
+    #                  pane ever sees a list it could widen.
+    #   series_trades  what the three time-series panes draw: train-only in
+    #                  TRAIN, the FULL history in TEST so the whole record and
+    #                  the cutoff are both visible.
+    #
+    # In TRAIN the two are the same population, which is the invariant worth
+    # asserting downstream: the equity endpoint must equal Total Ret there.
+    series_trades: list = []
     for r in rows:
         win = "train" if r["is_train"] else "test"
-        # Trades outside the active window are not returned at all. That is
-        # what makes the time-series panes stop at the cutoff in train mode
-        # rather than drawing test data the user has chosen not to look at.
-        if win != active:
-            continue
+        if active == "train" and win != "train":
+            continue          # TRAIN never draws test data at all
         bp, bs = int(r["bp"]), (int(r["bs"]) if two_factor else 0)
         n, avg, hold = int(r["n"]), float(r["avg_ret"] or 0), float(r["avg_hold"] or 0)
         cell = acc.setdefault((bs, bp), {"train": [0, 0.0], "test": [0, 0.0]})
@@ -592,10 +638,12 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         # Exit reasons and the ticker breakdown are TEST-window surfaces:
         # they answer "what happened out of sample", so counting train trades
         # in them would dilute exactly the thing being judged.
-        if True:
+        if win == active:
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
-        za = zacc[win]
-        za[0].append(ret); za[1].append(hold); za[2][r["ticker"]] += 1; za[3].append(r["trade_date"])
+        if win == active:
+            za = zacc[win]
+            za[0].append(ret); za[1].append(hold)
+            za[2][r["ticker"]] += 1; za[3].append(r["trade_date"])
         # trade_paths.entry_price is stored AS-TRADED (the store is
         # adjusted=false), so it is already the price a fill would have
         # happened at. That makes it exactly what the sizing path wants:
@@ -610,15 +658,20 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         # exit_return, and sizing and the max-strike filter both want the
         # as-traded price.
         _px = r["entry_price"]
-        trades.append({
+        _rec = {
             "ticker": r["ticker"], "trade_date": d,
             "ret": ret, "exit_bar": hold, "exit_rule": r["exit_rule"],
             "window": win,
             "entry_price":    float(_px) if _px is not None else None,
             "spot_entry_raw": float(_px) if _px is not None else None,
-        })
-        dates.append(d)
-        if True:
+        }
+        series_trades.append(_rec)
+        if win != active:
+            continue          # everything below is single-window only
+        trades.append(_rec)
+        if win == active:
+            dates.append(d)
+        if win == active:
             by_ticker.setdefault(r["ticker"], []).append(ret)
 
     eq = _sec_equity_curve(trades, "ret")
@@ -659,7 +712,14 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         "entry_anchor": req.entry_anchor,
         "cutoff_date": cutoff_iso,
         # Recall chart contracts — same field names, same shapes.
+        # window_trades: the single-window population. series_trades: what
+        # the three time-series panes draw. combined_trades is kept as an
+        # alias of window_trades so nothing that still reads it silently gets
+        # the wider set.
+        "window_trades":  trades,
+        "series_trades":  series_trades,
         "combined_trades": trades,
+        "price_bins":     _price_bins(trades),
         "combined_trade_dates": dates,
         "equity_primary": eq,
         "equity_combined": eq,
