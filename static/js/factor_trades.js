@@ -244,6 +244,61 @@ document.addEventListener('alpine:init', () => {
                calmar: maxDD < 0 ? (annual / Math.abs(maxDD)) : null };
     },
 
+
+    // Exit reasons. Page-local rather than in FactorCharts: no other page has
+    // an exit policy, so there is no second consumer to keep in step, and a
+    // shared module should not carry a chart only one page can use.
+    //
+    // Horizontal bars, one per rule that actually closed a trade, ordered by
+    // share. The backstop is drawn in a distinct colour because it means the
+    // opposite of the others: a bar for fixed_stop__2 is that stop working,
+    // while a bar for the auto-appended max_days__20 is every selected rule
+    // FAILING to fire and the horizon catching the trade by default. Same
+    // chart, opposite readings — see horizon_auto_added on the run card.
+    _renderExitReasons() {
+      const el = document.getElementById('ft-reasons');
+      const rows = this.zoneData?.exit_reasons || [];
+      if (this._charts['ft-reasons']) { this._charts['ft-reasons'].destroy(); delete this._charts['ft-reasons']; }
+      if (!el || !rows.length) return;
+      const labels = rows.map(r => r.label);
+      const data   = rows.map(r => +(r.frac * 100).toFixed(2));
+      const colors = rows.map(r => r.is_backstop
+        ? 'rgba(224,176,102,0.75)'          // backstop — nothing fired
+        : 'rgba(52,152,219,0.75)');         // a selected rule did its job
+      this._charts['ft-reasons'] = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: { labels, datasets: [{ data, backgroundColor: colors,
+                                     borderColor: colors, borderWidth: 1 }] },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+              callbacks: {
+                label: (c) => {
+                  const r = rows[c.dataIndex];
+                  return [`${r.frac != null ? (r.frac * 100).toFixed(1) : '—'}% of test trades`,
+                          `n = ${(r.n ?? 0).toLocaleString()}`,
+                          r.is_backstop
+                            ? 'backstop — no selected rule fired'
+                            : `${r.side} · ${r.rule_key}`];
+                },
+              },
+            },
+          },
+          scales: {
+            x: { ticks: { color: '#888', font: { size: 9 },
+                          callback: v => v + '%' },
+                 grid: { color: '#222' }, beginAtZero: true },
+            y: { ticks: { color: '#aaa', font: { size: 10 } },
+                 grid: { display: false } },
+          },
+        },
+      });
+    },
+
     renderCharts() {
       const FC = window.FactorCharts;
       if (!FC || !this.zoneData) return;
@@ -262,6 +317,7 @@ document.addEventListener('alpine:init', () => {
         FC._renderZoneYearly(this, 'ft-yearly', this.zoneData);
         FC._renderSecActivity(this, 'ft-activity-edited', this.zoneData);
         FC._renderSecBubble(this, 'ft-bubble-edited', this.zoneData);
+        this._renderExitReasons();
         if (this.lockedZone) {
           FC._renderSecActivity(this, 'ft-activity-locked', this.lockedZone);
           FC._renderSecBubble(this, 'ft-bubble-locked', this.lockedZone);
