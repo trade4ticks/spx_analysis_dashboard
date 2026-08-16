@@ -148,8 +148,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=17"></script>
-  <script src="/static/js/factor_trades.js?v=38"></script>
+  <script src="/static/js/factor_charts.js?v=18"></script>
+  <script src="/static/js/factor_trades.js?v=39"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -337,6 +337,25 @@
       {#- One batch instead of re-sampling by hand: policy + three baseline
           types x N seeds, both windows. Not interactive while it runs --
           6N+2 queries is a batch, and a partial table would look finished. -#}
+      <div class="ft-sec-h" style="margin-top:12px">Parameter response</div>
+      {#- Families with more than one catalog value; sweeping a single-value
+          family produces a one-point curve. -#}
+      <template x-for="f in gridFamilies" :key="'gf-'+f.family">
+        <div class="ft-rule" :class="gridSweep.includes(f.family) ? 'on' : ''"
+             @click="gridToggleFamily(f.family)" style="cursor:pointer">
+          <span class="ft-sw" :class="gridSweep.includes(f.family) ? 'on' : ''"></span>
+          <span class="ft-rule-name" x-text="f.family"></span>
+          <span class="ft-note" x-text="f.n + ' vals'"></span>
+        </div>
+      </template>
+      <div class="ft-note" x-show="gridSweep.length" style="margin-top:4px"
+           x-text="gridComboCount + ' combinations (incl. the null) · ~'
+                   + gridEstimate() + 's'"></div>
+      <button class="ft-btn" @click="runGrid()"
+              :disabled="gridRunning || loading || !selectedCells.length || !gridSweep.length"
+              title="Full cross product of the selected families' catalog values, plus the null combination. Shows each parameter's MARGINAL effect — averaged across every setting of the others — with a spread band, because a one-at-a-time sweep only describes the slice it was run on."
+              x-text="gridRunning ? ('Running… ' + gridElapsed + 's') : 'Run parameter grid'"></button>
+
       <button class="ft-btn primary" @click="runSuite()"
               :disabled="suiteRunning || loading || !selectedCells.length"
               title="Policy plus all three baseline types, N seeds each, train and test, in one batch. Reports mean / sd / min / max per run type and — the number that answers the question — how many of the N draws the policy beat."
@@ -657,6 +676,149 @@
                  x-text="'Random-exit rows drew holding periods averaging '
                          + (suiteData.hold?.avg_sessions ?? 0)
                          + ' sessions, from the policy\'s own distribution.'"></div>
+          </div>
+        </template>
+      </div>
+
+
+      <!-- 7b. Parameter response grid. Below the suite: both are batch tools
+           run occasionally, and both push the charts down when open, so they
+           live together at the bottom and both collapse.
+
+           The primary view is MARGINAL on purpose. A one-at-a-time sweep only
+           describes the slice it was run on, and if the stop's effect depends
+           on the target it does not generalise. Nothing here ranks
+           combinations except the scatter, whose job is to say whether the
+           surface means anything at all. -->
+      <div class="chart-box" x-show="gridData || gridRunning">
+        <div class="chart-title" style="cursor:pointer" @click="gridOpen = !gridOpen">
+          <span x-text="gridOpen ? '▾' : '▸'" style="display:inline-block;width:12px"></span>
+          Parameter response
+          <span class="ft-note" x-show="gridData"
+                x-text="(gridData?.n_combos ?? 0) + ' combinations · '
+                        + (gridData?.sweep || []).map(f => f.family).join(' × ')
+                        + ' · ' + (gridData?.n_trades ?? 0) + ' trades each'"></span>
+          <button class="ft-fs" @click.stop="gridCsv()" x-show="gridData"
+                  style="float:right;margin-left:6px"
+                  title="Every combination, one row each, both windows">CSV</button>
+        </div>
+
+        <div x-show="gridRunning" class="ft-note" style="padding:14px 2px">
+          Running <span x-text="gridComboCount"></span> combinations…
+          <span x-text="gridElapsed + 's'"></span> elapsed,
+          ~<span x-text="gridEstimate() + 's'"></span> expected.
+        </div>
+        <div x-show="gridData && !gridOpen" class="ft-note" style="padding:2px">
+          Collapsed — click the title to expand.
+        </div>
+
+        <template x-if="gridData && gridOpen">
+          <div>
+            <div class="ft-units" x-text="gridData.units_note"></div>
+
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+              <div>
+                <span class="ft-note">Metric</span>
+                <div class="ft-toggle">
+                  <template x-for="m in gridData.metrics" :key="'gm-'+m.key">
+                    <span :class="gridMetric === m.key ? 'on' : ''"
+                          @click="setGridMetric(m.key)" x-text="m.label"></span>
+                  </template>
+                </div>
+              </div>
+              <div>
+                {#- Train by default. A grid of test results is the most
+                    efficient curve-fitting device this page could offer, so
+                    switching to it is a deliberate act, not a default. -#}
+                <span class="ft-note">Window</span>
+                <div class="ft-toggle">
+                  <span :class="gridWindow === 'train' ? 'on' : ''"
+                        @click="setGridWindow('train')">TRAIN</span>
+                  <span :class="gridWindow === 'test' ? 'on' : ''"
+                        @click="setGridWindow('test')"
+                        title="Deliberate: reading a parameter surface on test is how a policy gets fitted to it">TEST</span>
+                </div>
+              </div>
+              <div>
+                <span class="ft-note">Band</span>
+                <div class="ft-toggle">
+                  <span :class="gridBandMode === 'minmax' ? 'on' : ''"
+                        @click="setGridBand('minmax')"
+                        title="Full range across every setting of the other parameters">min–max</span>
+                  <span :class="gridBandMode === 'sd' ? 'on' : ''"
+                        @click="setGridBand('sd')"
+                        title="One standard deviation across the other parameters' settings">±1 sd</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="ft-note" style="margin-bottom:8px">
+              Each panel averages the metric across every setting of the other
+              parameters. A <b>narrow band</b> means the effect holds regardless of
+              context. A <b>wide band</b> means it interacts with something — open the
+              2D view below to find out what. The dashed line is the null
+              combination: no stop, no target, horizon only.
+            </div>
+
+            <div class="ft-grid3">
+              <template x-for="m in gridMarginals" :key="'gp-'+m.family">
+                <div class="chart-box" style="margin-bottom:0">
+                  <div class="chart-title" x-text="m.family"></div>
+                  <div class="chart-canvas" style="height:190px">
+                    <canvas :id="'grid-mg-' + m.family"></canvas>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <template x-if="(gridData.sweep || []).length >= 2">
+              <div style="margin-top:14px">
+                <div class="chart-title">
+                  Two-parameter view
+                  <span class="ft-note">marginalised over every other swept family</span>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+                  <span class="ft-note">X</span>
+                  <select style="width:auto" x-model="gridPairX">
+                    <template x-for="f in gridData.sweep" :key="'px-'+f.family">
+                      <option :value="f.family" x-text="f.family"></option>
+                    </template>
+                  </select>
+                  <span class="ft-note">Y</span>
+                  <select style="width:auto" x-model="gridPairY">
+                    <template x-for="f in gridData.sweep" :key="'py-'+f.family">
+                      <option :value="f.family" x-text="f.family"></option>
+                    </template>
+                  </select>
+                </div>
+                <template x-if="gridHeat">
+                  <div style="overflow-x:auto">
+                    {{ m.heatmap_grid('gridHeat.grid', 'gridHeat', 'gh', 'compact',
+                                      bg_fn='gridCellBg', title_fn='gridCellTitle')
+                       | indent(20) | safe }}
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <div style="margin-top:14px">
+              <div class="chart-title" style="cursor:pointer" @click="toggleGridScatter()">
+                <span x-text="gridShowScatter ? '▾' : '▸'" style="display:inline-block;width:12px"></span>
+                Train / test rank scatter
+                <span class="ft-note">top 20 by train Calmar, plus the null combination</span>
+              </div>
+              <div x-show="gridShowScatter">
+                <div class="ft-note" style="margin-bottom:6px">
+                  If good train combinations are mostly good test combinations the
+                  surface is real. If this is a shapeless cloud the panels above are
+                  describing noise. Costs nothing to compute — every combination
+                  already carries both windows.
+                </div>
+                <div class="chart-canvas" style="height:280px">
+                  <canvas id="grid-scatter"></canvas>
+                </div>
+              </div>
+            </div>
           </div>
         </template>
       </div>

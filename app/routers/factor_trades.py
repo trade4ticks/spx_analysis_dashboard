@@ -1452,7 +1452,7 @@ def _policy_sql(combine_sql: str, where_bins: str,
     WITH c AS (
 {combine_sql}
     )
-    SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return,
+    SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule,
            tp.entry_price,
            (c.trade_date < $2::date) AS is_train
     FROM c
@@ -1839,3 +1839,298 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
         "errors": errors,
         "units_note": SUITE_UNITS_NOTE,
     }
+
+
+# ── Parameter response grid ───────────────────────────────────────────────
+#
+# The second layer on run_batch. The suite varies the SEED and holds
+# parameters fixed; this varies the PARAMETERS and holds the seed fixed.
+# Same fan-out, same folding, same concurrency cap — only the variant list
+# differs.
+#
+# The question is whether a parameter's effect is smooth and consistent, NOT
+# which combination scores best. That is why the primary view is marginal
+# (each parameter averaged across every setting of the others) with a spread
+# band: a one-at-a-time sweep only describes the slice it was run on, and if
+# the stop's effect depends on the target -- it does -- that slice does not
+# generalise.
+
+# 600 combinations is ~2.5 minutes of queries and ~12MB of returns. Past
+# that the honest answer is fewer families, not a batch that will not finish
+# well. Four families at seven values each is 2,401.
+GRID_MAX_COMBOS = 600
+
+GRID_METRICS = [
+    ("calmar",     "Calmar",     "ratio"),
+    ("avg_ret",    "Avg Ret",    "pct"),
+    ("total_ret",  "Total Ret",  "usd"),
+    ("max_dd",     "Max DD",     "usd"),
+    ("avg_hold",   "Avg DIT",    "sess"),
+    ("exit_share", "Exit share", "pct"),
+]
+
+
+class GridReq(ZoneReq):
+    # Families to sweep. Every catalog value of each is used, so the caller
+    # picks families rather than values -- the point is the whole response
+    # curve, and a hand-picked subset of it is the thing this replaces.
+    sweep_families: list[str] = []
+    concurrency: int = BATCH_MAX_CONCURRENCY
+
+
+@router.post("/grid")
+async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
+    """Full cross product over the swept families' catalog values.
+
+    TRAIN and TEST both come back from every combination at no extra cost:
+    is_train is a column in the SELECT, not a filter, so the rank scatter is
+    free rather than a doubling.
+
+    Returns per-trade RETURNS per combination against ONE shared skeleton.
+    The combine's only row filter is `path_status = 'ok'`, which does not
+    depend on which rules are selected, so every combination sees the same
+    trades in the same order -- only the exit changes. Shipping the skeleton
+    once instead of per combination is a ~30x reduction, and the invariant
+    is asserted per combination rather than trusted.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+    if not req.cells:
+        return {"error": "no cells selected"}
+    if not req.sweep_families:
+        return {"error": "pick at least one family to sweep"}
+
+    from app.routers.oi_analysis import _get_tt_cutoff
+
+    async with pool.acquire() as conn:
+        rules = await _load_rules(conn)
+        if not rules:
+            return {"error": "trade_path_rules is empty"}
+        by_key = by_key_from_rows(rules)
+
+        bin_cols = await _bin_columns(conn)
+        p_col = f"bin20_{req.primary_metric}"
+        if p_col not in bin_cols:
+            return {"error": f"no stored bins for {req.primary_metric!r} in tt_bins"}
+        two_factor = bool(req.secondary_metric)
+        s_col = f"bin20_{req.secondary_metric}" if two_factor else None
+        if two_factor and s_col not in bin_cols:
+            return {"error": f"no stored bins for {req.secondary_metric!r} in tt_bins"}
+
+        cutoff_iso = await _get_tt_cutoff(pool)
+        if not cutoff_iso:
+            return {"error": "tt_bins has no cutoff_date"}
+        try:
+            cutoff_d = _date.fromisoformat(cutoff_iso)
+        except (TypeError, ValueError):
+            return {"error": f"tt_bins cutoff_date is not an ISO date: {cutoff_iso!r}"}
+
+        n_bins = max(2, min(20, int(req.n_bins)))
+
+        def _collapse(col: str) -> str:
+            return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+
+        bps, bss = [], []
+        for c in req.cells:
+            if not c:
+                continue
+            bp = int(c[0])
+            bs = int(c[1]) if (two_factor and len(c) > 1) else 0
+            if not (0 <= bp < n_bins) or not (0 <= bs < n_bins):
+                return {"error": f"cell out of range for n_bins={n_bins}: {c}"}
+            bps.append(bp); bss.append(bs)
+        if not bps:
+            return {"error": "no valid cells"}
+
+        if two_factor:
+            cell_pred = ("(" + _collapse(p_col) + ", " + _collapse(s_col) +
+                         ") IN (SELECT * FROM unnest($3::int[], $4::int[]))")
+            args = [req.entry_anchor, cutoff_d, bps, bss]
+        else:
+            cell_pred = _collapse(p_col) + " = ANY($3::int[])"
+            args = [req.entry_anchor, cutoff_d, bps]
+
+        where_bins = f"bt.{p_col} > 0" + (f" AND bt.{s_col} > 0" if two_factor else "")
+
+        strike_pred = ""
+        if req.max_strike and req.max_strike > 0:
+            strike_pred = f" AND tp.entry_price <= ${len(args) + 1}"
+            args = args + [float(req.max_strike)]
+
+    # ── Cross product ────────────────────────────────────────────────────
+    fam_rules: dict[str, list] = {}
+    for r in rules:
+        fam_rules.setdefault(r["family"], []).append(r)
+    for rs in fam_rules.values():
+        rs.sort(key=lambda r: _rule_sort_key(r["params"]))
+
+    swept = []
+    for fam in req.sweep_families:
+        rs = fam_rules.get(fam)
+        if not rs:
+            return {"error": f"no such family in trade_path_rules: {fam!r}"}
+        swept.append({
+            "family": fam,
+            "values": [{"rule_key": r["rule_key"],
+                        "label": _rule_label(fam, r["params"]),
+                        "sort": _rule_sort_key(r["params"])[1]} for r in rs],
+        })
+
+    total = 1
+    for f in swept:
+        total *= len(f["values"])
+    if total > GRID_MAX_COMBOS:
+        dims = " x ".join(f"{len(f['values'])} {f['family']}" for f in swept)
+        return {"error": f"that sweep is {dims} = {total:,} combinations, over "
+                         f"the {GRID_MAX_COMBOS} limit. At ~1.2s each with "
+                         f"{BATCH_MAX_CONCURRENCY}-way concurrency that is "
+                         f"~{int(total * 1.2 / BATCH_MAX_CONCURRENCY / 60)} "
+                         f"minutes and roughly "
+                         f"{int(total * 20 / 1000)}MB of returns. Sweep fewer "
+                         f"families."}
+
+    # Families NOT being swept keep whatever the rail has selected, so a grid
+    # is a slice through the CURRENT policy rather than through a bare one.
+    fam_of = {r["rule_key"]: r["family"] for r in rules}
+    swept_names = {f["family"] for f in swept}
+    held = [k for k in (req.rule_keys or []) if fam_of.get(k) not in swept_names]
+
+    import itertools
+    variants = []
+    combos_meta = []
+    for combo in itertools.product(*[f["values"] for f in swept]):
+        keys = held + [c["rule_key"] for c in combo]
+        ix = len(combos_meta)
+        combos_meta.append({
+            "i": ix,
+            "params": {f["family"]: c["rule_key"]
+                       for f, c in zip(swept, combo)},
+            "labels": {f["family"]: c["label"] for f, c in zip(swept, combo)},
+            "is_null": False,
+        })
+        variants.append({"key": f"c{ix}", "group": "grid", "rule_keys": keys})
+
+    # The null combination is a PERMANENT reference, not something to
+    # remember to add: no stop, no target, no held rules -- an empty rule
+    # list, which build_combine_sql resolves to the horizon backstop alone.
+    # "Do nothing" has to be on every grid because a policy that cannot beat
+    # it is not a policy.
+    null_ix = len(combos_meta)
+    combos_meta.append({"i": null_ix, "params": {}, "labels": {},
+                        "is_null": True})
+    variants.append({"key": f"c{null_ix}", "group": "grid", "rule_keys": []})
+
+    ctx = BatchCtx(req, rules, by_key, cutoff_d, cutoff_iso, args,
+                   where_bins, cell_pred, strike_pred)
+    results = await run_batch(pool, ctx, variants, req.concurrency)
+
+    by_key_res = {r["key"]: r for r in results}
+    errors = [{"key": r["key"], "error": r["error"]}
+              for r in results if r.get("error")]
+
+    # ── One shared skeleton, verified per combination ────────────────────
+    ok = [by_key_res.get(f"c{m['i']}") for m in combos_meta]
+    first = next((r for r in ok if r and not r.get("error")), None)
+    if first is None:
+        return {"error": "every combination failed", "errors": errors}
+
+    base_rows = first.get("rows") or []
+    tickers: list = []
+    dates: list = []
+    tick_ix: dict = {}
+    date_ix: dict = {}
+
+    def _ix(v, table, out):
+        i = table.get(v)
+        if i is None:
+            i = len(out); table[v] = i; out.append(v)
+        return i
+
+    skel_t, skel_d, skel_p, skel_w = [], [], [], []
+    seq = []
+    for row in base_rows:
+        seq.append((row["ticker"], row["trade_date"]))
+        skel_t.append(_ix(row["ticker"], tick_ix, tickers))
+        skel_d.append(_ix(row["trade_date"].isoformat(), date_ix, dates))
+        _p = row["entry_price"]
+        skel_p.append(round(float(_p), 4) if _p is not None else None)
+        skel_w.append(1 if row["is_train"] else 0)
+
+    combos_out = []
+    for m in combos_meta:
+        r = by_key_res.get(f"c{m['i']}")
+        if r is None or r.get("error"):
+            combos_out.append({**m, "error": (r or {}).get("error", "missing")})
+            continue
+        rows = r.get("rows") or []
+        # LOUD. If this ever trips, every marginal curve on the page is
+        # averaging returns against the wrong trades -- and it would look
+        # like a surprising result, not like a bug. So it is a hard failure
+        # naming the combination and the first divergent row, not a warning.
+        if len(rows) != len(seq):
+            return {"error": f"row-sequence invariant broken: combination "
+                             f"{m['i']} ({m['labels'] or 'null'}) returned "
+                             f"{len(rows)} trades against the skeleton's "
+                             f"{len(seq)}. Every combination must see the "
+                             f"same trades — the grid cannot be trusted.",
+                    "invariant": "row_count"}
+        for j, row in enumerate(rows):
+            if (row["ticker"], row["trade_date"]) != seq[j]:
+                return {"error": f"row-sequence invariant broken: combination "
+                                 f"{m['i']} ({m['labels'] or 'null'}) diverges "
+                                 f"at row {j} — {row['ticker']} "
+                                 f"{row['trade_date']} where the skeleton has "
+                                 f"{seq[j][0]} {seq[j][1]}. Every combination "
+                                 f"must see the same trades in the same order "
+                                 f"— the grid cannot be trusted.",
+                        "invariant": "row_order"}
+        combos_out.append({
+            **m,
+            "r": [None if row["exit_return"] is None
+                  else round(float(row["exit_return"]), 8) for row in rows],
+            "train": {k: r["train"].get(k) for k in ("n", "avg_ret", "avg_hold")},
+            "test":  {k: r["test"].get(k)  for k in ("n", "avg_ret", "avg_hold")},
+            "reasons": _grid_reasons(rows),
+        })
+
+    return {
+        "sweep": swept,
+        "held": held,
+        "cutoff_date": cutoff_iso,
+        "cells": req.cells,
+        "entry_anchor": req.entry_anchor,
+        "max_strike": req.max_strike,
+        "metrics": [{"key": k, "label": l, "unit": u} for k, l, u in GRID_METRICS],
+        "tickers": tickers,
+        "dates": dates,
+        "skeleton": {"t": skel_t, "d": skel_d, "p": skel_p, "w": skel_w},
+        "combos": combos_out,
+        "null_index": null_ix,
+        "n_combos": len(combos_meta),
+        "n_trades": len(seq),
+        "concurrency": BATCH_MAX_CONCURRENCY,
+        "errors": errors,
+        "units_note": SUITE_UNITS_NOTE,
+    }
+
+
+def _grid_reasons(rows) -> dict:
+    """Exit-rule share per window for one combination.
+
+    Server-side because it is a count, not a portfolio quantity -- sizing
+    cannot touch it, so shipping it derived costs nothing and shipping the
+    rule per trade would cost a third array.
+    """
+    out = {"train": {}, "test": {}}
+    tot = {"train": 0, "test": 0}
+    for row in rows:
+        w = "train" if row["is_train"] else "test"
+        rk = row["exit_rule"]
+        if rk is None:
+            continue
+        out[w][rk] = out[w].get(rk, 0) + 1
+        tot[w] += 1
+    for w in ("train", "test"):
+        n = tot[w] or 1
+        out[w] = {k: v / n for k, v in out[w].items()}
+    return out

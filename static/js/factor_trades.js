@@ -334,6 +334,412 @@ document.addEventListener('alpine:init', () => {
       entry_exit: { label: 'random entries + exits', card: 'RANDOM ENTRIES + EXITS',
                     row: 'rand entry+exit', colour: '#1abc9c' },
     },
+    // ── Parameter response grid ──────────────────────────────────────────
+    // Second thin layer on the batch runner: the suite varies the seed, this
+    // varies the parameters. The question is whether each parameter's effect
+    // is SMOOTH AND CONSISTENT, not which combination scores best — so the
+    // primary view is marginal, with a spread band, and there is deliberately
+    // no ranking of combinations anywhere except the train/test scatter,
+    // which exists to test whether the surface means anything at all.
+    gridOpen: false,
+    gridSweep: [],            // family names
+    gridData: null,
+    gridRunning: false,
+    gridElapsed: 0,
+    _gridTimer: null,
+    gridMetric: 'calmar',
+    gridWindow: 'train',      // which window the panels read
+    gridPairX: '', gridPairY: '',
+    gridShowScatter: false,
+    _gridRange: 0.01,
+
+    get gridFamilies() {
+      const out = [];
+      for (const g of (this.ruleGroups || [])) {
+        for (const f of (g.families || [])) {
+          if ((f.rules || []).length > 1) out.push({ family: f.family, n: f.rules.length });
+        }
+      }
+      return out;
+    },
+    gridToggleFamily(fam) {
+      const i = this.gridSweep.indexOf(fam);
+      if (i >= 0) this.gridSweep.splice(i, 1);
+      else this.gridSweep.push(fam);
+      this.gridSweep = [...this.gridSweep];
+    },
+    get gridComboCount() {
+      let n = 1;
+      for (const fam of this.gridSweep) {
+        const f = this.gridFamilies.find(x => x.family === fam);
+        n *= (f?.n || 1);
+      }
+      return this.gridSweep.length ? n + 1 : 0;   // +1 for the null combination
+    },
+    gridEstimate() {
+      return Math.round(this.gridComboCount * 1.2 / 5);
+    },
+
+    async runGrid() {
+      if (!this.runData) { this.error = 'run a policy first'; return; }
+      if (!this.selectedCells.length) { this.error = 'select a zone first'; return; }
+      if (!this.gridSweep.length) { this.error = 'pick at least one family to sweep'; return; }
+      const src = this.runData;
+      this.gridRunning = true; this.error = ''; this.gridElapsed = 0;
+      this._gridTimer = setInterval(() => { this.gridElapsed += 1; }, 1000);
+      try {
+        const r = await fetch('/api/factor-trades/grid', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
+            entry_anchor: src.entry_anchor, rule_keys: src.rules,
+            n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
+            window: this.window, cells: this.selectedCells,
+            sweep_families: this.gridSweep,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        this.gridData = d;
+        this.gridOpen = true;
+        // Default the 2D view to the first two swept families rather than
+        // rendering every pair — three families is three heatmaps and only
+        // one is being read at a time.
+        this.gridPairX = d.sweep?.[0]?.family || '';
+        this.gridPairY = d.sweep?.[1]?.family || d.sweep?.[0]?.family || '';
+        this.$nextTick(() => this.renderGrid());
+      } catch (e) { this.error = String(e); }
+      finally {
+        this.gridRunning = false;
+        if (this._gridTimer) { clearInterval(this._gridTimer); this._gridTimer = null; }
+      }
+    },
+
+    // Per-combination metrics. Dollars come from the SAME _computeDollarSeries
+    // the stat bar uses, applied to the shared skeleton with this
+    // combination's returns spliced in — one implementation, and the grid
+    // cannot describe a differently-sized system than the rest of the page.
+    _gridStats(c, win) {
+      const d = this.gridData, sk = d.skeleton;
+      const want = win === 'train' ? 1 : 0;
+      const trades = [];
+      for (let i = 0; i < sk.w.length; i++) {
+        if (sk.w[i] !== want) continue;
+        const ret = c.r[i];
+        if (ret == null) continue;
+        trades.push({ ticker: d.tickers[sk.t[i]], trade_date: d.dates[sk.d[i]],
+                      ret, spot_entry_raw: sk.p[i] });
+      }
+      const base = { avg_ret: c[win]?.avg_ret ?? null, n: c[win]?.n ?? 0,
+                     avg_hold: c[win]?.avg_hold ?? null };
+      if (!trades.length) {
+        return { ...base, total_ret: null, max_dd: null, calmar: null, exit_share: null };
+      }
+      const ds = window.FactorCharts._computeDollarSeries(
+        this, trades, this.perTrade, this.dailyCap);
+      const $d = this._dollarStats(ds);
+      // Exit share of the rules this combination actually selected — the
+      // question "how often did this stop fire" only means anything about
+      // the rules in the combination.
+      let share = null;
+      const rk = Object.values(c.params || {});
+      if (rk.length) {
+        const rs = c.reasons?.[win] || {};
+        share = rk.reduce((a, k) => a + (rs[k] || 0), 0);
+      }
+      return { ...base, total_ret: $d?.total_ret_usd ?? null,
+               max_dd: $d?.max_dd_usd ?? null, calmar: $d?.calmar ?? null,
+               exit_share: share };
+    },
+
+    // Every combination x both windows, computed once per data/sizing change.
+    get gridStats() {
+      const d = this.gridData;
+      if (!d) return null;
+      return (d.combos || []).map(c => c.error ? null : ({
+        combo: c,
+        train: this._gridStats(c, 'train'),
+        test:  this._gridStats(c, 'test'),
+      }));
+    },
+
+    // THE PRIMARY VIEW. For each swept family, the metric averaged across
+    // every setting of every OTHER family, with the spread across those
+    // settings. A narrow band means the parameter's effect does not depend
+    // on context; a wide band means it interacts with something, which is
+    // the cue to open the 2D view and find out what.
+    get gridMarginals() {
+      const d = this.gridData, st = this.gridStats;
+      if (!d || !st) return [];
+      const win = this.gridWindow, mk = this.gridMetric;
+      return (d.sweep || []).map(f => {
+        const points = f.values.map(v => {
+          const vals = [];
+          for (const s of st) {
+            if (!s || s.combo.is_null) continue;      // the null combo is a
+            if (s.combo.params[f.family] !== v.rule_key) continue;  // reference,
+            const x = s[win]?.[mk];                   // not a grid point
+            if (x != null && isFinite(x)) vals.push(+x);
+          }
+          if (!vals.length) return { label: v.label, mean: null, lo: null, hi: null,
+                                     sdLo: null, sdHi: null, n: 0 };
+          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const sd = vals.length > 1
+            ? Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) : 0;
+          return { label: v.label, mean, n: vals.length,
+                   lo: Math.min(...vals), hi: Math.max(...vals),
+                   sdLo: mean - sd, sdHi: mean + sd };
+        });
+        return { family: f.family, points };
+      });
+    },
+
+    // Null combination as a reference line on every panel — it is the thing
+    // every parameter setting has to beat, so it belongs ON the chart rather
+    // than in a number to be remembered.
+    get gridNullValue() {
+      const st = this.gridStats;
+      const s = (st || []).find(x => x && x.combo.is_null);
+      return s ? s[this.gridWindow]?.[this.gridMetric] ?? null : null;
+    },
+
+    gridFmt(v) {
+      if (v == null || !isFinite(v)) return '—';
+      const u = (this.gridData?.metrics || []).find(m => m.key === this.gridMetric)?.unit;
+      if (u === 'ratio') return (+v).toFixed(2);
+      if (u === 'sess') return (+v).toFixed(1);
+      if (u === 'usd') {
+        const a = Math.abs(v), sg = v < 0 ? '-' : '';
+        if (a >= 1e6) return sg + '$' + (a / 1e6).toFixed(2) + 'M';
+        if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
+        return sg + '$' + a.toFixed(0);
+      }
+      return ((+v) * 100).toFixed(2) + '%';
+    },
+
+    // ── 2D view ──────────────────────────────────────────────────────────
+    // Marginalised over every family that is not one of the two axes, so a
+    // cell is "this pair at these settings, averaged over the rest" rather
+    // than one arbitrary slice.
+    get gridHeat() {
+      const d = this.gridData, st = this.gridStats;
+      if (!d || !st || !this.gridPairX || !this.gridPairY) return null;
+      const fx = (d.sweep || []).find(f => f.family === this.gridPairX);
+      const fy = (d.sweep || []).find(f => f.family === this.gridPairY);
+      if (!fx || !fy || fx.family === fy.family) return null;
+      const win = this.gridWindow, mk = this.gridMetric;
+      const grid = fy.values.map(vy => fx.values.map(vx => {
+        const vals = [];
+        for (const s of st) {
+          if (!s || s.combo.is_null) continue;
+          if (s.combo.params[fx.family] !== vx.rule_key) continue;
+          if (s.combo.params[fy.family] !== vy.rule_key) continue;
+          const x = s[win]?.[mk];
+          if (x != null && isFinite(x)) vals.push(+x);
+        }
+        if (!vals.length) return { n: 0, avg_ret: 0 };
+        return { n: vals.length,
+                 avg_ret: vals.reduce((a, b) => a + b, 0) / vals.length };
+      }));
+      // Own range, so this grid cannot borrow or clobber the factor
+      // heatmap's colour scale (they share a component).
+      let mx = 0;
+      for (const row of grid) for (const c of row) {
+        if (c.n) mx = Math.max(mx, Math.abs(c.avg_ret));
+      }
+      this._gridRange = mx || 0.01;
+      return { grid, x_labels: fx.values.map(v => v.label),
+               y_labels: fy.values.map(v => v.label) };
+    },
+    gridCellBg(cell) {
+      // Same formula as the factor heatmap, different range. minSampleN 0:
+      // every cell here is an average over combinations, not a trade count,
+      // so the low-n hatching does not apply.
+      return window.FactorCharts._hmPaint(this._gridRange, 0, cell);
+    },
+    gridCellTitle(cell) {
+      if (!cell || !cell.n) return 'no combinations';
+      return `${this.gridFmt(cell.avg_ret)} — mean over ${cell.n} combination(s)`;
+    },
+
+    // ── Rank scatter ─────────────────────────────────────────────────────
+    // Free: is_train is a column, so every combination already carries both
+    // windows. Does a good train combination stay good out of sample? If the
+    // cloud is shapeless the surface is noise and the marginal panels above
+    // are describing nothing.
+    get gridScatter() {
+      const st = this.gridStats;
+      if (!st) return [];
+      const rows = st.filter(Boolean)
+        .map(s => ({ train: s.train?.calmar, test: s.test?.calmar,
+                     isNull: s.combo.is_null, labels: s.combo.labels }))
+        .filter(r => r.train != null && r.test != null && isFinite(r.train) && isFinite(r.test));
+      const ranked = rows.filter(r => !r.isNull).sort((a, b) => b.train - a.train).slice(0, 20);
+      const nul = rows.find(r => r.isNull);
+      return nul ? [...ranked, nul] : ranked;
+    },
+
+    renderGrid() {
+      if (!this.gridData) return;
+      const panes = [['marginals', () => this._renderGridMarginals()],
+                     ['scatter',   () => this._renderGridScatter()]];
+      for (const [name, fn] of panes) {
+        try { fn(); } catch (e) { console.error(`[factor-trades] grid ${name} failed`, e); }
+      }
+    },
+
+    _renderGridMarginals() {
+      const nullV = this.gridNullValue;
+      for (const m of this.gridMarginals) {
+        const id = 'grid-mg-' + m.family;
+        const el = document.getElementById(id);
+        if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
+        if (!el) continue;
+        const labels = m.points.map(p => p.label);
+        const band = this.gridBandMode === 'sd'
+          ? [m.points.map(p => p.sdLo), m.points.map(p => p.sdHi)]
+          : [m.points.map(p => p.lo), m.points.map(p => p.hi)];
+        this._charts[id] = new Chart(el.getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets: [
+            // Band drawn as two bounds filled between, NOT as error bars:
+            // the shape of the spread across the other parameters is the
+            // thing being read, and bars make it a per-point lookup.
+            { data: band[1], borderColor: 'rgba(52,152,219,.25)', borderWidth: 0,
+              pointRadius: 0, fill: '+1', backgroundColor: 'rgba(52,152,219,.10)' },
+            { data: band[0], borderColor: 'rgba(52,152,219,.25)', borderWidth: 0,
+              pointRadius: 0, fill: false },
+            { data: m.points.map(p => p.mean), borderColor: '#3498db',
+              borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#3498db',
+              fill: false, tension: 0 },
+          ] },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+                filter: (i) => i.datasetIndex === 2,
+                callbacks: { label: (c) => {
+                  const p = m.points[c.dataIndex];
+                  return [`mean ${this.gridFmt(p.mean)}`,
+                          `range ${this.gridFmt(p.lo)} … ${this.gridFmt(p.hi)}`,
+                          `over ${p.n} combination(s)`];
+                } },
+              },
+              annotation: undefined,
+            },
+            scales: {
+              x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
+              y: { ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#222' } },
+            },
+          },
+          plugins: [{
+            id: 'gridNull',
+            afterDatasetsDraw(chart) {
+              if (nullV == null || !isFinite(nullV)) return;
+              const ys = chart.scales.y, xs = chart.scales.x;
+              if (!ys || !xs) return;
+              const py = ys.getPixelForValue(nullV);
+              if (!isFinite(py)) return;
+              const c = chart.ctx;
+              c.save();
+              c.strokeStyle = 'rgba(200,200,200,0.5)';
+              c.setLineDash([5, 4]); c.lineWidth = 1;
+              c.beginPath(); c.moveTo(xs.left, py); c.lineTo(xs.right, py); c.stroke();
+              c.fillStyle = 'rgba(200,200,200,0.75)';
+              c.font = '9px monospace';
+              c.fillText('do nothing', xs.left + 3, py - 3);
+              c.restore();
+            },
+          }],
+        });
+      }
+    },
+    gridBandMode: 'minmax',
+    setGridBand(m) { this.gridBandMode = m; this.$nextTick(() => this.renderGrid()); },
+    setGridMetric(m) { this.gridMetric = m; this.$nextTick(() => this.renderGrid()); },
+    setGridWindow(w) { this.gridWindow = w; this.$nextTick(() => this.renderGrid()); },
+
+    _renderGridScatter() {
+      const id = 'grid-scatter';
+      const el = document.getElementById(id);
+      if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
+      if (!el || !this.gridShowScatter) return;
+      const pts = this.gridScatter;
+      if (!pts.length) return;
+      this._charts[id] = new Chart(el.getContext('2d'), {
+        type: 'scatter',
+        data: { datasets: [
+          { data: pts.filter(p => !p.isNull).map(p => ({ x: p.train, y: p.test })),
+            backgroundColor: 'rgba(52,152,219,.75)', pointRadius: 4 },
+          { data: pts.filter(p => p.isNull).map(p => ({ x: p.train, y: p.test })),
+            backgroundColor: '#e84393', pointRadius: 7, pointStyle: 'rectRot' },
+        ] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444',
+              borderWidth: 1, callbacks: { label: (c) => {
+                const p = pts[c.datasetIndex === 1 ? pts.length - 1 : c.dataIndex];
+                return [`train ${c.parsed.x.toFixed(2)} → test ${c.parsed.y.toFixed(2)}`,
+                        p?.isNull ? 'do nothing'
+                                  : Object.values(p?.labels || {}).join(' / ')];
+              } } },
+          },
+          scales: {
+            x: { title: { display: true, text: 'train Calmar', color: '#888' },
+                 ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
+            y: { title: { display: true, text: 'test Calmar', color: '#888' },
+                 ticks: { color: '#888', font: { size: 9 } }, grid: { color: '#222' } },
+          },
+        },
+      });
+    },
+    toggleGridScatter() {
+      this.gridShowScatter = !this.gridShowScatter;
+      this.$nextTick(() => this.renderGrid());
+    },
+
+    gridCsv() {
+      const d = this.gridData, st = this.gridStats;
+      if (!d || !st) return;
+      const esc = (x) => {
+        const s = String(x ?? '');
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const fams = (d.sweep || []).map(f => f.family);
+      const out = [];
+      out.push(['# Factor Trades — parameter response grid']);
+      out.push(['# units', d.units_note]);
+      out.push(['# sizing', '$' + this.perTrade + '/trade', '$' + this.dailyCap + '/day cap']);
+      out.push(['# cutoff', d.cutoff_date]);
+      out.push(['# entry_anchor', d.entry_anchor, 'max_strike', d.max_strike ?? '']);
+      out.push(['# cells', JSON.stringify(d.cells)]);
+      out.push(['# held rules', (d.held || []).join(' | ')]);
+      out.push(['# combinations', d.n_combos, 'trades each', d.n_trades]);
+      for (const e of (d.errors || [])) out.push(['# FAILED', e.key, e.error]);
+      out.push([]);
+      const mcols = (d.metrics || []).map(m => m.key);
+      out.push([...fams, 'is_null',
+                ...mcols.map(k => 'train_' + k), ...mcols.map(k => 'test_' + k)]);
+      for (const s of st) {
+        if (!s) continue;
+        out.push([...fams.map(f => s.combo.labels?.[f] ?? ''),
+                  s.combo.is_null ? 'yes' : '',
+                  ...mcols.map(k => s.train?.[k] ?? ''),
+                  ...mcols.map(k => s.test?.[k] ?? '')]);
+      }
+      const blob = new Blob([out.map(r => r.map(esc).join(',')).join('\n')],
+                            { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `factor_trades_grid_${fams.join('_')}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    },
+
     // ── Baseline suite ───────────────────────────────────────────────────
     // One batch: the policy plus three baseline types x N seeds, train and
     // test. Replaces re-sampling by hand and transcribing into a spreadsheet.

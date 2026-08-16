@@ -1139,7 +1139,12 @@ window.FactorCharts = {
     });
   },
 
-  hmCellBg(cmp, cell) {
+  // Range-parameterised so a SECOND heatmap on the same page cannot borrow
+  // -- or clobber -- the first one's colour scale. The body is unchanged
+  // from hmCellBg; only the two reads off the component became arguments.
+  // The parameter is minSampleN, not minN: the body already declares a
+  // local minN and a same-named parameter shadows it.
+  _hmPaint(range, minSampleN, cell) {
     // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
     // same number determines hatching AND gradient inclusion. Critical
     // invariant: a cell rendered with a gradient color is also in the
@@ -1149,7 +1154,7 @@ window.FactorCharts = {
     // reason for keeping hatch and scale on the same threshold.
     if (!cell || !cell.n) return 'rgba(40,40,40,0.5)';   // n=0: empty
     const n = cell.n;
-    const minN = cmp.hmMinSampleN || 0;
+    const minN = minSampleN || 0;
     // Tier 2: 0 < n < threshold — hatched gray, no gradient color.
     // Pattern matches the Regime Heatmap style for visual consistency.
     if (n < minN) {
@@ -1158,9 +1163,13 @@ window.FactorCharts = {
            + '#1c1c1c';
     }
     // Tier 3: n >= threshold — gradient, scaled across visible cells only.
-    const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (cmp._hmRange || 0.01)));
+    const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (range || 0.01)));
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
+  },
+
+  hmCellBg(cmp, cell) {
+    return window.FactorCharts._hmPaint(cmp._hmRange, cmp.hmMinSampleN, cell);
   },
 
   _hmCellTitle(cmp, cell, ix, iy) {

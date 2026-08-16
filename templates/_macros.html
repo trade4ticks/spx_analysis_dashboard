@@ -41,6 +41,13 @@
     size        "compact" | "full"
     cls_expr    optional :class expression (selectable/selected styling)
     click_expr  optional @click expression
+    bg_fn       name of the cell-colour function; defaults to hmCellBg
+    title_fn    name of the hover-title function; defaults to _hmCellTitle
+  A SECOND grid on the same page must not reuse the first one's colour
+  scale -- hmCellBg reads _hmRange off the component, so two grids sharing
+  it would recolour each other. Pass bg_fn to point at a function carrying
+  its own range. Both default to today's names, so existing call sites are
+  byte-identical; the render gate proves it.
   Omitting cls_expr/click_expr omits those attributes entirely, which is how
   the TT pair renders as read-only.
 
@@ -49,7 +56,8 @@
                         cls_expr="...", click_expr='toggleHmCell(ix, iy)')
          | indent(18) | safe }}
 -#}
-{% macro heatmap_grid(grid_expr, obj, key, size, cls_expr=None, click_expr=None) -%}
+{% macro heatmap_grid(grid_expr, obj, key, size, cls_expr=None, click_expr=None,
+                      bg_fn='hmCellBg', title_fn='_hmCellTitle') -%}
 {%- set S = {
       'compact': {'tbl': 11, 'thpad': '3px 6px', 'thf': 10,
                   'w': 72, 'h': 46, 'pad': 3, 'valf': 12, 'nf': 10},
@@ -71,11 +79,11 @@
         <th x-text="{{ obj|safe }}.y_labels[iy]"
             style="text-align:right;padding:{{ S.thpad }};color:#666;font-weight:600;font-size:{{ S.thf }}px;white-space:nowrap"></th>
         <template x-for="(cell, ix) in row" :key="'{{ key }}cell-'+iy+'-'+ix">
-          <td :style="'background:' + hmCellBg(cell) + ';width:{{ S.w }}px;height:{{ S.h }}px;text-align:center;vertical-align:middle;border:1px solid #111;padding:{{ S.pad }}px;transition:opacity .1s'"
+          <td :style="'background:' + {{ bg_fn }}(cell) + ';width:{{ S.w }}px;height:{{ S.h }}px;text-align:center;vertical-align:middle;border:1px solid #111;padding:{{ S.pad }}px;transition:opacity .1s'"
               {%- if cls_expr %}
               :class="{{ cls_expr|safe }}"
               {%- endif %}
-              :title="_hmCellTitle(cell, ix, iy)"
+              :title="{{ title_fn }}(cell, ix, iy)"
               {%- if click_expr %}
               @click="{{ click_expr|safe }}"
               {%- endif %}>
