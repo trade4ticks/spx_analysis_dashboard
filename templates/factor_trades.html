@@ -97,8 +97,9 @@
     .ft-ov { position:fixed; inset:0; background:var(--bg); z-index:9999;
              display:flex; flex-direction:column; padding:12px; }
     .ft-ov-body { flex:1; min-height:0; position:relative; }
-    .ft-win { display:inline-flex; border:1px solid var(--border); border-radius:4px;
-              overflow:hidden; margin:0 10px; }
+    .ft-win { display:flex; border:1px solid var(--border); border-radius:4px;
+              overflow:hidden; }
+    .ft-win span { flex:1; text-align:center; }
     .ft-win span { padding:4px 14px; font-size:12px; font-weight:700; letter-spacing:.6px;
                    cursor:pointer; color:var(--dim); }
     .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
@@ -108,8 +109,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=10"></script>
-  <script src="/static/js/factor_trades.js?v=21"></script>
+  <script src="/static/js/factor_charts.js?v=11"></script>
+  <script src="/static/js/factor_trades.js?v=22"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -117,13 +118,6 @@
   <div class="topbar">
     <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
     {% set nav_active = "/factor-trades" %}{% include "_nav.html" %}
-    <div class="topbar-div"></div>
-    <!-- Deliberately prominent: iterating on train is a self-imposed
-         discipline, and switching to test should feel like a decision. -->
-    <div class="ft-win">
-      <span :class="{on: window==='train'}" @click="setWindow('train')">TRAIN</span>
-      <span :class="{on: window==='test', test: window==='test'}" @click="setWindow('test')">TEST</span>
-    </div>
     <div class="topbar-div"></div>
     <div class="topbar-right" style="font-size:11px;color:var(--dim)"
          x-text="cutoffDate ? ('TT cutoff ' + cutoffDate + ' (frozen)') : ''"></div>
@@ -237,6 +231,17 @@
         <input type="number" x-model.number="maxStrike" step="50">
       </div>
 
+      <!-- Page state belongs with the page's controls, not in the nav bar,
+           which is for moving between pages. Bottom of the rail so it is
+           always in view beside everything else that shapes a run. -->
+      <div class="ft-sec" style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <div class="ft-sec-h">Window</div>
+        <div class="ft-win">
+          <span :class="{on: window==='train'}" @click="setWindow('train')">TRAIN</span>
+          <span :class="{on: window==='test', test: window==='test'}" @click="setWindow('test')">TEST</span>
+        </div>
+      </div>
+
       <button class="ft-btn" @click="clearAll()">Clear all</button>
       <button class="ft-btn primary" @click="run()" :disabled="loading"
               x-text="loading ? 'Running…' : 'Run'"></button>
@@ -286,9 +291,9 @@
         <div class="chart-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span>Heatmap</span>
           <div class="ft-toggle">
-            <span :class="{on: gridView==='locked'}"  @click="gridView='locked'">Locked</span>
-            <span :class="{on: gridView==='edited'}"  @click="gridView='edited'">Edited</span>
-            <span :class="{on: gridView==='change'}"  @click="gridView='change'">Change</span>
+            <span :class="{on: gridView==='locked'}"  @click="setGridView('locked')">Locked</span>
+            <span :class="{on: gridView==='edited'}"  @click="setGridView('edited')">Edited</span>
+            <span :class="{on: gridView==='change'}"  @click="setGridView('change')">Change</span>
           </div>
           <span class="ft-note" x-text="policyLabel()"></span>
           <!-- Periodic reminder, not a warning: bright grey, on the caption

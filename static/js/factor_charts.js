@@ -630,7 +630,15 @@ window.FactorCharts = {
           const n = L.length ? L[0].length : 10;
           const key = iso.slice(0, n);
           const i = L.findIndex(d => d >= key);
-          if (i >= 0) px = xs.getPixelForValue(i);
+          if (i >= 0) {
+            // getPixelForValue on a category scale returns the bar's CENTRE,
+            // which draws the line through the middle of the first
+            // post-cutoff bar and reads as though that bar is split. The
+            // boundary is the midpoint between it and the bar before it.
+            px = (i > 0)
+              ? (xs.getPixelForValue(i - 1) + xs.getPixelForValue(i)) / 2
+              : xs.getPixelForValue(i) - (xs.getPixelForValue(1) - xs.getPixelForValue(0)) / 2;
+          }
         }
         if (px == null || !isFinite(px)) return;
         const c = chart.ctx;

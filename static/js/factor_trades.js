@@ -156,9 +156,19 @@ document.addEventListener('alpine:init', () => {
       this.renderCharts();
     },
 
+    // _hmRange drives hmCellBg's gradient. It was only recomputed at run
+    // time, so switching window or grid view left the previous window's
+    // range in place -- which is why cells lost their colours.
+    _refreshGrid() {
+      this.heatmapData = { grid: this.gridRows };
+      window.FactorCharts._hmRecomputeRange(this);
+    },
+    setGridView(v) { this.gridView = v; this._refreshGrid(); },
+
     setWindow(w) {
       if (w === this.window) return;
       this.window = w;
+      this._refreshGrid();
       // Both the run and the zone are window-scoped server-side, so the
       // whole page has to be refetched rather than re-filtered client-side.
       if (this.runData) this.run();
@@ -201,8 +211,7 @@ document.addEventListener('alpine:init', () => {
         this.metric = d.primary_metric;
         this.secSelectedMetric = d.secondary_metric || '';
         // FactorCharts.hmCellBg reads heatmapData + _hmRange for the gradient.
-        this.heatmapData = { grid: this.gridRows };
-        window.FactorCharts._hmRecomputeRange(this);
+        this._refreshGrid();
         this.runs.push(d);
         this.currentIdx = this.runs.length - 1;
         this.selectedCells = [];
@@ -224,9 +233,19 @@ document.addEventListener('alpine:init', () => {
       const lab = Array.from({ length: n }, (_, i) => 'B' + (i + 1));
       return { x_labels: lab, y_labels: this.runData?.mode === '1f' ? [''] : lab };
     },
+    // The grid carries BOTH windows per cell: avg_ret/n are train, and
+    // test_avg/test_n are test. Selection happens on train, so that is the
+    // default, but the toggle switches which face is shown rather than
+    // pinning it. Mapping here (not server-side) keeps one grid payload.
+    _faceOf(grid) {
+      if (this.window !== 'test') return grid;
+      return (grid || []).map(row => (row || []).map(c => c && ({
+        ...c, avg_ret: c.test_avg ?? 0, n: c.test_n ?? 0,
+      })));
+    },
     get gridRows() {
-      const cur = this.runData?.grid || [];
-      const lok = this.lockedRun?.grid || [];
+      const cur = this._faceOf(this.runData?.grid || []);
+      const lok = this._faceOf(this.lockedRun?.grid || []);
       if (this.gridView === 'locked') return lok;
       if (this.gridView !== 'change') return cur;
       // Change = edited minus locked, cell-wise. Cells absent on either side
@@ -371,7 +390,7 @@ document.addEventListener('alpine:init', () => {
       const el = document.getElementById('ft-pricebins');
       if (this._charts['ft-pricebins']) { this._charts['ft-pricebins'].destroy(); delete this._charts['ft-pricebins']; }
       const trades = (this.zoneData?.combined_trades || [])
-        .filter(t => t.window === 'test' && t.entry_price != null);
+        .filter(t => t.window === this.window && t.entry_price != null);
       if (!el || !trades.length) return;
       const B = this._priceBuckets;
       const acc = B.map(() => ({ n: 0, sum: 0 }));
