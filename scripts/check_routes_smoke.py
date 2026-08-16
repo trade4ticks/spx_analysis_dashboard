@@ -71,6 +71,7 @@ def main() -> int:
     # DB-free static pass first: it is the only check here that does not
     # need a live database, and it catches the class the others cannot.
     static_bad = _check_undefined_names()
+    static_bad += _check_alpine_templates()
 
     import app.main as main_mod
 
@@ -232,6 +233,64 @@ def _check_undefined_names() -> int:
         print("undefined names: none")
     print()
     return 1 if findings else 0
+
+
+def _check_alpine_templates() -> int:
+    """Every <template x-for/x-if> must contain exactly one element child.
+
+    Alpine requires a single root inside those templates. Give one two
+    siblings and it renders NOTHING -- no error in the console, no partial
+    output, the whole loop just silently disappears. That cost a round trip
+    when the split trail-rule control produced no dropdowns at all.
+
+    Static and DB-free, like the undefined-name scan above.
+
+    REPORT-ONLY for now. It currently flags two pre-existing pages
+    (ai_explorer, backtest_iv_analysis) that appear to work in the browser,
+    which means either those pages have a latent bug or this parser
+    miscounts children on unclosed tags. Until that is resolved, failing the
+    build on them would train people to ignore the gate -- so it warns and
+    returns 0. Resolve, then flip the return to 1.
+    """
+    from html.parser import HTMLParser
+
+    VOID = {"br", "hr", "img", "input", "meta", "link", "source", "area"}
+
+    class P(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack: list = []
+            self.bad: list = []
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            directive = next((k for k in a if k in ("x-for", "x-if")), None)                 if tag == "template" else None
+            if self.stack:
+                self.stack[-1][1].append(tag)
+            if tag in VOID:
+                return
+            self.stack.append([directive, [], self.getpos()[0],
+                               a.get("x-for") or a.get("x-if") or ""])
+
+        def handle_endtag(self, tag):
+            if not self.stack:
+                return
+            d, kids, line, expr = self.stack.pop()
+            if d and len(kids) != 1:
+                self.bad.append((line, d, expr, len(kids), kids))
+
+    bad = 0
+    for tpl in sorted((ROOT / "templates").glob("*.html")):
+        p = P()
+        p.feed(tpl.read_text(encoding="utf-8"))
+        for line, d, expr, n, kids in p.bad:
+            print(f"  {tpl.name}:{line}  {d}=\"{expr[:44]}\" has {n} element "
+                  f"children {kids} — Alpine renders nothing")
+            bad += 1
+    print("alpine template roots: ok" if not bad
+          else f"alpine template roots: {bad} WARNING(S) — report-only, see docstring")
+    print()
+    return 0
 
 
 def _check_factor_trades(app, real_db: bool, why_not: str) -> int:

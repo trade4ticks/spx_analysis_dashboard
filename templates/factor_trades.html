@@ -103,7 +103,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=10"></script>
-  <script src="/static/js/factor_trades.js?v=19"></script>
+  <script src="/static/js/factor_trades.js?v=20"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -170,6 +170,11 @@
           <div style="margin-bottom:8px">
             <div class="ft-sec-h" style="color:var(--muted)" x-text="g.title"></div>
             <template x-for="f in g.families" :key="'f-'+g.side+'-'+f.family">
+              <!-- ONE root element. Alpine's x-for template must contain
+                   exactly one, and an earlier version put the rule row and
+                   the split-dropdown block side by side inside it, which
+                   silently rendered nothing at all. -->
+              <div>
               <div class="ft-rule" :class="{on: !!selected[f.family]}">
                 <div class="ft-sw" :class="{on: !!selected[f.family]}"
                      @click="toggleFamily(f)" :title="f.family"></div>
@@ -201,6 +206,7 @@
                   </template>
                 </div>
               </template>
+              </div>
             </template>
           </div>
         </template>
