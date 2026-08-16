@@ -476,6 +476,9 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         "secondary_metric": req.secondary_metric,
         "entry_anchor":     req.entry_anchor,
         "max_strike":       req.max_strike,
+        # Echoed so a locked run carries its own window: comparing a TRAIN
+        # lock against a TEST run would cross populations silently.
+        "window":           active,
         "n_bins":           n_bins,
         "cutoff_date":      cutoff_iso,
         "grid":             grid,

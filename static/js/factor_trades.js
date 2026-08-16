@@ -193,6 +193,7 @@ document.addEventListener('alpine:init', () => {
 
     async run(random = false) {
       this.loading = true; this.error = '';
+      const prev = this.runData;
       try {
         const body = {
           primary_metric: this.primaryMetric,
@@ -210,6 +211,14 @@ document.addEventListener('alpine:init', () => {
         });
         const d = await r.json();
         if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        // Selection survives a re-run when the METRIC PAIR is unchanged: the
+        // bins are the same bins, so the cells still mean the same thing.
+        // Change a metric and they do not, so it is cleared. Re-selecting on
+        // every exit-parameter tweak was the main friction in the loop.
+        const samePair = prev
+          && prev.primary_metric === d.primary_metric
+          && (prev.secondary_metric || null) === (d.secondary_metric || null)
+          && prev.n_bins === d.n_bins;
         this.runData = d;
         this.metric = d.primary_metric;
         this.secSelectedMetric = d.secondary_metric || '';
@@ -217,16 +226,60 @@ document.addEventListener('alpine:init', () => {
         this._refreshGrid();
         this.runs.push(d);
         this.currentIdx = this.runs.length - 1;
-        this.selectedCells = [];
-        this.zoneData = null;
+        if (!samePair) { this.selectedCells = []; this.zoneData = null; }
+        this._refreshGrid();
+        this.$nextTick(() => this._scrollRunsRight());
+        if (samePair && this.selectedCells.length) {
+          // Same cells, new policy — refetch the zone rather than leaving the
+          // panes showing the previous run's trades.
+          this.loadZone();
+        }
       } catch (e) { this.error = String(e); }
       finally { this.loading = false; }
     },
 
-    lockRun(i) {
+    _scrollRunsRight() {
+      // New runs append, so the strip must anchor RIGHT or Current scrolls
+      // out of view exactly when it becomes the thing you want to see.
+      const el = document.getElementById('ft-runs');
+      if (el) el.scrollLeft = el.scrollWidth;
+    },
+
+    deleteRun(i) {
+      this.runs.splice(i, 1);
+      // Indices shift; a stale lockedIdx would silently point at a different
+      // run than the one that was locked.
+      if (this.lockedIdx === i) { this.lockedIdx = -1; this.lockedRun = null; this.lockedZone = null; }
+      else if (this.lockedIdx > i) this.lockedIdx -= 1;
+      if (this.currentIdx === i) this.currentIdx = Math.min(i, this.runs.length - 1);
+      else if (this.currentIdx > i) this.currentIdx -= 1;
+      this.$nextTick(() => this._scrollRunsRight());
+    },
+
+    async lockRun(i) {
       this.lockedIdx = (this.lockedIdx === i) ? -1 : i;
       this.lockedRun = this.lockedIdx >= 0 ? this.runs[this.lockedIdx] : null;
       this.lockedZone = null;
+      this._refreshGrid();
+      if (!this.lockedRun || !this.selectedCells.length) return;
+      // Fetch the locked run's OWN zone series, using ITS parameters and ITS
+      // window -- not the rail's current state. A locked TRAIN run compared
+      // against a TEST run would otherwise cross populations with nothing on
+      // screen saying so.
+      try {
+        const r = this.lockedRun;
+        const resp = await fetch('/api/factor-trades/zone', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            primary_metric: r.primary_metric, secondary_metric: r.secondary_metric,
+            entry_anchor: r.entry_anchor, rule_keys: r.rules,
+            n_bins: r.n_bins, max_strike: r.max_strike,
+            window: r.window || 'train', cells: this.selectedCells,
+          }),
+        });
+        const d = await resp.json();
+        if (resp.ok && !d.error) { this.lockedZone = d; this.renderCharts(); }
+      } catch (e) { console.error('[factor-trades] locked zone fetch failed', e); }
     },
 
     // ── Heatmap ──────────────────────────────────────────────────────────
