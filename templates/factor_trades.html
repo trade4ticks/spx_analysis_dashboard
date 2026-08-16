@@ -97,13 +97,19 @@
     .ft-ov { position:fixed; inset:0; background:var(--bg); z-index:9999;
              display:flex; flex-direction:column; padding:12px; }
     .ft-ov-body { flex:1; min-height:0; position:relative; }
+    .ft-win { display:inline-flex; border:1px solid var(--border); border-radius:4px;
+              overflow:hidden; margin:0 10px; }
+    .ft-win span { padding:4px 14px; font-size:12px; font-weight:700; letter-spacing:.6px;
+                   cursor:pointer; color:var(--dim); }
+    .ft-win span.on      { background:rgba(52,152,219,.25); color:#3498db; }
+    .ft-win span.on.test { background:rgba(232,67,147,.25); color:#e84393; }
     .ft-note { font-size:10px; color:var(--dim); font-weight:400; }
     .ft-tt   { font-size:10px; color:#c8c8c8; font-weight:400; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=10"></script>
-  <script src="/static/js/factor_trades.js?v=20"></script>
+  <script src="/static/js/factor_trades.js?v=21"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -111,6 +117,13 @@
   <div class="topbar">
     <div class="brand"><span style="color:#e84393">Pink</span><span style="color:#3498db">Blue</span>Labs</div>
     {% set nav_active = "/factor-trades" %}{% include "_nav.html" %}
+    <div class="topbar-div"></div>
+    <!-- Deliberately prominent: iterating on train is a self-imposed
+         discipline, and switching to test should feel like a decision. -->
+    <div class="ft-win">
+      <span :class="{on: window==='train'}" @click="setWindow('train')">TRAIN</span>
+      <span :class="{on: window==='test', test: window==='test'}" @click="setWindow('test')">TEST</span>
+    </div>
     <div class="topbar-div"></div>
     <div class="topbar-right" style="font-size:11px;color:var(--dim)"
          x-text="cutoffDate ? ('TT cutoff ' + cutoffDate + ' (frozen)') : ''"></div>
@@ -301,6 +314,7 @@
           </div>
           {{ m.stat_box('N', 'row.n') | indent(10) | safe }}
           {{ m.stat_box('Tickers', 'row.nTickers') | indent(10) | safe }}
+          {{ m.stat_box('Eff Tickers', 'row.effTickers') | indent(10) | safe }}
           {{ m.stat_box('Avg Ret', 'row.avgRet', sign_expr='row.avgRetRaw') | indent(10) | safe }}
           {{ m.stat_box('Median', 'row.median', sign_expr='row.medianRaw') | indent(10) | safe }}
           {{ m.stat_box('Std Dev', 'row.stdDev') | indent(10) | safe }}
@@ -322,7 +336,7 @@
            stays 2x2 rather than gaining a fifth pane to balance it. -->
       <div class="chart-box" x-show="zoneData">
         <div class="chart-title">Equity &amp; drawdown
-          <span class="ft-note">[train + test] — locked grey, edited colour</span>
+          <span class="ft-note"><span x-text="window.toUpperCase()"></span> — locked grey, edited colour</span>
           <label class="ft-note" style="margin-left:8px"><input type="checkbox" x-model="showDD"> DD</label>
           <button class="ft-fs" @click="openFs('ft-equity')" title="Full screen">⛶</button>
         </div>
@@ -331,19 +345,19 @@
 
       <div class="ft-grid3" x-show="zoneData">
         <div class="chart-box">
-          <div class="chart-title">Annual P&amp;L <span class="ft-note">[train + test] — grey locked, blue edited</span>
+          <div class="chart-title">Annual P&amp;L <span class="ft-note"><span x-text="window.toUpperCase()"></span> — grey locked, blue edited</span>
             <button class="ft-fs" @click="openFs('ft-yearly')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Exit reasons <span class="ft-note">[TEST window] — which rule closed each trade</span>
+          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — which rule closed each trade</span>
             <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-reasons"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Avg return by entry price <span class="ft-note">[TEST window]</span>
+          <div class="chart-title">Avg return by entry price <span class="ft-note"><span x-text="window.toUpperCase()"></span> window</span>
             <button class="ft-fs" @click="openFs('ft-pricebins')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-pricebins"></canvas></div>
@@ -353,7 +367,7 @@
       <div class="ft-grid2" x-show="zoneData">
         <div>
         <div class="chart-box">
-          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — edited</span>
+          <div class="chart-title">Trade activity <span class="ft-note"><span x-text="window.toUpperCase()"></span> — edited</span>
             <div class="ft-toggle" style="margin-left:8px">
               <span :class="{on: activityMode.ft === 'trades'}" @click="setActivityMode('trades')">Count</span>
               <span :class="{on: activityMode.ft === 'capital'}" @click="setActivityMode('capital')">Capital</span>
@@ -364,7 +378,7 @@
         </div>
           <div x-show="lockedZone">
         <div class="chart-box">
-          <div class="chart-title">Trade activity <span class="ft-note">[train + test] — locked</span>
+          <div class="chart-title">Trade activity <span class="ft-note"><span x-text="window.toUpperCase()"></span> — locked</span>
             <button class="ft-fs" @click="openFs('ft-activity-locked')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-activity-locked"></canvas></div>
@@ -373,14 +387,14 @@
         </div>
         <div>
         <div class="chart-box">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[TEST window] — edited</span>
+          <div class="chart-title">Ticker breakdown <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — edited</span>
             <button class="ft-fs" @click="openFs('ft-bubble-edited')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-bubble-edited"></canvas></div>
         </div>
           <div x-show="lockedZone">
         <div class="chart-box">
-          <div class="chart-title">Ticker breakdown <span class="ft-note">[TEST window] — locked</span>
+          <div class="chart-title">Ticker breakdown <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — locked</span>
             <button class="ft-fs" @click="openFs('ft-bubble-locked')" title="Full screen">⛶</button>
           </div>
           <div class="chart-canvas"><canvas id="ft-bubble-locked"></canvas></div>

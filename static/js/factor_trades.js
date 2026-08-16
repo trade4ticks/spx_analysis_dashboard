@@ -23,6 +23,9 @@ document.addEventListener('alpine:init', () => {
     loading: false, error: '',
     runs: [], currentIdx: -1, lockedIdx: -1,
     runData: null, lockedRun: null, zoneData: null, lockedZone: null,
+    // Page-level window. TRAIN by default: the workflow is to iterate on
+    // train and treat switching to test as a decision, not a default view.
+    window: 'train',
     gridView: 'edited', showDD: true, fsId: null, _fsHome: null,
     selectedCells: [],            // [[bp, bs], ...]
 
@@ -40,7 +43,9 @@ document.addEventListener('alpine:init', () => {
     // Keyed by section, because FactorCharts reads
     // cmp.activityMode?.[sectionKey] — a bare string silently
     // reads undefined and pins the chart to Count.
-    activityMode: { ft: 'trades', sec: 'trades', port: 'trades' },
+    // Capital by default: the question this page asks is what a policy ties
+    // up, not how many tickets it writes.
+    activityMode: { ft: 'capital', sec: 'trades', port: 'trades' },
     dedupeConc: { primary: false, sec: false, corr: false, port: false },
     secBubbleMinN: 0,
     // 'ft' is this page's key (FactorCharts._equityModeKey maps ft-*
@@ -151,6 +156,14 @@ document.addEventListener('alpine:init', () => {
       this.renderCharts();
     },
 
+    setWindow(w) {
+      if (w === this.window) return;
+      this.window = w;
+      // Both the run and the zone are window-scoped server-side, so the
+      // whole page has to be refetched rather than re-filtered client-side.
+      if (this.runData) this.run();
+    },
+
     clearAll() {
       this.selected = {};
       this.selectedCells = [];
@@ -175,6 +188,7 @@ document.addEventListener('alpine:init', () => {
           rule_keys: this.ruleKeys(),
           n_bins: 20,
           max_strike: this.maxStrike,
+          window: this.window,
           label: random ? 'random entries' : null,
         };
         const r = await fetch('/api/factor-trades/run', {
@@ -252,6 +266,7 @@ document.addEventListener('alpine:init', () => {
           n_bins: this.runData.n_bins,
           // Must match the run's population or the zone is a different trade set.
           max_strike: this.runData.max_strike ?? this.maxStrike,
+          window: this.window,
           cells: this.selectedCells,
         };
         const r = await fetch('/api/factor-trades/zone', {
@@ -415,7 +430,7 @@ document.addEventListener('alpine:init', () => {
       // Dollar stats for the three boxes that cannot come from the backend:
       // they depend on the rail's sizing, which is a client-side control.
       const ds = window.FactorCharts._computeDollarSeries(
-        this, (this.zoneData.combined_trades || []).filter(t => t.window === 'test'),
+        this, (this.zoneData.combined_trades || []).filter(t => t.window === this.window),
         this.perTrade, this.dailyCap);
       this.dollarStats = this._dollarStats(ds);
       try {
@@ -451,6 +466,7 @@ document.addEventListener('alpine:init', () => {
         return {
           key, label, window: win,
           nTickers: (s.n_tickers ?? 0).toLocaleString(),
+          effTickers: (s.eff_tickers ?? 0).toFixed(1),
           n: (s.n ?? 0).toLocaleString(),
           avgRet: pct(s.avg_ret), avgRetRaw: s.avg_ret ?? 0,
           median: pct(s.median),  medianRaw: s.median ?? 0,
@@ -485,15 +501,16 @@ document.addEventListener('alpine:init', () => {
       // number that silently switched windows would be the worst kind of
       // wrong. Selection happens on the heatmap, which is train.
       const edited = mk('edited', this.lockedRun ? 'Edited' : 'Current',
-                        { ...src.test, ...(this.dollarStats || {}) }, 'test');
+                        { ...src[this.window], ...(this.dollarStats || {}) }, this.window);
       if (!this.lockedRun) return [edited].filter(Boolean);
       const lockedSrc = this.lockedZone || this.lockedRun;
-      const locked = mk('locked', 'Locked', lockedSrc.test, 'test');
+      const locked = mk('locked', 'Locked', lockedSrc[this.window], this.window);
       const d = (a, b) => (a ?? 0) - (b ?? 0);
-      const st = src.test, lt = lockedSrc.test;
+      const st = src[this.window], lt = lockedSrc[this.window];
       const diff = (locked && edited) ? {
-        key: 'change', label: 'Change', window: 'test',
+        key: 'change', label: 'Change', window: this.window,
         nTickers: d(st?.n_tickers, lt?.n_tickers).toLocaleString(),
+        effTickers: d(st?.eff_tickers, lt?.eff_tickers).toFixed(1),
         n: d(st?.n, lt?.n).toLocaleString(),
         avgRet: pct(d(st?.avg_ret, lt?.avg_ret)), avgRetRaw: d(st?.avg_ret, lt?.avg_ret),
         median: pct(d(st?.median, lt?.median)), medianRaw: d(st?.median, lt?.median),

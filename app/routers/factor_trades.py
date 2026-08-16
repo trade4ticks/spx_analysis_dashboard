@@ -83,7 +83,21 @@ def _rule_label(family: str, params: Any) -> str:
     return ", ".join(f"{a}={b}" for a, b in sorted(params.items()))
 
 
-def _window_stats(rets: list, holds: list, tickers: set, span_days: float) -> dict:
+def _effective_tickers(counts) -> float:
+    """Participation ratio: (sum n)^2 / sum(n^2).
+
+    Reads ~N when N tickers contribute equally and ~k when k dominate, so it
+    says at a glance whether a zone's edge is broad or concentrated. Same
+    form as an effective-N / inverse-Herfindahl.
+    """
+    c = [x for x in counts if x > 0]
+    if not c:
+        return 0.0
+    tot = float(sum(c))
+    return (tot * tot) / float(sum(x * x for x in c))
+
+
+def _window_stats(rets: list, holds: list, tickers, span_days: float) -> dict:
     """Full stat set for one window. Matches Recall's box set plus the three
     this page needs (Calmar, Max DD, Avg Hold).
 
@@ -94,7 +108,8 @@ def _window_stats(rets: list, holds: list, tickers: set, span_days: float) -> di
     """
     n = len(rets)
     if not n:
-        return {"n": 0, "n_tickers": len(tickers), "avg_ret": 0.0, "median": 0.0,
+        return {"n": 0, "n_tickers": len(tickers),
+                "eff_tickers": 0.0, "avg_ret": 0.0, "median": 0.0,
                 "std_dev": 0.0, "p5": 0.0, "p95": 0.0, "win_rate": 0.0, "n_win": 0,
                 "avg_win": 0.0, "avg_loss": 0.0, "trades_per_year": 0.0,
                 "calmar": None, "max_dd": 0.0, "avg_hold": 0.0}
@@ -108,7 +123,11 @@ def _window_stats(rets: list, holds: list, tickers: set, span_days: float) -> di
     years = max(span_days / 365.25, 1e-9)
     return {
         "n": n,
-        "n_tickers": len(tickers),
+        "n_tickers": (len(tickers) if not hasattr(tickers, "values") else len(tickers)),
+        # tickers is a Counter of per-ticker trade counts; a plain set
+        # degrades to equal weighting, which is the right fallback.
+        "eff_tickers": _effective_tickers(
+            tickers.values() if hasattr(tickers, "values") else [1] * len(tickers)),
         "avg_ret":  float(a.mean()),
         "median":   float(np.median(a)),
         "std_dev":  float(a.std()),
@@ -217,6 +236,11 @@ class RunReq(BaseModel):
     # that cannot be reconciled and no way to tell which population a given
     # box covered.
     max_strike:       Optional[float] = None
+    # Page-level window. Everything except the heatmap reports on it: the
+    # stat bar, exit reasons, ticker breakdown, price bins, and the
+    # time-series panes, which simply stop at the cutoff in train mode
+    # because no test trade is returned at all.
+    window:           str = "train"
     label:            Optional[str] = None
 
 
@@ -338,8 +362,14 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     acc: dict = {}
     reasons: dict = {}
     tot = {"train": [0, 0.0, 0.0], "test": [0, 0.0, 0.0]}   # n, sum_ret, sum_hold
+    active = "train" if (req.window or "train") == "train" else "test"
     for r in rows:
         win = "train" if r["is_train"] else "test"
+        # Trades outside the active window are not returned at all. That is
+        # what makes the time-series panes stop at the cutoff in train mode
+        # rather than drawing test data the user has chosen not to look at.
+        if win != active:
+            continue
         bp, bs = int(r["bp"]), (int(r["bs"]) if two_factor else 0)
         n, avg, hold = int(r["n"]), float(r["avg_ret"] or 0), float(r["avg_hold"] or 0)
         cell = acc.setdefault((bs, bp), {"train": [0, 0.0], "test": [0, 0.0]})
@@ -347,7 +377,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
         cell[win][1] += avg * n
         t = tot[win]
         t[0] += n; t[1] += avg * n; t[2] += hold * n
-        if win == "train":
+        if win == active:
             rk = r["exit_rule"]
             reasons[rk] = reasons.get(rk, 0) + n
 
@@ -362,13 +392,14 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                 "test_avg":   (te_s / te_n) if te_n else 0.0,
             }
 
-    acc2 = {"train": ([], [], set(), []), "test": ([], [], set(), [])}
+    from collections import Counter as _Ctr2
+    acc2 = {"train": ([], [], _Ctr2(), []), "test": ([], [], _Ctr2(), [])}
     for r in srows:
         w = "train" if r["is_train"] else "test"
         rets, holds, tks, dates = acc2[w]
         rets.append(float(r["exit_return"] or 0.0))
         holds.append(float(r["exit_bar"] or 0.0))
-        tks.add(r["ticker"]); dates.append(r["trade_date"])
+        tks[r["ticker"]] += 1; dates.append(r["trade_date"])
 
     def _stats(win: str) -> dict:
         rets, holds, tks, dates = acc2[win]
@@ -378,7 +409,9 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     # Exit-reason breakdown. A user-selected max_days and the auto-appended
     # backstop are the SAME column with opposite meanings, so the backstop is
     # labelled as such ONLY when it was auto-added.
-    tot_test = tot["test"][0] or 1
+    # Same page-level window as /zone.
+    active = "train" if (req.window or "train") == "train" else "test"
+    tot_active = tot[active][0] or 1
     breakdown = []
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
@@ -391,7 +424,7 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
                             else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
             "is_backstop": is_backstop,
             "n":           n,
-            "frac":        n / tot_test,
+            "frac":        n / tot_active,
         })
 
     return {
@@ -539,11 +572,18 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     # ── Fold into the Recall chart contracts ──────────────────────────────
     trades, dates, reasons = [], [], {}
-    zacc = {"train": ([], [], set(), []), "test": ([], [], set(), [])}
+    from collections import Counter as _Ctr
+    zacc = {"train": ([], [], _Ctr(), []), "test": ([], [], _Ctr(), [])}
     by_ticker: dict[str, list] = {}
     tot = {"train": [0, 0.0, 0.0], "test": [0, 0.0, 0.0]}
+    active = "train" if (req.window or "train") == "train" else "test"
     for r in rows:
         win = "train" if r["is_train"] else "test"
+        # Trades outside the active window are not returned at all. That is
+        # what makes the time-series panes stop at the cutoff in train mode
+        # rather than drawing test data the user has chosen not to look at.
+        if win != active:
+            continue
         ret = float(r["exit_return"] or 0.0)
         hold = float(r["exit_bar"] or 0.0)
         d = r["trade_date"].isoformat()
@@ -552,10 +592,10 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         # Exit reasons and the ticker breakdown are TEST-window surfaces:
         # they answer "what happened out of sample", so counting train trades
         # in them would dilute exactly the thing being judged.
-        if win == "test":
+        if True:
             reasons[r["exit_rule"]] = reasons.get(r["exit_rule"], 0) + 1
         za = zacc[win]
-        za[0].append(ret); za[1].append(hold); za[2].add(r["ticker"]); za[3].append(r["trade_date"])
+        za[0].append(ret); za[1].append(hold); za[2][r["ticker"]] += 1; za[3].append(r["trade_date"])
         # trade_paths.entry_price is stored AS-TRADED (the store is
         # adjusted=false), so it is already the price a fill would have
         # happened at. That makes it exactly what the sizing path wants:
@@ -578,7 +618,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             "spot_entry_raw": float(_px) if _px is not None else None,
         })
         dates.append(d)
-        if win == "test":
+        if True:
             by_ticker.setdefault(r["ticker"], []).append(ret)
 
     eq = _sec_equity_curve(trades, "ret")
@@ -601,7 +641,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
         span = ((max(w[3]) - min(w[3])).days if len(w[3]) > 1 else 1)
         return _window_stats(w[0], w[1], w[2], span)
 
-    tot_test = tot["test"][0] or 1
+    tot_active = tot[active][0] or 1
     breakdown = []
     for rk, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         m = meta_by_key.get(rk, {})
@@ -610,11 +650,12 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
             "rule_key": rk, "family": m.get("family", rk), "side": m.get("side", ""),
             "label": ("backstop — no selected rule fired" if is_backstop
                       else f"{m.get('family', rk)} {_rule_label(m.get('family',''), m.get('params'))}"),
-            "is_backstop": is_backstop, "n": n, "frac": n / tot_test,
+            "is_backstop": is_backstop, "n": n, "frac": n / tot_active,
         })
 
     return {
         "cells": req.cells,
+        "window": active,
         "entry_anchor": req.entry_anchor,
         "cutoff_date": cutoff_iso,
         # Recall chart contracts — same field names, same shapes.
