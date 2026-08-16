@@ -306,16 +306,15 @@ window.FactorCharts = {
     }
 
     const isDollar = (mode === 'dollar_capped');
-    // Alpha carries n; hatching carries the train/test window. See _barPaint
-    // — these are two signals and they get two channels.
+    // Alpha carries n and only n; see _barPaint. min/max come from the
+    // years actually on screen, so TRAIN grades 2019-2023 against each
+    // other and TEST grades its full span against each other -- one
+    // population per mode, one scale.
     const ns = yearly.map(y => y.n);
     const minN = Math.min(...ns), maxN = Math.max(...ns);
     const nPct = y => maxN > minN ? (y.n - minN) / (maxN - minN) : 1;
-    const isPre = y => !!cmp.cutoffLineDate
-                       && String(y.year) < cmp.cutoffLineDate.slice(0, 4);
     const paints = yearly.map(y => window.FactorCharts._barPaint(
-      window.FactorCharts._barRgb(y.value >= 0 ? 'pos' : 'neg'),
-      nPct(y), isPre(y)));
+      window.FactorCharts._barRgb(y.value >= 0 ? 'pos' : 'neg'), nPct(y)));
     const fmt$ = v => {
       const abs = Math.abs(v);
       const sign = v < 0 ? '-' : '';
@@ -349,11 +348,7 @@ window.FactorCharts = {
                 const primary = isDollar
                   ? `P&L: ${fmt$(y.value)}`
                   : `Avg: ${(y.value*100).toFixed(3)}%`;
-                const out = [primary, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
-                // The hatch says this already; the readout confirms it, so
-                // texture never has to be decoded from memory.
-                if (isPre(y)) out.push('train (pre-cutoff)');
-                return out;
+                return [primary, `WR: ${(y.win_rate*100).toFixed(1)}%`, `n: ${y.n}`];
               },
             },
           },
@@ -653,50 +648,29 @@ window.FactorCharts = {
   },
 
   // ── Bar visual language ──────────────────────────────────────────────
-  // Two signals, two channels — they must never share one.
+  // ALPHA MEANS SAMPLE SIZE, and nothing else. Faint = thin n, vivid =
+  // well-populated. No second signal may be written to this channel.
   //
-  //   ALPHA   = sample size.  faint = thin n, vivid = well-populated.
-  //   TEXTURE = window.       solid = the window under analysis,
-  //                           diagonal hatch = pre-cutoff (train) context.
+  // A pre/post-cutoff distinction WAS layered on top of the gradient here,
+  // also as alpha, and the two cancelled: in TRAIN every bar is pre-cutoff
+  // so the gradient washed out to one flat tone, and in TEST a post-cutoff
+  // year on 756 trades read BRIGHTER than a pre-cutoff year on 1439 --
+  // backwards -- because the muting overwrote the alpha the gradient had
+  // just set. The vertical cutoff line already marks the boundary, so the
+  // bars do not need to carry it and the channel stays single-purpose.
   //
-  // Both used to ride on alpha and cancelled each other out: in TRAIN every
-  // bar is pre-cutoff, so the whole gradient washed out to one flat dim
-  // tone; in TEST a post-cutoff year on 756 trades read BRIGHTER than a
-  // pre-cutoff year on 1439 — backwards for an n gradient — purely because
-  // the muting had overwritten the alpha the gradient had just set.
-  //
-  // Hatching is the right partner for alpha because it is orthogonal: a
-  // hatched bar keeps the exact fill colour it would have had, so n stays
-  // comparable both within the pre-cutoff group and across the boundary.
+  // The gradient scales against whatever set is on screen: one population
+  // per mode, so TRAIN's bars grade against each other and TEST's against
+  // each other.
   //
   // Used by Annual P&L, price bins and the P&L distribution, so one look
   // means one thing everywhere on the page.
-  _hatchCache: {},
-
-  _hatch(fill) {
-    const cache = window.FactorCharts._hatchCache;
-    if (cache[fill]) return cache[fill];
-    const c = document.createElement('canvas');
-    c.width = c.height = 8;
-    const g = c.getContext('2d');
-    g.strokeStyle = fill;
-    g.lineWidth = 2.5;
-    // Two strokes so the pattern is seamless where the tile wraps.
-    g.beginPath(); g.moveTo(-2, 10); g.lineTo(10, -2);
-    g.moveTo(2, 14); g.lineTo(14, 2); g.stroke();
-    const pat = g.createPattern(c, 'repeat');
-    cache[fill] = pat;
-    return pat;
-  },
-
+  //
   // rgb: "r,g,b" string. nRatio: 0..1 (pass 1 when n is unknown/uniform).
-  // Returns the three Chart.js dataset colour fields, so every bar pane on
-  // the page is styled by one function rather than three lookalikes.
-  _barPaint(rgb, nRatio, preCutoff) {
+  _barPaint(rgb, nRatio) {
     const r = Number.isFinite(nRatio) ? Math.max(0, Math.min(1, nRatio)) : 1;
-    const fill = `rgba(${rgb},${(0.20 + 0.60 * r).toFixed(3)})`;
     return {
-      background:  preCutoff ? window.FactorCharts._hatch(fill) : fill,
+      background:  `rgba(${rgb},${(0.20 + 0.60 * r).toFixed(3)})`,
       border:      `rgba(${rgb},0.9)`,
       borderWidth: 1,
     };

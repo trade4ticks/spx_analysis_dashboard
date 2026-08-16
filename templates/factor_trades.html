@@ -87,6 +87,12 @@
                  border-radius:4px; padding:8px; margin-bottom:12px; }
     .chart-title { font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px; }
     .chart-canvas { height:220px; position:relative; }
+    /* Centred header over each half of a split pane. Bases mirror the
+       canvas flex bases exactly; if one changes the other must too. */
+    .ft-subhead { display:flex; gap:6px; margin-bottom:2px; }
+    .ft-subhead > div { min-width:0; text-align:center; font-size:10px;
+                        font-weight:700; letter-spacing:.4px; color:var(--muted);
+                        text-transform:uppercase; }
     .ft-grid2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; }
     .ft-grid3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px;
                 margin-bottom:12px; }
@@ -109,8 +115,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=15"></script>
-  <script src="/static/js/factor_trades.js?v=29"></script>
+  <script src="/static/js/factor_charts.js?v=16"></script>
+  <script src="/static/js/factor_trades.js?v=30"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -374,15 +380,25 @@
           <div class="chart-canvas"><canvas id="ft-yearly"></canvas></div>
         </div>
         <div class="chart-box">
-          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window — share of trades | avg hold</span>
-            <button class="ft-fs" @click="openFs('ft-reasons')" title="Full screen">⛶</button>
+          <div class="chart-title">Exit reasons <span class="ft-note"><span x-text="window.toUpperCase()"></span> window</span>
+            <button class="ft-fs" @click="openFs(['ft-reasons', 'ft-hold'])" title="Full screen">⛶</button>
           </div>
           {#- Two sub-charts rather than one dual-axis chart. Sharing a pane
               with a top axis made the grey hold bars dominate the coloured
               share bars and left no way to tell which scale a bar belonged
               to. Split, each has one axis and one meaning. Labels repeat on
-              both so a row is readable without counting across the gutter. -#}
-          <div class="chart-canvas" style="display:flex;gap:6px">
+              both so a row is readable without counting across the gutter.
+
+              Each half carries its own centred header: the pane tagline
+              names the pane, not either side, and reading the x-axis to
+              work out which half you are looking at is the same problem
+              the split was meant to remove. Header widths must track the
+              canvas flex basis below or they drift off centre. -#}
+          <div class="ft-subhead">
+            <div style="flex:1 1 58%">Share of exits</div>
+            <div style="flex:1 1 42%">Avg hold</div>
+          </div>
+          <div class="chart-canvas" style="height:198px;display:flex;gap:6px">
             <div style="flex:1 1 58%;min-width:0;position:relative"><canvas id="ft-reasons"></canvas></div>
             <div style="flex:1 1 42%;min-width:0;position:relative"><canvas id="ft-hold"></canvas></div>
           </div>

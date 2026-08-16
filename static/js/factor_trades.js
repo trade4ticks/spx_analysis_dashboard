@@ -136,22 +136,69 @@ document.addEventListener('alpine:init', () => {
     // Full screen: MOVE the canvas into the overlay and back again, so the
     // Chart.js instance survives and only needs a resize. Re-creating it
     // would mean re-deriving the dollar series for a resize.
+    // Headers for canvases that full-screen as part of a split pane. Must
+    // stay in step with the .ft-subhead text in the template.
+    _FS_LABEL: { 'ft-reasons': 'Share of exits', 'ft-hold': 'Avg hold' },
+    // Takes one id or a list. A pane split into sub-charts has to open as a
+    // unit -- expanding only the left half of exit reasons drops the very
+    // comparison the split was made for.
     openFs(id) {
-      const c = document.getElementById(id);
-      if (!c) return;
-      this._fsHome = c.parentElement;
-      this.fsId = id;
+      const ids = (Array.isArray(id) ? id : [id]).filter(Boolean);
+      const els = ids.map(i => document.getElementById(i));
+      if (els.some(e => !e)) return;
+      this._fsHome = els.map(e => e.parentElement);
+      this.fsId = ids;
       this.$nextTick(() => {
         const body = document.getElementById('ft-ov-body');
-        if (body) { body.appendChild(c); this._charts[id]?.resize(); }
+        if (!body) return;
+        body.style.display = ids.length > 1 ? 'flex' : '';
+        body.style.gap = ids.length > 1 ? '14px' : '';
+        els.forEach((c, k) => {
+          let host = body;
+          if (ids.length > 1) {
+            // Each canvas needs its OWN positioned, sized box; Chart.js
+            // measures the offset parent, and two canvases sharing one
+            // would both size to the full width and overlap.
+            const cell = document.createElement('div');
+            cell.className = 'ft-ov-cell';
+            cell.style.cssText = 'flex:1 1 0;min-width:0;display:flex;flex-direction:column';
+            // The header travels with the chart. Full screen is where the
+            // two halves sit furthest apart, so it is where an unlabelled
+            // sub-chart is hardest to attribute.
+            const h = document.createElement('div');
+            // Styled inline, not via .ft-subhead: that rule styles its
+            // CHILDREN, and this header is a leaf.
+            h.style.cssText = 'flex:0 0 auto;text-align:center;font-size:11px;'
+                            + 'font-weight:700;letter-spacing:.4px;padding-bottom:4px;'
+                            + 'text-transform:uppercase;color:var(--muted)';
+            h.textContent = this._FS_LABEL[ids[k]] || '';
+            cell.appendChild(h);
+            host = document.createElement('div');
+            host.style.cssText = 'flex:1;min-height:0;position:relative';
+            cell.appendChild(host);
+            body.appendChild(cell);
+          }
+          host.appendChild(c);
+          this._charts[ids[k]]?.resize();
+        });
       });
     },
     closeFs() {
-      const id = this.fsId, home = this._fsHome;
-      const c = id && document.getElementById(id);
-      if (c && home) home.appendChild(c);   // move back BEFORE clearing state
+      const ids = Array.isArray(this.fsId) ? this.fsId : (this.fsId ? [this.fsId] : []);
+      const homes = Array.isArray(this._fsHome) ? this._fsHome : [this._fsHome];
+      // Move every canvas back BEFORE clearing state or tearing down the
+      // wrapper cells, or they are destroyed along with the overlay.
+      ids.forEach((i, k) => {
+        const c = document.getElementById(i);
+        if (c && homes[k]) homes[k].appendChild(c);
+      });
+      const body = document.getElementById('ft-ov-body');
+      if (body) {
+        body.querySelectorAll('.ft-ov-cell').forEach(n => n.remove());
+        body.style.display = ''; body.style.gap = '';
+      }
       this.fsId = null; this._fsHome = null;
-      this.$nextTick(() => this._charts[id]?.resize());
+      this.$nextTick(() => ids.forEach(i => this._charts[i]?.resize()));
     },
 
     setActivityMode(m) {
@@ -405,22 +452,26 @@ document.addEventListener('alpine:init', () => {
       const labels = rows.map(r => r.label);
       const data   = rows.map(r => +(r.frac * 100).toFixed(2));
       // Colour by side: targets blue, stops pink, time grey, trend teal.
-      // The backstop keeps amber and overrides its side, because it means
-      // the opposite of a rule working -- nothing fired and the horizon
-      // caught the trade.
       const SIDE_COLOR = {
         target: 'rgba(52,152,219,0.78)',
         stop:   'rgba(232,67,147,0.72)',
         time:   'rgba(150,150,150,0.60)',
         trend:  'rgba(26,188,156,0.70)',
       };
-      const colors = rows.map(r => r.is_backstop
-        ? 'rgba(224,176,102,0.80)'
+      // The backstop still overrides its side -- it means the opposite of a
+      // rule working, since nothing fired and the horizon caught the trade
+      // -- but it does that OUTLINED rather than in amber. The page is
+      // strictly blue/pink/grey and a tan bar read as a fifth category
+      // rather than as a caveat on the time-exit grey it belongs beside.
+      const BACKSTOP = { fill: 'rgba(120,120,120,0.14)', line: 'rgba(205,205,205,0.95)', w: 2 };
+      const fills = rows.map(r => r.is_backstop ? BACKSTOP.fill
         : (SIDE_COLOR[r.side] || 'rgba(150,150,150,0.60)'));
+      const lines = rows.map((r, i) => r.is_backstop ? BACKSTOP.line : fills[i]);
+      const widths = rows.map(r => r.is_backstop ? BACKSTOP.w : 1);
       this._charts['ft-reasons'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels, datasets: [
-          { data, backgroundColor: colors, borderColor: colors, borderWidth: 1 },
+          { data, backgroundColor: fills, borderColor: lines, borderWidth: widths },
         ] },
         options: {
           indexAxis: 'y',
@@ -462,9 +513,11 @@ document.addEventListener('alpine:init', () => {
         data: { labels, datasets: [{
           data: rows.map(r => +(r.avg_hold ?? 0).toFixed(2)),
           // Same side colours, held back to a wash so the eye reads this
-          // pane as the quieter companion to the share pane.
-          backgroundColor: colors.map(c => c.replace(/[\d.]+\)$/, '0.34)')),
-          borderColor: colors, borderWidth: 1,
+          // pane as the quieter companion to the share pane. The backstop
+          // stays outlined here too, so the two halves agree on what it is.
+          backgroundColor: fills.map((c, i) => rows[i].is_backstop ? c
+                                    : c.replace(/[\d.]+\)$/, '0.34)')),
+          borderColor: lines, borderWidth: widths,
         }] },
         options: {
           indexAxis: 'y',
@@ -508,13 +561,10 @@ document.addEventListener('alpine:init', () => {
       const b = this.zoneData?.pnl_dist || [];
       if (!el || !b.length) return;
       // Same bar language as Annual P&L and the price bins: alpha = n.
-      // This pane is single-window by construction (server-computed from
-      // window_trades), so nothing here is ever hatched.
       const FC = window.FactorCharts;
       const mx = Math.max(...b.map(x => x.n), 1);
       const paints = b.map(x => FC._barPaint(
-        FC._barRgb(x.n ? (x.lo < 0 ? 'neg' : 'pos') : 'none'),
-        (x.n || 0) / mx, false));
+        FC._barRgb(x.n ? (x.lo < 0 ? 'neg' : 'pos') : 'none'), (x.n || 0) / mx));
       this._charts['ft-pnldist'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels: b.map(x => x.label), datasets: [{
@@ -546,12 +596,11 @@ document.addEventListener('alpine:init', () => {
       const lbl = bins.map(b => b.label);
       const avg = bins.map(b => b.avg_ret == null ? null : +(b.avg_ret * 100).toFixed(3));
       // Same bar language as Annual P&L: alpha = n, borders on every bar.
-      // Single-window pane, so nothing is hatched.
       const FC = window.FactorCharts;
       const mx = Math.max(...bins.map(b => b.n), 1);
       const paints = avg.map((v, i) => FC._barPaint(
         FC._barRgb(v == null ? 'none' : (v >= 0 ? 'pos' : 'neg')),
-        (bins[i].n || 0) / mx, false));
+        (bins[i].n || 0) / mx));
       this._charts['ft-pricebins'] = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: { labels: lbl, datasets: [{
