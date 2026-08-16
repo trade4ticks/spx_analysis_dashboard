@@ -181,49 +181,71 @@ def _check_undefined_names() -> int:
     import ast
     import builtins
 
-    # Module dunders are bound by the interpreter, not by any statement.
     EXTRA = {"__file__", "__name__", "__doc__", "__package__", "__spec__",
              "__loader__", "__builtins__", "__debug__"}
     KNOWN = set(dir(builtins)) | EXTRA
     findings: list[tuple[str, int, str, str]] = []
 
-    def bound_in(node) -> set[str]:
-        """Every name bound anywhere inside `node`, nested scopes included.
+    SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
-        Deliberately flat. Counting a nested function's locals as available
-        to its parent makes the check CONSERVATIVE -- it can miss a bug, but
-        it will not invent one, and a check that cries wolf is a check that
-        gets ignored.
+    def bound_here(node) -> set[str]:
+        """Names bound in THIS scope only — does not descend into nested ones.
+
+        The previous version collected bindings from the whole module and
+        handed them to every function, so a name defined in one function
+        looked available in all of them. That made cross-function leakage
+        invisible: series_trades was initialised in run() and used in zone(),
+        and the scan passed. Real lexical scoping is the fix; a flat set is
+        not merely imprecise, it is blind to the exact class this exists to
+        catch.
         """
         out: set[str] = set()
-        for n in ast.walk(node):
-            if isinstance(n, ast.arg):
-                out.add(n.arg)                      # def and lambda parameters
-            elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
-                out.add(n.id)                       # assignment, for, with, comprehension
-            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                out.add(n.name)
-            elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                for a in n.names:
-                    out.add((a.asname or a.name).split(".")[0])
-            elif isinstance(n, ast.ExceptHandler) and n.name:
-                out.add(n.name)
-            elif isinstance(n, (ast.Global, ast.Nonlocal)):
-                out.update(n.names)
+        args = getattr(node, "args", None)
+        if isinstance(args, ast.arguments):
+            for a in args.posonlyargs + args.args + args.kwonlyargs:
+                out.add(a.arg)
+            if args.vararg: out.add(args.vararg.arg)
+            if args.kwarg:  out.add(args.kwarg.arg)
+
+        def walk(n):
+            for c in ast.iter_child_nodes(n):
+                if isinstance(c, SCOPES):
+                    if not isinstance(c, ast.Lambda):
+                        out.add(c.name)          # the def's NAME binds here
+                    continue                      # its body is a child scope
+                if isinstance(c, ast.ClassDef):
+                    out.add(c.name); continue
+                if isinstance(c, ast.Name) and isinstance(c.ctx, (ast.Store, ast.Del)):
+                    out.add(c.id)
+                elif isinstance(c, (ast.Import, ast.ImportFrom)):
+                    for a in c.names:
+                        out.add((a.asname or a.name).split(".")[0])
+                elif isinstance(c, ast.ExceptHandler) and c.name:
+                    out.add(c.name)
+                elif isinstance(c, (ast.Global, ast.Nonlocal)):
+                    out.update(c.names)
+                walk(c)
+        walk(node)
         return out
+
+    def visit(node, enclosing: set[str], rel: str, where: str) -> None:
+        scope = enclosing | bound_here(node)
+
+        def walk(n):
+            for c in ast.iter_child_nodes(n):
+                if isinstance(c, SCOPES):
+                    visit(c, scope, rel,
+                          getattr(c, "name", "<lambda>"))
+                    continue
+                if isinstance(c, ast.Name) and isinstance(c.ctx, ast.Load)                         and c.id not in scope and c.id not in KNOWN:
+                    findings.append((rel, c.lineno, c.id, where))
+                walk(c)
+        walk(node)
 
     for py in sorted((ROOT / "app").rglob("*.py")):
         rel = str(py.relative_to(ROOT)).replace("\\", "/")
         tree = ast.parse(py.read_text(encoding="utf-8"))
-        module_names = bound_in(tree)
-        for fn in [n for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-            # module_names already includes every enclosing function's locals,
-            # so a closure reading an outer variable resolves cleanly.
-            scope = module_names | bound_in(fn) | KNOWN
-            for n in ast.walk(fn):
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)                         and n.id not in scope:
-                    findings.append((rel, n.lineno, n.id, fn.name))
+        visit(tree, set(), rel, "<module>")
 
     if findings:
         print("undefined names — these raise NameError when the path runs:")

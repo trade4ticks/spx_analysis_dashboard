@@ -411,11 +411,8 @@ async def run(req: RunReq = Body(...), pool=Depends(get_oi_pool)):
     #
     # In TRAIN the two are the same population, which is the invariant worth
     # asserting downstream: the equity endpoint must equal Total Ret there.
-    series_trades: list = []
     for r in rows:
         win = "train" if r["is_train"] else "test"
-        if active == "train" and win != "train":
-            continue          # TRAIN never draws test data at all
         bp, bs = int(r["bp"]), (int(r["bs"]) if two_factor else 0)
         n, avg, hold = int(r["n"]), float(r["avg_ret"] or 0), float(r["avg_hold"] or 0)
         cell = acc.setdefault((bs, bp), {"train": [0, 0.0], "test": [0, 0.0]})
@@ -618,6 +615,7 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 
     # ── Fold into the Recall chart contracts ──────────────────────────────
     trades, dates, reasons = [], [], {}
+    series_trades: list = []
     from collections import Counter as _Ctr
     zacc = {"train": ([], [], _Ctr(), []), "test": ([], [], _Ctr(), [])}
     by_ticker: dict[str, list] = {}
