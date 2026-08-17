@@ -1,4 +1,4 @@
-ok, `git pu# System Inventory
+# System Inventory
 
 Complete traced inventory of databases, tables, scripts, endpoints, data
 flow, and cleanup candidates. Builds on
@@ -7,6 +7,10 @@ scripts, every endpoint, and dead/vestigial flags.
 
 Update this when adding a table, script, or endpoint, or when retiring
 one of the cleanup candidates flagged below.
+
+How the app is *served* — the Cloudflare 100-second origin limit that
+`/api/factor-trades/grid` runs into, response compression, and the
+sizing of an async-job endpoint — is in `DEPLOYMENT_NOTES.md`.
 
 ---
 
