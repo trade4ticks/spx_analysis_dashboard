@@ -350,6 +350,11 @@ document.addEventListener('alpine:init', () => {
     gridMetric: 'calmar',
     gridWindow: 'train',      // which window the panels read
     gridPairX: '', gridPairY: '',
+    // Its own error slot. Routing grid failures into the shared `error`
+    // meant the pane's x-show went false and the whole thing evaporated --
+    // progress text included -- with the reason parked in the rail where it
+    // read as unrelated. A failed grid must say so where the grid was.
+    gridError: '',
     gridShowScatter: false,
     _gridRange: 0.01,
 
@@ -385,7 +390,8 @@ document.addEventListener('alpine:init', () => {
       if (!this.selectedCells.length) { this.error = 'select a zone first'; return; }
       if (!this.gridSweep.length) { this.error = 'pick at least one family to sweep'; return; }
       const src = this.runData;
-      this.gridRunning = true; this.error = ''; this.gridElapsed = 0;
+      this.gridRunning = true; this.error = ''; this.gridError = '';
+      this.gridElapsed = 0;
       this._gridTimer = setInterval(() => { this.gridElapsed += 1; }, 1000);
       try {
         const r = await fetch('/api/factor-trades/grid', {
@@ -398,20 +404,49 @@ document.addEventListener('alpine:init', () => {
             sweep_families: this.gridSweep,
           }),
         });
-        const d = await r.json();
-        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+        // A payload this size can fail in the parse rather than the fetch,
+        // and an unhandled throw here is what made the pane disappear.
+        let d;
+        try { d = await r.json(); }
+        catch (e) {
+          this.gridError = 'the response could not be parsed — it is probably '
+            + 'too large. Sweep fewer families. (' + e + ')';
+          return;
+        }
+        if (!r.ok || d.error) {
+          this.gridError = d?.error || ('HTTP ' + r.status);
+          return;
+        }
         this.gridData = d;
         this.gridOpen = true;
-        // Default the 2D view to the first two swept families rather than
-        // rendering every pair — three families is three heatmaps and only
-        // one is being read at a time.
+        // First two swept families, and NEVER the same family on both axes —
+        // a parameter plotted against itself gives one combination per cell,
+        // which is what n=1 everywhere was saying.
         this.gridPairX = d.sweep?.[0]?.family || '';
-        this.gridPairY = d.sweep?.[1]?.family || d.sweep?.[0]?.family || '';
+        this.gridPairY = d.sweep?.[1]?.family || '';
         this.$nextTick(() => this.renderGrid());
-      } catch (e) { this.error = String(e); }
+      } catch (e) {
+        // Includes the server dying mid-batch, which presents as a network
+        // failure. Named here rather than left as a bare TypeError.
+        this.gridError = String(e) + ' — if this was a large sweep the server '
+          + 'may have been unable to hold it; try fewer families.';
+      }
       finally {
         this.gridRunning = false;
         if (this._gridTimer) { clearInterval(this._gridTimer); this._gridTimer = null; }
+      }
+    },
+
+    // Axes must name two DIFFERENT families. Setting one to the other's
+    // family swaps them rather than silently plotting a parameter against
+    // itself.
+    setGridPair(axis, fam) {
+      if (axis === 'x') {
+        if (fam === this.gridPairY) this.gridPairY = this.gridPairX;
+        this.gridPairX = fam;
+      } else {
+        if (fam === this.gridPairX) this.gridPairX = this.gridPairY;
+        this.gridPairY = fam;
       }
     },
 

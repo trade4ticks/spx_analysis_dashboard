@@ -20,6 +20,7 @@ cutoff.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import date as _date
@@ -1307,6 +1308,24 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
 BATCH_MAX_CONCURRENCY = 5
 
 
+def _row_seq_hash(rows) -> str:
+    """Digest of a result's (ticker, trade_date) sequence.
+
+    Lets the row-order invariant be checked without keeping every
+    combination's rows resident. A digest mismatch says the same thing a
+    full comparison would -- this combination did not see the same trades --
+    it just cannot name the first divergent row, which is why the skeleton
+    combination is compared in full and the rest by digest.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for r in rows:
+        h.update(r["ticker"].encode("utf-8"))
+        h.update(b"|")
+        h.update(str(r["trade_date"].toordinal()).encode("ascii"))
+        h.update(b";")
+    return h.hexdigest()
+
+
 def _stats_by_window(rows) -> dict:
     """Train AND test stats from one variant's rows.
 
@@ -1520,10 +1539,25 @@ async def _run_variant(pool, ctx, v: dict) -> dict:
             return {**out, "error": f"unknown baseline_kind {kind!r}"}
 
     st = _stats_by_window(rows)
-    return {**out, "rule_keys": list(rule_keys),
-            "train": st["train"], "test": st["test"],
-            "rows": rows,
-            "horizon_auto_added": meta["horizon_auto_added"]}
+    res = {**out, "rule_keys": list(rule_keys),
+           "train": st["train"], "test": st["test"],
+           "horizon_auto_added": meta["horizon_auto_added"]}
+    if v.get("compact"):
+        # THE MEMORY FIX. Holding asyncpg Records for every variant meant
+        # the server carried combinations x trades of them at once --
+        # 183 x 5,409 is ~990k Record objects, which is what actually died
+        # on a larger sweep. A compact variant keeps only the returns it
+        # contributes plus a digest of its (ticker, date) sequence, so the
+        # row-order invariant is still checked, in O(1) per combination
+        # instead of O(n), against a skeleton built once.
+        res["r"] = [None if r["exit_return"] is None
+                    else round(float(r["exit_return"]), 8) for r in rows]
+        res["seq_hash"] = _row_seq_hash(rows)
+        res["n_rows"] = len(rows)
+        res["reasons"] = _grid_reasons(rows)
+    else:
+        res["rows"] = rows
+    return res
 
 
 async def run_batch(pool, ctx, variants: list,
@@ -1860,6 +1894,13 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
 # well. Four families at seven values each is 2,401.
 GRID_MAX_COMBOS = 600
 
+# The combination cap alone was the WRONG GUARD. It says nothing about how
+# many trades each combination carries, so a 5,409-trade zone sailed through
+# a 183-combination sweep at ~990k returns and took the server down instead
+# of answering. What scales is combinations x trades, so that is what is
+# capped. 1.2M returns is ~11MB of JSON and ~40MB resident.
+GRID_MAX_RETURNS = 1_200_000
+
 GRID_METRICS = [
     ("calmar",     "Calmar",     "ratio"),
     ("avg_ret",    "Avg Ret",    "pct"),
@@ -2018,23 +2059,62 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     null_ix = len(combos_meta)
     combos_meta.append({"i": null_ix, "params": {}, "labels": {},
                         "is_null": True})
-    variants.append({"key": f"c{null_ix}", "group": "grid", "rule_keys": []})
+    # NOT appended to `variants`: it runs first and alone, because the
+    # skeleton and the reference digest have to exist before any other
+    # combination can be checked against them.
+
+    # ── Pre-flight: how big is this actually going to be? ────────────────
+    #
+    # The combination cap alone was the wrong guard. It counts combinations
+    # and says nothing about trades, so a zone with 5,409 trades passed a
+    # 183-combination sweep straight through at ~990k returns -- and the
+    # server, holding every variant's rows at once, died rather than
+    # answering. The guard has to fire BEFORE the fan-out and has to measure
+    # the thing that actually scales: combinations x trades.
+    #
+    # One cheap COUNT buys that, reusing the zone's own count query so the
+    # number is the zone's real population and not an estimate of it.
+    async with pool.acquire() as conn:
+        base_combine, _ = build_combine_sql(req.rule_keys or [], by_key,
+                                            include_exit_rule=True)
+        cnt = await conn.fetch(
+            _zone_count_sql(base_combine, where_bins, cell_pred, strike_pred), *args)
+    trades_each = sum(int(r["k"]) for r in cnt)
+    if not trades_each:
+        return {"error": "the selected zone has no trades"}
+
+    n_combos = total + 1                     # + the null combination
+    returns = n_combos * trades_each
+    if returns > GRID_MAX_RETURNS:
+        dims = " x ".join(f"{len(f['values'])} {f['family']}" for f in swept)
+        max_combos = max(1, GRID_MAX_RETURNS // trades_each)
+        return {"error": f"that sweep is {dims} = {n_combos:,} combinations "
+                         f"against {trades_each:,} trades each = "
+                         f"{returns:,} returns, over the "
+                         f"{GRID_MAX_RETURNS:,} limit (~"
+                         f"{int(returns * 9 / 1e6)}MB). This zone supports "
+                         f"about {max_combos:,} combinations. Sweep fewer "
+                         f"families, or narrow the zone.",
+                 "n_combos": n_combos, "trades_each": trades_each,
+                 "limit": GRID_MAX_RETURNS}
 
     ctx = BatchCtx(req, rules, by_key, cutoff_d, cutoff_iso, args,
                    where_bins, cell_pred, strike_pred)
-    results = await run_batch(pool, ctx, variants, req.concurrency)
 
-    by_key_res = {r["key"]: r for r in results}
-    errors = [{"key": r["key"], "error": r["error"]}
-              for r in results if r.get("error")]
+    # ── Skeleton first, alone ────────────────────────────────────────────
+    #
+    # The null combination runs by itself and in FULL, because the skeleton
+    # and the reference digest have to exist before anything can be checked
+    # against them. Everything after it runs compact. One serialised query
+    # (~1.2s) buys a ~10x drop in peak server memory.
+    skel_res = await _run_variant(pool, ctx, {"key": f"c{null_ix}",
+                                              "group": "grid", "rule_keys": []})
+    if skel_res.get("error"):
+        return {"error": f"the null combination failed, so there is no "
+                         f"reference to check the grid against: "
+                         f"{skel_res['error']}"}
 
-    # ── One shared skeleton, verified per combination ────────────────────
-    ok = [by_key_res.get(f"c{m['i']}") for m in combos_meta]
-    first = next((r for r in ok if r and not r.get("error")), None)
-    if first is None:
-        return {"error": "every combination failed", "errors": errors}
-
-    base_rows = first.get("rows") or []
+    base_rows = skel_res.get("rows") or []
     tickers: list = []
     dates: list = []
     tick_ix: dict = {}
@@ -2047,50 +2127,63 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         return i
 
     skel_t, skel_d, skel_p, skel_w = [], [], [], []
-    seq = []
     for row in base_rows:
-        seq.append((row["ticker"], row["trade_date"]))
         skel_t.append(_ix(row["ticker"], tick_ix, tickers))
         skel_d.append(_ix(row["trade_date"].isoformat(), date_ix, dates))
         _p = row["entry_price"]
         skel_p.append(round(float(_p), 4) if _p is not None else None)
         skel_w.append(1 if row["is_train"] else 0)
+    ref_hash = _row_seq_hash(base_rows)
+    ref_n = len(base_rows)
+    null_r = [None if r["exit_return"] is None
+              else round(float(r["exit_return"]), 8) for r in base_rows]
+    null_reasons = _grid_reasons(base_rows)
+    base_rows = None                          # released before the fan-out
+
+    for v in variants:
+        v["compact"] = True
+    results = await run_batch(pool, ctx, variants, req.concurrency)
+
+    by_key_res = {r["key"]: r for r in results}
+    errors = [{"key": r["key"], "error": r["error"]}
+              for r in results if r.get("error")]
 
     combos_out = []
     for m in combos_meta:
+        if m["is_null"]:
+            combos_out.append({**m, "r": null_r,
+                               "train": {k: skel_res["train"].get(k)
+                                         for k in ("n", "avg_ret", "avg_hold")},
+                               "test": {k: skel_res["test"].get(k)
+                                        for k in ("n", "avg_ret", "avg_hold")},
+                               "reasons": null_reasons})
+            continue
         r = by_key_res.get(f"c{m['i']}")
         if r is None or r.get("error"):
             combos_out.append({**m, "error": (r or {}).get("error", "missing")})
             continue
-        rows = r.get("rows") or []
-        # LOUD. If this ever trips, every marginal curve on the page is
-        # averaging returns against the wrong trades -- and it would look
-        # like a surprising result, not like a bug. So it is a hard failure
-        # naming the combination and the first divergent row, not a warning.
-        if len(rows) != len(seq):
+        # LOUD. If this trips, every marginal curve is averaging returns
+        # against the wrong trades -- and it would read as a surprising
+        # result, not as a bug. Hard failure naming the combination, never a
+        # warning and never a fallback that yields a plausible-looking grid.
+        if r.get("n_rows") != ref_n or r.get("seq_hash") != ref_hash:
             return {"error": f"row-sequence invariant broken: combination "
                              f"{m['i']} ({m['labels'] or 'null'}) returned "
-                             f"{len(rows)} trades against the skeleton's "
-                             f"{len(seq)}. Every combination must see the "
-                             f"same trades — the grid cannot be trusted.",
-                    "invariant": "row_count"}
-        for j, row in enumerate(rows):
-            if (row["ticker"], row["trade_date"]) != seq[j]:
-                return {"error": f"row-sequence invariant broken: combination "
-                                 f"{m['i']} ({m['labels'] or 'null'}) diverges "
-                                 f"at row {j} — {row['ticker']} "
-                                 f"{row['trade_date']} where the skeleton has "
-                                 f"{seq[j][0]} {seq[j][1]}. Every combination "
-                                 f"must see the same trades in the same order "
-                                 f"— the grid cannot be trusted.",
-                        "invariant": "row_order"}
+                             f"{r.get('n_rows')} trades against the "
+                             f"skeleton's {ref_n}"
+                             + ("" if r.get("n_rows") != ref_n else
+                                " with the same count but a different "
+                                "(ticker, date) sequence")
+                             + ". Every combination must see the same trades "
+                               "in the same order — the grid cannot be "
+                               "trusted and has not been rendered.",
+                    "invariant": ("row_count" if r.get("n_rows") != ref_n
+                                  else "row_order")}
         combos_out.append({
-            **m,
-            "r": [None if row["exit_return"] is None
-                  else round(float(row["exit_return"]), 8) for row in rows],
+            **m, "r": r["r"],
             "train": {k: r["train"].get(k) for k in ("n", "avg_ret", "avg_hold")},
             "test":  {k: r["test"].get(k)  for k in ("n", "avg_ret", "avg_hold")},
-            "reasons": _grid_reasons(rows),
+            "reasons": r.get("reasons") or {"train": {}, "test": {}},
         })
 
     return {
@@ -2107,7 +2200,8 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "combos": combos_out,
         "null_index": null_ix,
         "n_combos": len(combos_meta),
-        "n_trades": len(seq),
+        "n_trades": ref_n,
+        "n_returns": returns,
         "concurrency": BATCH_MAX_CONCURRENCY,
         "errors": errors,
         "units_note": SUITE_UNITS_NOTE,

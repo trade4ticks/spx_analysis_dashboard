@@ -149,7 +149,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=18"></script>
-  <script src="/static/js/factor_trades.js?v=39"></script>
+  <script src="/static/js/factor_trades.js?v=40"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -690,7 +690,7 @@
            on the target it does not generalise. Nothing here ranks
            combinations except the scatter, whose job is to say whether the
            surface means anything at all. -->
-      <div class="chart-box" x-show="gridData || gridRunning">
+      <div class="chart-box" x-show="gridData || gridRunning || gridError">
         <div class="chart-title" style="cursor:pointer" @click="gridOpen = !gridOpen">
           <span x-text="gridOpen ? '▾' : '▸'" style="display:inline-block;width:12px"></span>
           Parameter response
@@ -711,6 +711,12 @@
         <div x-show="gridData && !gridOpen" class="ft-note" style="padding:2px">
           Collapsed — click the title to expand.
         </div>
+        {#- Shown HERE, not only in the rail. A grid that fails should say so
+            where the grid was, rather than removing itself from the page. -#}
+        <div x-show="gridError" x-text="gridError"
+             style="margin:6px 0;padding:7px 10px;border-radius:3px;font-size:11px;
+                    background:rgba(232,67,147,.10);border:1px solid rgba(232,67,147,.35);
+                    color:#e84393;white-space:pre-wrap"></div>
 
         <template x-if="gridData && gridOpen">
           <div>
@@ -778,18 +784,30 @@
                   <span class="ft-note">marginalised over every other swept family</span>
                 </div>
                 <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+                  {#- :value + @change, NOT x-model. x-model initialises
+                      before the x-for options exist, so the browser snaps the
+                      select to its first option and x-model writes that back
+                      into the model — which is how both axes ended up on the
+                      first swept family, giving n=1 in every cell. The rule
+                      selects in the rail already use this pattern. -#}
                   <span class="ft-note">X</span>
-                  <select style="width:auto" x-model="gridPairX">
+                  <select style="width:auto" :value="gridPairX"
+                          @change="setGridPair('x', $event.target.value)">
                     <template x-for="f in gridData.sweep" :key="'px-'+f.family">
-                      <option :value="f.family" x-text="f.family"></option>
+                      <option :value="f.family" :selected="f.family === gridPairX"
+                              x-text="f.family"></option>
                     </template>
                   </select>
                   <span class="ft-note">Y</span>
-                  <select style="width:auto" x-model="gridPairY">
+                  <select style="width:auto" :value="gridPairY"
+                          @change="setGridPair('y', $event.target.value)">
                     <template x-for="f in gridData.sweep" :key="'py-'+f.family">
-                      <option :value="f.family" x-text="f.family"></option>
+                      <option :value="f.family" :selected="f.family === gridPairY"
+                              x-text="f.family"></option>
                     </template>
                   </select>
+                  <span class="ft-note" x-show="gridPairX === gridPairY"
+                        style="color:#e84393">pick two different families</span>
                 </div>
                 <template x-if="gridHeat">
                   <div style="overflow-x:auto">
