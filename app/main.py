@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.templating import Jinja2Templates
 
 from app.db import init_pool, close_pool
@@ -28,6 +29,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SPX IV Dashboard", lifespan=lifespan)
+
+# Compress responses. The parameter grid returns ~9MB of JSON (one returns
+# array per combination) and JSON of that shape compresses roughly 8:1, so
+# this is ~1MB on the wire instead. That matters beyond bandwidth: a reverse
+# proxy in front of uvicorn measures its read timeout against TRANSFER TIME,
+# and an uncompressed multi-megabyte body over a slow link is what pushes
+# past it — the app logs 200 while the browser is handed the proxy's HTML
+# error page. Shrinking the body attacks that directly, from inside the app,
+# without touching the proxy config.
+#
+# minimum_size skips small responses, where the CPU is not worth it and the
+# compressed form can be larger than the original.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 

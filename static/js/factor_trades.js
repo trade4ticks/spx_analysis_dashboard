@@ -334,6 +334,64 @@ document.addEventListener('alpine:init', () => {
       entry_exit: { label: 'random entries + exits', card: 'RANDOM ENTRIES + EXITS',
                     row: 'rand entry+exit', colour: '#1abc9c' },
     },
+    // ── One place that turns a fetch into {data} or {error} ──────────────
+    //
+    // The order here is the whole point, and getting it wrong sent a real
+    // investigation to the wrong place: the previous code called r.json()
+    // FIRST and only inspected r.ok afterwards, so a proxy's HTML error page
+    // threw in the parser and was reported as "the response could not be
+    // parsed — it is probably too large. Sweep fewer families." The response
+    // began with <!DOCTYPE. It was not too large; it was not JSON, and the
+    // status and content-type both said so before a single byte was parsed.
+    //
+    // So: status, then content-type, then parse — and when it is not JSON,
+    // say what actually arrived rather than inferring a cause.
+    async _postJson(url, body) {
+      let r;
+      try {
+        r = await fetch(url, { method: 'POST',
+                               headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify(body) });
+      } catch (e) {
+        // The connection itself failed — no status to report.
+        return { error: `network error contacting ${url}: ${e}` };
+      }
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (!ct.includes('json')) {
+        let head = '';
+        try { head = (await r.text()).slice(0, 200).replace(/\s+/g, ' ').trim(); }
+        catch (e) { head = '(body unreadable: ' + e + ')'; }
+        const looksHtml = /^<!doctype|^<html/i.test(head);
+        return { error:
+          `${url} returned HTTP ${r.status} ${r.statusText || ''} as `
+          + `${ct || 'an unspecified content type'}, not JSON.\n`
+          + (looksHtml
+              ? 'The body is an HTML page. This application only returns '
+              + 'JSON, so it came from something in front of it — a reverse '
+              + 'proxy timing out or refusing the response. Check the read '
+              + 'timeout and body-size limits there; the app itself may well '
+              + 'have logged 200.\n'
+              : '')
+          + `First bytes received: ${head}` };
+      }
+      if (!r.ok) {
+        let d = null;
+        try { d = await r.json(); } catch (e) { /* fall through to the status */ }
+        return { error: d?.error || `HTTP ${r.status} ${r.statusText || ''}` };
+      }
+      try {
+        const d = await r.json();
+        if (d && d.error) return { error: d.error, data: d };
+        return { data: d };
+      } catch (e) {
+        // JSON content-type, 200, and still unparseable — a genuinely
+        // truncated or oversized body, which is the ONLY case where blaming
+        // size is warranted.
+        return { error: `${url} returned JSON that could not be parsed — the `
+                      + `body was probably truncated in transit. ${e}` };
+      }
+    },
+
     // ── Parameter response grid ──────────────────────────────────────────
     // Second thin layer on the batch runner: the suite varies the seed, this
     // varies the parameters. The question is whether each parameter's effect
@@ -394,29 +452,15 @@ document.addEventListener('alpine:init', () => {
       this.gridElapsed = 0;
       this._gridTimer = setInterval(() => { this.gridElapsed += 1; }, 1000);
       try {
-        const r = await fetch('/api/factor-trades/grid', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { data: d, error: err } = await this._postJson(
+          '/api/factor-trades/grid', {
             primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
             n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
             window: this.window, cells: this.selectedCells,
             sweep_families: this.gridSweep,
-          }),
-        });
-        // A payload this size can fail in the parse rather than the fetch,
-        // and an unhandled throw here is what made the pane disappear.
-        let d;
-        try { d = await r.json(); }
-        catch (e) {
-          this.gridError = 'the response could not be parsed — it is probably '
-            + 'too large. Sweep fewer families. (' + e + ')';
-          return;
-        }
-        if (!r.ok || d.error) {
-          this.gridError = d?.error || ('HTTP ' + r.status);
-          return;
-        }
+          });
+        if (err) { this.gridError = err; return; }
         this.gridData = d;
         this.gridOpen = true;
         // First two swept families, and NEVER the same family on both axes —
@@ -425,12 +469,7 @@ document.addEventListener('alpine:init', () => {
         this.gridPairX = d.sweep?.[0]?.family || '';
         this.gridPairY = d.sweep?.[1]?.family || '';
         this.$nextTick(() => this.renderGrid());
-      } catch (e) {
-        // Includes the server dying mid-batch, which presents as a network
-        // failure. Named here rather than left as a bare TypeError.
-        this.gridError = String(e) + ' — if this was a large sweep the server '
-          + 'may have been unable to hold it; try fewer families.';
-      }
+      } catch (e) { this.gridError = String(e); }
       finally {
         this.gridRunning = false;
         if (this._gridTimer) { clearInterval(this._gridTimer); this._gridTimer = null; }
@@ -805,18 +844,15 @@ document.addEventListener('alpine:init', () => {
       // seconds against a stated estimate is the honest version.
       this._suiteTimer = setInterval(() => { this.suiteElapsed += 1; }, 1000);
       try {
-        const r = await fetch('/api/factor-trades/suite', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        const { data: d, error: err } = await this._postJson(
+          '/api/factor-trades/suite', {
             primary_metric: src.primary_metric, secondary_metric: src.secondary_metric,
             entry_anchor: src.entry_anchor, rule_keys: src.rules,
             n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
             window: this.window, cells: this.selectedCells,
             seed: this.baselineSeed, n_draws: +this.suiteN || 10,
-          }),
-        });
-        const d = await r.json();
-        if (!r.ok || d.error) { this.error = d.error || ('HTTP ' + r.status); return; }
+          });
+        if (err) { this.error = err; return; }
         this.suiteData = d;
         this.suiteOpen = true;
         this.$nextTick(() => this._suiteVerifyAgainstStatBar());
