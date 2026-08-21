@@ -244,6 +244,41 @@ async def run(args) -> None:
                 verdict = "consistent with IS"
                 ambiguous.append(s["id"])
 
+            if args.explain_drift and recon.startswith("DRIFT"):
+                # WHY a signal drifts has two very different answers.
+                #
+                # is_bins is IN-SAMPLE: its edges are full-history quantiles,
+                # so a rebuild does not just append new dates -- it RE-LABELS
+                # every historical row against moved boundaries. A zone can
+                # therefore lose rows it used to contain.
+                #
+                # Split the fresh count at the horizon that existed when the
+                # stats were last written:
+                #   history part != stored  -> edges moved, rows re-labelled
+                #   history part == stored  -> pure append, only new dates
+                horizon = s["stats_updated_at"] or s["created_at"]
+                hz = horizon.date() if hasattr(horizon, "date") else horizon
+                hist = await _cell_stats(conn, "is_bins", prim, sec, outc,
+                                         n_bins, xs, ys, "train", hz)
+                hist_n, _ = _agg(hist)
+                new_n = is_n - hist_n
+                relabel = hist_n - st_n
+                print(f"  -- {label} drift breakdown (horizon {hz})")
+                print(f"     stored at save time            : {st_n:>8,}")
+                print(f"     is_bins today, dates <= horizon: {hist_n:>8,}"
+                      f"   -> re-labelled {relabel:+,}")
+                print(f"     is_bins today, dates >  horizon: {new_n:>8,}"
+                      f"   -> genuinely new")
+                print(f"     is_bins today, total           : {is_n:>8,}"
+                      f"   -> net {is_n - st_n:+,}")
+                if relabel:
+                    print("     => edges MOVED: a rebuild re-binned historical")
+                    print("        rows, so this zone does not mean today what")
+                    print("        it meant when it was saved.")
+                else:
+                    print("     => pure append: the zone is unchanged, it just")
+                    print("        has more dates in it.")
+
             occ = (f"is={sum(n for n,_ in is_pc.values())} "
                    f"ttTr={sum(n for n,_ in tt_tr.values())} "
                    f"ttTe={sum(n for n,_ in tt_te.values())} "
@@ -307,6 +342,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--verbose", action="store_true",
                     help="Per-cell occupancy for flagged signals")
+    ap.add_argument("--explain-drift", action="store_true",
+                    help="Split CHECK A's delta into new dates vs re-labelled "
+                         "history, which separates the two causes of drift")
     asyncio.run(run(ap.parse_args()))
 
 
