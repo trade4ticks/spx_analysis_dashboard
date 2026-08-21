@@ -28,6 +28,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.db import get_pool, get_oi_pool
+from app.routers._stat_shared import (
+    effective_tickers as _effective_tickers,
+    time_in_market as _time_in_market,
+)
 from app.routers.oi_analysis import (
     _sec_equity_curve,
     _parse_horizon,
@@ -1018,6 +1022,26 @@ async def portfolio_aggregate(
         "avg_ret":         round(avg_ret,  6),
         "win_rate":        round(win_rate, 4),
         "std":             round(std,      6),
+        # Canonical names for the SHARED stat-bar mapper
+        # (FactorCharts.statRowValues). The originals above and below stay
+        # so existing consumers are untouched -- what is not acceptable is
+        # teaching the mapper two vocabularies for the same quantity.
+        "std_dev":         round(std,      6),
+        "n_win":           n_winners,
+        "avg_win":         round(avg_winners, 6),
+        "avg_loss":        round(avg_losers,  6),
+        # Participation ratio over the WINDOW population, same function the
+        # exits page uses (_stat_shared.effective_tickers).
+        "eff_tickers":     round(_effective_tickers(
+                               [len(v) for v in by_ticker.values()]), 4),
+        # Share of trading days with at least one position open. NOT Avg
+        # DIT: these signals use fixed forward-return horizons, so mean hold
+        # is a constant equal to the horizon. This measures deployment
+        # instead, which is what a portfolio is assembled to change.
+        "time_in_market":  (lambda v: round(v, 6) if v is not None else None)(
+                               _time_in_market(
+                                   [r["trade_date"] for r in union_rows],
+                                   trading_days, horizon)),
         "p5":              round(p5,       6),
         "p95":             round(p95,      6),
         "median":          round(median,   6),

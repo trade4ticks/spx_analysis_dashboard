@@ -152,6 +152,46 @@
       {{ m.stat_box('Avg Ret', "fmtPct(row.avg_ret)", sign_expr='row.avg_ret')
          | indent(10) | safe }}
 -#}
+{#-
+  ── stat_bar_core ─────────────────────────────────────────────────────────
+  The fifteen stat boxes the exits page and the portfolio page have in
+  common, in ONE canonical order. Both pages call this, so the field list
+  and its order cannot drift between them.
+
+  The SIXTEENTH box differs by page and is appended at the call site:
+    exits page   Avg DIT          — mean exit bar; varies because exits are
+                                    rule-driven, so it is the number checked
+                                    against every policy tweak
+    portfolio    Time in Market   — share of trading days with a position
+                                    open. A DIFFERENT measurement, not a
+                                    substitute: portfolio signals use fixed
+                                    forward-return horizons, so Avg DIT
+                                    there would be a constant equal to the
+                                    horizon and would restate the outcome
+                                    name rather than measure anything.
+
+  `row` is the expression naming the row object, whose fields come from
+  FactorCharts.statRowValues().
+-#}
+{% macro stat_bar_core(row) -%}
+{{ stat_box('N',              row ~ '.n') }}
+{{ stat_box('Tickers',        row ~ '.nTickers') }}
+{{ stat_box('Eff Tickers',    row ~ '.effTickers') }}
+{{ stat_box('Avg Ret',        row ~ '.avgRet',    sign_expr=row ~ '.avgRetRaw') }}
+{{ stat_box('Median',         row ~ '.median',    sign_expr=row ~ '.medianRaw') }}
+{{ stat_box('Std Dev',        row ~ '.stdDev') }}
+{{ stat_box('Win %',          row ~ '.winRate') }}
+{{ stat_box('# Win',          row ~ '.nWin') }}
+{{ stat_box('Avg Win',        row ~ '.avgWin',    sign_expr=row ~ '.avgWinRaw') }}
+{{ stat_box('Avg Loss',       row ~ '.avgLoss',   sign_expr=row ~ '.avgLossRaw') }}
+{{ stat_box('Trd/Yr',         row ~ '.trdYr') }}
+{{ stat_box('Total Ret',      row ~ '.totalRet',  sign_expr=row ~ '.totalRetRaw') }}
+{{ stat_box('Avg Annual Ret', row ~ '.avgAnnRet', sign_expr=row ~ '.avgAnnRetRaw') }}
+{{ stat_box('Max DD',         row ~ '.maxDD',     sign_expr=row ~ '.maxDDRaw') }}
+{{ stat_box('Calmar',         row ~ '.calmar',    sign_expr=row ~ '.calmarRaw') }}
+{%- endmacro %}
+
+
 {% macro stat_box(label, value_expr, sign_expr=None) -%}
 <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
   <div class="stat-label">{{ label }}</div>

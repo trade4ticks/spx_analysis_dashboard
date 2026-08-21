@@ -8261,6 +8261,45 @@ document.addEventListener('alpine:init', () => {
       } finally { this.portLoading = false; }
     },
 
+    // ── Portfolio stat bar ──────────────────────────────────────────────
+    // Values for the shared 16-box bar. Formatting, the dollar fields and
+    // the Calmar guard all come from FactorCharts.statRowValues, the same
+    // mapper the exits page uses -- a second mapper would be a second
+    // definition of "Calmar" that keeps rendering while quietly disagreeing.
+    //
+    // Dollar figures are derived from the SAME sizing controls and the SAME
+    // _computeDollarSeries call the equity curve uses, so the bar and the
+    // chart cannot disagree. window_trades, not series_trades: this is the
+    // stat bar, so in TEST it covers the test window only.
+    get portDollarStats() {
+      const a = this.portAggregate;
+      if (!a) return null;
+      const p = this.equityDollarParams.port || { perTrade: 2000, dailyCap: 10000 };
+      const trades = a.window_trades || a.combined_trades || [];
+      if (!trades.length) return null;
+      const ds = this._computeDollarSeries(trades, p.perTrade, p.dailyCap);
+      const eq = ds?.equity || [];
+      if (!eq.length) return null;
+      const total = eq[eq.length - 1].value;
+      let peak = 0, maxDD = 0;
+      for (const pt of eq) {
+        if (pt.value > peak) peak = pt.value;
+        maxDD = Math.min(maxDD, pt.value - peak);
+      }
+      const d0 = new Date(eq[0].date), d1 = new Date(eq[eq.length - 1].date);
+      const years = Math.max((d1 - d0) / 31557600000, 1e-9);
+      // Calmar is ANNUALISED return over max drawdown. Total return would
+      // overstate it by the length of the window and make it incomparable
+      // with any published figure.
+      return { total_ret_usd: total, avg_annual_usd: total / years,
+               max_dd_usd: maxDD };
+    },
+    get portStatRow() {
+      const a = this.portAggregate;
+      if (!a) return window.FactorCharts.statRowValues({}, null);
+      return window.FactorCharts.statRowValues(a, this.portDollarStats);
+    },
+
     // Non-null when the last aggregate was refused for mixing selection
     // modes. Carries {modes:{mode:count}, message} for the banner.
     portMixedModes: null,

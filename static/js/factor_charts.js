@@ -1209,6 +1209,82 @@ window.FactorCharts = {
     return `rgba(232,67,147,${(0.15 + (-t) * 0.85).toFixed(2)})`;
   },
 
+  // ── Stat-bar values ──────────────────────────────────────────────────
+  // ONE mapper for the stat bar, used by the exits page and the portfolio
+  // page. Both render the same boxes, so the values behind them are
+  // formatted in one place -- a second mapper is a second definition of
+  // "Calmar" that keeps rendering while quietly disagreeing.
+  //
+  // s   server stats for ONE window (canonical names: n, n_tickers,
+  //     eff_tickers, avg_ret, median, std_dev, win_rate, n_win, avg_win,
+  //     avg_loss, trades_per_year, time_in_market)
+  // $d  dollar stats from _dollarStats(): total_ret_usd, avg_annual_usd,
+  //     max_dd_usd. May be null before the sizing path has run.
+  //
+  // TWO EXPLICIT SOURCES, never a spread of one over the other. A merge
+  // silently supplies whatever the right-hand side happens not to define,
+  // which is how a server-side percent Calmar ended up displayed beside
+  // blank dollar boxes.
+  _statPct(v) { return v == null ? '—' : (v * 100).toFixed(3) + '%'; },
+
+  _statFmt$(v) {
+    if (v == null) return '—';
+    const a = Math.abs(v), sg = v < 0 ? '-' : '';
+    if (a >= 1e6) return sg + '$' + (a / 1e6).toFixed(2) + 'M';
+    if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
+    return sg + '$' + a.toFixed(0);
+  },
+
+  // Annualised dollar return over dollar max drawdown. Blank unless BOTH
+  // inputs are present AND the drawdown is negative, so Calmar can never
+  // appear beside empty boxes, and a zero-drawdown sample renders "—"
+  // rather than an infinity dressed up as a great number.
+  //
+  // Lifted verbatim from the exits page. Derived HERE from the dollar
+  // figures shown beside it, NEVER from a server percent-based calmar --
+  // those are two different definitions, and falling back to the other one
+  // produced a populated Calmar sitting next to a blank Max DD.
+  _statCalmarRaw($d) {
+    const a = $d?.avg_annual_usd, d = $d?.max_dd_usd;
+    return (a != null && d != null && d < 0) ? (a / Math.abs(d)) : null;
+  },
+
+  statRowValues(s, $d) {
+    const FC = window.FactorCharts;
+    const pct = FC._statPct, fmt$ = FC._statFmt$;
+    const calmarRaw = FC._statCalmarRaw($d);
+    return {
+      n:          (s.n ?? 0).toLocaleString(),
+      nTickers:   (s.n_tickers ?? 0).toLocaleString(),
+      effTickers: (s.eff_tickers ?? 0).toFixed(1),
+      avgRet:  pct(s.avg_ret), avgRetRaw: s.avg_ret ?? 0,
+      median:  pct(s.median),  medianRaw: s.median ?? 0,
+      stdDev:  pct(s.std_dev),
+      winRate: s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—',
+      nWin:    (s.n_win ?? 0).toLocaleString(),
+      avgWin:  pct(s.avg_win),  avgWinRaw: s.avg_win ?? 0,
+      avgLoss: pct(s.avg_loss), avgLossRaw: s.avg_loss ?? 0,
+      trdYr:   (s.trades_per_year ?? 0).toFixed(1),
+      // Dollar figures come from the sizing controls via
+      // _computeDollarSeries, so they agree with the equity curve. Absent
+      // until that path has run: "—", never a percent mislabelled as
+      // dollars, which is what made Max DD render as -1826.885%.
+      totalRet:     $d?.total_ret_usd  != null ? fmt$($d.total_ret_usd)  : '—',
+      totalRetRaw:  $d?.total_ret_usd  ?? 0,
+      avgAnnRet:    $d?.avg_annual_usd != null ? fmt$($d.avg_annual_usd) : '—',
+      avgAnnRetRaw: $d?.avg_annual_usd ?? 0,
+      maxDD:        $d?.max_dd_usd     != null ? fmt$($d.max_dd_usd)     : '—',
+      maxDDRaw:     $d?.max_dd_usd     ?? 0,
+      calmar:    calmarRaw == null ? '—' : calmarRaw.toFixed(2),
+      calmarRaw: calmarRaw,
+      // Share of trading days with at least one position open. A DIFFERENT
+      // measurement from Avg DIT, not a substitute for it -- see
+      // _stat_shared.time_in_market.
+      timeInMkt: s.time_in_market != null
+        ? (s.time_in_market * 100).toFixed(1) + '%' : '—',
+    };
+  },
+
   hmCellBg(cmp, cell) {
     return window.FactorCharts._hmPaint(cmp._hmRange, cmp.hmMinSampleN, cell);
   },

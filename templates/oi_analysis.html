@@ -4903,60 +4903,25 @@
           </div>
         </template>
 
-        <!-- Aggregate stats bar — 12 fields, flex-1 single row (same sizing as primary stats bar) -->
+        {#- Aggregate stats bar. The 15 shared boxes come from
+            m.stat_bar_core, the SAME macro the exits page uses, so the field
+            list and its order cannot drift between the two pages. Values are
+            mapped by FactorCharts.statRowValues, also shared -- including the
+            Calmar guard, which blanks unless both dollar inputs are present
+            and the drawdown is negative.
+
+            The 16th box differs by page. Here it is Time in Market, not the
+            exits page's Avg DIT: these signals use fixed forward-return
+            horizons, so mean hold would be a constant equal to the horizon
+            and would restate the outcome name. Time in Market measures
+            deployment instead, which is the thing combining signals is meant
+            to change.
+
+            Population is the WINDOW -- test-only in TEST. -#}
         <template x-if="portAggregate && portAggregate.n > 0">
           <div style="display:flex;gap:4px;margin-bottom:12px">
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Tickers</div>
-              <div class="stat-value" x-text="portAggregate.n_tickers"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">N</div>
-              <div class="stat-value" x-text="(portAggregate.n || 0).toLocaleString()"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Avg Ret</div>
-              <div :class="(portAggregate.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
-                   x-text="((portAggregate.avg_ret||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Median</div>
-              <div :class="(portAggregate.median||0)>=0?'stat-value pos':'stat-value neg'"
-                   x-text="((portAggregate.median||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Std Dev</div>
-              <div class="stat-value" x-text="((portAggregate.std||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">P5</div>
-              <div class="stat-value neg" x-text="((portAggregate.p5||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">P95</div>
-              <div class="stat-value pos" x-text="((portAggregate.p95||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Win %</div>
-              <div :class="(portAggregate.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
-                   x-text="((portAggregate.win_rate||0)*100).toFixed(1)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label"># Win</div>
-              <div class="stat-value" x-text="(portAggregate.n_winners||0).toLocaleString()"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Avg Win</div>
-              <div class="stat-value pos" x-text="((portAggregate.avg_winners||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Avg Loss</div>
-              <div class="stat-value neg" x-text="((portAggregate.avg_losers||0)*100).toFixed(3)+'%'"></div>
-            </div>
-            <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-              <div class="stat-label">Trd/Yr</div>
-              <div class="stat-value" x-text="(portAggregate.trades_per_year||0).toFixed(1)"></div>
-            </div>
+            {{ m.stat_bar_core('portStatRow') | indent(12) | safe }}
+            {{ m.stat_box('Time in Market', 'portStatRow.timeInMkt') | indent(12) | safe }}
           </div>
         </template>
 

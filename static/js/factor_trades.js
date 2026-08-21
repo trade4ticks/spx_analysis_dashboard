@@ -2105,24 +2105,15 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     statRows() {
       const src = this.zoneData || this.runData;
       if (!src) return [];
-      const pct = v => v == null ? '—' : (v * 100).toFixed(3) + '%';
-      // Annualised dollar return over dollar max drawdown. Blank unless BOTH
-      // inputs are present, so Calmar can never appear beside empty boxes.
-      const calmarRawOf = (s) => {
-        const a = s?.avg_annual_usd, d = s?.max_dd_usd;
-        return (a != null && d != null && d < 0) ? (a / Math.abs(d)) : null;
-      };
-      const calmarOf = (s) => {
-        const v = calmarRawOf(s);
-        return v == null ? '—' : v.toFixed(2);
-      };
-      const fmt$ = v => {
-        if (v == null) return '—';
-        const a = Math.abs(v), sg = v < 0 ? '-' : '';
-        if (a >= 1e6) return sg + '$' + (a / 1e6).toFixed(2) + 'M';
-        if (a >= 1e3) return sg + '$' + (a / 1e3).toFixed(1) + 'k';
-        return sg + '$' + a.toFixed(0);
-      };
+      // Formatters and the Calmar guard now live in FactorCharts, shared
+      // with the portfolio bar. These are thin aliases so the Change row
+      // below reads the same as it did -- and, more importantly, so there is
+      // exactly ONE definition of Calmar on the project. The guard blanks
+      // unless both dollar inputs are present AND the drawdown is negative;
+      // a rewrite is how the percent-based fallback came back last time.
+      const pct  = v => window.FactorCharts._statPct(v);
+      const fmt$ = v => window.FactorCharts._statFmt$(v);
+      const calmarRawOf = (s) => window.FactorCharts._statCalmarRaw(s);
       // Two explicit sources rather than a spread. A merge silently supplies
       // whatever the right-hand side happens not to define -- which is how a
       // server-side percent Calmar ended up displayed beside blank dollar
@@ -2133,40 +2124,18 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
         if (!s) return null;
         return {
           key, label, window: win,
-          nTickers: (s.n_tickers ?? 0).toLocaleString(),
-          effTickers: (s.eff_tickers ?? 0).toFixed(1),
-          n: (s.n ?? 0).toLocaleString(),
-          avgRet: pct(s.avg_ret), avgRetRaw: s.avg_ret ?? 0,
-          median: pct(s.median),  medianRaw: s.median ?? 0,
-          stdDev: pct(s.std_dev),
+          // Shared mapper — the same one the portfolio bar uses. Everything
+          // page-specific stays below it.
+          ...window.FactorCharts.statRowValues(s, $d),
+          // p5 / p95 are not on the shared bar but the Change row below
+          // still diffs them.
           p5: pct(s.p5),   p5Raw: s.p5 ?? 0,
           p95: pct(s.p95), p95Raw: s.p95 ?? 0,
-          winRate: s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—',
-          nWin: (s.n_win ?? 0).toLocaleString(),
-          avgWin: pct(s.avg_win),   avgWinRaw: s.avg_win ?? 0,
-          avgLoss: pct(s.avg_loss), avgLossRaw: s.avg_loss ?? 0,
-          trdYr: (s.trades_per_year ?? 0).toFixed(1),
-          // Calmar is null when there is no drawdown — render "—" rather
-          // than an infinity dressed up as a great number.
-          // Calmar is derived HERE from the dollar figures shown beside it,
-          // never from the server's percent-based calmar. Those are two
-          // different definitions, and falling back to the other one produced
-          // a populated Calmar sitting next to a blank Max DD -- a number
-          // whose stated inputs were empty, which is worse than no number.
-          calmar: calmarOf($d), calmarRaw: calmarRawOf($d),
-          // Dollar figures come from the sizing controls via
-          // _computeDollarSeries. Until that path is wired these read "—"
-          // rather than a percent mislabelled as dollars, which is what made
-          // Max DD render as -1826.885%.
-          totalRet: $d?.total_ret_usd != null ? fmt$($d.total_ret_usd) : '—',
-          totalRetRaw: $d?.total_ret_usd ?? 0,
-          avgAnnRet: $d?.avg_annual_usd != null ? fmt$($d.avg_annual_usd) : '—',
-          avgAnnRetRaw: $d?.avg_annual_usd ?? 0,
-          maxDD: $d?.max_dd_usd != null ? fmt$($d.max_dd_usd) : '—',
-          maxDDRaw: $d?.max_dd_usd ?? 0,
           avgHold: (s.avg_hold ?? 0).toFixed(2) + ' sess',
-          // Same figure as Avg Hold, kept on the bar as well as the run
-          // card: it is the one stat you check against every policy tweak.
+          // This page's 16th box. Mean EXIT BAR, which varies here because
+          // exits are rule-driven -- the one stat checked against every
+          // policy tweak. The portfolio page has no exit rules, so its 16th
+          // box is Time in Market instead.
           avgDit: (s.avg_hold ?? 0).toFixed(2) + ' sess',
         };
       };

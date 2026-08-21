@@ -120,18 +120,10 @@ def _rule_sort_key(params: Any) -> tuple:
     return (1, 0.0)
 
 
-def _effective_tickers(counts) -> float:
-    """Participation ratio: (sum n)^2 / sum(n^2).
-
-    Reads ~N when N tickers contribute equally and ~k when k dominate, so it
-    says at a glance whether a zone's edge is broad or concentrated. Same
-    form as an effective-N / inverse-Herfindahl.
-    """
-    c = [x for x in counts if x > 0]
-    if not c:
-        return 0.0
-    tot = float(sum(c))
-    return (tot * tot) / float(sum(x * x for x in c))
+# Participation ratio. The implementation moved to _stat_shared so the
+# portfolio bar reports the SAME quantity; this alias keeps every existing
+# call site here unchanged.
+from app.routers._stat_shared import effective_tickers as _effective_tickers
 
 
 PRICE_BUCKETS = [(0, 25), (25, 50), (50, 100), (100, 150), (150, 200),
