@@ -41,6 +41,28 @@ let _gridHeatData = null;
 // either is a re-read of a different field, not a recompute.
 let _gridStatsKey = null, _gridStatsVal = null, _gridStatsData = null;
 
+// ── TEMPORARY DIAGNOSTIC (remove once the matrix stale-value bug is closed) ──
+// Off unless you set  window.FT_DEBUG = true  in the console.
+//
+// What it separates: whether gridHeat produces the NEW metric's numbers, and
+// whether the DOM cell bindings are then painted with those numbers or with
+// the previous ones. If COMPUTE reports the new metric while cellBg/fmt report
+// the old values, the getter is fine and the x-for is not re-binding `cell`.
+let _dbgWin = 0, _dbgCount = 0;
+function _ftDbg(tag, obj) {
+  if (typeof window === 'undefined' || !window.FT_DEBUG) return;
+  console.log('[FT ' + tag + ']', obj);
+}
+// Throttled: the cell bindings fire once per cell per paint, so cap the noise
+// at 3 lines per 250ms burst -- enough to see what a repaint carried.
+function _ftDbgCell(tag, obj) {
+  if (typeof window === 'undefined' || !window.FT_DEBUG) return;
+  const now = Date.now();
+  if (now - _dbgWin > 250) { _dbgWin = now; _dbgCount = 0; }
+  if (_dbgCount++ >= 3) return;
+  console.log('[FT ' + tag + ']', obj);
+}
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('factorTrades', () => ({
     metrics: [], ruleGroups: [], cutoffDate: '',
@@ -789,6 +811,7 @@ document.addEventListener('alpine:init', () => {
     get gridNullValue() { return this.gridRefs.mean; },
 
     gridFmt(v) {
+      _ftDbgCell('fmt', { metric: this.gridMetric, raw: v });
       if (v == null || !isFinite(v)) return '—';
       const u = (this.gridData?.metrics || []).find(m => m.key === this.gridMetric)?.unit;
       if (u === 'ratio') return (+v).toFixed(2);
@@ -829,6 +852,9 @@ document.addEventListener('alpine:init', () => {
                        this.gridMetric, this.gridColourBy,
                        this.perTrade, this.dailyCap].join('|');
       if (memoKey === _gridHeatKey && _gridHeatData === d && _gridHeatVal) {
+        _ftDbg('gridHeat MEMO-HIT', {
+          metric: this.gridMetric, window: this.gridWindow,
+          firstCell: _gridHeatVal.grid?.[0]?.[0]?.avg_ret });
         return _gridHeatVal;
       }
       const st = this.gridStats;
@@ -882,6 +908,10 @@ document.addEventListener('alpine:init', () => {
       };
       _gridHeatKey = memoKey;
       _gridHeatData = d;
+      _ftDbg('gridHeat COMPUTE', {
+        metric: this.gridMetric, window: this.gridWindow,
+        firstCell: grid?.[0]?.[0]?.avg_ret,
+        cells: grid.flat().filter(c => c.n).length });
       _gridHeatVal = { grid, x_labels: fx.values.map(v => v.label),
                        y_labels: fy.values.map(v => v.label) };
       return _gridHeatVal;
@@ -950,6 +980,8 @@ document.addEventListener('alpine:init', () => {
     // colour bindings: cells recolour, the grid is not rebuilt or re-laid
     // out, and no request is made.
     gridCellBg(cell) {
+      _ftDbgCell('cellBg', { metric: this.gridMetric, cellValue: cell && cell.avg_ret,
+                             span: this.gridSpan });
       if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
       // Same function the node heatmap and trade-activity grid call, same
       // default path, no opts. minSampleN 0: `n` here is a count of
@@ -1167,8 +1199,14 @@ beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     },
     gridShowBands: true,
     toggleGridBands() { this.gridShowBands = !this.gridShowBands; this.$nextTick(() => this.renderGrid()); },
-    setGridMetric(m) { this.gridMetric = m; this.$nextTick(() => this.renderGrid()); },
-    setGridWindow(w) { this.gridWindow = w; this.$nextTick(() => this.renderGrid()); },
+    setGridMetric(m) {
+      _ftDbg('setGridMetric', { from: this.gridMetric, to: m });
+      this.gridMetric = m; this.$nextTick(() => this.renderGrid());
+    },
+    setGridWindow(w) {
+      _ftDbg('setGridWindow', { from: this.gridWindow, to: w });
+      this.gridWindow = w; this.$nextTick(() => this.renderGrid());
+    },
 
     _renderGridScatter() {
       const id = 'grid-scatter';
