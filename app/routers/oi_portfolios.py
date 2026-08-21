@@ -841,12 +841,14 @@ async def portfolio_aggregate(
     # date range. Drives the Trade Activity pane's x-axis on initial
     # page load (no primary Analyze required) so its rolling H-day
     # window indexes actual trading days, not fired-trade dates.
-    # Range matches the equity curve (both span min→max of series_rows), so
-    # the two panes line up exactly. SERIES, not window: the activity pane is
-    # a time-series pane, so in TEST its axis covers the whole record.
+    # Spans the WHOLE record (all_rows), in both windows. This list IS the
+    # Trade Activity pane's category axis -- unlike equity, which is a time
+    # axis that seriesAxis can pin independently, activity can only be as
+    # wide as the days it is given. Built from series_rows it ended at the
+    # cutoff in TRAIN, so that one pane rescaled while the other two held.
     trading_days: list = []
     try:
-        td_dates = [r["trade_date"] for r in series_rows]
+        td_dates = [r["trade_date"] for r in all_rows]
         d0 = _date.fromisoformat(min(td_dates))
         d1 = _date.fromisoformat(max(td_dates))
         async with oi_pool.acquire() as conn:
@@ -858,7 +860,7 @@ async def portfolio_aggregate(
             )
         trading_days = [r["trade_date"].isoformat() for r in td_rows]
     except Exception:
-        trading_days = sorted({r["trade_date"] for r in series_rows})
+        trading_days = sorted({r["trade_date"] for r in all_rows})
 
     winner_avg = round(avg_winners, 6)
     loser_avg  = round(avg_losers,  6)
@@ -1030,12 +1032,17 @@ async def portfolio_aggregate(
         "equity_combined":      eq_port,  # singleSeries=true on frontend
         "yearly":               yearly_out,
         "tickers":              tickers_out,
-        # Named by purpose. combined_trades is kept as an ALIAS of
-        # window_trades so any consumer not yet migrated gets the
-        # conservative population rather than silently widening.
+        # Named by purpose. combined_trades is kept as an alias of
+        # SERIES_trades, matching what the exits page passes
+        # (factor_trades.js:2077). Every chart-layer consumer of
+        # combined_trades is a time-series pane -- the equity curve's
+        # dollar branch, Annual P&L, and Trade Activity all read it -- so
+        # aliasing it to window_trades made equity and activity drop their
+        # pre-cutoff stretch in TEST. The CSV export is the one consumer
+        # that wants the window, and it names window_trades explicitly.
         "series_trades":        series_trades,
         "window_trades":        window_trades,
-        "combined_trades":      window_trades,
+        "combined_trades":      series_trades,
         "combined_trade_dates": [r.get("trade_date", "") for r in series_rows],
         # Window envelope. cutoff_date is None for an in_sample portfolio,
         # which is how the client knows to hide the toggle entirely rather

@@ -8332,6 +8332,10 @@ document.addEventListener('alpine:init', () => {
       // for portfolio-wide union-N per day — and Annual P&L is a
       // time-series pane, so that set is series_trades: the full record in
       // TEST, train-only in TRAIN.
+      //
+      // combined_trades already aliases series_trades server-side, so this
+      // is belt-and-braces; it stays because it makes the population this
+      // pane draws obvious here rather than only in the endpoint.
       this._renderZoneYearly('chart-port-yearly', {
         ...this.portAggregate,
         combined_trades: this.portAggregate.series_trades

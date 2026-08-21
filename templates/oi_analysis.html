@@ -152,6 +152,10 @@
     }
     .mode-seg span:last-child { border-right:none; }
     .mode-seg span.on { background:rgba(255,255,255,0.14); color:var(--text); font-weight:600; }
+    /* Portfolio TRAIN/TEST — same active state as the WINDOW control on the
+       Factor Trades page (.ft-win span.on): blue-tinted fill, brighter blue
+       text. Inactive inherits .mode-seg's plain grey. */
+    .port-win span.on { background:rgba(52,152,219,.25); color:#3498db; font-weight:700; }
     /* P3 control bar — selected mode/bin shows bright blue + bold */
     .control-bar .mode-seg span.on { color: #3498db; font-weight: 700; }
 
@@ -4767,13 +4771,13 @@
                      Ret — that is the point, not a bug. -#}
           <span x-show="portHasWindow" style="display:inline-flex;align-items:center;gap:6px">
             <span style="font-size:11px;color:var(--dim)">Window</span>
-            <div class="mode-seg">
-              <span :class="{'on-tt': portWindow === 'train'}"
+            <div class="mode-seg port-win">
+              <span :class="{ on: portWindow === 'train' }"
                     @click="setPortWindow('train')"
-                    title="Time-series panes stop at the cutoff on a full-width axis. Every other number computes on the train window.">Train</span>
-              <span :class="{'on-is': portWindow === 'test'}"
+                    title="Time-series panes hold the full axis and stop at the cutoff. Every other number computes on the train window.">Train</span>
+              <span :class="{ on: portWindow === 'test' }"
                     @click="setPortWindow('test')"
-                    title="Time-series panes show the full record, pre-cutoff muted. The stat bar computes on the TEST window only.">Test</span>
+                    title="Time-series panes show the full record with the pre-cutoff stretch muted. The stat bar computes on the TEST window only.">Test</span>
             </div>
             <span style="font-size:10px;color:var(--dim);font-family:monospace"
                   x-text="'split ' + (portAggregate?.cutoff_date || '')"></span>
