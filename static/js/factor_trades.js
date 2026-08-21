@@ -67,9 +67,6 @@ document.addEventListener('alpine:init', () => {
                           port: { perTrade: 2000, dailyCap: 10000 } },
 
     async init() {
-      // Before any fetch: restores the saved ramp shape so the first render
-      // of the two-parameter view already uses it.
-      this._loadGridRamp();
       try {
         const [cols, rules, tt] = await Promise.all([
           fetch('/api/factor-analysis/columns').then(r => r.ok ? r.json() : null),
@@ -786,192 +783,164 @@ document.addEventListener('alpine:init', () => {
         return { n: vals.length,
                  avg_ret: vals.reduce((a, b) => a + b, 0) / vals.length };
       }));
-      // ENDPOINTS FROM THIS MATRIX, MIDPOINT AT THE NULL.
+      // SCALE MAX, ANCHORED AT ZERO.
       //
-      // Inheriting the factor heatmap's convention -- diverge at zero,
-      // symmetric across the corpus range -- put every cell in one slice of
-      // the ramp, because these are marginalised averages: all positive,
-      // clustered tightly, and nowhere near zero. Zero is not the question.
-      // "Better or worse than doing nothing" is, so that is the midpoint,
-      // and the reach on each side comes from this matrix's own p5/p95 --
-      // recomputed per metric and per pair, since Calmar, Avg Ret and Max DD
-      // do not share a range.
-      // The p5/p95 reach is now the DEFAULT rather than the only option:
-      // clipping tighter is the most direct lever on a matrix whose cells
-      // cluster, since it saturates the outliers and spends the ramp on the
-      // middle where the differences actually are.
-      const vals = [];
-      for (const row of grid) for (const c of row) if (c.n) vals.push(c.avg_ret);
-      const p = this._pct(vals);
-      const clip = this._GRID_CLIPS[this.gridClip] || this._GRID_CLIPS.p5;
+      // The ramp is _hmPaint's: zero is dark, brightness grows with distance
+      // from zero, terminating at #3498db / #e84393. So the only thing this
+      // has to produce is the MAGNITUDE at which the ramp saturates.
+      //
+      // A previous version stretched the ramp so the matrix MINIMUM went
+      // dark. That is wrong: with Calmars running 1.72-3.82 it painted 1.72
+      // near-black, which reads as zero when it is not zero. Zero is dark;
+      // nothing else is.
+      //
+      // autoSpan is p95 of the distance from the anchor -- a default, not a
+      // rule. The span slider overrides it, because the value ranges differ
+      // enormously between metrics (tight for Calmar, wide for dollars) and
+      // no auto-scaling heuristic beats seeing the matrix and setting it.
+      const anchor = this._gridAnchor;
+      const dists = [], vals = [];
+      for (const row of grid) for (const c of row) if (c.n) {
+        vals.push(c.avg_ret);
+        dists.push(Math.abs(c.avg_ret - anchor));
+      }
+      const pd = this._pct(dists);
       const mid = this.gridRefs.mean;
+      const maxAbs = dists.length ? Math.max(...dists) : 0;
       this._gridScale = {
-        lo: p(clip.lo), hi: p(clip.hi),
-        mid: (mid != null && isFinite(mid)) ? mid : (vals.length ? p(50) : 0),
+        autoSpan: dists.length ? (pd(95) || maxAbs || 0.01) : 0.01,
+        maxAbs,
+        lo: vals.length ? Math.min(...vals) : 0,
+        hi: vals.length ? Math.max(...vals) : 0,
+        mid: (mid != null && isFinite(mid)) ? mid : (vals.length ? this._pct(vals)(50) : 0),
         midIsNull: mid != null && isFinite(mid),
         n: vals.length,
       };
       return { grid, x_labels: fx.values.map(v => v.label),
                y_labels: fy.values.map(v => v.label) };
     },
-    _gridScale: { lo: 0, hi: 0, mid: 0, midIsNull: false, n: 0 },
-    // Rank-within-matrix, for when the spread is genuinely tight and even a
-    // p5/p95 ramp cannot separate the cells. Ranks are uniform by
-    // construction, so this always uses the full ramp -- at the cost of
-    // hiding how small the real differences are, which is why it is off by
-    // default and labelled.
-    gridRankColour: false,
-    toggleGridRank() { this.gridRankColour = !this.gridRankColour; },
-    // Both modes use the app's pink/blue. Only the ANCHOR differs:
-    //   'value'    anchored at ZERO, same semantics as the node heatmap --
-    //              negative is pink, positive is blue. Default.
-    //   'baseline' anchored at the null, for "what beats doing nothing".
-    // Contrast comes from luminance depth within each hue, not from a
-    // different palette; endpoints stay the matrix's own p5/p95.
+    _gridScale: { autoSpan: 0.01, maxAbs: 0, lo: 0, hi: 0, mid: 0,
+                  midIsNull: false, n: 0 },
+    // Anchor for the ramp. The ramp itself always treats ZERO as dark, so
+    // "vs baseline" is expressed by subtracting the null from each cell
+    // before painting -- the caller shifts the value, the ramp is untouched.
+    //   'value'    anchored at ZERO, same as the node heatmap.
+    //   'baseline' anchored at the null: what beats doing nothing.
     gridColourBy: 'value',
     setGridColourBy(m) { this.gridColourBy = m; },
+    get _gridAnchor() {
+      if (this.gridColourBy !== 'baseline') return 0;
+      const m = this.gridRefs.mean;
+      return (m != null && isFinite(m)) ? m : 0;
+    },
 
-    // ── Ramp shape controls ──────────────────────────────────────────────
-    // The palette is fixed: near-black tint -> canonical #3498db / #e84393.
-    // What is adjustable is HOW the matrix is distributed across it, because
-    // the reason these cells look flat is not the palette's range — it is
-    // that marginalised averages cluster tightly and sit nowhere near zero.
-    // Widening colour endpoints barely separates clustered data; clipping
-    // the range and bending the curve is what does.
+    // ── Span control ─────────────────────────────────────────────────────
+    // ONE control: the magnitude at which the ramp reaches full #3498db /
+    // #e84393. Zero stays pinned to the dark end; this moves the top only,
+    // and the same magnitude applies to both signs so +2.0 and -2.0 are
+    // equally bright. Values past it clamp at the terminal colour.
     //
-    //   clip   which slice of the matrix the ramp spans. Tighter clip means
-    //          the extremes saturate and the middle spreads out.
-    //   curve  redistributes cells within the ramp. Stored as -100..+100 so
-    //          the slider is symmetric about linear; gamma = 2^(-curve/100),
-    //          so +100 -> gamma 0.5 (brighter) and -100 -> gamma 2 (darker).
-    //   floor  target luminance of the dark end. Must stay above the empty
-    //          cell's 0.137 or a real mid-valued cell reads as "no data".
-    gridClip: 'p5',
-    gridCurve: 0,
-    gridFloor: 0.18,
-    gridRampOpen: false,
-    _GRID_CLIPS: {
-      p5:  { lo: 5,  hi: 95, label: 'p5–p95' },
-      p1:  { lo: 1,  hi: 99, label: 'p1–p99' },
-      p10: { lo: 10, hi: 90, label: 'p10–p90' },
-      p25: { lo: 25, hi: 75, label: 'p25–p75' },
-      full:{ lo: 0,  hi: 100, label: 'min–max' },
+    // null means "auto" -- p95 of the displayed cells' distance from the
+    // anchor, recomputed per matrix, since Calmar and dollar metrics have
+    // nothing in common range-wise.
+    gridSpanManual: null,
+    get gridSpan() {
+      const m = this.gridSpanManual;
+      if (m != null && isFinite(m) && m > 0) return m;
+      return this._gridScale.autoSpan || 0.01;
     },
-    get gridClipLabel() {
-      return (this._GRID_CLIPS[this.gridClip] || this._GRID_CLIPS.p5).label;
+    get gridSpanIsAuto() { return this.gridSpanManual == null; },
+    // Slider bounds track the matrix so one slider serves every metric.
+    // Top is a little past the largest cell, so the ramp can be relaxed
+    // until nothing clamps as well as tightened until most things do.
+    get gridSpanMax() {
+      const m = this._gridScale.maxAbs || 0;
+      return m > 0 ? m * 1.25 : 1;
     },
-    get gridGamma() { return Math.pow(2, -this.gridCurve / 100); },
-    toggleGridRamp() { this.gridRampOpen = !this.gridRampOpen; },
-    setGridClip(k) {
-      if (!this._GRID_CLIPS[k]) return;
-      this.gridClip = k;
-      this._saveGridRamp();
-    },
-    setGridCurve(v) {
-      this.gridCurve = Math.max(-100, Math.min(100, parseInt(v) || 0));
-      this._saveGridRamp();
-    },
-    setGridFloor(v) {
-      // Capped at 0.30, not higher: canonical pink is only luminance 0.423,
-      // so a floor of 0.40 leaves it a span of 0.024 — effectively one flat
-      // colour. Blue would still look fine, which is exactly why the cap has
-      // to come from the DIMMER hue rather than from what looks acceptable
-      // on screen while testing with positive cells.
+    get gridSpanMin()  { return this.gridSpanMax / 200; },
+    get gridSpanStep() { return this.gridSpanMax / 500; },
+    setGridSpan(v) {
       const f = parseFloat(v);
-      this.gridFloor = Math.max(0.04, Math.min(0.30, isFinite(f) ? f : 0.18));
-      this._saveGridRamp();
+      if (!isFinite(f) || f <= 0) return;
+      this.gridSpanManual = Math.max(this.gridSpanMin,
+                                     Math.min(this.gridSpanMax, f));
     },
-    resetGridRamp() {
-      this.gridClip = 'p5'; this.gridCurve = 0; this.gridFloor = 0.18;
-      this._saveGridRamp();
-    },
-    // True when the dark end has been pushed at or below the empty-cell
-    // shade, where a real cell stops being distinguishable from no data.
-    get gridFloorTooDark() { return this.gridFloor <= 0.14; },
-    // Persisted: "whenever I want" should survive a reload. Wrapped because
-    // a blocked localStorage (private mode, storage disabled) must not take
-    // the chart down with it.
-    _saveGridRamp() {
-      try {
-        localStorage.setItem('ft.gridRamp', JSON.stringify({
-          clip: this.gridClip, curve: this.gridCurve, floor: this.gridFloor,
-        }));
-      } catch (_) { /* non-persistent session; controls still work */ }
-    },
-    _loadGridRamp() {
-      try {
-        const s = JSON.parse(localStorage.getItem('ft.gridRamp') || '{}');
-        if (s.clip && this._GRID_CLIPS[s.clip]) this.gridClip = s.clip;
-        if (Number.isFinite(s.curve)) this.setGridCurve(s.curve);
-        if (Number.isFinite(s.floor)) this.setGridFloor(s.floor);
-      } catch (_) { /* defaults stand */ }
-    },
+    gridSpanAuto() { this.gridSpanManual = null; },
 
-    get _gridRampOpts() {
-      const S = this._gridScale;
-      // S.mid is the NULL, kept as a reference mark on the colourbar in both
-      // modes. It is the colour midpoint only in vs-baseline.
-      return { ramp: 'theme', lo: S.lo, hi: S.hi,
-               mid: this.gridColourBy === 'baseline' ? S.mid : 0,
-               floor: this.gridFloor, gamma: this.gridGamma };
-    },
-    gridCellFg(cell) {
-      if (!cell || !cell.n) return '#fff';
-      return window.FactorCharts._fgOn(this.gridCellBg(cell));
-    },
+    // PERFORMANCE: this is called once per cell on every render, and the
+    // span slider re-runs exactly these bindings while it is dragged. It
+    // must stay O(1) and must NOT touch `gridHeat` -- that getter
+    // re-marginalises over every swept combination, and reading it here is
+    // what made the old rank mode crawl (it rebuilt and re-sorted the whole
+    // matrix once per cell, so O(cells^2 x combos) per repaint).
+    //
+    // Nothing here reads gridHeat, so changing the span invalidates only the
+    // colour bindings: cells recolour, the grid is not rebuilt or re-laid
+    // out, and no request is made.
     gridCellBg(cell) {
-      // Same formula as the factor heatmap; only the anchoring differs.
-      // minSampleN 0: a cell here is an average over combinations, not a
-      // trade count, so the low-n hatching does not apply.
-      if (this.gridRankColour) {
-        if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
-        const all = [];
-        for (const row of (this.gridHeat?.grid || [])) for (const c of row)
-          if (c.n) all.push(c.avg_ret);
-        all.sort((a, b) => a - b);
-        const r = all.length > 1 ? all.indexOf(cell.avg_ret) / (all.length - 1) : 0.5;
-        // Rank mode ignores clip (ranks are uniform by construction, so
-        // there is nothing to clip) but still honours curve and floor.
-        return window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r },
-                                            { ramp: 'theme', mid: 0, lo: 0, hi: 1,
-                                              floor: this.gridFloor,
-                                              gamma: this.gridGamma });
-      }
-      return window.FactorCharts._hmPaint(1, 0, cell, this._gridRampOpts);
+      if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
+      // Same function the node heatmap and trade-activity grid call, same
+      // default path, no opts. minSampleN 0: `n` here is a count of
+      // combinations averaged, not trades, so hatching does not apply.
+      return window.FactorCharts._hmPaint(
+        this.gridSpan, 0,
+        { n: cell.n, avg_ret: (cell.avg_ret || 0) - this._gridAnchor });
     },
     gridCellTitle(cell) {
       if (!cell || !cell.n) return 'no combinations';
       const S = this._gridScale;
       const d = (cell.avg_ret ?? 0) - S.mid;
+      const shifted = Math.abs((cell.avg_ret ?? 0) - this._gridAnchor);
       return `${this.gridFmt(cell.avg_ret)} — mean over ${cell.n} combination(s)`
            + `
 ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
-           + (S.midIsNull ? 'do nothing' : 'the matrix median');
+           + (S.midIsNull ? 'do nothing' : 'the matrix median')
+           + (shifted > this.gridSpan ? `
+beyond the scale max (${this.gridFmt(this.gridSpan)}) — clamped` : '');
     },
     // Colourbar stops, so the ramp can be read rather than guessed at.
+    // Symmetric -span..+span around the anchor, which is what the ramp
+    // actually does — showing only the positive half would hide that zero
+    // is the dark end.
     get gridBarStops() {
-      const S = this._gridScale;
-      if (!S.n) return [];
       const out = [];
+      const span = this.gridSpan;
       for (let i = 0; i <= 20; i++) {
-        const t = i / 20;
-        out.push(window.FactorCharts._hmPaint(1, 0,
-          { n: 1, avg_ret: S.lo + t * (S.hi - S.lo) }, this._gridRampOpts));
+        const t = (i / 20) * 2 - 1;             // -1 .. +1
+        out.push(window.FactorCharts._hmPaint(span, 0, { n: 1, avg_ret: t * span }));
       }
       return out;
     },
+    get gridBarLo() { return this._gridAnchor - this.gridSpan; },
+    get gridBarHi() { return this._gridAnchor + this.gridSpan; },
+    // Where the null sits on the bar. In vs-baseline it IS the anchor, so
+    // dead centre; in value mode it is wherever "do nothing" falls.
     get gridBarMidPct() {
       const S = this._gridScale;
-      if (!S.n || S.hi === S.lo) return 50;
-      return Math.max(0, Math.min(100, ((S.mid - S.lo) / (S.hi - S.lo)) * 100));
+      const lo = this.gridBarLo, hi = this.gridBarHi;
+      if (!S.n || hi === lo) return 50;
+      return Math.max(0, Math.min(100, ((S.mid - lo) / (hi - lo)) * 100));
     },
-    // True when the null falls outside the matrix's own range, in which case
-    // the tick is pinned to an edge and says so rather than implying the
+    // True when the null falls outside the painted range, in which case the
+    // tick is pinned to an edge and says so rather than implying the
     // reference sits inside the data.
     get gridBarNullOff() {
       const S = this._gridScale;
       if (!S.n || !S.midIsNull) return '';
-      return S.mid > S.hi ? 'above' : (S.mid < S.lo ? 'below' : '');
+      return S.mid > this.gridBarHi ? 'above'
+           : (S.mid < this.gridBarLo ? 'below' : '');
+    },
+    // How many cells are clamped at a terminal colour — worth stating, since
+    // clamping is expected but silently clamping everything is not useful.
+    get gridClampedN() {
+      const g = this.gridHeat;
+      if (!g) return 0;
+      const span = this.gridSpan, a = this._gridAnchor;
+      let k = 0;
+      for (const row of g.grid) for (const c of row) {
+        if (c.n && Math.abs((c.avg_ret || 0) - a) > span) k++;
+      }
+      return k;
     },
 
     // ── Rank scatter ─────────────────────────────────────────────────────

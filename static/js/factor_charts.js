@@ -1139,121 +1139,36 @@ window.FactorCharts = {
     });
   },
 
-  // Range-parameterised so a SECOND heatmap on the same page cannot borrow
-  // -- or clobber -- the first one's colour scale. The body is unchanged
-  // from hmCellBg; only the two reads off the component became arguments.
-  // The parameter is minSampleN, not minN: the body already declares a
-  // local minN and a same-named parameter shadows it.
-  // ── Colour ramps ─────────────────────────────────────────────────────
+  // ── Colour ramp ──────────────────────────────────────────────────────
   //
-  // ONE PALETTE IN THIS APP: pink and blue. A third hue set on one surface
-  // means the same colour means different things on different pages, which
-  // costs more than any contrast it buys.
+  // ONE RAMP IN THIS APP, and this is it. The node heatmap, the trade-
+  // activity grid and the two-parameter view all render through _hmPaint
+  // below. There is no second ramp, no per-surface variant: a surface that
+  // needs a different scale passes a different `range`, not different code.
   //
-  // The fix for flat contrast is LUMINANCE RANGE WITHIN each hue family, not
-  // a different hue family. The eye discriminates lightness far better than
-  // saturation, and the previous ramp varied only alpha on one flat blue --
-  // which is why a near-2x spread (1.19 -> 2.32) looked uniform.
-  //
-  // THE RAMP ENDS ON THE CANONICAL COLOUR.
-  //
-  // The previous version ran dark -> canonical -> bright across five anchors,
-  // which bought luminance range by spending the top HALF of the ramp on
-  // pale cyan (#96e8ff) and pale pink (#ffa8d2) that appear nowhere else in
-  // the app. It read as a different palette, because it was one.
-  //
-  // Now each family runs "near-black tint of the canonical hue" -> canonical,
-  // built procedurally rather than from hand-picked anchors so the dark end
-  // is a controllable parameter. Measured against the alternatives:
-  //
-  //   main 20x20 heatmap     luminance span 0.292   tops out at #3186bf
-  //                                                 (0.85 alpha; never
-  //                                                  actually reaches brand)
-  //   old 5-anchor ramp      span 0.722             tops out off-brand
-  //   this ramp              span 0.457 (blue)      tops out at #3498db
-  //                          span 0.354 (pink)      tops out at #e84393
-  //
-  // 1.6x the main heatmap's variance, and the brightest cell on screen is
-  // exactly the dashboard's blue or pink.
-  _CANON: { blue: [52, 152, 219], pink: [232, 67, 147] },
+  // A previous version added a 'theme' ramp here that ran dark -> canonical
+  // -> pale cyan / near-white. It was wrong twice over: it rescaled so the
+  // matrix MINIMUM went dark (making a value of 1.72 read as zero), and it
+  // continued PAST the canonical colours into tints that appear nowhere
+  // else in the app. Deleted, along with its helpers -- nothing else used
+  // them.
 
-  // Relative luminance on raw 0-255 channels. Not gamma-correct, but it is
-  // the same formula _fgOn uses, and consistency between "how dark is this"
-  // and "what text goes on it" matters more here than colorimetric purity.
-  _lum(c) {
-    return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255;
-  },
-
-  _lerpRgb(a, b, t) {
-    return [Math.round(a[0] + (b[0] - a[0]) * t),
-            Math.round(a[1] + (b[1] - a[1]) * t),
-            Math.round(a[2] + (b[2] - a[2]) * t)];
-  },
-
-  _rampOf(anchors, u) {
-    const x = Math.max(0, Math.min(1, Number.isFinite(u) ? u : 0)) * (anchors.length - 1);
-    const i = Math.min(anchors.length - 2, Math.floor(x));
-    const c = window.FactorCharts._lerpRgb(anchors[i], anchors[i + 1], x - i);
-    return `rgb(${c[0]},${c[1]},${c[2]})`;
-  },
-
-  // Defaults for the ramp shape. floor is a TARGET LUMINANCE, not an alpha:
-  // scaling a hue toward black scales its luminance linearly, so asking for
-  // a luminance lets blue and pink start at the SAME darkness. Anchoring by
-  // alpha instead leaves canonical pink darker than canonical blue at both
-  // ends, so equal-magnitude cells in the two hues do not read as equal.
+  // _hmPaint(range, minSampleN, cell)
   //
-  // 0.18 default is deliberate: an empty cell paints rgba(40,40,40,0.5) over
-  // --bg, which composites to #232323 at luminance 0.137. A floor at or below
-  // that makes a real mid-valued cell look emptier than "no data". 0.18 sits
-  // clearly above it while still reading as near-black.
-  _RAMP_FLOOR: 0.18,
-  _RAMP_GAMMA: 1,
-
-  // sign picks the hue family; u picks the depth within it.
-  // opts.floor  target luminance of the dark end (0 = black)
-  // opts.gamma  curve. <1 pushes cells toward the bright end, >1 toward dark.
-  _rampTheme(sign, u, opts) {
-    const FC = window.FactorCharts;
-    const canon = sign >= 0 ? FC._CANON.blue : FC._CANON.pink;
-    const gamma = (opts && Number.isFinite(opts.gamma) && opts.gamma > 0)
-      ? opts.gamma : FC._RAMP_GAMMA;
-    const floorL = (opts && Number.isFinite(opts.floor))
-      ? Math.max(0, Math.min(0.9, opts.floor)) : FC._RAMP_FLOOR;
-    const t = Math.pow(Math.max(0, Math.min(1, Number.isFinite(u) ? u : 0)), gamma);
-    const Lc = FC._lum(canon);
-    // k scales the canonical hue down to the requested floor luminance.
-    const k = Lc > 0 ? Math.min(1, floorL / Lc) : 0;
-    const dark = [canon[0] * k, canon[1] * k, canon[2] * k];
-    const c = FC._lerpRgb(dark, canon, t);
-    return `rgb(${c[0]},${c[1]},${c[2]})`;
-  },
-
-  // Relative luminance, for picking cell text that stays readable across a
-  // ramp that deliberately spans dark to bright.
-  _fgOn(bg) {
-    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(bg || ''));
-    if (!m) return '#fff';
-    const L = (0.2126 * +m[1] + 0.7152 * +m[2] + 0.0722 * +m[3]) / 255;
-    return L > 0.55 ? '#101010' : '#fff';
-  },
-
-  // opts (all optional): {mid, lo, hi, ramp}. Default -- no opts -- is the
-  // original behaviour exactly: diverge around zero, symmetric +/-range, in
-  // the blue/pink node palette. A second heatmap can instead anchor the
-  // midpoint somewhere meaningful (the null combination) with independent
-  // endpoints, and choose a ramp whose semantics suit its own surface,
-  // without a second colour formula that could drift from this one.
+  //   range        SCALE MAX -- the magnitude at which the ramp reaches full
+  //                #3498db (positive) or #e84393 (negative). Symmetric: the
+  //                same magnitude applies to both signs, so +2.0 and -2.0 are
+  //                equally bright. Values beyond it CLAMP at the terminal
+  //                colour; they never get paler.
+  //   minSampleN   below this, a cell is hatched instead of coloured. Pass 0
+  //                on surfaces where `n` is not a trade count.
+  //   cell         {n, avg_ret}. avg_ret is measured FROM ZERO -- a caller
+  //                that wants a different anchor subtracts it before calling
+  //                rather than asking this function to move the anchor.
   //
-  //   ramp absent   blue/pink at fixed alpha    (the node heatmap)
-  //   ramp 'theme'  blue/pink with LUMINANCE depth, midpoint from opts.mid
-  //
-  // 'theme' keeps the app's semantics -- below the midpoint is pink, above is
-  // blue -- and spends the whole ramp on the data by STRETCHING when the
-  // midpoint falls outside [lo, hi]. Anchored at zero with all-positive data,
-  // a fixed 0..hi mapping would waste half the ramp on values that do not
-  // occur; here the dark end lands on lo instead.
-  _hmPaint(range, minSampleN, cell, opts) {
+  // Zero is always the dark end. That is the whole contract: a cell can be
+  // dark only by being near zero, never by being the smallest value present.
+  _hmPaint(range, minSampleN, cell) {
     // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
     // same number determines hatching AND gradient inclusion. Critical
     // invariant: a cell rendered with a gradient color is also in the
@@ -1271,40 +1186,9 @@ window.FactorCharts = {
            + 'repeating-linear-gradient(-45deg, #2e2e2e 0 4px, transparent 4px 8px),'
            + '#1c1c1c';
     }
-    // Tier 3: n >= threshold — gradient, scaled across visible cells only.
+    // Tier 3: n >= threshold — gradient, anchored at zero, clamped at ±range.
     const v = cell.avg_ret || 0;
-    let t;
-    if (opts && Number.isFinite(opts.mid)) {
-      // Distance from the midpoint, normalised by the reach on THAT side.
-      // Asymmetric on purpose: a matrix clustered just above its null has a
-      // short blue reach and a long red one, and forcing them equal is what
-      // collapses every cell into one slice of the ramp.
-      const d = v - opts.mid;
-      const up = (Number.isFinite(opts.hi) ? opts.hi : opts.mid) - opts.mid;
-      const dn = opts.mid - (Number.isFinite(opts.lo) ? opts.lo : opts.mid);
-      t = d >= 0 ? (up > 0 ? d / up : 0) : (dn > 0 ? d / dn : 0);
-      t = Math.max(-1, Math.min(1, t));
-    } else {
-      t = Math.max(-1, Math.min(1, v / (range || 0.01)));
-    }
-    if (opts && opts.ramp === 'theme') {
-      const mid = Number.isFinite(opts.mid) ? opts.mid : 0;
-      const lo = Number.isFinite(opts.lo) ? opts.lo : mid - 1;
-      const hi = Number.isFinite(opts.hi) ? opts.hi : mid + 1;
-      // Each side's dark end is the midpoint when the data straddles it, and
-      // the data's own edge when it does not -- so a matrix sitting entirely
-      // on one side of the anchor still gets the full luminance range, which
-      // is the contrast that was missing.
-      // opts.floor / opts.gamma shape the ramp; both fall back to defaults.
-      if (v >= mid) {
-        const base = Math.max(lo, mid);
-        return window.FactorCharts._rampTheme(
-          1, hi > base ? (v - base) / (hi - base) : 1, opts);
-      }
-      const base = Math.min(hi, mid);
-      return window.FactorCharts._rampTheme(
-        -1, base > lo ? (base - v) / (base - lo) : 1, opts);
-    }
+    const t = Math.max(-1, Math.min(1, v / (range || 0.01)));
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
   },
