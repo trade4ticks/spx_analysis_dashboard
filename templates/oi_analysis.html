@@ -3274,13 +3274,19 @@
 
                   <!-- Train heatmap (pre-cutoff, frozen thresholds) -->
                   <div style="flex:1;min-width:0;overflow-x:auto">
-                    <div style="font-size:10px;font-weight:700;color:#e6a23c;margin-bottom:4px">▣ Train (pre-cutoff)</div>
-                    {{ m.heatmap_grid('heatmapData.train_grid', 'heatmapData', 'tr', 'compact') | indent(20) | safe }}
+                    <div style="font-size:10px;font-weight:700;color:#e6a23c;margin-bottom:4px">
+                      ▣ Train (pre-cutoff) <span style="font-weight:400;color:var(--dim)">— click cells to build a zone</span>
+                    </div>
+                    {{ m.heatmap_grid('heatmapData.train_grid', 'heatmapData', 'tr', 'compact',
+                         cls_expr="'hm-cell-selectable' + (isHmCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
+                         click_expr='toggleHmCell(ix, iy)') | indent(20) | safe }}
                   </div>
 
                   <!-- Test heatmap (post-cutoff, bins ranked against frozen thresholds) -->
                   <div style="flex:1;min-width:0;overflow-x:auto">
-                    <div style="font-size:10px;font-weight:700;color:#3498db;margin-bottom:4px">▣ Test (post-cutoff)</div>
+                    <div style="font-size:10px;font-weight:700;color:#3498db;margin-bottom:4px">
+                      ▣ Test (post-cutoff) <span style="font-weight:400;color:var(--dim)">— view only</span>
+                    </div>
                     {{ m.heatmap_grid('heatmapData.test_grid', 'heatmapData', 'te', 'compact') | indent(20) | safe }}
                   </div>
 
@@ -3360,7 +3366,11 @@
                    Shows when at least one heatmap cell is selected.
                    The heatmap cells get @click="toggleHmCell(ix,iy)" to build the set;
                    this section displays selection state, analysis results, and save-as-signal. -->
-              <template x-if="pageMode === 'in_sample'">
+              <!-- end Zone Analyze -->
+
+              </div><!-- closes outer wrapper div for IS/WF template single-root requirement -->
+            </template>
+              <template x-if="pageMode === 'in_sample' || pageMode === 'train_test'">
                 <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
 
                   <!-- ── Zone header ───────────────────────────────────────── -->
@@ -3960,10 +3970,6 @@
 
                 </div>
               </template>
-              <!-- end Zone Analyze -->
-
-              </div><!-- closes outer wrapper div for IS/WF template single-root requirement -->
-            </template>
 
             <!-- Empty state — heatmap fires automatically on secondary select -->
             <div x-show="!heatmapData || (!heatmapData.grid && !heatmapData.test_grid)"
@@ -4080,6 +4086,17 @@
                             :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
                           Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
                         </th>
+                        {#- MODE — which grid the zone was drawn on. Not
+                            cosmetic: an IS zone and a TT zone are selected
+                            against different bin edges, so a portfolio
+                            mixing them refuses to aggregate. Once both kinds
+                            exist this is the only way to tell them apart. -#}
+                        <th class="sig-th-sort" style="width:96px"
+                            :class="sigSortClass('selection_mode')"
+                            @click="sigSortBy('selection_mode')"
+                            title="Bin table the zone was selected on. TT rows show the frozen split.">
+                          Mode <span class="sig-sort-arrow" x-text="sigSortArrow('selection_mode')"></span>
+                        </th>
                         <th class="sig-th-sort sig-th-left" style="width:90px"
                             :class="sigSortClass('corner')" @click="sigSortBy('corner')">
                           Corner <span class="sig-sort-arrow" x-text="sigSortArrow('corner')"></span>
@@ -4158,6 +4175,16 @@
                               x-text="sig.secondary_metric"
                               style="color:#e84393"></td>
                           <td class="sig-td" x-text="sig.outcome"></td>
+                          <td class="sig-td" style="white-space:nowrap">
+                            <span :style="sigModeStyle(sig)"
+                                  :title="sigModeTitle(sig)"
+                                  style="border-radius:3px;padding:1px 5px;font-family:monospace;
+                                         font-size:9px;letter-spacing:.5px;font-weight:700"
+                                  x-text="sigModeLabel(sig)"></span>
+                            <div x-show="sig.selection_cutoff"
+                                 style="font-size:9px;color:var(--dim);font-family:monospace;margin-top:2px"
+                                 x-text="sig.selection_cutoff"></div>
+                          </td>
                           <!-- Stage 3 saved-corner tag — the declared
                                quadrant the user set at save time. Drives
                                the Corner Scan 2F auto-match join key. -->
@@ -4179,7 +4206,7 @@
                           </td>
                         </tr>
                         <tr x-show="!!sigExpanded[sig.id]">
-                          <td colspan="13" class="sig-detail-td">
+                          <td colspan="14" class="sig-detail-td">
                             <div class="sig-detail-wrap">
                               <div class="sig-detail-title"
                                    x-text="(sig.per_cell_stats || []).length + ' selected cell' + ((sig.per_cell_stats || []).length === 1 ? '' : 's') + ' · sorted by avg_ret desc'"></div>

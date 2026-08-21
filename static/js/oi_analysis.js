@@ -5371,8 +5371,14 @@ document.addEventListener('alpine:init', () => {
     // ── Zone Analyze methods ──────────────────────────────────────────────────
 
     toggleHmCell(ix, iy) {
-      // Only active in IS mode; WF/TT cells are view-only.
-      if (this.pageMode !== 'in_sample') return;
+      // IS and TT are both real selection surfaces. In TT the cells come
+      // from the TRAIN grid, which is drawn on frozen bins — a zone picked
+      // there has a stable definition, which is the whole point of it.
+      //
+      // walk_forward stays view-only on purpose: its bins are re-ranked per
+      // row against expanding history, so a cell does not denote a fixed
+      // region and a zone saved against it would not be reproducible.
+      if (this.pageMode !== 'in_sample' && this.pageMode !== 'train_test') return;
       const key = `${ix}-${iy}`;
       const next = new Set(this.hmSelectedCells);
       if (next.has(key)) next.delete(key);
@@ -5420,6 +5426,11 @@ document.addEventListener('alpine:init', () => {
             date_from:        this.dateFrom  || null,
             date_to:          this.dateTo    || null,
             outlier_max_ret:  this.outlierMaxRetFor('zone'),
+            // Same provenance the save will carry. Without this the zone
+            // stats shown under the heatmap would come from is_bins while
+            // the saved signal came from tt_bins — two different
+            // populations behind one Save button.
+            ...this._selectionModeFields(),
           }),
         });
         if (r.ok) {
@@ -5603,9 +5614,12 @@ document.addEventListener('alpine:init', () => {
         body.n_bins           = this.recallSig.n_bins;
         body.cell_set         = opts.cell_set;
         if (this.recallCorner) body.corner = this.recallCorner;
-        // Recall re-selects cells on the heatmap that is currently on
-        // screen, so the page mode is the right provenance here too.
-        Object.assign(body, this._selectionModeFields());
+        // ALWAYS in_sample, never this.pageMode. The Recall pane is not
+        // gated on page mode but its heatmap fetches is_bins directly
+        // (see _recallFireRequests), so a zone re-selected there is an IS
+        // zone even if the page pill happens to read TT. Stamping pageMode
+        // here would label an is_bins selection 'train_test'.
+        body.selection_mode = 'in_sample';
       } else if (kind === 'recall-update') {
         body.cell_set = opts.cell_set;
         if (opts.name !== undefined) body.name = opts.name;
@@ -5652,6 +5666,34 @@ document.addEventListener('alpine:init', () => {
 
     // ── Sort dispatcher (Saved Signals table) ──────────────────────────
 
+    // ── Saved Signals: MODE column ──────────────────────────────────────
+    // Rows written before selection_mode existed come back as 'in_sample'
+    // from the backfill, so there is no unknown state to render.
+    sigModeLabel(sig) {
+      const m = sig?.selection_mode || 'in_sample';
+      return m === 'train_test' ? 'TT' : m === 'walk_forward' ? 'WF' : 'IS';
+    },
+    sigModeStyle(sig) {
+      const m = sig?.selection_mode || 'in_sample';
+      // Same colour vocabulary as the mode pills at the top of the page.
+      if (m === 'train_test')
+        return 'background:#3a2a12;color:#e6a23c;border:1px solid #7a5a22';
+      if (m === 'walk_forward')
+        return 'background:#12304a;color:#5cb0ed;border:1px solid #235a86';
+      return 'background:#234032;color:#8fd3ac;border:1px solid #2f5a44';
+    },
+    sigModeTitle(sig) {
+      const m = sig?.selection_mode || 'in_sample';
+      if (m === 'train_test') {
+        return 'Train-test: zone picked on frozen train bins'
+             + (sig.selection_cutoff ? `, split ${sig.selection_cutoff}` : '')
+             + '. Stats are the train window.';
+      }
+      if (m === 'walk_forward') return 'Walk-forward bins.';
+      return 'In-sample: zone picked on full-history bins, whose edges are '
+           + 're-derived on every pipeline rebuild.';
+    },
+
     sigSortBy(key) {
       if (this.sigSortKey === key) {
         this.sigSortDir = this.sigSortDir === 'asc' ? 'desc' : 'asc';
@@ -5685,6 +5727,7 @@ document.addEventListener('alpine:init', () => {
         case 'primary':          return (s.primary_metric   || '').toLowerCase();
         case 'secondary':        return (s.secondary_metric || '').toLowerCase();
         case 'outcome':          return (s.outcome          || '').toLowerCase();
+        case 'selection_mode':   return (s.selection_mode   || 'in_sample');
         case 'corner':           return (s.corner           || '').toLowerCase();
         case 'agg_avg_ret':      return s.agg_avg_ret;
         case 'agg_n':            return s.agg_n;
@@ -7345,6 +7388,15 @@ document.addEventListener('alpine:init', () => {
     // unchanged — currently a no-op, but kept so a future caller can
     // hook a reaction without re-introducing the gate.
     setPageMode(m) {
+      // A zone is only meaningful against the bins it was picked on, so a
+      // mode switch discards it rather than silently re-interpreting the
+      // same cell indices against different edges.
+      if (m !== this.pageMode && this.hmSelectedCells.size) {
+        this.hmSelectedCells = new Set();
+        this.zoneData = null;
+        this.zoneOpen = false;
+        this._destroyZoneCharts();
+      }
       if (m === this.pageMode && m !== 'train_test') return;
       this.pageMode = m;
     },

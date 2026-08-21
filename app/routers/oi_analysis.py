@@ -9115,6 +9115,13 @@ class ZoneAnalyzeRequest(BaseModel):
     outcome: str
     n_bins: int = 10          # heatmap grid resolution: 3 | 5 | 10 | 20
     cell_set: List[List[int]] # [[ix, iy], ...] — 0-based cell indices
+    # Which grid the cells were picked on. This endpoint feeds the zone
+    # stats that gate the Save control, so if it resolved a train_test
+    # selection against is_bins the user would be shown one population and
+    # save another. Defaults to in_sample: unchanged for every existing
+    # caller.
+    selection_mode: Optional[str] = "in_sample"
+    selection_cutoff: Optional[str] = None
     ticker: str = "ALL"
     date_from: Optional[str] = None
     date_to: Optional[str] = None
@@ -9176,6 +9183,23 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     if req.ticker != "ALL":
         ticker_sql = f" AND df.ticker = ${p}"; params.append(req.ticker); p += 1
 
+    # Per-request bin source. A train_test zone is scored on its TRAIN
+    # window — the same window the cells were picked on — so the numbers
+    # under the heatmap match what gets stored on save.
+    zone_bin_table = _SIGNAL_BIN_TABLE.get(req.selection_mode or "in_sample")
+    if zone_bin_table is None:
+        return {"error": f"unknown selection_mode: {req.selection_mode!r}"}
+    zone_window_sql = ""
+    if (req.selection_mode or "in_sample") == "train_test":
+        raw_cut = (req.selection_cutoff or "").strip()
+        if not raw_cut:
+            return {"error": "selection_cutoff required for train_test"}
+        try:
+            params.append(_date.fromisoformat(raw_cut))
+        except ValueError:
+            return {"error": f"selection_cutoff not a date: {raw_cut!r}"}
+        zone_window_sql = f" AND df.trade_date < ${p}"; p += 1
+
     # Include df.{pmetric} and df.{smetric} in the SELECT so the
     # frontend CSV export (recallDownloadCSV) can include per-trade
     # metric values matching the secondary-detail export format. Also
@@ -9185,7 +9209,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
                df.{pmetric}, df.{smetric}, df.spot_co,
                {out_sel}
         FROM daily_features df
-        JOIN is_bins ib USING (ticker, trade_date)
+        JOIN {zone_bin_table} ib USING (ticker, trade_date)
         WHERE ib.bin20_{pmetric} > 0
           AND ib.bin20_{smetric} > 0
           AND {out_nn}
@@ -9193,7 +9217,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             ((ib.bin20_{pmetric} - 1) * $1::int) / 20,
             ((ib.bin20_{smetric} - 1) * $1::int) / 20
           ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
-          {date_sql}{ticker_sql}
+          {date_sql}{ticker_sql}{zone_window_sql}
         ORDER BY df.trade_date, df.ticker
     """
 
