@@ -5570,6 +5570,20 @@ document.addEventListener('alpine:init', () => {
     // field (e.g. tags, notes) only needs to touch this one function.
     // The corner dropdown is read from signalCorner (zone) or
     // recallCorner (recall); empty string sends no corner.
+    // Which grid the zone in front of the user was drawn on. Sent with
+    // every create so the server never has to guess — a guessed mode is
+    // how a train-selected zone ends up scored on full-history IS bins.
+    _selectionModeFields() {
+      const m = this.pageMode === 'train_test' ? 'train_test'
+              : this.pageMode === 'walk_forward' ? 'walk_forward'
+              : 'in_sample';
+      const out = { selection_mode: m };
+      // cutoffDate is the frozen split discovered from tt_bins on page load
+      // (GET /tt-cutoff), not a user choice.
+      if (m === 'train_test') out.selection_cutoff = this.cutoffDate;
+      return out;
+    },
+
     _buildSignalSaveBody(kind, opts) {
       const body = {};
       if (kind === 'zone-new') {
@@ -5580,6 +5594,7 @@ document.addEventListener('alpine:init', () => {
         body.n_bins           = this.heatmapBins;
         body.cell_set         = opts.cell_set;
         if (this.signalCorner) body.corner = this.signalCorner;
+        Object.assign(body, this._selectionModeFields());
       } else if (kind === 'recall-new') {
         body.name             = opts.name;
         body.primary_metric   = this.recallSig.primary_metric;
@@ -5588,6 +5603,9 @@ document.addEventListener('alpine:init', () => {
         body.n_bins           = this.recallSig.n_bins;
         body.cell_set         = opts.cell_set;
         if (this.recallCorner) body.corner = this.recallCorner;
+        // Recall re-selects cells on the heatmap that is currently on
+        // screen, so the page mode is the right provenance here too.
+        Object.assign(body, this._selectionModeFields());
       } else if (kind === 'recall-update') {
         body.cell_set = opts.cell_set;
         if (opts.name !== undefined) body.name = opts.name;
@@ -8144,7 +8162,11 @@ document.addEventListener('alpine:init', () => {
       if (!this.portfolioId) return;
       this.portLoading = true;
       try {
-        // Portfolio aggregate is always IS — no mode params sent.
+        // Each signal is resolved against the bin table it was SELECTED
+        // on — the server dispatches per signal, so no mode param is sent
+        // from here. A portfolio whose enabled signals span more than one
+        // selection mode comes back as {error:'mixed_selection_modes'}
+        // instead of a number; portMixedModes surfaces that as a banner.
         // Outlier filter rides along when the portfolio section's
         // toggle is ON; backend filters per-signal trade rows before
         // both per-signal contribution stats and union_rows assembly.
@@ -8154,8 +8176,20 @@ document.addEventListener('alpine:init', () => {
             outlier_max_ret: this.outlierMaxRetFor('port'),
           }),
         });
-        if (!r.ok) { this.portAggregate = null; return; }
-        this.portAggregate = await r.json();
+        if (!r.ok) { this.portAggregate = null; this.portMixedModes = null; return; }
+        const _agg = await r.json();
+        if (_agg && _agg.error === 'mixed_selection_modes') {
+          // Contain-but-do-not-aggregate: the portfolio keeps its signals,
+          // the number is withheld. Same shape as the exits-page window
+          // banner — say why, prominently, instead of showing a figure that
+          // is neither in-sample nor out-of-sample.
+          this.portMixedModes = _agg;
+          this.portAggregate  = null;
+          this._destroyPortCharts();
+          return;
+        }
+        this.portMixedModes = null;
+        this.portAggregate = _agg;
         // Initialise loss-correlation slider to the portfolio's actual date range.
         const _td = (this.portAggregate.combined_trade_dates || []).filter(Boolean);
         if (_td.length) {
@@ -8170,6 +8204,10 @@ document.addEventListener('alpine:init', () => {
         console.error('portfolio aggregate', e);
       } finally { this.portLoading = false; }
     },
+
+    // Non-null when the last aggregate was refused for mixing selection
+    // modes. Carries {modes:{mode:count}, message} for the banner.
+    portMixedModes: null,
 
     _destroyPortCharts() {
       for (const k of ['port-equity', 'port-yearly', 'port-activity', 'port-bubble']) {

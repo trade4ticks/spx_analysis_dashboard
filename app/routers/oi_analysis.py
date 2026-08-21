@@ -8925,8 +8925,89 @@ _SIGNALS_DDL_STEPS = [
     """CREATE INDEX IF NOT EXISTS ix_signals_match
        ON signals (primary_metric, secondary_metric, corner, outcome)
        WHERE corner IS NOT NULL""",
+    # selection_mode — WHICH BIN TABLE THE ZONE WAS DRAWN ON.
+    #
+    # A zone is a set of heatmap cells, and a cell only means something
+    # relative to the bin edges that drew it. is_bins edges are full-history
+    # quantiles and get re-derived on every pipeline run, so an IS zone does
+    # not have a stable definition; tt_bins edges are frozen at a cutoff and
+    # do. Downstream, this column is what tells the portfolio tools which bin
+    # table to join for each signal.
+    #
+    # No DEFAULT, deliberately. A default of 'in_sample' would silently
+    # mislabel any save that failed to send its mode — the exact failure this
+    # column exists to make impossible. Absent mode lands NULL, which is
+    # visibly wrong rather than plausibly right.
+    #
+    # No CHECK constraint — validated in Pydantic, matching the `corner`
+    # convention above.
+    #
+    # The backfill is gated on the column not existing yet, so it runs exactly
+    # once. A bare `WHERE selection_mode IS NULL` would re-run on every boot
+    # and relabel a future NULL as 'in_sample' at the next restart.
+    """DO $$
+DECLARE
+    col_exists BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'signals' AND table_schema = 'public'
+           AND column_name = 'selection_mode'
+    ) INTO col_exists;
+
+    IF NOT col_exists THEN
+        ALTER TABLE signals ADD COLUMN selection_mode TEXT;
+        UPDATE signals SET selection_mode = 'in_sample'
+         WHERE selection_mode IS NULL;
+    END IF;
+END $$;""",
+    # selection_cutoff — WHICH frozen split a train_test zone was drawn
+    # against. NULL for in_sample and walk_forward. Without it a TT signal
+    # becomes unreadable the moment tt_bins is re-frozen at a different date.
+    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS selection_cutoff DATE",
 ]
 _signals_table_ensured = False
+
+
+# ── Per-signal bin source ────────────────────────────────────────────────
+# A saved zone must be re-resolved against the SAME bin table it was drawn
+# on, or the cell indices select a different population than the one the
+# user picked. Everything that turns a cell_set back into trades goes
+# through this.
+#
+# train_test resolves to the TRAIN window. That is the working assumption
+# for now: zones are searched, saved and assembled into portfolios entirely
+# in train, because the question being asked of a portfolio is coverage —
+# which signals fire in which periods, so capital stays deployed. Test is
+# looked at once, at the end, on the finished portfolio. A test view is a
+# later addition; nothing here forecloses it.
+_SIGNAL_BIN_TABLE = {
+    "in_sample":   "is_bins",
+    "walk_forward": "wf_bins",
+    "train_test":  "tt_bins",
+}
+
+
+def _signal_bin_source(sig) -> "tuple[str, object]":
+    """(bin_table, train_cutoff_or_None) for one signal row.
+
+    Unknown or NULL mode falls back to is_bins, which is what every row
+    written before selection_mode existed actually used.
+    """
+    mode = None
+    try:
+        mode = sig["selection_mode"]
+    except (KeyError, TypeError):
+        mode = sig.get("selection_mode") if hasattr(sig, "get") else None
+    mode = mode or "in_sample"
+    table = _SIGNAL_BIN_TABLE.get(mode, "is_bins")
+    if mode != "train_test":
+        return table, None
+    try:
+        cutoff = sig["selection_cutoff"]
+    except (KeyError, TypeError):
+        cutoff = sig.get("selection_cutoff") if hasattr(sig, "get") else None
+    return table, cutoff
 
 
 async def _ensure_signals_table(pool) -> None:
@@ -8944,7 +9025,9 @@ _SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
 
 async def _compute_signal_stats(pool, primary: str, secondary: str,
                                  outcome: str, n_bins: int,
-                                 cell_set: list) -> dict:
+                                 cell_set: list,
+                                 bin_table: str = "is_bins",
+                                 train_cutoff=None) -> dict:
     """Compute per-cell + aggregate stats for one signal using stored bins.
 
     Returns {agg_avg_ret, agg_n, per_cell_stats: [{ix, iy, avg_ret, n}, ...]}.
@@ -8952,6 +9035,12 @@ async def _compute_signal_stats(pool, primary: str, secondary: str,
     Each (ticker, trade_date) row has exactly ONE (cell_x, cell_y) at the
     signal's n_bins resolution, so per-cell sets are disjoint and the
     aggregate avg_ret = n-weighted mean across per-cell avg_rets.
+
+    bin_table / train_cutoff come from _signal_bin_source(). This used to
+    hardcode is_bins, which meant a zone drawn on any other grid was scored
+    against boundaries it was never selected under. For a train_test signal
+    the stats are the TRAIN window — one stat set, same columns, so every
+    downstream consumer is unchanged.
     """
     empty = {"agg_avg_ret": None, "agg_n": 0, "per_cell_stats": []}
     if not cell_set or n_bins not in (3, 5, 10, 20):
@@ -8974,6 +9063,14 @@ async def _compute_signal_stats(pool, primary: str, secondary: str,
         outcome_expr   = f"AVG(df.{outcome})"
         outcome_filter = f"df.{outcome} IS NOT NULL"
 
+    if bin_table not in _SIGNAL_BIN_TABLE.values():
+        return empty
+    params: list = [n_bins, xs, ys]
+    window_sql = ""
+    if train_cutoff is not None:
+        params.append(train_cutoff)
+        window_sql = f"AND df.trade_date < ${len(params)}"
+
     query = f"""
         SELECT
             ((ib.bin20_{primary}   - 1) * $1::int) / 20 AS ix,
@@ -8981,7 +9078,7 @@ async def _compute_signal_stats(pool, primary: str, secondary: str,
             {outcome_expr}::float8 AS avg_ret,
             COUNT(*) AS n
         FROM daily_features df
-        JOIN is_bins ib USING (ticker, trade_date)
+        JOIN {bin_table} ib USING (ticker, trade_date)
         WHERE ib.bin20_{primary}   > 0
           AND ib.bin20_{secondary} > 0
           AND {outcome_filter}
@@ -8989,11 +9086,12 @@ async def _compute_signal_stats(pool, primary: str, secondary: str,
             ((ib.bin20_{primary}   - 1) * $1::int) / 20,
             ((ib.bin20_{secondary} - 1) * $1::int) / 20
           ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+          {window_sql}
         GROUP BY ix, iy
     """
     async with pool.acquire() as conn:
         try:
-            rows = await conn.fetch(query, n_bins, xs, ys)
+            rows = await conn.fetch(query, *params)
         except Exception:
             return empty
 
@@ -9520,6 +9618,13 @@ class SaveSignalRequest(BaseModel):
     # construction (the column DDL default). Promotion to 'Active' is
     # a separate user action via PATCH /signals/{id}/status.
     corner:           Optional[str] = None
+    # Which grid the zone was drawn on. Defaults to in_sample so an older
+    # client that does not send it behaves exactly as before; the current
+    # frontend always sends it explicitly.
+    selection_mode:   Optional[str] = "in_sample"
+    # ISO date, train_test only — the frozen split the zone was drawn
+    # against. Ignored for other modes.
+    selection_cutoff: Optional[str] = None
 
 
 class SignalsBatchRequest(BaseModel):
@@ -9560,7 +9665,8 @@ async def list_signals(pool=Depends(get_oi_pool)):
             """SELECT id, name, primary_metric, secondary_metric,
                       outcome, n_bins, cell_set, created_at,
                       agg_avg_ret, agg_n, per_cell_stats, stats_updated_at,
-                      status, color_slot, corner
+                      status, color_slot, corner,
+                      selection_mode, selection_cutoff
                FROM signals ORDER BY created_at DESC"""
         )
     return {
@@ -9587,6 +9693,12 @@ async def list_signals(pool=Depends(get_oi_pool)):
                 "status":           r["status"] or "Test",
                 "color_slot":       r["color_slot"],
                 "corner":           r["corner"],
+                # Which grid this zone was drawn on, and (train_test only)
+                # which frozen split. Drives the portfolio tools' bin-table
+                # dispatch and the mixed-mode guard.
+                "selection_mode":   r["selection_mode"] or "in_sample",
+                "selection_cutoff": (r["selection_cutoff"].isoformat()
+                                     if r["selection_cutoff"] else None),
             }
             for r in rows
         ]
@@ -9614,9 +9726,33 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
         return {"error": str(exc)}
     await _ensure_signals_table(pool)
 
+    # Validated here rather than by a Postgres CHECK, matching the `corner`
+    # convention. An unrecognised mode is rejected instead of being coerced:
+    # a silently-defaulted mode is the failure this column exists to prevent.
+    sel_mode = (req.selection_mode or "in_sample").strip()
+    if sel_mode not in _SIGNAL_BIN_TABLE:
+        raise HTTPException(
+            400, f"selection_mode must be one of "
+                 f"{sorted(_SIGNAL_BIN_TABLE)}, got {sel_mode!r}")
+    sel_cutoff = None
+    if sel_mode == "train_test":
+        raw = (req.selection_cutoff or "").strip()
+        if not raw:
+            raise HTTPException(
+                400, "selection_cutoff is required for a train_test signal — "
+                     "without it the zone cannot be re-resolved once tt_bins "
+                     "is re-frozen at a different date")
+        try:
+            sel_cutoff = _date.fromisoformat(raw)
+        except ValueError:
+            raise HTTPException(400, f"selection_cutoff not a date: {raw!r}")
+
+    bin_table, train_cutoff = _signal_bin_source(
+        {"selection_mode": sel_mode, "selection_cutoff": sel_cutoff})
     stats = await _compute_signal_stats(
         pool, req.primary_metric, req.secondary_metric,
-        req.outcome, req.n_bins, req.cell_set)
+        req.outcome, req.n_bins, req.cell_set,
+        bin_table=bin_table, train_cutoff=train_cutoff)
 
     cell_json     = json.dumps(req.cell_set)
     per_cell_json = json.dumps(stats["per_cell_stats"])
@@ -9626,15 +9762,17 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
             """INSERT INTO signals
                (name, primary_metric, secondary_metric, outcome, n_bins, cell_set,
                 agg_avg_ret, agg_n, per_cell_stats, stats_updated_at,
-                status, color_slot, corner)
+                status, color_slot, corner,
+                selection_mode, selection_cutoff)
                VALUES ($1, $2, $3, $4, $5, $6::jsonb,
                        $7, $8, $9::jsonb, NOW(),
-                       'Test', NULL, $10)
+                       'Test', NULL, $10,
+                       $11, $12)
                RETURNING id, created_at, stats_updated_at""",
             req.name.strip(), req.primary_metric, req.secondary_metric,
             req.outcome, req.n_bins, cell_json,
             stats["agg_avg_ret"], stats["agg_n"], per_cell_json,
-            corner,
+            corner, sel_mode, sel_cutoff,
         )
     return {
         "id":               row["id"],
@@ -9644,6 +9782,8 @@ async def save_signal(req: SaveSignalRequest, pool=Depends(get_oi_pool)):
         "agg_n":            stats["agg_n"],
         "status":           "Test",
         "color_slot":       None,
+        "selection_mode":   sel_mode,
+        "selection_cutoff": sel_cutoff.isoformat() if sel_cutoff else None,
         "corner":           corner,
     }
 
@@ -9700,14 +9840,20 @@ async def update_signal_cells(signal_id: int, req: SignalUpdateRequest,
 
     async with pool.acquire() as conn:
         sig = await conn.fetchrow(
-            """SELECT id, name, primary_metric, secondary_metric, outcome, n_bins
+            """SELECT id, name, primary_metric, secondary_metric, outcome,
+                      n_bins, selection_mode, selection_cutoff
                FROM signals WHERE id = $1""", signal_id)
     if not sig:
         raise HTTPException(404, f"signal_id {signal_id} not found")
 
+    # Re-score against the grid this signal was drawn on, not whichever one
+    # happens to be hardcoded. Editing a train_test zone must not silently
+    # rewrite its stats on is_bins.
+    bin_table, train_cutoff = _signal_bin_source(sig)
     stats = await _compute_signal_stats(
         pool, sig["primary_metric"], sig["secondary_metric"],
-        sig["outcome"], sig["n_bins"], req.cell_set)
+        sig["outcome"], sig["n_bins"], req.cell_set,
+        bin_table=bin_table, train_cutoff=train_cutoff)
 
     cell_json     = json.dumps(req.cell_set)
     per_cell_json = json.dumps(stats["per_cell_stats"])
@@ -9863,7 +10009,7 @@ async def refresh_signals(req: SignalsBatchRequest, pool=Depends(get_oi_pool)):
     async with pool.acquire() as conn:
         sig_rows = await conn.fetch(
             """SELECT id, primary_metric, secondary_metric, outcome,
-                      n_bins, cell_set
+                      n_bins, cell_set, selection_mode, selection_cutoff
                FROM signals WHERE id = ANY($1)""", req.signal_ids)
 
     refreshed = 0
@@ -9871,9 +10017,13 @@ async def refresh_signals(req: SignalsBatchRequest, pool=Depends(get_oi_pool)):
     for r in sig_rows:
         try:
             cell_set = _parse_jsonb(r["cell_set"]) or []
+            # Per-signal bin source. Refreshing a train_test signal against
+            # is_bins would overwrite correct numbers with wrong ones.
+            bin_table, train_cutoff = _signal_bin_source(r)
             stats = await _compute_signal_stats(
                 pool, r["primary_metric"], r["secondary_metric"],
-                r["outcome"], r["n_bins"], cell_set)
+                r["outcome"], r["n_bins"], cell_set,
+                bin_table=bin_table, train_cutoff=train_cutoff)
             per_cell_json = json.dumps(stats["per_cell_stats"])
             async with pool.acquire() as conn:
                 await conn.execute(

@@ -8,7 +8,9 @@ signals is counted ONCE in the portfolio stats and equity curve.
 
 Portfolio metadata (CRUD) lives in the main app DB (via get_pool).
 Signal definitions live in the OI DB (via get_oi_pool).
-The aggregate endpoint queries is_bins + daily_features (via get_oi_pool).
+The aggregate endpoint queries daily_features joined to the bin table each
+signal was SELECTED on — is_bins / wf_bins / tt_bins, per signal (via
+get_oi_pool). See _signal_bin_source.
 """
 from collections import defaultdict
 from datetime import date as _date, timedelta
@@ -129,6 +131,62 @@ class LossAnalysisRequest(BaseModel):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+# ── Per-signal bin source ────────────────────────────────────────────────
+# A saved zone is a set of heatmap cells, and a cell only means anything
+# relative to the bin edges that drew it. Re-resolving a train_test zone
+# against is_bins picks a DIFFERENT set of trade-dates than the user
+# selected — not an error, just quietly the wrong population. So every place
+# that turns a cell_set back into trades asks this which table to join.
+#
+# train_test resolves to the TRAIN window. That is deliberate and matches how
+# these portfolios are used: signals are searched and saved in train, then
+# assembled to answer a COVERAGE question — which signals fire in which
+# periods, so capital stays deployed. Test is looked at once, at the end, on
+# the finished portfolio. A test view is a later addition.
+_SIGNAL_BIN_TABLE = {
+    "in_sample":    "is_bins",
+    "walk_forward": "wf_bins",
+    "train_test":   "tt_bins",
+}
+
+
+def _signal_bin_source(sig: dict) -> tuple:
+    """(bin_table, train_cutoff_or_None) for one signal dict."""
+    mode = (sig.get("selection_mode") or "in_sample")
+    table = _SIGNAL_BIN_TABLE.get(mode, "is_bins")
+    if mode != "train_test":
+        return table, None
+    return table, sig.get("selection_cutoff")
+
+
+def _mixed_mode_error(entries: list) -> dict:
+    """Non-None when the enabled signals span more than one selection mode.
+
+    A portfolio may CONTAIN mixed signals — blocking the link would be
+    obstructive, and a mixed set is a reasonable thing to assemble while
+    deciding. What it may not do is collapse them into one number: an IS zone
+    and a TT zone are selected against different bin edges, so summing them
+    produces a figure that is neither in-sample nor out-of-sample. Refusing
+    the aggregate is the honest half.
+    """
+    counts: dict = {}
+    for e in entries:
+        m = (e["sig"].get("selection_mode") or "in_sample")
+        counts[m] = counts.get(m, 0) + 1
+    if len(counts) <= 1:
+        return None
+    return {
+        "error": "mixed_selection_modes",
+        "modes": counts,
+        "message": (
+            "This portfolio mixes signals selected on different bin tables ("
+            + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+            + "). Their zones were drawn against different bin edges, so a "
+              "combined figure would be neither in-sample nor out-of-sample. "
+              "Filter to one selection mode to aggregate."),
+    }
 
 
 def _portfolio_row_to_dict(r) -> dict:
@@ -347,7 +405,8 @@ async def get_portfolio(pid: int,
             sig_rows = await conn.fetch(
                 """SELECT id, name, primary_metric, secondary_metric,
                           outcome, n_bins, cell_set,
-                          status, color_slot, corner
+                          status, color_slot, corner,
+                          selection_mode, selection_cutoff
                    FROM signals WHERE id = ANY($1)""", all_sids)
         sig_by_id = {r["id"]: dict(r) for r in sig_rows}
         for ps in ps_rows:
@@ -499,7 +558,8 @@ async def portfolio_aggregate(
     Phase 1  Load portfolio + portfolio_signals (main DB) and signal
              definitions (OI DB).
     Phase 2  Per-signal IS trade query: same SQL as /secondary-zone-analyze,
-             filtering daily_features via is_bins cell-set membership.
+             filtering daily_features via per-signal cell-set membership against the
+             bin table that signal was selected on.
     Phase 3  Union dedup via seen-dict: a (ticker, trade_date) satisfying
              multiple signals is counted ONCE. Structurally identical to the
              old OR-of-binary-vectors (V_port = M_sys.sum > 0).
@@ -540,7 +600,8 @@ async def portfolio_aggregate(
     async with oi_pool.acquire() as conn:
         sig_rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric,
-                      outcome, n_bins, cell_set
+                      outcome, n_bins, cell_set,
+                      selection_mode, selection_cutoff
                FROM signals WHERE id = ANY($1)""", all_sids)
     sig_by_id = {r["id"]: dict(r) for r in sig_rows}
 
@@ -557,6 +618,13 @@ async def portfolio_aggregate(
 
     if not enabled_signals:
         return _empty_aggregate(portfolio, outcome, all_ps)
+
+    # Contain-but-do-not-aggregate. The portfolio is allowed to hold signals
+    # from different selection modes; collapsing them into one number is what
+    # is refused.
+    mixed = _mixed_mode_error(enabled_signals)
+    if mixed:
+        return mixed
 
     # Safety: validate metric names (same check as zone-analyze)
     for entry in enabled_signals:
@@ -605,11 +673,21 @@ async def portfolio_aggregate(
             prim   = sig["primary_metric"]
             sec    = sig["secondary_metric"]
 
+            # Per-signal bin table + window. The train filter's placeholder
+            # index is computed from the shared date params rather than
+            # hardcoded, because those vary with the request.
+            bin_table, train_cutoff = _signal_bin_source(sig)
+            sig_params = list(date_params)
+            window_sql = ""
+            if train_cutoff is not None:
+                sig_params.append(train_cutoff)
+                window_sql = f" AND df.trade_date < ${3 + len(sig_params)}"
+
             query = f"""
                 SELECT df.ticker, df.trade_date::text AS trade_date,
                        df.spot_co, {out_sel}
                 FROM daily_features df
-                JOIN is_bins ib USING (ticker, trade_date)
+                JOIN {bin_table} ib USING (ticker, trade_date)
                 WHERE ib.bin20_{prim} > 0
                   AND ib.bin20_{sec}  > 0
                   AND {out_nn}
@@ -617,11 +695,11 @@ async def portfolio_aggregate(
                     ((ib.bin20_{prim} - 1) * $1::int) / 20,
                     ((ib.bin20_{sec}  - 1) * $1::int) / 20
                   ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
-                  {date_sql}{ticker_sql}
+                  {date_sql}{ticker_sql}{window_sql}
                 ORDER BY df.trade_date, df.ticker
             """
             try:
-                raw = await conn.fetch(query, n_bins, xs, ys, *date_params)
+                raw = await conn.fetch(query, n_bins, xs, ys, *sig_params)
             except Exception as exc:
                 per_signal_rows.append([])
                 continue
@@ -898,7 +976,7 @@ async def portfolio_loss_analysis(
     Algorithm
     ---------
     Phases 1-2  Same as /aggregate: load portfolio + signals, per-signal
-                IS trade queries via is_bins.
+                trade queries against each signal's own bin table.
     Phase 3     Union dedup (identical to /aggregate).
     Phase 4     Dollar-cap sizing per signal + deduped union → weekly sums.
                 Sizing mirrors JS _computeDollarSeries:
@@ -939,12 +1017,19 @@ async def portfolio_loss_analysis(
     if not enabled_ps:
         return {"error": "no enabled signals"}
 
+    # Same rule as the aggregate: a loss attribution across zones drawn on
+    # different bin edges attributes across incompatible populations.
+    mixed = _mixed_mode_error(enabled_signals)
+    if mixed:
+        return mixed
+
     # ── Phase 1b: load signal definitions ───────────────────────────────────
     all_sids = list({ps["signal_id"] for ps in all_ps})
     async with oi_pool.acquire() as conn:
         sig_rows = await conn.fetch(
             """SELECT id, name, primary_metric, secondary_metric,
-                      outcome, n_bins, cell_set
+                      outcome, n_bins, cell_set,
+                      selection_mode, selection_cutoff
                FROM signals WHERE id = ANY($1)""", all_sids)
     sig_by_id = {r["id"]: dict(r) for r in sig_rows}
 
@@ -1000,11 +1085,21 @@ async def portfolio_loss_analysis(
             prim = sig["primary_metric"]
             sec  = sig["secondary_metric"]
 
+            # Per-signal bin table + window. The train filter's placeholder
+            # index is computed from the shared date params rather than
+            # hardcoded, because those vary with the request.
+            bin_table, train_cutoff = _signal_bin_source(sig)
+            sig_params = list(date_params)
+            window_sql = ""
+            if train_cutoff is not None:
+                sig_params.append(train_cutoff)
+                window_sql = f" AND df.trade_date < ${3 + len(sig_params)}"
+
             query = f"""
                 SELECT df.ticker, df.trade_date::text AS trade_date,
                        df.spot_co, {out_sel}
                 FROM daily_features df
-                JOIN is_bins ib USING (ticker, trade_date)
+                JOIN {bin_table} ib USING (ticker, trade_date)
                 WHERE ib.bin20_{prim} > 0
                   AND ib.bin20_{sec}  > 0
                   AND {out_nn}
@@ -1012,11 +1107,11 @@ async def portfolio_loss_analysis(
                     ((ib.bin20_{prim} - 1) * $1::int) / 20,
                     ((ib.bin20_{sec}  - 1) * $1::int) / 20
                   ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
-                  {date_sql}{ticker_sql}
+                  {date_sql}{ticker_sql}{window_sql}
                 ORDER BY df.trade_date, df.ticker
             """
             try:
-                raw = await conn.fetch(query, n_bins, xs, ys, *date_params)
+                raw = await conn.fetch(query, n_bins, xs, ys, *sig_params)
             except Exception:
                 per_signal_rows.append([])
                 continue
@@ -1164,6 +1259,7 @@ async def portfolio_lab_candidates(
                    s.outcome, s.n_bins, s.cell_set,
                    s.agg_n, s.agg_avg_ret,
                    s.status, s.color_slot, s.corner,
+                   s.selection_mode, s.selection_cutoff,
                    COALESCE(mc_p.family_num,  0)  AS p_family_num,
                    COALESCE(mc_p.family_name, '') AS p_family_name,
                    COALESCE(mc_s.family_num,  0)  AS s_family_num,
@@ -1221,11 +1317,18 @@ async def portfolio_lab_candidates(
             out_sel = ", ".join(f"df.{c}" for c in outcome_cols)
             out_nn  = " AND ".join(f"df.{c} IS NOT NULL" for c in outcome_cols)
 
+            bin_table, train_cutoff = _signal_bin_source(cand)
+            lab_params: list = [n_bins, xs, ys]
+            window_sql = ""
+            if train_cutoff is not None:
+                lab_params.append(train_cutoff)
+                window_sql = f" AND df.trade_date < ${len(lab_params)}"
+
             query = f"""
                 SELECT df.ticker, df.trade_date::text AS trade_date,
                        df.spot_co, {out_sel}
                 FROM daily_features df
-                JOIN is_bins ib USING (ticker, trade_date)
+                JOIN {bin_table} ib USING (ticker, trade_date)
                 WHERE ib.bin20_{prim} > 0
                   AND ib.bin20_{sec}  > 0
                   AND {out_nn}
@@ -1233,10 +1336,11 @@ async def portfolio_lab_candidates(
                     ((ib.bin20_{prim} - 1) * $1::int) / 20,
                     ((ib.bin20_{sec}  - 1) * $1::int) / 20
                   ) IN (SELECT * FROM unnest($2::int[], $3::int[]))
+                  {window_sql}
                 ORDER BY df.trade_date, df.ticker
             """
             try:
-                raw = await conn.fetch(query, n_bins, xs, ys)
+                raw = await conn.fetch(query, *lab_params)
             except Exception:
                 cand["trades"] = []
                 continue
@@ -1293,6 +1397,9 @@ async def portfolio_lab_candidates(
                 "n_bins":           cand["n_bins"],
                 "agg_n":            cand["agg_n"],
                 "agg_avg_ret":      cand["agg_avg_ret"],
+                "selection_mode":   cand.get("selection_mode") or "in_sample",
+                "selection_cutoff": (cand["selection_cutoff"].isoformat()
+                                     if cand.get("selection_cutoff") else None),
                 "p_family_num":     cand["p_family_num"],
                 "p_family_name":    cand["p_family_name"],
                 "s_family_num":     cand["s_family_num"],
