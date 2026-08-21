@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Factor Analysis</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=3">
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
   <style>
     .oi-body { flex:1; overflow:auto; padding:16px; }
     .sel-bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
@@ -392,9 +392,9 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/signal_thumbnail.js?v=3"></script>
-  <script src="/static/js/factor_charts.js?v=22"></script>
-  <script src="/static/js/oi_analysis.js?v=270"></script>
+  <script src={{ asset('js/signal_thumbnail.js') }}></script>
+  <script src={{ asset('js/factor_charts.js') }}></script>
+  <script src={{ asset('js/oi_analysis.js') }}></script>
 </head>
 
 <body x-data="oiAnalysis" x-init="init()">

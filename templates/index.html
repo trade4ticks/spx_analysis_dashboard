@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV Dashboard</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=3">
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
 
   <!-- Alpine.js (defer keeps it from blocking render) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
@@ -14,8 +14,8 @@
   <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <!-- Our JS (charts must precede app) -->
-  <script src="/static/js/charts.js?v=1"></script>
-  <script src="/static/js/app.js?v=1"></script>
+  <script src={{ asset('js/charts.js') }}></script>
+  <script src={{ asset('js/app.js') }}></script>
 </head>
 
 <body x-data="dashboard" x-init="init()">

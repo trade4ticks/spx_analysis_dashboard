@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Ticker Analysis</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=3">
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
 
   <!-- Alpine.js (defer keeps it from blocking render) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
@@ -198,11 +198,11 @@
     }
   </style>
 
-  <!-- Page module (?v= cache-bust, matching the rest of the app).
+  <!-- Page module (content-hash cache-bust via asset(), like the rest of the app).
        NOT deferred: must run before the deferred Alpine bundle so the
        `alpine:init` listener is registered before Alpine starts (same
        load order app.js / oi_analysis.js rely on). -->
-  <script src="/static/js/ticker_analysis.js?v=27"></script>
+  <script src={{ asset('js/ticker_analysis.js') }}></script>
 </head>
 
 <body x-data="tickerAnalysis" x-init="init()">

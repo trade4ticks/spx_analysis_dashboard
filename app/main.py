@@ -1,3 +1,4 @@
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -58,7 +59,7 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 #
 # StaticFiles above is a separate ASGI mount and is unaffected: /static/* JS
 # and CSS keep their ETag / Last-Modified caching. Only the HTML loses ETag,
-# which makes the ?v=NNN cache-buster on JS strictly more reliable.
+# which makes the content-hash cache-buster on JS strictly more reliable.
 # Starlette >= 1.0 removed the legacy TemplateResponse(name, {"request": ...})
 # signature; request comes FIRST now. The old form raises
 # "TypeError: unhashable type: dict" at request time, not import time, so
@@ -66,6 +67,53 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 # scripts/check_routes_smoke.py, which exercises the real route layer.
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.keep_trailing_newline = True
+
+
+# ── Cache-busting off a CONTENT HASH ──────────────────────────────────────
+# Templates used to hard-code "?v=NN" and a human had to remember to bump it
+# on every JS edit. Forgetting once costs a debugging round: the browser
+# keeps serving the previous bundle, the symptom looks like a code bug, and
+# nothing about the page tells you which version you are actually running.
+# That happened, so the number is now derived rather than maintained.
+#
+# Hash is of file CONTENT, not mtime: a redeploy that rewrites files without
+# changing them must not invalidate a warm cache, and an edit that happens to
+# preserve mtime must not be missed.
+#
+# Cached in-process, keyed on (mtime_ns, size), so the common case is a stat
+# rather than a read. A dev editing a file gets a new hash on the next request
+# without a restart.
+_ASSET_CACHE: dict = {}
+
+
+def asset(path: str) -> str:
+    """URL for a file under /static, with a content-hash cache-buster.
+
+    Usage in a template:  <script src="{{ asset('js/app.js') }}"></script>
+    Unknown files degrade to an unversioned URL rather than raising — a
+    missing asset should surface as a 404 in the network tab, not a 500 on
+    the whole page.
+    """
+    rel = str(path).lstrip("/")
+    full = BASE_DIR / "static" / rel
+    try:
+        st = full.stat()
+    except OSError:
+        return f"/static/{rel}"
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _ASSET_CACHE.get(rel)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    try:
+        digest = hashlib.sha256(full.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return f"/static/{rel}"
+    url = f"/static/{rel}?v={digest}"
+    _ASSET_CACHE[rel] = (stamp, url)
+    return url
+
+
+templates.env.globals["asset"] = asset
 
 app.include_router(meta.router,       prefix="/api/meta")
 app.include_router(skew.router,       prefix="/api/skew")

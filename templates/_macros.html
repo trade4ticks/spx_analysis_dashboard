@@ -89,11 +89,23 @@
     </tr>
   </thead>
   <tbody>
-    <template x-for="(row, iy) in {{ grid_expr|safe }}" :key="'{{ key }}row-'+iy">
+    {#- KEYS CARRY THE CELL VALUE, NOT JUST THE POSITION.
+        Positional keys ('cell-'+iy+'-'+ix) told Alpine every cell was the
+        same item across renders, so it reused the nodes and their loop
+        scopes. The bindings inside a cell have TWO dependencies -- the
+        `cell` scope variable and, via the formatter, the active metric --
+        so a metric switch re-ran the formatter against a `cell` that was
+        never re-bound: new formatter, previous metric's number. That is
+        how Calmar 2.0743 rendered as "207.43%" under Avg Ret.
+        Including the value in the key forces a fresh node whenever the
+        painted content changes, and changes nothing when it does not. -#}
+    <template x-for="(row, iy) in {{ grid_expr|safe }}"
+              :key="'{{ key }}row-'+iy+'-'+(row ? row.map(c => c && c.avg_ret).join('_') : '')">
       <tr>
         <th x-text="{{ obj|safe }}.y_labels[iy]"
             style="text-align:right;padding:{{ S.thpad }};color:#666;font-weight:600;font-size:{{ S.thf }}px;white-space:nowrap"></th>
-        <template x-for="(cell, ix) in row" :key="'{{ key }}cell-'+iy+'-'+ix">
+        <template x-for="(cell, ix) in row"
+                  :key="'{{ key }}cell-'+iy+'-'+ix+'-'+(cell ? cell.avg_ret : 'e')+'-'+(cell ? cell.n : 0)">
           <td :style="'background:' + {{ bg_fn }}(cell) + ';width:{{ S.w }}px;height:{{ S.h }}px;text-align:center;vertical-align:middle;border:1px solid #111;padding:{{ S.pad }}px;transition:opacity .1s'"
               {%- if cls_expr %}
               :class="{{ cls_expr|safe }}"

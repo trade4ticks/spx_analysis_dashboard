@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Factor Trades</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=3">
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
   <style>
     /* Left rail is fixed so the active configuration is always in view —
        the page is driven by iterating on it. */
@@ -171,8 +171,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=22"></script>
-  <script src="/static/js/factor_trades.js?v=48"></script>
+  <script src={{ asset('js/factor_charts.js') }}></script>
+  <script src={{ asset('js/factor_trades.js') }}></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">

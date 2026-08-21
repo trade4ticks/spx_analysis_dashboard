@@ -979,15 +979,27 @@ document.addEventListener('alpine:init', () => {
     // Nothing here reads gridHeat, so changing the span invalidates only the
     // colour bindings: cells recolour, the grid is not rebuilt or re-laid
     // out, and no request is made.
+    // Span read used ONLY by the per-cell paint. Unlike `gridSpan` it does
+    // not go through _gridScale, so it never re-enters the gridHeat getter:
+    // 25 cells x several bindings was ~170 memo lookups per render, all of
+    // them asking a question the grid had already answered. Safe because a
+    // cell can only exist if gridHeat just produced it, which is the same
+    // pass that writes _gridScaleVal -- so the value is current by
+    // construction rather than by ordering luck.
+    get _gridSpanForPaint() {
+      const m = this.gridSpanManual;
+      if (m != null && isFinite(m) && m > 0) return m;
+      return (_gridScaleVal && _gridScaleVal.autoSpan) || 0.01;
+    },
     gridCellBg(cell) {
       _ftDbgCell('cellBg', { metric: this.gridMetric, cellValue: cell && cell.avg_ret,
-                             span: this.gridSpan });
+                             span: this._gridSpanForPaint });
       if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
       // Same function the node heatmap and trade-activity grid call, same
       // default path, no opts. minSampleN 0: `n` here is a count of
       // combinations averaged, not trades, so hatching does not apply.
       return window.FactorCharts._hmPaint(
-        this.gridSpan, 0,
+        this._gridSpanForPaint, 0,
         { n: cell.n, avg_ret: (cell.avg_ret || 0) - this._gridAnchor });
     },
     gridCellTitle(cell) {

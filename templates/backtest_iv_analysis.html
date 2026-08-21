@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SPX IV — Backtest IV Analysis</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=3">
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
   <style>
     .biv-body    { flex:1; overflow-y:auto; display:flex; flex-direction:column; min-height:0; }
     .biv-main    { padding:18px 22px; display:flex; flex-direction:column; gap:16px; }
@@ -1818,6 +1818,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="/static/js/backtest_iv_analysis.js?v=21"></script>
+  <script src={{ asset('js/backtest_iv_analysis.js') }}></script>
 </body>
 </html>
