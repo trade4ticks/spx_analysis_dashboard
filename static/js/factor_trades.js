@@ -451,6 +451,79 @@ document.addEventListener('alpine:init', () => {
       const sel = this.gridValues[fam];
       return sel ? sel.length : this.gridFamilyRules(fam).length;
     },
+    // A 2D selection -- up to 9 families x 16 values -- does not fit a 290px
+    // rail, and no amount of padding makes it fit. It opens in a modal
+    // instead, reusing the full-screen overlay pattern already on this page.
+    // The rail keeps a one-line summary per family and stays calm.
+    gridCfgOpen: false,
+    _gridShiftAnchor: {},          // family -> last clicked rule_key
+
+    // Ordered families are the common case, so a range selection saves the
+    // seven clicks it takes to drop three values.
+    gridChipClick(fam, rk, ev) {
+      const all = this.gridFamilyRules(fam).map(r => r.rule_key);
+      if (ev && ev.shiftKey && this._gridShiftAnchor[fam] != null) {
+        const a0 = all.indexOf(this._gridShiftAnchor[fam]);
+        const a1 = all.indexOf(rk);
+        if (a0 >= 0 && a1 >= 0) {
+          const [lo, hi] = a0 <= a1 ? [a0, a1] : [a1, a0];
+          const range = all.slice(lo, hi + 1);
+          // Shift-click SETS the range rather than toggling each member, so
+          // the result does not depend on what those members happened to be.
+          this.gridValues = { ...this.gridValues, [fam]: range };
+          return;
+        }
+      }
+      this._gridShiftAnchor[fam] = rk;
+      this.gridToggleValue(fam, rk);
+    },
+    gridSetAll(fam, on) {
+      const all = this.gridFamilyRules(fam).map(r => r.rule_key);
+      // "None" would make the family unsweepable, so it keeps the first
+      // value rather than producing a request the server must reject.
+      this.gridValues = { ...this.gridValues, [fam]: on ? all : all.slice(0, 1) };
+    },
+    gridDropped(fam) {
+      const sel = this.gridValues[fam];
+      if (!sel) return [];
+      return this.gridFamilyRules(fam).filter(r => !sel.includes(r.rule_key));
+    },
+    // What this family's deselection is buying, in the unit that matters.
+    // Shown before committing rather than discovered after a run.
+    gridFamilyCost(fam) {
+      if (!this.gridSweep.includes(fam)) return null;
+      const dropped = this.gridDropped(fam);
+      if (!dropped.length) return null;
+      const full = this.gridFamilyRules(fam).length;
+      const now = this.gridFamilyValueCount(fam);
+      const other = this.gridComboCount / Math.max(1, now);
+      return { dropped: dropped.map(r => r.label).join(', '),
+               was: Math.round(other * full), is: this.gridComboCount };
+    },
+    // trail carries two sub-fields; a flat 16-chip run hides that structure.
+    // Grouped by the first dimension so the grid reads as activation x
+    // distance. Families with one dimension return a single unnamed group.
+    gridChipGroups(fam) {
+      const f = { family: fam, rules: this.gridFamilyRules(fam) };
+      const dims = this.famDims(f);
+      if (dims.length < 2) return [{ label: '', rules: f.rules }];
+      const d0 = dims[0];
+      const out = new Map();
+      for (const r of f.rules) {
+        const k = String((r.params || {})[d0] ?? '');
+        if (!out.has(k)) out.set(k, []);
+        out.get(k).push(r);
+      }
+      return [...out.entries()]
+        .sort((a, b) => (+a[0]) - (+b[0]))
+        .map(([k, rules]) => ({ label: `${d0} ${this.famValLabel(d0, k)}`, rules }));
+    },
+    gridSummary(fam) {
+      const sel = this.gridValues[fam];
+      const rules = this.gridFamilyRules(fam);
+      const on = sel ? rules.filter(r => sel.includes(r.rule_key)) : rules;
+      return on.map(r => r.label).join(', ');
+    },
     gridToggleFamily(fam) {
       const i = this.gridSweep.indexOf(fam);
       if (i >= 0) this.gridSweep.splice(i, 1);
@@ -741,11 +814,32 @@ document.addEventListener('alpine:init', () => {
     // default and labelled.
     gridRankColour: false,
     toggleGridRank() { this.gridRankColour = !this.gridRankColour; },
+    // 'value'    sequential, dark -> bright, no good/bad semantics. Answers
+    //            "where is the ridge". Default, because the common reading
+    //            of this matrix is magnitude, not judgement.
+    // 'baseline' diverging around the null in amber/teal. Answers "does
+    //            anything beat doing nothing".
+    //
+    // The old blue/pink is gone from this surface. It is the node heatmap's
+    // palette, where pink means a NEGATIVE RETURN, and it carried that
+    // meaning onto cells where the worst is a profitable strategy that
+    // merely loses to a better one. One colour cannot say both.
+    gridColourBy: 'value',
+    setGridColourBy(m) { this.gridColourBy = m; },
+    get _gridRampOpts() {
+      const S = this._gridScale;
+      return this.gridColourBy === 'baseline'
+        ? { ramp: 'baseline', mid: S.mid, lo: S.lo, hi: S.hi }
+        : { ramp: 'value', lo: S.lo, hi: S.hi };
+    },
+    gridCellFg(cell) {
+      if (!cell || !cell.n) return '#fff';
+      return window.FactorCharts._fgOn(this.gridCellBg(cell));
+    },
     gridCellBg(cell) {
       // Same formula as the factor heatmap; only the anchoring differs.
       // minSampleN 0: a cell here is an average over combinations, not a
       // trade count, so the low-n hatching does not apply.
-      const S = this._gridScale;
       if (this.gridRankColour) {
         if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
         const all = [];
@@ -753,11 +847,13 @@ document.addEventListener('alpine:init', () => {
           if (c.n) all.push(c.avg_ret);
         all.sort((a, b) => a - b);
         const r = all.length > 1 ? all.indexOf(cell.avg_ret) / (all.length - 1) : 0.5;
-        return window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r - 0.5 },
-                                            { mid: 0, lo: -0.5, hi: 0.5 });
+        return this.gridColourBy === 'baseline'
+          ? window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r - 0.5 },
+                                         { ramp: 'baseline', mid: 0, lo: -0.5, hi: 0.5 })
+          : window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r },
+                                         { ramp: 'value', lo: 0, hi: 1 });
       }
-      return window.FactorCharts._hmPaint(1, 0, cell,
-        { mid: S.mid, lo: S.lo, hi: S.hi });
+      return window.FactorCharts._hmPaint(1, 0, cell, this._gridRampOpts);
     },
     gridCellTitle(cell) {
       if (!cell || !cell.n) return 'no combinations';
@@ -776,8 +872,7 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
       for (let i = 0; i <= 20; i++) {
         const t = i / 20;
         out.push(window.FactorCharts._hmPaint(1, 0,
-          { n: 1, avg_ret: S.lo + t * (S.hi - S.lo) },
-          { mid: S.mid, lo: S.lo, hi: S.hi }));
+          { n: 1, avg_ret: S.lo + t * (S.hi - S.lo) }, this._gridRampOpts));
       }
       return out;
     },
@@ -813,26 +908,42 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
       }
     },
 
+    // Two questions, two panels, neither compromising its axis for the other.
+    //
+    //   main  "what Calmar does 2x ATR produce"    -- absolute, autoscaled to
+    //         THE DATA ONLY. The null is drawn but excluded from the range,
+    //         so a baseline 2-3x the policies can never squeeze them into the
+    //         bottom quarter again.
+    //   strip "is that better than doing nothing"  -- value / null, reference
+    //         at 1.0, its own compressed range.
+    //
+    // Deliberately NOT a second y-axis. Plotting the baseline at all is meant
+    // to be a visual comparison, and two lines on different scales look
+    // comparable when they are not -- it would misrepresent the relativity it
+    // exists to show. The max_days panel settles it: the null is a CURVE
+    // there, so the ratio is a different SHAPE, not a rescaling, and no
+    // right-axis relabelling can be correct on that panel at all.
     _renderGridMarginals() {
       const refs = this.gridRefs;
+      const fmt = (v) => this.gridFmt(v);
+      // Both charts pin their y-axis to the same pixel width, which is what
+      // makes the strip's categories line up under the main panel's. Without
+      // it the two axes size independently and the columns drift apart.
+      const AXIS_W = 54;
       for (const m of this.gridMarginals) {
         const id = 'grid-mg-' + m.family;
+        const sid = 'grid-rs-' + m.family;
+        for (const k of [id, sid]) {
+          if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
+        }
         const el = document.getElementById(id);
-        if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
         if (!el) continue;
         const labels = m.points.map(p => p.label);
-        // The reference, per panel. On the max_days panel it is a curve --
-        // horizon-only evaluated at each swept horizon. Elsewhere it is the
-        // mean of those, which is the same marginalisation the panel itself
-        // performs, so the line and the curve describe one baseline.
         const refSeries = (m.family === 'max_days' && refs.kind === 'curve')
           ? m.values.map(v => refs.byValue[v.rule_key] ?? null)
           : (refs.mean != null ? labels.map(() => refs.mean) : null);
 
         const ds = [
-          // Nested bands, same hue at three depths: p5-p95 faintest, +/-1sd
-          // over it, mean above both. Two signals, one channel, distinguished
-          // by depth rather than by a toggle that shows one at a time.
           { data: m.points.map(p => p.hi), borderWidth: 0, pointRadius: 0,
             fill: '+1', backgroundColor: 'rgba(52,152,219,.08)' },
           { data: m.points.map(p => p.lo), borderWidth: 0, pointRadius: 0, fill: false },
@@ -842,21 +953,31 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
           { data: m.points.map(p => p.mean), borderColor: '#3498db', borderWidth: 2,
             pointRadius: 3, pointBackgroundColor: '#3498db', fill: false, tension: 0 },
         ];
-        if (!this.gridShowBands) { ds.splice(0, 4); }
-        if (refSeries) {
-          ds.push({ data: refSeries, borderColor: 'rgba(200,200,200,.75)',
-                    borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0,
-                    fill: false, tension: 0 });
-        }
+        if (!this.gridShowBands) ds.splice(0, 4);
         const meanIx = this.gridShowBands ? 4 : 0;
-        // FORCING THE REFERENCE INTO THE AXIS RANGE is the actual fix for the
-        // vanishing line. Chart.js scales to the plotted datasets, and the
-        // reference used to be drawn by a plugin that was not one of them --
-        // so whenever the baseline sat outside the marginals' range, which is
-        // exactly what sweeping max_days causes, getPixelForValue returned a
-        // pixel outside the plot and the line drew off-chart. Silently. It is
-        // a dataset now, so the axis cannot exclude it.
-        const fmt = (v) => this.gridFmt(v);
+        if (refSeries) {
+          ds.push({ data: refSeries, borderColor: 'rgba(200,200,200,.8)',
+                    borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0,
+                    fill: false, tension: 0, label: 'do nothing' });
+        }
+
+        // THE AXIS IS COMPUTED FROM THE DATA SERIES ONLY. The reference is
+        // still plotted -- it just cannot vote on the range. When it falls
+        // outside, Chart.js clips it to the plot area and the label below
+        // reports its value with an arrow, so nothing is lost.
+        let lo = Infinity, hi = -Infinity;
+        for (const d of (this.gridShowBands ? ds.slice(0, 5) : ds.slice(0, 1))) {
+          for (const v of d.data) if (v != null && isFinite(v)) {
+            lo = Math.min(lo, v); hi = Math.max(hi, v);
+          }
+        }
+        if (!isFinite(lo)) { lo = 0; hi = 1; }
+        const pad = (hi - lo) * 0.08 || Math.abs(hi || 1) * 0.08;
+        const yMin = lo - pad, yMax = hi + pad;
+        const nullV = refs.mean;
+        const nullOff = (nullV == null) ? null
+          : (nullV > yMax ? 'above' : (nullV < yMin ? 'below' : null));
+
         this._charts[id] = new Chart(el.getContext('2d'), {
           type: 'line',
           data: { labels, datasets: ds },
@@ -873,20 +994,121 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
                                `+/-1sd ${fmt(p.sdLo)} … ${fmt(p.sdHi)}`,
                                `p5-p95 ${fmt(p.lo)} … ${fmt(p.hi)}`,
                                `over ${p.n} combination(s)`];
-                  if (refSeries && refSeries[c.dataIndex] != null)
-                    out.push(`do nothing: ${fmt(refSeries[c.dataIndex])}`);
+                  const r = refSeries ? refSeries[c.dataIndex] : null;
+                  if (r != null) {
+                    out.push(`do nothing: ${fmt(r)}`);
+                    if (r) out.push(`ratio: ${(p.mean / r).toFixed(2)}x`);
+                  }
                   return out;
                 } },
               },
             },
             scales: {
-              x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
-              // One formatter across panels and matrix, so the same quantity
-              // is not a decimal here and a percentage there.
-              y: { ticks: { color: '#888', font: { size: 10 }, callback: fmt },
+              x: { ticks: { display: false }, grid: { display: false } },
+              y: { min: yMin, max: yMax, afterFit: (sc) => { sc.width = AXIS_W; },
+                   ticks: { color: '#888', font: { size: 10 }, callback: fmt },
                    grid: { color: '#222' } },
             },
           },
+          plugins: [{
+            id: 'gridNullLabel',
+            afterDatasetsDraw(chart) {
+              if (nullV == null) return;
+              const xs = chart.scales.x, ys = chart.scales.y;
+              if (!xs || !ys) return;
+              // Named on the chart. A bare dashed line with no text is what
+              // made this unreadable to begin with.
+              const txt = `do nothing: ${fmt(nullV)}`
+                        + (nullOff === 'above' ? '  ↑ above range'
+                           : nullOff === 'below' ? '  ↓ below range' : '');
+              const c = chart.ctx;
+              c.save();
+              c.font = '10px monospace';
+              c.fillStyle = 'rgba(210,210,210,.9)';
+              c.textAlign = 'right';
+              c.fillText(txt, xs.right - 2,
+                         nullOff === 'below' ? ys.bottom - 4 : ys.top + 11);
+              c.restore();
+            },
+          }],
+        });
+
+        // ── Residual strip ───────────────────────────────────────────────
+        const sel = document.getElementById(sid);
+        if (!sel || !refSeries) continue;
+        const RMAX = 2;
+        const ratio = m.points.map((p, i) => {
+          const r = refSeries[i];
+          if (!r || p.mean == null || !isFinite(p.mean)) return null;
+          return p.mean / r;
+        });
+        // Outliers are CLIPPED and flagged, not rescaled: letting one point
+        // stretch this axis reproduces the problem the strip exists to fix.
+        const clipped = ratio.map(v => v == null ? null : Math.min(RMAX, Math.max(0, v)));
+        this._charts[sid] = new Chart(sel.getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets: [
+            { data: clipped, borderColor: '#c8c8c8', borderWidth: 1.5,
+              pointRadius: 2.5, pointBackgroundColor: '#c8c8c8', fill: false, tension: 0 },
+          ] },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
+                callbacks: { label: (c) => {
+                  const v = ratio[c.dataIndex];
+                  return v == null ? 'no baseline'
+                    : [`${v.toFixed(2)}x do nothing`,
+                       v >= 1 ? 'beats it' : 'loses to it'];
+                } },
+              },
+            },
+            scales: {
+              x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
+              y: { min: 0, max: RMAX, afterFit: (sc) => { sc.width = AXIS_W; },
+                   ticks: { color: '#888', font: { size: 9 }, stepSize: 1,
+                            callback: (v) => v + 'x' },
+                   grid: { color: '#222' } },
+            },
+          },
+          plugins: [{
+            id: 'gridStripRef',
+            beforeDatasetsDraw(chart) {
+              const xs = chart.scales.x, ys = chart.scales.y;
+              if (!xs || !ys) return;
+              const c = chart.ctx;
+              const y1 = ys.getPixelForValue(1);
+              c.save();
+              // Below 1.0 is "loses to doing nothing" -- shaded so the
+              // question the strip answers is readable without the axis.
+              c.fillStyle = 'rgba(224,158,62,.10)';
+              c.fillRect(xs.left, y1, xs.right - xs.left, ys.bottom - y1);
+              c.strokeStyle = 'rgba(255,255,255,.55)';
+              c.lineWidth = 1;
+              c.beginPath(); c.moveTo(xs.left, y1); c.lineTo(xs.right, y1); c.stroke();
+              c.restore();
+            },
+            afterDatasetsDraw(chart) {
+              const xs = chart.scales.x, ys = chart.scales.y;
+              if (!xs || !ys) return;
+              const c = chart.ctx;
+              c.save();
+              c.font = '9px monospace';
+              c.fillStyle = 'rgba(230,230,230,.9)';
+              c.textAlign = 'center';
+              ratio.forEach((v, i) => {
+                if (v == null || v <= RMAX) return;
+                const px = xs.getPixelForValue(i);
+                c.beginPath();
+                c.moveTo(px, ys.top + 2); c.lineTo(px - 4, ys.top + 8);
+                c.lineTo(px + 4, ys.top + 8); c.closePath(); c.fill();
+                c.fillText(v.toFixed(1) + 'x', px, ys.top + 18);
+              });
+              c.restore();
+            },
+          }],
         });
       }
     },

@@ -47,6 +47,16 @@
                 hardcoded percent form. That default is only correct for
                 return-like quantities -- a grid showing Calmar 4.26 would
                 render "426.00%" without this.
+    fg_fn       name of a function returning the cell's TEXT colour, given the
+                cell. Default keeps #fff, which is right for the node
+                heatmap's translucent blues and pinks. A grid using a
+                sequential luminance ramp needs dark text at the bright end:
+                that ramp spans relative luminance 0.08 to 0.75, and white
+                stops being legible above about 0.55.
+
+  Both conditionals are written INLINE inside the tag on purpose. Wrapping
+  the element in an if/else block emits two style attributes on the default
+  path; the render gate catches that, but it is easier not to write it.
   A SECOND grid on the same page must not reuse the first one's colour
   scale -- hmCellBg reads _hmRange off the component, so two grids sharing
   it would recolour each other. Pass bg_fn to point at a function carrying
@@ -62,7 +72,7 @@
 -#}
 {% macro heatmap_grid(grid_expr, obj, key, size, cls_expr=None, click_expr=None,
                       bg_fn='hmCellBg', title_fn='_hmCellTitle',
-                      val_fn=None) -%}
+                      val_fn=None, fg_fn=None) -%}
 {%- set S = {
       'compact': {'tbl': 11, 'thpad': '3px 6px', 'thf': 10,
                   'w': 72, 'h': 46, 'pad': 3, 'valf': 12, 'nf': 10},
@@ -94,9 +104,9 @@
               {%- endif %}>
             <template x-if="cell && cell.n > 0">
               <div>
-                <span style="font-size:{{ S.valf }}px;font-weight:700;display:block;color:#fff"
+                <span {% if fg_fn %}style="font-size:{{ S.valf }}px;font-weight:700;display:block" :style="'color:' + {{ fg_fn|safe }}(cell)"{% else %}style="font-size:{{ S.valf }}px;font-weight:700;display:block;color:#fff"{% endif %}
                       x-text="{% if val_fn %}{{ val_fn|safe }}(cell.avg_ret){% else %}((cell.avg_ret||0)*100).toFixed(2) + '%'{% endif %}"></span>
-                <span style="font-size:{{ S.nf }}px;opacity:.55;display:block;color:#fff" x-text="'n=' + cell.n"></span>
+                <span {% if fg_fn %}style="font-size:{{ S.nf }}px;opacity:.55;display:block" :style="'color:' + {{ fg_fn|safe }}(cell)"{% else %}style="font-size:{{ S.nf }}px;opacity:.55;display:block;color:#fff"{% endif %} x-text="'n=' + cell.n"></span>
               </div>
             </template>
           </td>

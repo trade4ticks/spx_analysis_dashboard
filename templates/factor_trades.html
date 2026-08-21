@@ -141,6 +141,29 @@
     .ft-suite .sb.sb-win  { color:#3498db; }
     .ft-suite .sb.sb-loss { color:#e84393; }
     .ft-suite .sb.sb-mid  { color:#c8c8c8; }
+    /* Sweep configuration. Chips are FIXED WIDTH and monospace so "1x ATR"
+       and "1.5x ATR" align in columns instead of ragged-wrapping, and filled
+       vs outlined so selection reads at a glance -- blue text on blue was a
+       large part of why the rail version read as a wall of characters. */
+    .ft-cfg-row  { border-bottom:1px solid var(--border); padding:10px 2px; }
+    .ft-cfg-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+    .ft-cfg-name { font-family:monospace; font-size:13px; font-weight:700;
+                   color:var(--text); min-width:150px; }
+    .ft-cfg-btn  { font-size:10px; color:var(--dim); cursor:pointer;
+                   border:1px solid var(--border); border-radius:3px; padding:1px 7px; }
+    .ft-cfg-btn:hover { color:var(--text); border-color:var(--muted); }
+    .ft-cfg-grp  { display:flex; align-items:flex-start; gap:10px; margin-bottom:5px; }
+    .ft-cfg-glbl { flex:0 0 130px; font-size:10px; color:var(--dim);
+                   font-family:monospace; padding-top:5px; }
+    .ft-chips    { display:flex; flex-wrap:wrap; gap:6px; }
+    .ft-chip     { flex:0 0 auto; width:88px; text-align:center; cursor:pointer;
+                   font-family:monospace; font-size:11px; padding:4px 0;
+                   border-radius:3px; border:1px solid var(--border);
+                   color:var(--dim); background:transparent;
+                   user-select:none; transition:background .1s, color .1s; }
+    .ft-chip:hover { border-color:var(--muted); color:var(--text); }
+    .ft-chip.on  { background:#2a5a82; border-color:#3a7ab0; color:#fff;
+                   font-weight:600; }
     .ft-units { font-size:10px; color:#c8c8c8; margin-bottom:8px; padding:5px 9px;
                 border-radius:3px; background:rgba(255,255,255,.04);
                 border:1px solid var(--border); line-height:1.5; }
@@ -148,8 +171,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=19"></script>
-  <script src="/static/js/factor_trades.js?v=43"></script>
+  <script src="/static/js/factor_charts.js?v=20"></script>
+  <script src="/static/js/factor_trades.js?v=44"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -340,6 +363,10 @@
       <div class="ft-sec-h" style="margin-top:12px">Parameter response</div>
       {#- Families with more than one catalog value; sweeping a single-value
           family produces a one-point curve. -#}
+      {#- The rail carries a SUMMARY only. A 2D selection -- up to 9 families
+          by 16 values -- cannot be laid out in a 290px column, and the
+          previous inline chips proved it: no separators, ragged wrap, running
+          off the edge. The editor lives in a modal with room to breathe. -#}
       <template x-for="f in gridFamilies" :key="'gf-'+f.family">
         <div>
           <div class="ft-rule" :class="gridSweep.includes(f.family) ? 'on' : ''"
@@ -349,24 +376,15 @@
             <span class="ft-note"
                   x-text="gridFamilyValueCount(f.family) + '/' + f.n"></span>
           </div>
-          {#- Per-value picks rather than range endpoints: some families are
-              not ordered, and a non-contiguous selection is the point. All
-              are checked by default, and the last one cannot be unchecked --
-              a swept family with no values is not a sweep. -#}
-          <div x-show="gridSweep.includes(f.family)"
-               style="display:flex;flex-wrap:wrap;gap:3px;padding:2px 5px 5px 33px">
-            <template x-for="r in gridFamilyRules(f.family)" :key="'gv-'+r.rule_key">
-              <span @click="gridToggleValue(f.family, r.rule_key)"
-                    :style="gridValueOn(f.family, r.rule_key)
-                            ? 'background:rgba(52,152,219,.22);border-color:#3498db;color:var(--text)'
-                            : 'opacity:.45'"
-                    style="cursor:pointer;font-size:10px;font-family:monospace;
-                           padding:1px 5px;border-radius:3px;border:1px solid var(--border)"
-                    x-text="r.label"></span>
-            </template>
-          </div>
+          <div class="ft-note" x-show="gridSweep.includes(f.family)"
+               :title="gridSummary(f.family)"
+               style="padding:0 5px 4px 33px;font-family:monospace;white-space:nowrap;
+                      overflow:hidden;text-overflow:ellipsis"
+               x-text="gridSummary(f.family)"></div>
         </div>
       </template>
+      <button class="ft-btn" @click="gridCfgOpen = true" x-show="gridSweep.length"
+              style="margin-top:4px;font-size:11px">Configure sweep…</button>
       {#- Payload alongside time, because payload is the binding cap now:
           one query resolves every combination, but each still ships its
           returns to the browser for dollar sizing. -#}
@@ -826,8 +844,20 @@
               <template x-for="m in gridMarginals" :key="'gp-'+m.family">
                 <div class="chart-box" style="margin-bottom:0">
                   <div class="chart-title" x-text="m.family"></div>
-                  <div class="chart-canvas" style="height:190px">
+                  <div class="chart-canvas" style="height:172px">
                     <canvas :id="'grid-mg-' + m.family"></canvas>
+                  </div>
+                  {#- Residual strip: value / do-nothing, reference at 1.0.
+                      A separate panel rather than a second y-axis — two lines
+                      on different scales look comparable when they are not,
+                      and on the max_days panel the null is a CURVE, so the
+                      ratio is a different shape and no axis relabelling could
+                      be correct there. -#}
+                  <div class="chart-canvas" style="height:58px">
+                    <canvas :id="'grid-rs-' + m.family"></canvas>
+                  </div>
+                  <div class="ft-note" style="text-align:center">
+                    ×&nbsp;do&nbsp;nothing — above 1.0 beats it
                   </div>
                 </div>
               </template>
@@ -846,6 +876,19 @@
                       into the model — which is how both axes ended up on the
                       first swept family, giving n=1 in every cell. The rule
                       selects in the rail already use this pattern. -#}
+                  {#- Two questions, two ramps. Blue/pink is gone from this
+                      surface: it is the node heatmap's palette, where pink
+                      means a NEGATIVE RETURN, and here the worst cell is a
+                      profitable strategy that merely loses to a better one. -#}
+                  <span class="ft-note">Colour by</span>
+                  <div class="ft-toggle">
+                    <span :class="gridColourBy === 'value' ? 'on' : ''"
+                          @click="setGridColourBy('value')"
+                          title="Sequential dark to bright. Magnitude only, nothing is bad. Answers: where is the ridge.">value</span>
+                    <span :class="gridColourBy === 'baseline' ? 'on' : ''"
+                          @click="setGridColourBy('baseline')"
+                          title="Diverging around the null in amber/teal. Answers: does anything beat doing nothing.">vs baseline</span>
+                  </div>
                   <span class="ft-note">X</span>
                   <select style="width:auto" :value="gridPairX"
                           @change="setGridPair('x', $event.target.value)">
@@ -870,7 +913,7 @@
                     <div style="overflow-x:auto">
                       {{ m.heatmap_grid('gridHeat.grid', 'gridHeat', 'gh', 'compact',
                                         bg_fn='gridCellBg', title_fn='gridCellTitle',
-                                        val_fn='gridFmt')
+                                        val_fn='gridFmt', fg_fn='gridCellFg')
                          | indent(22) | safe }}
                     </div>
                     {#- The ramp is anchored at the null and scaled to this
@@ -922,6 +965,68 @@
           </div>
         </template>
       </div>
+
+      <!-- 7c. Sweep configuration. Modal because the selection is 2D and the
+           rail is not. Reuses the overlay pattern already on this page. -->
+      <template x-if="gridCfgOpen">
+        <div class="ft-ov" @keydown.escape.window="gridCfgOpen = false"
+             style="padding:18px 24px">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:10px">
+            <div class="chart-title" style="margin:0;flex:0 0 auto">Configure sweep</div>
+            {#- Counter and payload live in here, updating as chips are
+                clicked, because the decision being made IS the trade-off
+                between coverage and payload. -#}
+            <div class="ft-note" style="font-family:monospace"
+                 x-text="gridComboCount + ' combos · ~' + gridPayloadMB.toFixed(1)
+                         + 'MB of ~11MB cap'"></div>
+            <div style="flex:1;height:6px;border:1px solid var(--border);border-radius:3px;overflow:hidden">
+              <div :style="'height:100%;width:' + Math.min(100, gridPayloadMB / 11 * 100)
+                           + '%;background:' + (gridPayloadMB > 11 ? '#e84393' : '#3498db')"></div>
+            </div>
+            <button class="ft-btn" style="width:auto;padding:4px 12px;margin:0"
+                    @click="gridCfgOpen = false">Done</button>
+          </div>
+          <div class="ft-note" style="margin-bottom:10px">
+            Shift-click sets a range. The null combination and the horizon
+            references sit outside the cross product, so no filter here can
+            remove your baseline.
+          </div>
+          <div style="flex:1;min-height:0;overflow-y:auto">
+            <template x-for="f in gridFamilies" :key="'cf-'+f.family">
+              <div x-show="gridSweep.includes(f.family)" class="ft-cfg-row">
+                <div class="ft-cfg-head">
+                  <span class="ft-cfg-name" x-text="f.family"></span>
+                  <span class="ft-note" x-text="gridFamilyValueCount(f.family) + '/' + f.n"></span>
+                  <span class="ft-cfg-btn" @click="gridSetAll(f.family, true)">all</span>
+                  <span class="ft-cfg-btn" @click="gridSetAll(f.family, false)">none</span>
+                  <span class="ft-note" style="color:#e0b066"
+                        x-show="gridFamilyCost(f.family)"
+                        x-text="gridFamilyCost(f.family)
+                                ? ('dropping ' + gridFamilyCost(f.family).dropped
+                                   + ' → ' + gridFamilyCost(f.family).was + ' → '
+                                   + gridFamilyCost(f.family).is + ' combos') : ''"></span>
+                </div>
+                {#- Grouped by the first sub-field where a family has two, so
+                    trail reads as activation x distance rather than a
+                    sixteen-chip run-on. -#}
+                <template x-for="g in gridChipGroups(f.family)" :key="'cg-'+f.family+g.label">
+                  <div class="ft-cfg-grp">
+                    <span class="ft-cfg-glbl" x-show="g.label" x-text="g.label"></span>
+                    <div class="ft-chips">
+                      <template x-for="r in g.rules" :key="'cc-'+r.rule_key">
+                        <span class="ft-chip"
+                              :class="gridValueOn(f.family, r.rule_key) ? 'on' : ''"
+                              @click="gridChipClick(f.family, r.rule_key, $event)"
+                              x-text="r.label"></span>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
 
       <!-- 8: full-screen overlay. The canvas is MOVED here and moved back on
            close, so the Chart.js instance survives and only needs a resize. -->

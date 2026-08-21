@@ -1144,11 +1144,73 @@ window.FactorCharts = {
   // from hmCellBg; only the two reads off the component became arguments.
   // The parameter is minSampleN, not minN: the body already declares a
   // local minN and a same-named parameter shadows it.
-  // opts (all optional): {mid, lo, hi}. Default -- no opts -- is the
-  // original behaviour exactly: diverge around zero, symmetric +/-range.
-  // A second heatmap can instead anchor the midpoint somewhere meaningful
-  // (the null combination) with independent endpoints, without a second
-  // colour formula that could drift from this one.
+  // ── Colour ramps ─────────────────────────────────────────────────────
+  //
+  // LUMINANCE carries magnitude in both of these. The eye discriminates
+  // lightness far better than saturation, so a ramp that varies saturation
+  // on one hue makes a near-2x spread (1.19 -> 2.32) look flat -- which is
+  // exactly what it did.
+  //
+  // Neither uses red/pink-vs-blue. That is the node heatmap's palette, where
+  // red means a negative return, and it carried that meaning onto a surface
+  // where the worst cell is still a profitable strategy.
+
+  // Viridis anchors, truncated before the yellow end. The full ramp finishes
+  // near #fde725, which white cell text cannot sit on; stopping at green
+  // keeps the whole range legible while still spanning dark navy to bright.
+  _VIRIDIS: [[68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142],
+             [38, 130, 142], [31, 158, 137], [53, 183, 121], [110, 206, 88],
+             [154, 216, 60]],
+
+  _lerpRgb(a, b, t) {
+    return [Math.round(a[0] + (b[0] - a[0]) * t),
+            Math.round(a[1] + (b[1] - a[1]) * t),
+            Math.round(a[2] + (b[2] - a[2]) * t)];
+  },
+
+  // t in [0,1] -> sequential, monotone in luminance. Answers "where is the
+  // ridge" with no diverging semantics: nothing is bad, one end is simply
+  // more than the other.
+  _rampSequential(t) {
+    const V = window.FactorCharts._VIRIDIS;
+    const x = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0)) * (V.length - 1);
+    const i = Math.min(V.length - 2, Math.floor(x));
+    const c = window.FactorCharts._lerpRgb(V[i], V[i + 1], x - i);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  },
+
+  // t in [-1,1] -> amber below the midpoint, teal above, luminance rising
+  // with distance from it. Mid is a dim neutral rather than a light one:
+  // on a dark page a light midpoint reads as the most important cell, which
+  // is the opposite of what a midpoint means.
+  _rampDiverge(t) {
+    const v = Math.max(-1, Math.min(1, Number.isFinite(t) ? t : 0));
+    const MID = [58, 58, 62];
+    const AMBER = [224, 158, 62];
+    const TEAL = [38, 198, 176];
+    const c = window.FactorCharts._lerpRgb(MID, v < 0 ? AMBER : TEAL, Math.abs(v));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  },
+
+  // Relative luminance, for picking cell text that stays readable across a
+  // ramp that deliberately spans dark to bright.
+  _fgOn(bg) {
+    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(bg || ''));
+    if (!m) return '#fff';
+    const L = (0.2126 * +m[1] + 0.7152 * +m[2] + 0.0722 * +m[3]) / 255;
+    return L > 0.55 ? '#101010' : '#fff';
+  },
+
+  // opts (all optional): {mid, lo, hi, ramp}. Default -- no opts -- is the
+  // original behaviour exactly: diverge around zero, symmetric +/-range, in
+  // the blue/pink node palette. A second heatmap can instead anchor the
+  // midpoint somewhere meaningful (the null combination) with independent
+  // endpoints, and choose a ramp whose semantics suit its own surface,
+  // without a second colour formula that could drift from this one.
+  //
+  //   ramp absent      blue/pink diverging  (the node heatmap)
+  //   ramp 'value'     sequential viridis   (magnitude, no good/bad)
+  //   ramp 'baseline'  amber/teal diverging (below/above the midpoint)
   _hmPaint(range, minSampleN, cell, opts) {
     // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
     // same number determines hatching AND gradient inclusion. Critical
@@ -1183,6 +1245,16 @@ window.FactorCharts = {
     } else {
       t = Math.max(-1, Math.min(1, v / (range || 0.01)));
     }
+    const ramp = opts && opts.ramp;
+    if (ramp === 'value') {
+      // Sequential wants [0,1] across lo..hi, not a signed distance from a
+      // midpoint, so it is normalised independently of the diverging branch.
+      const lo = (opts && Number.isFinite(opts.lo)) ? opts.lo : 0;
+      const hi = (opts && Number.isFinite(opts.hi)) ? opts.hi : 1;
+      const u = hi > lo ? (v - lo) / (hi - lo) : 0.5;
+      return window.FactorCharts._rampSequential(Math.max(0, Math.min(1, u)));
+    }
+    if (ramp === 'baseline') return window.FactorCharts._rampDiverge(t);
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
   },
