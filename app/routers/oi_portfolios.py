@@ -115,6 +115,10 @@ class AggregateRequest(BaseModel):
     # per-signal trade-row assembly so both the per-signal
     # contribution stats AND the deduped union_rows reconcile.
     outlier_max_ret: Optional[float] = None
+    # 'train' | 'test'. Ignored for an in_sample portfolio, which has no
+    # cutoff to split on. Defaults to train: the coverage question these
+    # portfolios are assembled to answer is a train-window question.
+    window: Optional[str] = "train"
 
 
 class LossAnalysisRequest(BaseModel):
@@ -152,13 +156,47 @@ _SIGNAL_BIN_TABLE = {
 }
 
 
-def _signal_bin_source(sig: dict) -> tuple:
-    """(bin_table, train_cutoff_or_None) for one signal dict."""
+def _signal_bin_source(sig: dict, window: str = "train") -> tuple:
+    """(bin_table, train_cutoff_or_None) for one signal dict.
+
+    window="train"  train_test signals are restricted to their train window.
+                    The default, and what the surfaces with no window control
+                    (loss-analysis, portfolio-lab) want.
+    window="all"    no date restriction. The aggregate uses this so it can
+                    fetch both windows once and split them in Python -- a
+                    per-signal SQL restriction would make TEST mode return
+                    nothing at all, because every TT signal would have been
+                    filtered to pre-cutoff before the split happened.
+    """
     mode = (sig.get("selection_mode") or "in_sample")
     table = _SIGNAL_BIN_TABLE.get(mode, "is_bins")
-    if mode != "train_test":
+    if mode != "train_test" or window == "all":
         return table, None
     return table, sig.get("selection_cutoff")
+
+
+def _portfolio_cutoff(entries: list):
+    """The frozen split this portfolio's signals were drawn against, or None.
+
+    Not a user control. Mixed-mode portfolios already refuse to aggregate, so
+    every enabled signal here shares one selection_mode; if that mode is
+    train_test they also share one cutoff. Deriving it means the split can
+    never drift from the signals it came from.
+
+    Returns None for an in_sample portfolio -- there is no cutoff, so the
+    train/test toggle is absent rather than showing an arbitrary split.
+    """
+    cuts = set()
+    for e in entries:
+        sig = e["sig"]
+        if (sig.get("selection_mode") or "in_sample") != "train_test":
+            continue
+        c = sig.get("selection_cutoff")
+        if c is not None:
+            cuts.add(c.isoformat() if hasattr(c, "isoformat") else str(c))
+    if len(cuts) != 1:
+        return None
+    return next(iter(cuts))
 
 
 def _mixed_mode_error(entries: list) -> dict:
@@ -242,6 +280,8 @@ def _empty_aggregate(portfolio: dict, outcome: str, all_ps: list,
         "equity_primary": [], "equity_combined": [],
         "yearly": [], "tickers": [],
         "combined_trades": [], "combined_trade_dates": [],
+        "series_trades": [], "window_trades": [],
+        "window": "train", "cutoff_date": None, "series_axis": None,
         "winner_avg_ret": 0.0, "loser_avg_ret": 0.0,
         "n_each": [], "utilisation": 100.0,
         "phi_systems": [], "overlap_systems": [], "system_labels": [],
@@ -676,7 +716,9 @@ async def portfolio_aggregate(
             # Per-signal bin table + window. The train filter's placeholder
             # index is computed from the shared date params rather than
             # hardcoded, because those vary with the request.
-            bin_table, train_cutoff = _signal_bin_source(sig)
+            # window="all": fetch both windows and split in Python below.
+            # Restricting here would leave TEST mode with nothing to draw.
+            bin_table, train_cutoff = _signal_bin_source(sig, window="all")
             sig_params = list(date_params)
             window_sql = ""
             if train_cutoff is not None:
@@ -742,7 +784,37 @@ async def portfolio_aggregate(
             key = (row["ticker"], row["trade_date"])
             if key not in seen:
                 seen[key] = row
-    union_rows = sorted(seen.values(), key=lambda r: (r["trade_date"], r["ticker"]))
+    all_rows = sorted(seen.values(), key=lambda r: (r["trade_date"], r["ticker"]))
+
+    # TWO POPULATIONS, named by purpose so they cannot be confused:
+    #
+    #   window_trades  strictly the active window. Every single-window number
+    #                  is computed FROM IT SERVER-SIDE and shipped as a
+    #                  finished aggregate -- stats, ticker breakdown,
+    #                  utilisation, phi/overlap. No client pane ever sees a
+    #                  list it could widen.
+    #   series_trades  what the three time-series panes draw: train-only in
+    #                  TRAIN, the FULL history in TEST so the whole record and
+    #                  the cutoff are both visible.
+    #
+    # In TRAIN the two are the same population, which is the invariant worth
+    # asserting downstream: the equity endpoint must equal Total Ret there.
+    #
+    # (Mirrored from the exits page's /zone handler, which arrived at this
+    # shape after the stat bar twice got widened to the full period in TEST.)
+    port_cutoff = _portfolio_cutoff(enabled_signals)
+    active = "test" if (req.window or "train") == "test" else "train"
+    if not port_cutoff:
+        # in_sample portfolio: no cutoff, no split, no toggle.
+        active = "train"
+        series_rows = all_rows
+        union_rows  = all_rows
+    elif active == "train":
+        series_rows = [r for r in all_rows if r["trade_date"] < port_cutoff]
+        union_rows  = series_rows
+    else:
+        series_rows = all_rows
+        union_rows  = [r for r in all_rows if r["trade_date"] >= port_cutoff]
 
     n = len(union_rows)
     if n == 0:
@@ -769,11 +841,12 @@ async def portfolio_aggregate(
     # date range. Drives the Trade Activity pane's x-axis on initial
     # page load (no primary Analyze required) so its rolling H-day
     # window indexes actual trading days, not fired-trade dates.
-    # Range matches the equity curve (eq_port spans min→max of
-    # union_rows.trade_date), so the two panes line up exactly.
+    # Range matches the equity curve (both span min→max of series_rows), so
+    # the two panes line up exactly. SERIES, not window: the activity pane is
+    # a time-series pane, so in TEST its axis covers the whole record.
     trading_days: list = []
     try:
-        td_dates = [r["trade_date"] for r in union_rows]
+        td_dates = [r["trade_date"] for r in series_rows]
         d0 = _date.fromisoformat(min(td_dates))
         d1 = _date.fromisoformat(max(td_dates))
         async with oi_pool.acquire() as conn:
@@ -785,7 +858,7 @@ async def portfolio_aggregate(
             )
         trading_days = [r["trade_date"].isoformat() for r in td_rows]
     except Exception:
-        trading_days = sorted({r["trade_date"] for r in union_rows})
+        trading_days = sorted({r["trade_date"] for r in series_rows})
 
     winner_avg = round(avg_winners, 6)
     loser_avg  = round(avg_losers,  6)
@@ -807,11 +880,19 @@ async def portfolio_aggregate(
     # differs. equity_primary = equity_combined (single curve — no primary
     # universe split; the singleSeries=true path in _renderSecEquity handles
     # this on the frontend).
-    eq_port = _sec_equity_curve(union_rows, outcome)
+    # SERIES population: the equity curve is a time-series pane. In TEST it
+    # therefore spans the full record while the stat bar beside it covers the
+    # test window only -- so the equity endpoint deliberately will NOT equal
+    # Total Ret there. The muted pre-cutoff stretch and the cutoff line are
+    # what stop that being rediscovered as a bug months later.
+    eq_port = _sec_equity_curve(series_rows, outcome)
 
     # ── Yearly breakdown (single series) ────────────────────────────────────
+    # SERIES population — Annual P&L is one of the three time-series panes,
+    # so in TEST it shows every year and the cutoff line marks where the
+    # test window starts.
     by_year: dict = defaultdict(list)
-    for r in union_rows:
+    for r in series_rows:
         yr = int(r["trade_date"][:4])
         by_year[yr].append(r[outcome])
     yearly_out = []
@@ -825,6 +906,9 @@ async def portfolio_aggregate(
         })
 
     # ── Ticker breakdown ─────────────────────────────────────────────────────
+    # WINDOW population. The bubble pane sits next to the three time-series
+    # panes but is not one of them -- it answers "which tickers carried this
+    # window", so it belongs with the stat bar.
     by_ticker: dict = defaultdict(list)
     for r in union_rows:
         by_ticker[r["ticker"]].append(r[outcome])
@@ -842,15 +926,24 @@ async def portfolio_aggregate(
         })
     tickers_out.sort(key=lambda x: -x["n"])
 
-    # ── Enriched combined_trades (for activity chart + CSV) ──────────────────
-    horizon = _parse_horizon(outcome)
-    tickers_in_union = sorted({r["ticker"] for r in union_rows if r.get("ticker")})
-    calendars        = await _fetch_ticker_calendars(oi_pool, tickers_in_union)
-    combined_trades  = []
-    for r in union_rows:
-        rec = _build_enriched_trade(r, calendars, horizon,
-                                    primary_metric=None, outcome_col=outcome)
-        combined_trades.append(rec)
+    # ── Enriched trade lists, one per population ─────────────────────────────
+    # These were ONE list called combined_trades, feeding both the Annual P&L
+    # pane (a time-series pane, wants the series population) and the CSV
+    # export (wants what the user is looking at). One array serving two
+    # purposes is how a client pane silently widens itself, and it is also
+    # how a downloaded file ends up disagreeing with the view it came from.
+    horizon   = _parse_horizon(outcome)
+    all_tkrs  = sorted({r["ticker"] for r in series_rows if r.get("ticker")})
+    calendars = await _fetch_ticker_calendars(oi_pool, all_tkrs)
+
+    def _enrich(rows: list) -> list:
+        return [_build_enriched_trade(r, calendars, horizon,
+                                      primary_metric=None, outcome_col=outcome)
+                for r in rows]
+
+    series_trades = _enrich(series_rows)
+    # In TRAIN the two populations are identical, so avoid enriching twice.
+    window_trades = series_trades if union_rows is series_rows else _enrich(union_rows)
 
     # ── Phase 5: per-signal contribution stats ───────────────────────────────
     # Computed over each signal's OWN rows (before cross-signal dedup).
@@ -937,8 +1030,24 @@ async def portfolio_aggregate(
         "equity_combined":      eq_port,  # singleSeries=true on frontend
         "yearly":               yearly_out,
         "tickers":              tickers_out,
-        "combined_trades":      combined_trades,
-        "combined_trade_dates": [r.get("trade_date", "") for r in union_rows],
+        # Named by purpose. combined_trades is kept as an ALIAS of
+        # window_trades so any consumer not yet migrated gets the
+        # conservative population rather than silently widening.
+        "series_trades":        series_trades,
+        "window_trades":        window_trades,
+        "combined_trades":      window_trades,
+        "combined_trade_dates": [r.get("trade_date", "") for r in series_rows],
+        # Window envelope. cutoff_date is None for an in_sample portfolio,
+        # which is how the client knows to hide the toggle entirely rather
+        # than disable it over a split that does not exist.
+        "window":       active,
+        "cutoff_date":  port_cutoff,
+        # Fixed x-domain for the three time-series panes. Pinning it is what
+        # stops the axis rescaling on toggle -- with it, the shape alone says
+        # which window you are in.
+        "series_axis":  ({"from": min(r["trade_date"] for r in series_rows),
+                          "to":   max(r["trade_date"] for r in series_rows)}
+                         if series_rows else None),
         "winner_avg_ret":       winner_avg,
         "loser_avg_ret":        loser_avg,
         "n_each":               n_each,

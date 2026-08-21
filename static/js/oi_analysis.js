@@ -8226,6 +8226,7 @@ document.addEventListener('alpine:init', () => {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             outlier_max_ret: this.outlierMaxRetFor('port'),
+            window:          this.portWindow,
           }),
         });
         if (!r.ok) { this.portAggregate = null; this.portMixedModes = null; return; }
@@ -8242,6 +8243,9 @@ document.addEventListener('alpine:init', () => {
         }
         this.portMixedModes = null;
         this.portAggregate = _agg;
+        // The server decides: an in_sample portfolio has no cutoff and is
+        // always 'train', whatever the toggle last said.
+        this.portWindow = _agg.window || 'train';
         // Initialise loss-correlation slider to the portfolio's actual date range.
         const _td = (this.portAggregate.combined_trade_dates || []).filter(Boolean);
         if (_td.length) {
@@ -8261,6 +8265,33 @@ document.addEventListener('alpine:init', () => {
     // modes. Carries {modes:{mode:count}, message} for the banner.
     portMixedModes: null,
 
+    // ── Portfolio train/test window ─────────────────────────────────────
+    // Only meaningful for a TT portfolio. portAggregate.cutoff_date is null
+    // for an in_sample one, and portHasWindow gates the toggle off entirely
+    // rather than disabling it over a split that does not exist.
+    portWindow: 'train',
+    get portHasWindow() { return !!(this.portAggregate?.cutoff_date); },
+    setPortWindow(w) {
+      if (w === this.portWindow) return;
+      this.portWindow = w;
+      this.loadPortAggregate();
+    },
+
+    // The two fields FactorCharts reads for train/test rendering. Deliberately
+    // NOT this.cutoffDate — that is populated from /tt-cutoff on every page
+    // load regardless of mode, so keying off it would draw a train/test marker
+    // on in-sample portfolios. cutoffLineDate is the explicit opt-in, and the
+    // date comes from the portfolio's own signals via the aggregate response.
+    get cutoffLineDate() {
+      return this.portChartsActive ? (this.portAggregate?.cutoff_date || '') : '';
+    },
+    get seriesAxis() {
+      return this.portChartsActive ? (this.portAggregate?.series_axis || null) : null;
+    },
+    // Set only while the portfolio panes are the ones being drawn, so Recall
+    // and Zone charts on the same component are untouched.
+    portChartsActive: false,
+
     _destroyPortCharts() {
       for (const k of ['port-equity', 'port-yearly', 'port-activity', 'port-bubble']) {
         if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
@@ -8273,22 +8304,36 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       this._destroyPortCharts();
-      // Equity + activity + bubble delegate to the parameterized _renderSec* methods
-      // (singleSeries=true → one pink curve, no primary-universe blue line).
-      this._renderSecEquity('chart-port-equity', this.portAggregate, true);
-      this._renderPortYearly();
-      this._renderSecActivity('chart-port-activity', this.portAggregate);
-      this._renderSecBubble('chart-port-bubble', this.portAggregate);
+      // portChartsActive gates cutoffLineDate / seriesAxis so the cutoff
+      // marker and the pinned axis apply to THESE panes only — Recall and
+      // Zone render through the same FactorCharts functions on the same
+      // component and must not pick them up.
+      this.portChartsActive = true;
+      try {
+        // Equity + activity + bubble delegate to the parameterized _renderSec* methods
+        // (singleSeries=true → one pink curve, no primary-universe blue line).
+        this._renderSecEquity('chart-port-equity', this.portAggregate, true);
+        this._renderPortYearly();
+        this._renderSecActivity('chart-port-activity', this.portAggregate);
+        this._renderSecBubble('chart-port-bubble', this.portAggregate);
+      } finally {
+        this.portChartsActive = false;
+      }
     },
 
     _renderPortYearly() {
       // Delegates to _renderZoneYearly so the portfolio by-year pane
       // picks up the mode-aware (daily-avg-mean / per-trade-mean /
       // dollar-sum) logic — and so all three sections render through
-      // one path. portAggregate.combined_trades is the deduped union
-      // trade set, which is exactly what the dollar algorithm needs
-      // for portfolio-wide union-N per day.
-      this._renderZoneYearly('chart-port-yearly', this.portAggregate);
+      // one path. The dollar algorithm needs the deduped union trade set
+      // for portfolio-wide union-N per day — and Annual P&L is a
+      // time-series pane, so that set is series_trades: the full record in
+      // TEST, train-only in TRAIN.
+      this._renderZoneYearly('chart-port-yearly', {
+        ...this.portAggregate,
+        combined_trades: this.portAggregate.series_trades
+                      || this.portAggregate.combined_trades || [],
+      });
     },
 
     portSigCellTitle(i, j) {
@@ -8302,7 +8347,11 @@ document.addEventListener('alpine:init', () => {
 
     async portCsvDownload() {
       if (!this.portAggregate) return;
-      const trades = this.portAggregate.combined_trades || [];
+      // window_trades, not series_trades. A file downloaded from the TEST
+      // view must contain test trades — a CSV whose contents disagree with
+      // the view it came from is what misleads you three months later.
+      const trades = this.portAggregate.window_trades
+                  || this.portAggregate.combined_trades || [];
       if (!trades.length) return;
       // *_raw = as-traded prices (adjusted / split factor); size off those.
       // Each leg uses its own date's factor, so for a trade whose window
