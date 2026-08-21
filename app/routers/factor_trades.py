@@ -2080,14 +2080,27 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     # answering. The guard has to fire BEFORE the fan-out and has to measure
     # the thing that actually scales: combinations x trades.
     #
-    # One cheap COUNT buys that, reusing the zone's own count query so the
-    # number is the zone's real population and not an estimate of it.
+    # One cheap COUNT buys that. It deliberately does NOT go through
+    # build_combine_sql: the population is `path_status = 'ok'` intersected
+    # with the zone predicate, and none of that depends on which rules are
+    # selected -- the same fact that makes the sweep comparable cell to cell.
+    #
+    # Routing it through a combine also made an empty rule list fatal.
+    # build_combine_sql rightly refuses `[]` (a combine with no rules has no
+    # exit), so ANY caller holding nothing fixed -- which is what a sweep of
+    # every family means, and what check_grid_equivalence.py passes -- died
+    # in the pre-flight with "no rules selected" before a single combination
+    # was built. Counting rows needs no exit at all.
+    cnt_sql = f"""
+    SELECT COUNT(*) AS k
+    FROM tt_bins bt
+    JOIN trade_paths tp USING (ticker, trade_date)
+    WHERE tp.entry_anchor = $1 AND tp.path_status = 'ok'
+          AND $2::date IS NOT NULL
+          AND {where_bins} AND {cell_pred}{strike_pred}
+    """
     async with pool.acquire() as conn:
-        base_combine, _ = build_combine_sql(req.rule_keys or [], by_key,
-                                            include_exit_rule=True)
-        cnt = await conn.fetch(
-            _zone_count_sql(base_combine, where_bins, cell_pred, strike_pred), *args)
-    trades_each = sum(int(r["k"]) for r in cnt)
+        trades_each = int((await conn.fetchrow(cnt_sql, *args))["k"] or 0)
     if not trades_each:
         return {"error": "the selected zone has no trades"}
 

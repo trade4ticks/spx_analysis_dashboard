@@ -23,8 +23,19 @@ rule's return, which is a plausible number, not a nearby one.
 Usage
 -----
     python scripts/check_grid_equivalence.py --sweep fixed_stop,fixed_target
-    python scripts/check_grid_equivalence.py --sweep atr_stop,atr_target,max_days \
-        --cells "[[10,10],[11,10]]" --verify 12
+
+    # The strongest test of the transcription. `trail` and `breakeven` carry
+    # side='stop', so sweeping either alongside another stop puts TWO
+    # stop-side rules in every combination. Same-bar collisions between them
+    # exercise the WITHIN-SIDE tie-break -- the one resolved by the caller's
+    # rule order via a stable sort, and the one a re-implementation is most
+    # likely to get wrong with no error appearing anywhere.
+    python scripts/check_grid_equivalence.py --sweep atr_stop,trail
+
+    # Hold rules fixed across the sweep, as the page does for families that
+    # are selected in the rail but not swept.
+    python scripts/check_grid_equivalence.py --sweep atr_stop,trail \
+        --hold fixed_target__5 --cells "[[10,10],[11,10]]" --verify 12
 
 Needs DATABASE_URL and OI_DATABASE_URL. Exit 0 = every checked combination
 matched. Exit 1 = a mismatch, printed per trade with both values.
@@ -53,6 +64,8 @@ async def main() -> int:
     ap.add_argument("--primary", default=None, help="primary metric (default: first available)")
     ap.add_argument("--secondary", default=None)
     ap.add_argument("--cells", default="[[10,0]]", help="JSON [[bp,bs],...]")
+    ap.add_argument("--hold", default="",
+                    help="comma-separated rule_keys held fixed across the sweep")
     ap.add_argument("--anchor", default="open")
     ap.add_argument("--max-strike", type=float, default=1000.0)
     ap.add_argument("--verify", type=int, default=0,
@@ -88,7 +101,7 @@ async def main() -> int:
             primary_metric=primary,
             secondary_metric=a.secondary,
             entry_anchor=a.anchor,
-            rule_keys=[],
+            rule_keys=[x.strip() for x in a.hold.split(",") if x.strip()],
             n_bins=20,
             max_strike=a.max_strike,
             window="train",
@@ -100,6 +113,18 @@ async def main() -> int:
         out = await grid(req, pool=pool)
     finally:
         await close_pool()
+
+    # Print the mapping --sweep actually produced. A wrong family name or an
+    # unexpected value count is then visible directly, rather than inferred
+    # from a combination count that happens to look plausible.
+    for f in (out.get("sweep") or []):
+        vals = ", ".join(v["rule_key"] for v in f["values"])
+        print(f"  sweep {f['family']:<16} {len(f['values']):>3} values: {vals}")
+    if out.get("held"):
+        print(f"  held  {', '.join(out['held'])}")
+    if out.get("n_combos"):
+        print(f"  combinations         : {out['n_combos']} "
+              f"(incl. the null combination)")
 
     if out.get("error") and not out.get("verify"):
         print(f"FAIL — {out['error']}")
