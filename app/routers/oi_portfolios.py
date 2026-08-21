@@ -1042,12 +1042,16 @@ async def portfolio_aggregate(
         # than disable it over a split that does not exist.
         "window":       active,
         "cutoff_date":  port_cutoff,
-        # Fixed x-domain for the three time-series panes. Pinning it is what
-        # stops the axis rescaling on toggle -- with it, the shape alone says
-        # which window you are in.
-        "series_axis":  ({"from": min(r["trade_date"] for r in series_rows),
-                          "to":   max(r["trade_date"] for r in series_rows)}
-                         if series_rows else None),
+        # Fixed x-domain for the three time-series panes. Spans the WHOLE
+        # record -- all_rows, not series_rows -- so it is IDENTICAL in both
+        # windows. That is the entire point: the axis must not move, so the
+        # shape alone says which window you are in (half-filled = train,
+        # full = test). Built from series_rows it collapsed to the train
+        # range in TRAIN, which just made train look like a shorter chart
+        # and put the cutoff line flush against the right edge.
+        "series_axis":  ({"from": min(r["trade_date"] for r in all_rows),
+                          "to":   max(r["trade_date"] for r in all_rows)}
+                         if all_rows else None),
         "winner_avg_ret":       winner_avg,
         "loser_avg_ret":        loser_avg,
         "n_each":               n_each,

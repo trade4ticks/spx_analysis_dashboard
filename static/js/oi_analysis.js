@@ -8274,7 +8274,10 @@ document.addEventListener('alpine:init', () => {
     setPortWindow(w) {
       if (w === this.portWindow) return;
       this.portWindow = w;
-      this.loadPortAggregate();
+      // loadPortfolioAggregate, not loadPortAggregate. The wrong name threw
+      // on every click: the button state updated because portWindow is set
+      // first, and nothing else did because the refetch never ran.
+      this.loadPortfolioAggregate();
     },
 
     // The two fields FactorCharts reads for train/test rendering. Deliberately

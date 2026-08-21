@@ -4748,10 +4748,16 @@
                   x-text="'(' + (portAggregate?.outlier_excluded||0).toLocaleString() + ' excluded)'"></span>
           </span>
 
-          {#- TRAIN / TEST — absent, not disabled, on an in_sample portfolio.
-              There is no cutoff to split on, so a greyed control would imply
-              one exists. portHasWindow keys off the cutoff the SERVER derived
-              from this portfolio's own signals.
+          {#- TRAIN / TEST — styled as .mode-seg, the same segmented control
+              the page-wide Mode selector uses, so it reads as a control and
+              not as text. That class already carries cursor:pointer and the
+              on-tt / on-is state colours, so the states match the Train-test
+              and In-sample pills a user has already learned above.
+
+              ABSENT, not disabled, on an in_sample portfolio: there is no
+              cutoff to split on, and a greyed control would imply one exists.
+              portHasWindow keys off the cutoff the SERVER derived from this
+              portfolio's own signals.
 
               TRAIN  time-series panes stop at the cutoff on a full-width
                      axis; everything else computes on train.
@@ -4760,22 +4766,15 @@
                      TEST ONLY, so the equity endpoint will NOT equal Total
                      Ret — that is the point, not a bug. -#}
           <span x-show="portHasWindow" style="display:inline-flex;align-items:center;gap:6px">
-            <span style="font-size:11px;color:var(--dim)">Window:</span>
-            <span class="ft-win" style="display:inline-flex;border:1px solid var(--border);
-                                        border-radius:4px;overflow:hidden">
-              <span @click="setPortWindow('train')"
-                    :style="portWindow === 'train'
-                      ? 'background:rgba(230,162,60,.25);color:#e6a23c;font-weight:700'
-                      : 'color:var(--dim)'"
-                    style="padding:3px 12px;font-size:11px;cursor:pointer;letter-spacing:.5px"
-                    title="Time-series panes stop at the cutoff on a full-width axis. Every other number computes on the train window.">TRAIN</span>
-              <span @click="setPortWindow('test')"
-                    :style="portWindow === 'test'
-                      ? 'background:rgba(52,152,219,.25);color:#3498db;font-weight:700'
-                      : 'color:var(--dim)'"
-                    style="padding:3px 12px;font-size:11px;cursor:pointer;letter-spacing:.5px"
-                    title="Time-series panes show the full record, pre-cutoff muted. The stat bar computes on the TEST window only.">TEST</span>
-            </span>
+            <span style="font-size:11px;color:var(--dim)">Window</span>
+            <div class="mode-seg">
+              <span :class="{'on-tt': portWindow === 'train'}"
+                    @click="setPortWindow('train')"
+                    title="Time-series panes stop at the cutoff on a full-width axis. Every other number computes on the train window.">Train</span>
+              <span :class="{'on-is': portWindow === 'test'}"
+                    @click="setPortWindow('test')"
+                    title="Time-series panes show the full record, pre-cutoff muted. The stat bar computes on the TEST window only.">Test</span>
+            </div>
             <span style="font-size:10px;color:var(--dim);font-family:monospace"
                   x-text="'split ' + (portAggregate?.cutoff_date || '')"></span>
           </span>
