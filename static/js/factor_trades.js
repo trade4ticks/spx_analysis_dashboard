@@ -30,6 +30,17 @@ let _gridHeatKey = null, _gridHeatVal = null, _gridScaleVal = _GRID_SCALE_0;
 // collide whenever a re-run swept the same shape.
 let _gridHeatData = null;
 
+// Second memo, for gridStats. That getter runs _computeDollarSeries for every
+// combination x BOTH windows -- the expensive work on this pane -- and it was
+// uncached, so every read redid all of it. Both the 1D panels (gridMarginals)
+// and the 2D matrix read it, so a single metric switch paid for it more than
+// once. That is the multi-second pause on switching.
+//
+// It depends on the DATA and the DOLLAR SIZING only. Not on metric or window:
+// _gridStats returns every metric for both windows in one object, so switching
+// either is a re-read of a different field, not a recompute.
+let _gridStatsKey = null, _gridStatsVal = null, _gridStatsData = null;
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('factorTrades', () => ({
     metrics: [], ruleGroups: [], cutoffDate: '',
@@ -673,11 +684,22 @@ document.addEventListener('alpine:init', () => {
     get gridStats() {
       const d = this.gridData;
       if (!d) return null;
-      return (d.combos || []).map(c => c.error ? null : ({
+      // perTrade / dailyCap are live inputs and they feed
+      // _computeDollarSeries, so calmar, max_dd and total_ret all move when
+      // position sizing changes. They belong in the key; metric and window
+      // do not.
+      const key = `${this.perTrade}|${this.dailyCap}`;
+      if (key === _gridStatsKey && _gridStatsData === d && _gridStatsVal) {
+        return _gridStatsVal;
+      }
+      _gridStatsVal = (d.combos || []).map(c => c.error ? null : ({
         combo: c,
         train: this._gridStats(c, 'train'),
         test:  this._gridStats(c, 'test'),
       }));
+      _gridStatsKey = key;
+      _gridStatsData = d;
+      return _gridStatsVal;
     },
 
     // THE PRIMARY VIEW. For each swept family, the metric averaged across
@@ -794,8 +816,18 @@ document.addEventListener('alpine:init', () => {
       // combination, so reading it above the cache check would make a "hit"
       // as expensive as a miss. The span slider is deliberately NOT in the
       // key: changing the span must recolour, never re-marginalise.
+      // Every input that changes what this matrix DISPLAYS:
+      //   pairX/pairY  which families are on the axes
+      //   window       train vs test
+      //   metric       which column of the stats object is read
+      //   colourBy     moves the anchor, which moves autoSpan
+      //   perTrade/dailyCap  dollar sizing -> calmar, max_dd, total_ret
+      // Deliberately absent: the span slider (recolour only, never
+      // re-marginalise) and gridValues (a pre-RUN filter -- the matrix is
+      // built from d.sweep, i.e. what the completed run actually swept).
       const memoKey = [this.gridPairX, this.gridPairY, this.gridWindow,
-                       this.gridMetric, this.gridColourBy].join('|');
+                       this.gridMetric, this.gridColourBy,
+                       this.perTrade, this.dailyCap].join('|');
       if (memoKey === _gridHeatKey && _gridHeatData === d && _gridHeatVal) {
         return _gridHeatVal;
       }
