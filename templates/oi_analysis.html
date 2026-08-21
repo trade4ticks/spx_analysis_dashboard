@@ -4400,70 +4400,19 @@
 
         <div x-show="recallExpanded" x-transition style="padding:10px 12px 14px">
 
-          <!-- Order: stats bar → 4 visuals (2×2) → heatmap at bottom.
-               Stats bar markup is a verbatim copy of the main zone-
-               analyze stats bar (lines ~3153 onward) with zoneData
-               swapped for recallZoneData — exact same fields, order,
-               colors, sizing. No new component. -->
+          <!-- Order: stats bar → 4 visuals (2×2) → heatmap at bottom. -->
 
-          <!-- Stats bar — same 12-field layout as the main zone view -->
+          {#- Stat bar — the SAME 16 boxes as the portfolio, through the same
+              macro and the same value mapper (FactorCharts.statRowValues).
+              This was a hand-copied 12-field bar; a third implementation of
+              the same row is what extracting those was meant to prevent.
+
+              Population is the WINDOW, so in TEST every number here covers
+              the test window only. -#}
           <template x-if="recallZoneData && !recallZoneData.error && recallZoneData.n > 0">
             <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Tickers</div>
-                <div class="stat-value" x-text="recallZoneData.n_tickers"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">N</div>
-                <div class="stat-value" x-text="(recallZoneData.n||0).toLocaleString()"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Avg Ret</div>
-                <div :class="(recallZoneData.avg_ret||0)>=0?'stat-value pos':'stat-value neg'"
-                     x-text="((recallZoneData.avg_ret||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Median</div>
-                <div :class="(recallZoneData.median||0)>=0?'stat-value pos':'stat-value neg'"
-                     x-text="((recallZoneData.median||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Std Dev</div>
-                <div class="stat-value" x-text="((recallZoneData.std||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">P5</div>
-                <div :class="(recallZoneData.p5||0)>=0?'stat-value pos':'stat-value neg'"
-                     x-text="((recallZoneData.p5||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">P95</div>
-                <div :class="(recallZoneData.p95||0)>=0?'stat-value pos':'stat-value neg'"
-                     x-text="((recallZoneData.p95||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Win %</div>
-                <div :class="(recallZoneData.win_rate||0)>=0.5?'stat-value pos':'stat-value neg'"
-                     x-text="((recallZoneData.win_rate||0)*100).toFixed(1)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label"># Win</div>
-                <div class="stat-value" x-text="(recallZoneData.n_winners||0).toLocaleString()"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Avg Win</div>
-                <div class="stat-value pos"
-                     x-text="((recallZoneData.avg_winners||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Avg Loss</div>
-                <div class="stat-value neg"
-                     x-text="((recallZoneData.avg_losers||0)*100).toFixed(3)+'%'"></div>
-              </div>
-              <div class="stat-item" style="flex:1;min-width:0;text-align:center;border:1px solid var(--border);border-radius:4px">
-                <div class="stat-label">Trd/Yr</div>
-                <div class="stat-value" x-text="(recallZoneData.trades_per_year||0).toFixed(1)"></div>
-              </div>
+              {{ m.stat_bar_core('recallStatRow') | indent(14) | safe }}
+              {{ m.stat_box('Time in Market', 'recallStatRow.timeInMkt') | indent(14) | safe }}
             </div>
           </template>
 

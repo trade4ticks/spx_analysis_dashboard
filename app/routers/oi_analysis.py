@@ -9020,7 +9020,11 @@ async def _ensure_signals_table(pool) -> None:
     _signals_table_ensured = True
 
 
-from app.routers._stat_shared import split_windows as _split_windows
+from app.routers._stat_shared import (
+    split_windows as _split_windows,
+    effective_tickers as _effective_tickers,
+    time_in_market as _time_in_market,
+)
 
 _SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
 
@@ -9295,6 +9299,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     #                the FULL record in TEST so the cutoff is visible.
     # No cutoff (in_sample / walk_forward) means no split at all, so an
     # existing caller gets exactly its previous behaviour.
+    all_rows = valid_rows
     series_rows, valid_rows, zone_active = _split_windows(
         valid_rows, zone_cutoff, (req.window or "train"))
 
@@ -9356,7 +9361,7 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     # independently, activity can only be as wide as the days it is handed.
     # Built from the active window it would end at the cutoff in TRAIN and
     # that one pane would rescale while the other two held.
-    _axis_dates = [r["trade_date"] for r in series_rows] or dates_all
+    _axis_dates = [r["trade_date"] for r in all_rows] or dates_all
     trading_days: list = []
     if _axis_dates:
         try:
@@ -9477,6 +9482,22 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         "avg_winners":    avg_winners,
         "avg_losers":     avg_losers,
         "trades_per_year": trd_yr,
+        # Canonical names for the SHARED stat-bar mapper
+        # (FactorCharts.statRowValues). The legacy names above stay so
+        # existing consumers are untouched; what is not acceptable is
+        # teaching the mapper a second vocabulary for the same quantity.
+        "std_dev":        std,
+        "n_win":          n_winners,
+        "avg_win":        avg_winners,
+        "avg_loss":       avg_losers,
+        # Same two the portfolio bar carries, computed the same way and on
+        # the same (WINDOW) population, so the two bars are comparable.
+        "eff_tickers":    round(_effective_tickers(
+                              [len(v) for v in by_ticker_dict.values()]), 4),
+        "time_in_market": (lambda v: round(v, 6) if v is not None else None)(
+                              _time_in_market(
+                                  [r["trade_date"] for r in valid_rows],
+                                  trading_days, horizon_n)),
         # Chart data — same field names as /secondary-detail so JS can reuse components
         "equity_primary":  eq_zone,
         "equity_combined": eq_combined,
@@ -9492,9 +9513,13 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         # Fixed x-domain for the time-series panes: the WHOLE record, so it
         # is identical in both windows and the axis cannot rescale on a
         # toggle. Half-filled means train, full means test.
-        "series_axis": ({"from": min(r["trade_date"] for r in series_rows),
-                         "to":   max(r["trade_date"] for r in series_rows)}
-                        if series_rows else None),
+        # ALL rows, not series_rows: the domain must be the SAME in both
+        # windows or the axis rescales on toggle and TRAIN just looks like a
+        # shorter chart with the cutoff flush against the right edge. Half-
+        # filled means train, full means test.
+        "series_axis": ({"from": min(r["trade_date"] for r in all_rows),
+                         "to":   max(r["trade_date"] for r in all_rows)}
+                        if all_rows else None),
         "horizon":         _parse_horizon(outcome),
         "tickers":         tickers_out,
         "yearly":          yearly,

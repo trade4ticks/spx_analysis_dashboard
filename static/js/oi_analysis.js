@@ -2569,6 +2569,42 @@ document.addEventListener('alpine:init', () => {
     recallCutoff: null,
     recallWindow: 'train',
     get recallIsTT() { return this.recallMode === 'train_test' && !!this.recallCutoff; },
+
+    // ── Recall stat bar ─────────────────────────────────────────────────
+    // Same 16 boxes as the portfolio, through the same macro and the same
+    // mapper. Dollar figures come from the SAME sizing controls and the SAME
+    // _computeDollarSeries call the recall equity curve uses, so the bar and
+    // the chart cannot disagree.
+    //
+    // window_trades, not series_trades: this is the stat bar, so in TEST it
+    // covers the test window only.
+    get recallDollarStats() {
+      const d = this.recallZoneData;
+      if (!d) return null;
+      const p = this.equityDollarParams.recall || { perTrade: 2000, dailyCap: 10000 };
+      const trades = d.window_trades || d.combined_trades || [];
+      if (!trades.length) return null;
+      const ds = this._computeDollarSeries(trades, p.perTrade, p.dailyCap);
+      const eq = ds?.equity || [];
+      if (!eq.length) return null;
+      const total = eq[eq.length - 1].value;
+      let peak = 0, maxDD = 0;
+      for (const pt of eq) {
+        if (pt.value > peak) peak = pt.value;
+        maxDD = Math.min(maxDD, pt.value - peak);
+      }
+      const d0 = new Date(eq[0].date), d1 = new Date(eq[eq.length - 1].date);
+      const years = Math.max((d1 - d0) / 31557600000, 1e-9);
+      // ANNUALISED over max drawdown. Total return would overstate Calmar by
+      // the length of the window.
+      return { total_ret_usd: total, avg_annual_usd: total / years,
+               max_dd_usd: maxDD };
+    },
+    get recallStatRow() {
+      const d = this.recallZoneData;
+      if (!d) return window.FactorCharts.statRowValues({}, null);
+      return window.FactorCharts.statRowValues(d, this.recallDollarStats);
+    },
     recallSelectedCells: new Set(),
     recallSaving:        false,
     recallSaveMsg:       '',
