@@ -1920,6 +1920,10 @@ class GridReq(ZoneReq):
     # picks families rather than values -- the point is the whole response
     # curve, and a hand-picked subset of it is the thing this replaces.
     sweep_families: list[str] = []
+    # {family: [rule_key, ...]} restricting which catalog values are swept.
+    # Absent family = all of its values. Filtering is what makes a fourth
+    # family affordable, since the payload cap binds on combinations x trades.
+    sweep_values: dict[str, list[str]] = {}
     concurrency: int = BATCH_MAX_CONCURRENCY
     # Diff N combinations against build_combine_sql before returning. 0 = off.
     # On demand rather than always, because verifying costs exactly the
@@ -2018,6 +2022,13 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         rs = fam_rules.get(fam)
         if not rs:
             return {"error": f"no such family in trade_path_rules: {fam!r}"}
+        keep = req.sweep_values.get(fam)
+        if keep:
+            wanted = set(keep)
+            rs = [r for r in rs if r["rule_key"] in wanted]
+            if not rs:
+                return {"error": f"every value of {fam!r} was filtered out; "
+                                 f"a swept family needs at least one value"}
         swept.append({
             "family": fam,
             "values": [{"rule_key": r["rule_key"],
@@ -2045,10 +2056,8 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     held = [k for k in (req.rule_keys or []) if fam_of.get(k) not in swept_names]
 
     import itertools
-    variants = []
     combos_meta = []
     for combo in itertools.product(*[f["values"] for f in swept]):
-        keys = held + [c["rule_key"] for c in combo]
         ix = len(combos_meta)
         combos_meta.append({
             "i": ix,
@@ -2056,8 +2065,13 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
                        for f, c in zip(swept, combo)},
             "labels": {f["family"]: c["label"] for f, c in zip(swept, combo)},
             "is_null": False,
+            # Carried EXPLICITLY rather than reconstructed downstream as
+            # held + params.values(). Reference combinations below are not
+            # expressible that way, and a second reconstruction is where the
+            # resolve path and the oracle could come to disagree about what
+            # a combination even is.
+            "rule_keys": held + [c["rule_key"] for c in combo],
         })
-        variants.append({"key": f"c{ix}", "group": "grid", "rule_keys": keys})
 
     # The null combination is a PERMANENT reference, not something to
     # remember to add: no stop, no target, no held rules -- an empty rule
@@ -2066,7 +2080,34 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     # it is not a policy.
     null_ix = len(combos_meta)
     combos_meta.append({"i": null_ix, "params": {}, "labels": {},
-                        "is_null": True})
+                        "is_null": True, "rule_keys": [HORIZON_RULE_KEY]})
+
+    # ── Reference combinations ───────────────────────────────────────────
+    #
+    # "Do nothing" is not one number when max_days is swept: horizon-only at
+    # 5 days and horizon-only at 20 days are different baselines, and the
+    # max_days panel needs the CURVE, not a flat line through one of them.
+    # The other panels marginalise over the swept horizons, so their
+    # reference is the mean of these, computed client-side from the same
+    # values rather than from a separate notion of null.
+    #
+    # These are nearly free under the single-query design: the max_days
+    # columns are already in the fetch, so each costs one more argmin.
+    ref_ix: dict[str, int] = {}
+    hz_fam = next((f for f in swept if f["family"] == "max_days"), None)
+    if hz_fam:
+        for v in hz_fam["values"]:
+            i = len(combos_meta)
+            combos_meta.append({
+                "i": i, "params": {}, "labels": {"max_days": v["label"]},
+                "is_null": False, "is_ref": True,
+                "ref_family": "max_days", "ref_value": v["rule_key"],
+                # Horizon-only AT this horizon: no stop, no target, nothing
+                # held. build_combine_sql resolves a lone max_days rule
+                # without auto-appending the backstop, since it IS one.
+                "rule_keys": [v["rule_key"]],
+            })
+            ref_ix[v["rule_key"]] = i
     # NOT appended to `variants`: it runs first and alone, because the
     # skeleton and the reference digest have to exist before any other
     # combination can be checked against them.
@@ -2104,7 +2145,11 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     if not trades_each:
         return {"error": "the selected zone has no trades"}
 
-    n_combos = total + 1                     # + the null combination
+    # + the null, + one horizon-only reference per swept max_days value.
+    # The references ship returns like any other combination, so the cap has
+    # to count them or the guard understates the payload it is guarding.
+    n_ref = len(next((f["values"] for f in swept if f["family"] == "max_days"), []))
+    n_combos = total + 1 + n_ref
     returns = n_combos * trades_each
     if returns > GRID_MAX_RETURNS:
         dims = " x ".join(f"{len(f['values'])} {f['family']}" for f in swept)
@@ -2258,13 +2303,7 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
 
     tr_mask, te_mask = is_train, ~is_train
     for m in combos_meta:
-        rk = ([] if m["is_null"]
-              else held + [v for v in m["params"].values()])
-        # The null combination is rule_keys=[] in SQL, which build_combine_sql
-        # rejects -- it raises rather than emit an unbounded combine. The
-        # backstop alone is what "do nothing" means, so it is passed
-        # explicitly here and the two paths agree on the same key list.
-        order, w, eb, er = _resolve(rk or [HORIZON_RULE_KEY])
+        order, w, eb, er = _resolve(m["rule_keys"])
         rule_of = np.array(order, dtype=object)[w]
 
         stats = {}
@@ -2322,6 +2361,10 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "skeleton": {"t": skel_t, "d": skel_d, "p": skel_p, "w": skel_w},
         "combos": combos_out,
         "null_index": null_ix,
+        # rule_key -> combination index for horizon-only at that horizon.
+        # Empty when max_days is not swept, in which case the single null is
+        # the whole reference.
+        "ref_index": ref_ix,
         "n_combos": len(combos_meta),
         "n_trades": n_tr,
         "n_returns": returns,
@@ -2357,8 +2400,7 @@ async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
     async with pool.acquire() as conn:
         for pi in picks:
             m = combos_meta[pi]
-            rk = ([] if m["is_null"] else held + list(m["params"].values()))
-            rk = rk or [HORIZON_RULE_KEY]
+            rk = m["rule_keys"]
             combine_sql, _meta = build_combine_sql(rk, by_key,
                                                    include_exit_rule=True)
             rows = await conn.fetch(f"""

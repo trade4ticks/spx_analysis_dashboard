@@ -148,8 +148,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=18"></script>
-  <script src="/static/js/factor_trades.js?v=42"></script>
+  <script src="/static/js/factor_charts.js?v=19"></script>
+  <script src="/static/js/factor_trades.js?v=43"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -341,16 +341,41 @@
       {#- Families with more than one catalog value; sweeping a single-value
           family produces a one-point curve. -#}
       <template x-for="f in gridFamilies" :key="'gf-'+f.family">
-        <div class="ft-rule" :class="gridSweep.includes(f.family) ? 'on' : ''"
-             @click="gridToggleFamily(f.family)" style="cursor:pointer">
-          <span class="ft-sw" :class="gridSweep.includes(f.family) ? 'on' : ''"></span>
-          <span class="ft-rule-name" x-text="f.family"></span>
-          <span class="ft-note" x-text="f.n + ' vals'"></span>
+        <div>
+          <div class="ft-rule" :class="gridSweep.includes(f.family) ? 'on' : ''"
+               @click="gridToggleFamily(f.family)" style="cursor:pointer">
+            <span class="ft-sw" :class="gridSweep.includes(f.family) ? 'on' : ''"></span>
+            <span class="ft-rule-name" x-text="f.family"></span>
+            <span class="ft-note"
+                  x-text="gridFamilyValueCount(f.family) + '/' + f.n"></span>
+          </div>
+          {#- Per-value picks rather than range endpoints: some families are
+              not ordered, and a non-contiguous selection is the point. All
+              are checked by default, and the last one cannot be unchecked --
+              a swept family with no values is not a sweep. -#}
+          <div x-show="gridSweep.includes(f.family)"
+               style="display:flex;flex-wrap:wrap;gap:3px;padding:2px 5px 5px 33px">
+            <template x-for="r in gridFamilyRules(f.family)" :key="'gv-'+r.rule_key">
+              <span @click="gridToggleValue(f.family, r.rule_key)"
+                    :style="gridValueOn(f.family, r.rule_key)
+                            ? 'background:rgba(52,152,219,.22);border-color:#3498db;color:var(--text)'
+                            : 'opacity:.45'"
+                    style="cursor:pointer;font-size:10px;font-family:monospace;
+                           padding:1px 5px;border-radius:3px;border:1px solid var(--border)"
+                    x-text="r.label"></span>
+            </template>
+          </div>
         </div>
       </template>
+      {#- Payload alongside time, because payload is the binding cap now:
+          one query resolves every combination, but each still ships its
+          returns to the browser for dollar sizing. -#}
       <div class="ft-note" x-show="gridSweep.length" style="margin-top:4px"
-           x-text="gridComboCount + ' combinations (incl. the null) · ~'
-                   + gridEstimate() + 's'"></div>
+           x-text="gridComboCount + ' combos (incl. null + horizon refs) · ~'
+                   + gridEstimate() + 's · ~' + gridPayloadMB.toFixed(1) + 'MB'
+                   + (gridData ? '' : ' est')"></div>
+      <div class="ft-note" x-show="gridSweep.length && gridPayloadMB > 11"
+           style="color:#e84393">Over the payload cap — deselect some values.</div>
       {#- The oracle gate, reachable without leaving the page. Costs the
           per-combination queries the vectorised path removed, which is why
           it is off by default and asks for a count rather than a boolean. -#}
@@ -767,24 +792,34 @@
                 </div>
               </div>
               <div>
-                <span class="ft-note">Band</span>
+                <span class="ft-note">Bands</span>
                 <div class="ft-toggle">
-                  <span :class="gridBandMode === 'minmax' ? 'on' : ''"
-                        @click="setGridBand('minmax')"
-                        title="Full range across every setting of the other parameters">min–max</span>
-                  <span :class="gridBandMode === 'sd' ? 'on' : ''"
-                        @click="setGridBand('sd')"
-                        title="One standard deviation across the other parameters' settings">±1 sd</span>
+                  <span :class="gridShowBands ? 'on' : ''" @click="toggleGridBands()"
+                        title="Nested: p5-p95 faint, one sd over it, mean above both. p5-p95 rather than min-max so a single broken combination cannot set the outer edge, and so the band does not widen just because the sweep got bigger.">show</span>
+                  <span :class="!gridShowBands ? 'on' : ''" @click="toggleGridBands()">hide</span>
                 </div>
               </div>
             </div>
 
             <div class="ft-note" style="margin-bottom:8px">
-              Each panel averages the metric across every setting of the other
-              parameters. A <b>narrow band</b> means the effect holds regardless of
-              context. A <b>wide band</b> means it interacts with something — open the
-              2D view below to find out what. The dashed line is the null
-              combination: no stop, no target, horizon only.
+              Each panel averages the metric across every <b>selected</b> setting of the
+              other parameters — filtering values changes the other panels, so what
+              was included is listed below. A <b>narrow band</b> (p5-p95 faint, one sd
+              over it) means the effect holds regardless of context. A <b>wide band</b>
+              means it interacts with something — open the 2D view to find out what.
+              The dashed line is <b>do nothing</b>: no stop, no target, horizon only —
+              and a curve on the max_days panel, since horizon-only at 5 days and at
+              20 days are different baselines.
+            </div>
+            <div class="ft-note" style="margin-bottom:8px;font-family:monospace">
+              <template x-for="f in gridData.sweep" :key="'gi-'+f.family">
+                <div x-text="f.family + ': ' + f.values.map(v => v.label).join(', ')"></div>
+              </template>
+            </div>
+            <div class="ft-note" x-show="gridRefs.kind === 'none'"
+                 style="color:#e0b066;margin-bottom:8px">
+              Null unavailable for this configuration — no baseline is drawn on the
+              panels below.
             </div>
 
             <div class="ft-grid3">
@@ -831,10 +866,36 @@
                         style="color:#e84393">pick two different families</span>
                 </div>
                 <template x-if="gridHeat">
-                  <div style="overflow-x:auto">
-                    {{ m.heatmap_grid('gridHeat.grid', 'gridHeat', 'gh', 'compact',
-                                      bg_fn='gridCellBg', title_fn='gridCellTitle')
-                       | indent(20) | safe }}
+                  <div>
+                    <div style="overflow-x:auto">
+                      {{ m.heatmap_grid('gridHeat.grid', 'gridHeat', 'gh', 'compact',
+                                        bg_fn='gridCellBg', title_fn='gridCellTitle',
+                                        val_fn='gridFmt')
+                         | indent(22) | safe }}
+                    </div>
+                    {#- The ramp is anchored at the null and scaled to this
+                        matrix's own p5/p95, so it has to be readable rather
+                        than assumed. -#}
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+                      <span class="ft-note" x-text="gridFmt(_gridScale.lo)"></span>
+                      <div style="flex:0 0 220px;position:relative;height:12px;
+                                  border:1px solid var(--border);border-radius:2px;display:flex">
+                        <template x-for="(c, i) in gridBarStops" :key="'gb-'+i">
+                          <div :style="'flex:1;background:' + c"></div>
+                        </template>
+                        <div :style="'position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;left:' + gridBarMidPct + '%'"
+                             :title="(_gridScale.midIsNull ? 'do nothing: ' : 'median: ') + gridFmt(_gridScale.mid)"></div>
+                      </div>
+                      <span class="ft-note" x-text="gridFmt(_gridScale.hi)"></span>
+                      <span class="ft-note"
+                            x-text="'white mark = '
+                                    + (_gridScale.midIsNull ? 'do nothing' : 'matrix median')
+                                    + ' (' + gridFmt(_gridScale.mid) + ')'"></span>
+                      <span class="ft-toggle" style="margin-left:auto">
+                        <span :class="gridRankColour ? 'on' : ''" @click="toggleGridRank()"
+                              title="Colour by rank within this matrix instead of by value. Always uses the full ramp, which also hides how small the real differences are.">rank</span>
+                      </span>
+                    </div>
                   </div>
                 </template>
               </div>

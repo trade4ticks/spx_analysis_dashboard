@@ -425,6 +425,32 @@ document.addEventListener('alpine:init', () => {
       }
       return out;
     },
+    // {family: Set-like array of rule_keys}. Absent family = all values.
+    gridValues: {},
+    gridFamilyRules(fam) {
+      for (const g of (this.ruleGroups || []))
+        for (const f of (g.families || []))
+          if (f.family === fam) return f.rules || [];
+      return [];
+    },
+    gridValueOn(fam, rk) {
+      const sel = this.gridValues[fam];
+      return !sel || sel.includes(rk);
+    },
+    gridToggleValue(fam, rk) {
+      const all = this.gridFamilyRules(fam).map(r => r.rule_key);
+      let sel = this.gridValues[fam] ? [...this.gridValues[fam]] : [...all];
+      const i = sel.indexOf(rk);
+      if (i >= 0) sel.splice(i, 1); else sel.push(rk);
+      // A family with nothing selected is not a sweep. Refuse the last
+      // uncheck rather than sending a request the server will reject.
+      if (!sel.length) return;
+      this.gridValues = { ...this.gridValues, [fam]: all.filter(k => sel.includes(k)) };
+    },
+    gridFamilyValueCount(fam) {
+      const sel = this.gridValues[fam];
+      return sel ? sel.length : this.gridFamilyRules(fam).length;
+    },
     gridToggleFamily(fam) {
       const i = this.gridSweep.indexOf(fam);
       if (i >= 0) this.gridSweep.splice(i, 1);
@@ -432,12 +458,20 @@ document.addEventListener('alpine:init', () => {
       this.gridSweep = [...this.gridSweep];
     },
     get gridComboCount() {
+      if (!this.gridSweep.length) return 0;
       let n = 1;
-      for (const fam of this.gridSweep) {
-        const f = this.gridFamilies.find(x => x.family === fam);
-        n *= (f?.n || 1);
-      }
-      return this.gridSweep.length ? n + 1 : 0;   // +1 for the null combination
+      for (const fam of this.gridSweep) n *= this.gridFamilyValueCount(fam);
+      // + the null, + one horizon-only reference per swept max_days value.
+      const nref = this.gridSweep.includes('max_days')
+        ? this.gridFamilyValueCount('max_days') : 0;
+      return n + 1 + nref;
+    },
+    // Payload, not query time, is the binding cap now. Trades per combination
+    // is only known after a run, so before one this uses the last grid's
+    // count and says so by falling back to a round number.
+    get gridTradesEach() { return this.gridData?.n_trades || 2500; },
+    get gridPayloadMB() {
+      return (this.gridComboCount * this.gridTradesEach * 9) / 1e6;
     },
     // One query for the whole sweep now, so the estimate no longer scales
     // with combinations -- it is a single scan plus vectorised arithmetic,
@@ -469,6 +503,10 @@ document.addEventListener('alpine:init', () => {
             n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
             window: this.window, cells: this.selectedCells,
             sweep_families: this.gridSweep,
+            sweep_values: this.gridSweep.reduce((o, f) => {
+              if (this.gridValues[f]) o[f] = this.gridValues[f];
+              return o;
+            }, {}),
             verify: +this.gridVerify || 0,
           });
         if (err) { this.gridError = err; return; }
@@ -571,22 +609,68 @@ document.addEventListener('alpine:init', () => {
           const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
           const sd = vals.length > 1
             ? Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) : 0;
+          // p5-p95 rather than true min-max: one broken combination should
+          // not set the outer band, and the band should not widen simply
+          // because the sweep got bigger. With few combinations per point it
+          // degenerates toward min-max, which is the honest result.
+          const p = this._pct(vals);
           return { label: v.label, mean, n: vals.length,
-                   lo: Math.min(...vals), hi: Math.max(...vals),
-                   sdLo: mean - sd, sdHi: mean + sd };
+                   lo: p(5), hi: p(95),
+                   sdLo: mean - sd, sdHi: mean + sd,
+                   rawLo: Math.min(...vals), rawHi: Math.max(...vals) };
         });
-        return { family: f.family, points };
+        // values ride along so the max_days panel can look its reference up
+        // by rule_key rather than by position, which would break the moment
+        // a value filter reorders or drops one.
+        return { family: f.family, values: f.values, points };
       });
+    },
+
+    // Linear-interpolated percentile, the same convention numpy uses, so a
+    // band drawn here and a percentile quoted server-side agree.
+    _pct(vals) {
+      const a = [...vals].sort((x, y) => x - y);
+      return (q) => {
+        if (!a.length) return null;
+        if (a.length === 1) return a[0];
+        const i = (q / 100) * (a.length - 1);
+        const lo = Math.floor(i), hi = Math.ceil(i);
+        return lo === hi ? a[lo] : a[lo] + (a[hi] - a[lo]) * (i - lo);
+      };
     },
 
     // Null combination as a reference line on every panel — it is the thing
     // every parameter setting has to beat, so it belongs ON the chart rather
     // than in a number to be remembered.
-    get gridNullValue() {
-      const st = this.gridStats;
-      const s = (st || []).find(x => x && x.combo.is_null);
-      return s ? s[this.gridWindow]?.[this.gridMetric] ?? null : null;
+    // "Do nothing" is not one number when max_days is swept: horizon-only
+    // at 5 days and at 20 days are different baselines. The server emits one
+    // reference combination per swept horizon; this reads them.
+    //
+    //   max_days panel  -> the CURVE, one reference per x value
+    //   other panels    -> the mean over the SELECTED horizons, matching how
+    //                      those panels marginalise
+    //   max_days unswept-> the single null, a flat line as before
+    get gridRefs() {
+      const d = this.gridData, st = this.gridStats;
+      if (!d || !st) return { byValue: {}, mean: null, kind: 'none' };
+      const win = this.gridWindow, mk = this.gridMetric;
+      const byValue = {};
+      const vals = [];
+      for (const [rk, ix] of Object.entries(d.ref_index || {})) {
+        const v = st[ix]?.[win]?.[mk];
+        if (v != null && isFinite(v)) { byValue[rk] = v; vals.push(v); }
+      }
+      if (vals.length) {
+        return { byValue, kind: 'curve',
+                 mean: vals.reduce((a, b) => a + b, 0) / vals.length };
+      }
+      const nul = st.find(x => x && x.combo.is_null);
+      const v = nul ? nul[win]?.[mk] : null;
+      return { byValue: {}, kind: (v != null && isFinite(v)) ? 'flat' : 'none',
+               mean: (v != null && isFinite(v)) ? v : null };
     },
+    // Kept for the flat case; panels use gridRefs directly.
+    get gridNullValue() { return this.gridRefs.mean; },
 
     gridFmt(v) {
       if (v == null || !isFinite(v)) return '—';
@@ -626,25 +710,81 @@ document.addEventListener('alpine:init', () => {
         return { n: vals.length,
                  avg_ret: vals.reduce((a, b) => a + b, 0) / vals.length };
       }));
-      // Own range, so this grid cannot borrow or clobber the factor
-      // heatmap's colour scale (they share a component).
-      let mx = 0;
-      for (const row of grid) for (const c of row) {
-        if (c.n) mx = Math.max(mx, Math.abs(c.avg_ret));
-      }
-      this._gridRange = mx || 0.01;
+      // ENDPOINTS FROM THIS MATRIX, MIDPOINT AT THE NULL.
+      //
+      // Inheriting the factor heatmap's convention -- diverge at zero,
+      // symmetric across the corpus range -- put every cell in one slice of
+      // the ramp, because these are marginalised averages: all positive,
+      // clustered tightly, and nowhere near zero. Zero is not the question.
+      // "Better or worse than doing nothing" is, so that is the midpoint,
+      // and the reach on each side comes from this matrix's own p5/p95 --
+      // recomputed per metric and per pair, since Calmar, Avg Ret and Max DD
+      // do not share a range.
+      const vals = [];
+      for (const row of grid) for (const c of row) if (c.n) vals.push(c.avg_ret);
+      const p = this._pct(vals);
+      const mid = this.gridRefs.mean;
+      this._gridScale = {
+        lo: p(5), hi: p(95),
+        mid: (mid != null && isFinite(mid)) ? mid : (vals.length ? p(50) : 0),
+        midIsNull: mid != null && isFinite(mid),
+        n: vals.length,
+      };
       return { grid, x_labels: fx.values.map(v => v.label),
                y_labels: fy.values.map(v => v.label) };
     },
+    _gridScale: { lo: 0, hi: 0, mid: 0, midIsNull: false, n: 0 },
+    // Rank-within-matrix, for when the spread is genuinely tight and even a
+    // p5/p95 ramp cannot separate the cells. Ranks are uniform by
+    // construction, so this always uses the full ramp -- at the cost of
+    // hiding how small the real differences are, which is why it is off by
+    // default and labelled.
+    gridRankColour: false,
+    toggleGridRank() { this.gridRankColour = !this.gridRankColour; },
     gridCellBg(cell) {
-      // Same formula as the factor heatmap, different range. minSampleN 0:
-      // every cell here is an average over combinations, not a trade count,
-      // so the low-n hatching does not apply.
-      return window.FactorCharts._hmPaint(this._gridRange, 0, cell);
+      // Same formula as the factor heatmap; only the anchoring differs.
+      // minSampleN 0: a cell here is an average over combinations, not a
+      // trade count, so the low-n hatching does not apply.
+      const S = this._gridScale;
+      if (this.gridRankColour) {
+        if (!cell || !cell.n) return window.FactorCharts._hmPaint(1, 0, cell);
+        const all = [];
+        for (const row of (this.gridHeat?.grid || [])) for (const c of row)
+          if (c.n) all.push(c.avg_ret);
+        all.sort((a, b) => a - b);
+        const r = all.length > 1 ? all.indexOf(cell.avg_ret) / (all.length - 1) : 0.5;
+        return window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r - 0.5 },
+                                            { mid: 0, lo: -0.5, hi: 0.5 });
+      }
+      return window.FactorCharts._hmPaint(1, 0, cell,
+        { mid: S.mid, lo: S.lo, hi: S.hi });
     },
     gridCellTitle(cell) {
       if (!cell || !cell.n) return 'no combinations';
-      return `${this.gridFmt(cell.avg_ret)} — mean over ${cell.n} combination(s)`;
+      const S = this._gridScale;
+      const d = (cell.avg_ret ?? 0) - S.mid;
+      return `${this.gridFmt(cell.avg_ret)} — mean over ${cell.n} combination(s)`
+           + `
+${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
+           + (S.midIsNull ? 'do nothing' : 'the matrix median');
+    },
+    // Colourbar stops, so the ramp can be read rather than guessed at.
+    get gridBarStops() {
+      const S = this._gridScale;
+      if (!S.n) return [];
+      const out = [];
+      for (let i = 0; i <= 20; i++) {
+        const t = i / 20;
+        out.push(window.FactorCharts._hmPaint(1, 0,
+          { n: 1, avg_ret: S.lo + t * (S.hi - S.lo) },
+          { mid: S.mid, lo: S.lo, hi: S.hi }));
+      }
+      return out;
+    },
+    get gridBarMidPct() {
+      const S = this._gridScale;
+      if (!S.n || S.hi === S.lo) return 50;
+      return Math.max(0, Math.min(100, ((S.mid - S.lo) / (S.hi - S.lo)) * 100));
     },
 
     // ── Rank scatter ─────────────────────────────────────────────────────
@@ -674,75 +814,84 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderGridMarginals() {
-      const nullV = this.gridNullValue;
+      const refs = this.gridRefs;
       for (const m of this.gridMarginals) {
         const id = 'grid-mg-' + m.family;
         const el = document.getElementById(id);
         if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
         if (!el) continue;
         const labels = m.points.map(p => p.label);
-        const band = this.gridBandMode === 'sd'
-          ? [m.points.map(p => p.sdLo), m.points.map(p => p.sdHi)]
-          : [m.points.map(p => p.lo), m.points.map(p => p.hi)];
+        // The reference, per panel. On the max_days panel it is a curve --
+        // horizon-only evaluated at each swept horizon. Elsewhere it is the
+        // mean of those, which is the same marginalisation the panel itself
+        // performs, so the line and the curve describe one baseline.
+        const refSeries = (m.family === 'max_days' && refs.kind === 'curve')
+          ? m.values.map(v => refs.byValue[v.rule_key] ?? null)
+          : (refs.mean != null ? labels.map(() => refs.mean) : null);
+
+        const ds = [
+          // Nested bands, same hue at three depths: p5-p95 faintest, +/-1sd
+          // over it, mean above both. Two signals, one channel, distinguished
+          // by depth rather than by a toggle that shows one at a time.
+          { data: m.points.map(p => p.hi), borderWidth: 0, pointRadius: 0,
+            fill: '+1', backgroundColor: 'rgba(52,152,219,.08)' },
+          { data: m.points.map(p => p.lo), borderWidth: 0, pointRadius: 0, fill: false },
+          { data: m.points.map(p => p.sdHi), borderWidth: 0, pointRadius: 0,
+            fill: '+1', backgroundColor: 'rgba(52,152,219,.20)' },
+          { data: m.points.map(p => p.sdLo), borderWidth: 0, pointRadius: 0, fill: false },
+          { data: m.points.map(p => p.mean), borderColor: '#3498db', borderWidth: 2,
+            pointRadius: 3, pointBackgroundColor: '#3498db', fill: false, tension: 0 },
+        ];
+        if (!this.gridShowBands) { ds.splice(0, 4); }
+        if (refSeries) {
+          ds.push({ data: refSeries, borderColor: 'rgba(200,200,200,.75)',
+                    borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0,
+                    fill: false, tension: 0 });
+        }
+        const meanIx = this.gridShowBands ? 4 : 0;
+        // FORCING THE REFERENCE INTO THE AXIS RANGE is the actual fix for the
+        // vanishing line. Chart.js scales to the plotted datasets, and the
+        // reference used to be drawn by a plugin that was not one of them --
+        // so whenever the baseline sat outside the marginals' range, which is
+        // exactly what sweeping max_days causes, getPixelForValue returned a
+        // pixel outside the plot and the line drew off-chart. Silently. It is
+        // a dataset now, so the axis cannot exclude it.
+        const fmt = (v) => this.gridFmt(v);
         this._charts[id] = new Chart(el.getContext('2d'), {
           type: 'line',
-          data: { labels, datasets: [
-            // Band drawn as two bounds filled between, NOT as error bars:
-            // the shape of the spread across the other parameters is the
-            // thing being read, and bars make it a per-point lookup.
-            { data: band[1], borderColor: 'rgba(52,152,219,.25)', borderWidth: 0,
-              pointRadius: 0, fill: '+1', backgroundColor: 'rgba(52,152,219,.10)' },
-            { data: band[0], borderColor: 'rgba(52,152,219,.25)', borderWidth: 0,
-              pointRadius: 0, fill: false },
-            { data: m.points.map(p => p.mean), borderColor: '#3498db',
-              borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#3498db',
-              fill: false, tension: 0 },
-          ] },
+          data: { labels, datasets: ds },
           options: {
             responsive: true, maintainAspectRatio: false, animation: false,
             plugins: {
               legend: { display: false },
               tooltip: {
                 backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
-                filter: (i) => i.datasetIndex === 2,
+                filter: (i) => i.datasetIndex === meanIx,
                 callbacks: { label: (c) => {
                   const p = m.points[c.dataIndex];
-                  return [`mean ${this.gridFmt(p.mean)}`,
-                          `range ${this.gridFmt(p.lo)} … ${this.gridFmt(p.hi)}`,
-                          `over ${p.n} combination(s)`];
+                  const out = [`mean ${fmt(p.mean)}`,
+                               `+/-1sd ${fmt(p.sdLo)} … ${fmt(p.sdHi)}`,
+                               `p5-p95 ${fmt(p.lo)} … ${fmt(p.hi)}`,
+                               `over ${p.n} combination(s)`];
+                  if (refSeries && refSeries[c.dataIndex] != null)
+                    out.push(`do nothing: ${fmt(refSeries[c.dataIndex])}`);
+                  return out;
                 } },
               },
-              annotation: undefined,
             },
             scales: {
               x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
-              y: { ticks: { color: '#888', font: { size: 10 } }, grid: { color: '#222' } },
+              // One formatter across panels and matrix, so the same quantity
+              // is not a decimal here and a percentage there.
+              y: { ticks: { color: '#888', font: { size: 10 }, callback: fmt },
+                   grid: { color: '#222' } },
             },
           },
-          plugins: [{
-            id: 'gridNull',
-            afterDatasetsDraw(chart) {
-              if (nullV == null || !isFinite(nullV)) return;
-              const ys = chart.scales.y, xs = chart.scales.x;
-              if (!ys || !xs) return;
-              const py = ys.getPixelForValue(nullV);
-              if (!isFinite(py)) return;
-              const c = chart.ctx;
-              c.save();
-              c.strokeStyle = 'rgba(200,200,200,0.5)';
-              c.setLineDash([5, 4]); c.lineWidth = 1;
-              c.beginPath(); c.moveTo(xs.left, py); c.lineTo(xs.right, py); c.stroke();
-              c.fillStyle = 'rgba(200,200,200,0.75)';
-              c.font = '9px monospace';
-              c.fillText('do nothing', xs.left + 3, py - 3);
-              c.restore();
-            },
-          }],
         });
       }
     },
-    gridBandMode: 'minmax',
-    setGridBand(m) { this.gridBandMode = m; this.$nextTick(() => this.renderGrid()); },
+    gridShowBands: true,
+    toggleGridBands() { this.gridShowBands = !this.gridShowBands; this.$nextTick(() => this.renderGrid()); },
     setGridMetric(m) { this.gridMetric = m; this.$nextTick(() => this.renderGrid()); },
     setGridWindow(w) { this.gridWindow = w; this.$nextTick(() => this.renderGrid()); },
 

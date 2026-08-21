@@ -1144,7 +1144,12 @@ window.FactorCharts = {
   // from hmCellBg; only the two reads off the component became arguments.
   // The parameter is minSampleN, not minN: the body already declares a
   // local minN and a same-named parameter shadows it.
-  _hmPaint(range, minSampleN, cell) {
+  // opts (all optional): {mid, lo, hi}. Default -- no opts -- is the
+  // original behaviour exactly: diverge around zero, symmetric +/-range.
+  // A second heatmap can instead anchor the midpoint somewhere meaningful
+  // (the null combination) with independent endpoints, without a second
+  // colour formula that could drift from this one.
+  _hmPaint(range, minSampleN, cell, opts) {
     // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
     // same number determines hatching AND gradient inclusion. Critical
     // invariant: a cell rendered with a gradient color is also in the
@@ -1163,7 +1168,21 @@ window.FactorCharts = {
            + '#1c1c1c';
     }
     // Tier 3: n >= threshold — gradient, scaled across visible cells only.
-    const t = Math.max(-1, Math.min(1, (cell.avg_ret || 0) / (range || 0.01)));
+    const v = cell.avg_ret || 0;
+    let t;
+    if (opts && Number.isFinite(opts.mid)) {
+      // Distance from the midpoint, normalised by the reach on THAT side.
+      // Asymmetric on purpose: a matrix clustered just above its null has a
+      // short blue reach and a long red one, and forcing them equal is what
+      // collapses every cell into one slice of the ramp.
+      const d = v - opts.mid;
+      const up = (Number.isFinite(opts.hi) ? opts.hi : opts.mid) - opts.mid;
+      const dn = opts.mid - (Number.isFinite(opts.lo) ? opts.lo : opts.mid);
+      t = d >= 0 ? (up > 0 ? d / up : 0) : (dn > 0 ? d / dn : 0);
+      t = Math.max(-1, Math.min(1, t));
+    } else {
+      t = Math.max(-1, Math.min(1, v / (range || 0.01)));
+    }
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
   },
