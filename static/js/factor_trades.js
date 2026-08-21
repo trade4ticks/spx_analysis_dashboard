@@ -439,9 +439,19 @@ document.addEventListener('alpine:init', () => {
       }
       return this.gridSweep.length ? n + 1 : 0;   // +1 for the null combination
     },
+    // One query for the whole sweep now, so the estimate no longer scales
+    // with combinations -- it is a single scan plus vectorised arithmetic,
+    // and the transfer of the returns arrays. Verification is the exception:
+    // it deliberately reinstates per-combination queries.
     gridEstimate() {
-      return Math.round(this.gridComboCount * 1.2 / 5);
+      const q = 2;                                  // the single column fetch
+      const xfer = this.gridComboCount * 0.004;     // ~4ms per combo of JSON
+      return Math.max(2, Math.round(q + xfer + (this.gridVerify ? this.gridVerify * 1.2 : 0)));
     },
+    // Diff N combinations against build_combine_sql before the grid renders.
+    // Off by default: it costs exactly the per-combination queries the
+    // restructuring removed. On when you want the oracle consulted.
+    gridVerify: 0,
 
     async runGrid() {
       if (!this.runData) { this.error = 'run a policy first'; return; }
@@ -459,6 +469,7 @@ document.addEventListener('alpine:init', () => {
             n_bins: src.n_bins, max_strike: src.max_strike ?? this.maxStrike,
             window: this.window, cells: this.selectedCells,
             sweep_families: this.gridSweep,
+            verify: +this.gridVerify || 0,
           });
         if (err) { this.gridError = err; return; }
         this.gridData = d;

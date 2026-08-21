@@ -149,7 +149,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <script src="/static/js/factor_charts.js?v=18"></script>
-  <script src="/static/js/factor_trades.js?v=41"></script>
+  <script src="/static/js/factor_trades.js?v=42"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -351,6 +351,15 @@
       <div class="ft-note" x-show="gridSweep.length" style="margin-top:4px"
            x-text="gridComboCount + ' combinations (incl. the null) · ~'
                    + gridEstimate() + 's'"></div>
+      {#- The oracle gate, reachable without leaving the page. Costs the
+          per-combination queries the vectorised path removed, which is why
+          it is off by default and asks for a count rather than a boolean. -#}
+      <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+        <label style="margin:0;flex:1 1 auto"
+               title="Run N combinations through build_combine_sql as well and diff them per trade on exit_bar, exit_return and exit_rule. Bit-identical or the grid refuses to render.">Verify vs SQL</label>
+        <input type="number" min="0" max="50" step="1" x-model.number="gridVerify"
+               style="flex:0 0 62px;width:62px">
+      </div>
       <button class="ft-btn" @click="runGrid()"
               :disabled="gridRunning || loading || !selectedCells.length || !gridSweep.length"
               title="Full cross product of the selected families' catalog values, plus the null combination. Shows each parameter's MARGINAL effect — averaged across every setting of the others — with a spread band, because a one-at-a-time sweep only describes the slice it was run on."
@@ -721,6 +730,18 @@
         <template x-if="gridData && gridOpen">
           <div>
             <div class="ft-units" x-text="gridData.units_note"></div>
+            {#- Provenance for the restructuring: one query, N columns. If
+                this ever reads as more than one query the fan-out is back. -#}
+            <div class="ft-note" style="margin-bottom:6px"
+                 x-text="'Resolved from ' + (gridData.n_columns ?? 0) + ' exit columns in '
+                         + (gridData.queries ?? 0) + ' query'
+                         + ((gridData.verify)
+                            ? ' · verified against build_combine_sql on '
+                              + gridData.verify.combinations_checked + ' of '
+                              + gridData.verify.of + ' combinations, '
+                              + gridData.verify.trades_compared.toLocaleString()
+                              + ' trades, 0 mismatches'
+                            : '')"></div>
 
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
               <div>

@@ -35,6 +35,10 @@ from app.db import get_oi_pool
 from app.trade_path_rules import (
     CombineError,
     HORIZON_RULE_KEY,
+    # The tie-break order the vectorised combine transcribes. Imported from
+    # the vendored module rather than restated here, so the numpy path and
+    # the SQL cannot come to disagree about which rule wins a same-bar tie.
+    SIDE_PRIORITY,
     build_combine_sql,
     by_key_from_rows,
 )
@@ -1917,6 +1921,10 @@ class GridReq(ZoneReq):
     # curve, and a hand-picked subset of it is the thing this replaces.
     sweep_families: list[str] = []
     concurrency: int = BATCH_MAX_CONCURRENCY
+    # Diff N combinations against build_combine_sql before returning. 0 = off.
+    # On demand rather than always, because verifying costs exactly the
+    # per-combination queries this change removes.
+    verify: int = 0
 
 
 @router.post("/grid")
@@ -2098,23 +2106,124 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
                  "n_combos": n_combos, "trades_each": trades_each,
                  "limit": GRID_MAX_RETURNS}
 
-    ctx = BatchCtx(req, rules, by_key, cutoff_d, cutoff_iso, args,
-                   where_bins, cell_pred, strike_pred)
-
-    # ── Skeleton first, alone ────────────────────────────────────────────
+    # ── ONE query, then arithmetic ───────────────────────────────────────
     #
-    # The null combination runs by itself and in FULL, because the skeleton
-    # and the reference digest have to exist before anything can be checked
-    # against them. Everything after it runs compact. One serialised query
-    # (~1.2s) buys a ~10x drop in peak server memory.
-    skel_res = await _run_variant(pool, ctx, {"key": f"c{null_ix}",
-                                              "group": "grid", "rule_keys": []})
-    if skel_res.get("error"):
-        return {"error": f"the null combination failed, so there is no "
-                         f"reference to check the grid against: "
-                         f"{skel_res['error']}"}
+    # The grid used to issue one query per combination -- 295 round trips,
+    # each rescanning the same trade_paths x tt_bins rows to LEAST a
+    # different three or four columns. But an exit is not simulated here: it
+    # is a PRECOMPUTED COLUMN, so every combination is arithmetic over stored
+    # values that a single fetch can supply in full.
+    #
+    # So: fetch the union of bar/return columns the sweep touches, once, and
+    # resolve every combination in numpy. Cost becomes linear in swept VALUES
+    # (columns) rather than multiplicative in combinations, and the query
+    # count is bounded by the catalog at 118 exit columns no matter how many
+    # families are swept.
+    #
+    # build_combine_sql REMAINS THE ORACLE. This is a second implementation
+    # of the same convention and it is gated against the SQL, permanently,
+    # not once at merge -- see verify= below and
+    # scripts/check_grid_equivalence.py.
+    union_keys: list[str] = []
+    for k in held:
+        if k not in union_keys:
+            union_keys.append(k)
+    for f in swept:
+        for v in f["values"]:
+            if v["rule_key"] not in union_keys:
+                union_keys.append(v["rule_key"])
+    if HORIZON_RULE_KEY not in union_keys:
+        union_keys.append(HORIZON_RULE_KEY)
 
-    base_rows = skel_res.get("rows") or []
+    sel = []
+    for k in union_keys:
+        m = by_key[k]
+        sel.append(f"tp.{m.bar_col}")
+        sel.append(f"tp.{m.ret_col}")
+
+    col_sql = f"""
+    SELECT tp.ticker, tp.trade_date, tp.entry_price,
+           (tp.trade_date < $2::date) AS is_train,
+           {", ".join(sel)}
+    FROM tt_bins bt
+    JOIN trade_paths tp USING (ticker, trade_date)
+    WHERE tp.entry_anchor = $1 AND tp.path_status = 'ok'
+          AND {where_bins} AND {cell_pred}{strike_pred}
+    -- Row order is part of the contract: max_dd is a running peak-to-trough
+    -- over np.cumsum, so every combination must fold the same trades in the
+    -- same sequence. Matches the ordering build_combine_sql's consumers use.
+    ORDER BY tp.trade_date, tp.ticker
+    """
+    async with pool.acquire() as conn:
+        prows = await conn.fetch(col_sql, *args)
+
+    if not prows:
+        return {"error": "the selected zone has no trades"}
+    n_tr = len(prows)
+
+    # bar -> float64 with NULL as +inf, DELIBERATELY not NaN. A NULL bar means
+    # "this rule never fired", which is what LEAST's NULL-skipping encodes;
+    # NaN would propagate through min() and produce a plausible-looking
+    # number instead of losing to every real bar.
+    bars = np.empty((len(union_keys), n_tr), dtype=np.float64)
+    rets = np.empty((len(union_keys), n_tr), dtype=np.float64)
+    for ki, k in enumerate(union_keys):
+        m = by_key[k]
+        bcol, rcol = m.bar_col, m.ret_col
+        for i, row in enumerate(prows):
+            b = row[bcol]
+            bars[ki, i] = np.inf if b is None else float(b)
+            r = row[rcol]
+            rets[ki, i] = np.nan if r is None else float(r)
+
+    key_ix = {k: i for i, k in enumerate(union_keys)}
+    is_train = np.fromiter((1 if r["is_train"] else 0 for r in prows),
+                           dtype=np.int8, count=n_tr).astype(bool)
+    holds_all = None      # filled per combination from the winning bar
+
+    # The Q1 invariant the backstop depends on: path_status='ok' must imply
+    # the horizon bar exists, or LEAST could still be NULL and a trade would
+    # never exit. Asserted rather than inherited.
+    hz = bars[key_ix[HORIZON_RULE_KEY]]
+    n_unbounded = int(np.isinf(hz).sum())
+    if n_unbounded:
+        return {"error": f"{n_unbounded} of {n_tr} trades have "
+                         f"path_status='ok' but no {HORIZON_RULE_KEY} exit "
+                         f"bar. The horizon backstop cannot guarantee an "
+                         f"exit for them, so no combination is trustworthy. "
+                         f"This is an upstream trade_paths problem.",
+                "invariant": "backstop_null"}
+
+    def _ordered(rule_keys: list[str]) -> list[str]:
+        """Exactly build_combine_sql's ordering, transcribed.
+
+        dedup preserving first occurrence -> append the backstop if absent ->
+        STABLE sort by side priority. Stability is load-bearing: two rules of
+        the SAME side tying on a bar resolve by the caller's order, which a
+        non-stable sort would silently reassign.
+        """
+        keys = list(dict.fromkeys(rule_keys))
+        if HORIZON_RULE_KEY not in keys:
+            keys.append(HORIZON_RULE_KEY)
+        return sorted(keys, key=lambda k: SIDE_PRIORITY[by_key[k].side])
+
+    def _resolve(rule_keys: list[str]):
+        """LEAST + the winning rule's return, vectorised over all trades.
+
+        np.argmin returns the FIRST occurrence of the minimum, which is
+        precisely the SQL CASE's top-down "first WHEN that matches" over the
+        same `ordered` list. The tie-break therefore falls out of array
+        ordering rather than needing separate logic that could disagree.
+        """
+        order = _ordered(rule_keys)
+        ix = [key_ix[k] for k in order]
+        B = bars[ix]                       # (K, n_tr)
+        w = np.argmin(B, axis=0)           # first minimum == CASE order
+        eb = B[w, np.arange(n_tr)]
+        er = rets[ix][w, np.arange(n_tr)]
+        return order, w, eb, er
+
+    combos_out = []
     tickers: list = []
     dates: list = []
     tick_ix: dict = {}
@@ -2127,64 +2236,65 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         return i
 
     skel_t, skel_d, skel_p, skel_w = [], [], [], []
-    for row in base_rows:
+    for row in prows:
         skel_t.append(_ix(row["ticker"], tick_ix, tickers))
         skel_d.append(_ix(row["trade_date"].isoformat(), date_ix, dates))
         _p = row["entry_price"]
         skel_p.append(round(float(_p), 4) if _p is not None else None)
         skel_w.append(1 if row["is_train"] else 0)
-    ref_hash = _row_seq_hash(base_rows)
-    ref_n = len(base_rows)
-    null_r = [None if r["exit_return"] is None
-              else round(float(r["exit_return"]), 8) for r in base_rows]
-    null_reasons = _grid_reasons(base_rows)
-    base_rows = None                          # released before the fan-out
 
-    for v in variants:
-        v["compact"] = True
-    results = await run_batch(pool, ctx, variants, req.concurrency)
-
-    by_key_res = {r["key"]: r for r in results}
-    errors = [{"key": r["key"], "error": r["error"]}
-              for r in results if r.get("error")]
-
-    combos_out = []
+    tr_mask, te_mask = is_train, ~is_train
     for m in combos_meta:
-        if m["is_null"]:
-            combos_out.append({**m, "r": null_r,
-                               "train": {k: skel_res["train"].get(k)
-                                         for k in ("n", "avg_ret", "avg_hold")},
-                               "test": {k: skel_res["test"].get(k)
-                                        for k in ("n", "avg_ret", "avg_hold")},
-                               "reasons": null_reasons})
-            continue
-        r = by_key_res.get(f"c{m['i']}")
-        if r is None or r.get("error"):
-            combos_out.append({**m, "error": (r or {}).get("error", "missing")})
-            continue
-        # LOUD. If this trips, every marginal curve is averaging returns
-        # against the wrong trades -- and it would read as a surprising
-        # result, not as a bug. Hard failure naming the combination, never a
-        # warning and never a fallback that yields a plausible-looking grid.
-        if r.get("n_rows") != ref_n or r.get("seq_hash") != ref_hash:
-            return {"error": f"row-sequence invariant broken: combination "
-                             f"{m['i']} ({m['labels'] or 'null'}) returned "
-                             f"{r.get('n_rows')} trades against the "
-                             f"skeleton's {ref_n}"
-                             + ("" if r.get("n_rows") != ref_n else
-                                " with the same count but a different "
-                                "(ticker, date) sequence")
-                             + ". Every combination must see the same trades "
-                               "in the same order — the grid cannot be "
-                               "trusted and has not been rendered.",
-                    "invariant": ("row_count" if r.get("n_rows") != ref_n
-                                  else "row_order")}
+        rk = ([] if m["is_null"]
+              else held + [v for v in m["params"].values()])
+        # The null combination is rule_keys=[] in SQL, which build_combine_sql
+        # rejects -- it raises rather than emit an unbounded combine. The
+        # backstop alone is what "do nothing" means, so it is passed
+        # explicitly here and the two paths agree on the same key list.
+        order, w, eb, er = _resolve(rk or [HORIZON_RULE_KEY])
+        rule_of = np.array(order, dtype=object)[w]
+
+        stats = {}
+        reasons = {"train": {}, "test": {}}
+        for wn, mask in (("train", tr_mask), ("test", te_mask)):
+            n = int(mask.sum())
+            if not n:
+                stats[wn] = {"n": 0, "avg_ret": None, "avg_hold": None}
+                continue
+            sub_r = er[mask]
+            ok = ~np.isnan(sub_r)
+            stats[wn] = {
+                "n": int(ok.sum()),
+                "avg_ret": float(sub_r[ok].mean()) if ok.any() else None,
+                "avg_hold": float(eb[mask][ok].mean() / BARS_PER_SESSION)
+                            if ok.any() else None,
+            }
+            ru, rc = np.unique(rule_of[mask], return_counts=True)
+            tot = int(rc.sum()) or 1
+            reasons[wn] = {str(a): int(b) / tot for a, b in zip(ru, rc)}
+
         combos_out.append({
-            **m, "r": r["r"],
-            "train": {k: r["train"].get(k) for k in ("n", "avg_ret", "avg_hold")},
-            "test":  {k: r["test"].get(k)  for k in ("n", "avg_ret", "avg_hold")},
-            "reasons": r.get("reasons") or {"train": {}, "test": {}},
+            **m,
+            "r": [None if np.isnan(x) else round(float(x), 8) for x in er],
+            "train": stats["train"], "test": stats["test"],
+            "reasons": reasons,
         })
+
+    # ── Oracle gate ──────────────────────────────────────────────────────
+    # Runs the SQL path for a sample of combinations and diffs it against the
+    # numpy path, per trade, on (exit_bar, exit_return, exit_rule). Off by
+    # default because it reintroduces the per-combination queries this change
+    # exists to remove -- on demand, it is the whole point.
+    verify_report = None
+    if req.verify:
+        verify_report = await _grid_verify(
+            pool, combos_meta, held, by_key, prows, key_ix, bars, rets,
+            _ordered, where_bins, cell_pred, strike_pred, args,
+            max(1, min(int(req.verify), len(combos_meta))))
+        if verify_report.get("mismatches"):
+            return {"error": "VERIFY FAILED — the vectorised path disagrees "
+                             "with build_combine_sql. The grid has not been "
+                             "rendered.", "verify": verify_report}
 
     return {
         "sweep": swept,
@@ -2200,12 +2310,105 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
         "combos": combos_out,
         "null_index": null_ix,
         "n_combos": len(combos_meta),
-        "n_trades": ref_n,
+        "n_trades": n_tr,
         "n_returns": returns,
-        "concurrency": BATCH_MAX_CONCURRENCY,
-        "errors": errors,
+        "n_columns": 2 * len(union_keys),
+        "queries": 1,
+        "concurrency": 1,
+        "errors": [],
+        "verify": verify_report,
         "units_note": SUITE_UNITS_NOTE,
     }
+
+
+async def _grid_verify(pool, combos_meta, held, by_key, prows, key_ix,
+                       bars, rets, ordered_fn, where_bins, cell_pred,
+                       strike_pred, args, sample: int) -> dict:
+    """Diff the vectorised path against build_combine_sql, per trade.
+
+    Bit-identical or it fails. There are no legitimate small differences
+    here: both paths read the SAME stored columns, so any disagreement is a
+    bug in the transcription of LEAST + side-priority, not rounding.
+
+    Samples evenly across the combination list rather than taking the first
+    N, so a sweep whose late combinations differ in shape is still covered.
+    """
+    n = len(combos_meta)
+    step = max(1, n // sample)
+    picks = list(range(0, n, step))[:sample]
+    if n - 1 not in picks:
+        picks.append(n - 1)          # the null combination is always last
+
+    checked, mismatches = 0, []
+    key_of = [(r["ticker"], r["trade_date"]) for r in prows]
+    async with pool.acquire() as conn:
+        for pi in picks:
+            m = combos_meta[pi]
+            rk = ([] if m["is_null"] else held + list(m["params"].values()))
+            rk = rk or [HORIZON_RULE_KEY]
+            combine_sql, _meta = build_combine_sql(rk, by_key,
+                                                   include_exit_rule=True)
+            rows = await conn.fetch(f"""
+            WITH c AS (
+{combine_sql}
+            )
+            SELECT c.ticker, c.trade_date, c.exit_bar, c.exit_return, c.exit_rule
+            FROM c
+            JOIN tt_bins bt USING (ticker, trade_date)
+            JOIN trade_paths tp USING (ticker, trade_date, entry_anchor)
+            WHERE c.entry_anchor = $1 AND $2::date IS NOT NULL
+                  AND {where_bins} AND {cell_pred}{strike_pred}
+            ORDER BY c.trade_date, c.ticker
+            """, *args)
+
+            order = ordered_fn(rk)
+            ix = [key_ix[k] for k in order]
+            B = bars[ix]
+            w = np.argmin(B, axis=0)
+            ar = np.arange(B.shape[1])
+            eb = B[w, ar]
+            er = rets[ix][w, ar]
+            rule_of = np.array(order, dtype=object)[w]
+
+            if len(rows) != len(key_of):
+                mismatches.append({"combo": pi, "field": "row_count",
+                                   "sql": len(rows), "numpy": len(key_of)})
+                continue
+            for j, row in enumerate(rows):
+                checked += 1
+                if (row["ticker"], row["trade_date"]) != key_of[j]:
+                    mismatches.append({"combo": pi, "row": j, "field": "identity",
+                                       "sql": f"{row['ticker']} {row['trade_date']}",
+                                       "numpy": f"{key_of[j][0]} {key_of[j][1]}"})
+                    break
+                sb = row["exit_bar"]
+                if sb is None or float(sb) != float(eb[j]):
+                    mismatches.append({"combo": pi, "row": j, "field": "exit_bar",
+                                       "sql": sb, "numpy": float(eb[j]),
+                                       "trade": f"{key_of[j][0]} {key_of[j][1]}"})
+                sr = row["exit_return"]
+                nr = None if np.isnan(er[j]) else float(er[j])
+                # Exact equality, not a tolerance. Both sides read the same
+                # stored float; a tolerance here would hide the very class of
+                # bug this exists to catch.
+                if (sr is None) != (nr is None) or (
+                        sr is not None and float(sr) != nr):
+                    mismatches.append({"combo": pi, "row": j, "field": "exit_return",
+                                       "sql": sr, "numpy": nr,
+                                       "trade": f"{key_of[j][0]} {key_of[j][1]}"})
+                if row["exit_rule"] != rule_of[j]:
+                    mismatches.append({"combo": pi, "row": j, "field": "exit_rule",
+                                       "sql": row["exit_rule"], "numpy": str(rule_of[j]),
+                                       "trade": f"{key_of[j][0]} {key_of[j][1]}"})
+                if len(mismatches) >= 20:
+                    break
+            if len(mismatches) >= 20:
+                break
+
+    return {"combinations_checked": len(picks), "of": n,
+            "trades_compared": checked,
+            "mismatches": mismatches[:20],
+            "n_mismatches": len(mismatches)}
 
 
 def _grid_reasons(rows) -> dict:
