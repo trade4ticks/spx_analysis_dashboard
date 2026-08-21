@@ -1187,10 +1187,26 @@ window.FactorCharts = {
            + '#1c1c1c';
     }
     // Tier 3: n >= threshold — gradient, anchored at zero, clamped at ±range.
+    //
+    // Alpha runs 0.15 -> 1.00, NOT 0.15 -> 0.85.
+    //
+    // The dark end is unchanged: 0.15 is what makes a near-zero positive a
+    // dark navy and a near-zero negative a dark maroon. The two sides never
+    // converge on a shared black and never blend through purple, because a
+    // cell is only ever one hue at one alpha -- sign stays readable however
+    // small the magnitude.
+    //
+    // The bright end used to stop at 0.85, which composited to #3186bf /
+    // #ca3d81 -- close to the brand colours but never actually them. Full
+    // alpha makes #3498db and #e84393 TERMINAL: they are the brightest
+    // blue and pink that can appear anywhere, values past ±range clamp
+    // there, and nothing gets lighter. This is a deliberate change to the
+    // node heatmap too, since it shares this function and the rule is
+    // meant to hold everywhere.
     const v = cell.avg_ret || 0;
     const t = Math.max(-1, Math.min(1, v / (range || 0.01)));
-    if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
-    return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
+    if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.85).toFixed(2)})`;
+    return `rgba(232,67,147,${(0.15 + (-t) * 0.85).toFixed(2)})`;
   },
 
   hmCellBg(cmp, cell) {

@@ -9,6 +9,27 @@
 // same field names they expect (see the "FactorCharts contract" block
 // below). Anything cosmetic about these charts changes in one place.
 
+// Memo for the two-parameter marginalisation.
+//
+// Deliberately module-scope, NOT a field on the component. The scale it
+// produces has to be readable from the span-slider bounds as well as from
+// the grid, and the previous shape -- the gridHeat getter writing
+// this._gridScale as a side effect -- meant the slider's min/max/step were
+// correct only if the grid happened to be evaluated first. When it was not,
+// maxAbs was still 0, gridSpanMax fell back to 1, and a Calmar matrix
+// running 1.72-4.38 got a slider capped at 1 with every cell saturated.
+//
+// Keeping the cache out of the Alpine object also keeps it non-reactive:
+// writing a reactive field from inside a getter is how render loops start.
+// One factorTrades component exists per page, so a module-level cache is safe.
+const _GRID_SCALE_0 = { autoSpan: 0.01, maxAbs: 0, lo: 0, hi: 0, mid: 0,
+                        midIsNull: false, n: 0 };
+let _gridHeatKey = null, _gridHeatVal = null, _gridScaleVal = _GRID_SCALE_0;
+// Identity of the gridData the cache was built from. Comparing the object
+// itself is what makes a fresh run invalidate reliably; a combo COUNT would
+// collide whenever a re-run swept the same shape.
+let _gridHeatData = null;
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('factorTrades', () => ({
     metrics: [], ruleGroups: [], cutoffDate: '',
@@ -764,11 +785,22 @@ document.addEventListener('alpine:init', () => {
     // cell is "this pair at these settings, averaged over the rest" rather
     // than one arbitrary slice.
     get gridHeat() {
-      const d = this.gridData, st = this.gridStats;
-      if (!d || !st || !this.gridPairX || !this.gridPairY) return null;
+      const d = this.gridData;
+      if (!d || !this.gridPairX || !this.gridPairY) return null;
       const fx = (d.sweep || []).find(f => f.family === this.gridPairX);
       const fy = (d.sweep || []).find(f => f.family === this.gridPairY);
       if (!fx || !fy || fx.family === fy.family) return null;
+      // Memo, checked BEFORE touching gridStats -- that getter maps every
+      // combination, so reading it above the cache check would make a "hit"
+      // as expensive as a miss. The span slider is deliberately NOT in the
+      // key: changing the span must recolour, never re-marginalise.
+      const memoKey = [this.gridPairX, this.gridPairY, this.gridWindow,
+                       this.gridMetric, this.gridColourBy].join('|');
+      if (memoKey === _gridHeatKey && _gridHeatData === d && _gridHeatVal) {
+        return _gridHeatVal;
+      }
+      const st = this.gridStats;
+      if (!st) return null;
       const win = this.gridWindow, mk = this.gridMetric;
       const grid = fy.values.map(vy => fx.values.map(vx => {
         const vals = [];
@@ -807,7 +839,7 @@ document.addEventListener('alpine:init', () => {
       const pd = this._pct(dists);
       const mid = this.gridRefs.mean;
       const maxAbs = dists.length ? Math.max(...dists) : 0;
-      this._gridScale = {
+      _gridScaleVal = {
         autoSpan: dists.length ? (pd(95) || maxAbs || 0.01) : 0.01,
         maxAbs,
         lo: vals.length ? Math.min(...vals) : 0,
@@ -816,11 +848,19 @@ document.addEventListener('alpine:init', () => {
         midIsNull: mid != null && isFinite(mid),
         n: vals.length,
       };
-      return { grid, x_labels: fx.values.map(v => v.label),
-               y_labels: fy.values.map(v => v.label) };
+      _gridHeatKey = memoKey;
+      _gridHeatData = d;
+      _gridHeatVal = { grid, x_labels: fx.values.map(v => v.label),
+                       y_labels: fy.values.map(v => v.label) };
+      return _gridHeatVal;
     },
-    _gridScale: { autoSpan: 0.01, maxAbs: 0, lo: 0, hi: 0, mid: 0,
-                  midIsNull: false, n: 0 },
+    // Reading the scale ENSURES it is computed, rather than hoping the grid
+    // was rendered first. Memoised, so this is a key comparison after the
+    // first call -- cheap enough for the slider bounds and the colourbar.
+    get _gridScale() {
+      this.gridHeat;
+      return _gridScaleVal || _GRID_SCALE_0;
+    },
     // Anchor for the ramp. The ramp itself always treats ZERO as dark, so
     // "vs baseline" is expressed by subtracting the null from each cell
     // before painting -- the caller shifts the value, the ramp is untouched.
