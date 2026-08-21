@@ -171,8 +171,8 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
-  <script src="/static/js/factor_charts.js?v=20"></script>
-  <script src="/static/js/factor_trades.js?v=44"></script>
+  <script src="/static/js/factor_charts.js?v=21"></script>
+  <script src="/static/js/factor_trades.js?v=45"></script>
 </head>
 
 <body x-data="factorTrades" x-init="init()">
@@ -844,20 +844,14 @@
               <template x-for="m in gridMarginals" :key="'gp-'+m.family">
                 <div class="chart-box" style="margin-bottom:0">
                   <div class="chart-title" x-text="m.family"></div>
-                  <div class="chart-canvas" style="height:172px">
+                  {#- ONE plot. The per-point ratio to the null is drawn as a
+                      muted text row under the tick labels, not as a second
+                      chart: the null is a REFERENCE, not a benchmark -- it is
+                      a 20-day hold, and a policy returning 80% of it in 25%
+                      of the days is better, because it frees capital. A
+                      dedicated ratio panel asserted the opposite. -#}
+                  <div class="chart-canvas" style="height:210px">
                     <canvas :id="'grid-mg-' + m.family"></canvas>
-                  </div>
-                  {#- Residual strip: value / do-nothing, reference at 1.0.
-                      A separate panel rather than a second y-axis — two lines
-                      on different scales look comparable when they are not,
-                      and on the max_days panel the null is a CURVE, so the
-                      ratio is a different shape and no axis relabelling could
-                      be correct there. -#}
-                  <div class="chart-canvas" style="height:58px">
-                    <canvas :id="'grid-rs-' + m.family"></canvas>
-                  </div>
-                  <div class="ft-note" style="text-align:center">
-                    ×&nbsp;do&nbsp;nothing — above 1.0 beats it
                   </div>
                 </div>
               </template>
@@ -884,10 +878,10 @@
                   <div class="ft-toggle">
                     <span :class="gridColourBy === 'value' ? 'on' : ''"
                           @click="setGridColourBy('value')"
-                          title="Sequential dark to bright. Magnitude only, nothing is bad. Answers: where is the ridge.">value</span>
+                          title="Anchored at zero, same as the node heatmap: negative is pink, positive is blue. Depth within each hue carries magnitude, scaled to this matrix's p5/p95.">value</span>
                     <span :class="gridColourBy === 'baseline' ? 'on' : ''"
                           @click="setGridColourBy('baseline')"
-                          title="Diverging around the null in amber/teal. Answers: does anything beat doing nothing.">vs baseline</span>
+                          title="Same pink/blue, anchored at the null instead of zero. Answers: what beats doing nothing.">vs baseline</span>
                   </div>
                   <span class="ft-note">X</span>
                   <select style="width:auto" :value="gridPairX"
@@ -926,14 +920,19 @@
                         <template x-for="(c, i) in gridBarStops" :key="'gb-'+i">
                           <div :style="'flex:1;background:' + c"></div>
                         </template>
-                        <div :style="'position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;left:' + gridBarMidPct + '%'"
-                             :title="(_gridScale.midIsNull ? 'do nothing: ' : 'median: ') + gridFmt(_gridScale.mid)"></div>
+                        {#- Reference mark only. It is the colour midpoint
+                            just in vs-baseline mode; in value mode the
+                            midpoint is zero and this is simply where the
+                            null would fall. -#}
+                        <div x-show="_gridScale.midIsNull"
+                             :style="'position:absolute;top:-3px;bottom:-3px;width:2px;background:#fff;left:' + gridBarMidPct + '%'"
+                             :title="'do nothing: ' + gridFmt(_gridScale.mid)
+                                     + (gridBarNullOff ? ' (' + gridBarNullOff + ' this range)' : '')"></div>
                       </div>
                       <span class="ft-note" x-text="gridFmt(_gridScale.hi)"></span>
-                      <span class="ft-note"
-                            x-text="'white mark = '
-                                    + (_gridScale.midIsNull ? 'do nothing' : 'matrix median')
-                                    + ' (' + gridFmt(_gridScale.mid) + ')'"></span>
+                      <span class="ft-note" x-show="_gridScale.midIsNull"
+                            x-text="'white mark = do nothing (' + gridFmt(_gridScale.mid) + ')'
+                                    + (gridBarNullOff ? ' — ' + gridBarNullOff + ' this range' : '')"></span>
                       <span class="ft-toggle" style="margin-left:auto">
                         <span :class="gridRankColour ? 'on' : ''" @click="toggleGridRank()"
                               title="Colour by rank within this matrix instead of by value. Always uses the full ramp, which also hides how small the real differences are.">rank</span>

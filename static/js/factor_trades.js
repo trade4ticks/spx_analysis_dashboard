@@ -814,23 +814,20 @@ document.addEventListener('alpine:init', () => {
     // default and labelled.
     gridRankColour: false,
     toggleGridRank() { this.gridRankColour = !this.gridRankColour; },
-    // 'value'    sequential, dark -> bright, no good/bad semantics. Answers
-    //            "where is the ridge". Default, because the common reading
-    //            of this matrix is magnitude, not judgement.
-    // 'baseline' diverging around the null in amber/teal. Answers "does
-    //            anything beat doing nothing".
-    //
-    // The old blue/pink is gone from this surface. It is the node heatmap's
-    // palette, where pink means a NEGATIVE RETURN, and it carried that
-    // meaning onto cells where the worst is a profitable strategy that
-    // merely loses to a better one. One colour cannot say both.
+    // Both modes use the app's pink/blue. Only the ANCHOR differs:
+    //   'value'    anchored at ZERO, same semantics as the node heatmap --
+    //              negative is pink, positive is blue. Default.
+    //   'baseline' anchored at the null, for "what beats doing nothing".
+    // Contrast comes from luminance depth within each hue, not from a
+    // different palette; endpoints stay the matrix's own p5/p95.
     gridColourBy: 'value',
     setGridColourBy(m) { this.gridColourBy = m; },
     get _gridRampOpts() {
       const S = this._gridScale;
-      return this.gridColourBy === 'baseline'
-        ? { ramp: 'baseline', mid: S.mid, lo: S.lo, hi: S.hi }
-        : { ramp: 'value', lo: S.lo, hi: S.hi };
+      // S.mid is the NULL, kept as a reference mark on the colourbar in both
+      // modes. It is the colour midpoint only in vs-baseline.
+      return { ramp: 'theme', lo: S.lo, hi: S.hi,
+               mid: this.gridColourBy === 'baseline' ? S.mid : 0 };
     },
     gridCellFg(cell) {
       if (!cell || !cell.n) return '#fff';
@@ -847,11 +844,8 @@ document.addEventListener('alpine:init', () => {
           if (c.n) all.push(c.avg_ret);
         all.sort((a, b) => a - b);
         const r = all.length > 1 ? all.indexOf(cell.avg_ret) / (all.length - 1) : 0.5;
-        return this.gridColourBy === 'baseline'
-          ? window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r - 0.5 },
-                                         { ramp: 'baseline', mid: 0, lo: -0.5, hi: 0.5 })
-          : window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r },
-                                         { ramp: 'value', lo: 0, hi: 1 });
+        return window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r },
+                                            { ramp: 'theme', mid: 0, lo: 0, hi: 1 });
       }
       return window.FactorCharts._hmPaint(1, 0, cell, this._gridRampOpts);
     },
@@ -881,6 +875,14 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
       if (!S.n || S.hi === S.lo) return 50;
       return Math.max(0, Math.min(100, ((S.mid - S.lo) / (S.hi - S.lo)) * 100));
     },
+    // True when the null falls outside the matrix's own range, in which case
+    // the tick is pinned to an edge and says so rather than implying the
+    // reference sits inside the data.
+    get gridBarNullOff() {
+      const S = this._gridScale;
+      if (!S.n || !S.midIsNull) return '';
+      return S.mid > S.hi ? 'above' : (S.mid < S.lo ? 'below' : '');
+    },
 
     // ── Rank scatter ─────────────────────────────────────────────────────
     // Free: is_train is a column, so every combination already carries both
@@ -908,35 +910,21 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
       }
     },
 
-    // Two questions, two panels, neither compromising its axis for the other.
+    // ONE PANEL. The null is a reference, not a benchmark: it is a 20-day
+    // hold, and a policy returning 80% of it in 25% of the days is BETTER,
+    // because it frees capital. A second plot devoted to value/null encoded
+    // the opposite -- that everything is judged against it -- and cost a
+    // whole axis to carry one ratio.
     //
-    //   main  "what Calmar does 2x ATR produce"    -- absolute, autoscaled to
-    //         THE DATA ONLY. The null is drawn but excluded from the range,
-    //         so a baseline 2-3x the policies can never squeeze them into the
-    //         bottom quarter again.
-    //   strip "is that better than doing nothing"  -- value / null, reference
-    //         at 1.0, its own compressed range.
-    //
-    // Deliberately NOT a second y-axis. Plotting the baseline at all is meant
-    // to be a visual comparison, and two lines on different scales look
-    // comparable when they are not -- it would misrepresent the relativity it
-    // exists to show. The max_days panel settles it: the null is a CURVE
-    // there, so the ratio is a different SHAPE, not a rescaling, and no
-    // right-axis relabelling can be correct on that panel at all.
+    // The ratio is now a muted row of text under the x labels. Same
+    // information, nothing to mistake for a data series, no axis to misread.
     _renderGridMarginals() {
       const refs = this.gridRefs;
       const fmt = (v) => this.gridFmt(v);
-      // Both charts pin their y-axis to the same pixel width, which is what
-      // makes the strip's categories line up under the main panel's. Without
-      // it the two axes size independently and the columns drift apart.
-      const AXIS_W = 54;
       for (const m of this.gridMarginals) {
         const id = 'grid-mg-' + m.family;
-        const sid = 'grid-rs-' + m.family;
-        for (const k of [id, sid]) {
-          if (this._charts[k]) { this._charts[k].destroy(); delete this._charts[k]; }
-        }
         const el = document.getElementById(id);
+        if (this._charts[id]) { this._charts[id].destroy(); delete this._charts[id]; }
         if (!el) continue;
         const labels = m.points.map(p => p.label);
         const refSeries = (m.family === 'max_days' && refs.kind === 'curve')
@@ -961,10 +949,9 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
                     fill: false, tension: 0, label: 'do nothing' });
         }
 
-        // THE AXIS IS COMPUTED FROM THE DATA SERIES ONLY. The reference is
-        // still plotted -- it just cannot vote on the range. When it falls
-        // outside, Chart.js clips it to the plot area and the label below
-        // reports its value with an arrow, so nothing is lost.
+        // The axis is computed from the DATA series only. The reference is
+        // still drawn; it just cannot vote on the range, so a baseline
+        // several times the policies cannot squeeze them into a sliver.
         let lo = Infinity, hi = -Infinity;
         for (const d of (this.gridShowBands ? ds.slice(0, 5) : ds.slice(0, 1))) {
           for (const v of d.data) if (v != null && isFinite(v)) {
@@ -975,14 +962,20 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
         const pad = (hi - lo) * 0.08 || Math.abs(hi || 1) * 0.08;
         const yMin = lo - pad, yMax = hi + pad;
         const nullV = refs.mean;
-        const nullOff = (nullV == null) ? null
-          : (nullV > yMax ? 'above' : (nullV < yMin ? 'below' : null));
+        // Per-point ratio, drawn under the tick labels.
+        const ratios = m.points.map((p, i) => {
+          const r = refSeries ? refSeries[i] : null;
+          if (!r || p.mean == null || !isFinite(p.mean)) return null;
+          return p.mean / r;
+        });
 
         this._charts[id] = new Chart(el.getContext('2d'), {
           type: 'line',
           data: { labels, datasets: ds },
           options: {
             responsive: true, maintainAspectRatio: false, animation: false,
+            // Room for the ratio row without shrinking the plot into it.
+            layout: { padding: { bottom: 14 } },
             plugins: {
               legend: { display: false },
               tooltip: {
@@ -997,114 +990,43 @@ ${d >= 0 ? '+' : ''}${this.gridFmt(d)} vs `
                   const r = refSeries ? refSeries[c.dataIndex] : null;
                   if (r != null) {
                     out.push(`do nothing: ${fmt(r)}`);
-                    if (r) out.push(`ratio: ${(p.mean / r).toFixed(2)}x`);
+                    const q = ratios[c.dataIndex];
+                    if (q != null) out.push(`${q.toFixed(2)}x it`);
                   }
                   return out;
                 } },
               },
             },
             scales: {
-              x: { ticks: { display: false }, grid: { display: false } },
-              y: { min: yMin, max: yMax, afterFit: (sc) => { sc.width = AXIS_W; },
+              x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
+              y: { min: yMin, max: yMax,
                    ticks: { color: '#888', font: { size: 10 }, callback: fmt },
                    grid: { color: '#222' } },
             },
           },
           plugins: [{
-            id: 'gridNullLabel',
-            afterDatasetsDraw(chart) {
-              if (nullV == null) return;
-              const xs = chart.scales.x, ys = chart.scales.y;
-              if (!xs || !ys) return;
-              // Named on the chart. A bare dashed line with no text is what
-              // made this unreadable to begin with.
-              const txt = `do nothing: ${fmt(nullV)}`
-                        + (nullOff === 'above' ? '  ↑ above range'
-                           : nullOff === 'below' ? '  ↓ below range' : '');
-              const c = chart.ctx;
-              c.save();
-              c.font = '10px monospace';
-              c.fillStyle = 'rgba(210,210,210,.9)';
-              c.textAlign = 'right';
-              c.fillText(txt, xs.right - 2,
-                         nullOff === 'below' ? ys.bottom - 4 : ys.top + 11);
-              c.restore();
-            },
-          }],
-        });
-
-        // ── Residual strip ───────────────────────────────────────────────
-        const sel = document.getElementById(sid);
-        if (!sel || !refSeries) continue;
-        const RMAX = 2;
-        const ratio = m.points.map((p, i) => {
-          const r = refSeries[i];
-          if (!r || p.mean == null || !isFinite(p.mean)) return null;
-          return p.mean / r;
-        });
-        // Outliers are CLIPPED and flagged, not rescaled: letting one point
-        // stretch this axis reproduces the problem the strip exists to fix.
-        const clipped = ratio.map(v => v == null ? null : Math.min(RMAX, Math.max(0, v)));
-        this._charts[sid] = new Chart(sel.getContext('2d'), {
-          type: 'line',
-          data: { labels, datasets: [
-            { data: clipped, borderColor: '#c8c8c8', borderWidth: 1.5,
-              pointRadius: 2.5, pointBackgroundColor: '#c8c8c8', fill: false, tension: 0 },
-          ] },
-          options: {
-            responsive: true, maintainAspectRatio: false, animation: false,
-            plugins: {
-              legend: { display: false },
-              tooltip: {
-                backgroundColor: 'rgba(20,20,20,.95)', borderColor: '#444', borderWidth: 1,
-                callbacks: { label: (c) => {
-                  const v = ratio[c.dataIndex];
-                  return v == null ? 'no baseline'
-                    : [`${v.toFixed(2)}x do nothing`,
-                       v >= 1 ? 'beats it' : 'loses to it'];
-                } },
-              },
-            },
-            scales: {
-              x: { ticks: { color: '#888', font: { size: 10 } }, grid: { display: false } },
-              y: { min: 0, max: RMAX, afterFit: (sc) => { sc.width = AXIS_W; },
-                   ticks: { color: '#888', font: { size: 9 }, stepSize: 1,
-                            callback: (v) => v + 'x' },
-                   grid: { color: '#222' } },
-            },
-          },
-          plugins: [{
-            id: 'gridStripRef',
-            beforeDatasetsDraw(chart) {
-              const xs = chart.scales.x, ys = chart.scales.y;
-              if (!xs || !ys) return;
-              const c = chart.ctx;
-              const y1 = ys.getPixelForValue(1);
-              c.save();
-              // Below 1.0 is "loses to doing nothing" -- shaded so the
-              // question the strip answers is readable without the axis.
-              c.fillStyle = 'rgba(224,158,62,.10)';
-              c.fillRect(xs.left, y1, xs.right - xs.left, ys.bottom - y1);
-              c.strokeStyle = 'rgba(255,255,255,.55)';
-              c.lineWidth = 1;
-              c.beginPath(); c.moveTo(xs.left, y1); c.lineTo(xs.right, y1); c.stroke();
-              c.restore();
-            },
+            id: 'gridNullText',
             afterDatasetsDraw(chart) {
               const xs = chart.scales.x, ys = chart.scales.y;
               if (!xs || !ys) return;
               const c = chart.ctx;
               c.save();
+              if (nullV != null) {
+                // Named, in the corner, in real units. No arrow: the null is
+                // a reference point, and an arrow pointing at it implies a
+                // ceiling to be measured against, which it is not.
+                c.font = '10px monospace';
+                c.fillStyle = 'rgba(210,210,210,.9)';
+                c.textAlign = 'right';
+                c.fillText(`do nothing: ${fmt(nullV)}`, xs.right - 2, ys.top + 11);
+              }
+              // The ratio row: muted, smaller, under the tick labels.
               c.font = '9px monospace';
-              c.fillStyle = 'rgba(230,230,230,.9)';
+              c.fillStyle = 'rgba(150,150,150,.85)';
               c.textAlign = 'center';
-              ratio.forEach((v, i) => {
-                if (v == null || v <= RMAX) return;
-                const px = xs.getPixelForValue(i);
-                c.beginPath();
-                c.moveTo(px, ys.top + 2); c.lineTo(px - 4, ys.top + 8);
-                c.lineTo(px + 4, ys.top + 8); c.closePath(); c.fill();
-                c.fillText(v.toFixed(1) + 'x', px, ys.top + 18);
+              ratios.forEach((q, i) => {
+                if (q == null) return;
+                c.fillText(q.toFixed(2) + 'x', xs.getPixelForValue(i), xs.bottom + 11);
               });
               c.restore();
             },

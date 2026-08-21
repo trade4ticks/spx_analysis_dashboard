@@ -1146,21 +1146,20 @@ window.FactorCharts = {
   // local minN and a same-named parameter shadows it.
   // ── Colour ramps ─────────────────────────────────────────────────────
   //
-  // LUMINANCE carries magnitude in both of these. The eye discriminates
-  // lightness far better than saturation, so a ramp that varies saturation
-  // on one hue makes a near-2x spread (1.19 -> 2.32) look flat -- which is
-  // exactly what it did.
+  // ONE PALETTE IN THIS APP: pink and blue. A third hue set on one surface
+  // means the same colour means different things on different pages, which
+  // costs more than any contrast it buys.
   //
-  // Neither uses red/pink-vs-blue. That is the node heatmap's palette, where
-  // red means a negative return, and it carried that meaning onto a surface
-  // where the worst cell is still a profitable strategy.
-
-  // Viridis anchors, truncated before the yellow end. The full ramp finishes
-  // near #fde725, which white cell text cannot sit on; stopping at green
-  // keeps the whole range legible while still spanning dark navy to bright.
-  _VIRIDIS: [[68, 1, 84], [72, 40, 120], [62, 74, 137], [49, 104, 142],
-             [38, 130, 142], [31, 158, 137], [53, 183, 121], [110, 206, 88],
-             [154, 216, 60]],
+  // The fix for flat contrast is LUMINANCE RANGE WITHIN each hue family, not
+  // a different hue family. The eye discriminates lightness far better than
+  // saturation, and the previous ramp varied only alpha on one flat blue --
+  // which is why a near-2x spread (1.19 -> 2.32) looked uniform.
+  //
+  // Each family runs dark -> canonical -> bright, spanning roughly 0.12 to
+  // 0.85 relative luminance. The bright end is past where white text is
+  // legible, which is what fg_fn on heatmap_grid exists to handle.
+  _BLUE: [[12, 34, 74], [30, 92, 158], [52, 152, 219], [104, 196, 240], [150, 232, 255]],
+  _PINK: [[74, 14, 48], [150, 36, 96], [232, 67, 147], [246, 120, 180], [255, 168, 210]],
 
   _lerpRgb(a, b, t) {
     return [Math.round(a[0] + (b[0] - a[0]) * t),
@@ -1168,28 +1167,17 @@ window.FactorCharts = {
             Math.round(a[2] + (b[2] - a[2]) * t)];
   },
 
-  // t in [0,1] -> sequential, monotone in luminance. Answers "where is the
-  // ridge" with no diverging semantics: nothing is bad, one end is simply
-  // more than the other.
-  _rampSequential(t) {
-    const V = window.FactorCharts._VIRIDIS;
-    const x = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0)) * (V.length - 1);
-    const i = Math.min(V.length - 2, Math.floor(x));
-    const c = window.FactorCharts._lerpRgb(V[i], V[i + 1], x - i);
+  _rampOf(anchors, u) {
+    const x = Math.max(0, Math.min(1, Number.isFinite(u) ? u : 0)) * (anchors.length - 1);
+    const i = Math.min(anchors.length - 2, Math.floor(x));
+    const c = window.FactorCharts._lerpRgb(anchors[i], anchors[i + 1], x - i);
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   },
 
-  // t in [-1,1] -> amber below the midpoint, teal above, luminance rising
-  // with distance from it. Mid is a dim neutral rather than a light one:
-  // on a dark page a light midpoint reads as the most important cell, which
-  // is the opposite of what a midpoint means.
-  _rampDiverge(t) {
-    const v = Math.max(-1, Math.min(1, Number.isFinite(t) ? t : 0));
-    const MID = [58, 58, 62];
-    const AMBER = [224, 158, 62];
-    const TEAL = [38, 198, 176];
-    const c = window.FactorCharts._lerpRgb(MID, v < 0 ? AMBER : TEAL, Math.abs(v));
-    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  // sign picks the hue family, u picks the depth within it.
+  _rampTheme(sign, u) {
+    return window.FactorCharts._rampOf(
+      sign >= 0 ? window.FactorCharts._BLUE : window.FactorCharts._PINK, u);
   },
 
   // Relative luminance, for picking cell text that stays readable across a
@@ -1208,9 +1196,14 @@ window.FactorCharts = {
   // endpoints, and choose a ramp whose semantics suit its own surface,
   // without a second colour formula that could drift from this one.
   //
-  //   ramp absent      blue/pink diverging  (the node heatmap)
-  //   ramp 'value'     sequential viridis   (magnitude, no good/bad)
-  //   ramp 'baseline'  amber/teal diverging (below/above the midpoint)
+  //   ramp absent   blue/pink at fixed alpha    (the node heatmap)
+  //   ramp 'theme'  blue/pink with LUMINANCE depth, midpoint from opts.mid
+  //
+  // 'theme' keeps the app's semantics -- below the midpoint is pink, above is
+  // blue -- and spends the whole ramp on the data by STRETCHING when the
+  // midpoint falls outside [lo, hi]. Anchored at zero with all-positive data,
+  // a fixed 0..hi mapping would waste half the ramp on values that do not
+  // occur; here the dark end lands on lo instead.
   _hmPaint(range, minSampleN, cell, opts) {
     // Three tiers driven by the SINGLE `hmMinSampleN` threshold —
     // same number determines hatching AND gradient inclusion. Critical
@@ -1245,16 +1238,21 @@ window.FactorCharts = {
     } else {
       t = Math.max(-1, Math.min(1, v / (range || 0.01)));
     }
-    const ramp = opts && opts.ramp;
-    if (ramp === 'value') {
-      // Sequential wants [0,1] across lo..hi, not a signed distance from a
-      // midpoint, so it is normalised independently of the diverging branch.
-      const lo = (opts && Number.isFinite(opts.lo)) ? opts.lo : 0;
-      const hi = (opts && Number.isFinite(opts.hi)) ? opts.hi : 1;
-      const u = hi > lo ? (v - lo) / (hi - lo) : 0.5;
-      return window.FactorCharts._rampSequential(Math.max(0, Math.min(1, u)));
+    if (opts && opts.ramp === 'theme') {
+      const mid = Number.isFinite(opts.mid) ? opts.mid : 0;
+      const lo = Number.isFinite(opts.lo) ? opts.lo : mid - 1;
+      const hi = Number.isFinite(opts.hi) ? opts.hi : mid + 1;
+      // Each side's dark end is the midpoint when the data straddles it, and
+      // the data's own edge when it does not -- so a matrix sitting entirely
+      // on one side of the anchor still gets the full luminance range, which
+      // is the contrast that was missing.
+      if (v >= mid) {
+        const base = Math.max(lo, mid);
+        return window.FactorCharts._rampTheme(1, hi > base ? (v - base) / (hi - base) : 1);
+      }
+      const base = Math.min(hi, mid);
+      return window.FactorCharts._rampTheme(-1, base > lo ? (base - v) / (base - lo) : 1);
     }
-    if (ramp === 'baseline') return window.FactorCharts._rampDiverge(t);
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
   },
