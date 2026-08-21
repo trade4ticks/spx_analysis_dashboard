@@ -870,15 +870,17 @@
                       into the model — which is how both axes ended up on the
                       first swept family, giving n=1 in every cell. The rule
                       selects in the rail already use this pattern. -#}
-                  {#- Two questions, two ramps. Blue/pink is gone from this
-                      surface: it is the node heatmap's palette, where pink
-                      means a NEGATIVE RETURN, and here the worst cell is a
-                      profitable strategy that merely loses to a better one. -#}
+                  {#- Blue/pink IS this surface's palette, same as the node
+                      heatmap: the ramp runs from a near-black tint of the
+                      hue up to canonical #3498db / #e84393, so the brightest
+                      cell on screen is the dashboard's own colour. What
+                      differs between the two modes is only the ANCHOR. The
+                      ramp SHAPE (clip / curve / floor) is under the gear. -#}
                   <span class="ft-note">Colour by</span>
                   <div class="ft-toggle">
                     <span :class="gridColourBy === 'value' ? 'on' : ''"
                           @click="setGridColourBy('value')"
-                          title="Anchored at zero, same as the node heatmap: negative is pink, positive is blue. Depth within each hue carries magnitude, scaled to this matrix's p5/p95.">value</span>
+                          :title="'Anchored at zero, same as the node heatmap: negative is pink, positive is blue. Depth within each hue carries magnitude, scaled to this matrix\'s ' + gridClipLabel + '.'">value</span>
                     <span :class="gridColourBy === 'baseline' ? 'on' : ''"
                           @click="setGridColourBy('baseline')"
                           title="Same pink/blue, anchored at the null instead of zero. Answers: what beats doing nothing.">vs baseline</span>
@@ -901,6 +903,101 @@
                   </select>
                   <span class="ft-note" x-show="gridPairX === gridPairY"
                         style="color:#e84393">pick two different families</span>
+
+                  {#- ── Ramp shape ────────────────────────────────────────
+                      The palette is fixed; these change how the matrix is
+                      DISTRIBUTED across it. That is the lever that matters:
+                      these cells are marginalised averages, so they cluster
+                      tightly and widening the colour endpoints barely
+                      separates them — clipping the range and bending the
+                      curve does. -#}
+                  {#- click.outside lives on the WRAPPER, not the panel. On
+                      the panel it also fires for the click that opens it —
+                      the toggle is outside the panel — so the popover would
+                      open and close in the same event. -#}
+                  <div style="position:relative;margin-left:auto"
+                       @click.outside="gridRampOpen = false">
+                    <span class="ft-toggle">
+                      <span :class="gridRampOpen ? 'on' : ''"
+                            @click="toggleGridRamp()"
+                            title="Ramp shape: how this matrix is spread across the blue/pink gradient">
+                        ramp
+                        <span x-show="gridClip !== 'p5' || gridCurve !== 0 || gridFloor !== 0.18"
+                              style="color:#3498db">•</span>
+                      </span>
+                    </span>
+                    <div x-show="gridRampOpen"
+                         style="position:absolute;right:0;top:24px;z-index:40;width:290px;
+                                background:var(--surface);border:1px solid var(--border);
+                                border-radius:5px;padding:10px 12px;
+                                box-shadow:0 6px 20px rgba(0,0,0,.55)">
+                      <div style="display:flex;align-items:center;margin-bottom:8px">
+                        <span style="font-size:11px;font-weight:700;color:var(--text)">Ramp shape</span>
+                        <span class="ft-note" style="margin-left:auto;cursor:pointer;color:#3498db"
+                              @click="resetGridRamp()">reset</span>
+                      </div>
+
+                      {#- clip: which slice of the matrix the ramp spans -#}
+                      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                        <span class="ft-note" style="width:42px">clip</span>
+                        <select style="width:auto;flex:1" :value="gridClip"
+                                @change="setGridClip($event.target.value)"
+                                title="Which slice of the matrix the gradient spans. Tighter clip saturates the extremes and spends the ramp on the middle, where clustered cells actually differ.">
+                          <option value="p5"   :selected="gridClip==='p5'">p5–p95</option>
+                          <option value="p1"   :selected="gridClip==='p1'">p1–p99</option>
+                          <option value="p10"  :selected="gridClip==='p10'">p10–p90</option>
+                          <option value="p25"  :selected="gridClip==='p25'">p25–p75</option>
+                          <option value="full" :selected="gridClip==='full'">min–max</option>
+                        </select>
+                      </div>
+
+                      {#- curve: gamma, symmetric about linear -#}
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span class="ft-note" style="width:42px">curve</span>
+                        <input type="range" min="-100" max="100" step="5"
+                               :value="gridCurve" style="flex:1"
+                               @input="setGridCurve($event.target.value)"
+                               title="Redistributes cells within the ramp. Right pushes more cells toward the bright end, left toward the dark end.">
+                        <span class="ft-note" style="width:32px;text-align:right;font-family:monospace"
+                              x-text="gridGamma.toFixed(2)"></span>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;margin:0 0 8px 50px">
+                        <span class="ft-note" style="font-size:9px">darker</span>
+                        <span class="ft-note" style="font-size:9px">brighter</span>
+                      </div>
+
+                      {#- floor: luminance of the dark end -#}
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span class="ft-note" style="width:42px">floor</span>
+                        <input type="range" min="0.04" max="0.30" step="0.01"
+                               :value="gridFloor" style="flex:1"
+                               @input="setGridFloor($event.target.value)"
+                               title="How dark the midpoint end of the ramp gets. Below ~0.14 a real cell becomes indistinguishable from an empty one; capped at 0.30 because canonical pink runs out of range above that.">
+                        <span class="ft-note" style="width:32px;text-align:right;font-family:monospace"
+                              x-text="gridFloor.toFixed(2)"></span>
+                      </div>
+                      <div style="display:flex;justify-content:space-between;margin:0 0 6px 50px">
+                        <span class="ft-note" style="font-size:9px">black</span>
+                        <span class="ft-note" style="font-size:9px">lifted</span>
+                      </div>
+
+                      {#- An empty cell composites to luminance 0.137. A floor
+                          at or under that makes a real mid-valued cell look
+                          emptier than "no data", which is worth saying at the
+                          moment it happens rather than leaving to be found. -#}
+                      <div x-show="gridFloorTooDark"
+                           style="font-size:10px;color:#e84393;line-height:1.35;margin-top:2px">
+                        Below the empty-cell shade — mid cells will read as “no data”.
+                      </div>
+
+                      <div class="ft-note" style="font-size:10px;line-height:1.4;margin-top:8px;
+                                                  border-top:1px solid var(--border);padding-top:6px">
+                        Palette is fixed: near-black → <span style="color:#3498db">#3498db</span> /
+                        <span style="color:#e84393">#e84393</span>. These change how the matrix
+                        spreads across it, not the colours. Saved for next time.
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <template x-if="gridHeat">
                   <div>
@@ -911,8 +1008,8 @@
                          | indent(22) | safe }}
                     </div>
                     {#- The ramp is anchored at the null and scaled to this
-                        matrix's own p5/p95, so it has to be readable rather
-                        than assumed. -#}
+                        matrix's own clip range, so it has to be readable
+                        rather than assumed. -#}
                     <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
                       <span class="ft-note" x-text="gridFmt(_gridScale.lo)"></span>
                       <div style="flex:0 0 220px;position:relative;height:12px;

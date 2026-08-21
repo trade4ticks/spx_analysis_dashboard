@@ -67,6 +67,9 @@ document.addEventListener('alpine:init', () => {
                           port: { perTrade: 2000, dailyCap: 10000 } },
 
     async init() {
+      // Before any fetch: restores the saved ramp shape so the first render
+      // of the two-parameter view already uses it.
+      this._loadGridRamp();
       try {
         const [cols, rules, tt] = await Promise.all([
           fetch('/api/factor-analysis/columns').then(r => r.ok ? r.json() : null),
@@ -793,12 +796,17 @@ document.addEventListener('alpine:init', () => {
       // and the reach on each side comes from this matrix's own p5/p95 --
       // recomputed per metric and per pair, since Calmar, Avg Ret and Max DD
       // do not share a range.
+      // The p5/p95 reach is now the DEFAULT rather than the only option:
+      // clipping tighter is the most direct lever on a matrix whose cells
+      // cluster, since it saturates the outliers and spends the ramp on the
+      // middle where the differences actually are.
       const vals = [];
       for (const row of grid) for (const c of row) if (c.n) vals.push(c.avg_ret);
       const p = this._pct(vals);
+      const clip = this._GRID_CLIPS[this.gridClip] || this._GRID_CLIPS.p5;
       const mid = this.gridRefs.mean;
       this._gridScale = {
-        lo: p(5), hi: p(95),
+        lo: p(clip.lo), hi: p(clip.hi),
         mid: (mid != null && isFinite(mid)) ? mid : (vals.length ? p(50) : 0),
         midIsNull: mid != null && isFinite(mid),
         n: vals.length,
@@ -822,12 +830,90 @@ document.addEventListener('alpine:init', () => {
     // different palette; endpoints stay the matrix's own p5/p95.
     gridColourBy: 'value',
     setGridColourBy(m) { this.gridColourBy = m; },
+
+    // ── Ramp shape controls ──────────────────────────────────────────────
+    // The palette is fixed: near-black tint -> canonical #3498db / #e84393.
+    // What is adjustable is HOW the matrix is distributed across it, because
+    // the reason these cells look flat is not the palette's range — it is
+    // that marginalised averages cluster tightly and sit nowhere near zero.
+    // Widening colour endpoints barely separates clustered data; clipping
+    // the range and bending the curve is what does.
+    //
+    //   clip   which slice of the matrix the ramp spans. Tighter clip means
+    //          the extremes saturate and the middle spreads out.
+    //   curve  redistributes cells within the ramp. Stored as -100..+100 so
+    //          the slider is symmetric about linear; gamma = 2^(-curve/100),
+    //          so +100 -> gamma 0.5 (brighter) and -100 -> gamma 2 (darker).
+    //   floor  target luminance of the dark end. Must stay above the empty
+    //          cell's 0.137 or a real mid-valued cell reads as "no data".
+    gridClip: 'p5',
+    gridCurve: 0,
+    gridFloor: 0.18,
+    gridRampOpen: false,
+    _GRID_CLIPS: {
+      p5:  { lo: 5,  hi: 95, label: 'p5–p95' },
+      p1:  { lo: 1,  hi: 99, label: 'p1–p99' },
+      p10: { lo: 10, hi: 90, label: 'p10–p90' },
+      p25: { lo: 25, hi: 75, label: 'p25–p75' },
+      full:{ lo: 0,  hi: 100, label: 'min–max' },
+    },
+    get gridClipLabel() {
+      return (this._GRID_CLIPS[this.gridClip] || this._GRID_CLIPS.p5).label;
+    },
+    get gridGamma() { return Math.pow(2, -this.gridCurve / 100); },
+    toggleGridRamp() { this.gridRampOpen = !this.gridRampOpen; },
+    setGridClip(k) {
+      if (!this._GRID_CLIPS[k]) return;
+      this.gridClip = k;
+      this._saveGridRamp();
+    },
+    setGridCurve(v) {
+      this.gridCurve = Math.max(-100, Math.min(100, parseInt(v) || 0));
+      this._saveGridRamp();
+    },
+    setGridFloor(v) {
+      // Capped at 0.30, not higher: canonical pink is only luminance 0.423,
+      // so a floor of 0.40 leaves it a span of 0.024 — effectively one flat
+      // colour. Blue would still look fine, which is exactly why the cap has
+      // to come from the DIMMER hue rather than from what looks acceptable
+      // on screen while testing with positive cells.
+      const f = parseFloat(v);
+      this.gridFloor = Math.max(0.04, Math.min(0.30, isFinite(f) ? f : 0.18));
+      this._saveGridRamp();
+    },
+    resetGridRamp() {
+      this.gridClip = 'p5'; this.gridCurve = 0; this.gridFloor = 0.18;
+      this._saveGridRamp();
+    },
+    // True when the dark end has been pushed at or below the empty-cell
+    // shade, where a real cell stops being distinguishable from no data.
+    get gridFloorTooDark() { return this.gridFloor <= 0.14; },
+    // Persisted: "whenever I want" should survive a reload. Wrapped because
+    // a blocked localStorage (private mode, storage disabled) must not take
+    // the chart down with it.
+    _saveGridRamp() {
+      try {
+        localStorage.setItem('ft.gridRamp', JSON.stringify({
+          clip: this.gridClip, curve: this.gridCurve, floor: this.gridFloor,
+        }));
+      } catch (_) { /* non-persistent session; controls still work */ }
+    },
+    _loadGridRamp() {
+      try {
+        const s = JSON.parse(localStorage.getItem('ft.gridRamp') || '{}');
+        if (s.clip && this._GRID_CLIPS[s.clip]) this.gridClip = s.clip;
+        if (Number.isFinite(s.curve)) this.setGridCurve(s.curve);
+        if (Number.isFinite(s.floor)) this.setGridFloor(s.floor);
+      } catch (_) { /* defaults stand */ }
+    },
+
     get _gridRampOpts() {
       const S = this._gridScale;
       // S.mid is the NULL, kept as a reference mark on the colourbar in both
       // modes. It is the colour midpoint only in vs-baseline.
       return { ramp: 'theme', lo: S.lo, hi: S.hi,
-               mid: this.gridColourBy === 'baseline' ? S.mid : 0 };
+               mid: this.gridColourBy === 'baseline' ? S.mid : 0,
+               floor: this.gridFloor, gamma: this.gridGamma };
     },
     gridCellFg(cell) {
       if (!cell || !cell.n) return '#fff';
@@ -844,8 +930,12 @@ document.addEventListener('alpine:init', () => {
           if (c.n) all.push(c.avg_ret);
         all.sort((a, b) => a - b);
         const r = all.length > 1 ? all.indexOf(cell.avg_ret) / (all.length - 1) : 0.5;
+        // Rank mode ignores clip (ranks are uniform by construction, so
+        // there is nothing to clip) but still honours curve and floor.
         return window.FactorCharts._hmPaint(1, 0, { n: cell.n, avg_ret: r },
-                                            { ramp: 'theme', mid: 0, lo: 0, hi: 1 });
+                                            { ramp: 'theme', mid: 0, lo: 0, hi: 1,
+                                              floor: this.gridFloor,
+                                              gamma: this.gridGamma });
       }
       return window.FactorCharts._hmPaint(1, 0, cell, this._gridRampOpts);
     },

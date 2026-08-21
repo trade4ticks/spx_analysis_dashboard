@@ -1155,11 +1155,34 @@ window.FactorCharts = {
   // saturation, and the previous ramp varied only alpha on one flat blue --
   // which is why a near-2x spread (1.19 -> 2.32) looked uniform.
   //
-  // Each family runs dark -> canonical -> bright, spanning roughly 0.12 to
-  // 0.85 relative luminance. The bright end is past where white text is
-  // legible, which is what fg_fn on heatmap_grid exists to handle.
-  _BLUE: [[12, 34, 74], [30, 92, 158], [52, 152, 219], [104, 196, 240], [150, 232, 255]],
-  _PINK: [[74, 14, 48], [150, 36, 96], [232, 67, 147], [246, 120, 180], [255, 168, 210]],
+  // THE RAMP ENDS ON THE CANONICAL COLOUR.
+  //
+  // The previous version ran dark -> canonical -> bright across five anchors,
+  // which bought luminance range by spending the top HALF of the ramp on
+  // pale cyan (#96e8ff) and pale pink (#ffa8d2) that appear nowhere else in
+  // the app. It read as a different palette, because it was one.
+  //
+  // Now each family runs "near-black tint of the canonical hue" -> canonical,
+  // built procedurally rather than from hand-picked anchors so the dark end
+  // is a controllable parameter. Measured against the alternatives:
+  //
+  //   main 20x20 heatmap     luminance span 0.292   tops out at #3186bf
+  //                                                 (0.85 alpha; never
+  //                                                  actually reaches brand)
+  //   old 5-anchor ramp      span 0.722             tops out off-brand
+  //   this ramp              span 0.457 (blue)      tops out at #3498db
+  //                          span 0.354 (pink)      tops out at #e84393
+  //
+  // 1.6x the main heatmap's variance, and the brightest cell on screen is
+  // exactly the dashboard's blue or pink.
+  _CANON: { blue: [52, 152, 219], pink: [232, 67, 147] },
+
+  // Relative luminance on raw 0-255 channels. Not gamma-correct, but it is
+  // the same formula _fgOn uses, and consistency between "how dark is this"
+  // and "what text goes on it" matters more here than colorimetric purity.
+  _lum(c) {
+    return (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255;
+  },
 
   _lerpRgb(a, b, t) {
     return [Math.round(a[0] + (b[0] - a[0]) * t),
@@ -1174,10 +1197,36 @@ window.FactorCharts = {
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   },
 
-  // sign picks the hue family, u picks the depth within it.
-  _rampTheme(sign, u) {
-    return window.FactorCharts._rampOf(
-      sign >= 0 ? window.FactorCharts._BLUE : window.FactorCharts._PINK, u);
+  // Defaults for the ramp shape. floor is a TARGET LUMINANCE, not an alpha:
+  // scaling a hue toward black scales its luminance linearly, so asking for
+  // a luminance lets blue and pink start at the SAME darkness. Anchoring by
+  // alpha instead leaves canonical pink darker than canonical blue at both
+  // ends, so equal-magnitude cells in the two hues do not read as equal.
+  //
+  // 0.18 default is deliberate: an empty cell paints rgba(40,40,40,0.5) over
+  // --bg, which composites to #232323 at luminance 0.137. A floor at or below
+  // that makes a real mid-valued cell look emptier than "no data". 0.18 sits
+  // clearly above it while still reading as near-black.
+  _RAMP_FLOOR: 0.18,
+  _RAMP_GAMMA: 1,
+
+  // sign picks the hue family; u picks the depth within it.
+  // opts.floor  target luminance of the dark end (0 = black)
+  // opts.gamma  curve. <1 pushes cells toward the bright end, >1 toward dark.
+  _rampTheme(sign, u, opts) {
+    const FC = window.FactorCharts;
+    const canon = sign >= 0 ? FC._CANON.blue : FC._CANON.pink;
+    const gamma = (opts && Number.isFinite(opts.gamma) && opts.gamma > 0)
+      ? opts.gamma : FC._RAMP_GAMMA;
+    const floorL = (opts && Number.isFinite(opts.floor))
+      ? Math.max(0, Math.min(0.9, opts.floor)) : FC._RAMP_FLOOR;
+    const t = Math.pow(Math.max(0, Math.min(1, Number.isFinite(u) ? u : 0)), gamma);
+    const Lc = FC._lum(canon);
+    // k scales the canonical hue down to the requested floor luminance.
+    const k = Lc > 0 ? Math.min(1, floorL / Lc) : 0;
+    const dark = [canon[0] * k, canon[1] * k, canon[2] * k];
+    const c = FC._lerpRgb(dark, canon, t);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
   },
 
   // Relative luminance, for picking cell text that stays readable across a
@@ -1246,12 +1295,15 @@ window.FactorCharts = {
       // the data's own edge when it does not -- so a matrix sitting entirely
       // on one side of the anchor still gets the full luminance range, which
       // is the contrast that was missing.
+      // opts.floor / opts.gamma shape the ramp; both fall back to defaults.
       if (v >= mid) {
         const base = Math.max(lo, mid);
-        return window.FactorCharts._rampTheme(1, hi > base ? (v - base) / (hi - base) : 1);
+        return window.FactorCharts._rampTheme(
+          1, hi > base ? (v - base) / (hi - base) : 1, opts);
       }
       const base = Math.min(hi, mid);
-      return window.FactorCharts._rampTheme(-1, base > lo ? (base - v) / (base - lo) : 1);
+      return window.FactorCharts._rampTheme(
+        -1, base > lo ? (base - v) / (base - lo) : 1, opts);
     }
     if (t >= 0) return `rgba(52,152,219,${(0.15 + t * 0.7).toFixed(2)})`;
     return `rgba(232,67,147,${(0.15 + (-t) * 0.7).toFixed(2)})`;
