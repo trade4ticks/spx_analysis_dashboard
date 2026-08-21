@@ -76,12 +76,38 @@ document.addEventListener('alpine:init', () => {
     //   'port'    portfolio panes — cutoff and axis come from the aggregate
     //             response, i.e. from the portfolio's own signals.
     //
-    // Set it ONLY through withChartCtx(), which restores the previous value
-    // in a finally.
-    chartCtx: '',
+    // RESOLVED PER CANVAS, not from ambient state. FactorCharts calls
+    // cutoffLineDateFor / seriesAxisFor with the section key it derives from
+    // the canvas id, so the answer cannot depend on which render path ran.
+    //
+    // The ambient version did not hold: portfolio canvases are also
+    // re-rendered by openFullscreen, closeFullscreen, setEquityAggMode,
+    // setEquityDollarParam, setActivityMode and toggleDedupeConc, none of
+    // which set the flag -- those repaints silently took another section's
+    // answer.
+    //
+    //   'sec' / 'zone'  page-level panes. TT page mode wants the marker;
+    //                   cutoffDate alone cannot gate it, since that is
+    //                   populated from /tt-cutoff on every page load
+    //                   regardless of mode.
+    //   'recall'        the recalled signal's OWN provenance, which may be
+    //                   in_sample even while the page pill reads TT.
+    //   'port'          the portfolio's own cutoff, from its aggregate.
+    cutoffLineDateFor(key) {
+      if (key === 'port')   return this.portAggregate?.cutoff_date || '';
+      if (key === 'recall') return this.recallIsTT ? (this.recallCutoff || '') : '';
+      return this.pageMode === 'train_test' ? this.cutoffDate : '';
+    },
+    seriesAxisFor(key) {
+      if (key === 'port')   return this.portAggregate?.series_axis || null;
+      if (key === 'recall') return this.recallIsTT
+        ? (this.recallZoneData?.series_axis || null) : null;
+      return null;
+    },
 
+    // Flat fallbacks, kept because FactorCharts uses them for any page that
+    // does not define the *For resolvers. Nothing on THIS page reads them.
     get cutoffLineDate() {
-      if (this.chartCtx === 'port') return this.portAggregate?.cutoff_date || '';
       return this.pageMode === 'train_test' ? this.cutoffDate : '';
     },
     // Page-level charts opt OUT of the fixed x-domain: Zone and Recall panes
@@ -93,25 +119,13 @@ document.addEventListener('alpine:init', () => {
     // any `this.seriesAxis = ...` would then throw at runtime. Nothing
     // assigns to it today; the explicit setter below keeps that from becoming
     // a trap, and says where the value actually comes from.
-    get seriesAxis() {
-      if (this.chartCtx === 'port') return this.portAggregate?.series_axis || null;
-      return null;
-    },
+    get seriesAxis() { return null; },
     set seriesAxis(_v) {
-      // Derived from chartCtx, never assigned. Swallowing the write rather
-      // than throwing keeps a stray assignment from taking the page down,
-      // and the warning says where to look.
-      console.warn('[oi-analysis] seriesAxis is derived from chartCtx; '
-                 + 'assignment ignored. Set the context, not the field.');
-    },
-
-    // Run fn with the chart context set, then restore it. Restores the
-    // PREVIOUS value rather than '', so nesting cannot strand the outer
-    // group on the wrong context.
-    withChartCtx(ctx, fn) {
-      const prev = this.chartCtx;
-      this.chartCtx = ctx;
-      try { return fn(); } finally { this.chartCtx = prev; }
+      // Derived per canvas by seriesAxisFor(), never assigned. Swallowing the
+      // write rather than throwing keeps a stray assignment from taking the
+      // page down under 'use strict', and the warning says where to look.
+      console.warn('[oi-analysis] seriesAxis is derived per canvas by '
+                 + 'seriesAxisFor(key); assignment ignored.');
     },
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
@@ -2539,6 +2553,22 @@ document.addEventListener('alpine:init', () => {
     recallLoading:       false,
     recallHeatmapData:   null,
     recallZoneData:      null,
+    // ── Recall provenance ───────────────────────────────────────────────
+    // Recall's panes describe WHATEVER LOADED THEM, not the page pill. A
+    // corner scanned in TT and a signal saved from TT were both identified
+    // against tt_bins; re-resolving their cells on is_bins picks a different
+    // population and says nothing about it on screen. So the mode travels
+    // with the thing being recalled.
+    //
+    // recallMode      'in_sample' | 'train_test'
+    // recallCutoff    the frozen split, train_test only
+    // recallWindow    'train' | 'test' — which window the panes describe.
+    //                 Train by default: a zone is selected on train, and test
+    //                 is the check you make afterwards.
+    recallMode:   'in_sample',
+    recallCutoff: null,
+    recallWindow: 'train',
+    get recallIsTT() { return this.recallMode === 'train_test' && !!this.recallCutoff; },
     recallSelectedCells: new Set(),
     recallSaving:        false,
     recallSaveMsg:       '',
@@ -5985,6 +6015,12 @@ document.addEventListener('alpine:init', () => {
         // appending them here just duplicated that data. Going-
         // forward only; existing signals keep their stored names.
         name: `${row.primary_metric} × ${row.secondary_metric}`,
+        // PROVENANCE. corner_scan_2f rows carry the mode they were scanned
+        // under and the endpoint returns it; without this Recall would
+        // re-resolve a tt_bins corner against is_bins and show numbers for a
+        // population the corner was never identified in.
+        selection_mode:   row.mode || 'in_sample',
+        selection_cutoff: row.cutoff_date || null,
         primary_metric:   row.primary_metric,
         secondary_metric: row.secondary_metric,
         outcome:          row.outcome,
@@ -6018,10 +6054,27 @@ document.addEventListener('alpine:init', () => {
       // sigs carry the canonical value of the scanned row. Empty
       // string when neither is present (legacy signals pre-Stage-1).
       this.recallCorner = sig.corner || '';
+      // Adopt the loaded thing's OWN provenance. Both entry points supply it:
+      // a saved signal from its selection_mode column, a corner-scan row from
+      // the mode it was scanned under. Never this.pageMode -- the pill can
+      // read TT while the thing being recalled is an in-sample signal.
+      this.recallMode   = sig.selection_mode || 'in_sample';
+      this.recallCutoff = sig.selection_cutoff || null;
+      // Always open on TRAIN. The zone was selected there; test is the check
+      // you make afterwards, and it should be a deliberate click.
+      this.recallWindow = 'train';
       this.recallSelectedCells = new Set(
         (sig.cell_set || []).map(c => c[0] + '-' + c[1]));
       this.recallExpanded = true;
       await this._recallFireRequests();
+    },
+
+    // Re-fetch on window switch. Both Recall calls are window-scoped, so
+    // this is a refetch rather than a re-render.
+    setRecallWindow(w) {
+      if (w === this.recallWindow) return;
+      this.recallWindow = w;
+      this._recallFireRequests();
     },
 
     async _recallFireRequests() {
@@ -6039,12 +6092,19 @@ document.addEventListener('alpine:init', () => {
         // Outlier filter rides along on both so heatmap cells AND
         // aggregate visuals share the same filtered trade set.
         const outRecall = this.outlierMaxRetFor('recall');
+        // cutoff_date is what makes /heatmap read tt_bins instead of is_bins
+        // (make_spec resolves in_sample when it is absent). Sent only when
+        // the recalled thing is actually TT — an IS signal must keep its
+        // is_bins grid even while the page pill reads TT.
+        const ttQ = this.recallIsTT
+          ? `&cutoff_date=${encodeURIComponent(this.recallCutoff)}` : '';
         const heatmapUrl =
           `/api/factor-analysis/heatmap?ticker=ALL`
           + `&metric_x=${encodeURIComponent(sig.primary_metric)}`
           + `&metric_y=${encodeURIComponent(sig.secondary_metric)}`
           + `&outcome=${encodeURIComponent(sig.outcome)}`
           + `&bins=${sig.n_bins}`
+          + ttQ
           + (outRecall != null ? `&outlier_max_ret=${outRecall}` : '');
         const [hmResp, zoneResp] = await Promise.all([
           fetch(heatmapUrl),
@@ -6059,6 +6119,12 @@ document.addEventListener('alpine:init', () => {
               cell_set:         sig.cell_set || [],
               ticker:           'ALL',
               outlier_max_ret:  outRecall,
+              // Resolve the cells against the bin table they were picked on.
+              // Defaults to in_sample server-side, so an IS recall is
+              // byte-identical to before this change.
+              selection_mode:   this.recallMode,
+              selection_cutoff: this.recallCutoff,
+              window:           this.recallWindow,
             }),
           }),
         ]);
@@ -8388,17 +8454,14 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       this._destroyPortCharts();
-      // chartCtx 'port' makes cutoffLineDate / seriesAxis answer for THESE
-      // panes only. Zone and Recall render through the same FactorCharts
-      // functions on the same component and must not pick them up.
-      this.withChartCtx('port', () => {
-        // Equity + activity + bubble delegate to the parameterized _renderSec* methods
-        // (singleSeries=true → one pink curve, no primary-universe blue line).
-        this._renderSecEquity('chart-port-equity', this.portAggregate, true);
-        this._renderPortYearly();
-        this._renderSecActivity('chart-port-activity', this.portAggregate);
-        this._renderSecBubble('chart-port-bubble', this.portAggregate);
-      });
+      // No context to set: each canvas id resolves its own cutoff and axis
+      // through cutoffLineDateFor / seriesAxisFor, so every other path that
+      // re-renders these panes (fullscreen, equity mode, sizing, activity
+      // mode, dedupe) gets the same answer without having to remember.
+      this._renderSecEquity('chart-port-equity', this.portAggregate, true);
+      this._renderPortYearly();
+      this._renderSecActivity('chart-port-activity', this.portAggregate);
+      this._renderSecBubble('chart-port-bubble', this.portAggregate);
     },
 
     _renderPortYearly() {

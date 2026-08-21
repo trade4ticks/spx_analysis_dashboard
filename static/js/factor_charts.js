@@ -63,7 +63,7 @@ window.FactorCharts = {
         return sign + '$' + abs.toFixed(0);
       };
       cmp._charts[_key] = new Chart(ctx, {
-        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time'),
+        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time', null, canvasId),
                   ...window.FactorCharts._crosshairPlugin(cmp, 'time')],
         type: 'line',
         data: { datasets: [
@@ -91,8 +91,8 @@ window.FactorCharts = {
           scales: {
             x: {
               type: 'linear',
-              min: (window.FactorCharts._seriesAxis(cmp) || {}).fromMs ?? eqPxy[0].x,
-              max: (window.FactorCharts._seriesAxis(cmp) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
+              min: (window.FactorCharts._seriesAxis(cmp, canvasId) || {}).fromMs ?? eqPxy[0].x,
+              max: (window.FactorCharts._seriesAxis(cmp, canvasId) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
               ticks: { color: '#888', font: { size: 9 }, maxTicksLimit: 10,
                 autoSkip: true, autoSkipPadding: 16,
                 callback: val => new Date(val).toISOString().slice(0, 7) },
@@ -198,7 +198,7 @@ window.FactorCharts = {
     });
 
     cmp._charts[_key] = new Chart(ctx, {
-        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time'),
+        plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'time', null, canvasId),
                   ...window.FactorCharts._crosshairPlugin(cmp, 'time')],
       type: 'line',
       data: { datasets },   // no labels — points carry their own x
@@ -236,8 +236,8 @@ window.FactorCharts = {
             // bounds:'data' Chart.js still pads to "nice" tick
             // boundaries, so set min/max explicitly to the first
             // and last data points.
-            min: (window.FactorCharts._seriesAxis(cmp) || {}).fromMs ?? eqPxy[0].x,
-            max: (window.FactorCharts._seriesAxis(cmp) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
+            min: (window.FactorCharts._seriesAxis(cmp, canvasId) || {}).fromMs ?? eqPxy[0].x,
+            max: (window.FactorCharts._seriesAxis(cmp, canvasId) || {}).toMs ?? eqPxy[eqPxy.length - 1].x,
             ticks: {
               color: '#888', font: { size: 9 },
               maxTicksLimit: 10,
@@ -294,7 +294,7 @@ window.FactorCharts = {
     // than a shorter axis. Padding here, not in _yearlyForMode, keeps the
     // aggregation honest -- these are placeholders with n=0, not years with
     // zero return.
-    const _ax = window.FactorCharts._seriesAxis(cmp);
+    const _ax = window.FactorCharts._seriesAxis(cmp, canvasId);
     if (_ax) {
       const have = new Set(yearly.map(y => +y.year));
       for (let y = _ax.fromYear; y <= _ax.toYear; y++) {
@@ -326,7 +326,7 @@ window.FactorCharts = {
     };
     const ctx = canvas.getContext('2d');
     cmp._charts[chartKey] = new Chart(ctx, {
-      plugins: window.FactorCharts._cutoffPlugin(cmp, 'cat', yearly.map(y => y.year)),
+      plugins: window.FactorCharts._cutoffPlugin(cmp, 'cat', yearly.map(y => y.year), canvasId),
       type: 'bar',
       data: {
         labels:   yearly.map(y => y.year),
@@ -499,7 +499,7 @@ window.FactorCharts = {
 
     const ctx = canvas.getContext('2d');
     cmp._charts[_key] = new Chart(ctx, {
-      plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'cat', tradingDays),
+      plugins: [...window.FactorCharts._cutoffPlugin(cmp, 'cat', tradingDays, canvasId),
                 ...window.FactorCharts._crosshairPlugin(cmp, 'cat', tradingDays)],
       type: 'bar',
       data: {
@@ -511,7 +511,8 @@ window.FactorCharts = {
             data: open,
             borderColor: 'rgba(46,204,113,0.6)',
             backgroundColor: window.FactorCharts._preCutoffFade(
-              cmp, tradingDays, 'rgba(46,204,113,0.08)', 'rgba(46,204,113,0.03)'),
+              cmp, tradingDays, 'rgba(46,204,113,0.08)', 'rgba(46,204,113,0.03)',
+              canvasId),
             fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1.5,
             order: 1,
           },
@@ -520,7 +521,8 @@ window.FactorCharts = {
             label: isCapital ? 'Deployed' : 'Entered',
             data: entered,
             backgroundColor: window.FactorCharts._preCutoffFade(
-              cmp, tradingDays, 'rgba(52,152,219,0.7)', 'rgba(52,152,219,0.22)'),
+              cmp, tradingDays, 'rgba(52,152,219,0.7)', 'rgba(52,152,219,0.22)',
+              canvasId),
             barThickness: 2,
             order: 2,
           },
@@ -642,8 +644,37 @@ window.FactorCharts = {
   // says it -- half-filled is train, full is test -- and the cutoff line
   // stays in the same place on screen. Returns null when unset, so pages
   // that do not opt in keep data-driven bounds.
-  _seriesAxis(cmp) {
-    const a = cmp.seriesAxis;
+  // ── Per-pane train/test resolution ───────────────────────────────────
+  // Several unrelated pane groups render through these SAME functions on the
+  // SAME component -- on Factor Analysis that is the secondary panes, the
+  // Zone/analyze panes, Recall and the portfolio. Each needs a different
+  // cutoff and axis, and the answer must depend only on WHICH CANVAS is
+  // being drawn.
+  //
+  // It was ambient state (a flag set around one render call) and that did not
+  // hold: portfolio canvases are also re-rendered by openFullscreen,
+  // setEquityAggMode, setEquityDollarParam, setActivityMode and
+  // toggleDedupeConc, none of which set the flag, so those repaints silently
+  // fell through to another group's answer. Deriving from canvasId cannot be
+  // forgotten at a call site.
+  //
+  // A page opts in by defining cutoffLineDateFor(sectionKey) /
+  // seriesAxisFor(sectionKey). Without them the flat cmp.cutoffLineDate /
+  // cmp.seriesAxis are used exactly as before.
+  _cutoffOf(cmp, canvasId) {
+    if (typeof cmp.cutoffLineDateFor === 'function')
+      return cmp.cutoffLineDateFor(window.FactorCharts._equityModeKey(cmp, canvasId));
+    return cmp.cutoffLineDate;
+  },
+
+  _axisOf(cmp, canvasId) {
+    if (typeof cmp.seriesAxisFor === 'function')
+      return cmp.seriesAxisFor(window.FactorCharts._equityModeKey(cmp, canvasId));
+    return cmp.seriesAxis;
+  },
+
+  _seriesAxis(cmp, canvasId) {
+    const a = window.FactorCharts._axisOf(cmp, canvasId);
     if (!a || !a.from) return null;
     const to = a.to || new Date().toISOString().slice(0, 10);
     return { fromMs: new Date(a.from).getTime(), toMs: new Date(to).getTime(),
@@ -687,19 +718,20 @@ window.FactorCharts = {
          :                   '52,152,219';
   },
 
-  _preCutoffFade(cmp, dates, full, muted) {
-    const iso = cmp.cutoffLineDate;
+  _preCutoffFade(cmp, dates, full, muted, canvasId) {
+    const iso = window.FactorCharts._cutoffOf(cmp, canvasId);
     if (!iso) return full;
     return (dates || []).map(d => (String(d) < iso ? muted : full));
   },
 
-  _cutoffPlugin(cmp, kind, labels) {
+  _cutoffPlugin(cmp, kind, labels, canvasId) {
     // Deliberately NOT cmp.cutoffDate. On Factor Analysis that field is
     // populated from /tt-cutoff on every page load regardless of mode, so
     // keying off it would draw a train/test marker on in-sample Recall
-    // charts. cutoffLineDate is the explicit opt-in: a page returns a date
-    // only when it actually wants the line.
-    const iso = cmp.cutoffLineDate;
+    // charts. The resolved value is the explicit opt-in: a page returns a
+    // date only for the panes that actually want the line, keyed on which
+    // canvas is being drawn.
+    const iso = window.FactorCharts._cutoffOf(cmp, canvasId);
     if (!iso) return [];
     return [{
       id: 'ftCutoff',

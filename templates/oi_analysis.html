@@ -4288,6 +4288,41 @@
               </span>
             </span>
           </template>
+
+          {#- MODE BADGE. Recall describes whatever loaded it, which may not
+              match the page pill — a saved IS signal opened while the page
+              reads TT is still IS. Always shown, so a screenshot of this pane
+              is never ambiguous about which bin table produced the numbers. -#}
+          <template x-if="recallSig">
+            <span style="display:inline-flex;align-items:center;gap:6px;margin-left:8px">
+              <span :style="recallIsTT
+                      ? 'background:#3a2a12;color:#e6a23c;border:1px solid #7a5a22'
+                      : 'background:#234032;color:#8fd3ac;border:1px solid #2f5a44'"
+                    style="border-radius:3px;padding:1px 6px;font-family:monospace;
+                           font-size:9px;letter-spacing:.5px;font-weight:700"
+                    :title="recallIsTT
+                      ? 'Train-test: cells resolved on tt_bins, frozen at the split below'
+                      : 'In-sample: cells resolved on is_bins (full-history edges)'"
+                    x-text="recallIsTT ? 'TT' : 'IS'"></span>
+              <span x-show="recallIsTT"
+                    style="font-size:10px;color:var(--dim);font-family:monospace"
+                    x-text="'split ' + (recallCutoff || '')"></span>
+
+              {#- TRAIN / TEST — only for a TT recall. An IS signal has no
+                  cutoff, so the control is absent rather than disabled. -#}
+              <span x-show="recallIsTT" style="display:inline-flex;align-items:center;gap:6px">
+                <div class="mode-seg port-win">
+                  <span :class="{ on: recallWindow === 'train' }"
+                        @click="setRecallWindow('train')"
+                        title="Time-series panes hold the full axis and stop at the cutoff. Every other number computes on the train window.">Train</span>
+                  <span :class="{ on: recallWindow === 'test' }"
+                        @click="setRecallWindow('test')"
+                        title="Time-series panes show the full record with the pre-cutoff stretch muted. The stat bar computes on the TEST window only.">Test</span>
+                </div>
+              </span>
+            </span>
+          </template>
+
           <span x-show="recallLoading" style="color:#3498db;font-size:11px">Loading…</span>
           <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
             <span x-show="recallSaveMsg" style="font-size:11px;color:#3498db"
@@ -4688,7 +4723,9 @@
                bound to recall* state. Skips the 1D quantile bar charts
                that flank the main heatmap (discovery widgets, not part
                of the recall path). -->
-          <template x-if="recallHeatmapData && recallHeatmapData.grid">
+          {#- IS / WF recall: one grid, unchanged. -#}
+          <template x-if="recallHeatmapData && recallHeatmapData.grid
+                          && !recallHeatmapData.train_grid">
             <div style="overflow-x:auto">
               <div style="font-size:11px;color:var(--dim);margin-bottom:4px">
                 Heatmap — click cells to edit; <b x-text="recallSelectedCells.size"></b> selected
@@ -4696,6 +4733,34 @@
               {{ m.heatmap_grid('recallHeatmapData.grid', 'recallHeatmapData', 'rc', 'full',
                    cls_expr="'hm-cell-selectable' + (isRecallCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
                    click_expr='toggleRecallCell(ix, iy)') | indent(14) | safe }}
+            </div>
+          </template>
+
+          {#- TT recall: /heatmap returns train_grid + test_grid instead of
+              grid, so without this branch the pane would render blank.
+              Cells are edited on TRAIN — the frozen grid the zone was picked
+              on. The test grid is view-only, the same split the main page
+              uses. -#}
+          <template x-if="recallHeatmapData && recallHeatmapData.train_grid">
+            <div style="display:flex;gap:10px;align-items:flex-start">
+              <div style="flex:1;min-width:0;overflow-x:auto">
+                <div style="font-size:11px;color:#e6a23c;font-weight:700;margin-bottom:4px">
+                  ▣ Train (pre-cutoff) —
+                  <span style="font-weight:400;color:var(--dim)">click cells to edit;</span>
+                  <b x-text="recallSelectedCells.size"></b> selected
+                </div>
+                {{ m.heatmap_grid('recallHeatmapData.train_grid', 'recallHeatmapData', 'rctr', 'compact',
+                     cls_expr="'hm-cell-selectable' + (isRecallCellSelected(ix, iy) ? ' hm-cell-selected' : '')",
+                     click_expr='toggleRecallCell(ix, iy)') | indent(16) | safe }}
+              </div>
+              <div style="flex:1;min-width:0;overflow-x:auto">
+                <div style="font-size:11px;color:#3498db;font-weight:700;margin-bottom:4px">
+                  ▣ Test (post-cutoff)
+                  <span style="font-weight:400;color:var(--dim)">— view only</span>
+                </div>
+                {{ m.heatmap_grid('recallHeatmapData.test_grid', 'recallHeatmapData', 'rcte', 'compact')
+                   | indent(16) | safe }}
+              </div>
             </div>
           </template>
 

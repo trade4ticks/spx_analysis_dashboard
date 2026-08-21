@@ -74,6 +74,40 @@ def time_in_market(trade_dates, trading_days, horizon: int):
     return len(occupied) / float(span)
 
 
+def split_windows(rows: list, cutoff, window: str, date_key: str = "trade_date"):
+    """Split one trade population into the two a train/test view needs.
+
+    Returns (series_rows, window_rows, active_window).
+
+      window_rows  strictly the active window. Every single-window number is
+                   computed from it and shipped as a finished aggregate, so
+                   no client pane can widen its own population.
+      series_rows  what the three time-series panes draw: train-only in
+                   TRAIN, the FULL history in TEST so the whole record and
+                   the cutoff are both visible.
+
+    In TRAIN the two are the SAME LIST OBJECT, which is the invariant worth
+    asserting downstream: the equity endpoint must equal Total Ret there.
+
+    With no cutoff there is no split -- one population, window forced to
+    'train' -- which is how an in_sample caller gets exactly its previous
+    behaviour and no train/test control.
+
+    Extracted from the portfolio aggregate so Recall and the zone view use
+    the same definition rather than a lookalike. The shape itself came from
+    the exits page, which arrived at it after the stat bar twice got widened
+    to the full period in TEST.
+    """
+    if not cutoff:
+        return rows, rows, "train"
+    active = "test" if window == "test" else "train"
+    cut = cutoff.isoformat() if hasattr(cutoff, "isoformat") else str(cutoff)
+    if active == "train":
+        s = [r for r in rows if str(r[date_key]) < cut]
+        return s, s, "train"
+    return rows, [r for r in rows if str(r[date_key]) >= cut], "test"
+
+
 def canonical_stat_names(s: dict) -> dict:
     """Add the field names the shared client mapper reads.
 

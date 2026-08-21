@@ -9020,6 +9020,8 @@ async def _ensure_signals_table(pool) -> None:
     _signals_table_ensured = True
 
 
+from app.routers._stat_shared import split_windows as _split_windows
+
 _SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
 
 
@@ -9122,6 +9124,9 @@ class ZoneAnalyzeRequest(BaseModel):
     # caller.
     selection_mode: Optional[str] = "in_sample"
     selection_cutoff: Optional[str] = None
+    # 'train' | 'test'. Ignored unless selection_mode is train_test, since
+    # nothing else has a cutoff to split on.
+    window: Optional[str] = "train"
     ticker: str = "ALL"
     date_from: Optional[str] = None
     date_to: Optional[str] = None
@@ -9183,22 +9188,27 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     if req.ticker != "ALL":
         ticker_sql = f" AND df.ticker = ${p}"; params.append(req.ticker); p += 1
 
-    # Per-request bin source. A train_test zone is scored on its TRAIN
-    # window — the same window the cells were picked on — so the numbers
-    # under the heatmap match what gets stored on save.
+    # Per-request bin source: resolve the cells against the bin table they
+    # were picked on.
     zone_bin_table = _SIGNAL_BIN_TABLE.get(req.selection_mode or "in_sample")
     if zone_bin_table is None:
         return {"error": f"unknown selection_mode: {req.selection_mode!r}"}
+
+    # NO window filter in SQL. The train/test split happens in Python, on the
+    # full result, because TEST needs BOTH windows: the time-series panes draw
+    # the whole record while the stat bar covers test only. Filtering here
+    # would leave TEST with nothing to draw -- the same mistake the portfolio
+    # aggregate made before it switched to fetching both and splitting after.
     zone_window_sql = ""
+    zone_cutoff = None
     if (req.selection_mode or "in_sample") == "train_test":
         raw_cut = (req.selection_cutoff or "").strip()
         if not raw_cut:
             return {"error": "selection_cutoff required for train_test"}
         try:
-            params.append(_date.fromisoformat(raw_cut))
+            zone_cutoff = _date.fromisoformat(raw_cut)
         except ValueError:
             return {"error": f"selection_cutoff not a date: {raw_cut!r}"}
-        zone_window_sql = f" AND df.trade_date < ${p}"; p += 1
 
     # Include df.{pmetric} and df.{smetric} in the SELECT so the
     # frontend CSV export (recallDownloadCSV) can include per-trade
@@ -9237,7 +9247,9 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         return {
             **_empty_stats,
             "equity_primary": [], "equity_combined": [],
-            "combined_trades": [], "horizon": _parse_horizon(outcome),
+            "combined_trades": [], "series_trades": [], "window_trades": [],
+            "window": "train", "cutoff_date": None, "series_axis": None,
+            "horizon": _parse_horizon(outcome),
             "tickers": [], "yearly": [],
             "outlier_excluded": 0,
         }
@@ -9275,6 +9287,17 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
             outcome:      fov,   # keyed by outcome name — what _sec_equity_curve reads
         })
 
+    # TWO POPULATIONS. Same shape the portfolio aggregate uses, via the same
+    # helper, so Recall's panes behave like every other train/test surface:
+    #   window_rows  the active window; every single-window number below is
+    #                computed from it server-side as a finished aggregate.
+    #   series_rows  what the time-series panes draw -- train-only in TRAIN,
+    #                the FULL record in TEST so the cutoff is visible.
+    # No cutoff (in_sample / walk_forward) means no split at all, so an
+    # existing caller gets exactly its previous behaviour.
+    series_rows, valid_rows, zone_active = _split_windows(
+        valid_rows, zone_cutoff, (req.window or "train"))
+
     n = len(valid_rows)
     if n == 0:
         _empty_stats = {
@@ -9286,7 +9309,9 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         return {
             **_empty_stats,
             "equity_primary": [], "equity_combined": [],
-            "combined_trades": [], "horizon": _parse_horizon(outcome),
+            "combined_trades": [], "series_trades": [], "window_trades": [],
+            "window": "train", "cutoff_date": None, "series_axis": None,
+            "horizon": _parse_horizon(outcome),
             "tickers": [], "yearly": [],
             "outlier_excluded": outlier_excluded,
             "trading_days": [],
@@ -9326,13 +9351,17 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     # range. Drives the Trade Activity pane's x-axis so it shows zero-
     # trade days and gaps, and so its rolling H-day window indexes
     # ACTUAL trading days (not fired-trade dates). Span clamped to
-    # min/max of valid_rows.trade_date — same range eq_zone uses, so
-    # the activity pane lines up exactly with the equity curve.
+    # Span comes from ALL rows, both windows. This list IS the activity
+    # pane's category axis -- unlike equity, a time axis that seriesAxis pins
+    # independently, activity can only be as wide as the days it is handed.
+    # Built from the active window it would end at the cutoff in TRAIN and
+    # that one pane would rescale while the other two held.
+    _axis_dates = [r["trade_date"] for r in series_rows] or dates_all
     trading_days: list = []
-    if dates_all:
+    if _axis_dates:
         try:
-            d0_iso = min(dates_all)
-            d1_iso = max(dates_all)
+            d0_iso = min(_axis_dates)
+            d1_iso = max(_axis_dates)
             d0 = _date.fromisoformat(d0_iso)
             d1 = _date.fromisoformat(d1_iso)
             async with pool.acquire() as conn:
@@ -9344,19 +9373,25 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
                 )
             trading_days = [r["trade_date"].isoformat() for r in td_rows]
         except Exception:
-            trading_days = sorted(set(dates_all))   # safe fallback
+            trading_days = sorted(set(_axis_dates))   # safe fallback
 
     # ── Equity curve — cumulative SUM, same as _sec_equity_curve ──────────────
     # "cum += float(y)" for each row in date order.  No per-date averaging,
     # no compounding — this is the formula the secondary-detail component uses.
-    eq_zone = _sec_equity_curve(valid_rows, outcome)
+    # SERIES population: the equity curve is a time-series pane. In TEST it
+    # spans the full record while the stat bar beside it covers test only, so
+    # the equity endpoint deliberately will NOT equal Total Ret there -- the
+    # muted pre-cutoff stretch and the cutoff line are what mark that.
+    eq_zone = _sec_equity_curve(series_rows, outcome)
     # equity_combined mirrors primary (single zone curve; same line rendered twice
     # but the JS aligns combined to primary's date axis so they overlap cleanly).
     eq_combined = eq_zone
 
     # ── Yearly breakdown ───────────────────────────────────────────────────────
+    # SERIES population — Annual P&L is a time-series pane, so in TEST it
+    # shows every year and the cutoff line marks where the test window starts.
     by_year: dict = {}
-    for r in valid_rows:
+    for r in series_rows:
         yr = int(r["trade_date"][:4])
         by_year.setdefault(yr, []).append(r[outcome])
 
@@ -9376,18 +9411,36 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
     # trade_date, primary metric value, secondary metric value, entry/exit spot
     # prices, exit date, return) as the secondary-detail CSV does. Activity
     # chart still reads t.trade_date and t.ticker so its render is unchanged.
+    # TWO enriched lists, named by purpose.
+    #
+    # combined_trades aliases SERIES, because every chart-layer consumer of it
+    # is a time-series pane -- the equity curve's dollar branch, Annual P&L
+    # and Trade Activity all read it. Aliasing it to the window population is
+    # what made those panes drop their pre-cutoff stretch in TEST on the
+    # portfolio; the same three renderers are used here.
+    #
+    # window_trades is the active window, for anything that should match what
+    # the stat bar says -- the CSV export above all: a file downloaded from
+    # the TEST view must contain test trades.
     horizon_n = _parse_horizon(outcome)
-    tickers_in_zone = sorted({r["ticker"] for r in valid_rows})
+    tickers_in_zone = sorted({r["ticker"] for r in series_rows})
     calendars = await _fetch_ticker_calendars(pool, tickers_in_zone)
-    combined_trades = [
-        _build_enriched_trade(
-            r, calendars, horizon_n,
-            primary_metric=pmetric,
-            secondary_metric=smetric,
-            outcome_col=outcome,
-        )
-        for r in valid_rows
-    ]
+
+    def _enrich_zone(rows: list) -> list:
+        return [
+            _build_enriched_trade(
+                r, calendars, horizon_n,
+                primary_metric=pmetric,
+                secondary_metric=smetric,
+                outcome_col=outcome,
+            )
+            for r in rows
+        ]
+
+    combined_trades = _enrich_zone(series_rows)
+    # In TRAIN the two populations are the same list object, so do not enrich
+    # twice.
+    window_trades = combined_trades if valid_rows is series_rows else _enrich_zone(valid_rows)
 
     # ── Ticker breakdown — same format as /secondary-detail ───────────────────
     by_ticker_dict: dict = {}
@@ -9427,7 +9480,21 @@ async def secondary_zone_analyze(req: ZoneAnalyzeRequest, pool=Depends(get_oi_po
         # Chart data — same field names as /secondary-detail so JS can reuse components
         "equity_primary":  eq_zone,
         "equity_combined": eq_combined,
+        # Named by purpose; combined_trades aliases the series population.
         "combined_trades": combined_trades,
+        "series_trades":   combined_trades,
+        "window_trades":   window_trades,
+        # Window envelope. cutoff_date is None unless this was a train_test
+        # request, which is how the client knows whether to offer the
+        # TRAIN/TEST control at all rather than showing an arbitrary split.
+        "window":      zone_active,
+        "cutoff_date": zone_cutoff.isoformat() if zone_cutoff else None,
+        # Fixed x-domain for the time-series panes: the WHOLE record, so it
+        # is identical in both windows and the axis cannot rescale on a
+        # toggle. Half-filled means train, full means test.
+        "series_axis": ({"from": min(r["trade_date"] for r in series_rows),
+                         "to":   max(r["trade_date"] for r in series_rows)}
+                        if series_rows else None),
         "horizon":         _parse_horizon(outcome),
         "tickers":         tickers_out,
         "yearly":          yearly,
