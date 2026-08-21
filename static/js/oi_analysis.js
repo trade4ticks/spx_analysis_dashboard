@@ -51,15 +51,68 @@ document.addEventListener('alpine:init', () => {
     // sane string so the initial render before the fetch resolves doesn't
     // emit `undefined` in URLs; gets overwritten by the actual value.
     cutoffDate: '2024-01-01',
-    // Opt-in for FactorCharts._cutoffPlugin. cutoffDate itself is populated
-    // on every page load regardless of mode, so it cannot gate the marker:
-    // keying off it would draw a train/test line across in-sample Recall
-    // charts. Only train_test mode wants it.
-    get cutoffLineDate() { return this.pageMode === 'train_test' ? this.cutoffDate : ''; },
-    // Opted OUT of the fixed time-series x-domain: Recall's panes size to
-    // their own data, and pinning them to a fixed span would change existing
-    // charts. null keeps the data-driven bounds.
-    seriesAxis: null,
+    // ── Chart render context ────────────────────────────────────────────
+    // WHICH SET OF PANES IS BEING DRAWN RIGHT NOW.
+    //
+    // FactorCharts reads two fields off this component for train/test
+    // rendering -- cutoffLineDate (draws the marker, mutes pre-cutoff) and
+    // seriesAxis (pins the x-domain). Several unrelated pane groups render
+    // through the SAME FactorCharts functions on the SAME component: the
+    // page-level Zone charts, the portfolio panes, and Recall. Each wants a
+    // different answer, and none of them may leak into the others.
+    //
+    // This was a boolean (portChartsActive) when the portfolio was the only
+    // opt-in. That did not survive contact: the portfolio getters were added
+    // as a SECOND definition of cutoffLineDate on the same object literal,
+    // where the later definition silently wins -- so the page-level marker
+    // returned '' and the cutoff line on the main page's TT charts went dead.
+    // A boolean also could not have expressed a third consumer.
+    //
+    //   ''        page-level charts — Zone / analyze. TT mode wants the
+    //             marker; cutoffDate alone cannot gate it, because that is
+    //             populated from /tt-cutoff on every page load regardless of
+    //             mode and would draw a train/test line across in-sample
+    //             Recall charts.
+    //   'port'    portfolio panes — cutoff and axis come from the aggregate
+    //             response, i.e. from the portfolio's own signals.
+    //
+    // Set it ONLY through withChartCtx(), which restores the previous value
+    // in a finally.
+    chartCtx: '',
+
+    get cutoffLineDate() {
+      if (this.chartCtx === 'port') return this.portAggregate?.cutoff_date || '';
+      return this.pageMode === 'train_test' ? this.cutoffDate : '';
+    },
+    // Page-level charts opt OUT of the fixed x-domain: Zone and Recall panes
+    // size to their own data, and pinning them would change existing charts.
+    // null keeps the data-driven bounds.
+    //
+    // Read-only on purpose. This used to be a plain field, and the portfolio
+    // work replaced it with a getter that has no setter -- under 'use strict'
+    // any `this.seriesAxis = ...` would then throw at runtime. Nothing
+    // assigns to it today; the explicit setter below keeps that from becoming
+    // a trap, and says where the value actually comes from.
+    get seriesAxis() {
+      if (this.chartCtx === 'port') return this.portAggregate?.series_axis || null;
+      return null;
+    },
+    set seriesAxis(_v) {
+      // Derived from chartCtx, never assigned. Swallowing the write rather
+      // than throwing keeps a stray assignment from taking the page down,
+      // and the warning says where to look.
+      console.warn('[oi-analysis] seriesAxis is derived from chartCtx; '
+                 + 'assignment ignored. Set the context, not the field.');
+    },
+
+    // Run fn with the chart context set, then restore it. Restores the
+    // PREVIOUS value rather than '', so nesting cannot strand the outer
+    // group on the wrong context.
+    withChartCtx(ctx, fn) {
+      const prev = this.chartCtx;
+      this.chartCtx = ctx;
+      try { return fn(); } finally { this.chartCtx = prev; }
+    },
     // selectedBins20 is the sole selection state (1-20). D1+D10 in 10-bin = bins {1,2,19,20}.
     selectedBins20: new Set([1, 2, 19, 20]),
     equityMode: 'concurrent',   // 'concurrent' | 'non_overlapping'
@@ -8319,20 +8372,9 @@ document.addEventListener('alpine:init', () => {
       this.loadPortfolioAggregate();
     },
 
-    // The two fields FactorCharts reads for train/test rendering. Deliberately
-    // NOT this.cutoffDate — that is populated from /tt-cutoff on every page
-    // load regardless of mode, so keying off it would draw a train/test marker
-    // on in-sample portfolios. cutoffLineDate is the explicit opt-in, and the
-    // date comes from the portfolio's own signals via the aggregate response.
-    get cutoffLineDate() {
-      return this.portChartsActive ? (this.portAggregate?.cutoff_date || '') : '';
-    },
-    get seriesAxis() {
-      return this.portChartsActive ? (this.portAggregate?.series_axis || null) : null;
-    },
-    // Set only while the portfolio panes are the ones being drawn, so Recall
-    // and Zone charts on the same component are untouched.
-    portChartsActive: false,
+    // cutoffLineDate / seriesAxis are declared ONCE, near the top of this
+    // object, and switch on chartCtx. They used to be redeclared here for the
+    // portfolio, which silently overrode the page-level definitions.
 
     _destroyPortCharts() {
       for (const k of ['port-equity', 'port-yearly', 'port-activity', 'port-bubble']) {
@@ -8346,21 +8388,17 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       this._destroyPortCharts();
-      // portChartsActive gates cutoffLineDate / seriesAxis so the cutoff
-      // marker and the pinned axis apply to THESE panes only — Recall and
-      // Zone render through the same FactorCharts functions on the same
-      // component and must not pick them up.
-      this.portChartsActive = true;
-      try {
+      // chartCtx 'port' makes cutoffLineDate / seriesAxis answer for THESE
+      // panes only. Zone and Recall render through the same FactorCharts
+      // functions on the same component and must not pick them up.
+      this.withChartCtx('port', () => {
         // Equity + activity + bubble delegate to the parameterized _renderSec* methods
         // (singleSeries=true → one pink curve, no primary-universe blue line).
         this._renderSecEquity('chart-port-equity', this.portAggregate, true);
         this._renderPortYearly();
         this._renderSecActivity('chart-port-activity', this.portAggregate);
         this._renderSecBubble('chart-port-bubble', this.portAggregate);
-      } finally {
-        this.portChartsActive = false;
-      }
+      });
     },
 
     _renderPortYearly() {

@@ -138,6 +138,94 @@ def component_names(js_files: list) -> set | None:
         Path(harness).unlink(missing_ok=True)
 
 
+# Keys that are legitimately repeated because they belong to DIFFERENT nested
+# objects, not to the component itself. Matching is by name only, so a few
+# generic ones have to be exempted or every file trips.
+_DUP_OK = {
+    "label", "data", "type", "options", "min", "max", "color", "value",
+    "name", "key", "n", "title", "text", "display", "grid", "ticks",
+    "borderColor", "backgroundColor", "borderWidth", "pointRadius", "fill",
+    "tension", "stepped", "yAxisID", "position", "callback", "callbacks",
+    "plugins", "scales", "legend", "tooltip", "datasets", "responsive",
+    "maintainAspectRatio", "animation", "parsing", "mode", "intersect",
+}
+
+
+def duplicate_component_keys(js_path: Path) -> list:
+    """Keys defined TWICE at the top level of an Alpine.data() object literal.
+
+    Why this exists
+    ---------------
+    A duplicate key in an object literal is legal JavaScript: the later
+    definition silently wins. Nothing errors, nothing warns, and every name
+    still resolves -- so the reference check above passes cleanly while a
+    method or getter has been replaced by another one further down the file.
+
+    That has landed twice. `cutoffLineDate` was declared at the top of
+    oi_analysis.js for the page-level charts and again 8,000 lines later for
+    the portfolio; the later one returned '' unless the portfolio was
+    rendering, so the cutoff line on the main page's TT charts went dead. A
+    `seriesAxis` field was likewise replaced by a getter with no setter.
+
+    Depth is tracked by brace/bracket/paren balance from the object's opening
+    `({`, and only depth-1 keys are considered -- a `label:` inside a nested
+    Chart.js config is not a component member.
+    """
+    src = js_path.read_text(encoding="utf-8")
+    m = re.search(r"Alpine\.data\(\s*['\"][\w$]+['\"]\s*,\s*\(\s*\)\s*=>\s*\(\{", src)
+    if not m:
+        return []
+    i = m.end()
+    depth = 1
+    seen: dict = {}
+    dups: list = []
+    # Capture the accessor kind: a get/set PAIR for one name is a single
+    # property, not a redefinition, and must not be reported.
+    key_re = re.compile(r"(get|set|async)?\s*([A-Za-z_$][\w$]*)\s*[:(]")
+    line_start = True
+    while i < len(src) and depth > 0:
+        ch = src[i]
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth -= 1
+        elif ch == "\n":
+            line_start = True
+            i += 1
+            continue
+        elif depth == 1 and line_start and not ch.isspace():
+            # Skip comments outright.
+            if src.startswith("//", i):
+                i = src.find("\n", i)
+                if i == -1:
+                    break
+                continue
+            if src.startswith("/*", i):
+                i = src.find("*/", i) + 2
+                continue
+            km = key_re.match(src, i)
+            if km:
+                kind = km.group(1) or "plain"
+                name = km.group(2)
+                ln = src[:km.start()].count("\n") + 1
+                prev = seen.get(name)
+                if prev and name not in _DUP_OK:
+                    prev_ln, prev_kind = prev
+                    accessor_pair = {kind, prev_kind} == {"get", "set"}
+                    if not accessor_pair:
+                        dups.append(
+                            f"{js_path.name}: `{name}` defined at line "
+                            f"{prev_ln} AND line {ln} — the later one "
+                            f"silently wins")
+                elif not prev:
+                    seen[name] = (ln, kind)
+            line_start = False
+        elif not ch.isspace():
+            line_start = False
+        i += 1
+    return dups
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -206,7 +294,17 @@ def main() -> int:
                 f"{js_file.name}:~{line}: this.{name}() is called but is not "
                 f"on the component")
 
+    # ── Third pass: duplicate keys in the component object literal ──────
+    # Both names resolve, so neither pass above can see this one.
+    dup_files = 0
+    for js_file in sorted(STATIC.glob("js/*.js")):
+        d = duplicate_component_keys(js_file)
+        if d:
+            dup_files += 1
+            problems.extend(d)
+
     print(f"\nthis.X() calls    : {this_calls}")
+    print(f"files w/ dup keys : {dup_files}")
     print(f"\ntemplates checked : {checked}")
     print(f"templates skipped : {skipped}")
     print(f"calls inspected   : {calls_seen}")
