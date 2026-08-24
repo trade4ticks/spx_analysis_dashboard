@@ -108,14 +108,24 @@ for (const f of process.argv.slice(3)) {
   catch (e) { /* a bundle may need DOM we do not have; keep going */ }
 }
 if (!comp) { console.log(JSON.stringify({ok:false})); process.exit(0); }
-const names = new Set();
+const names = new Set(), fns = new Set();
 let o = comp;
 while (o && o !== Object.prototype) {
-  for (const k of Object.getOwnPropertyNames(o)) names.add(k);
+  for (const k of Object.getOwnPropertyNames(o)) {
+    names.add(k);
+    // getOwnPropertyDescriptor, not comp[k]: reading a getter would RUN it,
+    // and these components have getters that touch state this harness has
+    // not set up. A getter is recorded as callable-unknown (left out of
+    // `fns` only if it is plainly a data property), because a getter may
+    // legitimately return a function.
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    if (!d) continue;
+    if (typeof d.value === 'function' || d.get) fns.add(k);
+  }
   o = Object.getPrototypeOf(o);
 }
-for (const k of Object.keys(sb)) names.add(k);
-console.log(JSON.stringify({ok:true, names:[...names]}));
+for (const k of Object.keys(sb)) { names.add(k); fns.add(k); }
+console.log(JSON.stringify({ok:true, names:[...names], fns:[...fns]}));
 """
 
 
@@ -131,7 +141,9 @@ def component_names(js_files: list) -> set | None:
         if not line:
             return None
         data = json.loads(line[-1])
-        return set(data["names"]) if data.get("ok") else None
+        if not data.get("ok"):
+            return None
+        return set(data["names"]), set(data.get("fns") or [])
     except Exception:
         return None
     finally:
@@ -245,11 +257,12 @@ def main() -> int:
         js = [f for f in js if f.is_file()]
         if not js:
             continue
-        names = component_names(js)
-        if names is None:
+        got = component_names(js)
+        if got is None:
             print(f"  SKIP {tpl.name}: component could not be constructed")
             skipped += 1
             continue
+        names, fns = got
         checked += 1
         # Strip HTML comments and Jinja comments -- prose is not evaluated.
         body = re.sub(r"<!--.*?-->", "", text, flags=re.S)
@@ -260,7 +273,19 @@ def main() -> int:
             expr = STRLIT.sub("''", expr)
             for name in CALL.findall(expr):
                 calls_seen += 1
-                if name in BUILTINS or name in names or name in seen:
+                if name in BUILTINS or name in seen:
+                    continue
+                if name in names:
+                    # On the component, but is it CALLABLE? A string field
+                    # invoked as `oiNote()` resolves fine and throws at
+                    # runtime, which the membership check above cannot see --
+                    # the binding simply goes dead on the page.
+                    if name not in fns:
+                        seen.add(name)
+                        problems.append(
+                            f"{tpl.name}: {name}() is called from an Alpine "
+                            f"attribute but {name} is a data field, not a "
+                            f"method -- the binding will throw")
                     continue
                 # loop variables and inline consts are lower-cased short words;
                 # only report names that look like methods and are absent.
@@ -276,9 +301,10 @@ def main() -> int:
     # layer that bug lived on.
     this_calls = 0
     for js_file in sorted(STATIC.glob("js/*.js")):
-        names = component_names([js_file])
-        if names is None:
+        got = component_names([js_file])
+        if got is None:
             continue
+        names, fns = got
         src = js_file.read_text(encoding="utf-8")
         src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
         src = re.sub(r"(?m)^\s*//.*$", "", src)

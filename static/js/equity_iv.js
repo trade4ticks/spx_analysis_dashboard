@@ -29,7 +29,14 @@ const EQ_SURF = '#2d2d2d';   // theme --surface, used as the ring between overla
 /* Chart.js instances live OUTSIDE Alpine's reactive proxy. Wrapping Chart
  * internals in a Proxy breaks rendering — the same lesson the other pages on
  * this site already learned. */
-const EQ_CHARTS = { scatter: null, hist: null, ts0: null, ts1: null, ts2: null };
+const EQ_CHARTS = {
+  scatter: null, hist: null, ts0: null, ts1: null, ts2: null,
+  // Rows 6-9. The two curve-band kinds share one canvas but are keyed
+  // separately so switching the toggle destroys the outgoing chart
+  // rather than orphaning it on an element the new one is about to take.
+  'cb-skew': null, 'cb-term': null, 'cb-skew_term': null,
+  tent: null, sticky: null, tscat: null, svol: null, oi: null,
+};
 /* Per-render point metadata the tooltip and the label plugin need, kept off
  * the reactive object for the same reason. */
 const EQ_PTS = { scatter: [], hist: [] };
@@ -283,6 +290,156 @@ if (typeof Chart !== 'undefined' && Chart.defaults) {
   Chart.defaults.font.size   = 11;
 }
 
+/* The surface grid's view list, shared by the picker and the label lookup so
+ * a new view cannot appear in one and not the other. */
+const EQ_GRID_VIEWS = [
+  { k: 'iv_minus_atm',   label: 'IV − ATM',
+    hint: 'The shape view. Anchored on equity_atm at k=0, not put_delta 50.' },
+  { k: 'z_iv_minus_atm', label: 'z of IV − ATM',
+    hint: 'That spread scored against prior sessions. Deliberately not z of ' +
+          'raw IV: every cell moves with the vol level, so that view lights ' +
+          'the whole grid up at once and says nothing about shape.' },
+  { k: 'iv',             label: 'raw IV',   hint: 'The surface as fitted.' },
+  { k: 'chg_1d',         label: '1d change', hint: 'Against the prior close, per node.' },
+  { k: 'chg_5d',         label: '5d change', hint: 'Against five closes back, per node.' },
+];
+
+/* Markers for the tent: the historical band of the zero-cost width, plus
+ * today's short and long strikes and the delta-neutral point.
+ *
+ * Drawn as a plugin rather than as datasets because they are vertical
+ * annotations on a σ axis, not series — a dataset would put them in the
+ * legend, the tooltip and the y-scale calculation, none of which is wanted. */
+const eqTentMarks = {
+  id: 'eqTentMarks',
+  beforeDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.xs) return;
+    const { ctx, scales } = chart;
+    const xs = scales.x, ys = scales.y;
+    if (!xs || !ys) return;
+    const px = sig => {
+      // The x scale is categorical over `opts.xs`, so a σ value has to be
+      // located by interpolating its position in that array.
+      const arr = opts.xs;
+      if (!arr.length) return null;
+      if (sig <= arr[0]) return xs.getPixelForValue(0);
+      if (sig >= arr[arr.length - 1]) return xs.getPixelForValue(arr.length - 1);
+      let i = 0;
+      while (i < arr.length - 1 && arr[i + 1] < sig) i++;
+      const span = arr[i + 1] - arr[i];
+      const t = span === 0 ? 0 : (sig - arr[i]) / span;
+      return xs.getPixelForValue(i) + (xs.getPixelForValue(i + 1) - xs.getPixelForValue(i)) * t;
+    };
+    ctx.save();
+
+    // The band, as a shaded region on the σ axis: this is where the zero-cost
+    // short USUALLY sits, so today's marker inside or outside it is the read.
+    const b = opts.band;
+    if (b && b.p25 != null && b.p75 != null) {
+      const a = px(-Math.abs(b.p75)), c = px(-Math.abs(b.p25));
+      if (a != null && c != null) {
+        ctx.fillStyle = 'rgba(255,255,255,0.07)';
+        ctx.fillRect(Math.min(a, c), ys.top, Math.abs(c - a), ys.bottom - ys.top);
+      }
+    }
+    if (b && b.p10 != null && b.p90 != null) {
+      const a = px(-Math.abs(b.p90)), c = px(-Math.abs(b.p10));
+      if (a != null && c != null) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+        ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+        [a, c].forEach(x => {
+          ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+        });
+        ctx.setLineDash([]);
+      }
+    }
+
+    const mark = (sig, col, label) => {
+      if (sig == null) return;
+      const x = px(sig);
+      if (x == null) return;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+      ctx.fillStyle = col;
+      ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, ys.top - 2);
+    };
+    mark(opts.shortSigma, EQ_PINK, 'short ×2');
+    mark(opts.longSigma, EQ_BLUE, 'long');
+    mark(opts.dnSigma, '#f0a30a', 'Δ-neutral');
+    ctx.restore();
+  },
+};
+
+/* Spot markers for the sticky-strike panel. Today's spot and the prior
+ * session's, on a strike axis — the distance between them IS the migration
+ * the panel is decomposing, so it has to be visible. */
+const eqSpotMarks = {
+  id: 'eqSpotMarks',
+  beforeDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.strikes || !opts.strikes.length) return;
+    const { ctx, scales } = chart;
+    const xs = scales.x, ys = scales.y;
+    if (!xs || !ys) return;
+    const arr = opts.strikes;
+    const px = k => {
+      if (k == null || k <= arr[0]) return xs.getPixelForValue(0);
+      if (k >= arr[arr.length - 1]) return xs.getPixelForValue(arr.length - 1);
+      let i = 0;
+      while (i < arr.length - 1 && arr[i + 1] < k) i++;
+      const span = arr[i + 1] - arr[i];
+      const t = span === 0 ? 0 : (k - arr[i]) / span;
+      return xs.getPixelForValue(i) + (xs.getPixelForValue(i + 1) - xs.getPixelForValue(i)) * t;
+    };
+    ctx.save();
+    const mark = (k, col, dash, label) => {
+      if (k == null) return;
+      const x = px(k);
+      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = col;
+      ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, ys.top - 2);
+    };
+    mark(opts.prevSpot, 'rgba(138,138,138,0.9)', [4, 3], 'prev spot');
+    mark(opts.spot, '#e8e8e8', [], 'spot');
+    ctx.restore();
+  },
+};
+
+/* The structure's strikes overlaid on the OI profile. Without this the panel
+ * is ambient context; with it, it answers "is my short sitting on a wall". */
+const eqStrikeMarks = {
+  id: 'eqStrikeMarks',
+  afterDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.marks || !opts.marks.length || !opts.strikes) return;
+    const { ctx, scales } = chart;
+    const xs = scales.x, ys = scales.y;
+    if (!xs || !ys) return;
+    const arr = opts.strikes.map(Number);
+    ctx.save();
+    for (const m of opts.marks) {
+      // Nearest listed strike: the chain is a discrete ladder and a solved
+      // strike almost never lands exactly on one.
+      let bi = 0, bd = Infinity;
+      arr.forEach((k, i) => { const d = Math.abs(k - m.strike); if (d < bd) { bd = d; bi = i; } });
+      const x = xs.getPixelForValue(bi);
+      ctx.strokeStyle = m.color; ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
+      ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = m.color;
+      ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = 'center';
+      ctx.fillText(`${m.label} ${m.strike.toFixed(2)}`, x, ys.top - 2);
+    }
+    ctx.restore();
+  },
+};
+
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('equityIv', () => ({
 
@@ -330,6 +487,39 @@ document.addEventListener('alpine:init', () => {
     seriesChart: 'line',       // line | candle
     seriesEnvelope: true,
     envLo: 0.10, envHi: 0.90, envWindow: 63,
+
+    // ── rows 6–9 state ──────────────────────────────────────────────────
+    // Keyed off selectedTicker like the rest of the ticker half, so the
+    // universe half still works with nothing selected.
+
+    // Row 6. `cb` holds one payload per curve kind; the skew panel and the
+    // term panel render into separate canvases, and the term panel's kind is
+    // a toggle between two questions rather than two series.
+    cb: {}, cbLoading: {}, cbError: {},
+    cbDte: 30,                 // the tenor every per-tenor panel in 6–8 uses
+    cbWing: 25,
+    termKind: 'term',          // term | skew_term
+    termDeltas: [25, 75],
+
+    tent: null, tentLoading: false, tentError: '',
+    tentLongDelta: 25,
+
+    // Row 7
+    sticky: null, stickyLoading: false, stickyError: '',
+    grid: null, gridLoading: false, gridError: '',
+    gridView: 'iv_minus_atm',
+
+    // Row 8
+    tscat: null, tscatLoading: false, tscatError: '',
+    svol: null, svolLoading: false, svolError: '',
+
+    // Row 9 — collapsed by default. This is a periodic-curiosity section,
+    // not a check-every-time one, and it hits a different (slower, parquet)
+    // data path, so it does not load until it is opened.
+    oiOpen: false, oi: null, oiLoading: false, oiError: '', oiNote: '',
+    oiTab: 'profile',          // profile | doi | flow
+    oiDate: '', oiDoiN: 5, oiLookback: 252,
+
     ser: null, serLoading: false, serError: '',
     serFam: 'skew', serBase: 'iv_30d_atm',
     // pane index -> series names candle mode could not draw there
@@ -530,6 +720,10 @@ document.addEventListener('alpine:init', () => {
     onAxisChange() {
       this.activePreset = '';
       this.loadCrossSection();
+      // Row 8's Path panel plots the SAME axes for one ticker over time, so
+      // it follows the pickers. Leaving it behind would put two panels with
+      // the same axis labels on screen showing different metrics.
+      this.loadTimeScatter();
     },
 
     applyPreset(p) {
@@ -543,6 +737,7 @@ document.addEventListener('alpine:init', () => {
       setAxis('y', p.y);
       this.activePreset = p.label;
       this.loadCrossSection();
+      this.loadTimeScatter();
     },
 
     /** Selecting re-renders the scatter to move the highlight ring. The
@@ -1012,6 +1207,7 @@ document.addEventListener('alpine:init', () => {
       }
       await Promise.all([
         this.loadHeader(), this.loadUnusual(), this.loadRails(), this.loadSeries(),
+        this.loadSurface(), this.loadOi(),
       ]);
     },
 
@@ -1728,6 +1924,887 @@ document.addEventListener('alpine:init', () => {
     rgba(hex, a) {
       const n = parseInt(hex.slice(1), 16);
       return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+    },
+
+    // ══ Rows 6–8: the surface panels ═════════════════════════════════════
+    //
+    // These read equity_surface / equity_atm rather than the metric layer, so
+    // they load from /api/equity-iv/{curve-band,tent,sticky-strike,
+    // surface-grid,time-scatter,spot-vol}. All of them follow the page's
+    // scoring rule: today at the selected snapshot, history at the daily
+    // close ending at the prior session.
+
+    async loadSurface() {
+      if (!this.selectedTicker) {
+        this.cb = {}; this.tent = null; this.sticky = null;
+        this.grid = null; this.tscat = null; this.svol = null;
+        return;
+      }
+      await Promise.all([
+        this.loadCurveBand('skew'),
+        this.loadCurveBand(this.termKind),
+        this.loadTent(),
+        this.loadSticky(),
+        this.loadGrid(),
+        this.loadTimeScatter(),
+        this.loadSpotVol(),
+      ]);
+    },
+
+    /** Shared query string for every surface panel. */
+    _sq(extra) {
+      const q = new URLSearchParams({
+        ticker: this.selectedTicker,
+        window: this.histWindow,
+        exclude_extrapolated: String(this.excludeExtrap),
+      });
+      if (this.date) q.set('date', this.date);
+      if (this.snapshot) q.set('snapshot', this.snapshot);
+      for (const [k, v] of Object.entries(extra || {})) q.set(k, String(v));
+      return q;
+    },
+
+    // ── Row 6a/6c: the curve band panels ────────────────────────────────
+
+    async loadCurveBand(kind) {
+      this.cbLoading[kind] = true; this.cbError[kind] = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/curve-band?' + this._sq({
+          kind, dte: this.cbDte, wing: this.cbWing,
+          deltas: this.termDeltas.join(','),
+        }));
+        if (j.error) { this.cbError[kind] = j.error; this.cb[kind] = null; }
+        else { this.cb[kind] = j; this.renderCurveBand(kind); }
+      } catch (e) {
+        this.cbError[kind] = String(e.message || e); this.cb[kind] = null;
+      } finally {
+        this.cbLoading[kind] = false;
+      }
+    },
+
+    setTermKind(k) {
+      if (this.termKind === k) return;
+      // The old kind's chart is destroyed rather than left behind: both
+      // render into the same canvas, and Chart.js will happily keep the
+      // previous instance alive and attached to it.
+      const old = EQ_CHARTS['cb-' + this.termKind];
+      if (old) { old.destroy(); EQ_CHARTS['cb-' + this.termKind] = null; }
+      this.termKind = k;
+      this.loadCurveBand(k);
+    },
+
+    setCbDte(v) {
+      const n = parseInt(v, 10);
+      if (!isFinite(n) || n === this.cbDte) return;
+      this.cbDte = n;
+      this.loadCurveBand('skew');
+      this.loadTent();
+      this.loadSticky();
+    },
+
+    cbAvailableDtes() {
+      const src = this.cb.skew || this.grid || this.tent;
+      return (src && src.available && src.available.dtes) || [];
+    },
+
+    /* Band + today's line, on one canvas.
+     *
+     * Four fill datasets stacked from P10 up, each filling to the one below,
+     * so the shading reads as a nested envelope rather than four ribbons.
+     * The median is a line because a median is a location, not an edge. */
+    renderCurveBand(kind) {
+      if (typeof Chart === 'undefined') return;
+      const key = 'cb-' + kind;
+      if (EQ_CHARTS[key]) { EQ_CHARTS[key].destroy(); EQ_CHARTS[key] = null; }
+      const j = this.cb[kind];
+      if (!j) return;
+      this.$nextTick(() => this.paintCurveBand(kind));
+    },
+
+    paintCurveBand(kind) {
+      const j = this.cb[kind];
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-cb-' + (kind === 'skew' ? 'skew' : 'term'));
+      if (!el) return;
+      const key = 'cb-' + kind;
+      if (EQ_CHARTS[key]) { EQ_CHARTS[key].destroy(); EQ_CHARTS[key] = null; }
+
+      // Multi-series panels (term by delta) key both band and line on the
+      // series value; the others have a single implicit series.
+      const keyed = kind === 'term';
+      const xs = [...new Set([...j.band.map(b => b.x), ...j.today.map(t => t.x),
+                              ...(j.atm_band || []).map(b => b.x)])].sort((a, b) => a - b);
+      const at = (arr, x, s) => arr.find(r => r.x === x && (!keyed || r.series === s));
+
+      const datasets = [];
+      const bandFor = (rows, colr, label) => {
+        const g = k => xs.map(x => { const r = at(rows, x); return r ? r[k] : null; });
+        datasets.push({ label: label + ' P10', data: g('p10'), borderColor: 'transparent',
+                        pointRadius: 0, fill: false, order: 5 });
+        datasets.push({ label: label + ' P25', data: g('p25'), borderColor: 'transparent',
+                        pointRadius: 0, backgroundColor: this.rgba(colr, 0.07),
+                        fill: '-1', order: 5 });
+        datasets.push({ label: label + ' P75', data: g('p75'), borderColor: 'transparent',
+                        pointRadius: 0, backgroundColor: this.rgba(colr, 0.16),
+                        fill: '-1', order: 5 });
+        datasets.push({ label: label + ' P90', data: g('p90'), borderColor: 'transparent',
+                        pointRadius: 0, backgroundColor: this.rgba(colr, 0.07),
+                        fill: '-1', order: 5 });
+        datasets.push({ label: label + ' median', data: g('p50'),
+                        borderColor: this.rgba(colr, 0.55), borderWidth: 1,
+                        borderDash: [3, 3], pointRadius: 0, fill: false, order: 4 });
+      };
+
+      const series = keyed
+        ? [...new Set(j.today.map(t => t.series))].sort((a, b) => a - b)
+        : [null];
+
+      series.forEach((s, i) => {
+        const colr = this.seriesColor(i);
+        bandFor(j.band.filter(b => !keyed || b.series === s), colr,
+                keyed ? this.deltaLabel(s) : '');
+        const pts = xs.map(x => { const t = at(j.today, x, s); return t ? t.v : null; });
+        datasets.push({
+          label: keyed ? this.deltaLabel(s) : 'today',
+          data: pts, borderColor: colr, backgroundColor: colr,
+          borderWidth: 2, pointHoverRadius: 4, tension: 0, order: 1,
+          // A fabricated node is marked on today's line, never dropped: the
+          // band already excludes them from history, and a gap here would
+          // read as missing data rather than as a value not to trust.
+          pointRadius: xs.map(x => {
+            const t = at(j.today, x, s); return (t && t.extrap) ? 3 : 0;
+          }),
+          pointBackgroundColor: xs.map(x => {
+            const t = at(j.today, x, s); return (t && t.extrap) ? EQ_PINK : colr;
+          }),
+        });
+      });
+
+      if (j.atm_band && j.atm_band.length) bandFor(j.atm_band, EQ_GREY, 'ATM');
+      if (j.atm_today && j.atm_today.length) {
+        datasets.push({
+          label: 'ATM',
+          data: xs.map(x => { const t = j.atm_today.find(r => r.x === x); return t ? t.v : null; }),
+          borderColor: '#e8e8e8', borderWidth: 2, borderDash: [6, 3],
+          pointRadius: 0, tension: 0, order: 1,
+        });
+      }
+
+      const self = this;
+      EQ_CHARTS[key] = new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: { labels: xs.map(x => String(x)), datasets },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { title: { display: true, text: self.cbXLabel(kind),
+                          color: '#8a8a8a', font: { size: 10 } },
+                 ticks: { maxTicksLimit: 10, maxRotation: 0 },
+                 grid: { display: false } },
+            y: { ticks: { callback: v => self.fmtShort(v, 'vol_decimal') },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              // The band edges are four datasets whose only job is to shade.
+              // Listing them turns a five-line tooltip into a twenty-line one.
+              filter: it => !/ P\d0$/.test(it.dataset.label),
+              callbacks: {
+                label: it => `${it.dataset.label}  ${self.fmt(it.parsed.y, 'vol_decimal')}`,
+              },
+            },
+          },
+        },
+      });
+    },
+
+    cbXLabel(kind) {
+      if (kind === 'skew') return 'put_delta  (25 = 25Δ put, 75 = 25Δ call)';
+      if (kind === 'skew_term') return 'tenor (days)  ·  wing IV − ATM IV';
+      return 'tenor (days)';
+    },
+
+    /** put_delta in the language of the trade. 75 is a 25-delta CALL. */
+    deltaLabel(dl) {
+      if (dl == null) return '';
+      if (dl === 50) return '50Δ put';
+      return dl < 50 ? `${dl}Δ put` : `${100 - dl}Δ call`;
+    },
+
+    cbSubtitle(kind) {
+      const j = this.cb[kind];
+      if (!j) return '';
+      const n = j.band.length ? Math.max(...j.band.map(b => b.n || 0)) : 0;
+      const a = j.axis || {};
+      const what = kind === 'skew' ? `${a.dte}d`
+                 : kind === 'skew_term' ? `${this.deltaLabel(a.wing)} − ATM`
+                 : (a.deltas || []).map(d => this.deltaLabel(d)).join(', ');
+      return `${what} · band from ${n} prior sessions`;
+    },
+
+    // ── Row 6b: the tent ────────────────────────────────────────────────
+
+    async loadTent() {
+      this.tentLoading = true; this.tentError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/tent?' + this._sq({
+          dte: this.cbDte, long_delta: this.tentLongDelta,
+        }));
+        if (j.error) { this.tentError = j.error; this.tent = null; }
+        else {
+          this.tent = j;
+          this.renderTent();
+          // The OI profile overlays these strikes, and the two load in
+          // parallel — so if OI won that race it drew without them.
+          if (this.oiOpen && this.oiTab === 'profile' && this.oi) this.renderOi();
+        }
+      } catch (e) {
+        this.tentError = String(e.message || e); this.tent = null;
+      } finally {
+        this.tentLoading = false;
+      }
+    },
+
+    renderTent() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.tent) { EQ_CHARTS.tent.destroy(); EQ_CHARTS.tent = null; }
+      this.$nextTick(() => this.paintTent());
+    },
+
+    /* The 1×2 payoff at expiry, in ATM-implied-move units.
+     *
+     * Long one put at K_long, short two at K_short. Below K_short the position
+     * loses one unit of notional per unit of further decline, which is the
+     * whole risk of the structure and the reason the panel draws the payoff
+     * rather than just the width. */
+    paintTent() {
+      const j = this.tent;
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-tent');
+      if (!el) return;
+      const L = j.long_leg, S = j.short_leg;
+      if (!L || !S || L.sigma == null || S.sigma == null) return;
+
+      const lo = Math.min(S.sigma * 2.2, -4), hi = 1.5;
+      const step = (hi - lo) / 120;
+      const xs = [], ys = [];
+      const net = (j.zc_cost != null) ? j.zc_cost : 0;
+      // Payoff in the same sigma units as the x axis, so the vertical scale
+      // is "implied moves of P&L" rather than dollars — comparable across
+      // dates and names, which is the point of the whole panel.
+      for (let s = lo; s <= hi + 1e-9; s += step) {
+        const longPay  = Math.max(0, L.sigma - s);
+        const shortPay = -2 * Math.max(0, S.sigma - s);
+        xs.push(s);
+        ys.push(longPay + shortPay - net);
+      }
+
+      const self = this;
+      EQ_CHARTS.tent = new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: xs.map(x => x.toFixed(2)),
+          datasets: [{
+            label: 'payoff', data: ys,
+            borderColor: EQ_BLUE, borderWidth: 2, pointRadius: 0,
+            tension: 0, fill: false,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { title: { display: true, text: 'σ from spot (ATM implied move)',
+                          color: '#8a8a8a', font: { size: 10 } },
+                 ticks: { maxTicksLimit: 9, maxRotation: 0 },
+                 grid: { display: false } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' },
+                 ticks: { callback: v => v.toFixed(2) } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: {
+              title: it => `${Number(it[0].label).toFixed(2)}σ`,
+              label: it => `payoff ${it.parsed.y.toFixed(3)}σ`,
+            } },
+            eqTentMarks: {
+              band: j.band, longSigma: L.sigma, shortSigma: S.sigma,
+              dnSigma: j.dn_width_sigma == null ? null : -Math.abs(j.dn_width_sigma),
+              xs,
+            },
+          },
+        },
+        plugins: [eqTentMarks],
+      });
+    },
+
+    tentNote() {
+      const j = this.tent;
+      if (!j) return '';
+      const bits = [];
+      if (j.zc_width_sigma != null) {
+        bits.push(`zero-cost short at ${Math.abs(j.zc_width_sigma).toFixed(2)}σ`);
+      }
+      if (j.dn_width_sigma != null) {
+        bits.push(`delta-neutral at ${Math.abs(j.dn_width_sigma).toFixed(2)}σ`);
+      }
+      if (j.band && j.band.p50 != null) {
+        bits.push(`usual ${Math.abs(j.band.p50).toFixed(2)}σ (P25–P75 ` +
+                  `${Math.abs(j.band.p75).toFixed(2)}–${Math.abs(j.band.p25).toFixed(2)})`);
+      }
+      return bits.join('  ·  ');
+    },
+
+    /** The gap that is the actual skew reading, in the entry decision's units. */
+    tentGapNote() {
+      const j = this.tent;
+      if (!j || j.zc_width_sigma == null || j.dn_width_sigma == null) return '';
+      const gap = Math.abs(j.zc_width_sigma) - Math.abs(j.dn_width_sigma);
+      const dir = gap > 0 ? 'further out than' : 'closer in than';
+      return `Zero-cost sits ${Math.abs(gap).toFixed(2)}σ ${dir} delta-neutral — `
+           + `${gap > 0 ? 'steep' : 'flat'} skew. That gap, not either number on `
+           + `its own, is the skew reading in the units the entry uses.`;
+    },
+
+    /** A convention mismatch would be invisible on screen, so it is stated. */
+    tentCheckNote() {
+      const c = this.tent && this.tent.sigma_check;
+      if (!c || c.agrees !== false) return '';
+      return `σ convention mismatch: the stored width is `
+           + `${c.stored == null ? '—' : c.stored.toFixed(2)}σ but this panel `
+           + `derives ${c.derived == null ? '—' : c.derived.toFixed(2)}σ from the `
+           + `surface. The band is right; the payoff diagram's x values are this `
+           + `page's convention, not the loader's.`;
+    },
+
+    // ── Row 7a: sticky-strike decomposition ─────────────────────────────
+
+    async loadSticky() {
+      this.stickyLoading = true; this.stickyError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/sticky-strike?'
+          + this._sq({ dte: this.cbDte }));
+        if (j.error) { this.stickyError = j.error; this.sticky = null; }
+        else { this.sticky = j; this.renderSticky(); }
+      } catch (e) {
+        this.stickyError = String(e.message || e); this.sticky = null;
+      } finally {
+        this.stickyLoading = false;
+      }
+    },
+
+    renderSticky() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.sticky) { EQ_CHARTS.sticky.destroy(); EQ_CHARTS.sticky = null; }
+      this.$nextTick(() => this.paintSticky());
+    },
+
+    /* Three smiles in strike space plus the residual on a twin axis.
+     *
+     * The residual is the panel's answer, so it gets its own scale rather
+     * than being squeezed onto the IV axis where a 40bp repricing is a
+     * hairline. Pink and filled, because "how much did the surface actually
+     * reprice" is what the eye should land on. */
+    paintSticky() {
+      const j = this.sticky;
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-sticky');
+      if (!el) return;
+
+      const ks = [...new Set([...j.today.map(p => p.strike),
+                              ...j.prev.map(p => p.strike)])]
+        .filter(k => k != null).sort((a, b) => a - b);
+      const pick = (rows, k, f) => {
+        const r = rows.find(p => p.strike === k);
+        return r ? (f ? f(r) : r.iv) : null;
+      };
+
+      const self = this;
+      EQ_CHARTS.sticky = new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: ks.map(k => k.toFixed(2)),
+          datasets: [
+            { label: `residual (repricing)`, yAxisID: 'yR',
+              data: ks.map(k => pick(j.residual, k, r => r.v)),
+              borderColor: EQ_PINK, backgroundColor: this.rgba(EQ_PINK, 0.16),
+              borderWidth: 1, pointRadius: 0, fill: 'origin', tension: 0, order: 5 },
+            { label: `${j.prev_date} smile`,
+              data: ks.map(k => pick(j.prev, k)),
+              borderColor: this.rgba('#8a8a8a', 0.85), borderWidth: 1.5,
+              borderDash: [5, 3], pointRadius: 0, tension: 0, order: 2 },
+            { label: `${j.prev_date} re-read at today's spot`,
+              data: ks.map(k => pick(j.shifted, k)),
+              borderColor: this.rgba(EQ_BLUE, 0.55), borderWidth: 1.5,
+              borderDash: [2, 2], pointRadius: 0, tension: 0, order: 2 },
+            { label: `${j.date} smile`,
+              data: ks.map(k => pick(j.today, k)),
+              borderColor: EQ_BLUE, borderWidth: 2.5, pointRadius: 0,
+              tension: 0, order: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { title: { display: true, text: 'strike', color: '#8a8a8a',
+                          font: { size: 10 } },
+                 ticks: { maxTicksLimit: 9, maxRotation: 0 }, grid: { display: false } },
+            y: { position: 'left',
+                 ticks: { callback: v => self.fmtShort(v, 'vol_decimal') },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+            yR: { position: 'right',
+                  ticks: { callback: v => (v * 100).toFixed(1) + 'pt' },
+                  grid: { drawOnChartArea: false } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: {
+              title: it => 'strike ' + it[0].label,
+              label: it => it.dataset.yAxisID === 'yR'
+                ? `residual ${(it.parsed.y * 100).toFixed(2)} vol pts`
+                : `${it.dataset.label}  ${self.fmt(it.parsed.y, 'vol_decimal')}`,
+            } },
+            eqSpotMarks: {
+              spot: j.spot, prevSpot: j.prev_spot, strikes: ks,
+            },
+          },
+        },
+        plugins: [eqSpotMarks],
+      });
+    },
+
+    stickyNote() {
+      const j = this.sticky;
+      if (!j) return '';
+      const r = j.spot_return;
+      const move = r == null ? '—' : (r * 100).toFixed(2) + '%';
+      let s = `Spot ${move} since ${j.prev_date}. The dashed blue line is that `
+            + `session's smile re-read at today's spot — the part of any skew `
+            + `change that is strike migration, not repricing. Pink is the rest, `
+            + `and the rest is the trade.`;
+      if (j.n_out_of_domain) {
+        s += `  ${j.n_out_of_domain} of today's strikes fall outside the prior `
+           + `session's fitted range, so they have no sticky-delta reading and `
+           + `no residual — the line stops rather than extrapolating one.`;
+      }
+      return s;
+    },
+
+    // ── Row 7b: the surface grid ────────────────────────────────────────
+
+    async loadGrid() {
+      this.gridLoading = true; this.gridError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/surface-grid?'
+          + this._sq({ view: this.gridView }));
+        if (j.error) { this.gridError = j.error; this.grid = null; }
+        else { this.grid = j; }
+      } catch (e) {
+        this.gridError = String(e.message || e); this.grid = null;
+      } finally {
+        this.gridLoading = false;
+      }
+    },
+
+    setGridView(v) {
+      if (this.gridView === v) return;
+      this.gridView = v;
+      this.loadGrid();
+    },
+
+    gridViews: EQ_GRID_VIEWS,
+
+    gridCell(dte, dl) {
+      if (!this.grid) return null;
+      return this.grid.cells.find(c => c.dte === dte && c.put_delta === dl) || null;
+    },
+
+    /* Diverging blue/pink about zero, scaled to the view's own range.
+     *
+     * Scaled per view rather than on one fixed scale because the views are in
+     * different units — raw IV is a level around 0.3, a 1-day change is a few
+     * hundredths — and a shared scale would render four of the five flat. */
+    gridRange() {
+      if (!this.grid) return [0, 1];
+      const vs = this.grid.cells.map(c => c.v).filter(v => v != null);
+      if (!vs.length) return [0, 1];
+      if (this.gridView === 'iv') return [Math.min(...vs), Math.max(...vs)];
+      const m = Math.max(...vs.map(Math.abs));
+      return [-m, m];
+    },
+
+    gridStyle(c) {
+      if (!c || c.v == null) return 'background:transparent';
+      const [lo, hi] = this.gridRange();
+      if (this.gridView === 'iv') {
+        const t = hi === lo ? 0.5 : (c.v - lo) / (hi - lo);
+        return `background:${this.rgba(EQ_BLUE, 0.08 + t * 0.62)}`;
+      }
+      const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+      const t = Math.min(1, Math.abs(c.v) / m);
+      const col = c.v >= 0 ? EQ_BLUE : EQ_PINK;
+      return `background:${this.rgba(col, 0.06 + t * 0.64)}`;
+    },
+
+    gridText(c) {
+      if (!c || c.v == null) return '';
+      if (this.gridView === 'z_iv_minus_atm') return c.v.toFixed(1);
+      if (this.gridView === 'iv') return (c.v * 100).toFixed(0);
+      return (c.v * 100).toFixed(1);
+    },
+
+    gridTitle(c) {
+      if (!c) return '';
+      const parts = [`${c.dte}d  ${this.deltaLabel(c.put_delta)}`];
+      if (c.iv != null) parts.push(`IV ${this.fmt(c.iv, 'vol_decimal')}`);
+      if (c.atm_iv != null) parts.push(`ATM ${this.fmt(c.atm_iv, 'vol_decimal')}`);
+      if (c.strike != null) parts.push(`strike ${c.strike.toFixed(2)}`);
+      if (c.v != null) parts.push(`${this.gridViewLabel()} ${this.gridText(c)}`);
+      if (c.extrap) parts.push('node fabricated by the smile fit — not an observation');
+      return parts.join('\n');
+    },
+
+    gridViewLabel() {
+      const hit = EQ_GRID_VIEWS.find(v => v.k === this.gridView);
+      return hit ? hit.label : this.gridView;
+    },
+
+    gridNote() {
+      const j = this.grid;
+      if (!j) return '';
+      let s = '';
+      if (this.gridView === 'iv_minus_atm' || this.gridView === 'z_iv_minus_atm') {
+        s = 'Anchored on equity_atm at k=0, not put_delta 50 — they are '
+          + 'different nodes and the difference is what is being measured. '
+          + 'Spread-to-ATM rather than the cell’s own IV, because z-scoring '
+          + 'raw IV lights the whole grid up together whenever vol is high or '
+          + 'low and turns a heatmap into an expensive ATM readout.';
+      } else if (j.reference_date) {
+        s = `Change against the ${j.reference_date} close, per node.`;
+      }
+      if (j.n_thin_baseline) {
+        s += `  ${j.n_thin_baseline} cell(s) had too little history to score and `
+           + `are blank rather than shown at zero.`;
+      }
+      return s;
+    },
+
+    // ── Row 8a: the time-scatter ────────────────────────────────────────
+
+    async loadTimeScatter() {
+      this.tscatLoading = true; this.tscatError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/time-scatter?' + this._sq({
+          x: this.xCol(), y: this.yCol(),
+        }));
+        if (j.error) { this.tscatError = j.error; this.tscat = null; }
+        else { this.tscat = j; this.renderTimeScatter(); }
+      } catch (e) {
+        this.tscatError = String(e.message || e); this.tscat = null;
+      } finally {
+        this.tscatLoading = false;
+      }
+    },
+
+    renderTimeScatter() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.tscat) { EQ_CHARTS.tscat.destroy(); EQ_CHARTS.tscat = null; }
+      this.$nextTick(() => this.paintTimeScatter());
+    },
+
+    /* Age gradient, oldest to newest. The point of the panel is the PATH, and
+     * a path needs a direction — without the gradient it is an undifferentiated
+     * cloud and a hysteresis loop is invisible again, which is the exact
+     * failure two separate line charts already have. */
+    paintTimeScatter() {
+      const j = this.tscat;
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-tscat');
+      if (!el) return;
+      const pts = j.points.filter(p => p.x != null && p.y != null);
+      if (!pts.length) return;
+      const hist = pts.filter(p => !p.today);
+      const today = pts.filter(p => p.today);
+      const n = Math.max(1, hist.length - 1);
+
+      const self = this;
+      EQ_CHARTS.tscat = new Chart(el.getContext('2d'), {
+        type: 'scatter',
+        data: {
+          datasets: [
+            { label: 'path', data: hist.map(p => ({ x: p.x, y: p.y })),
+              parsing: false, showLine: false,
+              pointRadius: 2.5, pointHoverRadius: 5,
+              pointBackgroundColor: hist.map((_, i) =>
+                eqMix('#3a3a3a', EQ_BLUE, i / n)),
+              pointBorderWidth: 0, order: 2 },
+            { label: 'today', data: today.map(p => ({ x: p.x, y: p.y })),
+              parsing: false, showLine: false,
+              pointRadius: 6, pointHoverRadius: 8,
+              pointBackgroundColor: EQ_PINK,
+              pointBorderColor: '#ffffff', pointBorderWidth: 1.5, order: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          scales: {
+            x: { title: { display: true, text: j.x.column_name, color: '#8a8a8a',
+                          font: { size: 10 } },
+                 ticks: { callback: v => self.fmtShort(v, j.x.units) },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { title: { display: true, text: j.y.column_name, color: '#8a8a8a',
+                          font: { size: 10 } },
+                 ticks: { callback: v => self.fmtShort(v, j.y.units) },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: {
+              label: it => {
+                const src = it.datasetIndex === 0 ? hist : today;
+                const p = src[it.dataIndex];
+                return p ? `${p.date}  ${self.fmtShort(p.x, j.x.units)} / `
+                         + `${self.fmtShort(p.y, j.y.units)}` : '';
+              },
+            } },
+            eqZeroLines: { x: true, y: true },
+          },
+        },
+        plugins: [eqZeroLines],
+      });
+    },
+
+    // ── Row 8b: spot-vol scatter ────────────────────────────────────────
+
+    async loadSpotVol() {
+      this.svolLoading = true; this.svolError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/spot-vol?'
+          + this._sq({ dte: this.cbDte }));
+        if (j.error) { this.svolError = j.error; this.svol = null; }
+        else { this.svol = j; this.renderSpotVol(); }
+      } catch (e) {
+        this.svolError = String(e.message || e); this.svol = null;
+      } finally {
+        this.svolLoading = false;
+      }
+    },
+
+    renderSpotVol() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.svol) { EQ_CHARTS.svol.destroy(); EQ_CHARTS.svol = null; }
+      this.$nextTick(() => this.paintSpotVol());
+    },
+
+    paintSpotVol() {
+      const j = this.svol;
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-svol');
+      if (!el) return;
+      const hist = j.points.filter(p => !p.partial);
+      const live = j.points.filter(p => p.partial);
+      if (!hist.length) return;
+
+      const xs = hist.map(p => p.ret);
+      const lo = Math.min(...xs), hi = Math.max(...xs);
+      const line = (j.fit && j.fit.beta != null)
+        ? [{ x: lo, y: j.fit.alpha + j.fit.beta * lo },
+           { x: hi, y: j.fit.alpha + j.fit.beta * hi }]
+        : [];
+
+      const self = this;
+      EQ_CHARTS.svol = new Chart(el.getContext('2d'), {
+        type: 'scatter',
+        data: {
+          datasets: [
+            { label: 'fit', data: line, parsing: false, showLine: true,
+              borderColor: this.rgba(EQ_BLUE, 0.7), borderWidth: 1.5,
+              borderDash: [5, 3], pointRadius: 0, order: 3 },
+            { label: 'overnight moves', data: hist.map(p => ({ x: p.ret, y: p.d_iv })),
+              parsing: false, showLine: false, pointRadius: 2.5,
+              pointHoverRadius: 5, pointBackgroundColor: this.rgba(EQ_BLUE, 0.55),
+              pointBorderWidth: 0, order: 2 },
+            // Hollow, like the live point on the history line and for the same
+            // reason: a part-session move is not an overnight move, and it is
+            // shown on the cloud but excluded from the fit.
+            { label: 'today (partial session)',
+              data: live.map(p => ({ x: p.ret, y: p.d_iv })),
+              parsing: false, showLine: false, pointRadius: 6,
+              pointHoverRadius: 8, pointBackgroundColor: EQ_SURF,
+              pointBorderColor: EQ_PINK, pointBorderWidth: 2, order: 1 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          scales: {
+            x: { title: { display: true, text: 'underlying log return',
+                          color: '#8a8a8a', font: { size: 10 } },
+                 ticks: { callback: v => (v * 100).toFixed(1) + '%' },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+            y: { title: { display: true, text: 'Δ ATM IV', color: '#8a8a8a',
+                          font: { size: 10 } },
+                 ticks: { callback: v => (v * 100).toFixed(1) + 'pt' },
+                 grid: { color: 'rgba(255,255,255,0.05)' } },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { filter: it => it.datasetIndex !== 0, callbacks: {
+              label: it => {
+                const src = it.datasetIndex === 1 ? hist : live;
+                const p = src[it.dataIndex];
+                if (!p) return '';
+                return `${p.date}  ret ${(p.ret * 100).toFixed(2)}%  `
+                     + `ΔIV ${(p.d_iv * 100).toFixed(2)}pt`
+                     + (p.partial ? '  · partial session, not in the fit' : '');
+              },
+            } },
+            eqZeroLines: { x: true, y: true },
+          },
+        },
+        plugins: [eqZeroLines],
+      });
+    },
+
+    svolNote() {
+      const j = this.svol;
+      if (!j || !j.fit) return '';
+      const f = j.fit;
+      if (f.beta == null) {
+        return `Not enough overnight moves in this window to fit a line (${j.n_fit}).`;
+      }
+      return `β ${f.beta.toFixed(2)}  ·  R² ${f.r2 == null ? '—' : f.r2.toFixed(2)}`
+           + `  ·  ${j.n_fit} overnight moves at ${j.dte}d. The header chips carry `
+           + `the stored β; this is the cloud behind it. A respectable β can come `
+           + `from two regimes averaged together or three outliers carrying the `
+           + `fit, and only the shape says which.`;
+    },
+
+    // ── Row 9: open interest, from the existing chain endpoints ─────────
+
+    async loadOi() {
+      if (!this.oiOpen || !this.selectedTicker) return;
+      this.oiLoading = true; this.oiError = ''; this.oiNote = '';
+      try {
+        // The chain store is a different dataset from equity_surface — parquet
+        // per (ticker, year), keyed on daily_features dates. A ticker in the
+        // IV universe is not guaranteed to be in it, and the honest answer
+        // when it is not is to say so rather than draw an empty panel.
+        const dj = await eqGetJson('/api/ticker-analysis/chain/dates?ticker='
+          + encodeURIComponent(this.selectedTicker));
+        const dates = dj.dates || [];
+        if (!dates.length) {
+          this.oiError = `No option-chain history for ${this.selectedTicker}. `
+            + `The OI store is a separate dataset from the IV surface and does `
+            + `not cover every ticker in this universe.`;
+          this.oi = null;
+          return;
+        }
+        // Nearest chain date at or before the page's date; the two datasets
+        // are captured independently and do not always have the same days.
+        const want = this.date || dates[dates.length - 1];
+        const usable = dates.filter(d => d <= want);
+        const useDate = usable.length ? usable[usable.length - 1] : dates[0];
+        if (useDate !== want) {
+          this.oiNote = `Nearest chain date at or before ${want} is ${useDate}.`;
+        }
+        this.oiDate = useDate;
+
+        const base = `ticker=${encodeURIComponent(this.selectedTicker)}&date=${useDate}`;
+        const url = this.oiTab === 'profile'
+          ? `/api/ticker-analysis/chain/oi-profile?${base}`
+          : this.oiTab === 'doi'
+            ? `/api/ticker-analysis/chain/doi-profile?${base}&n=${this.oiDoiN}`
+            : `/api/ticker-analysis/chain/flow?${base}&lookback=${this.oiLookback}&mode=oi`;
+        const j = await eqGetJson(url);
+        if (j.error) { this.oiError = j.error; this.oi = null; }
+        else { this.oi = j; this.renderOi(); }
+      } catch (e) {
+        this.oiError = String(e.message || e); this.oi = null;
+      } finally {
+        this.oiLoading = false;
+      }
+    },
+
+    toggleOi() {
+      this.oiOpen = !this.oiOpen;
+      if (this.oiOpen) this.loadOi();
+    },
+
+    setOiTab(t) {
+      if (this.oiTab === t) return;
+      this.oiTab = t;
+      this.loadOi();
+    },
+
+    /** The structure's strikes, for the OI overlay. This is what turns the
+     *  panel from ambient context into an answer: is my short sitting on a
+     *  wall? */
+    oiOverlayStrikes() {
+      const j = this.tent;
+      if (!j) return [];
+      const out = [];
+      if (j.short_leg && j.short_leg.strike != null) {
+        out.push({ strike: j.short_leg.strike, label: 'short ×2', color: EQ_PINK });
+      }
+      if (j.long_leg && j.long_leg.strike != null) {
+        out.push({ strike: j.long_leg.strike, label: 'long', color: EQ_BLUE });
+      }
+      return out;
+    },
+
+    renderOi() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.oi) { EQ_CHARTS.oi.destroy(); EQ_CHARTS.oi = null; }
+      this.$nextTick(() => this.paintOi());
+    },
+
+    paintOi() {
+      const j = this.oi;
+      if (!j || typeof Chart === 'undefined') return;
+      const el = document.getElementById('eq-oi');
+      if (!el) return;
+      const rows = j.rows || j.strikes || j.profile || [];
+      if (!rows.length) { this.oiError = 'The chain endpoint returned no rows.'; return; }
+
+      const strikes = rows.map(r => r.strike);
+      const call = rows.map(r => r.call_oi != null ? r.call_oi : r.call);
+      const put  = rows.map(r => r.put_oi  != null ? r.put_oi  : r.put);
+
+      const self = this;
+      EQ_CHARTS.oi = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: strikes.map(s => Number(s).toFixed(2)),
+          datasets: [
+            { label: 'put',  data: put,  backgroundColor: this.rgba(EQ_PINK, 0.65) },
+            { label: 'call', data: call, backgroundColor: this.rgba(EQ_BLUE, 0.65) },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 10 } },
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { stacked: false, grid: { display: false },
+                 ticks: { maxTicksLimit: 12, maxRotation: 0 } },
+            y: { grid: { color: 'rgba(255,255,255,0.05)' },
+                 ticks: { callback: v => self.fmtShort(v, 'count') } },
+          },
+          plugins: {
+            legend: { display: false },
+            eqStrikeMarks: { marks: self.oiOverlayStrikes(), strikes },
+          },
+        },
+        plugins: [eqStrikeMarks],
+      });
     },
 
     // ── formatting ───────────────────────────────────────────────────────

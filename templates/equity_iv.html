@@ -148,6 +148,38 @@
     .eq-chip-x { cursor:pointer; padding:0 4px; font-weight:700; opacity:.7; }
     .eq-chip-x:hover { opacity:1; }
 
+
+    /* ── Rows 6-9 ───────────────────────────────────────────────────────
+       Three- and two-up grids on the same minmax(0,·) basis as row 1, so a
+       wide chart cannot push the page past the viewport. Panels do not assume
+       a fixed width — the rows are expected to be rearranged. */
+    .eq-row3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; align-items:start; margin-bottom:12px; }
+    .eq-row2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; align-items:start; margin-bottom:12px; }
+    @media (max-width:1250px) { .eq-row3 { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+    @media (max-width:900px)  { .eq-row3, .eq-row2 { grid-template-columns:minmax(0,1fr); } }
+
+    .eq-band-canvas { height:240px; }
+
+    /* Surface grid. A table rather than a canvas: the cells carry text and
+       tooltips, it reflows without a redraw, and the extrapolation mark is
+       the same .eq-fab used everywhere else on the page. */
+    .eq-gridwrap { overflow-x:auto; padding:6px 10px 4px; }
+    .eq-grid { border-collapse:separate; border-spacing:1px; font-size:9.5px; width:100%; }
+    .eq-grid th {
+      color:var(--dim); font-weight:700; font-size:9px; padding:2px 3px;
+      text-align:center; white-space:nowrap; background:transparent;
+    }
+    .eq-grid-corner { color:var(--muted) !important; text-align:left !important; }
+    .eq-grid-row { color:var(--muted) !important; text-align:right !important; padding-right:5px !important; }
+    .eq-grid td {
+      text-align:center; padding:2px 3px; min-width:26px; border-radius:2px;
+      font-variant-numeric:tabular-nums; color:var(--text); cursor:default;
+    }
+    /* The grid's fabricated mark is a ring, not the asterisk used in the
+       tables — an asterisk inside a 26px coloured cell is unreadable. */
+    .eq-grid td.eq-fab { color:#e84393; box-shadow:inset 0 0 0 1px #e84393; }
+    .eq-grid td.eq-fab::after { content:''; }
+
     .eq-note { font-size:10px; color:var(--dim); padding:0 10px 8px; line-height:1.5; }
     .eq-warn { color:var(--warning); }
 
@@ -911,6 +943,279 @@
             on a line marks a point resting on a fabricated node.
           </div>
         </div>
+      </div>
+    </template>
+
+
+    <!-- ── Row 6: three "today vs history" band panels ────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-row3">
+
+        <!-- Tent -->
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Tent</span>
+            <span class="eq-section-sub">1×2 put ratio</span>
+            <div class="eq-spacer"></div>
+            <span class="eq-lbl">Tenor</span>
+            <select class="eq-sel" style="max-width:80px"
+                    :value="cbDte" @change="setCbDte($event.target.value)">
+              <template x-for="t in cbAvailableDtes()" :key="'td-'+t">
+                <option :value="t" x-text="t + 'd'"></option>
+              </template>
+            </select>
+            <span class="eq-section-sub" x-show="tentLoading" x-cloak>loading…</span>
+          </div>
+
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-tent"></canvas>
+            <div class="panel-error" x-show="tentError" x-cloak x-text="tentError"></div>
+          </div>
+
+          <div class="eq-note">
+            <span x-show="tentNote()" x-text="tentNote()"
+                  style="display:block;color:var(--text)"></span>
+            <span x-show="tentGapNote()" x-text="tentGapNote()"
+                  style="display:block;margin-top:3px"></span>
+            <span x-show="tentCheckNote()" x-text="tentCheckNote()"
+                  class="eq-warn" style="display:block;margin-top:3px"></span>
+            The shaded strip is where the zero-cost short usually sits — P25–P75
+            solid, P10–P90 dashed — so today's marker inside or outside it is the
+            read. σ, not strike or delta: a strike axis moves with spot and a
+            delta axis compresses exactly where the trade lives.
+          </div>
+        </div>
+
+        <!-- Skew curve -->
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Skew curve</span>
+            <span class="eq-section-sub" x-text="cbSubtitle('skew')"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="cbLoading.skew" x-cloak>loading…</span>
+          </div>
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-cb-skew"></canvas>
+            <div class="panel-error" x-show="cbError.skew" x-cloak x-text="cbError.skew"></div>
+          </div>
+          <div class="eq-note">
+            IV by delta at this tenor, today against the band. put_delta is
+            put-convention throughout: 25 is a 25Δ put, 75 is a 25Δ <em>call</em>.
+            The band is a pointwise envelope across prior sessions, not a set of
+            historical curves — a line tracing P90 at every delta is not a smile
+            that ever traded.
+          </div>
+        </div>
+
+        <!-- Term structure / skew term structure -->
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Term</span>
+            <div class="seg">
+              <div class="seg-btn" :class="{on: termKind === 'term'}"
+                   @click="setTermKind('term')"
+                   title="IV by tenor at the chosen deltas.">IV</div>
+              <div class="seg-btn" :class="{on: termKind === 'skew_term'}"
+                   @click="setTermKind('skew_term')"
+                   title="The put-wing slope by tenor. Whether the 21-day wing is rich relative to the 60-day wing is a different setup from both being rich together, and IV-by-tenor cannot separate them.">skew</div>
+            </div>
+            <span class="eq-section-sub" x-text="cbSubtitle(termKind)"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="cbLoading[termKind]" x-cloak>loading…</span>
+          </div>
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-cb-term"></canvas>
+            <div class="panel-error" x-show="cbError[termKind]" x-cloak
+                 x-text="cbError[termKind]"></div>
+          </div>
+          <div class="eq-note">
+            <template x-if="termKind === 'term'">
+              <span>IV by tenor, with the white dashed line the ATM term structure
+                from <code>equity_atm</code> — evaluated at k=0, not put_delta 50.</span>
+            </template>
+            <template x-if="termKind === 'skew_term'">
+              <span>Wing IV minus ATM IV, by tenor. A parallel shift in the whole
+                surface moves every tenor's IV and leaves every tenor's slope
+                alone, which is exactly why this is a separate view rather than
+                another series on the IV one.</span>
+            </template>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Row 7: sticky-strike decomposition + surface grid ──────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-row2">
+
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Sticky-strike vs sticky-delta</span>
+            <span class="eq-section-sub"
+                  x-text="sticky ? sticky.prev_date + ' → ' + sticky.date + ' · ' + sticky.dte + 'd' : ''"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="stickyLoading" x-cloak>loading…</span>
+          </div>
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-sticky"></canvas>
+            <div class="panel-error" x-show="stickyError" x-cloak x-text="stickyError"></div>
+          </div>
+          <div class="eq-note">
+            <span x-show="stickyNote()" x-text="stickyNote()"
+                  style="display:block;margin-bottom:3px"></span>
+            Skew that is rich because flow bid the wings mean-reverts on its own.
+            Skew that is rich because spot moved only reverts if spot bounces —
+            a directional bet in disguise. Nothing else on this page separates
+            those two, and they call for opposite decisions.
+          </div>
+        </div>
+
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Surface grid</span>
+            <div class="seg">
+              <template x-for="v in gridViews" :key="'gv-'+v.k">
+                <div class="seg-btn" :class="{on: gridView === v.k}"
+                     @click="setGridView(v.k)" :title="v.hint" x-text="v.label"></div>
+              </template>
+            </div>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="gridLoading" x-cloak>loading…</span>
+          </div>
+
+          <div class="eq-gridwrap">
+            <table class="eq-grid" x-show="grid" x-cloak>
+              <thead>
+                <tr>
+                  <th class="eq-grid-corner">dte \ Δ</th>
+                  <template x-for="dl in (grid ? grid.deltas : [])" :key="'gh-'+dl">
+                    <th :title="deltaLabel(dl)" x-text="dl"></th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="dte in (grid ? grid.dtes : [])" :key="'gr-'+dte">
+                  <tr>
+                    <th class="eq-grid-row" x-text="dte"></th>
+                    <template x-for="dl in grid.deltas" :key="'gc-'+dte+'-'+dl">
+                      <td :style="gridStyle(gridCell(dte, dl))"
+                          :class="{'eq-fab': gridCell(dte, dl) && gridCell(dte, dl).extrap}"
+                          :title="gridTitle(gridCell(dte, dl))"
+                          x-text="gridText(gridCell(dte, dl))"></td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div class="panel-error" x-show="gridError" x-cloak x-text="gridError"></div>
+          </div>
+
+          <div class="eq-note">
+            Rows are tenors, columns are put_delta. Blue above, pink below —
+            colour is direction, scaled to this view's own range, since the five
+            views are in different units and one shared scale would render four
+            of them flat.
+            <span x-show="gridNote()" x-text="gridNote()"
+                  style="display:block;margin-top:3px"></span>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Row 8: time-scatter + spot-vol scatter ─────────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-row2">
+
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Path</span>
+            <span class="eq-section-sub"
+                  x-text="tscat ? (tscat.n_points + ' sessions · ' + histWindow.toUpperCase()) : ''"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="tscatLoading" x-cloak>loading…</span>
+          </div>
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-tscat"></canvas>
+            <div class="panel-error" x-show="tscatError" x-cloak x-text="tscatError"></div>
+          </div>
+          <div class="eq-note">
+            The scatter's axes, one dot per prior session for this ticker,
+            shaded dark-to-blue by age with today in pink. A hysteresis loop —
+            skew rising as IV falls, then both retracing by a different route —
+            is plainly a loop here and completely invisible as two lines against
+            time. Change the axes with the Cross-section pickers above.
+          </div>
+        </div>
+
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Spot–vol</span>
+            <span class="eq-section-sub"
+                  x-text="svol ? (svol.dte + 'd · ' + histWindow.toUpperCase()) : ''"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="svolLoading" x-cloak>loading…</span>
+          </div>
+          <div class="eq-ts-wrap eq-band-canvas">
+            <canvas id="eq-svol"></canvas>
+            <div class="panel-error" x-show="svolError" x-cloak x-text="svolError"></div>
+          </div>
+          <div class="eq-note">
+            <span x-show="svolNote()" x-text="svolNote()"
+                  style="display:block;margin-bottom:3px;color:var(--text)"></span>
+            Today is hollow because it is a part-session move measured against
+            overnight moves — shown on the cloud, excluded from the fit.
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Row 9: open interest, collapsed ────────────────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-section">
+        <div class="eq-section-hdr">
+          <span class="eq-section-title" style="cursor:pointer" @click="toggleOi()"
+                x-text="(oiOpen ? '▾ ' : '▸ ') + 'Open interest'"></span>
+          <span class="eq-section-sub"
+                x-text="oiOpen && oiDate ? oiDate : 'positioning · periodic check'"></span>
+          <template x-if="oiOpen">
+            <div class="seg">
+              <div class="seg-btn" :class="{on: oiTab === 'profile'}"
+                   @click="setOiTab('profile')" title="OI by strike, puts and calls.">profile</div>
+              <div class="seg-btn" :class="{on: oiTab === 'doi'}"
+                   @click="setOiTab('doi')"
+                   title="Signed build and unwind per strike. Change is where positioning shows up; level is largely a function of how long a strike has been listed.">ΔOI</div>
+              <div class="seg-btn" :class="{on: oiTab === 'flow'}"
+                   @click="setOiTab('flow')" title="Strikes × time.">flow</div>
+            </div>
+          </template>
+          <div class="eq-spacer"></div>
+          <span class="eq-section-sub" x-show="oiOpen && oiLoading" x-cloak>loading…</span>
+        </div>
+
+        <template x-if="oiOpen">
+          <div>
+            <div class="eq-ts-wrap eq-band-canvas">
+              <canvas id="eq-oi"></canvas>
+              <div class="panel-error" x-show="oiError" x-cloak x-text="oiError"></div>
+            </div>
+            <div class="eq-note">
+              <span x-show="oiNote" x-text="oiNote" class="eq-warn"
+                    style="display:block;margin-bottom:3px"></span>
+              Served by the existing chain endpoints under
+              <code>/api/ticker-analysis/chain/</code> — the same data the Ticker
+              Analysis page renders, not a second copy. That store is keyed on
+              <code>daily_features</code> dates and does not cover every ticker in
+              this IV universe, so a name with no chain history says so rather
+              than drawing an empty panel.
+              <span x-show="oiTab === 'profile'" style="display:block;margin-top:3px">
+                The dashed lines are the current structure's strikes — short ×2 in
+                pink, long in blue — snapped to the nearest listed strike. That
+                overlay is what makes this "is my short sitting on a wall" rather
+                than ambient context.
+              </span>
+            </div>
+          </div>
+        </template>
       </div>
     </template>
 

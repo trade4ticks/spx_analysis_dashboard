@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.routers.equity_iv as eiv
+import app.routers.equity_iv_surface as eivs
 
 SEEN, BAD = [], []
 
@@ -398,6 +399,69 @@ async def main():
                               sort=None, dir="desc", limit=10,
                               exclude_extrapolated=False, pool=pool)))
 
+    # ── rows 6-8: the surface panels ─────────────────────────────────────
+    for kind in ("skew", "term", "skew_term"):
+        for ex in (True, False):
+            cases.append((f"curve-band {kind} excl={ex}",
+                          eivs.curve_band(ticker="AAPL", kind=kind, dte=30,
+                                          wing=25, deltas="25,75", date=None,
+                                          snapshot=None, window="1y",
+                                          exclude_extrapolated=ex, pool=pool)))
+    cases.append(("curve-band term, all window",
+                  eivs.curve_band(ticker="AAPL", kind="term", dte=30, wing=25,
+                                  deltas="10,25,75,90", date=None, snapshot=None,
+                                  window="all", exclude_extrapolated=True,
+                                  pool=pool)))
+
+    for win in ("3m", "all"):
+        cases.append((f"tent {win}",
+                      eivs.tent(ticker="AAPL", dte=30, long_delta=25, date=None,
+                                snapshot=None, window=win,
+                                exclude_extrapolated=True, pool=pool)))
+
+    for ex in (True, False):
+        cases.append((f"sticky-strike excl={ex}",
+                      eivs.sticky_strike(ticker="AAPL", dte=30, date=None,
+                                         snapshot=None, prev_date=None,
+                                         exclude_extrapolated=ex, pool=pool)))
+    cases.append(("sticky-strike explicit prev",
+                  eivs.sticky_strike(ticker="AAPL", dte=30, date="2026-08-24",
+                                     snapshot=None, prev_date="2026-08-21",
+                                     exclude_extrapolated=True, pool=pool)))
+
+    for view in eivs.GRID_VIEWS:
+        for win in ("1y", "all"):
+            cases.append((f"surface-grid {view} {win}",
+                          eivs.surface_grid(ticker="AAPL", view=view, date=None,
+                                            snapshot=None, window=win,
+                                            exclude_extrapolated=True,
+                                            pool=pool)))
+
+    for xa, ya in (("skew_30d_25p_atm_z_63", "iv_30d_atm_z_63"),
+                   ("skew_30d_25p_atm", "iv_30d_atm"),
+                   ("skew_30d_25p_atm_z_63", "iv_30d_atm")):
+        for win in ("3m", "all"):
+            cases.append((f"time-scatter {xa}/{ya} {win}",
+                          eivs.time_scatter(ticker="AAPL", x=xa, y=ya, date=None,
+                                            snapshot=None, window=win,
+                                            exclude_extrapolated=True,
+                                            pool=pool)))
+
+    for win in ("1y", "all"):
+        cases.append((f"spot-vol {win}",
+                      eivs.spot_vol(ticker="AAPL", dte=30, date=None,
+                                    snapshot=None, window=win, pool=pool)))
+
+    must_400.append(("curve-band rejects an unknown kind",
+                     eivs.curve_band(ticker="AAPL", kind="nope", dte=30, wing=25,
+                                     deltas="25", date=None, snapshot=None,
+                                     window="1y", exclude_extrapolated=True,
+                                     pool=pool)))
+    must_400.append(("surface-grid rejects an unknown view",
+                     eivs.surface_grid(ticker="AAPL", view="z_iv", date=None,
+                                       snapshot=None, window="1y",
+                                       exclude_extrapolated=True, pool=pool)))
+
     failed = 0
     for name, coro in cases:
         try:
@@ -414,6 +478,7 @@ async def main():
         except TypeError as exc:
             failed += 1
             print(f"  UNSERIALISABLE  {name}: {exc}")
+
 
     # ── the live point actually behaves ──────────────────────────────────
     # Running the endpoint is not the same as checking what it returned.
