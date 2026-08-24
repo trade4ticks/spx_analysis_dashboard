@@ -457,9 +457,12 @@ async def main():
                                      deltas="25", date=None, snapshot=None,
                                      window="1y", exclude_extrapolated=True,
                                      pool=pool)))
+    # NOT "z_iv" -- that was this case's sentinel until z_iv became a real
+    # view, at which point the assertion started testing that a valid view is
+    # rejected. A sentinel has to be a name that cannot become meaningful.
     must_400.append(("surface-grid rejects an unknown view",
-                     eivs.surface_grid(ticker="AAPL", view="z_iv", date=None,
-                                       snapshot=None, window="1y",
+                     eivs.surface_grid(ticker="AAPL", view="__not_a_view__",
+                                       date=None, snapshot=None, window="1y",
                                        exclude_extrapolated=True, pool=pool)))
 
     failed = 0

@@ -396,14 +396,22 @@ async def tent(
                 *bargs,
             )
 
-        # Spot and the ATM vol that defines the sigma unit. underlying_price
-        # is the only place spot is stored.
+        # Spot and the ATM vol that defines the sigma unit.
         anchor = await conn.fetchrow(
             f"SELECT a.underlying_price AS spot, a.atm_iv, a.atm_strike "
             f"FROM {ATM_TABLE} a "
             f"WHERE a.ticker = $1 AND a.trade_date = $2 AND a.snapshot = $3 "
             f"  AND a.dte = $4",
             ticker, d, snap, use_dte,
+        )
+        # The metric layer's spot as well. The header shows THAT one, this
+        # panel prices off equity_atm, and if the two disagree the page shows
+        # a spot beside strikes that were computed against a different one —
+        # which is exactly the kind of mismatch that looks like nothing.
+        metric_spot = await conn.fetchval(
+            f"SELECT m.spot FROM {METRICS_TABLE} m "
+            f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
+            ticker, d, snap,
         )
 
         # Both legs' strikes. The short leg's delta is wherever the zero-cost
@@ -470,10 +478,36 @@ async def tent(
             return None
         return float(today_m[key])
 
+    # Two invariants that must hold for the drawn structure to be a put ratio
+    # at all. Neither is decoration: if a strike sits above spot the panel is
+    # drawing something that is not the trade, and every downstream consumer
+    # of these strikes — the OI overlay especially — inherits it.
+    mspot = None if metric_spot is None else float(metric_spot)
+    problems = []
+    for nm, lg in (("long", long_leg), ("short", short_leg)):
+        if lg and lg["strike"] is not None and spot and lg["strike"] > spot:
+            problems.append(
+                f"{nm} strike {lg['strike']:.2f} is ABOVE spot {spot:.2f}; a put "
+                f"ratio's strikes must be below it")
+    if (long_leg and short_leg and long_leg["strike"] is not None
+            and short_leg["strike"] is not None
+            and short_leg["strike"] >= long_leg["strike"]):
+        problems.append(
+            f"short strike {short_leg['strike']:.2f} is not below the long "
+            f"{long_leg['strike']:.2f}; the 1x2 is inverted")
+    if spot and mspot and abs(spot / mspot - 1.0) > 0.005:
+        problems.append(
+            f"equity_atm.underlying_price is {spot:.2f} but equity_metrics.spot "
+            f"is {mspot:.2f} — a {abs(spot / mspot - 1.0) * 100:.1f}% gap. The "
+            f"header shows the second; every strike here is priced against the "
+            f"first, so they are not on the same basis.")
+
     return {
         "ticker": ticker, "date": str(d), "snapshot": snap,
         "dte": use_dte, "window": window,
         "spot": spot, "atm_iv": atm_iv,
+        "metric_spot": mspot,
+        "geometry_problems": problems,
         "long_leg": long_leg, "short_leg": short_leg,
         "ratio": {"long": 1, "short": 2},
         "zc_width_sigma": stored_width,
@@ -662,7 +696,7 @@ async def sticky_strike(
 
 # ── Row 7: the surface grid ─────────────────────────────────────────────────
 
-GRID_VIEWS = ("iv", "iv_minus_atm", "z_iv_minus_atm", "chg_1d", "chg_5d")
+GRID_VIEWS = ("iv", "z_iv", "iv_minus_atm", "z_iv_minus_atm", "chg_1d", "chg_5d")
 
 
 @router.get("/surface-grid")
@@ -679,17 +713,21 @@ async def surface_grid(
 
     views:
       iv              the raw surface
-      iv_minus_atm    THE SHAPE VIEW, and the default
-      z_iv_minus_atm  z of that spread, computed here over the window
+      z_iv            z of the raw surface
+      iv_minus_atm    the SHAPE view, and the default (labelled "Skew")
+      z_iv_minus_atm  z of that spread
       chg_1d          today minus the prior session, per node
       chg_5d          today minus five sessions back, per node
 
-    iv_minus_atm is the default, and z_iv is deliberately NOT offered, because
-    z-scoring a cell's own IV makes the entire grid light up together whenever
-    vol is high or low — every cell moves with the level, so the heatmap
-    becomes an expensive ATM IV readout. Z-scoring the SPREAD to ATM removes
-    the level and leaves shape, which is the only thing a grid can show that a
-    single number cannot.
+    iv_minus_atm is the default because z-scoring a cell's own IV makes the
+    grid light up together whenever vol is high or low — every cell moves with
+    the level, so that view is largely an expensive ATM IV readout. Scoring the
+    SPREAD to ATM removes the level and leaves shape.
+
+    z_iv is offered anyway, on request: "is the whole surface rich" is a real
+    question, and the answer to it being a uniformly-lit grid is informative
+    once you know that is what the view does. The two sit side by side so the
+    comparison is one click.
 
     The ATM anchor is equity_atm at k=0, never put_delta 50. They are not the
     same node and the difference is exactly the quantity being measured.
@@ -724,7 +762,8 @@ async def surface_grid(
         )
 
         stats = {}
-        if view == "z_iv_minus_atm":
+        if view in ("z_iv", "z_iv_minus_atm"):
+            scored = "s.iv" if view == "z_iv" else "(s.iv - a.atm_iv)"
             sargs  = [ticker, BASELINE_SNAPSHOT, d]
             swhere = "s.ticker = $1 AND s.snapshot = $2 AND s.trade_date < $3"
             if start:
@@ -732,9 +771,9 @@ async def surface_grid(
                 swhere += f" AND s.trade_date >= ${len(sargs)}"
             srows = await conn.fetch(
                 f"SELECT s.dte, s.put_delta, "
-                f"       avg(s.iv - a.atm_iv) AS mu, "
-                f"       stddev_samp(s.iv - a.atm_iv) AS sd, "
-                f"       count(s.iv - a.atm_iv) AS n "
+                f"       avg({scored}) AS mu, "
+                f"       stddev_samp({scored}) AS sd, "
+                f"       count({scored}) AS n "
                 f"FROM {SURFACE_TABLE} s {join_atm} "
                 f"WHERE {swhere}{keep} "
                 f"GROUP BY s.dte, s.put_delta",
@@ -777,9 +816,10 @@ async def surface_grid(
             v = iv
         elif view == "iv_minus_atm":
             v = None if (iv is None or atm is None) else iv - atm
-        elif view == "z_iv_minus_atm":
+        elif view in ("z_iv", "z_iv_minus_atm"):
             mu, sd, n = stats.get(key, (None, None, 0))
-            spread = None if (iv is None or atm is None) else iv - atm
+            spread = iv if view == "z_iv" else (
+                None if (iv is None or atm is None) else iv - atm)
             if spread is None or mu is None or not sd or n < BASELINE_MIN_N:
                 v = None
                 if spread is not None and n and n < BASELINE_MIN_N:

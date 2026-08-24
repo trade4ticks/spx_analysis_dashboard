@@ -290,16 +290,55 @@ if (typeof Chart !== 'undefined' && Chart.defaults) {
   Chart.defaults.font.size   = 11;
 }
 
+/* Recency ramp for the two scatters.
+ *
+ * A 141-to-159-dot cloud on a dark-to-blue age gradient makes the recent
+ * sessions -- the only ones anybody is reading a trajectory from -- the
+ * dimmest thing on the panel, because "recent" and "bright" were fighting a
+ * background that is already dark. So the ramp is not a gradient over the
+ * whole cloud at all:
+ *
+ *   older than the last N   uniform dim blue. They are context, and context
+ *                           does not need to be individually distinguishable.
+ *   the last N              faint-to-bright PINK, so the recent path reads as
+ *                           a run rather than as more cloud.
+ *   today                   drawn separately, brightest, by the caller.
+ *
+ * Pink for the recent run because blue is already the cloud; a second blue
+ * ramp on top of a blue cloud is the problem this replaces.
+ */
+const EQ_RECENT_N = 10;
+
+function eqRecentColor(i, total) {
+  const back = total - 1 - i;                       // 0 = most recent
+  if (back >= EQ_RECENT_N) return 'rgba(52,152,219,0.30)';
+  const t = 1 - (back / EQ_RECENT_N);               // 0 faint .. 1 bright
+  return `rgba(232,67,147,${(0.30 + t * 0.65).toFixed(3)})`;
+}
+
+function eqRecentRadius(i, total) {
+  const back = total - 1 - i;
+  if (back >= EQ_RECENT_N) return 2;
+  return 2.5 + 1.5 * (1 - back / EQ_RECENT_N);
+}
+
 /* The surface grid's view list, shared by the picker and the label lookup so
  * a new view cannot appear in one and not the other. */
 const EQ_GRID_VIEWS = [
-  { k: 'iv_minus_atm',   label: 'IV − ATM',
-    hint: 'The shape view. Anchored on equity_atm at k=0, not put_delta 50.' },
-  { k: 'z_iv_minus_atm', label: 'z of IV − ATM',
-    hint: 'That spread scored against prior sessions. Deliberately not z of ' +
-          'raw IV: every cell moves with the vol level, so that view lights ' +
-          'the whole grid up at once and says nothing about shape.' },
+  // Named for the THING, not the formula. "IV - ATM" describes how it is
+  // computed; "Skew" is what it is, and is what it gets called everywhere
+  // else on the page and in the trade.
+  { k: 'iv_minus_atm',   label: 'Skew',
+    hint: 'Wing IV minus ATM IV, per node. The shape view. Anchored on ' +
+          'equity_atm at k=0, not put_delta 50.' },
+  { k: 'z_iv_minus_atm', label: 'z of Skew',
+    hint: 'That spread scored against prior sessions at the daily close.' },
   { k: 'iv',             label: 'raw IV',   hint: 'The surface as fitted.' },
+  { k: 'z_iv',           label: 'z of raw IV',
+    hint: 'Every cell moves with the vol level, so this view tends to light ' +
+          'up or go dark all at once — which answers "is the whole surface ' +
+          'rich" rather than "what shape is it". Sits beside raw IV so the ' +
+          'comparison against z of Skew is one click.' },
   { k: 'chg_1d',         label: '1d change', hint: 'Against the prior close, per node.' },
   { k: 'chg_5d',         label: '5d change', hint: 'Against five closes back, per node.' },
 ];
@@ -378,29 +417,23 @@ const eqTentMarks = {
 const eqSpotMarks = {
   id: 'eqSpotMarks',
   beforeDatasetsDraw(chart, args, opts) {
-    if (!opts || !opts.strikes || !opts.strikes.length) return;
+    if (!opts) return;
     const { ctx, scales } = chart;
     const xs = scales.x, ys = scales.y;
     if (!xs || !ys) return;
-    const arr = opts.strikes;
-    const px = k => {
-      if (k == null || k <= arr[0]) return xs.getPixelForValue(0);
-      if (k >= arr[arr.length - 1]) return xs.getPixelForValue(arr.length - 1);
-      let i = 0;
-      while (i < arr.length - 1 && arr[i + 1] < k) i++;
-      const span = arr[i + 1] - arr[i];
-      const t = span === 0 ? 0 : (k - arr[i]) / span;
-      return xs.getPixelForValue(i) + (xs.getPixelForValue(i + 1) - xs.getPixelForValue(i)) * t;
-    };
     ctx.save();
     const mark = (k, col, dash, label) => {
       if (k == null) return;
-      const x = px(k);
+      // A linear scale locates a strike directly. The category version this
+      // replaced had to interpolate a position out of the label array, which
+      // was both fiddly and wrong whenever the two sessions' strikes differed.
+      const x = xs.getPixelForValue(k);
+      if (!isFinite(x)) return;
       ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash(dash);
       ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = col;
-      ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
+      ctx.font = "600 9px 'Segoe UI', system-ui, sans-serif";
       ctx.textAlign = 'center';
       ctx.fillText(label, x, ys.top - 2);
     };
@@ -410,35 +443,56 @@ const eqSpotMarks = {
   },
 };
 
-/* The structure's strikes overlaid on the OI profile. Without this the panel
- * is ambient context; with it, it answers "is my short sitting on a wall". */
+/* The structure's strikes overlaid on the OI panels. Without this the panel
+ * is ambient context; with it, it answers "is my short sitting on a wall".
+ *
+ * The mark carries its PRICE, not just a role — "short x2 @ 397.16" rather
+ * than "short x2". The number is the thing being checked against the ladder,
+ * and making the reader find it in a footer defeats the overlay.
+ *
+ * Two orientations: the profile and dOI charts put strike on a CATEGORY x
+ * axis, the flow chart puts it on a LINEAR y axis. The caller says which.
+ * Marks are only ever passed in when the two datasets have been checked to
+ * agree on a basis -- see oiOverlayCheck(). */
 const eqStrikeMarks = {
   id: 'eqStrikeMarks',
   afterDatasetsDraw(chart, args, opts) {
-    if (!opts || !opts.marks || !opts.marks.length || !opts.strikes) return;
+    if (!opts || !opts.marks || !opts.marks.length) return;
     const { ctx, scales } = chart;
     const xs = scales.x, ys = scales.y;
     if (!xs || !ys) return;
-    const arr = opts.strikes.map(Number);
     ctx.save();
+    ctx.font = "600 9px 'Segoe UI', system-ui, sans-serif";
     for (const m of opts.marks) {
-      // Nearest listed strike: the chain is a discrete ladder and a solved
-      // strike almost never lands exactly on one.
-      let bi = 0, bd = Infinity;
-      arr.forEach((k, i) => { const d = Math.abs(k - m.strike); if (d < bd) { bd = d; bi = i; } });
-      const x = xs.getPixelForValue(bi);
-      ctx.strokeStyle = m.color; ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
-      ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = m.color;
-      ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
-      ctx.textAlign = 'center';
-      ctx.fillText(`${m.label} ${m.strike.toFixed(2)}`, x, ys.top - 2);
+      const text = `${m.label} @ ${m.strike.toFixed(2)}`;
+      ctx.strokeStyle = m.color; ctx.fillStyle = m.color;
+      ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      if (opts.horizontal) {
+        const y = ys.getPixelForValue(m.strike);
+        if (!isFinite(y)) continue;
+        ctx.beginPath(); ctx.moveTo(xs.left, y); ctx.lineTo(xs.right, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.textAlign = 'left';
+        ctx.fillText(text, xs.left + 4, y - 3);
+      } else {
+        // A solved strike almost never lands exactly on the listed ladder, so
+        // the nearest rung is used -- which is safe only because a mark whose
+        // strike is off the ladder entirely was filtered out upstream.
+        const arr = (opts.strikes || []).map(Number);
+        if (!arr.length) continue;
+        let bi = 0, bd = Infinity;
+        arr.forEach((k, i) => { const d = Math.abs(k - m.strike); if (d < bd) { bd = d; bi = i; } });
+        const x = xs.getPixelForValue(bi);
+        if (!isFinite(x)) continue;
+        ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.textAlign = 'center';
+        ctx.fillText(text, x, ys.top - 3);
+      }
     }
     ctx.restore();
   },
 };
-
 
 document.addEventListener('alpine:init', () => {
   Alpine.data('equityIv', () => ({
@@ -509,8 +563,14 @@ document.addEventListener('alpine:init', () => {
     grid: null, gridLoading: false, gridError: '',
     gridView: 'iv_minus_atm',
 
-    // Row 8
+    // Row 8. The Path panel has its OWN axis pickers rather than following
+    // the Cross-section ones. Sharing them meant scrolling up to change this
+    // panel, and left the global scatter showing whatever the ticker panel
+    // wanted rather than what was set for cross-sectional work — two panels
+    // fighting over one pair of controls.
     tscat: null, tscatLoading: false, tscatError: '',
+    tsFamX: 'skew', tsBaseX: 'skew_30d_25p_atm', tsZX: true,
+    tsFamY: 'realized_vol', tsBaseY: 'log_ret_1w', tsZY: false,
     svol: null, svolLoading: false, svolError: '',
 
     // Row 9 — collapsed by default. This is a periodic-curiosity section,
@@ -518,7 +578,19 @@ document.addEventListener('alpine:init', () => {
     // data path, so it does not load until it is opened.
     oiOpen: false, oi: null, oiLoading: false, oiError: '', oiNote: '',
     oiTab: 'profile',          // profile | doi | flow
-    oiDate: '', oiDoiN: 5, oiLookback: 252,
+    oiDate: '', oiDates: [], oiDoiN: 5, oiLookback: 252,
+    oiSide: 'all',             // all | call | put
+    // DTE bands in the chain endpoints' "lo-hi" form. Empty = every expiry.
+    // Deliberately NOT the 1m/3m/6m span buttons: those move the lookback,
+    // which is a different axis from which expiries are counted.
+    oiDteBand: '',
+    oiDteBands: [
+      { v: '',        label: 'all' },
+      { v: '0-30',    label: '0–30' },
+      { v: '31-90',   label: '31–90' },
+      { v: '91-180',  label: '91–180' },
+      { v: '181-3650', label: '180+' },
+    ],
 
     ser: null, serLoading: false, serError: '',
     serFam: 'skew', serBase: 'iv_30d_atm',
@@ -577,6 +649,8 @@ document.addEventListener('alpine:init', () => {
       }
       if (!this.byCol[this.railBase]) this.railBase = this.firstMetric(this.railFam);
       if (!this.byCol[this.serBase]) this.serBase = this.firstMetric(this.serFam);
+      if (!this.byCol[this.tsBaseX]) this.tsBaseX = this.firstMetric(this.tsFamX);
+      if (!this.byCol[this.tsBaseY]) this.tsBaseY = this.firstMetric(this.tsFamY);
     },
 
     async loadCatalog() {
@@ -720,10 +794,6 @@ document.addEventListener('alpine:init', () => {
     onAxisChange() {
       this.activePreset = '';
       this.loadCrossSection();
-      // Row 8's Path panel plots the SAME axes for one ticker over time, so
-      // it follows the pickers. Leaving it behind would put two panels with
-      // the same axis labels on screen showing different metrics.
-      this.loadTimeScatter();
     },
 
     applyPreset(p) {
@@ -737,7 +807,6 @@ document.addEventListener('alpine:init', () => {
       setAxis('y', p.y);
       this.activePreset = p.label;
       this.loadCrossSection();
-      this.loadTimeScatter();
     },
 
     /** Selecting re-renders the scatter to move the highlight ring. The
@@ -2051,7 +2120,7 @@ document.addEventListener('alpine:init', () => {
                         pointRadius: 0, backgroundColor: this.rgba(colr, 0.07),
                         fill: '-1', order: 5 });
         datasets.push({ label: label + ' median', data: g('p50'),
-                        borderColor: this.rgba(colr, 0.55), borderWidth: 1,
+                        borderColor: this.rgba(colr, 0.5), borderWidth: 0.75,
                         borderDash: [3, 3], pointRadius: 0, fill: false, order: 4 });
       };
 
@@ -2067,12 +2136,12 @@ document.addEventListener('alpine:init', () => {
         datasets.push({
           label: keyed ? this.deltaLabel(s) : 'today',
           data: pts, borderColor: colr, backgroundColor: colr,
-          borderWidth: 2, pointHoverRadius: 4, tension: 0, order: 1,
+          borderWidth: 1.25, pointHoverRadius: 4, tension: 0, order: 1,
           // A fabricated node is marked on today's line, never dropped: the
           // band already excludes them from history, and a gap here would
           // read as missing data rather than as a value not to trust.
           pointRadius: xs.map(x => {
-            const t = at(j.today, x, s); return (t && t.extrap) ? 3 : 0;
+            const t = at(j.today, x, s); return (t && t.extrap) ? 2 : 0;
           }),
           pointBackgroundColor: xs.map(x => {
             const t = at(j.today, x, s); return (t && t.extrap) ? EQ_PINK : colr;
@@ -2085,7 +2154,7 @@ document.addEventListener('alpine:init', () => {
         datasets.push({
           label: 'ATM',
           data: xs.map(x => { const t = j.atm_today.find(r => r.x === x); return t ? t.v : null; }),
-          borderColor: '#e8e8e8', borderWidth: 2, borderDash: [6, 3],
+          borderColor: '#e8e8e8', borderWidth: 1.25, borderDash: [6, 3],
           pointRadius: 0, tension: 0, order: 1,
         });
       }
@@ -2107,10 +2176,26 @@ document.addEventListener('alpine:init', () => {
                  grid: { color: 'rgba(255,255,255,0.05)' } },
           },
           plugins: {
-            legend: { display: false },
+            // A legend, because the term panel draws a pink line, a blue line
+            // and a white dashed one and nothing on screen said which delta
+            // each was. Filtered to the real series: the band edges are four
+            // shading datasets per series and would swamp it.
+            //
+            // Only where there is more than one line to name. The skew and
+            // skew-term panels draw a single series, and a legend reading
+            // "today" under them is a caption for something already obvious.
+            legend: {
+              display: keyed || !!(j.atm_today && j.atm_today.length),
+              position: 'bottom',
+              labels: {
+                boxWidth: 10, boxHeight: 2, font: { size: 9 }, padding: 8,
+                usePointStyle: false,
+                filter: it => !/ (P\d0|median)$/.test(it.text),
+              },
+            },
             tooltip: {
-              // The band edges are four datasets whose only job is to shade.
-              // Listing them turns a five-line tooltip into a twenty-line one.
+              // Same reason: listing the four shading datasets turns a
+              // five-line tooltip into a twenty-line one.
               filter: it => !/ P\d0$/.test(it.dataset.label),
               callbacks: {
                 label: it => `${it.dataset.label}  ${self.fmt(it.parsed.y, 'vol_decimal')}`,
@@ -2188,8 +2273,12 @@ document.addEventListener('alpine:init', () => {
       const L = j.long_leg, S = j.short_leg;
       if (!L || !S || L.sigma == null || S.sigma == null) return;
 
-      const lo = Math.min(S.sigma * 2.2, -4), hi = 1.5;
-      const step = (hi - lo) / 120;
+      // Framed on the structure, not on the whole downside. The first
+      // version ran to -4σ, which packed the tent into the right third and
+      // spent two thirds of the panel on empty space below the short strike.
+      // The floor still yields if the short sits further out than -2.5σ.
+      const lo = Math.min(-2.5, S.sigma - 0.6), hi = 1.0;
+      const step = (hi - lo) / 140;
       const xs = [], ys = [];
       const net = (j.zc_cost != null) ? j.zc_cost : 0;
       // Payoff in the same sigma units as the x axis, so the vertical scale
@@ -2209,7 +2298,7 @@ document.addEventListener('alpine:init', () => {
           labels: xs.map(x => x.toFixed(2)),
           datasets: [{
             label: 'payoff', data: ys,
-            borderColor: EQ_BLUE, borderWidth: 2, pointRadius: 0,
+            borderColor: EQ_BLUE, borderWidth: 1.25, pointRadius: 0,
             tension: 0, fill: false,
           }],
         },
@@ -2309,52 +2398,66 @@ document.addEventListener('alpine:init', () => {
      * than being squeezed onto the IV axis where a 40bp repricing is a
      * hairline. Pink and filled, because "how much did the surface actually
      * reprice" is what the eye should land on. */
+    /* Three smiles in strike space plus the residual on a twin axis.
+     *
+     * A LINEAR x axis carrying {x, y} points, not a category axis over shared
+     * labels. The first version used categories over the union of both
+     * sessions' strikes, which is wrong twice over: strikes are not evenly
+     * spaced, and — the reason the panel rendered blank — spot moves, so the
+     * delta-derived strikes differ between sessions. Every line then had a
+     * value at its own ~19 strikes and null at the other session's, and with
+     * pointRadius 0 and spanGaps false each segment was broken by a null.
+     * Nothing drew, while the y-axis still scaled off the data and looked
+     * entirely healthy.
+     *
+     * The residual gets its own scale rather than being squeezed onto the IV
+     * axis, where a 40bp repricing is a hairline. It is the panel's answer,
+     * so it is the filled pink one. */
     paintSticky() {
       const j = this.sticky;
       if (!j || typeof Chart === 'undefined') return;
       const el = document.getElementById('eq-sticky');
       if (!el) return;
 
-      const ks = [...new Set([...j.today.map(p => p.strike),
-                              ...j.prev.map(p => p.strike)])]
-        .filter(k => k != null).sort((a, b) => a - b);
-      const pick = (rows, k, f) => {
-        const r = rows.find(p => p.strike === k);
-        return r ? (f ? f(r) : r.iv) : null;
-      };
+      const xy = (rows, f) => rows
+        .filter(p => p.strike != null && (f ? f(p) : p.iv) != null)
+        .map(p => ({ x: p.strike, y: f ? f(p) : p.iv }))
+        .sort((a, b) => a.x - b.x);
 
       const self = this;
       EQ_CHARTS.sticky = new Chart(el.getContext('2d'), {
         type: 'line',
         data: {
-          labels: ks.map(k => k.toFixed(2)),
           datasets: [
-            { label: `residual (repricing)`, yAxisID: 'yR',
-              data: ks.map(k => pick(j.residual, k, r => r.v)),
-              borderColor: EQ_PINK, backgroundColor: this.rgba(EQ_PINK, 0.16),
+            { label: 'residual (repricing)', yAxisID: 'yR',
+              data: xy(j.residual, r => r.v), parsing: false,
+              borderColor: EQ_PINK, backgroundColor: this.rgba(EQ_PINK, 0.14),
               borderWidth: 1, pointRadius: 0, fill: 'origin', tension: 0, order: 5 },
             { label: `${j.prev_date} smile`,
-              data: ks.map(k => pick(j.prev, k)),
-              borderColor: this.rgba('#8a8a8a', 0.85), borderWidth: 1.5,
+              data: xy(j.prev), parsing: false,
+              borderColor: this.rgba('#8a8a8a', 0.85), borderWidth: 1,
               borderDash: [5, 3], pointRadius: 0, tension: 0, order: 2 },
             { label: `${j.prev_date} re-read at today's spot`,
-              data: ks.map(k => pick(j.shifted, k)),
-              borderColor: this.rgba(EQ_BLUE, 0.55), borderWidth: 1.5,
+              data: xy(j.shifted), parsing: false,
+              borderColor: this.rgba(EQ_BLUE, 0.55), borderWidth: 1,
               borderDash: [2, 2], pointRadius: 0, tension: 0, order: 2 },
             { label: `${j.date} smile`,
-              data: ks.map(k => pick(j.today, k)),
-              borderColor: EQ_BLUE, borderWidth: 2.5, pointRadius: 0,
+              data: xy(j.today), parsing: false,
+              borderColor: EQ_BLUE, borderWidth: 1.5, pointRadius: 0,
               tension: 0, order: 1 },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { right: 10 } },
-          interaction: { mode: 'index', intersect: false },
+          interaction: { mode: 'nearest', axis: 'x', intersect: false },
           scales: {
-            x: { title: { display: true, text: 'strike', color: '#8a8a8a',
+            x: { type: 'linear',
+                 title: { display: true, text: 'strike', color: '#8a8a8a',
                           font: { size: 10 } },
-                 ticks: { maxTicksLimit: 9, maxRotation: 0 }, grid: { display: false } },
+                 ticks: { maxTicksLimit: 9, maxRotation: 0,
+                          callback: v => Number(v).toFixed(0) },
+                 grid: { display: false } },
             y: { position: 'left',
                  ticks: { callback: v => self.fmtShort(v, 'vol_decimal') },
                  grid: { color: 'rgba(255,255,255,0.05)' } },
@@ -2363,16 +2466,16 @@ document.addEventListener('alpine:init', () => {
                   grid: { drawOnChartArea: false } },
           },
           plugins: {
-            legend: { display: false },
+            legend: { display: true, position: 'bottom',
+                      labels: { boxWidth: 10, boxHeight: 2, font: { size: 9 },
+                                padding: 8, usePointStyle: false } },
             tooltip: { callbacks: {
-              title: it => 'strike ' + it[0].label,
+              title: it => 'strike ' + Number(it[0].parsed.x).toFixed(2),
               label: it => it.dataset.yAxisID === 'yR'
                 ? `residual ${(it.parsed.y * 100).toFixed(2)} vol pts`
                 : `${it.dataset.label}  ${self.fmt(it.parsed.y, 'vol_decimal')}`,
             } },
-            eqSpotMarks: {
-              spot: j.spot, prevSpot: j.prev_spot, strikes: ks,
-            },
+            eqSpotMarks: { spot: j.spot, prevSpot: j.prev_spot },
           },
         },
         plugins: [eqSpotMarks],
@@ -2497,11 +2600,39 @@ document.addEventListener('alpine:init', () => {
 
     // ── Row 8a: the time-scatter ────────────────────────────────────────
 
+    tsXCol() { return this.resolve(this.tsBaseX, this.tsZX); },
+    tsYCol() { return this.resolve(this.tsBaseY, this.tsZY); },
+
+    onTsFamily(axis) {
+      if (axis === 'x') {
+        this.tsBaseX = this.firstMetric(this.tsFamX);
+        if (!this.hasZ(this.tsBaseX)) this.tsZX = false;
+      } else {
+        this.tsBaseY = this.firstMetric(this.tsFamY);
+        if (!this.hasZ(this.tsBaseY)) this.tsZY = false;
+      }
+      this.loadTimeScatter();
+    },
+
+    setTsForm(axis, useZ) {
+      const base = axis === 'x' ? this.tsBaseX : this.tsBaseY;
+      if (useZ && !this.hasZ(base)) return;   // no z variant — the toggle is inert
+      if (axis === 'x') this.tsZX = useZ; else this.tsZY = useZ;
+      this.loadTimeScatter();
+    },
+
+    /** Copy the Cross-section's current pair, for when the two should match. */
+    tsCopyGlobal() {
+      this.tsFamX = this.xFam; this.tsBaseX = this.xBase; this.tsZX = this.xZ;
+      this.tsFamY = this.yFam; this.tsBaseY = this.yBase; this.tsZY = this.yZ;
+      this.loadTimeScatter();
+    },
+
     async loadTimeScatter() {
       this.tscatLoading = true; this.tscatError = '';
       try {
         const j = await eqGetJson('/api/equity-iv/time-scatter?' + this._sq({
-          x: this.xCol(), y: this.yCol(),
+          x: this.tsXCol(), y: this.tsYCol(),
         }));
         if (j.error) { this.tscatError = j.error; this.tscat = null; }
         else { this.tscat = j; this.renderTimeScatter(); }
@@ -2531,7 +2662,6 @@ document.addEventListener('alpine:init', () => {
       if (!pts.length) return;
       const hist = pts.filter(p => !p.today);
       const today = pts.filter(p => p.today);
-      const n = Math.max(1, hist.length - 1);
 
       const self = this;
       EQ_CHARTS.tscat = new Chart(el.getContext('2d'), {
@@ -2540,9 +2670,9 @@ document.addEventListener('alpine:init', () => {
           datasets: [
             { label: 'path', data: hist.map(p => ({ x: p.x, y: p.y })),
               parsing: false, showLine: false,
-              pointRadius: 2.5, pointHoverRadius: 5,
-              pointBackgroundColor: hist.map((_, i) =>
-                eqMix('#3a3a3a', EQ_BLUE, i / n)),
+              pointRadius: hist.map((_, i) => eqRecentRadius(i, hist.length)),
+              pointHoverRadius: 5,
+              pointBackgroundColor: hist.map((_, i) => eqRecentColor(i, hist.length)),
               pointBorderWidth: 0, order: 2 },
             { label: 'today', data: today.map(p => ({ x: p.x, y: p.y })),
               parsing: false, showLine: false,
@@ -2625,11 +2755,13 @@ document.addEventListener('alpine:init', () => {
         data: {
           datasets: [
             { label: 'fit', data: line, parsing: false, showLine: true,
-              borderColor: this.rgba(EQ_BLUE, 0.7), borderWidth: 1.5,
+              borderColor: this.rgba(EQ_BLUE, 0.7), borderWidth: 1,
               borderDash: [5, 3], pointRadius: 0, order: 3 },
             { label: 'overnight moves', data: hist.map(p => ({ x: p.ret, y: p.d_iv })),
-              parsing: false, showLine: false, pointRadius: 2.5,
-              pointHoverRadius: 5, pointBackgroundColor: this.rgba(EQ_BLUE, 0.55),
+              parsing: false, showLine: false,
+              pointRadius: hist.map((_, i) => eqRecentRadius(i, hist.length)),
+              pointHoverRadius: 5,
+              pointBackgroundColor: hist.map((_, i) => eqRecentColor(i, hist.length)),
               pointBorderWidth: 0, order: 2 },
             // Hollow, like the live point on the history line and for the same
             // reason: a part-session move is not an overnight move, and it is
@@ -2697,35 +2829,45 @@ document.addEventListener('alpine:init', () => {
         // per (ticker, year), keyed on daily_features dates. A ticker in the
         // IV universe is not guaranteed to be in it, and the honest answer
         // when it is not is to say so rather than draw an empty panel.
-        const dj = await eqGetJson('/api/ticker-analysis/chain/dates?ticker='
-          + encodeURIComponent(this.selectedTicker));
-        const dates = dj.dates || [];
-        if (!dates.length) {
+        if (!this.oiDates.length) {
+          const dj = await eqGetJson('/api/ticker-analysis/chain/dates?ticker='
+            + encodeURIComponent(this.selectedTicker));
+          this.oiDates = dj.dates || [];
+        }
+        if (!this.oiDates.length) {
           this.oiError = `No option-chain history for ${this.selectedTicker}. `
             + `The OI store is a separate dataset from the IV surface and does `
             + `not cover every ticker in this universe.`;
           this.oi = null;
           return;
         }
-        // Nearest chain date at or before the page's date; the two datasets
-        // are captured independently and do not always have the same days.
-        const want = this.date || dates[dates.length - 1];
-        const usable = dates.filter(d => d <= want);
-        const useDate = usable.length ? usable[usable.length - 1] : dates[0];
-        if (useDate !== want) {
-          this.oiNote = `Nearest chain date at or before ${want} is ${useDate}.`;
+        if (!this.oiDate || !this.oiDates.includes(this.oiDate)) {
+          // Nearest chain date at or before the page's date; the two datasets
+          // are captured independently and do not always have the same days.
+          const want = this.date || this.oiDates[this.oiDates.length - 1];
+          const usable = this.oiDates.filter(d => d <= want);
+          this.oiDate = usable.length ? usable[usable.length - 1]
+                                      : this.oiDates[0];
+          if (this.oiDate !== want) {
+            this.oiNote = `Nearest chain date at or before ${want} is ${this.oiDate}.`;
+          }
         }
-        this.oiDate = useDate;
 
-        const base = `ticker=${encodeURIComponent(this.selectedTicker)}&date=${useDate}`;
-        const url = this.oiTab === 'profile'
-          ? `/api/ticker-analysis/chain/oi-profile?${base}`
-          : this.oiTab === 'doi'
-            ? `/api/ticker-analysis/chain/doi-profile?${base}&n=${this.oiDoiN}`
-            : `/api/ticker-analysis/chain/flow?${base}&lookback=${this.oiLookback}&mode=oi`;
-        const j = await eqGetJson(url);
+        const q = new URLSearchParams({
+          ticker: this.selectedTicker, date: this.oiDate, side: this.oiSide,
+        });
+        if (this.oiDteBand) q.set('dte_bands', this.oiDteBand);
+        if (this.oiTab === 'doi') q.set('n', String(this.oiDoiN));
+        if (this.oiTab === 'flow') { q.set('lookback', String(this.oiLookback)); q.set('mode', 'oi'); }
+        const path = this.oiTab === 'profile' ? 'oi-profile'
+                   : this.oiTab === 'doi' ? 'doi-profile' : 'flow';
+        const j = await eqGetJson(`/api/ticker-analysis/chain/${path}?` + q);
         if (j.error) { this.oiError = j.error; this.oi = null; }
-        else { this.oi = j; this.renderOi(); }
+        else if (j.empty) {
+          this.oi = j;
+          this.oiError = `No chain rows for ${this.oiDate} at this DTE / side `
+            + `filter. Widen the DTE range or pick another date.`;
+        } else { this.oi = j; this.renderOi(); }
       } catch (e) {
         this.oiError = String(e.message || e); this.oi = null;
       } finally {
@@ -2744,6 +2886,33 @@ document.addEventListener('alpine:init', () => {
       this.loadOi();
     },
 
+    setOiSide(v) {
+      if (this.oiSide === v) return;
+      this.oiSide = v;
+      this.loadOi();
+    },
+
+    setOiDteBand(v) {
+      if (this.oiDteBand === v) return;
+      this.oiDteBand = v;
+      this.loadOi();
+    },
+
+    setOiDateIdx(i) {
+      const n = parseInt(i, 10);
+      if (!isFinite(n) || !this.oiDates.length) return;
+      const d = this.oiDates[Math.max(0, Math.min(this.oiDates.length - 1, n))];
+      if (d === this.oiDate) return;
+      this.oiDate = d;
+      this.oiNote = '';
+      this.loadOi();
+    },
+
+    get oiDateIdx() {
+      const i = this.oiDates.indexOf(this.oiDate);
+      return i < 0 ? Math.max(0, this.oiDates.length - 1) : i;
+    },
+
     /** The structure's strikes, for the OI overlay. This is what turns the
      *  panel from ambient context into an answer: is my short sitting on a
      *  wall? */
@@ -2760,51 +2929,206 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
+    /* Whether the overlay can be trusted on THIS chart.
+     *
+     * The chain store's strikes are split-ADJUSTED (strike x adj_factor) and
+     * its spot is daily_features.spot_pc. equity_surface's strikes are on
+     * whatever basis the IV loader uses. If those two disagree, the marks land
+     * on real-looking strikes that are not the trade's — and snapping them to
+     * the nearest listed strike, which is what the mark plugin does, makes a
+     * wrong overlay look completely at home. So the disagreement is detected
+     * and the marks are suppressed rather than drawn misleadingly. */
+    oiOverlayCheck() {
+      const marks = this.oiOverlayStrikes();
+      if (!marks.length || !this.oi) return { ok: false, why: '' };
+      const ks = this.oiStrikeList();
+      if (!ks.length) return { ok: false, why: '' };
+      const lo = Math.min(...ks), hi = Math.max(...ks);
+      const out = marks.filter(m => m.strike < lo || m.strike > hi);
+      if (out.length) {
+        return { ok: false, why:
+          `Structure strikes (${marks.map(m => m.strike.toFixed(2)).join(', ')}) `
+          + `fall outside this chart's strike ladder (${lo.toFixed(2)}–${hi.toFixed(2)}), `
+          + `so they are not drawn. The chain store's strikes are split-adjusted `
+          + `and its spot is ${this.oi.spot == null ? '—' : Number(this.oi.spot).toFixed(2)}`
+          + `${this.oi.adj_factor != null ? ` (adj ${this.oi.adj_factor})` : ''}; `
+          + `the IV surface priced these against `
+          + `${this.tent && this.tent.spot != null ? this.tent.spot.toFixed(2) : '—'}. `
+          + `Those are different bases — snapping the marks to the nearest listed `
+          + `strike would put them somewhere plausible and wrong.` };
+      }
+      const spot = this.oi.spot;
+      if (spot && marks.some(m => m.strike > spot)) {
+        return { ok: false, why:
+          `Structure strikes sit ABOVE this chart's spot (${Number(spot).toFixed(2)}). `
+          + `A put ratio's strikes must be below it, so the overlay is suppressed `
+          + `until the two datasets agree on a basis.` };
+      }
+      return { ok: true, why: '' };
+    },
+
+    oiStrikeList() {
+      const j = this.oi;
+      if (!j) return [];
+      if (this.oiTab === 'flow') return (j.strikes || []).map(Number);
+      return (j.strikes || []).map(r => Number(r.strike));
+    },
+
     renderOi() {
       if (typeof Chart === 'undefined') return;
       if (EQ_CHARTS.oi) { EQ_CHARTS.oi.destroy(); EQ_CHARTS.oi = null; }
       this.$nextTick(() => this.paintOi());
     },
 
+    /* One renderer per payload shape.
+     *
+     * The three chain endpoints return three DIFFERENT shapes, and the first
+     * version of this panel pointed all three tabs at a single renderer that
+     * only understood the profile's. ΔOI came back as {strike, doi} and drew
+     * nothing; flow came back as a strike x time matrix whose `strikes` are
+     * bare numbers, so reading r.strike gave undefined and the axis filled
+     * with NaN. Both looked like "no data" rather than like a bug. */
     paintOi() {
       const j = this.oi;
       if (!j || typeof Chart === 'undefined') return;
       const el = document.getElementById('eq-oi');
       if (!el) return;
-      const rows = j.rows || j.strikes || j.profile || [];
-      if (!rows.length) { this.oiError = 'The chain endpoint returned no rows.'; return; }
+      if (this.oiTab === 'profile') return this.paintOiProfile(el, j);
+      if (this.oiTab === 'doi') return this.paintOiDoi(el, j);
+      return this.paintOiFlow(el, j);
+    },
 
-      const strikes = rows.map(r => r.strike);
-      const call = rows.map(r => r.call_oi != null ? r.call_oi : r.call);
-      const put  = rows.map(r => r.put_oi  != null ? r.put_oi  : r.put);
+    _oiMarksPlugin() {
+      const chk = this.oiOverlayCheck();
+      return { marks: chk.ok ? this.oiOverlayStrikes() : [],
+               strikes: this.oiStrikeList() };
+    },
 
-      const self = this;
+    paintOiProfile(el, j) {
+      const rows = j.strikes || [];
       EQ_CHARTS.oi = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: {
-          labels: strikes.map(s => Number(s).toFixed(2)),
+          labels: rows.map(r => Number(r.strike).toFixed(2)),
           datasets: [
-            { label: 'put',  data: put,  backgroundColor: this.rgba(EQ_PINK, 0.65) },
-            { label: 'call', data: call, backgroundColor: this.rgba(EQ_BLUE, 0.65) },
+            { label: 'put',  data: rows.map(r => r.put_oi),
+              backgroundColor: this.rgba(EQ_PINK, 0.6), borderWidth: 0 },
+            { label: 'call', data: rows.map(r => r.call_oi),
+              backgroundColor: this.rgba(EQ_BLUE, 0.6), borderWidth: 0 },
+          ],
+        },
+        options: this._oiBarOptions('open interest'),
+      });
+    },
+
+    paintOiDoi(el, j) {
+      const rows = j.strikes || [];
+      // Signed: a build and an unwind are opposite facts and must not share a
+      // colour. Blue for a build, pink for an unwind — the page's directions.
+      const vals = rows.map(r => r.doi);
+      const self = this;   // used by the per-bar colour map below
+      EQ_CHARTS.oi = new Chart(el.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: rows.map(r => Number(r.strike).toFixed(2)),
+          datasets: [{
+            label: 'ΔOI', data: vals, borderWidth: 0,
+            backgroundColor: vals.map(v =>
+              self.rgba(v >= 0 ? EQ_BLUE : EQ_PINK, 0.65)),
+          }],
+        },
+        options: this._oiBarOptions('ΔOI  (' + (j.date_prev || '') + ' → ' + (j.date || '') + ')'),
+      });
+    },
+
+    /* Flow is a strike x time matrix, so it is drawn as a scatter of sized,
+     * signed dots rather than as bars — one cell per (date, strike). Chart.js
+     * has no heatmap type, and a bubble grid reads the same way without
+     * another dependency. */
+    paintOiFlow(el, j) {
+      const dates = j.dates || [];
+      const strikes = (j.strikes || []).map(Number);
+      const matrix = j.matrix || [];
+      const scale = j.max || 1;
+      const pts = [];
+      for (let si = 0; si < matrix.length; si++) {
+        const row = matrix[si] || [];
+        for (let di = 0; di < row.length; di++) {
+          const v = row[di];
+          if (v == null || v === 0) continue;
+          pts.push({ x: di, y: strikes[si], v });
+        }
+      }
+      const self = this;
+      EQ_CHARTS.oi = new Chart(el.getContext('2d'), {
+        type: 'scatter',
+        data: {
+          datasets: [
+            { label: 'flow', data: pts, parsing: false,
+              pointRadius: pts.map(p =>
+                Math.max(1, Math.min(7, 1 + 6 * Math.sqrt(Math.abs(p.v) / scale)))),
+              pointBackgroundColor: pts.map(p =>
+                self.rgba(p.v >= 0 ? EQ_BLUE : EQ_PINK, 0.55)),
+              pointBorderWidth: 0, order: 2 },
+            // The spot path, so "where OI concentrated" can be read against
+            // "where price went" — which is the whole point of the panel.
+            { label: 'spot', parsing: false, showLine: true, pointRadius: 0,
+              data: (j.spots || []).map((s, i) => (s == null ? null : { x: i, y: s }))
+                                   .filter(Boolean),
+              borderColor: '#e8e8e8', borderWidth: 1, order: 1 },
           ],
         },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { right: 10 } },
-          interaction: { mode: 'index', intersect: false },
           scales: {
-            x: { stacked: false, grid: { display: false },
-                 ticks: { maxTicksLimit: 12, maxRotation: 0 } },
-            y: { grid: { color: 'rgba(255,255,255,0.05)' },
-                 ticks: { callback: v => self.fmtShort(v, 'count') } },
+            x: { type: 'linear', grid: { display: false },
+                 ticks: { maxTicksLimit: 8, maxRotation: 0,
+                          callback: v => dates[Math.round(v)] || '' } },
+            y: { type: 'linear', grid: { color: 'rgba(255,255,255,0.05)' },
+                 ticks: { callback: v => Number(v).toFixed(0) } },
           },
           plugins: {
             legend: { display: false },
-            eqStrikeMarks: { marks: self.oiOverlayStrikes(), strikes },
+            tooltip: { filter: it => it.datasetIndex === 0, callbacks: {
+              label: it => {
+                const p = pts[it.dataIndex];
+                if (!p) return '';
+                return `${dates[p.x] || ''}  strike ${p.y}  `
+                     + `${p.v >= 0 ? '+' : ''}${self.fmtShort(p.v, 'count')}`;
+              },
+            } },
+            eqStrikeMarks: { ...this._oiMarksPlugin(), horizontal: true },
           },
         },
         plugins: [eqStrikeMarks],
       });
+    },
+
+    _oiBarOptions(yLabel) {
+      const self = this;
+      return {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        layout: { padding: { right: 10, top: 14 } },
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { grid: { display: false },
+               ticks: { maxTicksLimit: 12, maxRotation: 0 } },
+          y: { title: { display: true, text: yLabel, color: '#8a8a8a',
+                        font: { size: 10 } },
+               grid: { color: 'rgba(255,255,255,0.05)' },
+               ticks: { callback: v => self.fmtShort(v, 'count') } },
+        },
+        plugins: {
+          legend: { display: false },
+          eqStrikeMarks: this._oiMarksPlugin(),
+        },
+      };
+    },
+
+    oiOverlayNote() {
+      const chk = this.oiOverlayCheck();
+      return chk.ok ? '' : chk.why;
     },
 
     // ── formatting ───────────────────────────────────────────────────────

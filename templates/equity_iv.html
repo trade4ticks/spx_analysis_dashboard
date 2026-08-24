@@ -158,7 +158,9 @@
     @media (max-width:1250px) { .eq-row3 { grid-template-columns:repeat(2, minmax(0,1fr)); } }
     @media (max-width:900px)  { .eq-row3, .eq-row2 { grid-template-columns:minmax(0,1fr); } }
 
-    .eq-band-canvas { height:240px; }
+    /* 260 rather than 240: the term and sticky-strike panels carry a
+       bottom legend, and at 240 it ate the bottom of the plot. */
+    .eq-band-canvas { height:260px; }
 
     /* Surface grid. A table rather than a canvas: the cells carry text and
        tooltips, it reflows without a redraw, and the extrapolation mark is
@@ -179,6 +181,27 @@
        tables — an asterisk inside a 26px coloured cell is unreadable. */
     .eq-grid td.eq-fab { color:#e84393; box-shadow:inset 0 0 0 1px #e84393; }
     .eq-grid td.eq-fab::after { content:''; }
+
+
+    /* Range input, dark. The browser default is a light track that reads as
+       a foreign control on this page. */
+    .eq-slider {
+      flex:1; min-width:120px; max-width:340px; height:4px; appearance:none;
+      background:var(--border); border-radius:2px; outline:none; cursor:pointer;
+    }
+    .eq-slider::-webkit-slider-thumb {
+      appearance:none; width:12px; height:12px; border-radius:50%;
+      background:var(--accent); cursor:pointer; border:none;
+    }
+    .eq-slider::-moz-range-thumb {
+      width:12px; height:12px; border-radius:50%; background:var(--accent);
+      cursor:pointer; border:none;
+    }
+    .eq-slider:disabled { opacity:.35; cursor:not-allowed; }
+
+    /* The OI panel is full width and its charts carry more rows than the
+       row-6 band panels, so it gets its own height. */
+    .eq-oi-canvas { height:330px; }
 
     .eq-note { font-size:10px; color:var(--dim); padding:0 10px 8px; line-height:1.5; }
     .eq-warn { color:var(--warning); }
@@ -974,11 +997,14 @@
 
           <div class="eq-note">
             <span x-show="tentNote()" x-text="tentNote()"
-                  style="display:block;color:var(--text)"></span>
+                  style="display:block"></span>
             <span x-show="tentGapNote()" x-text="tentGapNote()"
                   style="display:block;margin-top:3px"></span>
             <span x-show="tentCheckNote()" x-text="tentCheckNote()"
                   class="eq-warn" style="display:block;margin-top:3px"></span>
+            <template x-for="g in (tent ? tent.geometry_problems : [])" :key="'gp-'+g">
+              <span class="eq-warn" style="display:block;margin-top:3px" x-text="g"></span>
+            </template>
             The shaded strip is where the zero-cost short usually sits — P25–P75
             solid, P10–P90 dashed — so today's marker inside or outside it is the
             read. σ, not strike or delta: a strike axis moves with spot and a
@@ -992,6 +1018,17 @@
             <span class="eq-section-title">Skew curve</span>
             <span class="eq-section-sub" x-text="cbSubtitle('skew')"></span>
             <div class="eq-spacer"></div>
+            <!-- The same control as the tent's, bound to the same tenor. One
+                 tenor is a page-level idea ("what am I trading"), so it is
+                 shared; the control appears on both panels so it can be
+                 changed from wherever you are looking. -->
+            <span class="eq-lbl">Tenor</span>
+            <select class="eq-sel" style="max-width:80px"
+                    :value="cbDte" @change="setCbDte($event.target.value)">
+              <template x-for="t in cbAvailableDtes()" :key="'sd-'+t">
+                <option :value="t" x-text="t + 'd'"></option>
+              </template>
+            </select>
             <span class="eq-section-sub" x-show="cbLoading.skew" x-cloak>loading…</span>
           </div>
           <div class="eq-ts-wrap eq-band-canvas">
@@ -1132,18 +1169,68 @@
             <span class="eq-section-sub"
                   x-text="tscat ? (tscat.n_points + ' sessions · ' + histWindow.toUpperCase()) : ''"></span>
             <div class="eq-spacer"></div>
+            <button class="btn" @click="tsCopyGlobal()"
+                    title="Copy the Cross-section's current axis pair into this panel.">
+              ⤓ match scatter
+            </button>
             <span class="eq-section-sub" x-show="tscatLoading" x-cloak>loading…</span>
+          </div>
+
+          <!-- Its own pickers. Sharing the Cross-section's meant scrolling up
+               to change this panel, and left the global scatter showing what
+               the ticker panel wanted rather than what was set for
+               cross-sectional work. -->
+          <div class="eq-axisrow" style="padding-bottom:0">
+            <span class="eq-lbl">X</span>
+            <select class="eq-sel" style="max-width:120px" x-model="tsFamX"
+                    @change="onTsFamily('x')">
+              <template x-for="f in families" :key="'tsxf-'+f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+            <select class="eq-sel" style="max-width:165px" x-model="tsBaseX"
+                    @change="loadTimeScatter()">
+              <template x-for="m in metricsFor(tsFamX)" :key="'tsxm-'+m.column_name">
+                <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+              </template>
+            </select>
+            <div class="p-seg">
+              <span :class="{on: !tsZX}" @click="setTsForm('x', false)">val</span>
+              <span :class="{on: tsZX}" @click="setTsForm('x', true)"
+                    :style="hasZ(tsBaseX) ? '' : 'opacity:.35;cursor:not-allowed'">z</span>
+            </div>
+          </div>
+          <div class="eq-axisrow" style="padding-top:4px">
+            <span class="eq-lbl">Y</span>
+            <select class="eq-sel" style="max-width:120px" x-model="tsFamY"
+                    @change="onTsFamily('y')">
+              <template x-for="f in families" :key="'tsyf-'+f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+            <select class="eq-sel" style="max-width:165px" x-model="tsBaseY"
+                    @change="loadTimeScatter()">
+              <template x-for="m in metricsFor(tsFamY)" :key="'tsym-'+m.column_name">
+                <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+              </template>
+            </select>
+            <div class="p-seg">
+              <span :class="{on: !tsZY}" @click="setTsForm('y', false)">val</span>
+              <span :class="{on: tsZY}" @click="setTsForm('y', true)"
+                    :style="hasZ(tsBaseY) ? '' : 'opacity:.35;cursor:not-allowed'">z</span>
+            </div>
           </div>
           <div class="eq-ts-wrap eq-band-canvas">
             <canvas id="eq-tscat"></canvas>
             <div class="panel-error" x-show="tscatError" x-cloak x-text="tscatError"></div>
           </div>
           <div class="eq-note">
-            The scatter's axes, one dot per prior session for this ticker,
-            shaded dark-to-blue by age with today in pink. A hysteresis loop —
-            skew rising as IV falls, then both retracing by a different route —
-            is plainly a loop here and completely invisible as two lines against
-            time. Change the axes with the Cross-section pickers above.
+            One dot per prior session for this ticker. Older sessions are a
+            uniform dim blue — they are context, not individually readable —
+            and the most recent 10 run faint to bright pink, with today
+            brightest. A hysteresis loop, skew rising as IV falls then both
+            retracing by a different route, is plainly a loop here and
+            completely invisible as two lines against time.
           </div>
         </div>
 
@@ -1161,7 +1248,7 @@
           </div>
           <div class="eq-note">
             <span x-show="svolNote()" x-text="svolNote()"
-                  style="display:block;margin-bottom:3px;color:var(--text)"></span>
+                  style="display:block;margin-bottom:3px"></span>
             Today is hollow because it is a part-session move measured against
             overnight moves — shown on the cloud, excluded from the fit.
           </div>
@@ -1194,12 +1281,56 @@
 
         <template x-if="oiOpen">
           <div>
-            <div class="eq-ts-wrap eq-band-canvas">
+            <!-- The same controls the Ticker Analysis OI page carries. NOT the
+                 1m/3m/6m span buttons: those move the lookback, which is a
+                 different axis from which expiries are counted. -->
+            <div class="eq-axisrow" style="border-bottom:1px solid var(--border)">
+              <span class="eq-lbl">Side</span>
+              <div class="seg">
+                <template x-for="sd in ['all','call','put']" :key="'os-'+sd">
+                  <div class="seg-btn" :class="{on: oiSide === sd}"
+                       @click="setOiSide(sd)" x-text="sd"></div>
+                </template>
+              </div>
+
+              <span class="eq-lbl">DTE</span>
+              <div class="seg">
+                <template x-for="b in oiDteBands" :key="'ob-'+b.v">
+                  <div class="seg-btn" :class="{on: oiDteBand === b.v}"
+                       @click="setOiDteBand(b.v)" x-text="b.label"></div>
+                </template>
+              </div>
+
+              <template x-if="oiTab === 'doi'">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span class="eq-lbl">Δ sessions</span>
+                  <input class="eq-num" type="number" min="1" max="60"
+                         x-model.number="oiDoiN" @change="loadOi()">
+                </div>
+              </template>
+            </div>
+
+            <div class="eq-axisrow" style="border-bottom:1px solid var(--border)">
+              <span class="eq-lbl">Date</span>
+              <input type="range" class="eq-slider" min="0"
+                     :max="Math.max(0, oiDates.length - 1)" :value="oiDateIdx"
+                     @input="setOiDateIdx($event.target.value)"
+                     :disabled="!oiDates.length"
+                     title="Rewind through the chain store's snapshot dates.">
+              <span class="eq-section-sub" x-text="oiDate || '—'"></span>
+              <span class="eq-section-sub"
+                    x-text="oiDates.length ? '(' + (oiDateIdx + 1) + ' / ' + oiDates.length + ')' : ''"></span>
+            </div>
+
+            <div class="eq-ts-wrap eq-oi-canvas">
               <canvas id="eq-oi"></canvas>
               <div class="panel-error" x-show="oiError" x-cloak x-text="oiError"></div>
             </div>
+
             <div class="eq-note">
               <span x-show="oiNote" x-text="oiNote" class="eq-warn"
+                    style="display:block;margin-bottom:3px"></span>
+              <span x-show="oiOverlayNote()" x-text="oiOverlayNote()" class="eq-warn"
                     style="display:block;margin-bottom:3px"></span>
               Served by the existing chain endpoints under
               <code>/api/ticker-analysis/chain/</code> — the same data the Ticker
@@ -1208,10 +1339,23 @@
               this IV universe, so a name with no chain history says so rather
               than drawing an empty panel.
               <span x-show="oiTab === 'profile'" style="display:block;margin-top:3px">
-                The dashed lines are the current structure's strikes — short ×2 in
-                pink, long in blue — snapped to the nearest listed strike. That
-                overlay is what makes this "is my short sitting on a wall" rather
-                than ambient context.
+                The dashed lines are the current structure's strikes, each
+                labelled with its price, snapped to the nearest listed strike.
+                They are drawn only when this chart's strike ladder and the IV
+                surface agree on a basis — the chain store's strikes are
+                split-adjusted, and a mark placed across that gap would look
+                entirely at home while pointing at the wrong rung.
+              </span>
+              <span x-show="oiTab === 'doi'" style="display:block;margin-top:3px">
+                Signed: blue is a build, pink an unwind. Change is where
+                positioning shows up — level is largely a function of how long a
+                strike has been listed.
+              </span>
+              <span x-show="oiTab === 'flow'" style="display:block;margin-top:3px">
+                Strikes down the side, sessions across, dot size by magnitude and
+                colour by sign, with the white line the spot path. This is the
+                one that shows whether large-OI strikes mattered, because it puts
+                where OI concentrated next to where price actually went.
               </span>
             </div>
           </div>
