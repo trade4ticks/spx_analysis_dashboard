@@ -90,13 +90,29 @@ class Conn:
     async def fetch(self, sql, *args):
         check_sql(sql, args)
         if "ORDER BY m.trade_date, m.snapshot" in sql:
-            # The /series data query. These rows deliberately STOP BEFORE the
-            # anchor date, which is the mid-session state the live point
-            # exists for: with today's close already present the append is
-            # correctly skipped, and a fixture containing it would leave that
-            # path untested while looking like it passed.
-            return [Row(trade_date=datetime.date(2026, 8, d), snapshot=s)
+            # The /series data query, fixtured as a real mid-session state:
+            # four settled days, then today with intraday buckets present and
+            # NO 1545 close. That is the only shape that exercises all three
+            # modes honestly -- the daily line has nothing for today and must
+            # append, while intraday and candle already have today's buckets.
+            rows = [Row(trade_date=datetime.date(2026, 8, d), snapshot=s)
                     for d in (18, 19, 20, 21) for s in ("0945", "1200", "1545")]
+            rows += [Row(trade_date=ANCHOR, snapshot=s) for s in ("0945", "1200")]
+            # This fake ignores WHERE clauses in general, which is fine for SQL
+            # checking and wrong for behaviour: without the snapshot filter,
+            # daily mode would see today's intraday rows, conclude the session
+            # was settled, and skip the append the case exists to test. So the
+            # two filters that change WHICH ROWS COME BACK are applied.
+            one = re.search(r"m\.snapshot = \$(\d+)", sql)
+            if one:
+                want = args[int(one.group(1)) - 1]
+                rows = [r for r in rows if r["snapshot"] == want]
+            cap = re.search(r"m\.snapshot <= \$(\d+)", sql)
+            if cap:
+                upto = args[int(cap.group(1)) - 1]
+                rows = [r for r in rows
+                        if r["trade_date"] < ANCHOR or r["snapshot"] <= upto]
+            return rows
         if "generate_series" in sql or "snapshot" in sql:
             return [Row(trade_date=datetime.date(2026, 8, d), snapshot=s)
                     for d in (20, 21, 24) for s in ("0945", "1545")]
@@ -444,6 +460,27 @@ async def main():
     if r4["live_point"]["appended"]:
         failed += 1
         print("  LIVE  include_today=False still appended")
+
+    # The intraday view marks NOTHING. Every point there is a snapshot and
+    # none is a close, so flagging today's would mark a whole run for a
+    # property they all share -- and with a few weeks of intraday history it
+    # would be the entire chart. The daily and candle views keep the mark,
+    # where a settled session really is a different kind of observation.
+    r5 = await one(mode="intraday")
+    n_intraday_partial = sum(1 for p in r5["series"][0]["points"] if p.get("partial"))
+    if n_intraday_partial:
+        failed += 1
+        print(f"  LIVE  intraday flagged {n_intraday_partial} point(s) partial; "
+              f"the daily/partial distinction does not apply there")
+    if not r5["series"][0]["points"]:
+        failed += 1
+        print("  LIVE  intraday returned no points, so the check above is vacuous")
+
+    r6 = await one(mode="candle")
+    if not any(p.get("partial") for p in r6["series"][0]["points"]):
+        failed += 1
+        print("  LIVE  candle mode lost the partial bar; today's bar is an "
+              "unfinished session and must stay distinguishable")
 
     # Endpoints that must REFUSE rather than fall back to the stored z. A
     # silent fallback here is indistinguishable from a correct answer, which

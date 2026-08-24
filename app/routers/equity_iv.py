@@ -1847,7 +1847,23 @@ async def series(
                 )
 
             def is_partial(td, snap_):
-                """A reading of the anchor session that is not its close."""
+                """A reading of the anchor session that is not its close.
+
+                Never true on the intraday view. The mark exists to separate a
+                settled close from a mid-session sample, and that is a
+                distinction the daily line makes and the intraday line cannot:
+                there every point is a snapshot and none is a close, so
+                flagging today's would mark a whole run for a property all of
+                them share. That is an artifact rendered as a signal — and
+                once intraday has a few weeks of history it would be the
+                entire chart, uniformly.
+
+                Candle mode keeps it, because a candle bar is a whole session
+                and today's is an unfinished one, which is the same
+                distinction the daily line draws.
+                """
+                if mode == "intraday":
+                    return False
                 return td == as_of and snap_ != BASELINE_SNAPSHOT
 
             if mode == "candle":
