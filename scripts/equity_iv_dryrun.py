@@ -83,9 +83,20 @@ class Row(dict):
         return 1.25
 
 
+ANCHOR = datetime.date(2026, 8, 24)
+
+
 class Conn:
     async def fetch(self, sql, *args):
         check_sql(sql, args)
+        if "ORDER BY m.trade_date, m.snapshot" in sql:
+            # The /series data query. These rows deliberately STOP BEFORE the
+            # anchor date, which is the mid-session state the live point
+            # exists for: with today's close already present the append is
+            # correctly skipped, and a fixture containing it would leave that
+            # path untested while looking like it passed.
+            return [Row(trade_date=datetime.date(2026, 8, d), snapshot=s)
+                    for d in (18, 19, 20, 21) for s in ("0945", "1200", "1545")]
         if "generate_series" in sql or "snapshot" in sql:
             return [Row(trade_date=datetime.date(2026, 8, d), snapshot=s)
                     for d in (20, 21, 24) for s in ("0945", "1545")]
@@ -179,6 +190,41 @@ def self_test():
          "SELECT avg(v) OVER (PARTITION BY ticker ORDER BY trade_date "
          "ROWS BETWEEN $1 PRECEDING AND 1 PRECEDING), stddev_samp(v) FROM v"),
     ]
+    # The live partial point may be SCORED by the envelope but must never
+    # enter it. This is a pure function, so it is tested directly rather than
+    # inferred from a chart.
+    env = eiv._rolling_pct_envelope
+    settled   = [1.0] * 40
+    with_live = settled + [99.0]            # an absurd live reading
+    admit     = [True] * 40 + [False]
+
+    # hi_q = 1.0 so the band's top IS the window maximum. At 0.9 a lone
+    # outlier among 20 values never reaches the band, and the assertion would
+    # pass whether or not the point leaked -- which is how the first version
+    # of this test managed to prove nothing.
+    a = env(with_live, 20, 0.0, 1.0, admit=admit)
+    b = env(settled,   20, 0.0, 1.0)
+    if a[:40] != b:
+        print("  SELF-TEST FAILED: live point changed an earlier band")
+        return 1
+    if a[40] == (None, None):
+        print("  SELF-TEST FAILED: live point got no band at all")
+        return 1
+    if a[40][1] >= 99.0:
+        print("  SELF-TEST FAILED: live point leaked into its own band")
+        return 1
+
+    # ...and it MUST leak without the admit list, or none of the above is
+    # evidence of anything.
+    tail_leak = env(with_live + [1.0], 20, 0.0, 1.0)[41][1]
+    tail_keep = env(with_live + [1.0], 20, 0.0, 1.0, admit=admit + [True])[41][1]
+    if tail_leak != 99.0:
+        print("  SELF-TEST FAILED: canary — outlier absent from an unfiltered band")
+        return 1
+    if tail_keep == tail_leak:
+        print("  SELF-TEST FAILED: admit list has no effect on later bands")
+        return 1
+
     bad = 0
     for name, sql in must_fire:
         n = len(BAD)
@@ -238,13 +284,35 @@ async def main():
                 cases.append((f"series {mode} {win} env={envon}",
                               eiv.series(ticker="AAPL",
                                          metrics="skew_30d_25p_atm,iv_30d_atm",
-                                         mode=mode, snapshot=None, window=win,
+                                         mode=mode, snapshot=None, date=None,
+                                         live_snapshot=None, include_today=True,
+                                         window=win,
                                          z_window=63, envelope=envon,
                                          env_window=63, env_lo=0.10, env_hi=0.90,
                                          exclude_extrapolated=True, pool=pool)))
+    # The live-point paths: anchored date + selected bucket, in every mode,
+    # and with the append suppressed.
+    for mode in ("daily", "intraday", "candle"):
+        for live in ("1200", "1545"):
+            cases.append((f"series live {mode} @{live}",
+                          eiv.series(ticker="AAPL", metrics="iv_30d_atm",
+                                     mode=mode, snapshot=None,
+                                     date="2026-08-24", live_snapshot=live,
+                                     include_today=True, window="1y",
+                                     z_window=63, envelope=True, env_window=63,
+                                     env_lo=0.10, env_hi=0.90,
+                                     exclude_extrapolated=True, pool=pool)))
+    cases.append(("series live suppressed",
+                  eiv.series(ticker="AAPL", metrics="iv_30d_atm", mode="daily",
+                             snapshot=None, date=None, live_snapshot="1200",
+                             include_today=False, window="all", z_window=63,
+                             envelope=False, env_window=63, env_lo=0.10,
+                             env_hi=0.90, exclude_extrapolated=True, pool=pool)))
+
     cases.append(("series alt snapshot, no z_stored",
                   eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm",
-                             mode="daily", snapshot="0945", window="1y",
+                             mode="daily", snapshot="0945", date=None,
+                             live_snapshot=None, include_today=True, window="1y",
                              z_window=63, envelope=True, env_window=20,
                              env_lo=0.05, env_hi=0.95,
                              exclude_extrapolated=False, pool=pool)))
@@ -254,7 +322,8 @@ async def main():
     # silent fallback here looks identical to a correct answer.
     must_400.append(("series rejects a stored z column",
                      eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
-                                mode="daily", snapshot=None, window="1y",
+                                mode="daily", snapshot=None, date=None,
+                                live_snapshot=None, include_today=True, window="1y",
                                 z_window=63, envelope=True, env_window=20,
                                 env_lo=0.05, env_hi=0.95,
                                 exclude_extrapolated=False, pool=pool)))
@@ -329,6 +398,52 @@ async def main():
         except TypeError as exc:
             failed += 1
             print(f"  UNSERIALISABLE  {name}: {exc}")
+
+    # ── the live point actually behaves ──────────────────────────────────
+    # Running the endpoint is not the same as checking what it returned.
+    async def one(**kw):
+        base = dict(ticker="AAPL", metrics="iv_30d_atm", mode="daily",
+                    snapshot=None, date="2026-08-24", live_snapshot="1200",
+                    include_today=True, window="1y", z_window=63,
+                    envelope=True, env_window=63, env_lo=0.10, env_hi=0.90,
+                    exclude_extrapolated=True, pool=pool)
+        base.update(kw)
+        return await eiv.series(**base)
+
+    r = await one()
+    pts = r["series"][0]["points"]
+    if not r["live_point"]["appended"]:
+        failed += 1
+        print("  LIVE  daily mid-session did not append today's point")
+    elif not pts[-1].get("partial"):
+        failed += 1
+        print("  LIVE  appended point is not flagged partial")
+    elif pts[-1]["t"] != "2026-08-24":
+        failed += 1
+        print(f"  LIVE  appended point dated {pts[-1]['t']}, want the anchor")
+    elif pts[-1].get("snapshot") != "1200":
+        failed += 1
+        print(f"  LIVE  appended point at {pts[-1].get('snapshot')}, want 1200")
+    elif any(p.get("partial") for p in pts[:-1]):
+        failed += 1
+        print("  LIVE  a settled close was flagged partial")
+
+    # The selected bucket drives it, so it advances with the session.
+    r2 = await one(live_snapshot="1330")
+    if r2["series"][0]["points"][-1].get("snapshot") != "1330":
+        failed += 1
+        print("  LIVE  point did not follow the selected snapshot")
+
+    # At the close there is nothing to append -- the settled row IS the point.
+    r3 = await one(live_snapshot="1545")
+    if r3["live_point"]["appended"]:
+        failed += 1
+        print("  LIVE  appended a partial point at the close bucket")
+
+    r4 = await one(include_today=False)
+    if r4["live_point"]["appended"]:
+        failed += 1
+        print("  LIVE  include_today=False still appended")
 
     # Endpoints that must REFUSE rather than fall back to the stored z. A
     # silent fallback here is indistinguishable from a correct answer, which

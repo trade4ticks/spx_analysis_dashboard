@@ -1648,7 +1648,7 @@ def _quantile(sorted_vals, p):
     return sorted_vals[lo_i] + (sorted_vals[hi_i] - sorted_vals[lo_i]) * (pos - lo_i)
 
 
-def _rolling_pct_envelope(vals, win, lo_q, hi_q):
+def _rolling_pct_envelope(vals, win, lo_q, hi_q, admit=None):
     """Trailing percentile band, one (lo, hi) per point, aligned to `vals`.
 
     Trailing rather than centred: a centred window at index i uses values
@@ -1660,18 +1660,25 @@ def _rolling_pct_envelope(vals, win, lo_q, hi_q):
     point is admitted — so a marker is never inside the distribution it is
     being judged against.
 
+    `admit` is a parallel list of booleans for values that may be SCORED but
+    must not be COUNTED — the live partial point at the end of the series.
+    A 12:15 reading is a sample of an unfinished session, and letting it into
+    the band would put a not-yet-real observation into the definition of
+    normal. It still gets a band, because the band was already built from
+    prior history alone.
+
     Nulls and (when excluded) extrapolated observations arrive as None and
     never enter `hist`, so the band describes observed history only.
     """
     out, hist = [], []
     floor = max(8, win // 4)
-    for v in vals:
+    for i, v in enumerate(vals):
         if len(hist) >= floor:
             w = sorted(hist[-win:])
             out.append((_quantile(w, lo_q), _quantile(w, hi_q)))
         else:
             out.append((None, None))
-        if v is not None:
+        if v is not None and (admit is None or admit[i]):
             hist.append(v)
     return out
 
@@ -1682,6 +1689,9 @@ async def series(
     metrics:              str   = Query(..., description="CSV of columns, max 4"),
     mode:                 str   = Query("daily", description="daily|intraday|candle"),
     snapshot:             str   = Query(None, description="daily mode bucket"),
+    date:                 str   = Query(None, description="anchor date; default latest"),
+    live_snapshot:        str   = Query(None, description="the page's selected bucket"),
+    include_today:        bool  = Query(True),
     window:               str   = Query("1y"),
     z_window:             int   = Query(63),
     envelope:             bool  = Query(True),
@@ -1704,6 +1714,39 @@ async def series(
                  and `first_date` say how few, rather than drawing a stub
                  chart that reads as a loading failure.
 
+    THE LIVE POINT
+    --------------
+    The chart shows the world as of (`date`, `live_snapshot`) — the same
+    anchor the header, the cards and the rails use. That is what puts today
+    on the line: in daily mode the 1545 row does not exist until the close,
+    so a series filtered to that bucket ended at the prior session while
+    every other panel on the page already showed today.
+
+    So when the anchor date has no settled close yet, today's reading at the
+    selected bucket is appended as a final point flagged `partial`. It
+    advances with the session because it is read at `live_snapshot` rather
+    than pinned to a bucket.
+
+    `partial` is not decoration. A 12:15 reading is a sample of an unfinished
+    session, not a close, and the two must not be readable as the same kind
+    of observation — the client draws it as an open marker on a dashed
+    segment. The flag is set the same way in every mode: the point belongs to
+    the anchor date and is not that date's settled close.
+
+    What a partial point must NEVER do is help score itself:
+
+      * it is kept out of the rolling envelope's history, so the band it sits
+        against is built from settled sessions only. Its own band still
+        renders, because the envelope was already trailing — computed from
+        history strictly before each point.
+      * the z baseline never sees it. _baseline_for reads BASELINE_SNAPSHOT
+        strictly before the anchor date, so the yardstick is prior sessions
+        whatever the live point does.
+
+    Once the close lands, the settled 1545 row IS the point and nothing is
+    appended — the partial reading is replaced by the real one rather than
+    left sitting beside it.
+
     z in every mode comes from the daily baseline — see _daily_baseline().
     """
     if not pool:
@@ -1724,8 +1767,9 @@ async def series(
                    "already carries its daily-baseline z.")
 
     out = []
+    appended_live = False
     async with pool.acquire() as conn:
-        as_of, latest_snap = await _resolve_slice(conn, None, None)
+        as_of, live_snap = await _resolve_slice(conn, date, live_snapshot)
         daily_snap = snapshot or DAILY_SNAPSHOT
         start      = _window_start(as_of, window)
 
@@ -1751,9 +1795,23 @@ async def series(
 
             where = ["m.ticker = $1"]
             args  = [ticker]
+            # Upper-bounded at the anchor date. Without this the chart ran to
+            # whatever the newest capture was, so picking an earlier date moved
+            # every other panel on the page and left this one alone.
+            args.append(as_of)
+            p_asof = len(args)
+            where.append(f"m.trade_date <= ${p_asof}")
             if mode == "daily":
                 args.append(daily_snap)
                 where.append(f"m.snapshot = ${len(args)}")
+            else:
+                # The anchor date is truncated at the selected bucket, so the
+                # intraday line stops where the page says it is rather than
+                # running ahead to the newest capture. Snapshots are
+                # zero-padded HHMM text, so this ordering is chronological.
+                args.append(live_snap)
+                where.append(f"(m.trade_date < ${p_asof} "
+                             f"OR m.snapshot <= ${len(args)})")
             if start:
                 args.append(start)
                 where.append(f"m.trade_date >= ${len(args)}")
@@ -1765,8 +1823,9 @@ async def series(
                 *args,
             )
 
-            # Note the baseline does NOT take daily_snap. The caller may plot
-            # some other bucket's closes; the yardstick is 1545 either way.
+            # Note the baseline takes neither daily_snap nor live_snap. The
+            # caller may plot any bucket; the yardstick is 1545 closes strictly
+            # before the anchor date either way.
             bl = await _daily_baseline(conn, cat, e, ticker, as_of, z_window)
             mu, sd, n_base = bl["mu"], bl["sigma"], bl["n"]
 
@@ -1775,18 +1834,44 @@ async def series(
                     return None
                 return (v - _mu) / _sd
 
+            # In daily mode the settled close may simply not exist yet.
+            live_row = None
+            settled_today = any(r["trade_date"] == as_of for r in rows)
+            if (include_today and mode == "daily" and not settled_today
+                    and live_snap != daily_snap):
+                live_row = await conn.fetchrow(
+                    f"SELECT m.trade_date, m.snapshot, {_expr(e)} AS v, "
+                    f"{_extrap_expr(e)} AS ex {_from_clause(False)} "
+                    f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
+                    ticker, as_of, live_snap,
+                )
+
+            def is_partial(td, snap_):
+                """A reading of the anchor session that is not its close."""
+                return td == as_of and snap_ != BASELINE_SNAPSHOT
+
             if mode == "candle":
-                by_day = {}
+                by_day, last_snap = {}, {}
                 for r in rows:
                     if r["v"] is None or (exclude_extrapolated and r["ex"]):
                         continue
                     by_day.setdefault(r["trade_date"], []).append(float(r["v"]))
+                    last_snap[r["trade_date"]] = r["snapshot"]   # rows are ordered
                 pts = []
-                for d in sorted(by_day):
-                    vs = by_day[d]                    # already snapshot-ordered
-                    pts.append({"t": d.isoformat(), "o": vs[0], "h": max(vs),
+                for dd in sorted(by_day):
+                    vs = by_day[dd]                   # already snapshot-ordered
+                    pts.append({"t": dd.isoformat(), "o": vs[0], "h": max(vs),
                                 "l": min(vs), "c": vs[-1], "n": len(vs),
-                                "z": zof(vs[-1])})
+                                "z": zof(vs[-1]),
+                                # A bar whose last bucket is not the close is a
+                                # bar of a session still being written.
+                                "partial": is_partial(dd, last_snap.get(dd)),
+                                # NOT called `snapshot`: a candle bar is a
+                                # whole day, and the client labels the x axis
+                                # with the bucket whenever a point carries
+                                # one. That would stamp every daily bar with
+                                # a time it does not represent.
+                                "last_bucket": last_snap.get(dd)})
                 closes = [p["c"] for p in pts]
             else:
                 pts = []
@@ -1795,16 +1880,33 @@ async def series(
                     ex    = bool(r["ex"])
                     shown = None if (v is None or (exclude_extrapolated and ex)) else v
                     p = {"t": r["trade_date"].isoformat(), "v": shown, "extrap": ex,
-                         "z": zof(shown)}
-                    if mode == "intraday":
+                         "z": zof(shown),
+                         "partial": is_partial(r["trade_date"], r["snapshot"])}
+                    if mode == "intraday" or p["partial"]:
                         p["snapshot"] = r["snapshot"]
                     if want_stored:
                         p["z_stored"] = None if r["zs"] is None else float(r["zs"])
                     pts.append(p)
+
+                if live_row is not None and live_row["v"] is not None:
+                    ex    = bool(live_row["ex"])
+                    shown = None if (exclude_extrapolated and ex) else float(live_row["v"])
+                    # snapshot comes from live_snap, not from the row: the
+                    # query filtered on it, so it is the same value by
+                    # construction, and taking it from the parameter means the
+                    # label cannot disagree with what was asked for.
+                    pts.append({"t": as_of.isoformat(), "v": shown, "extrap": ex,
+                                "z": zof(shown), "partial": True,
+                                "snapshot": live_snap})
+                    appended_live = True
+
                 closes = [p["v"] for p in pts]
 
             if envelope and pts:
-                band = _rolling_pct_envelope(closes, env_window, env_lo, env_hi)
+                # A partial point is scored BY the band but never joins it.
+                admit = [not p.get("partial") for p in pts]
+                band  = _rolling_pct_envelope(closes, env_window, env_lo, env_hi,
+                                              admit=admit)
                 for p, (lo, hi) in zip(pts, band):
                     p["env_lo"], p["env_hi"] = lo, hi
 
@@ -1814,6 +1916,7 @@ async def series(
                 "n_points":   len(pts),
                 "first_date": pts[0]["t"] if pts else None,
                 "last_date":  pts[-1]["t"] if pts else None,
+                "n_partial":  sum(1 for p in pts if p.get("partial")),
                 "baseline":   {"mu": mu, "sigma": sd, "n": n_base,
                                "snapshot": BASELINE_SNAPSHOT,
                                "first": bl["first"], "last": bl["last"],
@@ -1826,7 +1929,17 @@ async def series(
     return {
         "ticker": ticker, "mode": mode, "window": window, "z_window": z_window,
         "snapshot": daily_snap if mode == "daily" else None,
-        "latest_snapshot": latest_snap, "as_of": as_of.isoformat(),
+        "live_snapshot": live_snap,
+        "latest_snapshot": live_snap,
+        "as_of": as_of.isoformat(),
+        "live_point": {
+            "appended": appended_live,
+            "snapshot": live_snap,
+            "date":     as_of.isoformat(),
+            # True once the close has landed: the settled row is then the
+            # point, and nothing is appended.
+            "settled":  live_snap == BASELINE_SNAPSHOT,
+        },
         "z_source": "daily_baseline",
         "envelope": ({"on": True, "window": env_window, "lo": env_lo, "hi": env_hi}
                      if envelope else {"on": False}),

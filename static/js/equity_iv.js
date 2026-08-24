@@ -241,19 +241,27 @@ const eqCandles = {
     w = Math.max(1.5, Math.min(14, w));
     ctx.save();
     bars.forEach((b, i) => {
+      if (!b) return;                 // an empty slot on the shared x axis
       const px = xs.getPixelForValue(i);
       const up = b.c >= b.o;
       const col = up ? EQ_BLUE : EQ_PINK;
       ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+      // A partial bar is a session still being written — its "close" is
+      // whatever the latest bucket happens to be. Drawn hollow with a dashed
+      // wick so it cannot be read as a finished day.
+      ctx.setLineDash(b.partial ? [3, 2] : []);
       ctx.beginPath();
       ctx.moveTo(px, ys.getPixelForValue(b.h));
       ctx.lineTo(px, ys.getPixelForValue(b.l));
       ctx.stroke();
+      ctx.setLineDash([]);
       const yo = ys.getPixelForValue(b.o), yc = ys.getPixelForValue(b.c);
       const top = Math.min(yo, yc), h = Math.abs(yc - yo);
       if (h < 1) {
         ctx.beginPath();
         ctx.moveTo(px - w / 2, top); ctx.lineTo(px + w / 2, top); ctx.stroke();
+      } else if (b.partial) {
+        ctx.strokeRect(px - w / 2 + 0.5, top + 0.5, w - 1, h - 1);
       } else {
         ctx.fillRect(px - w / 2, top, w, h);
       }
@@ -1303,8 +1311,13 @@ document.addEventListener('alpine:init', () => {
           env_lo: String(this.envLo), env_hi: String(this.envHi),
           exclude_extrapolated: String(this.excludeExtrap),
         });
-        // Daily mode pins the close bucket server-side; intraday and candle
-        // read every bucket, so sending one would filter them to nothing.
+        // The chart is anchored to the same (date, snapshot) as every other
+        // panel. `snapshot` is NOT sent — that parameter picks which bucket's
+        // closes the daily line plots, and it stays pinned to 1545.
+        // `live_snapshot` is the page's selection, which is what puts today
+        // on the line and what makes it advance as the session does.
+        if (this.date) q.set('date', this.date);
+        if (this.snapshot) q.set('live_snapshot', this.snapshot);
         const j = await eqGetJson('/api/equity-iv/series?' + q);
         if (j.error) { this.serError = j.error; this.ser = null; }
         else { this.ser = j; this.renderSeries(); }
@@ -1392,6 +1405,20 @@ document.addEventListener('alpine:init', () => {
       const what = this.ser.mode === 'candle' ? 'bars' : 'points';
       return `${n} ${what} — intraday capture starts 2026-08-24 and is sparse `
            + `before 11:25 that day, so this view is short by construction.`;
+    },
+
+    /** The live point's provenance, when there is one on the chart. */
+    livePointNote() {
+      const lp = this.ser && this.ser.live_point;
+      if (!lp) return '';
+      const nPartial = (this.ser.series || [])
+        .reduce((a, s) => Math.max(a, s.n_partial || 0), 0);
+      if (!nPartial) return '';
+      const what = lp.appended ? 'The final point is' : 'Points from';
+      return `${what} today (${lp.date}) at ${lp.snapshot} — an unfinished `
+           + `session sampled at the selected bucket, not a close. Drawn hollow `
+           + `on a dashed segment, and kept out of both the envelope and the `
+           + `baseline that scores it. It advances as you move the snapshot.`;
     },
 
     /** Where the z on screen came from. The whole point is that it does not
@@ -1489,10 +1516,35 @@ document.addEventListener('alpine:init', () => {
           this.candleDropped[pane] = [];
         }
 
-        // Every series in a pane shares one x axis, so the labels come from
-        // the longest one and shorter series align to its tail.
-        const longest = mine.reduce((a, o) => o.d.points.length > a.points.length ? o.d : a, mine[0].d);
-        const labels = longest.points.map(p => this.pointLabel(p));
+        /* Every series in a pane shares one x axis, built as the union of
+         * every series' labels rather than taken from the longest one.
+         *
+         * The old shape right-aligned each series against the longest, which
+         * is only correct while they all end on the same observation. The
+         * live point broke that: a metric with a value at 12:15 gains a final
+         * point, one that is null there does not, and right-alignment would
+         * then slide that series' last SETTLED close into the live slot —
+         * drawing yesterday's close as though it were today's reading.
+         *
+         * Labels are "YYYY-MM-DD" or "YYYY-MM-DD HHMM", both of which sort
+         * lexicographically into chronological order, so a plain sort is the
+         * axis.
+         *
+         * One caveat, recorded because it is not obvious: a bare date sorts
+         * BEFORE that same date's buckets, so "2026-08-24" (a 15:45 close)
+         * would land left of "2026-08-24 0945". That never arises, and the
+         * reason is worth knowing before anyone changes it — the server
+         * appends a live point only when NO row exists for the anchor date at
+         * the daily bucket, and row existence is a property of the row, not
+         * of any metric's value in it. So every series in one request agrees
+         * about whether today is settled, and a bare date and a bucket for
+         * the same day cannot both be on the axis. */
+        const labelSet = new Set();
+        for (const o of mine) {
+          for (const p of o.d.points) labelSet.add(this.pointLabel(p));
+        }
+        const labels = [...labelSet].sort();
+        const slot = new Map(labels.map((l, i) => [l, i]));
 
         const datasets = [];
         const meta = [];
@@ -1503,21 +1555,31 @@ document.addEventListener('alpine:init', () => {
           const yid = o.s.axis === 'right' ? 'yR' : 'y';
           if (yid === 'yR') usesRight = true;
           const pts = o.d.points;
-          const pad = labels.length - pts.length;      // shorter series, right-aligned
-          const align = arr => new Array(Math.max(0, pad)).fill(null).concat(arr);
+
+          // Each point placed at its OWN label's slot; gaps stay null.
+          const byIndex = new Array(labels.length).fill(null);
+          for (const p of pts) {
+            const i = slot.get(this.pointLabel(p));
+            if (i != null) byIndex[i] = p;
+          }
+          const align = get => byIndex.map(p => p == null ? null : get(p));
+          // Chart.js wants a number for every point-style entry, so absent
+          // slots take the inert value rather than null.
+          const alignNum = (get, absent) =>
+            byIndex.map(p => p == null ? absent : get(p));
 
           if (candle) {
             // Invisible highs and lows so the scale fits the wicks; the
             // plugin paints the bodies.
             datasets.push({
               label: o.d.column_name, yAxisID: yid,
-              data: align(pts.map(p => p.h)),
+              data: align(p => p.h),
               borderColor: 'transparent', backgroundColor: 'transparent',
               pointRadius: 0, showLine: false,
             });
             datasets.push({
               label: o.d.column_name + ' low', yAxisID: yid,
-              data: align(pts.map(p => p.l)),
+              data: align(p => p.l),
               borderColor: 'transparent', backgroundColor: 'transparent',
               pointRadius: 0, showLine: false,
             });
@@ -1527,30 +1589,46 @@ document.addEventListener('alpine:init', () => {
               // ties the upper edge down to the lower one.
               datasets.push({
                 label: o.d.column_name + ' P' + Math.round(this.envLo * 100),
-                yAxisID: yid, data: align(pts.map(p => p.env_lo)),
+                yAxisID: yid, data: align(p => p.env_lo),
                 borderColor: 'transparent', pointRadius: 0, fill: false, order: 3,
               });
               datasets.push({
                 label: o.d.column_name + ' P' + Math.round(this.envHi * 100),
-                yAxisID: yid, data: align(pts.map(p => p.env_hi)),
+                yAxisID: yid, data: align(p => p.env_hi),
                 borderColor: 'transparent', pointRadius: 0,
                 backgroundColor: this.rgba(colr, 0.10), fill: '-1', order: 3,
               });
             }
             datasets.push({
               label: o.d.column_name, yAxisID: yid,
-              data: align(pts.map(p => p.v)),
+              data: align(p => p.v),
               borderColor: colr, backgroundColor: colr,
               borderWidth: 1.5, pointHoverRadius: 3,
               tension: 0, spanGaps: false, order: 1,
-              // A fabricated point is drawn, but marked — the line would
-              // otherwise present spline output as observation. Every other
-              // point has radius 0, so this is the dataset's only pointRadius.
-              pointBackgroundColor: align(pts.map(p => p.extrap ? EQ_PINK : colr)),
-              pointRadius: align(pts.map(p => p.extrap ? 2.5 : 0)),
+              // Two kinds of point are marked, and they mean different things:
+              //   pink filled — rests on a node the spline fabricated
+              //   hollow ring — a PARTIAL reading: an unfinished session
+              //                 sampled at the selected bucket, not a close
+              // Every other point has radius 0, so these are the dataset's
+              // only pointRadius / pointBackgroundColor entries.
+              pointBackgroundColor: alignNum(
+                p => p.partial ? EQ_SURF : (p.extrap ? EQ_PINK : colr), colr),
+              pointBorderColor: alignNum(p => p.extrap ? EQ_PINK : colr, colr),
+              pointBorderWidth: alignNum(p => p.partial ? 1.5 : 0, 0),
+              pointRadius: alignNum(
+                p => p.partial ? 3.5 : (p.extrap ? 2.5 : 0), 0),
+              // Dash any segment entering a partial point. A solid line from
+              // a close to a 12:15 sample would draw the two as the same kind
+              // of observation, which is exactly the claim being avoided.
+              segment: {
+                borderDash: ctx => {
+                  const p = byIndex[ctx.p1DataIndex];
+                  return (p && p.partial) ? [4, 3] : undefined;
+                },
+              },
             });
           }
-          meta.push({ col: o.d.column_name, units: o.d.units, pts, pad,
+          meta.push({ col: o.d.column_name, units: o.d.units, byIndex,
                       color: colr, axis: yid });
         }
 
@@ -1567,6 +1645,10 @@ document.addEventListener('alpine:init', () => {
           options: {
             responsive: true, maintainAspectRatio: false,
             animation: false,
+            // Dead space at the right edge so the line — and especially the
+            // live point's marker, which is the rightmost thing on the chart
+            // — is not clipped against the frame.
+            layout: { padding: { right: 10 } },
             interaction: { mode: 'index', intersect: false },
             scales: {
               x: {
@@ -1600,7 +1682,9 @@ document.addEventListener('alpine:init', () => {
         };
 
         const chart = new Chart(el.getContext('2d'), cfg);
-        if (candle) chart.$candles = meta[0] ? meta[0].pts : [];
+        // Slot-aligned, so the plugin's index matches the x scale's. Empty
+        // slots are null and simply not drawn.
+        if (candle) chart.$candles = meta[0] ? meta[0].byIndex : [];
         EQ_CHARTS['ts' + pane] = chart;
       }
     },
@@ -1615,19 +1699,30 @@ document.addEventListener('alpine:init', () => {
       const m = candle ? meta[mi] : meta.find(x => x.col === item.dataset.label);
       if (candle) {
         if (item.datasetIndex % 2) return null;
-        const p = m && m.pts[item.dataIndex - m.pad];
+        const p = m && m.byIndex[item.dataIndex];
         if (!p) return null;
         return `${m.col}  O ${this.fmt(p.o, m.units)}  H ${this.fmt(p.h, m.units)}  `
              + `L ${this.fmt(p.l, m.units)}  C ${this.fmt(p.c, m.units)}`
              + `  (${p.n} buckets)`
-             + (p.z == null ? '' : `  z ${p.z.toFixed(2)}`);
+             + (p.z == null ? '' : `  z ${p.z.toFixed(2)}`)
+             + this.partialSuffix(p);
       }
       if (!m) return null;                       // an envelope edge — not a row
-      const p = m.pts[item.dataIndex - m.pad];
+      const p = m.byIndex[item.dataIndex];
       if (!p || p.v == null) return null;
       return `${m.col}  ${this.fmt(p.v, m.units)}`
            + (p.z == null ? '' : `  z ${p.z.toFixed(2)}`)
-           + (p.extrap ? '  · rests on a fabricated node' : '');
+           + (p.extrap ? '  · rests on a fabricated node' : '')
+           + this.partialSuffix(p);
+    },
+
+    /** Says so in words, not only in line style — the dash is easy to miss
+     *  on a dense chart, and the difference between a close and a mid-session
+     *  sample is the kind of thing that gets read wrong once and acted on. */
+    partialSuffix(p) {
+      if (!p || !p.partial) return '';
+      const at = p.snapshot || p.last_bucket || '';
+      return `  · LIVE ${at} — session in progress, not a close`;
     },
 
     rgba(hex, a) {
