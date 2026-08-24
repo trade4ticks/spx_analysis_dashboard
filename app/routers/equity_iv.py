@@ -187,8 +187,32 @@ async def _catalog(pool) -> dict:
     for entry in by_col.values():
         entry["extrap_flags"] = _flags_for(entry, extrap_cols)
 
-    _catalog_cache = {"by_col": by_col, "extrap_cols": extrap_cols}
+    _catalog_cache = {
+        "by_col": by_col,
+        "extrap_cols": extrap_cols,
+        # Every column that really exists on equity_metrics, catalogued or
+        # not. The header reads context columns (spot, atm iv, 50dma, ...)
+        # that are not metrics and so have no catalog row, and this is what
+        # lets it ask for them without either hardcoding a name that might
+        # not exist or opening a hole in the identifier whitelist.
+        "live_metric_cols": {c for (t, c) in live if t == METRICS_TABLE},
+    }
     return _catalog_cache
+
+
+def _first_live(cat: dict, *candidates: str):
+    """First candidate column that exists on equity_metrics, else None.
+
+    The header wants quantities whose exact column name this code cannot
+    verify from here. Naming one and hoping is how a page 500s on a rename;
+    naming several and taking the first real one degrades to "absent"
+    instead, which is the same thing NULL already has to render as.
+    """
+    live = cat["live_metric_cols"]
+    for c in candidates:
+        if c in live:
+            return c
+    return None
 
 
 def _flags_for(entry: dict, extrap_cols: set) -> list:
@@ -667,4 +691,585 @@ async def scanner(
         "n_rows":    len(out),
         "truncated": len(out) >= limit,
         "exclude_extrapolated": bool(exclude_extrapolated),
+    }
+
+
+# ── ticker half ──────────────────────────────────────────────────────────────
+#
+# Everything below is scoped to ONE ticker, so the queries are small and the
+# history windows can be generous. Two rules carry through all of them:
+#
+#   Per-metric extrapolation, never a ticker rate. A name can be 40%
+#   extrapolated chain-wide while the two nodes a given metric rests on are
+#   both real — AAL is exactly that. Each value resolves its OWN flags via
+#   _extrap_expr, and the chain rate travels separately as context.
+#
+#   Extrapolated observations are excluded from HISTORICAL DISTRIBUTIONS, not
+#   just from today. A percentile band computed over fabricated values
+#   describes a normal range that never existed.
+
+
+# Context columns for the header. Several are quantities this code cannot
+# confirm the name of, so each is resolved against the live table by
+# _first_live and renders as absent when no candidate exists — the same
+# treatment a legitimately NULL metric gets.
+HEADER_CANDIDATES = {
+    "atm_iv":        ("iv_30d_atm", "atm_iv_30d", "atm_iv"),
+    "rv":            ("rv_21d", "rv_1m", "realized_vol_21d", "rv_20d"),
+    "term_ratio":    ("term_ratio_30d_90d", "term_ratio_30d_60d"),
+    "px_vs_50dma":   ("px_vs_50dma", "price_vs_50dma", "spot_vs_50dma"),
+    "days_to_earn":  ("days_to_earnings",),
+    "spotvol_beta":  ("spotvol_beta_1m", "spotvol_beta_3m"),
+    "spotvol_r2":    ("spotvol_r2_1m", "spotvol_r2_3m"),
+}
+
+
+@router.get("/ticker-header")
+async def ticker_header(
+    ticker:   str = Query(...),
+    date:     str = Query(None),
+    snapshot: str = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """The thin sticky header: spot, ATM IV, RV, and the state chips.
+
+    `days_to_earnings` is currently NULL on every row — no calendar source is
+    wired up — so it is returned as null and must render as absent. That is
+    the same contract every other metric has, and the reason it is not
+    special-cased into a zero.
+
+    `source` distinguishes a 'live' row, captured at an arbitrary instant and
+    rounded to the grid bucket, from an 'exact' row out of the anchored
+    historical record; `captured_at` holds the true instant. Both are
+    returned because a header that says 15:45 when the capture happened at
+    15:47:31 is quietly wrong about when it is describing.
+    """
+    if not pool:
+        return {"error": "OI database not configured"}
+
+    cat = await _catalog(pool)
+    resolved = {k: _first_live(cat, *cands) for k, cands in HEADER_CANDIDATES.items()}
+
+    sel = ["m.ticker", "m.spot", "m.extrap_rate_short", "m.source",
+           "m.captured_at", "m.median_n_strikes_clean"]
+    for key, col in resolved.items():
+        if col:
+            sel.append('m."{}" AS {}'.format(col, key))
+
+    async with pool.acquire() as conn:
+        d, snap = await _resolve_slice(conn, date, snapshot)
+        row = await conn.fetchrow(
+            f"SELECT {', '.join(sel)} FROM {METRICS_TABLE} m "
+            f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
+            ticker, d, snap,
+        )
+
+    if row is None:
+        return {"error": f"No row for {ticker} at {d} {snap}",
+                "ticker": ticker, "date": str(d), "snapshot": snap}
+
+    def g(key):
+        return row[key] if resolved.get(key) else None
+
+    term = g("term_ratio")
+    return {
+        "ticker": row["ticker"], "date": str(d), "snapshot": snap,
+        "spot":   row["spot"],
+        "atm_iv": g("atm_iv"),
+        "rv":     g("rv"),
+        # Contango when the far tenor is richer than the near one. The ratio
+        # is near/far, so < 1 is contango. Null in, null out.
+        "term_ratio": term,
+        "term_state": None if term is None else ("contango" if term < 1 else "backwardation"),
+        "px_vs_50dma":   g("px_vs_50dma"),
+        "days_to_earnings": g("days_to_earn"),
+        "spotvol_beta":  g("spotvol_beta"),
+        "spotvol_r2":    g("spotvol_r2"),
+        "extrap_rate":   row["extrap_rate_short"],
+        "liquidity":     row["median_n_strikes_clean"],
+        "source":        row["source"],
+        "captured_at":   _jsonable(row["captured_at"]),
+        # Which candidate answered each slot, so the client can label the chip
+        # with the column it is actually showing rather than a generic word.
+        "resolved":      resolved,
+    }
+
+
+@router.get("/unusual")
+async def unusual(
+    ticker:               str  = Query(...),
+    date:                 str  = Query(None),
+    snapshot:             str  = Query(None),
+    z_window:             int  = Query(63),
+    window:               str  = Query("1y"),
+    limit:                int  = Query(40, ge=1, le=200),
+    families:             str  = Query(None, description="CSV family filter"),
+    exclude_extrapolated: bool = Query(True),
+    pool=Depends(get_oi_pool),
+):
+    """Today's metrics for one ticker, ranked by |z|. Row 4's card strip.
+
+    This is the discovery mechanism the page turns on: ~600 metric columns is
+    far more than anyone can page through, so the question "which of these is
+    extreme today" has to be answered by the server before the user has to
+    know which column to ask about.
+
+    Ranked on |z| from the requested z window. Percentile is computed over
+    the page's history window from the BASE column, with extrapolated
+    observations dropped — a percentile that counts fabricated history is
+    describing a normal range that never occurred.
+
+    A metric whose own nodes are extrapolated today is excluded from the
+    ranking under the toggle rather than shown with a marker: this list is
+    sorted BY extremeness, and a fabricated node is exactly what manufactures
+    a spurious extreme. It stays in the payload, flagged, so the client can
+    show what was withheld.
+    """
+    if not pool:
+        return {"error": "OI database not configured", "cards": []}
+    if z_window not in (63, 252):
+        raise HTTPException(400, f"z_window must be 63 or 252, got {z_window}")
+
+    cat  = await _catalog(pool)
+    form = f"z_{z_window}"
+    fams = {f.strip() for f in families.split(",") if f.strip()} if families else None
+
+    # Every z column at this window whose base column also exists — the card
+    # needs the value, the z and the percentile, and a z with no base has no
+    # value to show.
+    pairs = []
+    for e in cat["by_col"].values():
+        if e["form"] != form:
+            continue
+        base = e["base_column"]
+        if not base or base not in cat["by_col"]:
+            continue
+        if fams and e["family"] not in fams:
+            continue
+        pairs.append((cat["by_col"][base], e))
+    if not pairs:
+        return {"error": f"No {form} columns in the catalog", "cards": []}
+
+    sel = ["m.extrap_rate_short"]
+    for i, (be, ze) in enumerate(pairs):
+        sel += [f"{_expr(be)} AS b{i}", f"{_expr(ze)} AS z{i}",
+                f"{_extrap_expr(be)} AS e{i}"]
+
+    async with pool.acquire() as conn:
+        d, snap = await _resolve_slice(conn, date, snapshot)
+        row = await conn.fetchrow(
+            f"SELECT {', '.join(sel)} {_from_clause(True)} "
+            f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
+            ticker, d, snap,
+        )
+        if row is None:
+            return {"ticker": ticker, "date": str(d), "snapshot": snap,
+                    "cards": [], "error": f"No row for {ticker}"}
+
+        # Rank first, then price percentiles only for what will be shown.
+        # Percentile needs a window scan per column; doing all ~368 would be
+        # ~368 scans to populate a strip that shows a few dozen.
+        ranked = []
+        for i, (be, ze) in enumerate(pairs):
+            zv, bv, ex = row[f"z{i}"], row[f"b{i}"], row[f"e{i}"]
+            if zv is None or bv is None:
+                continue
+            ranked.append({"i": i, "base": be, "z_entry": ze,
+                           "value": float(bv), "z": float(zv), "extrap": bool(ex)})
+        ranked.sort(key=lambda c: abs(c["z"]), reverse=True)
+
+        shown = [c for c in ranked if not (exclude_extrapolated and c["extrap"])]
+        withheld = len(ranked) - len(shown)
+        shown = shown[:limit]
+
+        start = _window_start(d, window)
+        for c in shown:
+            be = c["base"]
+            # Percentile over the SAME snapshot, so an 09:45 reading is
+            # ranked against other 09:45 readings rather than against a day
+            # that also contains the close.
+            pct_sql = (
+                f"SELECT count(*) FILTER (WHERE {_expr(be)} <= $4)::float8 "
+                f"       / NULLIF(count(*) FILTER (WHERE {_expr(be)} IS NOT NULL), 0) "
+                f"{_from_clause(be['form'] != 'base')} "
+                f"WHERE m.ticker = $1 AND m.snapshot = $2 AND m.trade_date <= $3 "
+                + ("AND m.trade_date >= $5 " if start else "")
+                + f"AND NOT {_extrap_expr(be)}"
+            )
+            args = [ticker, snap, d, c["value"]] + ([start] if start else [])
+            c["percentile"] = await conn.fetchval(pct_sql, *args)
+
+    cards = [{
+        "column":      c["base"]["column_name"],
+        "z_column":    c["z_entry"]["column_name"],
+        "family":      c["base"]["family"],
+        "tenor":       c["base"]["tenor"],
+        "wing":        c["base"]["wing"],
+        "units":       c["base"]["units"],
+        "description": c["base"]["description"],
+        "value":       c["value"],
+        "z":           c["z"],
+        "percentile":  c["percentile"],
+        "extrap":      c["extrap"],
+        "extrap_flags": c["base"]["extrap_flags"],
+    } for c in shown]
+
+    return {
+        "ticker": ticker, "date": str(d), "snapshot": snap,
+        "z_window": z_window, "window": window,
+        "cards": cards,
+        "n_ranked": len(ranked),
+        "n_withheld_extrapolated": withheld,
+        "exclude_extrapolated": bool(exclude_extrapolated),
+        "extrap_rate": row["extrap_rate_short"],
+    }
+
+
+RAILS_DEFAULT = (
+    "skew_30d_25p_atm", "skew_30d_10p_atm", "iv_30d_atm",
+    "term_ratio_30d_90d", "rr_30d_25d", "zc_width_sigma_30d",
+    "vrp_1m", "convexity_30d_25p_atm_25c",
+)
+
+
+@router.get("/rails")
+async def rails(
+    ticker:               str  = Query(...),
+    metrics:              str  = Query(None, description="CSV of base columns"),
+    date:                 str  = Query(None),
+    snapshot:             str  = Query(None),
+    window:               str  = Query("1y"),
+    z_window:             int  = Query(63),
+    exclude_extrapolated: bool = Query(True),
+    pool=Depends(get_oi_pool),
+):
+    """Row 5's rails: one horizontal distribution bar per metric.
+
+    PERCENTILES, NOT STANDARD DEVIATIONS, and that is a deliberate choice
+    rather than a stylistic one. Skew distributions are right-skewed and
+    fat-tailed, so a symmetric +/-2SD band is wrong asymmetrically -- too
+    wide on the left and too narrow on the right, and the right is the tail
+    that matters for a wing that has run. P5/P25/P50/P75/P95 makes no
+    distributional assumption at all.
+
+    The z is still returned, from the stored z column, because "where in the
+    range" and "how many sigma" answer different questions and the header
+    chips speak in sigma. It is a label beside the bar, not the bar's
+    geometry.
+
+    Extrapolated observations are dropped from the distribution AND from
+    today's marker under the toggle. Leaving them in the history would define
+    a normal range partly out of values the spline invented.
+    """
+    if not pool:
+        return {"error": "OI database not configured", "rails": []}
+
+    cat  = await _catalog(pool)
+    cols = [c.strip() for c in metrics.split(",") if c.strip()] if metrics \
+        else [c for c in RAILS_DEFAULT if c in cat["by_col"]]
+    if not cols:
+        return {"error": "No usable rail metrics", "rails": []}
+    entries = [_entry(cat, c) for c in cols]
+
+    out = []
+    async with pool.acquire() as conn:
+        d, snap = await _resolve_slice(conn, date, snapshot)
+        start = _window_start(d, window)
+        for e in entries:
+            zcol = None
+            for cand in cat["by_col"].values():
+                if cand["form"] == f"z_{z_window}" and cand["base_column"] == e["column_name"]:
+                    zcol = cand
+                    break
+
+            sel = [f"{_expr(e)} AS v", f"{_extrap_expr(e)} AS ex"]
+            if zcol:
+                sel.append(f"{_expr(zcol)} AS z")
+            cur = await conn.fetchrow(
+                f"SELECT {', '.join(sel)} "
+                f"{_from_clause(e['form'] != 'base' or bool(zcol))} "
+                f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
+                ticker, d, snap,
+            )
+
+            dist_sql = (
+                f"SELECT percentile_cont(0.05) WITHIN GROUP (ORDER BY {_expr(e)}) AS p5, "
+                f"       percentile_cont(0.25) WITHIN GROUP (ORDER BY {_expr(e)}) AS p25, "
+                f"       percentile_cont(0.50) WITHIN GROUP (ORDER BY {_expr(e)}) AS p50, "
+                f"       percentile_cont(0.75) WITHIN GROUP (ORDER BY {_expr(e)}) AS p75, "
+                f"       percentile_cont(0.95) WITHIN GROUP (ORDER BY {_expr(e)}) AS p95, "
+                f"       count({_expr(e)}) AS n "
+                f"{_from_clause(e['form'] != 'base')} "
+                f"WHERE m.ticker = $1 AND m.snapshot = $2 AND m.trade_date <= $3 "
+                + ("AND m.trade_date >= $4 " if start else "")
+                + ("AND NOT " + _extrap_expr(e) if exclude_extrapolated else "")
+            )
+            args = [ticker, snap, d] + ([start] if start else [])
+            dist = await conn.fetchrow(dist_sql, *args)
+
+            v  = cur["v"] if cur else None
+            ex = bool(cur["ex"]) if cur else False
+            shown = None if (v is None or (exclude_extrapolated and ex)) else float(v)
+
+            pct = None
+            if shown is not None and dist and dist["n"]:
+                pct_sql = (
+                    f"SELECT count(*) FILTER (WHERE {_expr(e)} <= $4)::float8 "
+                    f"       / NULLIF(count({_expr(e)}), 0) "
+                    f"{_from_clause(e['form'] != 'base')} "
+                    f"WHERE m.ticker = $1 AND m.snapshot = $2 AND m.trade_date <= $3 "
+                    + ("AND m.trade_date >= $5 " if start else "")
+                    + ("AND NOT " + _extrap_expr(e) if exclude_extrapolated else "")
+                )
+                pargs = [ticker, snap, d, shown] + ([start] if start else [])
+                pct = await conn.fetchval(pct_sql, *pargs)
+
+            out.append({
+                **_meta(e),
+                "value":      shown,
+                "raw_value":  None if v is None else float(v),
+                "extrap":     ex,
+                "z":          (float(cur["z"]) if (zcol and cur and cur["z"] is not None) else None),
+                "z_column":   zcol["column_name"] if zcol else None,
+                "percentile": pct,
+                "p5":  _f(dist, "p5"),  "p25": _f(dist, "p25"),
+                "p50": _f(dist, "p50"), "p75": _f(dist, "p75"),
+                "p95": _f(dist, "p95"),
+                "n":   int(dist["n"]) if dist and dist["n"] else 0,
+            })
+
+    return {
+        "ticker": ticker, "date": str(d), "snapshot": snap,
+        "window": window, "z_window": z_window,
+        "rails": out,
+        "exclude_extrapolated": bool(exclude_extrapolated),
+    }
+
+
+def _f(row, key):
+    """float() a percentile_cont result, tolerating a null row or null value."""
+    if row is None or row[key] is None:
+        return None
+    return float(row[key])
+
+DAILY_SNAPSHOT = "1545"
+SERIES_MAX     = 4
+
+
+async def _daily_baseline(conn, entry, ticker, as_of, snap, z_window):
+    """(mu, sigma, n) for one metric over the DAILY close series.
+
+    This is the single source of z for /series, in every mode. The reason is
+    the intraday toggle: an intraday reading normalised against intraday
+    history would be measured against a baseline that starts on 2026-08-24
+    and is sparse before 11:25 that day. A z of 2.4 would then mean "extreme
+    relative to the last few hours", while the same number on the daily view
+    means "extreme relative to the last quarter" — same label, two scales,
+    and the user reading across the toggle has no way to see the swap.
+
+    So intraday z is (v - mu) / sigma against the daily close baseline: the
+    intraday point moves, the yardstick does not.
+
+    Deriving daily z the same way rather than reading the stored z column is
+    deliberate too — mixing estimators across the toggle reintroduces the
+    discontinuity by a different route. The stored value is returned beside
+    it as `z_stored` so a divergence shows up instead of hiding.
+    """
+    sql = (
+        f"SELECT avg(v) AS mu, stddev_samp(v) AS sd, count(*) AS n FROM ("
+        f"  SELECT {_expr(entry)} AS v "
+        f"  {_from_clause(entry['form'] != 'base')} "
+        f"  WHERE m.ticker = $1 AND m.snapshot = $2 AND m.trade_date <= $3 "
+        f"    AND NOT {_extrap_expr(entry)} AND {_expr(entry)} IS NOT NULL "
+        f"  ORDER BY m.trade_date DESC LIMIT $4"
+        f") s"
+    )
+    r = await conn.fetchrow(sql, ticker, snap, as_of, z_window)
+    mu = None if r["mu"] is None else float(r["mu"])
+    sd = None if r["sd"] is None else float(r["sd"])
+    return mu, sd, int(r["n"] or 0)
+
+
+def _quantile(sorted_vals, p):
+    """Linear-interpolated quantile of an already-sorted list."""
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos  = p * (len(sorted_vals) - 1)
+    lo_i = int(pos)
+    hi_i = min(lo_i + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo_i] + (sorted_vals[hi_i] - sorted_vals[lo_i]) * (pos - lo_i)
+
+
+def _rolling_pct_envelope(vals, win, lo_q, hi_q):
+    """Trailing percentile band, one (lo, hi) per point, aligned to `vals`.
+
+    Trailing rather than centred: a centred window at index i uses values
+    from after i, so the band at any historical point would be drawn partly
+    out of the future. On a chart whose whole purpose is "was this unusual
+    AT THE TIME", that is the wrong band.
+
+    The band is computed from history strictly BEFORE each point, then the
+    point is admitted — so a marker is never inside the distribution it is
+    being judged against.
+
+    Nulls and (when excluded) extrapolated observations arrive as None and
+    never enter `hist`, so the band describes observed history only.
+    """
+    out, hist = [], []
+    floor = max(8, win // 4)
+    for v in vals:
+        if len(hist) >= floor:
+            w = sorted(hist[-win:])
+            out.append((_quantile(w, lo_q), _quantile(w, hi_q)))
+        else:
+            out.append((None, None))
+        if v is not None:
+            hist.append(v)
+    return out
+
+
+@router.get("/series")
+async def series(
+    ticker:               str   = Query(...),
+    metrics:              str   = Query(..., description="CSV of columns, max 4"),
+    mode:                 str   = Query("daily", description="daily|intraday|candle"),
+    snapshot:             str   = Query(None, description="daily mode bucket"),
+    window:               str   = Query("1y"),
+    z_window:             int   = Query(63),
+    envelope:             bool  = Query(True),
+    env_window:           int   = Query(63, ge=8, le=504),
+    env_lo:               float = Query(0.10, ge=0.0, le=0.5),
+    env_hi:               float = Query(0.90, ge=0.5, le=1.0),
+    exclude_extrapolated: bool  = Query(True),
+    pool=Depends(get_oi_pool),
+):
+    """Row 5's time series. Up to 4 metrics; the client assigns axis and pane.
+
+    mode:
+      daily    — one point per trade_date at `snapshot` (default 1545 close)
+      intraday — every snapshot bucket, ordered (trade_date, snapshot)
+      candle   — daily OHLC OF THE METRIC, built from the intraday buckets
+                 inside each day: open = first bucket, close = last, high and
+                 low the extremes. This needs intraday coverage to exist,
+                 which begins 2026-08-24 and is sparse before 11:25 that day,
+                 so candle mode returns few bars by construction. `n_points`
+                 and `first_date` say how few, rather than drawing a stub
+                 chart that reads as a loading failure.
+
+    z in every mode comes from the daily baseline — see _daily_baseline().
+    """
+    if not pool:
+        return {"error": "OI database not configured", "series": []}
+    if mode not in ("daily", "intraday", "candle"):
+        raise HTTPException(400, f"mode must be daily|intraday|candle, got {mode!r}")
+    if env_lo >= env_hi:
+        raise HTTPException(400, f"env_lo {env_lo} must be below env_hi {env_hi}")
+
+    cat  = await _catalog(pool)
+    cols = [c.strip() for c in metrics.split(",") if c.strip()]
+    if not cols:
+        raise HTTPException(400, "No metrics requested")
+    if len(cols) > SERIES_MAX:
+        raise HTTPException(400, f"At most {SERIES_MAX} series, got {len(cols)}")
+    entries = [_entry(cat, c) for c in cols]
+
+    out = []
+    async with pool.acquire() as conn:
+        as_of, latest_snap = await _resolve_slice(conn, None, None)
+        daily_snap = snapshot or DAILY_SNAPSHOT
+        start      = _window_start(as_of, window)
+
+        for e in entries:
+            needs_z = e["form"] != "base"
+            zcol    = None
+            for cand in cat["by_col"].values():
+                if cand["form"] == f"z_{z_window}" and cand["base_column"] == e["column_name"]:
+                    zcol = cand
+                    break
+
+            sel = ["m.trade_date", "m.snapshot", f"{_expr(e)} AS v",
+                   f"{_extrap_expr(e)} AS ex"]
+            want_stored = bool(zcol) and mode == "daily"
+            if want_stored:
+                sel.append(f"{_expr(zcol)} AS zs")
+                needs_z = True
+
+            where = ["m.ticker = $1"]
+            args  = [ticker]
+            if mode == "daily":
+                args.append(daily_snap)
+                where.append(f"m.snapshot = ${len(args)}")
+            if start:
+                args.append(start)
+                where.append(f"m.trade_date >= ${len(args)}")
+
+            rows = await conn.fetch(
+                f"SELECT {', '.join(sel)} {_from_clause(needs_z)} "
+                f"WHERE {' AND '.join(where)} "
+                f"ORDER BY m.trade_date, m.snapshot",
+                *args,
+            )
+
+            mu, sd, n_base = await _daily_baseline(
+                conn, e, ticker, as_of, daily_snap, z_window)
+
+            def zof(v, _mu=mu, _sd=sd):
+                if v is None or _mu is None or not _sd:
+                    return None
+                return (v - _mu) / _sd
+
+            if mode == "candle":
+                by_day = {}
+                for r in rows:
+                    if r["v"] is None or (exclude_extrapolated and r["ex"]):
+                        continue
+                    by_day.setdefault(r["trade_date"], []).append(float(r["v"]))
+                pts = []
+                for d in sorted(by_day):
+                    vs = by_day[d]                    # already snapshot-ordered
+                    pts.append({"t": d.isoformat(), "o": vs[0], "h": max(vs),
+                                "l": min(vs), "c": vs[-1], "n": len(vs),
+                                "z": zof(vs[-1])})
+                closes = [p["c"] for p in pts]
+            else:
+                pts = []
+                for r in rows:
+                    v     = None if r["v"] is None else float(r["v"])
+                    ex    = bool(r["ex"])
+                    shown = None if (v is None or (exclude_extrapolated and ex)) else v
+                    p = {"t": r["trade_date"].isoformat(), "v": shown, "extrap": ex,
+                         "z": zof(shown)}
+                    if mode == "intraday":
+                        p["snapshot"] = r["snapshot"]
+                    if want_stored:
+                        p["z_stored"] = None if r["zs"] is None else float(r["zs"])
+                    pts.append(p)
+                closes = [p["v"] for p in pts]
+
+            if envelope and pts:
+                band = _rolling_pct_envelope(closes, env_window, env_lo, env_hi)
+                for p, (lo, hi) in zip(pts, band):
+                    p["env_lo"], p["env_hi"] = lo, hi
+
+            out.append({
+                **_meta(e),
+                "points":     pts,
+                "n_points":   len(pts),
+                "first_date": pts[0]["t"] if pts else None,
+                "last_date":  pts[-1]["t"] if pts else None,
+                "baseline":   {"mu": mu, "sigma": sd, "n": n_base,
+                               "snapshot": daily_snap, "as_of": as_of.isoformat(),
+                               "z_window": z_window},
+                "z_stored_column": zcol["column_name"] if want_stored else None,
+            })
+
+    return {
+        "ticker": ticker, "mode": mode, "window": window, "z_window": z_window,
+        "snapshot": daily_snap if mode == "daily" else None,
+        "latest_snapshot": latest_snap, "as_of": as_of.isoformat(),
+        "z_source": "daily_baseline",
+        "envelope": ({"on": True, "window": env_window, "lo": env_lo, "hi": env_hi}
+                     if envelope else {"on": False}),
+        "exclude_extrapolated": bool(exclude_extrapolated),
+        "series": out,
     }

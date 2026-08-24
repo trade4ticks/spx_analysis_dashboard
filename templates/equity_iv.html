@@ -150,6 +150,135 @@
 
     .eq-note { font-size:10px; color:var(--dim); padding:0 10px 8px; line-height:1.5; }
     .eq-warn { color:var(--warning); }
+
+    /* ── Row 3: ticker header ───────────────────────────────────────────
+       Sticky against .eq-body, which is the scrolling box. It stays thin on
+       purpose: it is the answer to "which ticker am I looking at", not a
+       panel, and rows 4 and 5 are what the screen is for. */
+    .eq-thdr {
+      position:sticky; top:0; z-index:6;
+      display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+      background:var(--raised); border:1px solid var(--border); border-radius:6px;
+      padding:7px 12px; margin-bottom:12px;
+      box-shadow:0 3px 10px rgba(0,0,0,.35);
+    }
+    .eq-thdr-tkr { font-size:17px; font-weight:700; color:var(--text); letter-spacing:.4px; }
+    .eq-thdr-num { display:flex; align-items:baseline; gap:5px; }
+    .eq-thdr-lbl { font-size:9px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; }
+    .eq-thdr-val { font-size:13px; font-weight:600; color:var(--text); font-variant-numeric:tabular-nums; }
+
+    /* State chips. Tone is DIRECTION, not rank: blue above, pink below,
+       neutral when the direction is unknown or meaningless. */
+    .eq-state {
+      display:inline-flex; align-items:baseline; gap:5px;
+      background:var(--surface); border:1px solid var(--border); border-radius:10px;
+      padding:2px 9px; font-size:10px; white-space:nowrap; cursor:default;
+    }
+    .eq-state b { font-weight:600; font-variant-numeric:tabular-nums; color:var(--text); }
+    .eq-state span { color:var(--dim); text-transform:uppercase; letter-spacing:.3px; font-size:9px; }
+    .eq-state.up   { border-color:rgba(52,152,219,.55); }
+    .eq-state.up b { color:#3498db; }
+    .eq-state.down   { border-color:rgba(232,67,147,.55); }
+    .eq-state.down b { color:#e84393; }
+
+    /* ── Row 4: today, what's unusual ───────────────────────────────────
+       A horizontal strip, not a grid: the order IS the ranking, and a grid
+       that wraps would put rank 5 under rank 1 and imply a column meaning
+       that does not exist. */
+    .eq-cards {
+      display:flex; gap:7px; overflow-x:auto; overflow-y:hidden;
+      padding:8px 10px 10px; scrollbar-width:thin;
+    }
+    .eq-card {
+      flex:0 0 auto; width:132px;
+      border:1px solid var(--border); border-radius:5px; padding:6px 8px;
+      cursor:pointer; user-select:none; transition:transform .08s;
+    }
+    .eq-card:hover { transform:translateY(-2px); }
+    .eq-card.on { outline:1px solid var(--accent); outline-offset:1px; }
+    .eq-card-name {
+      font-size:9.5px; color:var(--muted); line-height:1.25; height:24px;
+      overflow:hidden; word-break:break-all;
+    }
+    .eq-card-val {
+      font-size:14px; font-weight:700; color:var(--text);
+      font-variant-numeric:tabular-nums; margin:3px 0 1px;
+    }
+    .eq-card-foot { display:flex; justify-content:space-between; font-size:9.5px; }
+    .eq-card-z { font-weight:700; font-variant-numeric:tabular-nums; }
+    .eq-card-z.up { color:#3498db; }
+    .eq-card-z.down { color:#e84393; }
+    .eq-card-pct { color:var(--dim); font-variant-numeric:tabular-nums; }
+
+    /* ── Row 5: rails (~35%) + time series (~65%) ───────────────────── */
+    .eq-row53 { display:grid; grid-template-columns:minmax(0,35fr) minmax(0,65fr); gap:12px; align-items:start; }
+    @media (max-width:1250px) { .eq-row53 { grid-template-columns:minmax(0,1fr); } }
+
+    .eq-rails { padding:6px 10px 4px; }
+    .eq-rail {
+      display:grid; grid-template-columns:minmax(0,1fr) minmax(90px,2.1fr) auto;
+      align-items:center; gap:8px; padding:4px 0;
+      border-bottom:1px solid rgba(255,255,255,.04);
+    }
+    .eq-rail:last-child { border-bottom:none; }
+    .eq-rail-name {
+      font-size:10px; color:var(--muted); white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis; cursor:default;
+    }
+    .eq-rail-x { cursor:pointer; opacity:.35; padding-left:4px; font-weight:700; }
+    .eq-rail-x:hover { opacity:1; color:#e84393; }
+
+    /* The track is the P5–P95 domain, expanded when today sits outside it.
+       Outer band = P5–P95, inner box = the interquartile range, tick =
+       median, marker = today. Percentiles throughout — the distributions
+       are right-skewed, so a symmetric sigma band would misstate both
+       tails at once. */
+    .eq-rail-track { position:relative; height:16px; }
+    .eq-rail-outer {
+      position:absolute; top:6px; height:4px; border-radius:2px;
+      background:rgba(255,255,255,.10);
+    }
+    .eq-rail-inner {
+      position:absolute; top:4px; height:8px; border-radius:2px;
+      background:rgba(255,255,255,.20);
+    }
+    .eq-rail-med {
+      position:absolute; top:2px; width:1px; height:12px;
+      background:var(--dim);
+    }
+    .eq-rail-mark {
+      position:absolute; top:0; width:3px; height:16px; border-radius:1px;
+      margin-left:-1.5px;
+    }
+    .eq-rail-read {
+      font-size:10px; text-align:right; white-space:nowrap;
+      font-variant-numeric:tabular-nums; min-width:96px;
+    }
+    .eq-rail-read b { color:var(--text); font-weight:600; }
+    .eq-rail-read i { color:var(--dim); font-style:normal; }
+    .eq-rail-read.beyond b { color:var(--warning); }
+
+    .eq-ts-wrap { position:relative; padding:6px 10px 4px; }
+    .eq-ts-main { height:300px; }
+    .eq-ts-sub  { height:130px; }
+    .eq-ts-wrap > canvas {
+      position:absolute; top:6px; left:10px; right:10px; bottom:4px;
+      width:calc(100% - 20px) !important; height:calc(100% - 10px) !important;
+    }
+
+    /* Series chips carry the axis and pane controls, so a metric can be
+       moved to the right-hand scale or into its own pane without a dialog. */
+    .eq-schip {
+      display:inline-flex; align-items:center; gap:6px;
+      background:var(--surface); border:1px solid var(--border); border-radius:10px;
+      padding:2px 4px 2px 8px; font-size:10px; white-space:nowrap;
+    }
+    .eq-schip-dot { width:8px; height:8px; border-radius:2px; flex:0 0 auto; }
+    .eq-schip-btn {
+      cursor:pointer; color:var(--dim); border:1px solid var(--border);
+      border-radius:3px; padding:0 4px; font-size:9px;
+    }
+    .eq-schip-btn:hover { color:var(--text); border-color:var(--dim); }
   </style>
 </head>
 
@@ -499,6 +628,256 @@
         </div>
       </template>
     </div>
+
+    <!-- ── Row 3: ticker header ───────────────────────────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-thdr">
+        <span class="eq-thdr-tkr" x-text="selectedTicker"></span>
+
+        <div class="eq-thdr-num">
+          <span class="eq-thdr-lbl">Spot</span>
+          <span class="eq-thdr-val" x-text="hdr ? fmt(hdr.spot, 'price') : '—'"></span>
+        </div>
+        <div class="eq-thdr-num">
+          <span class="eq-thdr-lbl">ATM IV</span>
+          <span class="eq-thdr-val"
+                :title="hdr && hdr.resolved ? (hdr.resolved.atm_iv || 'no ATM IV column on equity_metrics') : ''"
+                x-text="hdr ? fmt(hdr.atm_iv, unitsOf(hdr.resolved.atm_iv) || 'vol_decimal') : '—'"></span>
+        </div>
+        <div class="eq-thdr-num">
+          <span class="eq-thdr-lbl">RV</span>
+          <span class="eq-thdr-val"
+                :title="hdr && hdr.resolved ? (hdr.resolved.rv || 'no realized-vol column on equity_metrics') : ''"
+                x-text="hdr ? fmt(hdr.rv, unitsOf(hdr.resolved.rv) || 'vol_decimal') : '—'"></span>
+        </div>
+
+        <template x-for="c in hdrChips()" :key="'hc-'+c.k">
+          <span class="eq-state" :class="c.tone" :title="c.title">
+            <span x-text="c.k"></span><b x-text="c.v"></b>
+          </span>
+        </template>
+
+        <div class="eq-spacer"></div>
+        <span class="eq-section-sub" x-show="hdrLoading" x-cloak>loading…</span>
+        <span class="eq-section-sub eq-warn" x-show="hdrError" x-cloak x-text="hdrError"></span>
+      </div>
+    </template>
+
+    <!-- ── Row 4: today, what's unusual ───────────────────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-section">
+        <div class="eq-section-hdr">
+          <span class="eq-section-title">Today, what's unusual</span>
+          <span class="eq-section-sub"
+                x-text="unusual ? ('ranked by |z| over ' + unusual.n_ranked + ' metrics · ' + zWindow + 'd') : ''"></span>
+          <div class="eq-spacer"></div>
+          <span class="eq-section-sub eq-warn"
+                x-show="unusual && unusual.n_withheld_extrapolated"
+                x-cloak
+                :title="'These ranked as extreme on a value built from a node the smile fit fabricated. A fabricated node is exactly what manufactures a spurious extreme, so they are withheld from a list sorted BY extremeness. Turn off &quot;Exclude extrapolated&quot; to see them.'"
+                x-text="unusual ? unusual.n_withheld_extrapolated + ' withheld (fabricated node)' : ''"></span>
+        </div>
+
+        <div class="eq-cards">
+          <template x-for="c in unusualCards()" :key="'uc-'+c.column">
+            <div class="eq-card" :style="cardStyle(c)"
+                 :class="{on: seriesSpecs.some(s => s.b === c.column)}"
+                 :title="cardTitle(c)" @click="addSeries(c.column)">
+              <div class="eq-card-name" x-text="c.column"></div>
+              <div class="eq-card-val" x-text="fmt(c.value, c.units)"></div>
+              <div class="eq-card-foot">
+                <span class="eq-card-z" :class="cardZClass(c)"
+                      x-text="(c.z >= 0 ? '+' : '') + c.z.toFixed(2) + 'σ'"></span>
+                <span class="eq-card-pct" x-text="pctText(c.percentile)"></span>
+              </div>
+            </div>
+          </template>
+          <span class="eq-section-sub" x-show="unusualLoading" x-cloak>loading…</span>
+          <span class="eq-section-sub eq-warn" x-show="unusualError" x-cloak x-text="unusualError"></span>
+          <span class="eq-section-sub"
+                x-show="!unusualLoading && !unusualError && unusual && !unusual.cards.length"
+                x-cloak>Nothing to rank — no metric has both a value and a z at this snapshot.</span>
+        </div>
+
+        <div class="eq-note">
+          With ~600 metrics per name, this is the entry point: the server
+          ranks every metric that has a value and a z, and only the top
+          <span x-text="unusualLimit"></span> come back. Percentile is over the
+          <span x-text="histWindow.toUpperCase()"></span> window with
+          extrapolated observations dropped, so "normal range" never includes a
+          value the spline invented. Click a card to chart it.
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Row 5: rails + time series ─────────────────────────────────── -->
+    <template x-if="selectedTicker">
+      <div class="eq-row53">
+
+        <!-- Rails -->
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Where it sits</span>
+            <span class="eq-section-sub" x-text="histWindow.toUpperCase() + ' distribution'"></span>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="railsLoading" x-cloak>loading…</span>
+          </div>
+
+          <div class="eq-rails">
+            <template x-for="(r, i) in railRows()" :key="'rail-'+r.column_name">
+              <div class="eq-rail">
+                <div class="eq-rail-name" :title="railTitle(r)">
+                  <span x-text="r.column_name"></span>
+                  <span class="eq-rail-x" @click="removeRail(i)">×</span>
+                </div>
+
+                <div class="eq-rail-track" :title="railTitle(r)">
+                  <div class="eq-rail-outer" :style="railOuterStyle(r)"></div>
+                  <div class="eq-rail-inner" :style="railInnerStyle(r)"></div>
+                  <div class="eq-rail-med"   :style="railMedStyle(r)"></div>
+                  <div class="eq-rail-mark"  :style="railMarkStyle(r)"></div>
+                </div>
+
+                <div class="eq-rail-read" :class="{beyond: railGeom(r) && railGeom(r).beyond}">
+                  <template x-if="r.value != null">
+                    <span>
+                      <b x-text="fmt(r.value, r.units)"></b>
+                      <i x-text="' · ' + pctText(r.percentile)"></i>
+                      <i x-show="r.z != null"
+                         x-text="' · ' + (r.z >= 0 ? '+' : '') + (r.z != null ? r.z.toFixed(1) : '') + 'σ'"></i>
+                    </span>
+                  </template>
+                  <template x-if="r.value == null">
+                    <span :class="railMissing(r) === 'excluded' ? 'eq-fab' : 'eq-null'"
+                          :title="railMissing(r) === 'excluded'
+                            ? 'A value existed and was excluded — it rests on a node the smile fit fabricated.'
+                            : 'No value at this snapshot. The metric is null, not zero.'"
+                          x-text="'—'"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <div class="eq-section-sub" x-show="!railsLoading && !railRows().length" x-cloak
+                 style="padding:6px 0">No rails — add one below.</div>
+            <div class="eq-section-sub eq-warn" x-show="railsError" x-cloak x-text="railsError"></div>
+          </div>
+
+          <div class="eq-axisrow" style="border-top:1px solid var(--border)">
+            <span class="eq-lbl">Add rail</span>
+            <select class="eq-sel" x-model="railFam" @change="railBase = firstMetric(railFam)"
+                    style="max-width:130px">
+              <template x-for="f in families" :key="'rf-'+f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+            <select class="eq-sel" x-model="railBase" style="max-width:170px">
+              <template x-for="m in metricsFor(railFam)" :key="'rm-'+m.column_name">
+                <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+              </template>
+            </select>
+            <button class="btn" @click="addRail()">+</button>
+          </div>
+
+          <div class="eq-note">
+            Outer bar is P5–P95, the box is P25–P75, the tick is the median and
+            the bright mark is today. When today falls outside P5–P95 the track
+            stretches to contain it rather than pinning it to the end, so a
+            reading just past the 95th and one far past it do not land in the
+            same place. <strong>Percentiles, not standard deviations</strong> —
+            these distributions are right-skewed and fat-tailed, so a symmetric
+            ±2σ band would be too wide on the left and too narrow on the right,
+            which is the tail that matters. Extrapolated observations are
+            excluded from the distribution and from today's mark.
+          </div>
+        </div>
+
+        <!-- Time series -->
+        <div class="eq-section">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">History</span>
+            <div class="seg">
+              <template x-for="m in ['daily','intraday']" :key="'sm-'+m">
+                <div class="seg-btn" :class="{on: seriesMode === m}"
+                     @click="setSeriesMode(m)" x-text="m"></div>
+              </template>
+            </div>
+            <div class="seg">
+              <template x-for="c in ['line','candle']" :key="'sc-'+c">
+                <div class="seg-btn" :class="{on: seriesChart === c}"
+                     @click="setSeriesChart(c)" x-text="c"></div>
+              </template>
+            </div>
+            <div class="chip" :class="{on: seriesEnvelope}" @click="toggleEnvelope()"
+                 :title="'Trailing P' + Math.round(envLo*100) + '–P' + Math.round(envHi*100)
+                        + ' band over ' + envWindow + ' observations, computed from history BEFORE each point '
+                        + 'so a marker is never inside the distribution judging it.'">
+              Envelope
+            </div>
+            <div class="eq-spacer"></div>
+            <span class="eq-section-sub" x-show="serLoading" x-cloak>loading…</span>
+          </div>
+
+          <div class="eq-chips" style="padding-top:7px">
+            <template x-for="(s, i) in seriesSpecs" :key="'ss-'+s.b">
+              <span class="eq-schip">
+                <span class="eq-schip-dot" :style="'background:' + seriesColor(i)"></span>
+                <span x-text="s.b" :title="describe(s.b)"></span>
+                <span class="eq-schip-btn" @click="cycleAxis(i)"
+                      title="Move between the left and right scale. A twin axis is how two metrics in different units share one pane."
+                      x-text="s.axis === 'left' ? 'L' : 'R'"></span>
+                <span class="eq-schip-btn" @click="cyclePane(i)"
+                      title="Move to another pane. Use this when the units are too far apart for even a twin axis to be readable."
+                      x-text="'p' + (s.pane + 1)"></span>
+                <span class="eq-chip-x" @click="removeSeries(i)">×</span>
+              </span>
+            </template>
+          </div>
+
+          <div class="eq-axisrow" style="padding-top:0">
+            <span class="eq-lbl">Add series</span>
+            <select class="eq-sel" x-model="serFam" @change="serBase = firstMetric(serFam)"
+                    style="max-width:130px">
+              <template x-for="f in families" :key="'tf-'+f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+            <select class="eq-sel" x-model="serBase" style="max-width:180px">
+              <template x-for="m in metricsFor(serFam)" :key="'tm-'+m.column_name">
+                <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+              </template>
+            </select>
+            <button class="btn" @click="addSeries(serBase)"
+                    :disabled="seriesFull()"
+                    :title="seriesFull() ? 'Four series is the cap — past that the panes are too crowded to read a level off.' : ''">+</button>
+            <span class="eq-section-sub" x-show="seriesFull()" x-cloak>4 max</span>
+          </div>
+
+          <template x-for="p in activePanes()" :key="'pane-'+p">
+            <div class="eq-ts-wrap" :class="p === 0 ? 'eq-ts-main' : 'eq-ts-sub'">
+              <canvas :id="'eq-ts-' + p"></canvas>
+            </div>
+          </template>
+
+          <div class="panel-error" x-show="serError" x-cloak x-text="serError"
+               style="margin:0 10px 8px"></div>
+
+          <div class="eq-note">
+            <span x-show="seriesCoverageNote()" x-text="seriesCoverageNote()"
+                  class="eq-warn" style="display:block"></span>
+            <span x-show="candleDroppedText()" x-text="candleDroppedText()"
+                  class="eq-warn" style="display:block"></span>
+            <span x-show="baselineNote()" x-text="baselineNote()" style="display:block"></span>
+            Candles are the daily OHLC <em>of the metric</em> — open, high, low
+            and close across that day's intraday buckets, coloured blue when the
+            metric rose through the day and pink when it fell. That is not the
+            green/red of a price chart: a rising skew is not "good". A pink dot
+            on a line marks a point resting on a fabricated node.
+          </div>
+        </div>
+      </div>
+    </template>
+
 
   </div>
 </body>

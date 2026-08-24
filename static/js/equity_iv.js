@@ -29,10 +29,20 @@ const EQ_SURF = '#2d2d2d';   // theme --surface, used as the ring between overla
 /* Chart.js instances live OUTSIDE Alpine's reactive proxy. Wrapping Chart
  * internals in a Proxy breaks rendering — the same lesson the other pages on
  * this site already learned. */
-const EQ_CHARTS = { scatter: null, hist: null };
+const EQ_CHARTS = { scatter: null, hist: null, ts0: null, ts1: null, ts2: null };
 /* Per-render point metadata the tooltip and the label plugin need, kept off
  * the reactive object for the same reason. */
 const EQ_PTS = { scatter: [], hist: [] };
+
+/* Time-series pane count. The spec caps extra panes at 3–4; three is the
+ * point past which each pane is too short to read a level off, given the
+ * rails sit beside them and the whole row has to fit one screen. */
+const EQ_TS_PANES = 3;
+
+/* Series colours. Blue and pink first because they carry the page's meaning;
+ * the next two are neutral so they never read as "positive"/"negative" for a
+ * metric that has no such direction. */
+const EQ_SERIES_COLORS = ['#3498db', '#e84393', '#f0a30a', '#9b8ec4'];
 
 /* Preset axis pairs — the questions asked most often. Clicking through two
  * family dropdowns and two metric dropdowns every time is friction, so these
@@ -198,6 +208,60 @@ const eqMedianLine = {
   },
 };
 
+/* Candlesticks for a METRIC, not a price.
+ *
+ * Chart.js has no candle type and the financial plugin is another CDN
+ * dependency on a page that already has two, so this draws them: the owning
+ * dataset carries invisible points at each bar's high and low, which is what
+ * makes the y-scale fit the wicks, and this plugin paints the body and wick
+ * over them from chart.$candles.
+ *
+ * Colour is close-vs-open, in the page's own vocabulary — blue for a metric
+ * that rose through the day, pink for one that fell. It is NOT the
+ * up/down-green/red of a price chart, because a rising skew is not "good".
+ *
+ * A bar built from a single intraday bucket has o == h == l == c and would
+ * paint as a one-pixel smear that reads as a rendering fault. Those are drawn
+ * as a plain dash instead, and `n` in the tooltip says how many buckets the
+ * bar was built from. */
+const eqCandles = {
+  id: 'eqCandles',
+  afterDatasetsDraw(chart) {
+    const bars = chart.$candles;
+    if (!bars || !bars.length) return;
+    const { ctx, scales } = chart;
+    const xs = scales.x, ys = scales.y;
+    if (!xs || !ys) return;
+    // Body width from the actual spacing between the first two bars, so it
+    // stays right when the window changes the point count.
+    let w = 6;
+    if (bars.length > 1) {
+      w = Math.abs(xs.getPixelForValue(1) - xs.getPixelForValue(0)) * 0.6;
+    }
+    w = Math.max(1.5, Math.min(14, w));
+    ctx.save();
+    bars.forEach((b, i) => {
+      const px = xs.getPixelForValue(i);
+      const up = b.c >= b.o;
+      const col = up ? EQ_BLUE : EQ_PINK;
+      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, ys.getPixelForValue(b.h));
+      ctx.lineTo(px, ys.getPixelForValue(b.l));
+      ctx.stroke();
+      const yo = ys.getPixelForValue(b.o), yc = ys.getPixelForValue(b.c);
+      const top = Math.min(yo, yc), h = Math.abs(yc - yo);
+      if (h < 1) {
+        ctx.beginPath();
+        ctx.moveTo(px - w / 2, top); ctx.lineTo(px + w / 2, top); ctx.stroke();
+      } else {
+        ctx.fillRect(px - w / 2, top, w, h);
+      }
+    });
+    ctx.restore();
+  },
+};
+
 /* House Chart.js defaults, matching charts.js so this page reads as the same
  * system as the Dashboard. Guarded because Chart.js comes from a CDN: if it
  * fails to load, the page should degrade to "charts missing" rather than
@@ -231,6 +295,38 @@ document.addEventListener('alpine:init', () => {
     selectedTicker: null,
     slice: { date: '', snapshot: '', source: '' },
 
+    // ── ticker half (rows 3–5) ───────────────────────────────────────────
+    // Everything below is keyed off selectedTicker and stays empty until a
+    // ticker is picked, so the universe half of the page works on its own.
+    hdr: null, hdrLoading: false, hdrError: '',
+
+    unusual: null, unusualLoading: false, unusualError: '',
+    unusualLimit: 40,
+
+    /* The rail set is configurable; this is the default eight. They are the
+     * ones that answer "is this name's surface shaped normally" — level,
+     * both skew wings, term, the risk reversal, the zero-cost width, the
+     * variance premium and the convexity. Any that the catalog does not have
+     * are dropped at load rather than erroring. */
+    railMetrics: ['skew_30d_25p_atm', 'skew_30d_10p_atm', 'iv_30d_atm',
+                  'term_ratio_30d_90d', 'rr_30d_25d', 'zc_width_sigma_30d',
+                  'vrp_1m', 'convexity_30d_25p_atm_25c'],
+    rails: null, railsLoading: false, railsError: '',
+    railFam: 'skew', railBase: 'skew_30d_25p_atm',
+
+    /* Up to four series. `axis` puts one on the right-hand scale so two
+     * metrics in different units can share a pane; `pane` splits them out
+     * entirely when the units are too far apart for even a twin axis. */
+    seriesSpecs: [{ b: 'skew_30d_25p_atm', axis: 'left', pane: 0 }],
+    seriesMode: 'daily',       // daily | intraday
+    seriesChart: 'line',       // line | candle
+    seriesEnvelope: true,
+    envLo: 0.10, envHi: 0.90, envWindow: 63,
+    ser: null, serLoading: false, serError: '',
+    serFam: 'skew', serBase: 'iv_30d_atm',
+    // pane index -> series names candle mode could not draw there
+    candleDropped: {},
+
     // ── scatter ──────────────────────────────────────────────────────────
     presets: EQ_PRESETS,
     activePreset: EQ_PRESETS[0].label,
@@ -263,8 +359,26 @@ document.addEventListener('alpine:init', () => {
     async init() {
       await this.loadCatalog();
       if (this.catError) return;
+      this.pruneTickerDefaults();
       await this.loadCalendar();
       await this.reloadAll();
+    },
+
+    /* The rail and series defaults are written as column names, and the
+     * catalog is the whitelist those names have to survive: /rails and
+     * /series reject an unknown column with a 400 rather than skipping it,
+     * so one retired metric in the default list would take the whole panel
+     * down instead of costing it one row. Pruned once, here, against what
+     * the catalog actually returned. */
+    pruneTickerDefaults() {
+      this.railMetrics = this.railMetrics.filter(c => this.byCol[c]);
+      this.seriesSpecs = this.seriesSpecs.filter(s => this.byCol[s.b]);
+      if (!this.seriesSpecs.length) {
+        const first = this.firstMetric(this.families[0] || '');
+        if (first) this.seriesSpecs.push({ b: first, axis: 'left', pane: 0 });
+      }
+      if (!this.byCol[this.railBase]) this.railBase = this.firstMetric(this.railFam);
+      if (!this.byCol[this.serBase]) this.serBase = this.firstMetric(this.serFam);
     },
 
     async loadCatalog() {
@@ -317,7 +431,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     async reloadAll() {
-      await Promise.all([this.loadCrossSection(), this.loadScanner()]);
+      await Promise.all([this.loadCrossSection(), this.loadScanner(), this.loadTicker()]);
     },
 
     // ── catalog helpers ──────────────────────────────────────────────────
@@ -370,10 +484,16 @@ document.addEventListener('alpine:init', () => {
       this.reloadAll();
     },
 
+    /* The history window is the distribution every percentile on the page is
+     * taken over, so it drives the rails, the cards' percentiles and the
+     * series span as well as the universe stats. Leaving the ticker half on
+     * the old window would put a 3M percentile beside a 2Y one with nothing
+     * on screen saying they disagree. */
     setHistWindow(w) {
       if (this.histWindow === w) return;
       this.histWindow = w;
       this.loadUniverseStats();
+      this.loadTicker();
     },
 
     toggleExtrap() {
@@ -424,6 +544,7 @@ document.addEventListener('alpine:init', () => {
     selectTicker(t) {
       this.selectedTicker = t;
       setTimeout(() => this.renderScatter(), 0);
+      this.loadTicker();
     },
 
     // ── cross-section ────────────────────────────────────────────────────
@@ -866,6 +987,614 @@ document.addEventListener('alpine:init', () => {
            + `tenors ≤30d are extrapolated, chain-wide.\n\nThis says the chain is `
            + `thin, NOT that any metric in this row is affected. The per-cell `
            + `marks say that.`;
+    },
+
+    // ══ Ticker half (rows 3–5) ═══════════════════════════════════════════
+    //
+    // Loaded as one unit whenever the ticker, date, snapshot, z window,
+    // history window or extrapolation toggle changes. Fired in parallel:
+    // the four requests are independent and serialising them would put the
+    // slowest one in front of the header, which is the part that tells you
+    // the click registered.
+
+    async loadTicker() {
+      if (!this.selectedTicker) {
+        this.hdr = null; this.unusual = null; this.rails = null; this.ser = null;
+        return;
+      }
+      await Promise.all([
+        this.loadHeader(), this.loadUnusual(), this.loadRails(), this.loadSeries(),
+      ]);
+    },
+
+    // ── Row 3: ticker header ─────────────────────────────────────────────
+
+    async loadHeader() {
+      if (!this.selectedTicker || !this.date || !this.snapshot) return;
+      this.hdrLoading = true; this.hdrError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/ticker-header?' + new URLSearchParams({
+          ticker: this.selectedTicker, date: this.date, snapshot: this.snapshot,
+        }));
+        if (j.error) { this.hdrError = j.error; this.hdr = null; }
+        else { this.hdr = j; }
+      } catch (e) {
+        this.hdrError = String(e.message || e); this.hdr = null;
+      } finally {
+        this.hdrLoading = false;
+      }
+    },
+
+    /* Whether a "vs" metric is above or below its reference depends on
+     * whether the loader stored a difference or a ratio, and the header
+     * resolves its columns at runtime rather than hardcoding one. So the
+     * pivot comes from the catalog's units, and when the catalog does not
+     * describe the column, the chip shows the number with NO tone rather
+     * than guessing a direction and colouring it confidently wrong. */
+    pivotFor(col) {
+      const m = this.byCol[col];
+      if (!m || !m.units) return null;
+      if (m.units === 'ratio') return 1;
+      if (['fraction', 'log_return', 'vol_decimal', 'sigma', 'z_score'].includes(m.units)) return 0;
+      return null;
+    },
+
+    toneVs(v, pivot) {
+      if (v == null || pivot == null) return '';
+      return v > pivot ? 'up' : (v < pivot ? 'down' : '');
+    },
+
+    /** State chips for row 3. Each is {k, v, tone, title}. A null value is
+     *  rendered as an em dash with tone '' — absent, never zero. */
+    hdrChips() {
+      const h = this.hdr;
+      if (!h) return [];
+      const R = h.resolved || {};
+      const out = [];
+
+      out.push({
+        k: 'Term', v: h.term_state || '—',
+        tone: h.term_state === 'contango' ? 'up' : (h.term_state === 'backwardation' ? 'down' : ''),
+        title: R.term_ratio
+          ? `${R.term_ratio} = ${this.fmt(h.term_ratio, this.unitsOf(R.term_ratio))}. `
+            + 'The ratio is near/far, so below 1 is contango — the far tenor is richer.'
+          : 'No term-structure ratio column exists on equity_metrics.',
+      });
+
+      const pv = this.pivotFor(R.px_vs_50dma);
+      out.push({
+        k: '50dma', v: this.fmt(h.px_vs_50dma, this.unitsOf(R.px_vs_50dma)),
+        tone: this.toneVs(h.px_vs_50dma, pv),
+        title: R.px_vs_50dma
+          ? `${R.px_vs_50dma}${pv == null ? ' — units unknown to the catalog, so no above/below colour is asserted.' : ''}`
+          : 'No 50-day-average column exists on equity_metrics.',
+      });
+
+      out.push({
+        k: 'Earnings',
+        v: h.days_to_earnings == null ? '—' : this.fmt(h.days_to_earnings, 'days'),
+        tone: '',
+        title: h.days_to_earnings == null
+          ? 'days_to_earnings is NULL for every row — no earnings calendar is wired up yet. '
+            + 'It renders as absent, not as zero.'
+          : 'Trading days to the next earnings date.',
+      });
+
+      out.push({
+        k: 'Spot-vol β', v: this.fmt(h.spotvol_beta, this.unitsOf(R.spotvol_beta)),
+        tone: this.toneVs(h.spotvol_beta, 0),
+        title: (R.spotvol_beta || 'spot-vol beta')
+          + (h.spotvol_r2 == null ? '' : ` — R² ${this.fmt(h.spotvol_r2, 'ratio')}`)
+          + '. A low R² means the beta is fitted through noise; read it with that in mind.',
+      });
+
+      out.push({
+        k: 'Extrapolated',
+        v: h.extrap_rate == null ? '—' : (h.extrap_rate * 100).toFixed(0) + '%',
+        tone: h.extrap_rate == null ? '' : (h.extrap_rate >= 0.25 ? 'down' : ''),
+        title: 'Share of nodes at tenors ≤30d the smile fit fabricated, chain-wide. '
+             + 'This describes the surface, NOT any single metric — the per-metric '
+             + 'marks in the rails and cards do that.',
+      });
+
+      out.push({
+        k: 'Strikes', v: this.fmt(h.liquidity, 'count'), tone: '',
+        title: 'median_n_strikes_clean — surviving strikes per fitted expiry. '
+             + 'A liquidity proxy; this database has no volume or ADV column.',
+      });
+
+      out.push({
+        k: 'Captured', v: this.captureText(), tone: '',
+        title: h.source === 'live'
+          ? 'Captured at an arbitrary instant and rounded to the grid bucket. '
+            + 'The bucket label is not the capture time.'
+          : 'From the anchored historical record, taken at the bucket itself.',
+      });
+
+      return out;
+    },
+
+    /* The bucket says 15:45; a live capture may have happened at 15:47:31.
+     * Showing the bucket alone would be quietly wrong about what instant the
+     * header describes, so the real time is what the chip shows. */
+    captureText() {
+      const h = this.hdr;
+      if (!h || !h.captured_at) return h && h.snapshot ? h.snapshot : '—';
+      const t = String(h.captured_at).replace('T', ' ');
+      return t.slice(11, 19) || t;
+    },
+
+    // ── Row 4: today, what's unusual ─────────────────────────────────────
+
+    async loadUnusual() {
+      if (!this.selectedTicker || !this.date || !this.snapshot) return;
+      this.unusualLoading = true; this.unusualError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/unusual?' + new URLSearchParams({
+          ticker: this.selectedTicker, date: this.date, snapshot: this.snapshot,
+          z_window: String(this.zWindow), window: this.histWindow,
+          limit: String(this.unusualLimit),
+          exclude_extrapolated: String(this.excludeExtrap),
+        }));
+        if (j.error) { this.unusualError = j.error; this.unusual = null; }
+        else { this.unusual = j; }
+      } catch (e) {
+        this.unusualError = String(e.message || e); this.unusual = null;
+      } finally {
+        this.unusualLoading = false;
+      }
+    },
+
+    unusualCards() { return this.unusual ? this.unusual.cards : []; },
+
+    /* Cards are coloured by DIRECTION, never by rank — blue for rich/above,
+     * pink for cheap/below — with the tint tracking |z| so the strongest
+     * reading is the most saturated. Ranking is already expressed by
+     * position in the strip; colouring by it too would say the same thing
+     * twice and leave nothing to say which way the metric moved. */
+    cardStyle(c) {
+      const t = Math.min(1, Math.abs(c.z) / 3);
+      const col = c.z >= 0 ? '52,152,219' : '232,67,147';
+      return `background:rgba(${col},${(0.06 + t * 0.16).toFixed(3)});`
+           + `border-color:rgba(${col},${(0.35 + t * 0.5).toFixed(3)});`;
+    },
+
+    cardZClass(c) { return c.z >= 0 ? 'up' : 'down'; },
+
+    pctText(p) {
+      if (p == null) return '—';
+      return (p * 100).toFixed(0) + 'th';
+    },
+
+    cardTitle(c) {
+      const dep = this.depends(c.column);
+      return (c.description || c.column)
+        + `\n\nz ${c.z.toFixed(2)} over ${this.zWindow}d`
+        + `\npercentile ${this.pctText(c.percentile)} over ${this.histWindow.toUpperCase()}`
+        + (dep ? `\ndepends on: ${dep}` : '')
+        + '\n\nClick to chart it.';
+    },
+
+    // ── Row 5a: rails ────────────────────────────────────────────────────
+
+    async loadRails() {
+      if (!this.selectedTicker || !this.date || !this.snapshot) return;
+      if (!this.railMetrics.length) { this.rails = null; return; }
+      this.railsLoading = true; this.railsError = '';
+      try {
+        const j = await eqGetJson('/api/equity-iv/rails?' + new URLSearchParams({
+          ticker: this.selectedTicker, metrics: this.railMetrics.join(','),
+          date: this.date, snapshot: this.snapshot,
+          window: this.histWindow, z_window: String(this.zWindow),
+          exclude_extrapolated: String(this.excludeExtrap),
+        }));
+        if (j.error) { this.railsError = j.error; this.rails = null; }
+        else { this.rails = j; }
+      } catch (e) {
+        this.railsError = String(e.message || e); this.rails = null;
+      } finally {
+        this.railsLoading = false;
+      }
+    },
+
+    railRows() { return this.rails ? this.rails.rails : []; },
+
+    /* Rail geometry, as percentages of the track.
+     *
+     * The domain is p5..p95 EXPANDED to contain today's value when today is
+     * outside it, rather than clamping the marker to the end of the track.
+     * Clamping would draw a value at the 99th percentile and one at the
+     * 300th in exactly the same place, which is the one thing this panel
+     * exists to distinguish. A little padding keeps the marker off the edge.
+     *
+     * Returns null when the distribution is degenerate (no spread, or too
+     * few observations), so the row can say so instead of dividing by zero.
+     */
+    railGeom(r) {
+      if (r.p5 == null || r.p95 == null || !r.n) return null;
+      let lo = r.p5, hi = r.p95;
+      if (r.value != null) { lo = Math.min(lo, r.value); hi = Math.max(hi, r.value); }
+      const span = hi - lo;
+      if (!(span > 0)) return null;
+      const pad = span * 0.06;
+      lo -= pad; hi += pad;
+      const pos = v => v == null ? null : ((v - lo) / (hi - lo)) * 100;
+      const g = {
+        outerL: pos(r.p5), outerR: pos(r.p95),
+        innerL: pos(r.p25), innerR: pos(r.p75),
+        median: pos(r.p50), value: pos(r.value),
+        beyond: r.value != null && (r.value < r.p5 || r.value > r.p95),
+      };
+      g.outerW = g.outerR - g.outerL;
+      g.innerW = (g.innerL == null || g.innerR == null) ? null : g.innerR - g.innerL;
+      return g;
+    },
+
+    /* Style helpers so the template binds one expression per element rather
+     * than recomputing the geometry inline four times. */
+    railOuterStyle(r) {
+      const g = this.railGeom(r);
+      return g ? `left:${g.outerL}%;width:${g.outerW}%` : 'display:none';
+    },
+    railInnerStyle(r) {
+      const g = this.railGeom(r);
+      return (g && g.innerW != null) ? `left:${g.innerL}%;width:${g.innerW}%` : 'display:none';
+    },
+    railMedStyle(r) {
+      const g = this.railGeom(r);
+      return (g && g.median != null) ? `left:${g.median}%` : 'display:none';
+    },
+    railMarkStyle(r) {
+      const g = this.railGeom(r);
+      if (!g || g.value == null) return 'display:none';
+      // Outside P5–P95 the marker keeps the page's directional colours;
+      // inside, it is neutral so "normal" does not read as a signal.
+      const col = g.beyond ? (r.value > r.p95 ? EQ_BLUE : EQ_PINK) : '#e8e8e8';
+      return `left:${g.value}%;background:${col};box-shadow:0 0 0 1px rgba(0,0,0,.55)`;
+    },
+
+    railTitle(r) {
+      const u = r.units, f = v => this.fmt(v, u);
+      const dep = this.depends(r.column_name);
+      return `${r.column_name}\n${r.description || ''}`
+        + `\n\nP5 ${f(r.p5)}  P25 ${f(r.p25)}  median ${f(r.p50)}  P75 ${f(r.p75)}  P95 ${f(r.p95)}`
+        + `\ntoday ${r.value == null ? '—' : f(r.value)}`
+        + `   percentile ${this.pctText(r.percentile)}`
+        + (r.z == null ? '' : `   z ${r.z.toFixed(2)}`)
+        + `\nn=${r.n} over ${this.histWindow.toUpperCase()}`
+        + (dep ? `\ndepends on: ${dep}` : '')
+        + '\n\nPercentiles, not standard deviations: these distributions are '
+        + 'right-skewed and fat-tailed, so a symmetric band would be too wide '
+        + 'on one side and too narrow on the other.';
+    },
+
+    /** Why a rail has no marker — excluded vs never there. Different facts. */
+    railMissing(r) {
+      if (r.value != null) return '';
+      if (r.raw_value != null) return 'excluded';   // existed, fabricated node
+      return 'absent';
+    },
+
+    addRail() {
+      if (!this.railBase || this.railMetrics.includes(this.railBase)) return;
+      this.railMetrics.push(this.railBase);
+      this.loadRails();
+    },
+
+    removeRail(i) {
+      this.railMetrics.splice(i, 1);
+      if (this.railMetrics.length) this.loadRails(); else this.rails = null;
+    },
+
+    // ── Row 5b: time series ──────────────────────────────────────────────
+
+    async loadSeries() {
+      if (!this.selectedTicker || !this.seriesSpecs.length) { this.ser = null; return; }
+      this.serLoading = true; this.serError = '';
+      try {
+        const q = new URLSearchParams({
+          ticker: this.selectedTicker,
+          metrics: this.seriesSpecs.map(s => s.b).join(','),
+          mode: this.effectiveSeriesMode(),
+          window: this.histWindow,
+          z_window: String(this.zWindow),
+          envelope: String(this.seriesEnvelope),
+          env_window: String(this.envWindow),
+          env_lo: String(this.envLo), env_hi: String(this.envHi),
+          exclude_extrapolated: String(this.excludeExtrap),
+        });
+        // Daily mode pins the close bucket server-side; intraday and candle
+        // read every bucket, so sending one would filter them to nothing.
+        const j = await eqGetJson('/api/equity-iv/series?' + q);
+        if (j.error) { this.serError = j.error; this.ser = null; }
+        else { this.ser = j; this.renderSeries(); }
+      } catch (e) {
+        this.serError = String(e.message || e); this.ser = null;
+      } finally {
+        this.serLoading = false;
+      }
+    },
+
+    /* Candles need more than one bucket per day to have an open and a close,
+     * so the chart toggle only means anything on the intraday grid. Asking
+     * for candles on the daily view resolves to candles over intraday
+     * buckets rather than silently drawing a line — the button said candle. */
+    effectiveSeriesMode() {
+      return this.seriesChart === 'candle' ? 'candle' : this.seriesMode;
+    },
+
+    setSeriesMode(m) {
+      if (this.seriesMode === m) return;
+      this.seriesMode = m;
+      this.loadSeries();
+    },
+
+    setSeriesChart(c) {
+      if (this.seriesChart === c) return;
+      this.seriesChart = c;
+      this.loadSeries();
+    },
+
+    toggleEnvelope() {
+      this.seriesEnvelope = !this.seriesEnvelope;
+      this.loadSeries();
+    },
+
+    /** Add a metric as a series. Called from the picker and from a card. */
+    addSeries(base, opts) {
+      if (!base || !this.byCol[base]) return;
+      if (this.seriesSpecs.some(s => s.b === base)) return;
+      if (this.seriesSpecs.length >= 4) return;
+      const o = opts || {};
+      this.seriesSpecs.push({
+        b: base,
+        axis: o.axis || (this.seriesSpecs.length ? 'right' : 'left'),
+        pane: o.pane == null ? 0 : o.pane,
+      });
+      this.loadSeries();
+    },
+
+    removeSeries(i) {
+      this.seriesSpecs.splice(i, 1);
+      this.loadSeries();
+    },
+
+    cycleAxis(i) {
+      const s = this.seriesSpecs[i];
+      s.axis = s.axis === 'left' ? 'right' : 'left';
+      this.renderSeries();
+    },
+
+    cyclePane(i) {
+      const s = this.seriesSpecs[i];
+      s.pane = (s.pane + 1) % EQ_TS_PANES;
+      this.renderSeries();
+    },
+
+    seriesColor(i) { return EQ_SERIES_COLORS[i % EQ_SERIES_COLORS.length]; },
+
+    /** Panes that actually hold a series, so empty canvases stay hidden. */
+    activePanes() {
+      const used = new Set(this.seriesSpecs.map(s => s.pane));
+      return [...Array(EQ_TS_PANES).keys()].filter(p => used.has(p));
+    },
+
+    seriesFull() { return this.seriesSpecs.length >= 4; },
+
+    /* Intraday coverage begins 2026-08-24 and is sparse before 11:25 that
+     * day. A chart that suddenly shows six points is a real state, not a
+     * failure, and saying so is cheaper than the user re-checking their
+     * filters. */
+    seriesCoverageNote() {
+      if (!this.ser || this.ser.mode === 'daily') return '';
+      const n = Math.min(...this.ser.series.map(s => s.n_points));
+      if (!isFinite(n)) return '';
+      const what = this.ser.mode === 'candle' ? 'bars' : 'points';
+      return `${n} ${what} — intraday capture starts 2026-08-24 and is sparse `
+           + `before 11:25 that day, so this view is short by construction.`;
+    },
+
+    /** Where the z on screen came from. The whole point is that it does not
+     *  change when the intraday toggle does. */
+    baselineNote() {
+      if (!this.ser || !this.ser.series.length) return '';
+      const b = this.ser.series[0].baseline;
+      if (!b || b.mu == null) return '';
+      return `z from the ${b.snapshot} daily close over ${b.z_window} days `
+           + `(n=${b.n}) in every mode — the intraday point moves, the yardstick does not.`;
+    },
+
+    renderSeries() {
+      if (typeof Chart === 'undefined' || !this.ser) return;
+      for (let p = 0; p < EQ_TS_PANES; p++) {
+        const key = 'ts' + p;
+        if (EQ_CHARTS[key]) { EQ_CHARTS[key].destroy(); EQ_CHARTS[key] = null; }
+      }
+      this.candleDropped = {};
+      // Destroy first, then paint after Alpine has added or removed the
+      // canvases that activePanes() changed — painting into an element the
+      // x-for is about to replace leaves a chart bound to a detached node.
+      this.$nextTick(() => this.paintSeries());
+    },
+
+    /** Series candle mode could not draw in a pane, for the note under it. */
+    candleDroppedText() {
+      const all = Object.values(this.candleDropped || {}).flat();
+      if (!all.length) return '';
+      return `Not drawn as candles: ${all.join(', ')} — one candle series per `
+           + `pane. Move them to another pane, or switch back to line.`;
+    },
+
+    paintSeries() {
+      if (typeof Chart === 'undefined' || !this.ser) return;
+      const candle = this.ser.mode === 'candle';
+
+      for (const pane of this.activePanes()) {
+        const el = document.getElementById('eq-ts-' + pane);
+        if (!el) continue;
+
+        let mine = this.seriesSpecs
+          .map((s, i) => ({ s, i, d: this.ser.series.find(x => x.column_name === s.b) }))
+          .filter(o => o.d && o.s.pane === pane);
+        if (!mine.length) continue;
+
+        /* One candle series per pane. Two sets of bodies overlaid at the same
+         * x positions is unreadable, and carrying the extra series as
+         * invisible high/low points would stretch the y scale for something
+         * that never gets drawn — a chart silently rescaled by data you
+         * cannot see. The dropped ones are named under the chart; move them
+         * to another pane to see them. */
+        if (candle && mine.length > 1) {
+          this.candleDropped[pane] = mine.slice(1).map(o => o.d.column_name);
+          mine = mine.slice(0, 1);
+        } else {
+          this.candleDropped[pane] = [];
+        }
+
+        // Every series in a pane shares one x axis, so the labels come from
+        // the longest one and shorter series align to its tail.
+        const longest = mine.reduce((a, o) => o.d.points.length > a.points.length ? o.d : a, mine[0].d);
+        const labels = longest.points.map(p => this.pointLabel(p));
+
+        const datasets = [];
+        const meta = [];
+        let usesRight = false;
+
+        for (const o of mine) {
+          const colr = this.seriesColor(o.i);
+          const yid = o.s.axis === 'right' ? 'yR' : 'y';
+          if (yid === 'yR') usesRight = true;
+          const pts = o.d.points;
+          const pad = labels.length - pts.length;      // shorter series, right-aligned
+          const align = arr => new Array(Math.max(0, pad)).fill(null).concat(arr);
+
+          if (candle) {
+            // Invisible highs and lows so the scale fits the wicks; the
+            // plugin paints the bodies.
+            datasets.push({
+              label: o.d.column_name, yAxisID: yid,
+              data: align(pts.map(p => p.h)),
+              borderColor: 'transparent', backgroundColor: 'transparent',
+              pointRadius: 0, showLine: false,
+            });
+            datasets.push({
+              label: o.d.column_name + ' low', yAxisID: yid,
+              data: align(pts.map(p => p.l)),
+              borderColor: 'transparent', backgroundColor: 'transparent',
+              pointRadius: 0, showLine: false,
+            });
+          } else {
+            if (this.seriesEnvelope && pts.some(p => p.env_lo != null)) {
+              // Band drawn first so the line sits on top of it. `fill:'-1'`
+              // ties the upper edge down to the lower one.
+              datasets.push({
+                label: o.d.column_name + ' P' + Math.round(this.envLo * 100),
+                yAxisID: yid, data: align(pts.map(p => p.env_lo)),
+                borderColor: 'transparent', pointRadius: 0, fill: false, order: 3,
+              });
+              datasets.push({
+                label: o.d.column_name + ' P' + Math.round(this.envHi * 100),
+                yAxisID: yid, data: align(pts.map(p => p.env_hi)),
+                borderColor: 'transparent', pointRadius: 0,
+                backgroundColor: this.rgba(colr, 0.10), fill: '-1', order: 3,
+              });
+            }
+            datasets.push({
+              label: o.d.column_name, yAxisID: yid,
+              data: align(pts.map(p => p.v)),
+              borderColor: colr, backgroundColor: colr,
+              borderWidth: 1.5, pointHoverRadius: 3,
+              tension: 0, spanGaps: false, order: 1,
+              // A fabricated point is drawn, but marked — the line would
+              // otherwise present spline output as observation. Every other
+              // point has radius 0, so this is the dataset's only pointRadius.
+              pointBackgroundColor: align(pts.map(p => p.extrap ? EQ_PINK : colr)),
+              pointRadius: align(pts.map(p => p.extrap ? 2.5 : 0)),
+            });
+          }
+          meta.push({ col: o.d.column_name, units: o.d.units, pts, pad,
+                      color: colr, axis: yid });
+        }
+
+        // Each axis is labelled in the units of the first series on it. A
+        // twin axis exists precisely because the two series are in different
+        // units, so formatting both scales the same way defeats it.
+        const leftUnits  = (meta.find(m => m.axis === 'y')  || meta[0]).units;
+        const rightUnits = (meta.find(m => m.axis === 'yR') || {}).units;
+
+        const self = this;
+        const cfg = {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+              x: {
+                ticks: { maxTicksLimit: 8, autoSkip: true, maxRotation: 0 },
+                grid: { display: false },
+              },
+              y: {
+                position: 'left',
+                ticks: { callback: v => self.fmtShort(v, leftUnits) },
+                grid: { color: 'rgba(255,255,255,0.05)' },
+              },
+              ...(usesRight ? {
+                yR: {
+                  position: 'right',
+                  ticks: { callback: v => self.fmtShort(v, rightUnits) },
+                  grid: { drawOnChartArea: false },
+                },
+              } : {}),
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  title: items => items.length ? String(items[0].label) : '',
+                  label: item => self.seriesTooltip(item, meta, candle),
+                },
+              },
+            },
+          },
+          plugins: candle ? [eqCandles] : [],
+        };
+
+        const chart = new Chart(el.getContext('2d'), cfg);
+        if (candle) chart.$candles = meta[0] ? meta[0].pts : [];
+        EQ_CHARTS['ts' + pane] = chart;
+      }
+    },
+
+    pointLabel(p) {
+      return p.snapshot ? `${p.t} ${p.snapshot}` : p.t;
+    },
+
+    seriesTooltip(item, meta, candle) {
+      // Two hidden datasets per candle series; one line row is enough.
+      const mi = candle ? Math.floor(item.datasetIndex / 2) : null;
+      const m = candle ? meta[mi] : meta.find(x => x.col === item.dataset.label);
+      if (candle) {
+        if (item.datasetIndex % 2) return null;
+        const p = m && m.pts[item.dataIndex - m.pad];
+        if (!p) return null;
+        return `${m.col}  O ${this.fmt(p.o, m.units)}  H ${this.fmt(p.h, m.units)}  `
+             + `L ${this.fmt(p.l, m.units)}  C ${this.fmt(p.c, m.units)}`
+             + `  (${p.n} buckets)`
+             + (p.z == null ? '' : `  z ${p.z.toFixed(2)}`);
+      }
+      if (!m) return null;                       // an envelope edge — not a row
+      const p = m.pts[item.dataIndex - m.pad];
+      if (!p || p.v == null) return null;
+      return `${m.col}  ${this.fmt(p.v, m.units)}`
+           + (p.z == null ? '' : `  z ${p.z.toFixed(2)}`)
+           + (p.extrap ? '  · rests on a fabricated node' : '');
+    },
+
+    rgba(hex, a) {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
     },
 
     // ── formatting ───────────────────────────────────────────────────────
