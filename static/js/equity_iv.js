@@ -597,10 +597,13 @@ document.addEventListener('alpine:init', () => {
                     `${self.xCol()}: ${self.fmt(p.x, self.xUnits())}`,
                     `${self.yCol()}: ${self.fmt(p.y, self.unitsOf(self.yCol()))}`,
                     `spot: ${p.spot != null ? p.spot.toFixed(2) : '—'}`,
-                    `extrapolated: ${p.extrap_rate != null ? (p.extrap_rate * 100).toFixed(1) + '%' : '—'}`,
+                    // Labelled "chain" so it is not read as a verdict on the
+                    // two axis metrics — those get their own line below.
+                    `chain extrap ≤30d: ${p.extrap_rate != null ? (p.extrap_rate * 100).toFixed(1) + '%' : '—'}`,
                   ];
                   if (useColor) rows.push(`${self.colorCol()}: ${self.fmt(p.color, cUnits)}`);
-                  if (p.x_extrap || p.y_extrap) rows.push('⚠ built on a fabricated node');
+                  if (p.x_extrap) rows.push(`⚠ x rests on a fabricated node (${self.depends(self.xCol())})`);
+                  if (p.y_extrap) rows.push(`⚠ y rests on a fabricated node (${self.depends(self.yCol())})`);
                   return rows;
                 },
               },
@@ -781,9 +784,88 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* ── Per-cell extrapolation marking ────────────────────────────────────
+     * A cell is marked when the nodes THAT COLUMN depends on are
+     * extrapolated — not when the ticker's chain-wide rate is high. The two
+     * are routinely different: AAL can sit at 40% chain-wide because its
+     * short-tenor 10-delta nodes do not reach, while skew_30d_25p_atm rests
+     * only on 25p@30d and atm@30d, both of which are real. Scoring the cell
+     * by the ticker rate makes a genuine signal look fabricated.
+     *
+     * Three distinct absences, deliberately distinguishable:
+     *   dim  —    the metric is genuinely null (thin chain, tenor did not
+     *             bracket). Absent, not zero.
+     *   pink —*   present but excluded by the toggle, because it rests on a
+     *             fabricated node.
+     *   pink 1.23* shown and suspect: the toggle is off, so the value is
+     *             visible but flagged.
+     * Before this, the middle case rendered as a dim em dash identical to
+     * the first, so "we threw this away" and "there was nothing here" were
+     * the same pixel. */
+
+    isFabricated(row, col) { return !!(row.extrap && row.extrap[col]); },
+
     cellClass(row, col) {
-      if (row.values[col] == null) return 'eq-null';
-      return row.extrap && row.extrap[col] ? 'eq-fab' : '';
+      if (this.isFabricated(row, col)) return 'eq-fab';
+      return row.values[col] == null ? 'eq-null' : '';
+    },
+
+    cellText(row, col) {
+      const v = row.values[col];
+      if (v == null) return '—';
+      return this.fmt(v, this.unitsOf(col));
+    },
+
+    cellTitle(row, col) {
+      if (this.isFabricated(row, col)) {
+        const dep = this.depends(col);
+        return (row.values[col] == null
+          ? 'Excluded: rests on a fabricated node'
+          : 'Shown but suspect: rests on a fabricated node')
+          + (dep ? ` (${dep})` : '')
+          + '. The smile fit returned its boundary value there, so this is not an observation.';
+      }
+      if (row.values[col] == null) {
+        return 'No value at this snapshot — the metric is null, not zero.';
+      }
+      return '';
+    },
+
+    /** The surface nodes a metric rests on, as "25p@30d, atm@30d".
+     *  Answers "what would have to be fabricated for this to be wrong". */
+    depends(col) {
+      const m = this.byCol[col];
+      if (!m || !m.extrap_flags || !m.extrap_flags.length) return '';
+      return m.extrap_flags
+        .map(f => { const p = f.replace('extrap_', '').split('_'); return `${p[0]}@${p[1]}`; })
+        .join(', ');
+    },
+
+    /** Column-header tooltip: what the metric is, then what it rests on. */
+    headerTitle(col) {
+      const dep = this.depends(col);
+      return this.describe(col) + (dep ? `\n\nDepends on: ${dep}` : '');
+    },
+
+    /* ── Chain-wide rate, demoted ──────────────────────────────────────────
+     * extrap_rate_short is still worth having — a name at 40% is one whose
+     * surface is thin in general — but it is context, not a verdict on any
+     * row. It rides as a small dot beside the ticker with the number in the
+     * tooltip, rather than as a column that competes with the values. */
+
+    chainClass(row) {
+      const r = row.extrap_rate;
+      if (r == null || r <= 0) return '';
+      if (r >= 0.25) return 'hi';
+      return r >= 0.10 ? 'mid' : 'lo';
+    },
+
+    tickerTitle(row) {
+      if (row.extrap_rate == null) return row.ticker;
+      return `${row.ticker} — ${(row.extrap_rate * 100).toFixed(1)}% of nodes at `
+           + `tenors ≤30d are extrapolated, chain-wide.\n\nThis says the chain is `
+           + `thin, NOT that any metric in this row is affected. The per-cell `
+           + `marks say that.`;
     },
 
     // ── formatting ───────────────────────────────────────────────────────

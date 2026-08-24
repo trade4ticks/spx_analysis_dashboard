@@ -122,10 +122,21 @@
     /* A missing metric is legitimately null — a thin chain lacks wing nodes,
        a short tenor does not always bracket. It renders as absent. */
     .eq-null { color:var(--dim); }
-    /* A value built on a node the spline fabricated. Marked, not hidden, so
-       the reading is visible as suspect when the exclude toggle is off. */
+    /* A value whose OWN nodes the spline fabricated — scoped to the metric in
+       that column, not to the ticker. Marked, not hidden: with the exclude
+       toggle off it reads "1.23*" in pink, and with the toggle on it reads
+       "—*", which is deliberately NOT the same as the dim "—" of a metric
+       that is simply absent. Throwing a value away and never having one are
+       different facts and must not share a glyph. */
     .eq-fab { color:#e84393; }
     .eq-fab::after { content:'*'; font-weight:700; }
+    /* Chain-wide extrapolation rate, demoted to a dot beside the ticker. It
+       describes the surface, not any row value — a name can be thin overall
+       while the two nodes a given metric rests on are both real. */
+    .eq-chain { font-size:9px; margin-left:3px; vertical-align:top; }
+    .eq-chain.lo  { color:var(--dim); }
+    .eq-chain.mid { color:var(--warning); }
+    .eq-chain.hi  { color:#e84393; }
 
     .eq-chips { display:flex; gap:5px; flex-wrap:wrap; padding:0 10px 7px; }
     .eq-chip {
@@ -295,7 +306,8 @@
             <div class="ps-val a" x-text="scatterCounts().plotted"></div></div>
           <div class="ps"><div class="ps-lbl">Null (absent)</div>
             <div class="ps-val" x-text="scatterCounts().nulls"></div></div>
-          <div class="ps"><div class="ps-lbl">Fabricated node</div>
+          <div class="ps" :title="'Tickers where a node THESE TWO AXES rest on was fabricated (' + (depends(xCol()) || 'no node dependency') + ' / ' + (depends(yCol()) || 'no node dependency') + '). Not the chain-wide rate.'">
+            <div class="ps-lbl">Axis node faked</div>
             <div class="ps-val y" x-text="scatterCounts().fabricated"></div></div>
           <div class="ps"><div class="ps-lbl">Size by</div>
             <div class="ps-val t" style="font-size:10px">strikes/expiry</div></div>
@@ -438,25 +450,26 @@
                   <th @click="sortBy('__ticker')">Ticker</th>
                   <template x-for="c in scanCols" :key="'th-'+c.b+c.z">
                     <th :class="{on: scanSort === resolve(c.b, c.z)}"
-                        :title="describe(resolve(c.b, c.z))"
+                        :title="headerTitle(resolve(c.b, c.z))"
                         @click="sortBy(resolve(c.b, c.z))"
                         x-text="colHeader(c) + (scanSort === resolve(c.b, c.z) ? (scanDir === 'desc' ? ' ▾' : ' ▴') : '')"></th>
                   </template>
                   <th>Spot</th>
-                  <th title="Fraction of nodes extrapolated across tenors ≤ 30">Extrap</th>
                 </tr>
               </thead>
               <tbody>
                 <template x-for="r in (scan ? scan.rows : [])" :key="'tr-'+r.ticker">
                   <tr :class="{on: selectedTicker === r.ticker}" @click="selectTicker(r.ticker)">
-                    <td class="eq-tkr" x-text="r.ticker"></td>
+                    <td class="eq-tkr" :title="tickerTitle(r)">
+                      <span x-text="r.ticker"></span><span class="eq-chain"
+                            :class="chainClass(r)" x-show="chainClass(r)">•</span>
+                    </td>
                     <template x-for="c in scanCols" :key="'td-'+r.ticker+c.b+c.z">
                       <td :class="cellClass(r, resolve(c.b, c.z))"
-                          x-text="fmt(r.values[resolve(c.b, c.z)], unitsOf(resolve(c.b, c.z)))"></td>
+                          :title="cellTitle(r, resolve(c.b, c.z))"
+                          x-text="cellText(r, resolve(c.b, c.z))"></td>
                     </template>
                     <td x-text="r.spot != null ? r.spot.toFixed(2) : '—'"></td>
-                    <td :class="r.extrap_rate > 0.1 ? 'eq-fab' : ''"
-                        x-text="r.extrap_rate != null ? (r.extrap_rate * 100).toFixed(1) + '%' : '—'"></td>
                   </tr>
                 </template>
               </tbody>
@@ -470,10 +483,18 @@
 
           <div class="eq-note">
             <span class="eq-fab" style="font-size:11px"></span>
-            marks a value built on a node the smile fit fabricated. Rates vary
-            enormously by name — SPY 0.0%, AAPL 2.6%, T 21.6% on one date — so a
-            scan that averages over fabricated nodes ranks thin chains as
-            unusually flat.
+            marks a cell whose <em>own</em> nodes the smile fit fabricated —
+            <code>skew_30d_25p_atm</code> is marked when 25p@30d or atm@30d did
+            not reach, and not otherwise. Hover a column header for what that
+            metric rests on. A pink <span class="eq-fab">—</span> means the value
+            existed and was excluded; a dim — means there was never one.
+            The dot beside a ticker is its <em>chain-wide</em> rate across tenors
+            ≤30d (<span class="eq-chain lo">•</span> under 10%,
+            <span class="eq-chain mid">•</span> 10–25%,
+            <span class="eq-chain hi">•</span> over 25%) — context about how thin
+            the surface is, not a verdict on any value in the row. A name at 40%
+            can still carry a perfectly real 30-day skew reading if the two nodes
+            it needs both trade.
           </div>
         </div>
       </template>
