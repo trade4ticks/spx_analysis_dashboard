@@ -68,7 +68,7 @@
     /* Row 1: scatter ~60% / distribution ~40%. minmax(0,·) so a wide chart
        cannot push the grid past the viewport — panels must not assume a
        fixed width, the rows are expected to be rearranged later. */
-    .eq-row { display:grid; grid-template-columns:minmax(0,60fr) minmax(0,40fr); gap:12px; align-items:start; }
+    .eq-row { display:grid; grid-template-columns:minmax(0,60fr) minmax(0,40fr); gap:12px; }
     @media (max-width:1100px) { .eq-row { grid-template-columns:minmax(0,1fr); } }
 
     .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
@@ -161,8 +161,29 @@
        Three- and two-up grids on the same minmax(0,·) basis as row 1, so a
        wide chart cannot push the page past the viewport. Panels do not assume
        a fixed width — the rows are expected to be rearranged. */
-    .eq-row3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; align-items:start; margin-bottom:12px; }
-    .eq-row2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; align-items:start; margin-bottom:12px; }
+    /* align-items:stretch (the default) rather than start, so panels in a row
+       share a height instead of each ending where its own content happens to
+       stop — which left ragged dead background between them. The section then
+       becomes a flex column and its canvas takes the slack, so the shorter
+       visuals gain the space rather than the row just growing padding. */
+    .eq-row3 { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:12px; margin-bottom:12px; }
+    .eq-row2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:12px; margin-bottom:12px; }
+    .eq-row3 > .eq-section, .eq-row2 > .eq-section,
+    .eq-row53 > .eq-section, .eq-row > .eq-section {
+      display:flex; flex-direction:column; min-height:0;
+    }
+    /* The canvas wrapper is the part that grows; notes and control rows keep
+       their natural height. min-height keeps Chart.js from collapsing it. */
+    .eq-row3 > .eq-section > .eq-band-canvas,
+    .eq-row2 > .eq-section > .eq-band-canvas,
+    .eq-row53 > .eq-section > .eq-ts-wrap,
+    .eq-row > .eq-section > .eq-canvas-wrap {
+      flex:1 1 auto; min-height:220px;
+    }
+    /* The notes sit at the bottom of whatever height the row settles on, so a
+       short panel's note does not float in the middle of its own dead space. */
+    .eq-row3 > .eq-section > .eq-note,
+    .eq-row2 > .eq-section > .eq-note { margin-top:auto; }
     @media (max-width:1250px) { .eq-row3 { grid-template-columns:repeat(2, minmax(0,1fr)); } }
     @media (max-width:900px)  { .eq-row3, .eq-row2 { grid-template-columns:minmax(0,1fr); } }
 
@@ -278,7 +299,7 @@
     .eq-card-pct { color:var(--dim); font-variant-numeric:tabular-nums; }
 
     /* ── Row 5: rails (~35%) + time series (~65%) ───────────────────── */
-    .eq-row53 { display:grid; grid-template-columns:minmax(0,35fr) minmax(0,65fr); gap:12px; align-items:start; }
+    .eq-row53 { display:grid; grid-template-columns:minmax(0,35fr) minmax(0,65fr); gap:12px; }
     @media (max-width:1250px) { .eq-row53 { grid-template-columns:minmax(0,1fr); } }
 
     .eq-rails { padding:6px 10px 4px; }
@@ -993,9 +1014,16 @@
             <span class="eq-section-sub">1×2 put ratio</span>
             <div class="eq-spacer"></div>
             <span class="eq-lbl">Tenor</span>
+            <!-- The options come from state and the DOM value is re-asserted
+                 once they have rendered. A <select> whose value is bound
+                 before its options exist silently falls back to the first
+                 option, which is how this read 0d while every panel drew 30d.
+                 x-effect re-runs when dteOptions or cbDte changes; $nextTick
+                 defers the write until after x-for has emitted them. -->
             <select class="eq-sel" style="max-width:80px"
-                    :value="cbDte" @change="setCbDte($event.target.value)">
-              <template x-for="t in cbAvailableDtes()" :key="'td-'+t">
+                    @change="setCbDte($event.target.value)"
+                    x-effect="dteOptions.length; $nextTick(() => { $el.value = String(cbDte); })">
+              <template x-for="t in dteOptions" :key="'td-'+t">
                 <option :value="t" x-text="t + 'd'"></option>
               </template>
             </select>
@@ -1036,8 +1064,9 @@
                  changed from wherever you are looking. -->
             <span class="eq-lbl">Tenor</span>
             <select class="eq-sel" style="max-width:80px"
-                    :value="cbDte" @change="setCbDte($event.target.value)">
-              <template x-for="t in cbAvailableDtes()" :key="'sd-'+t">
+                    @change="setCbDte($event.target.value)"
+                    x-effect="dteOptions.length; $nextTick(() => { $el.value = String(cbDte); })">
+              <template x-for="t in dteOptions" :key="'sd-'+t">
                 <option :value="t" x-text="t + 'd'"></option>
               </template>
             </select>
@@ -1070,7 +1099,8 @@
             </div>
             <template x-if="termKind === 'skew_term'">
               <select class="eq-sel" style="max-width:95px"
-                      :value="cbWing" @change="setCbWing($event.target.value)"
+                      x-effect="$nextTick(() => { $el.value = String(cbWing); })"
+                      @change="setCbWing($event.target.value)"
                       title="Which wing's slope by tenor. Whether the call wing is rich by tenor is a different question from the put wing.">
                 <template x-for="w in cbWings" :key="'cw-'+w">
                   <option :value="w" x-text="deltaLabel(w)"></option>
@@ -1320,10 +1350,14 @@
               </div>
 
               <span class="eq-lbl">DTE</span>
+              <!-- Multi-select: the chain endpoints take a CSV of bands, so
+                   0–7 + 8–14 + 15–30 composes into 0–30 without needing a
+                   button for every span anyone might want. "all" clears. -->
               <div class="seg">
                 <template x-for="b in oiDteBands" :key="'ob-'+b.v">
-                  <div class="seg-btn" :class="{on: oiDteBand === b.v}"
-                       @click="setOiDteBand(b.v)" x-text="b.label"></div>
+                  <div class="seg-btn" :class="{on: oiDteOn(b.v)}"
+                       @click="toggleOiDte(b.v)" x-text="b.label"
+                       :title="b.v ? 'Toggle. Combines with the other bands.' : 'Every expiry — clears the rest.'"></div>
                 </template>
               </div>
 
@@ -1405,6 +1439,12 @@
                 The strike axis defaults to the band around spot holding ~90% of
                 the map's total flow — drawn full-range, the part worth reading
                 is a few pixels tall.
+                The two dashed paths are the OI-weighted average call (blue) and
+                put (pink) strike, per session. Their spread against each other
+                and against the spot path is what a single end-of-window number
+                cannot show. Today's levels appear as short markers at the right
+                edge only: they are current values, and running them back across
+                the year would assert a level that never held.
               </span>
             </div>
           </div>

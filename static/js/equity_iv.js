@@ -497,12 +497,26 @@ const eqRefLines = {
       ctx.strokeStyle = m.color; ctx.fillStyle = m.color;
       ctx.setLineDash([4, 3]);
       if (opts.horizontal) {
+        /* A SHORT segment at the right edge, not a full-width rule.
+         *
+         * On the flow map the x axis is time, and these three are today's
+         * values. Drawn across the whole width they assert a level that held
+         * all year, which is a claim about history that was never made and
+         * is usually false — the weighted-average strike migrates as the book
+         * rolls. At the right edge they read as what they are: where things
+         * stand now, against a chart of how they got there.
+         *
+         * The per-session paths drawn as datasets are the historical version
+         * of the same quantity, and they can be compared against these
+         * end-markers directly. */
         const y = ys.getPixelForValue(m.v);
         if (!isFinite(y) || y < ys.top || y > ys.bottom) return;
-        ctx.beginPath(); ctx.moveTo(xs.left, y); ctx.lineTo(xs.right, y); ctx.stroke();
+        const seg = Math.min(46, (xs.right - xs.left) * 0.12);
+        ctx.beginPath();
+        ctx.moveTo(xs.right - seg, y); ctx.lineTo(xs.right, y); ctx.stroke();
         ctx.setLineDash([]);
-        ctx.textAlign = 'left';
-        ctx.fillText(text, xs.left + 4, y - 3);
+        ctx.textAlign = 'right';
+        ctx.fillText(text, xs.right - 2, y - 4);
       } else {
         // A category axis over the listed ladder: a reference level almost
         // never lands on a rung, so its pixel is interpolated between the two
@@ -586,6 +600,14 @@ document.addEventListener('alpine:init', () => {
     cb: {}, cbLoading: {}, cbError: {},
     cbDte: 30,                 // the tenor every per-tenor panel in 6–8 uses
     cbDteChosen: false,        // true once resolved against the real tenor list
+    /* The tenor list as STATE, not derived from whichever payload happens to
+     * have arrived. The select's options are rendered from this by x-for, and
+     * a <select> whose value is bound before its options exist falls back to
+     * its first option — which is how the control read 0d while every panel
+     * drew 30d. Holding the list in state means the options and the value are
+     * set from the same place, and the template re-asserts the DOM value once
+     * the options have rendered. */
+    dteOptions: [],
     cbWing: 25,
     termKind: 'term',          // term | skew_term
     termDeltas: [25, 75],
@@ -616,11 +638,16 @@ document.addEventListener('alpine:init', () => {
     oiDate: '', oiDates: [], oiDoiN: 5, oiLookback: 252,
     oiSide: 'all',             // all | call | put
     oiRef: null,               // {spot, call, put} reference levels
+    oiFlowCall: null, oiFlowPut: null,   // per-session weighted strike paths
     oiFlowZoom: 1,             // multiplier on the measured strike half-range
-    // DTE bands in the chain endpoints' "lo-hi" form. Empty = every expiry.
-    // Deliberately NOT the 1m/3m/6m span buttons: those move the lookback,
-    // which is a different axis from which expiries are counted.
-    oiDteBand: '',
+    /* DTE bands in the chain endpoints' "lo-hi" form, MULTI-select: the
+     * endpoints take a CSV of bands, so 0-7 + 8-14 + 15-30 composes into
+     * 0-30 without needing a band for every span anyone might want.
+     * Empty = every expiry.
+     *
+     * Deliberately NOT the 1m/3m/6m span buttons: those move the lookback,
+     * which is a different axis from which expiries are counted. */
+    oiDteSel: [],
     // Finer than the first cut. 0–30 lumped the weekly, the monthly and the
     // next-month expiry into one bucket, which is most of what anyone trading
     // this style is trying to separate.
@@ -2097,7 +2124,11 @@ document.addEventListener('alpine:init', () => {
           deltas: this.termDeltas.join(','),
         }));
         if (j.error) { this.cbError[kind] = j.error; this.cb[kind] = null; }
-        else { this.cb[kind] = j; this.renderCurveBand(kind); }
+        else {
+          this.cb[kind] = j;
+          if (j.available) this.adoptDtes(j.available.dtes);
+          this.renderCurveBand(kind);
+        }
       } catch (e) {
         this.cbError[kind] = String(e.message || e); this.cb[kind] = null;
       } finally {
@@ -2127,11 +2158,23 @@ document.addEventListener('alpine:init', () => {
       this.loadSpotVol();
     },
 
-    cbAvailableDtes() {
-      const src = this.cb.skew || this.tent || this.sticky;
-      const fromPayload = (src && src.available && src.available.dtes) || [];
-      if (fromPayload.length) return fromPayload;
-      return (this.grid && this.grid.dtes) || [];
+    /** Adopt the surface's real tenor list, and settle the default once. */
+    adoptDtes(list) {
+      if (!list || !list.length) return;
+      if (this.dteOptions.length !== list.length
+          || this.dteOptions.some((t, i) => t !== list[i])) {
+        this.dteOptions = [...list];
+      }
+      if (this.cbDteChosen) return;
+      this.cbDteChosen = true;
+      const want = this.pickDefaultDte(list);
+      if (want !== this.cbDte) {
+        this.cbDte = want;
+        this.loadCurveBand('skew');
+        this.loadTent();
+        this.loadSticky();
+        this.loadSpotVol();
+      }
     },
 
     /* 0DTE is a poor default: the fit is least reliable at the shortest
@@ -2324,12 +2367,15 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.tentError = j.error; this.tent = null; }
         else {
           this.tent = j;
-          // Adopt the tenor the server actually used. The picker is populated
-          // from the surface's real tenor list, and a default of 30 that is
-          // not on that list left the control showing its first option (0d)
-          // while every panel below drew the nearest available — the label
-          // and the data disagreeing, with nothing on screen to say so.
-          if (j.dte != null && j.dte !== this.cbDte) this.cbDte = j.dte;
+          if (j.available) this.adoptDtes(j.available.dtes);
+          // Adopt the tenor the server actually RESOLVED. It snaps the request
+          // to the nearest fitted tenor, and if that differs from what was
+          // asked for, the control has to move with it or the label and the
+          // chart disagree with nothing on screen to say so.
+          if (j.dte != null && j.dte !== this.cbDte) {
+            this.cbDte = j.dte;
+            this.cbDteChosen = true;
+          }
           this.renderTent();
         }
       } catch (e) {
@@ -2607,21 +2653,7 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.gridError = j.error; this.grid = null; }
         else {
           this.grid = j;
-          // The grid is the first payload that carries the surface's real
-          // tenor list, so it is the earliest point a sane default can be
-          // chosen. Only moves off the initial value, never off a user pick.
-          if (!this.cbDteChosen && j.dtes && j.dtes.length) {
-            const want = this.pickDefaultDte(j.dtes);
-            if (want !== this.cbDte) {
-              this.cbDte = want;
-              this.cbDteChosen = true;
-              this.loadCurveBand('skew');
-              this.loadTent();
-              this.loadSticky();
-              this.loadSpotVol();
-            }
-            this.cbDteChosen = true;
-          }
+          if (j.dtes) this.adoptDtes(j.dtes);
         }
       } catch (e) {
         this.gridError = String(e.message || e); this.grid = null;
@@ -2822,65 +2854,120 @@ document.addEventListener('alpine:init', () => {
       this.$nextTick(() => this.paintTimeScatter());
     },
 
-    /* Age gradient, oldest to newest. The point of the panel is the PATH, and
-     * a path needs a direction — without the gradient it is an undifferentiated
-     * cloud and a hysteresis loop is invisible again, which is the exact
-     * failure two separate line charts already have. */
-    paintTimeScatter() {
-      const j = this.tscat;
-      if (!j || typeof Chart === 'undefined') return;
-      const el = document.getElementById('eq-tscat');
-      if (!el) return;
-      const pts = j.points.filter(p => p.x != null && p.y != null);
-      if (!pts.length) return;
-      const hist = pts.filter(p => !p.today);
-      const today = pts.filter(p => p.today);
+    /* ONE age-scatter renderer, shared by Path and Spot-vol.
+     *
+     * These were two implementations of the same rule -- older points on an
+     * age gradient, the most recent EQ_RECENT_N in pink, the current reading
+     * highlighted -- and they diverged on screen three times running despite
+     * calling the same ramp helpers. A rule written twice is a rule that will
+     * diverge again, so there is now one path and the callers differ only in
+     * what they hand it.
+     *
+     * cfg: { key, el, hist, highlight, fit, xTitle, yTitle, xTick, yTick,
+     *        label }
+     *   hist       oldest-first. Order IS the age, so the caller must not
+     *              re-sort it.
+     *   highlight  the single current point, drawn brightest, or null.
+     *   fit        [{x,y},{x,y}] for a regression line, or null.
+     */
+    paintAgeScatter(cfg) {
+      if (typeof Chart === 'undefined') return;
+      const el = document.getElementById(cfg.el);
+      if (!el || !cfg.hist.length) return;
+      if (EQ_CHARTS[cfg.key]) { EQ_CHARTS[cfg.key].destroy(); EQ_CHARTS[cfg.key] = null; }
 
       const self = this;
-      EQ_CHARTS.tscat = new Chart(el.getContext('2d'), {
+      const hist = cfg.hist;
+      const hi   = cfg.highlight ? [cfg.highlight] : [];
+      const datasets = [];
+
+      if (cfg.fit && cfg.fit.length === 2) {
+        datasets.push({
+          label: 'fit', data: cfg.fit, parsing: false, showLine: true,
+          borderColor: this.rgba(EQ_BLUE, 0.7), borderWidth: 1,
+          borderDash: [5, 3], pointRadius: 0, order: 4,
+        });
+      }
+      datasets.push({
+        label: cfg.label || 'history',
+        data: hist.map(p => ({ x: p.x, y: p.y })), parsing: false, showLine: false,
+        pointRadius: hist.map((_, i) => eqRecentRadius(i, hist.length)),
+        pointHoverRadius: 6,
+        pointBackgroundColor: hist.map((_, i) => eqRecentColor(i, hist.length)),
+        // A thin dark ring on the recent run only. Ten pink dots in a quiet
+        // stretch land almost on top of each other and read as about five;
+        // the ring keeps them individually countable without making the
+        // older cloud noisier.
+        pointBorderColor: hist.map((_, i) =>
+          (hist.length - 1 - i) < EQ_RECENT_N ? 'rgba(20,20,20,0.85)' : 'transparent'),
+        pointBorderWidth: hist.map((_, i) =>
+          (hist.length - 1 - i) < EQ_RECENT_N ? 0.75 : 0),
+        order: 2,
+      });
+      if (hi.length) {
+        datasets.push({
+          label: 'current', data: hi.map(p => ({ x: p.x, y: p.y })),
+          parsing: false, showLine: false,
+          pointRadius: 6, pointHoverRadius: 8,
+          pointBackgroundColor: cfg.highlightHollow ? EQ_SURF : EQ_PINK,
+          pointBorderColor: cfg.highlightHollow ? EQ_PINK : '#ffffff',
+          pointBorderWidth: cfg.highlightHollow ? 2 : 1.5,
+          order: 1,
+        });
+      }
+
+      const fitOffset = (cfg.fit && cfg.fit.length === 2) ? 1 : 0;
+      EQ_CHARTS[cfg.key] = new Chart(el.getContext('2d'), {
         type: 'scatter',
-        data: {
-          datasets: [
-            { label: 'path', data: hist.map(p => ({ x: p.x, y: p.y })),
-              parsing: false, showLine: false,
-              pointRadius: hist.map((_, i) => eqRecentRadius(i, hist.length)),
-              pointHoverRadius: 5,
-              pointBackgroundColor: hist.map((_, i) => eqRecentColor(i, hist.length)),
-              pointBorderWidth: 0, order: 2 },
-            { label: 'today', data: today.map(p => ({ x: p.x, y: p.y })),
-              parsing: false, showLine: false,
-              pointRadius: 6, pointHoverRadius: 8,
-              pointBackgroundColor: EQ_PINK,
-              pointBorderColor: '#ffffff', pointBorderWidth: 1.5, order: 1 },
-          ],
-        },
+        data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { right: 10 } },
           scales: {
-            x: { title: { display: true, text: j.x.column_name, color: '#8a8a8a',
+            x: { title: { display: true, text: cfg.xTitle, color: '#8a8a8a',
                           font: { size: 10 } },
-                 ticks: { callback: v => self.fmtShort(v, j.x.units) },
+                 ticks: { callback: v => cfg.xTick(v) },
                  grid: { color: 'rgba(255,255,255,0.05)' } },
-            y: { title: { display: true, text: j.y.column_name, color: '#8a8a8a',
+            y: { title: { display: true, text: cfg.yTitle, color: '#8a8a8a',
                           font: { size: 10 } },
-                 ticks: { callback: v => self.fmtShort(v, j.y.units) },
+                 ticks: { callback: v => cfg.yTick(v) },
                  grid: { color: 'rgba(255,255,255,0.05)' } },
           },
           plugins: {
             legend: { display: false },
-            tooltip: { callbacks: {
-              label: it => {
-                const src = it.datasetIndex === 0 ? hist : today;
-                const p = src[it.dataIndex];
-                return p ? `${p.date}  ${self.fmtShort(p.x, j.x.units)} / `
-                         + `${self.fmtShort(p.y, j.y.units)}` : '';
+            tooltip: {
+              filter: it => it.datasetIndex !== (fitOffset - 1),
+              callbacks: {
+                label: it => {
+                  const src = it.datasetIndex === fitOffset ? hist : hi;
+                  const p = src[it.dataIndex];
+                  return p ? cfg.tip(p) : '';
+                },
               },
-            } },
+            },
             eqZeroLines: { x: true, y: true },
           },
         },
         plugins: [eqZeroLines],
+      });
+    },
+
+    /* The point of the panel is the PATH, and a path needs a direction. */
+    paintTimeScatter() {
+      const j = this.tscat;
+      if (!j) return;
+      const pts = j.points.filter(p => p.x != null && p.y != null);
+      const today = pts.find(p => p.today) || null;
+      const hist = pts.filter(p => !p.today);
+      const self = this;
+      this.paintAgeScatter({
+        key: 'tscat', el: 'eq-tscat', hist, highlight: today,
+        highlightHollow: false, fit: null,
+        xTitle: j.x.column_name, yTitle: j.y.column_name,
+        xTick: v => self.fmtShort(v, j.x.units),
+        yTick: v => self.fmtShort(v, j.y.units),
+        tip: p => `${p.date}  ${self.fmtShort(p.x, j.x.units)} / `
+                + `${self.fmtShort(p.y, j.y.units)}`,
       });
     },
 
@@ -2908,73 +2995,32 @@ document.addEventListener('alpine:init', () => {
 
     paintSpotVol() {
       const j = this.svol;
-      if (!j || typeof Chart === 'undefined') return;
-      const el = document.getElementById('eq-svol');
-      if (!el) return;
+      if (!j) return;
       const hist = j.points.filter(p => !p.partial);
-      const live = j.points.filter(p => p.partial);
+      const live = j.points.find(p => p.partial) || null;
       if (!hist.length) return;
 
       const xs = hist.map(p => p.ret);
       const lo = Math.min(...xs), hi = Math.max(...xs);
-      const line = (j.fit && j.fit.beta != null)
+      const fit = (j.fit && j.fit.beta != null)
         ? [{ x: lo, y: j.fit.alpha + j.fit.beta * lo },
            { x: hi, y: j.fit.alpha + j.fit.beta * hi }]
-        : [];
+        : null;
 
-      const self = this;
-      EQ_CHARTS.svol = new Chart(el.getContext('2d'), {
-        type: 'scatter',
-        data: {
-          datasets: [
-            { label: 'fit', data: line, parsing: false, showLine: true,
-              borderColor: this.rgba(EQ_BLUE, 0.7), borderWidth: 1,
-              borderDash: [5, 3], pointRadius: 0, order: 3 },
-            { label: 'overnight moves', data: hist.map(p => ({ x: p.ret, y: p.d_iv })),
-              parsing: false, showLine: false,
-              pointRadius: hist.map((_, i) => eqRecentRadius(i, hist.length)),
-              pointHoverRadius: 5,
-              pointBackgroundColor: hist.map((_, i) => eqRecentColor(i, hist.length)),
-              pointBorderWidth: 0, order: 2 },
-            // Hollow, like the live point on the history line and for the same
-            // reason: a part-session move is not an overnight move, and it is
-            // shown on the cloud but excluded from the fit.
-            { label: 'today (partial session)',
-              data: live.map(p => ({ x: p.ret, y: p.d_iv })),
-              parsing: false, showLine: false, pointRadius: 6,
-              pointHoverRadius: 8, pointBackgroundColor: EQ_SURF,
-              pointBorderColor: EQ_PINK, pointBorderWidth: 2, order: 1 },
-          ],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false, animation: false,
-          layout: { padding: { right: 10 } },
-          scales: {
-            x: { title: { display: true, text: 'underlying log return',
-                          color: '#8a8a8a', font: { size: 10 } },
-                 ticks: { callback: v => (v * 100).toFixed(1) + '%' },
-                 grid: { color: 'rgba(255,255,255,0.05)' } },
-            y: { title: { display: true, text: 'Δ ATM IV', color: '#8a8a8a',
-                          font: { size: 10 } },
-                 ticks: { callback: v => (v * 100).toFixed(1) + 'pt' },
-                 grid: { color: 'rgba(255,255,255,0.05)' } },
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: { filter: it => it.datasetIndex !== 0, callbacks: {
-              label: it => {
-                const src = it.datasetIndex === 1 ? hist : live;
-                const p = src[it.dataIndex];
-                if (!p) return '';
-                return `${p.date}  ret ${(p.ret * 100).toFixed(2)}%  `
-                     + `ΔIV ${(p.d_iv * 100).toFixed(2)}pt`
-                     + (p.partial ? '  · partial session, not in the fit' : '');
-              },
-            } },
-            eqZeroLines: { x: true, y: true },
-          },
-        },
-        plugins: [eqZeroLines],
+      this.paintAgeScatter({
+        key: 'svol', el: 'eq-svol',
+        hist: hist.map(p => ({ x: p.ret, y: p.d_iv, date: p.date, partial: false })),
+        // Hollow, like the live point on the history line and for the same
+        // reason: a part-session move is not an overnight move.
+        highlight: live ? { x: live.ret, y: live.d_iv, date: live.date, partial: true } : null,
+        highlightHollow: true,
+        fit,
+        xTitle: 'underlying log return', yTitle: 'Δ ATM IV',
+        xTick: v => (v * 100).toFixed(1) + '%',
+        yTick: v => (v * 100).toFixed(1) + 'pt',
+        tip: p => `${p.date}  ret ${(p.x * 100).toFixed(2)}%  `
+                + `ΔIV ${(p.y * 100).toFixed(2)}pt`
+                + (p.partial ? '  · partial session, not in the fit' : ''),
       });
     },
 
@@ -3029,7 +3075,8 @@ document.addEventListener('alpine:init', () => {
         const base = { ticker: this.selectedTicker, date: this.oiDate,
                        side: this.oiSide };
         const q = new URLSearchParams(base);
-        if (this.oiDteBand) q.set('dte_bands', this.oiDteBand);
+        const dteParam = this.oiDteParam();
+        if (dteParam) q.set('dte_bands', dteParam);
         if (this.oiTab === 'doi') q.set('n', String(this.oiDoiN));
         if (this.oiTab === 'flow') { q.set('lookback', String(this.oiLookback)); q.set('mode', 'oi'); }
         const path = this.oiTab === 'profile' ? 'oi-profile'
@@ -3041,15 +3088,40 @@ document.addEventListener('alpine:init', () => {
         // every tab rather than appearing on one.
         const wantRef = this.oiTab !== 'profile';
         const rq = new URLSearchParams(base);
-        if (this.oiDteBand) rq.set('dte_bands', this.oiDteBand);
-        const [j, rj] = await Promise.all([
+        if (dteParam) rq.set('dte_bands', dteParam);
+
+        /* The flow map's matrix is total OI per (strike, session) — the
+         * endpoint sums both option types unless `side` filters — so a
+         * per-session CALL and PUT weighted average cannot be derived from
+         * it. It can be derived from two more flow fetches at side=call and
+         * side=put, which is cheaper than it looks: each is one parquet pass
+         * over the same window, cached server-side on the same key, and the
+         * column-wise weighting afterwards is arithmetic on data already in
+         * hand. So it costs two extra reads on the FIRST view of the flow tab
+         * per (ticker, date, lookback, DTE band) and nothing on re-render or
+         * zoom. */
+        const sideFlow = (sd) => {
+          const fq = new URLSearchParams(base);
+          fq.set('side', sd);
+          fq.set('lookback', String(this.oiLookback));
+          fq.set('mode', 'oi');
+          if (dteParam) fq.set('dte_bands', dteParam);
+          return eqGetJson('/api/ticker-analysis/chain/flow?' + fq);
+        };
+        const wantFlowSides = this.oiTab === 'flow';
+
+        const [j, rj, cf, pf] = await Promise.all([
           eqGetJson(`/api/ticker-analysis/chain/${path}?` + q),
           wantRef ? eqGetJson('/api/ticker-analysis/chain/oi-profile?' + rq)
                   : Promise.resolve(null),
+          wantFlowSides ? sideFlow('call') : Promise.resolve(null),
+          wantFlowSides ? sideFlow('put')  : Promise.resolve(null),
         ]);
 
         if (j.error) { this.oiError = j.error; this.oi = null; return; }
         this.oiRef = this.oiRefLevels(rj || j);
+        this.oiFlowCall = this.oiWeightedPath(cf);
+        this.oiFlowPut  = this.oiWeightedPath(pf);
         if (j.empty) {
           this.oi = j;
           this.oiError = `No chain rows for ${this.oiDate} at this DTE / side `
@@ -3089,6 +3161,28 @@ document.addEventListener('alpine:init', () => {
       return out;
     },
 
+    /* Column-wise OI-weighted average strike: sum(strike * oi) / sum(oi) per
+     * session. Sessions with no OI at all yield null rather than 0, so the
+     * line breaks instead of diving to the axis. */
+    oiWeightedPath(j) {
+      if (!j || j.error || j.empty) return null;
+      const strikes = (j.strikes || []).map(Number);
+      const matrix = j.matrix || [];
+      const dates = j.dates || [];
+      if (!strikes.length || !matrix.length) return null;
+      const out = [];
+      for (let di = 0; di < dates.length; di++) {
+        let w = 0, ws = 0;
+        for (let si = 0; si < matrix.length; si++) {
+          const v = Number((matrix[si] || [])[di]);
+          if (!isFinite(v) || v <= 0) continue;
+          w += v; ws += v * strikes[si];
+        }
+        out.push(w > 0 ? { x: di, y: ws / w } : null);
+      }
+      return out.filter(Boolean);
+    },
+
     toggleOi() {
       this.oiOpen = !this.oiOpen;
       if (this.oiOpen) this.loadOi();
@@ -3096,7 +3190,31 @@ document.addEventListener('alpine:init', () => {
 
     setOiTab(t) { if (this.oiTab !== t) { this.oiTab = t; this.loadOi(); } },
     setOiSide(v) { if (this.oiSide !== v) { this.oiSide = v; this.loadOi(); } },
-    setOiDteBand(v) { if (this.oiDteBand !== v) { this.oiDteBand = v; this.loadOi(); } },
+    /** Toggle one band. "all" is the empty selection, so picking it clears. */
+    toggleOiDte(v) {
+      if (!v) {
+        if (!this.oiDteSel.length) return;
+        this.oiDteSel = [];
+      } else {
+        const i = this.oiDteSel.indexOf(v);
+        if (i >= 0) this.oiDteSel.splice(i, 1);
+        else this.oiDteSel.push(v);
+      }
+      this.loadOi();
+    },
+
+    oiDteOn(v) {
+      return v ? this.oiDteSel.includes(v) : this.oiDteSel.length === 0;
+    },
+
+    /** The CSV the chain endpoints want, or '' for every expiry. */
+    oiDteParam() {
+      // Ordered by their low bound so the value is stable regardless of the
+      // order they were clicked -- it is a cache key on the server.
+      return [...this.oiDteSel]
+        .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
+        .join(',');
+    },
 
     setOiDateIdx(i) {
       const n = parseInt(i, 10);
@@ -3289,6 +3407,17 @@ document.addEventListener('alpine:init', () => {
               data: (j.spots || []).map((s, i) => (s == null ? null : { x: i, y: s }))
                                    .filter(Boolean),
               borderColor: '#e8e8e8', borderWidth: 1, order: 1 },
+            // Where the call and put books sat, session by session. Their
+            // spread against each other, and against the spot path, is the
+            // thing a single end-of-window number cannot show.
+            { label: 'call OI avg', parsing: false, showLine: true, pointRadius: 0,
+              data: this.oiFlowCall || [],
+              borderColor: this.rgba(EQ_BLUE, 0.9), borderWidth: 1,
+              borderDash: [3, 2], order: 1 },
+            { label: 'put OI avg', parsing: false, showLine: true, pointRadius: 0,
+              data: this.oiFlowPut || [],
+              borderColor: this.rgba(EQ_PINK, 0.9), borderWidth: 1,
+              borderDash: [3, 2], order: 1 },
           ],
         },
         options: {
@@ -3313,6 +3442,7 @@ document.addEventListener('alpine:init', () => {
                      + `${p.v >= 0 ? '+' : ''}${self.fmtShort(p.v, 'count')}`;
               },
             } },
+            // Today's levels, drawn only at the right edge — see eqRefLines.
             eqRefLines: this._oiRefPlugin(true),
           },
         },
