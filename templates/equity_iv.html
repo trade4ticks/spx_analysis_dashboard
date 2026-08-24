@@ -1147,6 +1147,8 @@
                   style="display:block;margin-top:3px"></span>
             <span x-show="tentSigmaNote()" x-text="tentSigmaNote()"
                   class="eq-section-sub" style="display:block;margin-top:3px"></span>
+            <span x-show="tentGhostNote()" x-text="tentGhostNote()"
+                  class="eq-section-sub" style="display:block;margin-top:3px"></span>
             <template x-for="g in (tent ? tent.geometry_problems : [])" :key="'gp-'+g">
               <span class="eq-warn" style="display:block;margin-top:3px" x-text="g"></span>
             </template>

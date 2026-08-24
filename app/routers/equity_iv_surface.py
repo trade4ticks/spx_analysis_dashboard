@@ -309,6 +309,19 @@ async def curve_band(
 TENT_CANDIDATES = {
     "zc_width":  ("zc_width_sigma_{t}d",),
     "zc_delta":  ("zc_short_delta_{t}d",),
+    # The 25-delta LONG leg's sigma. Specced and pre-wired, not yet backfilled
+    # — _first_live returns None until it lands and the ghost tent stays dark,
+    # then lights up on its own with no code change. Several candidate names
+    # because the metrics project owns the final one.
+    #
+    # It has to be STORED rather than derived here, and not only on the
+    # general principle. The ghost's long position is a historical MEDIAN, so
+    # deriving it would mean re-reading the surface and re-deriving the
+    # convention on every prior session in the window — the same second
+    # implementation that put the short marker 0.13 sigma off its own band,
+    # replicated ~250 times instead of once.
+    "long_sigma": ("long_sigma_{t}d", "zc_long_sigma_{t}d",
+                   "long_width_sigma_{t}d"),
     "zc_cost":   ("zc_cost_{t}d", "cost_zero_cost_{t}d"),
     "dn_cost":   ("cost_at_delta_neutral_{t}d", "cost_at_delta_neutral"),
     "dn_width":  ("dn_width_sigma_{t}d", "delta_neutral_width_sigma_{t}d"),
@@ -394,18 +407,24 @@ async def tent(
                 ticker, d, snap,
             )
 
-        # The width's own history, on the page's scoring rule: daily closes,
-        # ending at the prior session.
-        band = None
+        # Both legs' own history, on the page's scoring rule: daily closes,
+        # ending at the prior session. One pass — the two share a WHERE, and
+        # the ghost needs their medians on the same set of sessions or it is
+        # drawing a structure that never existed on any single day.
+        band_sel = []
         if cols["zc_width"]:
-            wexpr  = 'm."{}"'.format(cols["zc_width"])
+            band_sel.append(_band_aggs('m."{}"'.format(cols["zc_width"]), "b"))
+        if cols["long_sigma"]:
+            band_sel.append(_band_aggs('m."{}"'.format(cols["long_sigma"]), "l"))
+        band_row = None
+        if band_sel:
             bargs  = [ticker, BASELINE_SNAPSHOT, d]
             bwhere = "m.ticker = $1 AND m.snapshot = $2 AND m.trade_date < $3"
             if start:
                 bargs.append(start)
                 bwhere += f" AND m.trade_date >= ${len(bargs)}"
-            band = await conn.fetchrow(
-                f"SELECT {_band_aggs(wexpr, 'b')} "
+            band_row = await conn.fetchrow(
+                f"SELECT {', '.join(band_sel)} "
                 f"FROM {METRICS_TABLE} m WHERE {bwhere}",
                 *bargs,
             )
@@ -515,18 +534,66 @@ async def tent(
             return None
         return sigma_scale * math.log(strike / spot)
 
-    for lg in (long_leg, short_leg):
-        if lg:
-            lg["sigma"] = sigma_of(lg["strike"])
+    if short_leg:
+        short_leg["sigma"] = sigma_of(short_leg["strike"])
+
+    # The long leg prefers its own stored sigma and falls back to the
+    # calibrated scale only while long_sigma_{t}d is unbackfilled. Both are
+    # on the same axis and the same sign convention (stored is positive and
+    # increasing with distance; the axis is negative below spot).
+    stored_long = m("long_sigma")
+    long_source = None
+    if long_leg:
+        if stored_long is not None:
+            long_leg["sigma"] = -abs(stored_long)
+            long_source = "stored"
+        else:
+            long_leg["sigma"] = sigma_of(long_leg["strike"])
+            long_source = "calibrated" if long_leg["sigma"] is not None else None
+
+    band      = _band_of(band_row, "b") if (cols["zc_width"] and band_row is not None) else None
+    long_band = _band_of(band_row, "l") if (cols["long_sigma"] and band_row is not None) else None
+
+    # ── The ghost: the average structure, from stored medians ───────────────
+    # Today's tent alone cannot say WHICH leg moved. The long's sigma is a
+    # function of the smile's slope between ATM and 25 delta, so it travels
+    # with skew exactly as the short does, off a different segment of the same
+    # curve — measured across the universe it moves about half as much as the
+    # short and is 0.78 correlated with it. So a narrow-looking tent can be the
+    # short coming in, the long going out, or the pair sliding toward spot, and
+    # the short's band cannot separate those. The median structure drawn behind
+    # today's makes them three visibly different pictures.
+    ghost = None
+    ghost_reason = None
+    if band is None or band.get("p50") is None:
+        ghost_reason = "no history for the short leg in this window"
+    elif long_band is None:
+        ghost_reason = ("long_sigma_{t}d is not in equity_metrics yet — the "
+                        "ghost needs the long leg's sigma on every prior "
+                        "session, which is a stored column, not something this "
+                        "panel should derive").format(t=use_dte)
+    elif long_band.get("p50") is None:
+        ghost_reason = "no history for the long leg in this window"
+    else:
+        ghost = {
+            "long_sigma":  -abs(long_band["p50"]),
+            "short_sigma": -abs(band["p50"]),
+            "n": min(band.get("n") or 0, long_band.get("n") or 0),
+        }
 
     sigma_basis = {
-        "source":   cols["zc_width"],
-        "value":    stored_width,
+        "source":     cols["zc_width"],
+        "value":      stored_width,
+        "long_source": long_source,
+        "long_column": cols["long_sigma"],
+        "long_value":  stored_long,
         "scale_per_log_moneyness": sigma_scale,
         "note": ("sigma is the stored metric, not a derivation. The short leg "
-                 "sits at -zc_width_sigma by construction; the long leg is "
-                 "placed on a scale calibrated from that same stored pair, so "
-                 "there is one source on this axis and nothing to drift."),
+                 "sits at -zc_width_sigma by construction. The long leg reads "
+                 "long_sigma_{t}d when it exists; until that backfill lands it "
+                 "is placed on a scale calibrated from the stored short pair, "
+                 "which is exact for today but cannot produce a historical "
+                 "median — hence no ghost until the column ships."),
     }
 
     # Two invariants that must hold for the drawn structure to be a put ratio
@@ -575,7 +642,10 @@ async def tent(
         "dn_cost":        m("dn_cost"),
         "dn_width_sigma": m("dn_width"),
         "dn_short_delta": m("dn_delta"),
-        "band": _band_of(band, "b") if band is not None else None,
+        "band":      band,
+        "long_band": long_band,
+        "ghost":     ghost,
+        "ghost_unavailable_because": ghost_reason,
         "sigma_basis": sigma_basis,
         "resolved": cols,
         "exclude_extrapolated": bool(exclude_extrapolated),

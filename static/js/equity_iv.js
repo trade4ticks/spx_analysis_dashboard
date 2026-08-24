@@ -376,46 +376,44 @@ const EQ_GRID_VIEWS = [
 const eqTentMarks = {
   id: 'eqTentMarks',
   beforeDatasetsDraw(chart, args, opts) {
-    if (!opts || !opts.xs) return;
+    if (!opts) return;
     const { ctx, scales } = chart;
     const xs = scales.x, ys = scales.y;
     if (!xs || !ys) return;
-    const px = sig => {
-      // The x scale is categorical over `opts.xs`, so a σ value has to be
-      // located by interpolating its position in that array.
-      const arr = opts.xs;
-      if (!arr.length) return null;
-      if (sig <= arr[0]) return xs.getPixelForValue(0);
-      if (sig >= arr[arr.length - 1]) return xs.getPixelForValue(arr.length - 1);
-      let i = 0;
-      while (i < arr.length - 1 && arr[i + 1] < sig) i++;
-      const span = arr[i + 1] - arr[i];
-      const t = span === 0 ? 0 : (sig - arr[i]) / span;
-      return xs.getPixelForValue(i) + (xs.getPixelForValue(i + 1) - xs.getPixelForValue(i)) * t;
-    };
+    // The x scale is LINEAR in sigma, so a value maps straight to a pixel.
+    // This used to interpolate a position in a category array, which put every
+    // marker up to half a sample off its own kink.
+    const px = sig => (sig == null ? null : xs.getPixelForValue(sig));
     ctx.save();
 
-    // The band, as a shaded region on the σ axis: this is where the zero-cost
-    // short USUALLY sits, so today's marker inside or outside it is the read.
-    const b = opts.band;
-    if (b && b.p25 != null && b.p75 != null) {
-      const a = px(-Math.abs(b.p75)), c = px(-Math.abs(b.p25));
-      if (a != null && c != null) {
-        ctx.fillStyle = 'rgba(255,255,255,0.07)';
-        ctx.fillRect(Math.min(a, c), ys.top, Math.abs(c - a), ys.bottom - ys.top);
+    // Each leg's band, as a shaded region on the σ axis: where that leg
+    // USUALLY sits, so today's marker inside or outside it is the read. Both
+    // legs get identical treatment — the long moves for the same reason the
+    // short does, off a different segment of the smile, so showing dispersion
+    // on only one of them silently attributes all the movement to that one.
+    const drawBand = b => {
+      if (!b) return;
+      if (b.p25 != null && b.p75 != null) {
+        const a = px(-Math.abs(b.p75)), c = px(-Math.abs(b.p25));
+        if (a != null && c != null) {
+          ctx.fillStyle = 'rgba(255,255,255,0.07)';
+          ctx.fillRect(Math.min(a, c), ys.top, Math.abs(c - a), ys.bottom - ys.top);
+        }
       }
-    }
-    if (b && b.p5 != null && b.p95 != null) {
-      const a = px(-Math.abs(b.p95)), c = px(-Math.abs(b.p5));
-      if (a != null && c != null) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.16)';
-        ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
-        [a, c].forEach(x => {
-          ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
-        });
-        ctx.setLineDash([]);
+      if (b.p5 != null && b.p95 != null) {
+        const a = px(-Math.abs(b.p95)), c = px(-Math.abs(b.p5));
+        if (a != null && c != null) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+          ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+          [a, c].forEach(x => {
+            ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
+          });
+          ctx.setLineDash([]);
+        }
       }
-    }
+    };
+    drawBand(opts.band);
+    drawBand(opts.longBand);
 
     const mark = (sig, col, label) => {
       if (sig == null) return;
@@ -431,6 +429,19 @@ const eqTentMarks = {
     mark(opts.shortSigma, EQ_PINK, 'short ×2');
     mark(opts.longSigma, EQ_BLUE, 'long');
     mark(opts.dnSigma, '#f0a30a', 'Δ-neutral');
+
+    // Direct label on the ghost's peak rather than a legend box: two series
+    // in a panel this tight, and identity should not rest on a grey line
+    // being recognised as "the other one".
+    if (opts.ghost && opts.ghost.short_sigma != null) {
+      const x = px(opts.ghost.short_sigma);
+      if (x != null) {
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.font = "700 9px 'Segoe UI', system-ui, sans-serif";
+        ctx.textAlign = 'center';
+        ctx.fillText('usual', x, ys.bottom + 11);
+      }
+    }
     ctx.restore();
   },
 };
@@ -2450,45 +2461,98 @@ document.addEventListener('alpine:init', () => {
        * exactly the thing that varies by name and by day. So the span of
        * interest is measured, then padded to 1/0.8 of itself. */
       const band = j.band || {};
-      const marks = [S.sigma, L.sigma, 0].concat(
-        [band.p5, band.p25, band.p50, band.p75, band.p95]
-          .filter(v => v != null).map(v => -Math.abs(v)));
+      const lband = j.long_band || {};
+      const G = j.ghost;
+      const bandMarks = b => [b.p5, b.p25, b.p50, b.p75, b.p95]
+        .filter(v => v != null).map(v => -Math.abs(v));
+      const marks = [S.sigma, L.sigma, 0]
+        .concat(bandMarks(band))
+        .concat(bandMarks(lband))
+        .concat(G ? [G.long_sigma, G.short_sigma].filter(v => v != null) : []);
       const iLo = Math.min(...marks), iHi = Math.max(...marks);
       const span = Math.max(0.4, iHi - iLo);
       const pad  = span * (1 / 0.8 - 1) / 2;
       const lo = iLo - pad, hi = iHi + pad;
-      const step = (hi - lo) / 160;
-      const xs = [], ys = [];
       const net = (j.zc_cost != null) ? j.zc_cost : 0;
-      // Payoff in the same sigma units as the x axis, so the vertical scale
-      // is "implied moves of P&L" rather than dollars — comparable across
-      // dates and names, which is the point of the whole panel.
-      for (let s = lo; s <= hi + 1e-9; s += step) {
-        const longPay  = Math.max(0, L.sigma - s);
-        const shortPay = -2 * Math.max(0, S.sigma - s);
-        xs.push(s);
-        ys.push(longPay + shortPay - net);
+
+      /* A dense grid for hovering, PLUS the kinks themselves as exact
+       * samples. On a uniform grid alone each vertex lands between two
+       * samples and the peak is clipped by up to half a step — visible as a
+       * marker line that misses the apex, and enough to stop the ghost's peak
+       * matching today's even when the arithmetic behind it was right. The x
+       * scale is linear (not categorical) precisely so these extra,
+       * unevenly-spaced points do not distort the axis. */
+      const xs = [];
+      for (let i = 0; i <= 160; i++) xs.push(lo + (hi - lo) * i / 160);
+      for (const v of [L.sigma, S.sigma].concat(G ? [G.long_sigma, G.short_sigma] : [])) {
+        if (v != null && v > lo && v < hi) xs.push(v);
+      }
+      xs.sort((a, b) => a - b);
+
+      // Payoff in the same sigma units as the x axis, so the vertical scale is
+      // "implied moves of P&L" rather than dollars — comparable across dates
+      // and names, which is the point of the whole panel.
+      const payoff = (lng, shrt, k) => xs.map(x => ({
+        x, y: k * (Math.max(0, lng - x) - 2 * Math.max(0, shrt - x)) - net,
+      }));
+      const ys = payoff(L.sigma, S.sigma, 1);
+
+      /* The ghost: the same payoff shape at the MEDIAN long and short sigma.
+       *
+       * Scaled so its peak matches today's, deliberately. The two structures
+       * generally cost different amounts, and an unnormalised ghost carries
+       * that as a height difference — at which point "today is taller" reads
+       * as "today is wider", which is a claim about a different leg entirely.
+       * Matching heights strips the cost out and leaves only geometry: where
+       * each kink sits. Narrower-than-usual and closer-to-spot-than-usual then
+       * look different on the page instead of needing two numbers compared in
+       * your head.
+       *
+       * Matched on WIDTH rather than on drawn peak height, and today's net is
+       * applied to both. Peak height is width minus cost, so a debit bigger
+       * than the width makes it negative — normalising on that would scale the
+       * ghost by a negative number and draw it upside down. Width is always
+       * positive, the shared net is a common vertical offset, and the peaks
+       * still coincide exactly: k*gW - net == tW - net. */
+      let gys = null;
+      if (G && G.long_sigma != null && G.short_sigma != null) {
+        const tW = L.sigma - S.sigma;              // today's width, > 0
+        const gW = G.long_sigma - G.short_sigma;   // the usual width, > 0
+        if (tW > 0 && gW > 0) {
+          gys = payoff(G.long_sigma, G.short_sigma, tW / gW);
+        }
       }
 
       const self = this;
+      /* Ghost first so today's line paints over it. Neither dataset sets
+       * `order`, so Chart.js keeps array order and index 0 draws behind. */
+      const datasets = [];
+      if (gys) {
+        datasets.push({
+          label: 'usual', data: gys,
+          borderColor: 'rgba(255,255,255,0.24)', borderWidth: 1.25,
+          pointRadius: 0, tension: 0, fill: false,
+        });
+      }
+      datasets.push({
+        label: 'today', data: ys,
+        borderColor: EQ_BLUE, borderWidth: 1.25, pointRadius: 0,
+        tension: 0, fill: false,
+      });
+
       EQ_CHARTS.tent = new Chart(el.getContext('2d'), {
         type: 'line',
-        data: {
-          labels: xs.map(x => x.toFixed(2)),
-          datasets: [{
-            label: 'payoff', data: ys,
-            borderColor: EQ_BLUE, borderWidth: 1.25, pointRadius: 0,
-            tension: 0, fill: false,
-          }],
-        },
+        data: { datasets },
         options: {
           responsive: true, maintainAspectRatio: false, animation: false,
           layout: { padding: { right: 10 } },
           interaction: { mode: 'index', intersect: false },
           scales: {
-            x: { title: { display: true, text: 'σ from spot (ATM implied move)',
+            x: { type: 'linear', min: lo, max: hi,
+                 title: { display: true, text: 'σ from spot (ATM implied move)',
                           color: '#8a8a8a', font: { size: 10 } },
-                 ticks: { maxTicksLimit: 9, maxRotation: 0 },
+                 ticks: { maxTicksLimit: 9, maxRotation: 0,
+                          callback: v => Number(v).toFixed(2) },
                  grid: { display: false } },
             y: { grid: { color: 'rgba(255,255,255,0.05)' },
                  ticks: { callback: v => v.toFixed(2) } },
@@ -2496,13 +2560,14 @@ document.addEventListener('alpine:init', () => {
           plugins: {
             legend: { display: false },
             tooltip: { callbacks: {
-              title: it => `${Number(it[0].label).toFixed(2)}σ`,
-              label: it => `payoff ${it.parsed.y.toFixed(3)}σ`,
+              title: it => `${it[0].parsed.x.toFixed(2)}σ`,
+              label: it => `${it.dataset.label} ${it.parsed.y.toFixed(3)}σ`,
             } },
             eqTentMarks: {
-              band: j.band, longSigma: L.sigma, shortSigma: S.sigma,
+              band: j.band, longBand: j.long_band,
+              longSigma: L.sigma, shortSigma: S.sigma,
               dnSigma: j.dn_width_sigma == null ? null : -Math.abs(j.dn_width_sigma),
-              xs,
+              ghost: G,
             },
           },
         },
@@ -2539,13 +2604,41 @@ document.addEventListener('alpine:init', () => {
            + `its own, is the skew reading in the units the entry uses.`;
     },
 
+    /** What the grey tent is, or why there isn't one yet. */
+    tentGhostNote() {
+      const j = this.tent;
+      if (!j) return '';
+      if (j.ghost) {
+        const g = j.ghost;
+        return `Grey "usual" tent: the median structure over the window `
+             + `(long ${Math.abs(g.long_sigma).toFixed(2)}σ, short `
+             + `${Math.abs(g.short_sigma).toFixed(2)}σ, n=${g.n}), peak-matched `
+             + `to today's so only the geometry differs — a tent that is `
+             + `narrower than usual and one that sits closer to spot than usual `
+             + `are different pictures, and the short's band alone cannot tell `
+             + `them apart.`;
+      }
+      return j.ghost_unavailable_because
+        ? `No "usual" tent: ${j.ghost_unavailable_because}.`
+        : '';
+    },
+
     /** Where the sigma axis comes from. One source, so there is no mismatch
      *  to warn about — this states the provenance instead. */
     tentSigmaNote() {
       const b = this.tent && this.tent.sigma_basis;
       if (!b || b.value == null) return '';
-      return `σ from ${b.source || 'the stored metric'} = `
-           + `${b.value.toFixed(2)}σ, plotted as stored.`;
+      const short = `short σ from ${b.source || 'the stored metric'} = `
+                  + `${b.value.toFixed(2)}σ, plotted as stored`;
+      if (b.long_source === 'stored') {
+        return `${short}; long σ from ${b.long_column} = `
+             + `${Math.abs(b.long_value).toFixed(2)}σ, likewise.`;
+      }
+      if (b.long_source === 'calibrated') {
+        return `${short}; long σ placed on a scale calibrated from that same `
+             + `stored pair, pending the long_sigma backfill.`;
+      }
+      return `${short}.`;
     },
 
     // ── Row 7a: sticky-strike decomposition ─────────────────────────────
