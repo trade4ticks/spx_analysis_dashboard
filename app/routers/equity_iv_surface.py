@@ -89,8 +89,16 @@ def _nearest(values, want):
     return min(values, key=lambda v: abs(v - want))
 
 
+# P5 / P25 / P50 / P75 / P95 — the SAME five the rails use, so that "outside
+# the band" carries one meaning everywhere on the page. The tent shipped on
+# P10/P90 and the rails on P5/P95, which made the identical visual position
+# mean two different things one panel apart.
+BAND_QUANTILES = ((0.05, "p5"), (0.25, "p25"), (0.50, "p50"),
+                  (0.75, "p75"), (0.95, "p95"))
+
+
 def _band_aggs(expr: str, alias: str) -> str:
-    """P10 / P25 / P50 / P75 / P90 of one expression.
+    """P5 / P25 / P50 / P75 / P95 of one expression.
 
     Percentiles rather than mean +/- k*sd, for the reason stated throughout
     this page: these distributions are right-skewed and fat-tailed, so a
@@ -99,8 +107,7 @@ def _band_aggs(expr: str, alias: str) -> str:
     """
     return ", ".join(
         f"percentile_cont({q}) WITHIN GROUP (ORDER BY {expr}) AS {alias}_{nm}"
-        for q, nm in ((0.10, "p10"), (0.25, "p25"), (0.50, "p50"),
-                      (0.75, "p75"), (0.90, "p90"))
+        for q, nm in BAND_QUANTILES
     ) + f", count({expr}) AS {alias}_n"
 
 
@@ -108,7 +115,7 @@ def _band_of(row, alias):
     if row is None:
         return None
     out = {k: (None if row[f"{alias}_{k}"] is None else float(row[f"{alias}_{k}"]))
-           for k in ("p10", "p25", "p50", "p75", "p90")}
+           for _q, k in BAND_QUANTILES}
     out["n"] = int(row[f"{alias}_n"] or 0)
     return out
 
@@ -754,7 +761,7 @@ async def surface_grid(
 
         rows = await conn.fetch(
             f"SELECT s.dte, s.put_delta, s.iv, s.strike, s.extrapolated, "
-            f"       a.atm_iv, a.underlying_price AS spot "
+            f"       s.dte_actual, a.atm_iv, a.underlying_price AS spot "
             f"FROM {SURFACE_TABLE} s {join_atm} "
             f"WHERE s.ticker = $1 AND s.trade_date = $2 AND s.snapshot = $3 "
             f"ORDER BY s.dte, s.put_delta",
@@ -805,7 +812,7 @@ async def surface_grid(
         else:
             ref_date = None
 
-    cells, n_thin = [], 0
+    cells, n_thin, actual = [], 0, {}
     for r in rows:
         key = (int(r["dte"]), int(r["put_delta"]))
         iv  = None if r["iv"] is None else float(r["iv"])
@@ -835,11 +842,32 @@ async def surface_grid(
             "strike": None if r["strike"] is None else float(r["strike"]),
             "extrap": ex,
         })
+        if r["dte_actual"] is not None:
+            actual.setdefault(key[0], float(r["dte_actual"]))
+
+    # Per-tenor row metadata. `dte_actual` is the node's TRUE tenor, and a
+    # row where it differs from the target tenor was read off a listed expiry
+    # rather than blended from the two that bracket it. That distinction is
+    # invisible in the values and shows up as a step in the column -- AAPL's
+    # 7d row sitting below both 5d and 10d, for instance -- which reads as a
+    # data fault unless the grid says which rows are which.
+    #
+    # This reports the SIGNATURE, from stored data. The fit itself is built in
+    # the separate Open_Interest project, so this module cannot confirm the
+    # rule that produced it, only that the row carries a real expiry's tenor.
+    row_meta = []
+    for t in ax["dtes"]:
+        a = actual.get(t)
+        row_meta.append({
+            "dte": t, "dte_actual": a,
+            "direct": (a is not None and abs(a - t) > 0.01),
+        })
 
     return {
         "ticker": ticker, "date": str(d), "snapshot": snap,
         "view": view, "window": window,
         "dtes": ax["dtes"], "deltas": ax["deltas"],
+        "rows": row_meta,
         "cells": cells,
         "reference_date": _jsonable(ref_date),
         "n_thin_baseline": n_thin,

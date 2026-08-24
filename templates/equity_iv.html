@@ -24,10 +24,18 @@
 
     /* Control bar. Same look as .ctrl-strip but page-local, so spacing can
        be tuned without touching the global strip every other page uses. */
+    /* Sticky: this is the genuinely page-scoped set — ticker, date, snapshot,
+       z window, history window, extrapolation — and it is what you scroll back
+       for. Panel-scoped controls stay in their panels, where being adjacent to
+       the thing they change is most of what makes them readable.
+       --eq-ctrl-h is measured at runtime (syncCtrlHeight) so the ticker header
+       can stick directly beneath it however the bar wraps. */
     .eq-ctrl {
+      position:sticky; top:0; z-index:9;
       display:flex; align-items:center; gap:10px; flex-wrap:wrap;
       background:var(--surface); border:1px solid var(--border);
       border-radius:6px; padding:8px 12px; margin-bottom:12px;
+      box-shadow:0 4px 12px rgba(0,0,0,.45);
     }
     .eq-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
     .eq-spacer { margin-left:auto; }
@@ -181,6 +189,10 @@
        tables — an asterisk inside a 26px coloured cell is unreadable. */
     .eq-grid td.eq-fab { color:#e84393; box-shadow:inset 0 0 0 1px #e84393; }
     .eq-grid td.eq-fab::after { content:''; }
+    /* A tenor read straight off a listed expiry rather than blended from the
+       two that bracket it. Subtle on purpose: it explains a step in the
+       column, it is not a warning. */
+    .eq-direct { color:var(--accent); font-weight:700; margin-left:2px; }
 
 
     /* Range input, dark. The browser default is a light track that reads as
@@ -211,7 +223,7 @@
        purpose: it is the answer to "which ticker am I looking at", not a
        panel, and rows 4 and 5 are what the screen is for. */
     .eq-thdr {
-      position:sticky; top:0; z-index:6;
+      position:sticky; top:var(--eq-ctrl-h, 52px); z-index:6;
       display:flex; align-items:center; gap:12px; flex-wrap:wrap;
       background:var(--raised); border:1px solid var(--border); border-radius:6px;
       padding:7px 12px; margin-bottom:12px;
@@ -360,7 +372,7 @@
   <div class="eq-body">
 
     <!-- ── Page controls ──────────────────────────────────────────────── -->
-    <div class="eq-ctrl">
+    <div class="eq-ctrl" id="eq-ctrl">
       <span class="eq-lbl">Date</span>
       <select class="eq-sel" x-model="date" @change="onDateChange()">
         <template x-for="d in dates" :key="d.date">
@@ -1056,6 +1068,15 @@
                    @click="setTermKind('skew_term')"
                    title="The put-wing slope by tenor. Whether the 21-day wing is rich relative to the 60-day wing is a different setup from both being rich together, and IV-by-tenor cannot separate them.">skew</div>
             </div>
+            <template x-if="termKind === 'skew_term'">
+              <select class="eq-sel" style="max-width:95px"
+                      :value="cbWing" @change="setCbWing($event.target.value)"
+                      title="Which wing's slope by tenor. Whether the call wing is rich by tenor is a different question from the put wing.">
+                <template x-for="w in cbWings" :key="'cw-'+w">
+                  <option :value="w" x-text="deltaLabel(w)"></option>
+                </template>
+              </select>
+            </template>
             <span class="eq-section-sub" x-text="cbSubtitle(termKind)"></span>
             <div class="eq-spacer"></div>
             <span class="eq-section-sub" x-show="cbLoading[termKind]" x-cloak>loading…</span>
@@ -1133,7 +1154,10 @@
               <tbody>
                 <template x-for="dte in (grid ? grid.dtes : [])" :key="'gr-'+dte">
                   <tr>
-                    <th class="eq-grid-row" x-text="dte"></th>
+                    <th class="eq-grid-row" :title="gridRowTitle(dte)">
+                      <span x-text="dte"></span><span class="eq-direct"
+                            x-show="gridRowDirect(dte)">·</span>
+                    </th>
                     <template x-for="dl in grid.deltas" :key="'gc-'+dte+'-'+dl">
                       <td :style="gridStyle(gridCell(dte, dl))"
                           :class="{'eq-fab': gridCell(dte, dl) && gridCell(dte, dl).extrap}"
@@ -1148,6 +1172,8 @@
           </div>
 
           <div class="eq-note">
+            <span x-show="gridDirectNote()" x-text="gridDirectNote()"
+                  style="display:block;margin-bottom:3px"></span>
             Rows are tenors, columns are put_delta. Blue above, pink below —
             colour is direction, scaled to this view's own range, since the five
             views are in different units and one shared scale would render four
@@ -1312,14 +1338,31 @@
 
             <div class="eq-axisrow" style="border-bottom:1px solid var(--border)">
               <span class="eq-lbl">Date</span>
+              <!-- The slider spans the whole store, so it moves a week or more
+                   per pixel and cannot land on a chosen session. The arrows
+                   are how you actually get to one. -->
+              <button class="btn" @click="stepOiDate(-1)" :disabled="oiAtStart"
+                      title="Back one session">&lsaquo;</button>
               <input type="range" class="eq-slider" min="0"
                      :max="Math.max(0, oiDates.length - 1)" :value="oiDateIdx"
                      @input="setOiDateIdx($event.target.value)"
                      :disabled="!oiDates.length"
                      title="Rewind through the chain store's snapshot dates.">
+              <button class="btn" @click="stepOiDate(1)" :disabled="oiAtEnd"
+                      title="Forward one session">&rsaquo;</button>
               <span class="eq-section-sub" x-text="oiDate || '—'"></span>
               <span class="eq-section-sub"
                     x-text="oiDates.length ? '(' + (oiDateIdx + 1) + ' / ' + oiDates.length + ')' : ''"></span>
+
+              <template x-if="oiTab === 'flow'">
+                <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
+                  <span class="eq-lbl">Strike zoom</span>
+                  <button class="btn" @click="setOiFlowZoom(0.7)" title="Zoom in">+</button>
+                  <button class="btn" @click="setOiFlowZoom(1.4)" title="Zoom out">&minus;</button>
+                  <button class="btn" @click="resetOiFlowZoom()"
+                          title="Back to the measured default: the band around spot holding ~90% of the map's flow.">fit</button>
+                </div>
+              </template>
             </div>
 
             <div class="eq-ts-wrap eq-oi-canvas">
@@ -1330,7 +1373,7 @@
             <div class="eq-note">
               <span x-show="oiNote" x-text="oiNote" class="eq-warn"
                     style="display:block;margin-bottom:3px"></span>
-              <span x-show="oiOverlayNote()" x-text="oiOverlayNote()" class="eq-warn"
+              <span x-show="oiRefNote()" x-text="oiRefNote()"
                     style="display:block;margin-bottom:3px"></span>
               Served by the existing chain endpoints under
               <code>/api/ticker-analysis/chain/</code> — the same data the Ticker
@@ -1338,13 +1381,16 @@
               <code>daily_features</code> dates and does not cover every ticker in
               this IV universe, so a name with no chain history says so rather
               than drawing an empty panel.
-              <span x-show="oiTab === 'profile'" style="display:block;margin-top:3px">
-                The dashed lines are the current structure's strikes, each
-                labelled with its price, snapped to the nearest listed strike.
-                They are drawn only when this chart's strike ladder and the IV
-                surface agree on a basis — the chain store's strikes are
-                split-adjusted, and a mark placed across that gap would look
-                entirely at home while pointing at the wrong rung.
+              <span style="display:block;margin-top:3px">
+                Three dashed reference lines: white spot, blue the OI-weighted
+                average call strike, pink the OI-weighted average put strike.
+                All three come from this chart's own payload, so nothing has to
+                be reconciled across datasets — which the structure-strike
+                overlay they replaced could not claim, since equity_surface's
+                strikes and the split-adjusted chain ladder are not on the same
+                basis. OI-weighted average rather than max-OI strike: the single
+                largest strike is often one old expiry, while the weighted
+                average says where positioning actually sits.
               </span>
               <span x-show="oiTab === 'doi'" style="display:block;margin-top:3px">
                 Signed: blue is a build, pink an unwind. Change is where
@@ -1356,6 +1402,9 @@
                 colour by sign, with the white line the spot path. This is the
                 one that shows whether large-OI strikes mattered, because it puts
                 where OI concentrated next to where price actually went.
+                The strike axis defaults to the band around spot holding ~90% of
+                the map's total flow — drawn full-range, the part worth reading
+                is a few pixels tall.
               </span>
             </div>
           </div>

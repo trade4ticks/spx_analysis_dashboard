@@ -309,11 +309,25 @@ if (typeof Chart !== 'undefined' && Chart.defaults) {
  */
 const EQ_RECENT_N = 10;
 
+/* The older cloud keeps an age gradient — flattening it to one dim blue threw
+ * away the ordering that makes a path readable at all. It runs dark-slate to
+ * blue, staying well under the pink so the recent run is still where the eye
+ * lands.
+ *
+ * The recent run is PINK and starts at 0.45 alpha, not 0.30: at 0.30 the
+ * oldest few of the ten were indistinguishable from the blue behind them, so
+ * ten dots read as about five. */
 function eqRecentColor(i, total) {
   const back = total - 1 - i;                       // 0 = most recent
-  if (back >= EQ_RECENT_N) return 'rgba(52,152,219,0.30)';
-  const t = 1 - (back / EQ_RECENT_N);               // 0 faint .. 1 bright
-  return `rgba(232,67,147,${(0.30 + t * 0.65).toFixed(3)})`;
+  if (back >= EQ_RECENT_N) {
+    const older = Math.max(1, total - EQ_RECENT_N - 1);
+    const t = Math.min(1, i / older);               // 0 oldest .. 1 newest
+    const rgb = eqMix('#24405a', EQ_BLUE, t);       // "rgb(r,g,b)"
+    return rgb.replace('rgb(', 'rgba(')
+              .replace(')', `,${(0.35 + t * 0.3).toFixed(2)})`);
+  }
+  const t = 1 - (back / EQ_RECENT_N);               // 0 faintest .. 1 brightest
+  return `rgba(232,67,147,${(0.45 + t * 0.5).toFixed(3)})`;
 }
 
 function eqRecentRadius(i, total) {
@@ -325,22 +339,32 @@ function eqRecentRadius(i, total) {
 /* The surface grid's view list, shared by the picker and the label lookup so
  * a new view cannot appear in one and not the other. */
 const EQ_GRID_VIEWS = [
-  // Named for the THING, not the formula. "IV - ATM" describes how it is
-  // computed; "Skew" is what it is, and is what it gets called everywhere
-  // else on the page and in the trade.
-  { k: 'iv_minus_atm',   label: 'Skew',
+  // `fmt` is carried per view, not decided by a chain of comparisons with a
+  // fallback. z_iv was added to this list without a matching case in the
+  // formatter and fell through to the vol-points default, so every z came
+  // out multiplied by 100 — a z of -1.24 rendered as -124. A view that
+  // cannot be added without also declaring its units cannot repeat that.
+  //
+  //   'z'    a z-score. Plain number, one decimal.
+  //   'pt'   a vol quantity in decimal form, rendered as vol points.
+  //   'pt0'  the same, to whole points.
+  { k: 'iv_minus_atm',   label: 'Skew', fmt: 'pt',
     hint: 'Wing IV minus ATM IV, per node. The shape view. Anchored on ' +
           'equity_atm at k=0, not put_delta 50.' },
-  { k: 'z_iv_minus_atm', label: 'z of Skew',
+  { k: 'z_iv_minus_atm', label: 'z of Skew', fmt: 'z',
     hint: 'That spread scored against prior sessions at the daily close.' },
-  { k: 'iv',             label: 'raw IV',   hint: 'The surface as fitted.' },
-  { k: 'z_iv',           label: 'z of raw IV',
+  { k: 'iv',             label: 'raw IV', fmt: 'pt0',
+    hint: 'The surface as fitted.' },
+  { k: 'z_iv',           label: 'z of raw IV', fmt: 'z',
     hint: 'Every cell moves with the vol level, so this view tends to light ' +
           'up or go dark all at once — which answers "is the whole surface ' +
-          'rich" rather than "what shape is it". Sits beside raw IV so the ' +
-          'comparison against z of Skew is one click.' },
-  { k: 'chg_1d',         label: '1d change', hint: 'Against the prior close, per node.' },
-  { k: 'chg_5d',         label: '5d change', hint: 'Against five closes back, per node.' },
+          'rich" rather than "what shape is it". It is NOT a restatement of ' +
+          'raw IV: a node can carry high IV and a low z, because it is ' +
+          'usually even higher.' },
+  { k: 'chg_1d',         label: '1d change', fmt: 'pt',
+    hint: 'Against the prior close, per node.' },
+  { k: 'chg_5d',         label: '5d change', fmt: 'pt',
+    hint: 'Against five closes back, per node.' },
 ];
 
 /* Markers for the tent: the historical band of the zero-cost width, plus
@@ -381,8 +405,8 @@ const eqTentMarks = {
         ctx.fillRect(Math.min(a, c), ys.top, Math.abs(c - a), ys.bottom - ys.top);
       }
     }
-    if (b && b.p10 != null && b.p90 != null) {
-      const a = px(-Math.abs(b.p90)), c = px(-Math.abs(b.p10));
+    if (b && b.p5 != null && b.p95 != null) {
+      const a = px(-Math.abs(b.p95)), c = px(-Math.abs(b.p5));
       if (a != null && c != null) {
         ctx.strokeStyle = 'rgba(255,255,255,0.16)';
         ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
@@ -443,19 +467,23 @@ const eqSpotMarks = {
   },
 };
 
-/* The structure's strikes overlaid on the OI panels. Without this the panel
- * is ambient context; with it, it answers "is my short sitting on a wall".
+/* Reference levels on the OI panels: spot, and the OI-weighted average call
+ * and put strike.
  *
- * The mark carries its PRICE, not just a role — "short x2 @ 397.16" rather
- * than "short x2". The number is the thing being checked against the ladder,
- * and making the reader find it in a footer defeats the overlay.
+ * This replaced an overlay of the TRADE's strikes, which drew across two
+ * datasets that do not agree on a basis — equity_surface's strikes against a
+ * split-adjusted chain ladder — and so could put a mark on a real-looking
+ * rung that was not the right one. These three come out of the chain payload
+ * itself, so there is nothing to reconcile.
  *
- * Two orientations: the profile and dOI charts put strike on a CATEGORY x
- * axis, the flow chart puts it on a LINEAR y axis. The caller says which.
- * Marks are only ever passed in when the two datasets have been checked to
- * agree on a basis -- see oiOverlayCheck(). */
-const eqStrikeMarks = {
-  id: 'eqStrikeMarks',
+ * Thin, and labelled with their value: the number is what is being compared
+ * against the ladder, and making the reader find it in a footer defeats the
+ * point of drawing it.
+ *
+ * Two orientations: the profile and ΔOI charts put strike on a CATEGORY x
+ * axis, the flow map on a LINEAR y axis. The caller says which. */
+const eqRefLines = {
+  id: 'eqRefLines',
   afterDatasetsDraw(chart, args, opts) {
     if (!opts || !opts.marks || !opts.marks.length) return;
     const { ctx, scales } = chart;
@@ -463,33 +491,39 @@ const eqStrikeMarks = {
     if (!xs || !ys) return;
     ctx.save();
     ctx.font = "600 9px 'Segoe UI', system-ui, sans-serif";
-    for (const m of opts.marks) {
-      const text = `${m.label} @ ${m.strike.toFixed(2)}`;
+    ctx.lineWidth = 1;
+    opts.marks.forEach((m, i) => {
+      const text = `${m.label} ${m.v.toFixed(2)}`;
       ctx.strokeStyle = m.color; ctx.fillStyle = m.color;
-      ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      ctx.setLineDash([4, 3]);
       if (opts.horizontal) {
-        const y = ys.getPixelForValue(m.strike);
-        if (!isFinite(y)) continue;
+        const y = ys.getPixelForValue(m.v);
+        if (!isFinite(y) || y < ys.top || y > ys.bottom) return;
         ctx.beginPath(); ctx.moveTo(xs.left, y); ctx.lineTo(xs.right, y); ctx.stroke();
         ctx.setLineDash([]);
         ctx.textAlign = 'left';
         ctx.fillText(text, xs.left + 4, y - 3);
       } else {
-        // A solved strike almost never lands exactly on the listed ladder, so
-        // the nearest rung is used -- which is safe only because a mark whose
-        // strike is off the ladder entirely was filtered out upstream.
+        // A category axis over the listed ladder: a reference level almost
+        // never lands on a rung, so its pixel is interpolated between the two
+        // it falls between rather than snapped to the nearer one.
         const arr = (opts.strikes || []).map(Number);
-        if (!arr.length) continue;
-        let bi = 0, bd = Infinity;
-        arr.forEach((k, i) => { const d = Math.abs(k - m.strike); if (d < bd) { bd = d; bi = i; } });
-        const x = xs.getPixelForValue(bi);
-        if (!isFinite(x)) continue;
+        if (arr.length < 2) return;
+        let hi = arr.findIndex(k => k >= m.v);
+        if (hi < 0) hi = arr.length - 1;
+        const lo = Math.max(0, hi - 1);
+        const span = arr[hi] - arr[lo];
+        const t = span === 0 ? 0 : (m.v - arr[lo]) / span;
+        const x = xs.getPixelForValue(lo)
+                + (xs.getPixelForValue(hi) - xs.getPixelForValue(lo)) * t;
+        if (!isFinite(x)) return;
         ctx.beginPath(); ctx.moveTo(x, ys.top); ctx.lineTo(x, ys.bottom); ctx.stroke();
         ctx.setLineDash([]);
+        // Staggered, so three levels close together do not overprint.
         ctx.textAlign = 'center';
-        ctx.fillText(text, x, ys.top - 3);
+        ctx.fillText(text, x, ys.top - 3 - (i % 2) * 10);
       }
-    }
+    });
     ctx.restore();
   },
 };
@@ -551,6 +585,7 @@ document.addEventListener('alpine:init', () => {
     // a toggle between two questions rather than two series.
     cb: {}, cbLoading: {}, cbError: {},
     cbDte: 30,                 // the tenor every per-tenor panel in 6–8 uses
+    cbDteChosen: false,        // true once resolved against the real tenor list
     cbWing: 25,
     termKind: 'term',          // term | skew_term
     termDeltas: [25, 75],
@@ -580,15 +615,22 @@ document.addEventListener('alpine:init', () => {
     oiTab: 'profile',          // profile | doi | flow
     oiDate: '', oiDates: [], oiDoiN: 5, oiLookback: 252,
     oiSide: 'all',             // all | call | put
+    oiRef: null,               // {spot, call, put} reference levels
+    oiFlowZoom: 1,             // multiplier on the measured strike half-range
     // DTE bands in the chain endpoints' "lo-hi" form. Empty = every expiry.
     // Deliberately NOT the 1m/3m/6m span buttons: those move the lookback,
     // which is a different axis from which expiries are counted.
     oiDteBand: '',
+    // Finer than the first cut. 0–30 lumped the weekly, the monthly and the
+    // next-month expiry into one bucket, which is most of what anyone trading
+    // this style is trying to separate.
     oiDteBands: [
-      { v: '',        label: 'all' },
-      { v: '0-30',    label: '0–30' },
-      { v: '31-90',   label: '31–90' },
-      { v: '91-180',  label: '91–180' },
+      { v: '',         label: 'all' },
+      { v: '0-7',      label: '0–7' },
+      { v: '8-14',     label: '8–14' },
+      { v: '15-30',    label: '15–30' },
+      { v: '31-60',    label: '31–60' },
+      { v: '61-180',   label: '61–180' },
       { v: '181-3650', label: '180+' },
     ],
 
@@ -626,7 +668,19 @@ document.addEventListener('alpine:init', () => {
 
     // ── lifecycle ────────────────────────────────────────────────────────
 
+    /* The ticker header sticks beneath the control bar, and the bar's height
+     * depends on how it wraps — which depends on the viewport. Measured rather
+     * than guessed, so the two never overlap at an awkward width. */
+    syncCtrlHeight() {
+      const el = document.getElementById('eq-ctrl');
+      if (!el) return;
+      const h = Math.round(el.getBoundingClientRect().height);
+      if (h > 0) document.documentElement.style.setProperty('--eq-ctrl-h', h + 'px');
+    },
+
     async init() {
+      this.syncCtrlHeight();
+      window.addEventListener('resize', () => this.syncCtrlHeight());
       await this.loadCatalog();
       if (this.catError) return;
       this.pruneTickerDefaults();
@@ -2066,14 +2120,43 @@ document.addEventListener('alpine:init', () => {
       const n = parseInt(v, 10);
       if (!isFinite(n) || n === this.cbDte) return;
       this.cbDte = n;
+      this.cbDteChosen = true;
       this.loadCurveBand('skew');
       this.loadTent();
       this.loadSticky();
+      this.loadSpotVol();
     },
 
     cbAvailableDtes() {
-      const src = this.cb.skew || this.grid || this.tent;
-      return (src && src.available && src.available.dtes) || [];
+      const src = this.cb.skew || this.tent || this.sticky;
+      const fromPayload = (src && src.available && src.available.dtes) || [];
+      if (fromPayload.length) return fromPayload;
+      return (this.grid && this.grid.dtes) || [];
+    },
+
+    /* 0DTE is a poor default: the fit is least reliable at the shortest
+     * tenor and it is the first thing anyone sees. 30 is the working tenor
+     * for this style; if the surface does not carry it, the nearest tenor of
+     * at least 7 days wins, and only an all-sub-7 surface can land on 0. */
+    pickDefaultDte(list) {
+      if (!list || !list.length) return this.cbDte;
+      const usable = list.filter(t => t >= 7);
+      const pool = usable.length ? usable : list;
+      return pool.reduce((a, t) =>
+        Math.abs(t - 30) < Math.abs(a - 30) ? t : a, pool[0]);
+    },
+
+    /* The wings the skew-term view can be drawn at, in put convention.
+     * 10/25 are the put wings; 75/90 are the 25- and 10-delta CALLS. Whether
+     * the call wing is rich by tenor is a different question from the put
+     * wing, and the panel could previously only ask one of them. */
+    cbWings: [10, 25, 75, 90],
+
+    setCbWing(v) {
+      const n = parseInt(v, 10);
+      if (!isFinite(n) || n === this.cbWing) return;
+      this.cbWing = n;
+      this.loadCurveBand('skew_term');
     },
 
     /* Band + today's line, on one canvas.
@@ -2108,7 +2191,7 @@ document.addEventListener('alpine:init', () => {
       const datasets = [];
       const bandFor = (rows, colr, label) => {
         const g = k => xs.map(x => { const r = at(rows, x); return r ? r[k] : null; });
-        datasets.push({ label: label + ' P10', data: g('p10'), borderColor: 'transparent',
+        datasets.push({ label: label + ' P5', data: g('p5'), borderColor: 'transparent',
                         pointRadius: 0, fill: false, order: 5 });
         datasets.push({ label: label + ' P25', data: g('p25'), borderColor: 'transparent',
                         pointRadius: 0, backgroundColor: this.rgba(colr, 0.07),
@@ -2116,7 +2199,7 @@ document.addEventListener('alpine:init', () => {
         datasets.push({ label: label + ' P75', data: g('p75'), borderColor: 'transparent',
                         pointRadius: 0, backgroundColor: this.rgba(colr, 0.16),
                         fill: '-1', order: 5 });
-        datasets.push({ label: label + ' P90', data: g('p90'), borderColor: 'transparent',
+        datasets.push({ label: label + ' P95', data: g('p95'), borderColor: 'transparent',
                         pointRadius: 0, backgroundColor: this.rgba(colr, 0.07),
                         fill: '-1', order: 5 });
         datasets.push({ label: label + ' median', data: g('p50'),
@@ -2190,13 +2273,13 @@ document.addEventListener('alpine:init', () => {
               labels: {
                 boxWidth: 10, boxHeight: 2, font: { size: 9 }, padding: 8,
                 usePointStyle: false,
-                filter: it => !/ (P\d0|median)$/.test(it.text),
+                filter: it => !/ (P\d+|median)$/.test(it.text),
               },
             },
             tooltip: {
               // Same reason: listing the four shading datasets turns a
               // five-line tooltip into a twenty-line one.
-              filter: it => !/ P\d0$/.test(it.dataset.label),
+              filter: it => !/ P\d+$/.test(it.dataset.label),
               callbacks: {
                 label: it => `${it.dataset.label}  ${self.fmt(it.parsed.y, 'vol_decimal')}`,
               },
@@ -2241,10 +2324,13 @@ document.addEventListener('alpine:init', () => {
         if (j.error) { this.tentError = j.error; this.tent = null; }
         else {
           this.tent = j;
+          // Adopt the tenor the server actually used. The picker is populated
+          // from the surface's real tenor list, and a default of 30 that is
+          // not on that list left the control showing its first option (0d)
+          // while every panel below drew the nearest available — the label
+          // and the data disagreeing, with nothing on screen to say so.
+          if (j.dte != null && j.dte !== this.cbDte) this.cbDte = j.dte;
           this.renderTent();
-          // The OI profile overlays these strikes, and the two load in
-          // parallel — so if OI won that race it drew without them.
-          if (this.oiOpen && this.oiTab === 'profile' && this.oi) this.renderOi();
         }
       } catch (e) {
         this.tentError = String(e.message || e); this.tent = null;
@@ -2273,12 +2359,23 @@ document.addEventListener('alpine:init', () => {
       const L = j.long_leg, S = j.short_leg;
       if (!L || !S || L.sigma == null || S.sigma == null) return;
 
-      // Framed on the structure, not on the whole downside. The first
-      // version ran to -4σ, which packed the tent into the right third and
-      // spent two thirds of the panel on empty space below the short strike.
-      // The floor still yields if the short sits further out than -2.5σ.
-      const lo = Math.min(-2.5, S.sigma - 0.6), hi = 1.0;
-      const step = (hi - lo) / 140;
+      /* Framed off the DATA: what has to be legible is the legs plus the
+       * historical band, and that span gets ~80% of the width.
+       *
+       * Fixed windows do not work here. -4σ packed the structure into the
+       * right quarter; -2.5σ was better and still left it small whenever the
+       * short sits close in — and how far out the zero-cost strike lands is
+       * exactly the thing that varies by name and by day. So the span of
+       * interest is measured, then padded to 1/0.8 of itself. */
+      const band = j.band || {};
+      const marks = [S.sigma, L.sigma, 0].concat(
+        [band.p5, band.p25, band.p50, band.p75, band.p95]
+          .filter(v => v != null).map(v => -Math.abs(v)));
+      const iLo = Math.min(...marks), iHi = Math.max(...marks);
+      const span = Math.max(0.4, iHi - iLo);
+      const pad  = span * (1 / 0.8 - 1) / 2;
+      const lo = iLo - pad, hi = iHi + pad;
+      const step = (hi - lo) / 160;
       const xs = [], ys = [];
       const net = (j.zc_cost != null) ? j.zc_cost : 0;
       // Payoff in the same sigma units as the x axis, so the vertical scale
@@ -2343,7 +2440,8 @@ document.addEventListener('alpine:init', () => {
       }
       if (j.band && j.band.p50 != null) {
         bits.push(`usual ${Math.abs(j.band.p50).toFixed(2)}σ (P25–P75 ` +
-                  `${Math.abs(j.band.p75).toFixed(2)}–${Math.abs(j.band.p25).toFixed(2)})`);
+                  `${Math.abs(j.band.p75).toFixed(2)}–${Math.abs(j.band.p25).toFixed(2)}, ` +
+                  `P5–P95 ${Math.abs(j.band.p95).toFixed(2)}–${Math.abs(j.band.p5).toFixed(2)})`);
       }
       return bits.join('  ·  ');
     },
@@ -2507,7 +2605,24 @@ document.addEventListener('alpine:init', () => {
         const j = await eqGetJson('/api/equity-iv/surface-grid?'
           + this._sq({ view: this.gridView }));
         if (j.error) { this.gridError = j.error; this.grid = null; }
-        else { this.grid = j; }
+        else {
+          this.grid = j;
+          // The grid is the first payload that carries the surface's real
+          // tenor list, so it is the earliest point a sane default can be
+          // chosen. Only moves off the initial value, never off a user pick.
+          if (!this.cbDteChosen && j.dtes && j.dtes.length) {
+            const want = this.pickDefaultDte(j.dtes);
+            if (want !== this.cbDte) {
+              this.cbDte = want;
+              this.cbDteChosen = true;
+              this.loadCurveBand('skew');
+              this.loadTent();
+              this.loadSticky();
+              this.loadSpotVol();
+            }
+            this.cbDteChosen = true;
+          }
+        }
       } catch (e) {
         this.gridError = String(e.message || e); this.grid = null;
       } finally {
@@ -2555,12 +2670,68 @@ document.addEventListener('alpine:init', () => {
       return `background:${this.rgba(col, 0.06 + t * 0.64)}`;
     },
 
+    /* Which grid rows were read straight off a listed expiry.
+     *
+     * `dte_actual` is the node's TRUE tenor. A row where it differs from the
+     * target tenor came from a real expiry; a row where it matches exactly was
+     * interpolated between the two that bracket the target. That is invisible
+     * in the numbers and shows up as a step in the column — AAPL's 7d row
+     * sitting below both 5d and 10d — which reads as a data fault until the
+     * grid says which rows are which. It also MOVES as the expiry calendar
+     * moves, so it cannot be learned once and remembered.
+     *
+     * The surface fit itself is built in the separate Open_Interest project,
+     * so this is the stored signature of a direct read, not a claim about the
+     * rule that produced it. */
+    gridRow(dte) {
+      if (!this.grid || !this.grid.rows) return null;
+      return this.grid.rows.find(r => r.dte === dte) || null;
+    },
+
+    gridRowDirect(dte) {
+      const r = this.gridRow(dte);
+      return !!(r && r.direct);
+    },
+
+    gridRowTitle(dte) {
+      const r = this.gridRow(dte);
+      if (!r || r.dte_actual == null) return `${dte}-day tenor`;
+      if (!r.direct) {
+        return `${dte}-day target, blended from the expiries either side `
+             + `(dte_actual ${r.dte_actual.toFixed(2)}).`;
+      }
+      return `${dte}-day target read DIRECTLY off a listed expiry at `
+           + `${r.dte_actual.toFixed(2)} days — no blending. Rows around it are `
+           + `interpolated, so a step here is the fit changing method, not the `
+           + `surface changing shape.`;
+    },
+
+    gridDirectNote() {
+      if (!this.grid || !this.grid.rows) return '';
+      const hits = this.grid.rows.filter(r => r.direct).map(r => r.dte);
+      if (!hits.length) return '';
+      return `A · beside a tenor marks a row read directly off a listed expiry `
+           + `rather than blended from the two either side (${hits.join(', ')}d `
+           + `today). Those rows can sit a step away from their neighbours — `
+           + `that is the fit changing method, not the surface changing shape, `
+           + `and it moves as the expiry calendar moves.`;
+    },
+
+    gridFmt() {
+      const hit = EQ_GRID_VIEWS.find(v => v.k === this.gridView);
+      return hit ? hit.fmt : 'pt';
+    },
+
     gridText(c) {
       if (!c || c.v == null) return '';
-      if (this.gridView === 'z_iv_minus_atm') return c.v.toFixed(1);
-      if (this.gridView === 'iv') return (c.v * 100).toFixed(0);
+      const f = this.gridFmt();
+      if (f === 'z')   return c.v.toFixed(1);
+      if (f === 'pt0') return (c.v * 100).toFixed(0);
       return (c.v * 100).toFixed(1);
     },
+
+    /** Units for the tooltip, so a z is never read as vol points. */
+    gridUnits() { return this.gridFmt() === 'z' ? 'σ' : 'vol pts'; },
 
     gridTitle(c) {
       if (!c) return '';
@@ -2568,7 +2739,9 @@ document.addEventListener('alpine:init', () => {
       if (c.iv != null) parts.push(`IV ${this.fmt(c.iv, 'vol_decimal')}`);
       if (c.atm_iv != null) parts.push(`ATM ${this.fmt(c.atm_iv, 'vol_decimal')}`);
       if (c.strike != null) parts.push(`strike ${c.strike.toFixed(2)}`);
-      if (c.v != null) parts.push(`${this.gridViewLabel()} ${this.gridText(c)}`);
+      if (c.v != null) {
+        parts.push(`${this.gridViewLabel()} ${this.gridText(c)} ${this.gridUnits()}`);
+      }
       if (c.extrap) parts.push('node fabricated by the smile fit — not an observation');
       return parts.join('\n');
     },
@@ -2853,17 +3026,31 @@ document.addEventListener('alpine:init', () => {
           }
         }
 
-        const q = new URLSearchParams({
-          ticker: this.selectedTicker, date: this.oiDate, side: this.oiSide,
-        });
+        const base = { ticker: this.selectedTicker, date: this.oiDate,
+                       side: this.oiSide };
+        const q = new URLSearchParams(base);
         if (this.oiDteBand) q.set('dte_bands', this.oiDteBand);
         if (this.oiTab === 'doi') q.set('n', String(this.oiDoiN));
         if (this.oiTab === 'flow') { q.set('lookback', String(this.oiLookback)); q.set('mode', 'oi'); }
         const path = this.oiTab === 'profile' ? 'oi-profile'
                    : this.oiTab === 'doi' ? 'doi-profile' : 'flow';
-        const j = await eqGetJson(`/api/ticker-analysis/chain/${path}?` + q);
-        if (j.error) { this.oiError = j.error; this.oi = null; }
-        else if (j.empty) {
+
+        // The reference lines are computed from the OI PROFILE, which the
+        // other two tabs do not return. Fetched alongside them, under the
+        // same date / side / DTE filters, so the lines mean the same thing on
+        // every tab rather than appearing on one.
+        const wantRef = this.oiTab !== 'profile';
+        const rq = new URLSearchParams(base);
+        if (this.oiDteBand) rq.set('dte_bands', this.oiDteBand);
+        const [j, rj] = await Promise.all([
+          eqGetJson(`/api/ticker-analysis/chain/${path}?` + q),
+          wantRef ? eqGetJson('/api/ticker-analysis/chain/oi-profile?' + rq)
+                  : Promise.resolve(null),
+        ]);
+
+        if (j.error) { this.oiError = j.error; this.oi = null; return; }
+        this.oiRef = this.oiRefLevels(rj || j);
+        if (j.empty) {
           this.oi = j;
           this.oiError = `No chain rows for ${this.oiDate} at this DTE / side `
             + `filter. Widen the DTE range or pick another date.`;
@@ -2875,28 +3062,41 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    /* Three reference levels, all computed from the CHAIN payload itself.
+     *
+     * This replaces the structure-strike overlay, and the change is not only
+     * cosmetic: the structure's strikes come from equity_surface and the
+     * chain's ladder is split-adjusted off daily_features, so that overlay
+     * was drawing across two bases that do not agree. These three come from
+     * one payload, so there is nothing to reconcile.
+     *
+     * OI-weighted average strike rather than max-OI strike: the single
+     * largest strike is often an artefact of one old expiry, while the
+     * weighted average says where the positioning actually sits. */
+    oiRefLevels(j) {
+      const out = { spot: (j && j.spot != null) ? Number(j.spot) : null,
+                    call: null, put: null };
+      const rows = (j && j.strikes) || [];
+      let cw = 0, cs = 0, pw = 0, ps = 0;
+      for (const r of rows) {
+        const k = Number(r.strike);
+        if (!isFinite(k)) continue;
+        const c = Number(r.call_oi) || 0, p = Number(r.put_oi) || 0;
+        cw += c; cs += c * k; pw += p; ps += p * k;
+      }
+      if (cw > 0) out.call = cs / cw;
+      if (pw > 0) out.put = ps / pw;
+      return out;
+    },
+
     toggleOi() {
       this.oiOpen = !this.oiOpen;
       if (this.oiOpen) this.loadOi();
     },
 
-    setOiTab(t) {
-      if (this.oiTab === t) return;
-      this.oiTab = t;
-      this.loadOi();
-    },
-
-    setOiSide(v) {
-      if (this.oiSide === v) return;
-      this.oiSide = v;
-      this.loadOi();
-    },
-
-    setOiDteBand(v) {
-      if (this.oiDteBand === v) return;
-      this.oiDteBand = v;
-      this.loadOi();
-    },
+    setOiTab(t) { if (this.oiTab !== t) { this.oiTab = t; this.loadOi(); } },
+    setOiSide(v) { if (this.oiSide !== v) { this.oiSide = v; this.loadOi(); } },
+    setOiDteBand(v) { if (this.oiDteBand !== v) { this.oiDteBand = v; this.loadOi(); } },
 
     setOiDateIdx(i) {
       const n = parseInt(i, 10);
@@ -2908,70 +3108,78 @@ document.addEventListener('alpine:init', () => {
       this.loadOi();
     },
 
+    /* One session per click. The slider spans the whole store — several
+     * hundred sessions across a few hundred pixels — so it moves a week or
+     * more per pixel and cannot land on a chosen day. */
+    stepOiDate(delta) {
+      if (!this.oiDates.length) return;
+      this.setOiDateIdx(this.oiDateIdx + delta);
+    },
+
     get oiDateIdx() {
       const i = this.oiDates.indexOf(this.oiDate);
       return i < 0 ? Math.max(0, this.oiDates.length - 1) : i;
     },
 
-    /** The structure's strikes, for the OI overlay. This is what turns the
-     *  panel from ambient context into an answer: is my short sitting on a
-     *  wall? */
-    oiOverlayStrikes() {
-      const j = this.tent;
-      if (!j) return [];
-      const out = [];
-      if (j.short_leg && j.short_leg.strike != null) {
-        out.push({ strike: j.short_leg.strike, label: 'short ×2', color: EQ_PINK });
-      }
-      if (j.long_leg && j.long_leg.strike != null) {
-        out.push({ strike: j.long_leg.strike, label: 'long', color: EQ_BLUE });
-      }
-      return out;
-    },
-
-    /* Whether the overlay can be trusted on THIS chart.
-     *
-     * The chain store's strikes are split-ADJUSTED (strike x adj_factor) and
-     * its spot is daily_features.spot_pc. equity_surface's strikes are on
-     * whatever basis the IV loader uses. If those two disagree, the marks land
-     * on real-looking strikes that are not the trade's — and snapping them to
-     * the nearest listed strike, which is what the mark plugin does, makes a
-     * wrong overlay look completely at home. So the disagreement is detected
-     * and the marks are suppressed rather than drawn misleadingly. */
-    oiOverlayCheck() {
-      const marks = this.oiOverlayStrikes();
-      if (!marks.length || !this.oi) return { ok: false, why: '' };
-      const ks = this.oiStrikeList();
-      if (!ks.length) return { ok: false, why: '' };
-      const lo = Math.min(...ks), hi = Math.max(...ks);
-      const out = marks.filter(m => m.strike < lo || m.strike > hi);
-      if (out.length) {
-        return { ok: false, why:
-          `Structure strikes (${marks.map(m => m.strike.toFixed(2)).join(', ')}) `
-          + `fall outside this chart's strike ladder (${lo.toFixed(2)}–${hi.toFixed(2)}), `
-          + `so they are not drawn. The chain store's strikes are split-adjusted `
-          + `and its spot is ${this.oi.spot == null ? '—' : Number(this.oi.spot).toFixed(2)}`
-          + `${this.oi.adj_factor != null ? ` (adj ${this.oi.adj_factor})` : ''}; `
-          + `the IV surface priced these against `
-          + `${this.tent && this.tent.spot != null ? this.tent.spot.toFixed(2) : '—'}. `
-          + `Those are different bases — snapping the marks to the nearest listed `
-          + `strike would put them somewhere plausible and wrong.` };
-      }
-      const spot = this.oi.spot;
-      if (spot && marks.some(m => m.strike > spot)) {
-        return { ok: false, why:
-          `Structure strikes sit ABOVE this chart's spot (${Number(spot).toFixed(2)}). `
-          + `A put ratio's strikes must be below it, so the overlay is suppressed `
-          + `until the two datasets agree on a basis.` };
-      }
-      return { ok: true, why: '' };
-    },
+    get oiAtStart() { return this.oiDateIdx <= 0; },
+    get oiAtEnd() { return this.oiDateIdx >= this.oiDates.length - 1; },
 
     oiStrikeList() {
       const j = this.oi;
       if (!j) return [];
       if (this.oiTab === 'flow') return (j.strikes || []).map(Number);
       return (j.strikes || []).map(r => Number(r.strike));
+    },
+
+    // ── flow zoom ───────────────────────────────────────────────────────
+
+    /* The flow map's strike axis spans every strike ever listed, most of
+     * which carry nothing. Drawn full-range the interesting band is a few
+     * pixels tall, which is why the Ticker Analysis version reads better —
+     * it is not bigger, it is zoomed.
+     *
+     * The default half-range is measured: the narrowest band around spot that
+     * holds ~90% of the map's total absolute flow. Zoom multiplies it. */
+    oiFlowRange() {
+      const j = this.oi;
+      if (!j || this.oiTab !== 'flow') return null;
+      const strikes = (j.strikes || []).map(Number);
+      const matrix = j.matrix || [];
+      if (!strikes.length || !matrix.length) return null;
+      const centre = (this.oiRef && this.oiRef.spot) || strikes[Math.floor(strikes.length / 2)];
+
+      const weight = strikes.map((k, si) =>
+        (matrix[si] || []).reduce((a, v) => a + Math.abs(Number(v) || 0), 0));
+      const total = weight.reduce((a, w) => a + w, 0);
+      let half;
+      if (total > 0) {
+        // Grow a window outward from spot until it holds 90% of the flow.
+        const order = strikes.map((k, i) => ({ d: Math.abs(k - centre), w: weight[i] }))
+                             .sort((a, b) => a.d - b.d);
+        let acc = 0;
+        half = order[order.length - 1].d;
+        for (const o of order) {
+          acc += o.w;
+          if (acc >= total * 0.90) { half = o.d; break; }
+        }
+      } else {
+        half = (Math.max(...strikes) - Math.min(...strikes)) / 2;
+      }
+      half = Math.max(half, centre * 0.02) * this.oiFlowZoom;
+      return { min: centre - half, max: centre + half, centre };
+    },
+
+    setOiFlowZoom(mult) {
+      const z = Math.max(0.15, Math.min(8, this.oiFlowZoom * mult));
+      if (z === this.oiFlowZoom) return;
+      this.oiFlowZoom = z;
+      this.renderOi();
+    },
+
+    resetOiFlowZoom() {
+      if (this.oiFlowZoom === 1) return;
+      this.oiFlowZoom = 1;
+      this.renderOi();
     },
 
     renderOi() {
@@ -2990,7 +3198,7 @@ document.addEventListener('alpine:init', () => {
      * with NaN. Both looked like "no data" rather than like a bug. */
     paintOi() {
       const j = this.oi;
-      if (!j || typeof Chart === 'undefined') return;
+      if (!j || typeof Chart === 'undefined' || j.empty) return;
       const el = document.getElementById('eq-oi');
       if (!el) return;
       if (this.oiTab === 'profile') return this.paintOiProfile(el, j);
@@ -2998,10 +3206,13 @@ document.addEventListener('alpine:init', () => {
       return this.paintOiFlow(el, j);
     },
 
-    _oiMarksPlugin() {
-      const chk = this.oiOverlayCheck();
-      return { marks: chk.ok ? this.oiOverlayStrikes() : [],
-               strikes: this.oiStrikeList() };
+    _oiRefPlugin(horizontal) {
+      const r = this.oiRef || {};
+      const marks = [];
+      if (r.spot != null) marks.push({ v: r.spot, color: '#e8e8e8', label: 'spot' });
+      if (r.call != null) marks.push({ v: r.call, color: EQ_BLUE, label: 'call OI avg' });
+      if (r.put  != null) marks.push({ v: r.put,  color: EQ_PINK, label: 'put OI avg' });
+      return { marks, strikes: this.oiStrikeList(), horizontal: !!horizontal };
     },
 
     paintOiProfile(el, j) {
@@ -3026,7 +3237,7 @@ document.addEventListener('alpine:init', () => {
       // Signed: a build and an unwind are opposite facts and must not share a
       // colour. Blue for a build, pink for an unwind — the page's directions.
       const vals = rows.map(r => r.doi);
-      const self = this;   // used by the per-bar colour map below
+      const self = this;
       EQ_CHARTS.oi = new Chart(el.getContext('2d'), {
         type: 'bar',
         data: {
@@ -3037,26 +3248,28 @@ document.addEventListener('alpine:init', () => {
               self.rgba(v >= 0 ? EQ_BLUE : EQ_PINK, 0.65)),
           }],
         },
-        options: this._oiBarOptions('ΔOI  (' + (j.date_prev || '') + ' → ' + (j.date || '') + ')'),
+        options: this._oiBarOptions(
+          'ΔOI  (' + (j.date_prev || '') + ' → ' + (j.date || '') + ')'),
       });
     },
 
-    /* Flow is a strike x time matrix, so it is drawn as a scatter of sized,
-     * signed dots rather than as bars — one cell per (date, strike). Chart.js
-     * has no heatmap type, and a bubble grid reads the same way without
-     * another dependency. */
     paintOiFlow(el, j) {
       const dates = j.dates || [];
       const strikes = (j.strikes || []).map(Number);
       const matrix = j.matrix || [];
       const scale = j.max || 1;
+      const range = this.oiFlowRange();
       const pts = [];
       for (let si = 0; si < matrix.length; si++) {
+        const k = strikes[si];
+        // Clipped to the visible band rather than left to the scale: several
+        // thousand off-screen points cost paint time and nothing else.
+        if (range && (k < range.min || k > range.max)) continue;
         const row = matrix[si] || [];
         for (let di = 0; di < row.length; di++) {
           const v = row[di];
           if (v == null || v === 0) continue;
-          pts.push({ x: di, y: strikes[si], v });
+          pts.push({ x: di, y: k, v });
         }
       }
       const self = this;
@@ -3086,6 +3299,8 @@ document.addEventListener('alpine:init', () => {
                  ticks: { maxTicksLimit: 8, maxRotation: 0,
                           callback: v => dates[Math.round(v)] || '' } },
             y: { type: 'linear', grid: { color: 'rgba(255,255,255,0.05)' },
+                 min: range ? range.min : undefined,
+                 max: range ? range.max : undefined,
                  ticks: { callback: v => Number(v).toFixed(0) } },
           },
           plugins: {
@@ -3098,10 +3313,10 @@ document.addEventListener('alpine:init', () => {
                      + `${p.v >= 0 ? '+' : ''}${self.fmtShort(p.v, 'count')}`;
               },
             } },
-            eqStrikeMarks: { ...this._oiMarksPlugin(), horizontal: true },
+            eqRefLines: this._oiRefPlugin(true),
           },
         },
-        plugins: [eqStrikeMarks],
+        plugins: [eqRefLines],
       });
     },
 
@@ -3121,14 +3336,18 @@ document.addEventListener('alpine:init', () => {
         },
         plugins: {
           legend: { display: false },
-          eqStrikeMarks: this._oiMarksPlugin(),
+          eqRefLines: this._oiRefPlugin(false),
         },
       };
     },
 
-    oiOverlayNote() {
-      const chk = this.oiOverlayCheck();
-      return chk.ok ? '' : chk.why;
+    oiRefNote() {
+      const r = this.oiRef || {};
+      const bits = [];
+      if (r.spot != null) bits.push(`spot ${Number(r.spot).toFixed(2)}`);
+      if (r.call != null) bits.push(`call OI avg ${r.call.toFixed(2)}`);
+      if (r.put  != null) bits.push(`put OI avg ${r.put.toFixed(2)}`);
+      return bits.join('  ·  ');
     },
 
     // ── formatting ───────────────────────────────────────────────────────
