@@ -36,6 +36,7 @@ a node is fabricated or it is not. Fabricated nodes are excluded from every
 historical distribution — otherwise "normal range" is partly built from values
 the spline invented — and marked, never silently dropped, in today's curve.
 """
+import math
 from datetime import date as date_type
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -149,9 +150,9 @@ async def curve_band(
     together, and IV-by-tenor cannot separate them — a parallel shift in the
     whole surface moves every tenor's IV and leaves every tenor's SLOPE alone.
 
-    The band is P10/P25/P50/P75/P90 across prior sessions at each x, so it is
+    The band is P5/P25/P50/P75/P95 across prior sessions at each x, so it is
     a pointwise envelope, NOT a set of historical curves. A curve tracing the
-    P90 line at every delta is not a curve that ever traded; the band says
+    P95 line at every delta is not a curve that ever traded; the band says
     "each point, against its own history", which is the question being asked.
     """
     if not pool:
@@ -357,12 +358,18 @@ async def tent(
     further out than delta-neutral; flat skew pulls it closer in. Either
     number alone does not say which regime you are in.
 
-    A calibration check is RETURNED rather than assumed. The short strike's
-    sigma is derived here from the surface and compared against the stored
-    zc_width_sigma. This module cannot see the loader's convention, and if the
-    two disagree then the payoff diagram and the band are drawn on different
-    axes — which would look completely normal on screen. `sigma_check` says so
-    instead of letting it pass.
+    There is ONE source for the sigma axis: the stored zc_width_sigma. Both
+    the band and the short marker come from it, so they cannot disagree.
+
+    This module used to derive its own copy of the short's sigma as a
+    defensive check, on the reasoning that it could not see the loader's
+    convention. That was the wrong response to not knowing — the derivation
+    was wrong twice over (linear moneyness where the loader is logarithmic,
+    and a delta-node snap where the loader solves), so the panel drew a
+    correct band with a wrong marker on it. Two implementations of one
+    definition drift; the fix is one implementation, not a check between two.
+    See sigma_basis in the payload for how the long leg is placed without
+    reintroducing a second one.
     """
     if not pool:
         return {"error": "OI database not configured"}
@@ -421,69 +428,106 @@ async def tent(
             ticker, d, snap,
         )
 
-        # Both legs' strikes. The short leg's delta is wherever the zero-cost
-        # solve landed, so it is looked up rather than assumed.
-        short_delta = None
-        if today_m is not None and cols["zc_delta"] and today_m["zc_delta"] is not None:
-            short_delta = _nearest(ax["deltas"], float(today_m["zc_delta"]))
-        long_dl = _nearest(ax["deltas"], long_delta)
-        wanted  = [dl for dl in {long_dl, short_delta} if dl is not None]
+        # The whole delta grid for this tenor. Both legs are interpolated off
+        # it rather than snapped to a node — see leg_at().
         legs = await conn.fetch(
             f"SELECT s.put_delta, s.strike, s.iv, s.price, s.extrapolated "
             f"FROM {SURFACE_TABLE} s "
             f"WHERE s.ticker = $1 AND s.trade_date = $2 AND s.snapshot = $3 "
-            f"  AND s.dte = $4 AND s.put_delta = ANY($5::int[])",
-            ticker, d, snap, use_dte, wanted,
+            f"  AND s.dte = $4 ORDER BY s.put_delta",
+            ticker, d, snap, use_dte,
         )
 
     by_delta = {int(r["put_delta"]): r for r in legs}
     spot   = None if anchor is None or anchor["spot"] is None else float(anchor["spot"])
     atm_iv = None if anchor is None or anchor["atm_iv"] is None else float(anchor["atm_iv"])
 
-    def sigma_of(strike):
-        """Strike -> ATM-implied-move units. Negative below spot."""
-        if strike is None or not spot or not atm_iv:
+    # ── Legs, by interpolation ──────────────────────────────────────────────
+    # The delta grid is 5 apart and the zero-cost short lands wherever the
+    # solve put it — MSTR's was 14.22. Snapping that to node 15 moved the
+    # strike from 84.84 to 85.61, and the OI overlay ("is my short sitting on
+    # a wall") inherits the wrong strike along with it. So the stored
+    # fractional delta is interpolated between its bracketing nodes instead.
+    nodes   = sorted(by_delta)
+    strikes = [None if by_delta[n]["strike"] is None else float(by_delta[n]["strike"]) for n in nodes]
+    ivs     = [None if by_delta[n]["iv"]     is None else float(by_delta[n]["iv"])     for n in nodes]
+    prices  = [None if by_delta[n]["price"]  is None else float(by_delta[n]["price"])  for n in nodes]
+
+    def leg_at(dl):
+        """One leg at a (possibly fractional) put delta, off the surface grid."""
+        if dl is None or len(nodes) < 2:
             return None
-        move = spot * atm_iv * ((use_dte / 365.0) ** 0.5)
-        if not move:
+        k = _interp(nodes, strikes, dl)
+        if k is None:
             return None
-        return (strike - spot) / move
-
-    def leg(dl):
-        r = by_delta.get(dl)
-        if r is None:
-            return None
-        k = None if r["strike"] is None else float(r["strike"])
-        return {"put_delta": dl, "strike": k, "sigma": sigma_of(k),
-                "iv":    None if r["iv"] is None else float(r["iv"]),
-                "price": None if r["price"] is None else float(r["price"]),
-                "extrap": bool(r["extrapolated"])}
-
-    long_leg  = leg(long_dl)
-    short_leg = leg(short_delta) if short_delta is not None else None
-
-    stored_width = None
-    if today_m is not None and cols["zc_width"] and today_m["zc_width"] is not None:
-        stored_width = float(today_m["zc_width"])
-
-    derived = short_leg["sigma"] if short_leg else None
-    check = {"stored": stored_width, "derived": derived, "agrees": None,
-             "note": "derived = (K - spot) / (spot * atm_iv * sqrt(dte/365))"}
-    if stored_width is not None and derived is not None:
-        # Compared on magnitude: a stored WIDTH is naturally positive while a
-        # strike below spot derives negative. That sign difference is a
-        # convention, not a disagreement.
-        check["agrees"] = abs(abs(stored_width) - abs(derived)) <= 0.15
-        if not check["agrees"]:
-            check["note"] += (". These disagree by more than 0.15 sigma, so the "
-                              "payoff diagram and the band are not on the same "
-                              "axis. Trust the band; the diagram's x values are "
-                              "this module's convention, not the loader's.")
+        lo = max((n for n in nodes if n <= dl), default=None)
+        hi = min((n for n in nodes if n >= dl), default=None)
+        # Fabricated if EITHER bracketing node was: interpolating between a
+        # real node and an invented one gives a partly invented answer, and
+        # calling that clean is how the flag stops meaning anything.
+        fab = any(bool(by_delta[n]["extrapolated"])
+                  for n in (lo, hi) if n is not None)
+        return {"put_delta": dl, "strike": k,
+                "iv":     _interp(nodes, ivs, dl),
+                "price":  _interp(nodes, prices, dl),
+                "extrap": fab,
+                "between": [lo, hi]}
 
     def m(key):
         if today_m is None or not cols.get(key) or today_m[key] is None:
             return None
         return float(today_m[key])
+
+    stored_width = m("zc_width")
+    stored_delta = m("zc_delta")
+
+    long_leg  = leg_at(float(long_delta))
+    short_leg = leg_at(stored_delta)
+
+    # ── The sigma axis: ONE source ──────────────────────────────────────────
+    # zc_width_sigma is the loader's own answer for how far out the short
+    # sits, so it is used verbatim. An earlier version derived a second copy
+    # here and got it wrong twice over — linear moneyness where the loader is
+    # logarithmic, and a snapped strike where the loader solves — which drew a
+    # correct band with a wrong marker on the same axis. That looks entirely
+    # normal on screen and invalidates precisely the inside-or-outside-the-band
+    # judgement the panel exists to support.
+    #
+    # The long leg still needs a position on that axis and has no stored sigma
+    # of its own. Rather than reimplement the definition to place it, the
+    # scale is CALIBRATED from the stored pair: one anchor at (short strike,
+    # -zc_width_sigma), the origin at (spot, 0). Verified against the data —
+    # ln(K/spot) / (atm_iv * sqrt(dte/365)) reproduces the stored width to
+    # four decimals across the universe — but nothing here depends on that
+    # formula. If the loader changes its denominator the scale absorbs it,
+    # because it is read off the loader's output instead of reproduced from
+    # its arithmetic. The only assumption left is that sigma is proportional
+    # to log-moneyness, which every lognormal convention satisfies.
+    sigma_scale = None
+    if (stored_width is not None and short_leg and short_leg["strike"]
+            and spot and short_leg["strike"] > 0 and spot > 0):
+        lm = math.log(short_leg["strike"] / spot)
+        if lm:
+            sigma_scale = -abs(stored_width) / lm
+
+    def sigma_of(strike):
+        if sigma_scale is None or not strike or not spot or strike <= 0:
+            return None
+        return sigma_scale * math.log(strike / spot)
+
+    for lg in (long_leg, short_leg):
+        if lg:
+            lg["sigma"] = sigma_of(lg["strike"])
+
+    sigma_basis = {
+        "source":   cols["zc_width"],
+        "value":    stored_width,
+        "scale_per_log_moneyness": sigma_scale,
+        "note": ("sigma is the stored metric, not a derivation. The short leg "
+                 "sits at -zc_width_sigma by construction; the long leg is "
+                 "placed on a scale calibrated from that same stored pair, so "
+                 "there is one source on this axis and nothing to drift."),
+    }
 
     # Two invariants that must hold for the drawn structure to be a put ratio
     # at all. Neither is decoration: if a strike sits above spot the panel is
@@ -502,6 +546,14 @@ async def tent(
         problems.append(
             f"short strike {short_leg['strike']:.2f} is not below the long "
             f"{long_leg['strike']:.2f}; the 1x2 is inverted")
+    # zc_width_sigma is DEFINED for a 25-delta-long 1x2. Move the long leg and
+    # the stored width — and therefore the band, and the short marker — is
+    # describing a different structure from the one drawn.
+    if int(long_delta) != 25:
+        problems.append(
+            f"long leg is {int(long_delta)}-delta, but zc_width_sigma is defined "
+            f"for a 25-delta long; the band and the short marker describe a "
+            f"25-delta structure, not the one drawn")
     if spot and mspot and abs(spot / mspot - 1.0) > 0.005:
         problems.append(
             f"equity_atm.underlying_price is {spot:.2f} but equity_metrics.spot "
@@ -518,13 +570,13 @@ async def tent(
         "long_leg": long_leg, "short_leg": short_leg,
         "ratio": {"long": 1, "short": 2},
         "zc_width_sigma": stored_width,
-        "zc_short_delta": m("zc_delta"),
+        "zc_short_delta": stored_delta,
         "zc_cost":        m("zc_cost"),
         "dn_cost":        m("dn_cost"),
         "dn_width_sigma": m("dn_width"),
         "dn_short_delta": m("dn_delta"),
         "band": _band_of(band, "b") if band is not None else None,
-        "sigma_check": check,
+        "sigma_basis": sigma_basis,
         "resolved": cols,
         "exclude_extrapolated": bool(exclude_extrapolated),
         "basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session",

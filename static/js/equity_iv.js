@@ -2240,7 +2240,7 @@ document.addEventListener('alpine:init', () => {
 
     /* Band + today's line, on one canvas.
      *
-     * Four fill datasets stacked from P10 up, each filling to the one below,
+     * Four fill datasets stacked from P5 up, each filling to the one below,
      * so the shading reads as a nested envelope rather than four ribbons.
      * The median is a line because a median is a location, not an edge. */
     renderCurveBand(kind) {
@@ -2539,15 +2539,13 @@ document.addEventListener('alpine:init', () => {
            + `its own, is the skew reading in the units the entry uses.`;
     },
 
-    /** A convention mismatch would be invisible on screen, so it is stated. */
-    tentCheckNote() {
-      const c = this.tent && this.tent.sigma_check;
-      if (!c || c.agrees !== false) return '';
-      return `σ convention mismatch: the stored width is `
-           + `${c.stored == null ? '—' : c.stored.toFixed(2)}σ but this panel `
-           + `derives ${c.derived == null ? '—' : c.derived.toFixed(2)}σ from the `
-           + `surface. The band is right; the payoff diagram's x values are this `
-           + `page's convention, not the loader's.`;
+    /** Where the sigma axis comes from. One source, so there is no mismatch
+     *  to warn about — this states the provenance instead. */
+    tentSigmaNote() {
+      const b = this.tent && this.tent.sigma_basis;
+      if (!b || b.value == null) return '';
+      return `σ from ${b.source || 'the stored metric'} = `
+           + `${b.value.toFixed(2)}σ, plotted as stored.`;
     },
 
     // ── Row 7a: sticky-strike decomposition ─────────────────────────────

@@ -1145,14 +1145,17 @@
                   style="display:block"></span>
             <span x-show="tentGapNote()" x-text="tentGapNote()"
                   style="display:block;margin-top:3px"></span>
-            <span x-show="tentCheckNote()" x-text="tentCheckNote()"
-                  class="eq-warn" style="display:block;margin-top:3px"></span>
+            <span x-show="tentSigmaNote()" x-text="tentSigmaNote()"
+                  class="eq-section-sub" style="display:block;margin-top:3px"></span>
             <template x-for="g in (tent ? tent.geometry_problems : [])" :key="'gp-'+g">
               <span class="eq-warn" style="display:block;margin-top:3px" x-text="g"></span>
             </template>
             The shaded strip is where the zero-cost short usually sits — P25–P75
-            solid, P10–P90 dashed — so today's marker inside or outside it is the
-            read. σ, not strike or delta: a strike axis moves with spot and a
+            solid, P5–P95 dashed — so today's marker inside or outside it is the
+            read. Both the strip and the marker are the stored
+            <code>zc_width_sigma</code>, so they cannot disagree. σ here is
+            <code>atm_iv × sqrt(dte/365)</code> in log-moneyness against spot —
+            not strike or delta, because a strike axis moves with spot and a
             delta axis compresses exactly where the trade lives.
           </div>
         </div>
@@ -1191,7 +1194,7 @@
             IV by delta at this tenor, today against the band. put_delta is
             put-convention throughout: 25 is a 25Δ put, 75 is a 25Δ <em>call</em>.
             The band is a pointwise envelope across prior sessions, not a set of
-            historical curves — a line tracing P90 at every delta is not a smile
+            historical curves — a line tracing P95 at every delta is not a smile
             that ever traded.
           </div>
         </div>
