@@ -338,6 +338,16 @@
         </template>
       </div>
 
+      <!-- Every z and percentile on this page is measured against the daily
+           close series, whatever bucket is selected. That is invisible while
+           the two agree, and load-bearing the moment they do not, so it is
+           stated on screen rather than left in a docstring. -->
+      <span class="eq-state up" x-show="onIntradaySnapshot" x-cloak
+            :title="zBasisNote()"
+            style="cursor:help">
+        <span>scored vs</span><b>1545 daily</b>
+      </span>
+
       <div class="ctrl-div"></div>
 
       <!-- Without this, thin-chained names quietly dominate any
@@ -624,6 +634,16 @@
             the surface is, not a verdict on any value in the row. A name at 40%
             can still carry a perfectly real 30-day skew reading if the two nodes
             it needs both trade.
+            <span x-show="scan && scan.z_source" style="display:block;margin-top:4px">
+              A <code>_z_</code> column here is computed against that ticker's
+              <strong x-text="scan && scan.baseline ? scan.baseline.snapshot + ' daily closes' : 'daily closes'"></strong>
+              over
+              <strong x-text="scan && scan.baseline ? scan.baseline.z_window + ' sessions' : ''"></strong>
+              ending at the prior session — not against the selected bucket's own
+              history. Filters and sorts run on that same derived value, so
+              "skew z &gt; 1.5" selects from the whole universe rather than from
+              whatever a page of rows happened to contain.
+            </span>
           </div>
         </div>
       </template>
@@ -701,11 +721,17 @@
 
         <div class="eq-note">
           With ~600 metrics per name, this is the entry point: the server
-          ranks every metric that has a value and a z, and only the top
-          <span x-text="unusualLimit"></span> come back. Percentile is over the
-          <span x-text="histWindow.toUpperCase()"></span> window with
-          extrapolated observations dropped, so "normal range" never includes a
-          value the spline invented. Click a card to chart it.
+          ranks every metric that has a value and a score, and only the top
+          <span x-text="unusualLimit"></span> come back.
+          <span x-text="zBasisNote()"></span>
+          Percentile is over the
+          <span x-text="histWindow.toUpperCase()"></span> window of daily
+          closes, ending at the prior session, with extrapolated observations
+          dropped — so "normal range" never includes a value the spline
+          invented, and today is never counted among the values it is being
+          ranked against. Click a card to chart it.
+          <span x-show="thinBaselineNote()" x-text="thinBaselineNote()"
+                class="eq-warn" style="display:block;margin-top:4px"></span>
         </div>
       </div>
     </template>
@@ -789,6 +815,14 @@
             ±2σ band would be too wide on the left and too narrow on the right,
             which is the tail that matters. Extrapolated observations are
             excluded from the distribution and from today's mark.
+            <span style="display:block;margin-top:4px">
+              The distribution is built from
+              <strong x-text="rails && rails.distribution_basis ? rails.distribution_basis.snapshot + ' daily closes' : 'daily closes'"></strong>
+              over the <span x-text="histWindow.toUpperCase()"></span> window,
+              ending at the prior session — not from the selected snapshot's own
+              history. The mark is today at the selected snapshot, which is the
+              point: an 11:25 reading placed against the daily range.
+            </span>
           </div>
         </div>
 

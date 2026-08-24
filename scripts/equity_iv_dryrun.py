@@ -15,6 +15,7 @@ tables.
 """
 import asyncio, datetime, json, os, sys, io, re
 import sqlglot
+from fastapi import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.routers.equity_iv as eiv
@@ -33,6 +34,32 @@ def check_sql(sql, args):
     used = {int(n) for n in re.findall(r"\$(\d+)", sql)}
     if used and (max(used) != len(args) or used != set(range(1, len(args) + 1))):
         BAD.append(("ARGS", sql, f"placeholders {sorted(used)} vs {len(args)} args"))
+    _check_contamination(sql)
+
+
+# The baseline must never contain the date it is scoring. These are the two
+# ways the file has actually got that wrong, so they are asserted rather than
+# left to review:
+#
+#   1. `trade_date <= $n` inside a baseline or distribution scan. The first
+#      version of _daily_baseline shipped with exactly that, and it escaped
+#      notice because mid-session the current day's 1545 row does not exist
+#      yet -- the window was clean by accident and dirty after the close.
+#   2. a rolling window frame ending at CURRENT ROW instead of 1 PRECEDING.
+def _check_contamination(sql):
+    flat = " ".join(sql.split())
+    is_baseline = ("bl_days AS" in flat or "stddev_samp" in flat
+                   or "percentile_cont" in flat)
+    if is_baseline and re.search(r"trade_date <= \$\d+", flat):
+        BAD.append(("CONTAMINATED", flat,
+                    "a scoring window uses trade_date <= (includes today)"))
+    if "ROWS BETWEEN" in flat and "AND CURRENT ROW" in flat:
+        BAD.append(("CONTAMINATED", flat,
+                    "rolling frame ends at CURRENT ROW (scores a date "
+                    "against itself); want 1 PRECEDING"))
+    if "bl_days AS" in flat and not re.search(r"trade_date < \$\d+", flat):
+        BAD.append(("CONTAMINATED", flat,
+                    "baseline CTE has no strict trade_date < bound"))
 
 
 class Row(dict):
@@ -96,6 +123,12 @@ def seed_catalog():
                        "units": "vol_pts", "description": col, "formula": None,
                        "extrap_flags": []}
 
+    # The scatter's default `size` is a catalogued metric in production, so
+    # the synthetic catalog has to carry it or every cross-section case 400s
+    # on the whitelist rather than on anything real.
+    add("median_n_strikes_clean", "base", fam="liquidity")
+    by_col["median_n_strikes_clean"]["units"] = "count"
+
     for col, wing, tenor in (("skew_30d_25p_atm", "25p_atm", 30),
                              ("iv_30d_atm", "atm", 30),
                              ("rr_30d_25d", "25d", 30),
@@ -119,10 +152,59 @@ def seed_catalog():
     }
 
 
+def self_test():
+    """Prove the contamination checks still fire before trusting a clean run.
+
+    A check that cannot fail reads exactly like a check that passes. These
+    assertions are the only thing standing between a future edit and the bug
+    this file was written for, so they get tested themselves.
+    """
+    must_fire = [
+        ("baseline scan with <=",
+         "WITH bl_days AS (SELECT ticker, trade_date FROM equity_metrics "
+         "WHERE snapshot = $1 AND trade_date <= $2 AND trade_date >= $3) SELECT 1"),
+        ("rolling frame ending at CURRENT ROW",
+         "SELECT avg(v) OVER (PARTITION BY ticker ORDER BY trade_date "
+         "ROWS BETWEEN $1 PRECEDING AND CURRENT ROW), stddev_samp(v) FROM v"),
+        ("baseline CTE with no strict upper bound",
+         "WITH bl_days AS (SELECT ticker FROM equity_metrics "
+         "WHERE snapshot = $1) SELECT 1"),
+    ]
+    must_not = [
+        ("clean baseline",
+         "WITH bl_days AS (SELECT ticker, trade_date FROM equity_metrics "
+         "WHERE snapshot = $1 AND trade_date < $2 AND trade_date >= $3) "
+         "SELECT stddev_samp(x) FROM t"),
+        ("clean rolling frame",
+         "SELECT avg(v) OVER (PARTITION BY ticker ORDER BY trade_date "
+         "ROWS BETWEEN $1 PRECEDING AND 1 PRECEDING), stddev_samp(v) FROM v"),
+    ]
+    bad = 0
+    for name, sql in must_fire:
+        n = len(BAD)
+        _check_contamination(sql)
+        if len(BAD) == n:
+            print(f"  SELF-TEST FAILED: no finding for {name!r}")
+            bad += 1
+        del BAD[n:]
+    for name, sql in must_not:
+        n = len(BAD)
+        _check_contamination(sql)
+        if len(BAD) != n:
+            print(f"  SELF-TEST FAILED: false positive on {name!r}")
+            bad += 1
+        del BAD[n:]
+    return bad
+
+
 async def main():
+    if self_test():
+        print("contamination checks are broken; not running the rest")
+        return 1
     seed_catalog()
     pool = Pool()
     cases = []
+    must_400 = []
 
     cases.append(("ticker-header",
                   eiv.ticker_header(ticker="AAPL", date=None, snapshot=None, pool=pool)))
@@ -160,12 +242,76 @@ async def main():
                                          z_window=63, envelope=envon,
                                          env_window=63, env_lo=0.10, env_hi=0.90,
                                          exclude_extrapolated=True, pool=pool)))
-    cases.append(("series z-form metric",
-                  eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
+    cases.append(("series alt snapshot, no z_stored",
+                  eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm",
                              mode="daily", snapshot="0945", window="1y",
                              z_window=63, envelope=True, env_window=20,
                              env_lo=0.05, env_hi=0.95,
                              exclude_extrapolated=False, pool=pool)))
+
+    # Panels that cannot derive a rolling z must REFUSE a stored z column
+    # rather than quietly serving the same-snapshot one. Asserted, because a
+    # silent fallback here looks identical to a correct answer.
+    must_400.append(("series rejects a stored z column",
+                     eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
+                                mode="daily", snapshot=None, window="1y",
+                                z_window=63, envelope=True, env_window=20,
+                                env_lo=0.05, env_hi=0.95,
+                                exclude_extrapolated=False, pool=pool)))
+    must_400.append(("rails rejects a stored z column",
+                     eiv.rails(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
+                               date=None, snapshot=None, window="1y",
+                               z_window=63, exclude_extrapolated=True,
+                               pool=pool)))
+    must_400.append(("scanner rejects mixed z windows",
+                     eiv.scanner(columns="skew_30d_25p_atm_z_63,iv_30d_atm_z_252",
+                                 date=None, snapshot=None, filter=[], sort=None,
+                                 dir="desc", limit=10,
+                                 exclude_extrapolated=True, pool=pool)))
+
+    # ── the universe half, which reads z the same way ────────────────────
+    for zc in ("skew_30d_25p_atm_z_63", "skew_30d_25p_atm"):
+        for ex in (True, False):
+            cases.append((f"cross-section x={zc} excl={ex}",
+                          eiv.cross_section(x=zc, y="iv_30d_atm", date=None,
+                                            snapshot=None,
+                                            size="median_n_strikes_clean",
+                                            color=None, exclude_extrapolated=ex,
+                                            pool=pool)))
+    cases.append(("cross-section coloured by z",
+                  eiv.cross_section(x="skew_30d_25p_atm_z_252",
+                                    y="iv_30d_atm_z_252", date=None,
+                                    snapshot=None, size=None,
+                                    color="rv_21d_z_252",
+                                    exclude_extrapolated=True, pool=pool)))
+
+    for metric in ("skew_30d_25p_atm_z_63", "iv_30d_atm"):
+        for win in ("3m", "all"):
+            cases.append((f"universe-stats {metric} {win}",
+                          eiv.universe_stats(metric=metric, date=None,
+                                             snapshot=None, window=win, hot=1.5,
+                                             exclude_extrapolated=True,
+                                             pool=pool)))
+
+    cases.append(("scanner z cols + z filter + z sort",
+                  eiv.scanner(columns="skew_30d_25p_atm_z_63,iv_30d_atm,rv_21d",
+                              date=None, snapshot=None,
+                              filter=["skew_30d_25p_atm_z_63:gt:1.5",
+                                      "term_ratio_30d_90d:lt:1.0"],
+                              sort="skew_30d_25p_atm_z_63", dir="desc",
+                              limit=300, exclude_extrapolated=True, pool=pool)))
+    cases.append(("scanner base only, no baseline needed",
+                  eiv.scanner(columns="iv_30d_atm,rv_21d", date=None,
+                              snapshot=None, filter=[], sort="iv_30d_atm",
+                              dir="asc", limit=50, exclude_extrapolated=True,
+                              pool=pool)))
+    cases.append(("scanner abs + nullok filters on z",
+                  eiv.scanner(columns="skew_30d_25p_atm_z_252", date=None,
+                              snapshot=None,
+                              filter=["skew_30d_25p_atm_z_252:absgt:2",
+                                      "iv_30d_atm:nullorgt:0.1"],
+                              sort=None, dir="desc", limit=10,
+                              exclude_extrapolated=False, pool=pool)))
 
     failed = 0
     for name, coro in cases:
@@ -183,7 +329,26 @@ async def main():
         except TypeError as exc:
             failed += 1
             print(f"  UNSERIALISABLE  {name}: {exc}")
-    print(f"\ncases: {len(cases)}, raised: {failed}")
+
+    # Endpoints that must REFUSE rather than fall back to the stored z. A
+    # silent fallback here is indistinguishable from a correct answer, which
+    # is exactly why it gets an assertion instead of a comment.
+    for name, coro in must_400:
+        try:
+            await coro
+        except HTTPException as exc:
+            if exc.status_code != 400:
+                failed += 1
+                print(f"  WRONG STATUS  {name}: got {exc.status_code}")
+        except Exception as exc:
+            failed += 1
+            print(f"  WRONG ERROR   {name}: {type(exc).__name__}: {exc}")
+        else:
+            failed += 1
+            print(f"  NOT REFUSED   {name}: returned instead of raising 400")
+
+    print(f"\nself-test: contamination checks fire correctly")
+    print(f"cases: {len(cases)} + {len(must_400)} must-refuse, failures: {failed}")
     print(f"sql statements checked: {len(SEEN)} ({len(set(SEEN))} distinct)")
     for kind, sql, msg in BAD[:12]:
         print(f"\n  {kind}: {msg}\n    {sql[:300]}")

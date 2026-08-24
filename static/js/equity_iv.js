@@ -1400,8 +1400,46 @@ document.addEventListener('alpine:init', () => {
       if (!this.ser || !this.ser.series.length) return '';
       const b = this.ser.series[0].baseline;
       if (!b || b.mu == null) return '';
-      return `z from the ${b.snapshot} daily close over ${b.z_window} days `
-           + `(n=${b.n}) in every mode — the intraday point moves, the yardstick does not.`;
+      return `z from the ${b.snapshot} daily close over ${b.z_window} sessions `
+           + `(n=${b.n}${b.last ? `, through ${b.last}` : ''}) in every mode — `
+           + `the point moves, the yardstick does not.`;
+    },
+
+    /* ── One scoring rule, said once ────────────────────────────────────────
+     * Every z and percentile on this page — scatter, scanner, cards, rails,
+     * charts — is measured against the daily close series ending at the
+     * PRIOR session. The line below is what makes that checkable rather than
+     * a claim in a docstring: if `last` is ever the date on screen, the
+     * exclusion broke, and it is right there to see. */
+
+    /** The daily-baseline provenance line, from whichever payload has it. */
+    zBasisNote() {
+      const b = (this.rails && this.rails.baseline)
+             || (this.unusual && this.unusual.baseline);
+      if (!b) return '';
+      const through = b.last ? `through ${b.last}` : 'through the prior session';
+      return `Scored against ${b.snapshot} daily closes, ${b.z_window} sessions, `
+           + `${through}${b.sessions ? ` (${b.sessions} sessions)` : ''}. `
+           + `Today is never inside the window scoring it.`;
+    },
+
+    /** True when the selected snapshot is not the daily close, which is
+     *  exactly the case the whole baseline rule exists for. */
+    get onIntradaySnapshot() {
+      const b = (this.rails && this.rails.baseline)
+             || (this.unusual && this.unusual.baseline);
+      return !!(b && this.snapshot && this.snapshot !== b.snapshot);
+    },
+
+    /** Metrics that had a value today but no score, because the baseline was
+     *  thinner than the floor. Reported rather than shown as z = 0. */
+    thinBaselineNote() {
+      const u = this.unusual;
+      if (!u || !u.n_unscored_thin_baseline) return '';
+      const min = u.baseline ? u.baseline.min_n : '';
+      return `${u.n_unscored_thin_baseline} metric(s) had a value today but `
+           + `fewer than ${min} daily observations to score it against, so they `
+           + `carry no z and are not ranked.`;
     },
 
     renderSeries() {
