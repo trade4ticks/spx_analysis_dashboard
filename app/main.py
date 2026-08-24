@@ -17,7 +17,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv
 
 BASE_DIR = Path(__file__).parent.parent  # project root
 
@@ -135,6 +135,7 @@ app.include_router(backtest_iv.router,  prefix="/api/backtest-iv")
 app.include_router(ticker_analysis.router, prefix="/api/ticker-analysis")
 app.include_router(ticker_chain.router,    prefix="/api/ticker-analysis")
 app.include_router(factor_trades.router,    prefix="/api/factor-trades")
+app.include_router(equity_iv.router,        prefix="/api/equity-iv")
 
 
 @app.get("/today")
@@ -180,6 +181,11 @@ async def factor_trades_page(request: Request):
 @app.get("/ticker-analysis")
 async def ticker_analysis_page(request: Request):
     return templates.TemplateResponse(request, "ticker_analysis.html")
+
+
+@app.get("/equity-iv")
+async def equity_iv_page(request: Request):
+    return templates.TemplateResponse(request, "equity_iv.html")
 
 
 @app.get("/backtest-iv-analysis")

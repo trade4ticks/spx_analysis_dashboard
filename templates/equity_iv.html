@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Equity IV Analysis</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+
+  <!-- Alpine.js (defer keeps it from blocking render) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <!-- Chart.js must load before equity_iv.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src={{ asset('js/equity_iv.js') }}></script>
+
+  <style>
+    /* ── Equity IV Analysis — page-scoped styles ───────────────────────────
+       Every rule is prefixed `.eq-` so nothing here can leak onto another
+       page. Colours come from theme.css tokens: --accent (#3498db) and the
+       canonical pink #e84393, which on this page mean the same thing they
+       mean everywhere else in the app — blue positive/above, pink
+       negative/below. Nothing is styled by rank. */
+
+    .eq-body { flex:1; overflow:auto; padding:12px 14px; min-height:0; }
+
+    /* Control bar. Same look as .ctrl-strip but page-local, so spacing can
+       be tuned without touching the global strip every other page uses. */
+    .eq-ctrl {
+      display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:8px 12px; margin-bottom:12px;
+    }
+    .eq-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
+    .eq-spacer { margin-left:auto; }
+
+    /* Dark native dropdowns. The option/optgroup background is the part that
+       stops the popup rendering white-on-dark. */
+    .eq-sel {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:4px 7px; border-radius:4px; color-scheme:dark;
+      max-width:230px;
+    }
+    .eq-sel option, .eq-sel optgroup { background:var(--raised); color:var(--text); }
+    .eq-sel optgroup { font-weight:700; color:var(--muted); }
+    .eq-sel:disabled { opacity:.4; cursor:not-allowed; }
+    .eq-num {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:12px; padding:4px 7px; border-radius:4px; width:74px;
+    }
+
+    /* Section shell — one per top-to-bottom block. */
+    .eq-section { background:var(--surface); border:1px solid var(--border); border-radius:6px; margin-bottom:12px; }
+    .eq-section-hdr {
+      display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      padding:6px 10px; border-bottom:1px solid var(--border);
+      background:var(--raised); border-top-left-radius:6px; border-top-right-radius:6px;
+    }
+    .eq-section-title { font-size:12px; font-weight:700; letter-spacing:.3px; color:var(--text); }
+    .eq-section-sub   { font-size:10px; color:var(--dim); }
+
+    /* Row 1: scatter ~60% / distribution ~40%. minmax(0,·) so a wide chart
+       cannot push the grid past the viewport — panels must not assume a
+       fixed width, the rows are expected to be rearranged later. */
+    .eq-row { display:grid; grid-template-columns:minmax(0,60fr) minmax(0,40fr); gap:12px; align-items:start; }
+    @media (max-width:1100px) { .eq-row { grid-template-columns:minmax(0,1fr); } }
+
+    .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
+    .eq-canvas-scatter { height:420px; }
+    .eq-canvas-hist    { height:260px; }
+    /* Same idiom as theme.css's .panel-body canvas: absolute inside a sized
+       wrapper, so Chart.js's responsive resize has a stable box to measure
+       and the canvas cannot grow the row on every reflow. */
+    .eq-canvas-wrap > canvas {
+      position:absolute; top:8px; left:10px; right:10px; bottom:4px;
+      width:calc(100% - 20px) !important; height:calc(100% - 12px) !important;
+    }
+
+    /* Preset buttons. These are the questions asked most often; clicking
+       through two dropdowns every time is friction, so they sit above them. */
+    .eq-presets { display:flex; gap:5px; flex-wrap:wrap; padding:7px 10px 0; }
+    .eq-preset {
+      background:var(--surface); border:1px solid var(--border); border-radius:10px;
+      padding:3px 9px; font-size:10px; color:var(--muted); cursor:pointer;
+      white-space:nowrap; user-select:none; transition:all .1s;
+    }
+    .eq-preset:hover { border-color:var(--dim); color:var(--text); }
+    .eq-preset.on { background:rgba(52,152,219,.14); border-color:var(--accent); color:var(--accent); font-weight:600; }
+    /* The extrapolation preset answers, at a glance, whether the tickers at
+       the edge of the scatter are opportunities or artifacts, so it is
+       always visible rather than one of a rotating set. */
+    .eq-preset.pin { border-style:dashed; }
+
+    .eq-axisrow { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:7px 10px; }
+
+    /* Colour-by legend: a diverging ramp, so it needs a strip, not swatches. */
+    .eq-ramp { display:flex; align-items:center; gap:6px; font-size:10px; color:var(--dim); }
+    .eq-ramp-bar {
+      width:120px; height:8px; border-radius:2px; border:1px solid var(--border);
+      background:linear-gradient(90deg,#e84393 0%, #8a8a8a 50%, #3498db 100%);
+    }
+
+    /* Scanner table. ~14 rows then internal scroll, so the table cannot push
+       the rest of the page down. */
+    .eq-tbl-wrap { max-height:430px; overflow:auto; }
+    .eq-tbl { width:100%; border-collapse:separate; border-spacing:0; font-size:11px; }
+    .eq-tbl th {
+      position:sticky; top:0; z-index:2;
+      background:var(--raised); color:var(--muted);
+      font-size:9px; text-transform:uppercase; letter-spacing:.3px; font-weight:700;
+      text-align:right; padding:6px 8px; white-space:nowrap;
+      border-bottom:1px solid var(--border); cursor:pointer; user-select:none;
+    }
+    .eq-tbl th:first-child, .eq-tbl td:first-child { text-align:left; }
+    .eq-tbl th.on { color:var(--accent); }
+    .eq-tbl td {
+      padding:4px 8px; text-align:right; white-space:nowrap;
+      border-bottom:1px solid rgba(255,255,255,.04); font-variant-numeric:tabular-nums;
+    }
+    .eq-tbl tbody tr { cursor:pointer; }
+    .eq-tbl tbody tr:hover { background:rgba(52,152,219,.08); }
+    .eq-tbl tbody tr.on { background:rgba(52,152,219,.16); }
+    .eq-tkr { font-weight:700; color:var(--text); }
+    /* A missing metric is legitimately null — a thin chain lacks wing nodes,
+       a short tenor does not always bracket. It renders as absent. */
+    .eq-null { color:var(--dim); }
+    /* A value built on a node the spline fabricated. Marked, not hidden, so
+       the reading is visible as suspect when the exclude toggle is off. */
+    .eq-fab { color:#e84393; }
+    .eq-fab::after { content:'*'; font-weight:700; }
+
+    .eq-chips { display:flex; gap:5px; flex-wrap:wrap; padding:0 10px 7px; }
+    .eq-chip {
+      display:inline-flex; align-items:center; gap:5px;
+      background:rgba(52,152,219,.12); border:1px solid var(--accent); border-radius:10px;
+      padding:2px 4px 2px 9px; font-size:10px; color:var(--accent); white-space:nowrap;
+    }
+    .eq-chip.filt { background:rgba(232,67,147,.12); border-color:#e84393; color:#e84393; }
+    .eq-chip-x { cursor:pointer; padding:0 4px; font-weight:700; opacity:.7; }
+    .eq-chip-x:hover { opacity:1; }
+
+    .eq-note { font-size:10px; color:var(--dim); padding:0 10px 8px; line-height:1.5; }
+    .eq-warn { color:var(--warning); }
+  </style>
+</head>
+
+<body x-data="equityIv" x-init="init()">
+
+  <!-- ── Topbar ─────────────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    {% set nav_active = "/equity-iv" %}{% include "_nav.html" %}
+    <div class="topbar-div"></div>
+    <div class="price-block">
+      <span style="font-size:11px;color:var(--dim)">SELECTED</span>
+      <span class="price-big" x-text="selectedTicker || '—'"></span>
+    </div>
+    <div class="topbar-right">
+      <span x-text="slice.date || '—'"></span> ·
+      <span x-text="slice.snapshot || '—'"></span>
+      <span x-show="slice.source" class="mode-pill"
+            :class="slice.source === 'exact' ? 'daily' : 'intraday'"
+            x-text="slice.source"></span>
+    </div>
+  </div>
+
+  <div class="eq-body">
+
+    <!-- ── Page controls ──────────────────────────────────────────────── -->
+    <div class="eq-ctrl">
+      <span class="eq-lbl">Date</span>
+      <select class="eq-sel" x-model="date" @change="onDateChange()">
+        <template x-for="d in dates" :key="d.date">
+          <option :value="d.date" x-text="d.date"></option>
+        </template>
+      </select>
+
+      <span class="eq-lbl">Snapshot</span>
+      <select class="eq-sel" x-model="snapshot" @change="reloadAll()" style="max-width:90px">
+        <template x-for="s in snapshots" :key="s">
+          <option :value="s" x-text="s"></option>
+        </template>
+      </select>
+
+      <div class="ctrl-div"></div>
+
+      <span class="eq-lbl">Z window</span>
+      <div class="seg">
+        <template x-for="w in [63, 252]" :key="w">
+          <div class="seg-btn" :class="{on: zWindow === w}"
+               @click="setZWindow(w)" x-text="w + 'd'"></div>
+        </template>
+      </div>
+
+      <span class="eq-lbl">History</span>
+      <div class="seg">
+        <template x-for="w in ['3m','1y','2y','all']" :key="w">
+          <div class="seg-btn" :class="{on: histWindow === w}"
+               @click="setHistWindow(w)" x-text="w.toUpperCase()"></div>
+        </template>
+      </div>
+
+      <div class="ctrl-div"></div>
+
+      <!-- Without this, thin-chained names quietly dominate any
+           cross-sectional skew measure. On by default. -->
+      <div class="chip" :class="{on: excludeExtrap}" @click="toggleExtrap()"
+           title="Drop values built on a node the smile fit fabricated">
+        Exclude extrapolated
+      </div>
+
+      <div class="eq-spacer"></div>
+      <button class="btn" @click="reloadAll()">↺ Refresh</button>
+    </div>
+
+    <!-- ── Row 1: cross-sectional scatter + universe distribution ─────── -->
+    <div class="eq-row">
+
+      <!-- Scatter -->
+      <div class="eq-section">
+        <div class="eq-section-hdr">
+          <span class="eq-section-title">Cross-section</span>
+          <span class="eq-section-sub" x-text="csSubtitle()"></span>
+          <div class="eq-spacer"></div>
+          <span class="eq-section-sub" x-show="cs" x-text="cs ? cs.n_tickers + ' tickers' : ''"></span>
+        </div>
+
+        <div class="eq-presets">
+          <template x-for="p in presets" :key="p.label">
+            <div class="eq-preset" :class="{on: activePreset === p.label, pin: p.permanent}"
+                 :title="p.why" @click="applyPreset(p)" x-text="p.label"></div>
+          </template>
+        </div>
+
+        <div class="eq-axisrow">
+          <span class="eq-lbl">X</span>
+          <select class="eq-sel" x-model="xFam" @change="onFamilyChange('x')">
+            <template x-for="f in families" :key="'xf-'+f">
+              <option :value="f" x-text="f"></option>
+            </template>
+          </select>
+          <select class="eq-sel" x-model="xBase" @change="onAxisChange()">
+            <template x-for="m in metricsFor(xFam)" :key="'xm-'+m.column_name">
+              <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+            </template>
+          </select>
+          <div class="p-seg">
+            <span :class="{on: !xZ}" @click="setAxisForm('x', false)">val</span>
+            <span :class="{on: xZ}" @click="setAxisForm('x', true)"
+                  :style="hasZ(xBase) ? '' : 'opacity:.35;cursor:not-allowed'">z</span>
+          </div>
+        </div>
+
+        <div class="eq-axisrow" style="padding-top:0">
+          <span class="eq-lbl">Y</span>
+          <select class="eq-sel" x-model="yFam" @change="onFamilyChange('y')">
+            <template x-for="f in families" :key="'yf-'+f">
+              <option :value="f" x-text="f"></option>
+            </template>
+          </select>
+          <select class="eq-sel" x-model="yBase" @change="onAxisChange()">
+            <template x-for="m in metricsFor(yFam)" :key="'ym-'+m.column_name">
+              <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+            </template>
+          </select>
+          <div class="p-seg">
+            <span :class="{on: !yZ}" @click="setAxisForm('y', false)">val</span>
+            <span :class="{on: yZ}" @click="setAxisForm('y', true)"
+                  :style="hasZ(yBase) ? '' : 'opacity:.35;cursor:not-allowed'">z</span>
+          </div>
+
+          <div class="ctrl-div"></div>
+          <span class="eq-lbl">Colour</span>
+          <select class="eq-sel" x-model="colorBase" @change="onAxisChange()" style="max-width:180px">
+            <option value="">none</option>
+            <template x-for="m in colorChoices()" :key="'cm-'+m.column_name">
+              <option :value="m.column_name" x-text="m.column_name"></option>
+            </template>
+          </select>
+          <div class="eq-ramp" x-show="colorBase">
+            <span x-text="fmtShort(colorRange()[0], colorUnits())"></span>
+            <div class="eq-ramp-bar"></div>
+            <span x-text="fmtShort(colorRange()[1], colorUnits())"></span>
+          </div>
+        </div>
+
+        <div class="eq-canvas-wrap eq-canvas-scatter">
+          <canvas id="eq-scatter"></canvas>
+          <div class="spinner" x-show="csLoading" x-cloak>
+            <div class="spinner-dot"></div><span>loading</span>
+          </div>
+          <div class="panel-error" x-show="csError" x-cloak x-text="csError"></div>
+        </div>
+
+        <div class="panel-stats">
+          <div class="ps"><div class="ps-lbl">Plotted</div>
+            <div class="ps-val a" x-text="scatterCounts().plotted"></div></div>
+          <div class="ps"><div class="ps-lbl">Null (absent)</div>
+            <div class="ps-val" x-text="scatterCounts().nulls"></div></div>
+          <div class="ps"><div class="ps-lbl">Fabricated node</div>
+            <div class="ps-val y" x-text="scatterCounts().fabricated"></div></div>
+          <div class="ps"><div class="ps-lbl">Size by</div>
+            <div class="ps-val t" style="font-size:10px">strikes/expiry</div></div>
+        </div>
+
+        <div class="eq-note">
+          Size is <code>median_n_strikes_clean</code> — surviving strikes per fitted
+          expiry, a liquidity <em>proxy</em>. This database has no volume, ADV or
+          market-cap column and no sector table, so the spec's "colour by sector,
+          size by liquidity" has no source; colour is an optional metric on a
+          diverging ramp instead.
+        </div>
+      </div>
+
+      <!-- Universe distribution -->
+      <div class="eq-section">
+        <div class="eq-section-hdr">
+          <span class="eq-section-title">Universe distribution</span>
+          <span class="eq-section-sub" x-text="xCol()"></span>
+        </div>
+
+        <div class="eq-canvas-wrap eq-canvas-hist">
+          <canvas id="eq-hist"></canvas>
+          <div class="panel-error" x-show="csError" x-cloak x-text="csError"></div>
+        </div>
+
+        <div class="panel-stats">
+          <div class="ps"><div class="ps-lbl">Above +1.5σ</div>
+            <div class="ps-val a" x-text="us && us.today ? us.today.n_hot : '—'"></div></div>
+          <div class="ps"><div class="ps-lbl">Its hist. avg</div>
+            <div class="ps-val" x-text="us && us.hot_count_avg != null ? us.hot_count_avg.toFixed(1) : '—'"></div></div>
+        </div>
+        <div class="panel-stats">
+          <div class="ps"><div class="ps-lbl">Universe median</div>
+            <div class="ps-val p" x-text="us && us.today && us.today.median != null ? fmtShort(us.today.median, xUnits()) : '—'"></div></div>
+          <div class="ps"><div class="ps-lbl">Dispersion pctile</div>
+            <div class="ps-val t" x-text="us && us.dispersion_percentile != null ? us.dispersion_percentile.toFixed(0) + '%' : '—'"></div></div>
+        </div>
+
+        <div class="eq-note">
+          If the median ticker sits at +0.4σ, a ticker at +2.0σ is part of a
+          market-wide move, not a name-specific opportunity — same number,
+          different trade. Stats are over the
+          <span x-text="histWindow.toUpperCase()"></span> window
+          (<span x-text="us ? us.n_dates : 0"></span> dates).
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Row 2: scanner ─────────────────────────────────────────────── -->
+    <div class="eq-section">
+      <div class="eq-section-hdr">
+        <span class="eq-section-title" style="cursor:pointer" @click="scanOpen = !scanOpen"
+              x-text="(scanOpen ? '▾ ' : '▸ ') + 'Scanner'"></span>
+        <span class="eq-section-sub" x-text="scan ? scan.n_rows + ' rows' + (scan.truncated ? ' (truncated)' : '') : ''"></span>
+        <div class="eq-spacer"></div>
+        <template x-if="scanOpen">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span class="eq-lbl">Add column</span>
+            <select class="eq-sel" x-model="pickFam" @change="pickBase = firstMetric(pickFam)">
+              <template x-for="f in families" :key="'pf-'+f">
+                <option :value="f" x-text="f"></option>
+              </template>
+            </select>
+            <select class="eq-sel" x-model="pickBase">
+              <template x-for="m in metricsFor(pickFam)" :key="'pm-'+m.column_name">
+                <option :value="m.column_name" x-text="m.column_name" :title="m.description"></option>
+              </template>
+            </select>
+            <div class="p-seg">
+              <span :class="{on: !pickZ}" @click="pickZ = false">val</span>
+              <span :class="{on: pickZ}" @click="pickZ = hasZ(pickBase)">z</span>
+            </div>
+            <button class="btn" @click="addScanCol()">+ col</button>
+            <button class="btn" @click="addScanFilter()">+ filter</button>
+          </div>
+        </template>
+      </div>
+
+      <template x-if="scanOpen">
+        <div>
+          <div class="eq-chips">
+            <template x-for="(c, i) in scanCols" :key="'sc-'+c.b+c.z">
+              <span class="eq-chip">
+                <span x-text="resolve(c.b, c.z)"></span>
+                <span class="eq-chip-x" @click="removeScanCol(i)">×</span>
+              </span>
+            </template>
+          </div>
+
+          <template x-if="scanFilters.length">
+            <div class="eq-chips">
+              <template x-for="(f, i) in scanFilters" :key="'sf-'+i">
+                <span class="eq-chip filt">
+                  <span x-text="resolve(f.b, f.z) + ' ' + f.op + ' ' + f.v"></span>
+                  <span class="eq-chip-x" @click="removeScanFilter(i)">×</span>
+                </span>
+              </template>
+            </div>
+          </template>
+
+          <template x-if="filterDraft">
+            <div class="eq-axisrow" style="border-top:1px solid var(--border)">
+              <span class="eq-lbl">Filter</span>
+              <select class="eq-sel" x-model="filtFam" @change="filtBase = firstMetric(filtFam)">
+                <template x-for="f in families" :key="'ff-'+f">
+                  <option :value="f" x-text="f"></option>
+                </template>
+              </select>
+              <select class="eq-sel" x-model="filtBase">
+                <template x-for="m in metricsFor(filtFam)" :key="'fm-'+m.column_name">
+                  <option :value="m.column_name" x-text="m.column_name"></option>
+                </template>
+              </select>
+              <div class="p-seg">
+                <span :class="{on: !filtZ}" @click="filtZ = false">val</span>
+                <span :class="{on: filtZ}" @click="filtZ = hasZ(filtBase)">z</span>
+              </div>
+              <select class="eq-sel" x-model="filtOp" style="max-width:150px">
+                <template x-for="o in filterOps" :key="'fo-'+o.op">
+                  <option :value="o.op" x-text="o.label" :title="o.hint"></option>
+                </template>
+              </select>
+              <input class="eq-num" type="text" x-model="filtVal" placeholder="value"
+                     :disabled="filtOp === 'isnull' || filtOp === 'notnull'">
+              <button class="btn primary" @click="commitFilter()">Apply</button>
+              <button class="btn" @click="filterDraft = false">Cancel</button>
+              <span class="eq-note eq-warn" style="padding:0"
+                    x-show="filtBase === 'days_to_earnings'">
+                days_to_earnings is NULL for every row — no earnings source is wired
+                up yet. Use "null or &gt;" so unknown counts as passing.
+              </span>
+            </div>
+          </template>
+
+          <div class="eq-tbl-wrap">
+            <table class="eq-tbl">
+              <thead>
+                <tr>
+                  <th @click="sortBy('__ticker')">Ticker</th>
+                  <template x-for="c in scanCols" :key="'th-'+c.b+c.z">
+                    <th :class="{on: scanSort === resolve(c.b, c.z)}"
+                        :title="describe(resolve(c.b, c.z))"
+                        @click="sortBy(resolve(c.b, c.z))"
+                        x-text="colHeader(c) + (scanSort === resolve(c.b, c.z) ? (scanDir === 'desc' ? ' ▾' : ' ▴') : '')"></th>
+                  </template>
+                  <th>Spot</th>
+                  <th title="Fraction of nodes extrapolated across tenors ≤ 30">Extrap</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="r in (scan ? scan.rows : [])" :key="'tr-'+r.ticker">
+                  <tr :class="{on: selectedTicker === r.ticker}" @click="selectTicker(r.ticker)">
+                    <td class="eq-tkr" x-text="r.ticker"></td>
+                    <template x-for="c in scanCols" :key="'td-'+r.ticker+c.b+c.z">
+                      <td :class="cellClass(r, resolve(c.b, c.z))"
+                          x-text="fmt(r.values[resolve(c.b, c.z)], unitsOf(resolve(c.b, c.z)))"></td>
+                    </template>
+                    <td x-text="r.spot != null ? r.spot.toFixed(2) : '—'"></td>
+                    <td :class="r.extrap_rate > 0.1 ? 'eq-fab' : ''"
+                        x-text="r.extrap_rate != null ? (r.extrap_rate * 100).toFixed(1) + '%' : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div class="hm-loading" x-show="scanLoading" x-cloak>loading…</div>
+            <div class="hm-error"   x-show="scanError"   x-cloak x-text="scanError"></div>
+            <div class="hm-empty"   x-show="!scanLoading && !scanError && scan && !scan.n_rows" x-cloak>
+              No rows match the filters.
+            </div>
+          </div>
+
+          <div class="eq-note">
+            <span class="eq-fab" style="font-size:11px"></span>
+            marks a value built on a node the smile fit fabricated. Rates vary
+            enormously by name — SPY 0.0%, AAPL 2.6%, T 21.6% on one date — so a
+            scan that averages over fabricated nodes ranks thin chains as
+            unusually flat.
+          </div>
+        </div>
+      </template>
+    </div>
+
+  </div>
+</body>
+</html>
