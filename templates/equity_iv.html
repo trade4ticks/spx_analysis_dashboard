@@ -20,6 +20,17 @@
        mean everywhere else in the app — blue positive/above, pink
        negative/below. Nothing is styled by rank. */
 
+    html { color-scheme: dark; }
+    body {
+      /* Inherited, so it reaches .eq-cards, .eq-tbl-wrap, .eq-gridwrap,
+         .eq-body and anything added later without each needing a rule. */
+      scrollbar-color: var(--border) var(--bg);
+    }
+    ::-webkit-scrollbar { width:8px; height:8px; }
+    ::-webkit-scrollbar-track { background:var(--bg); }
+    ::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
+    ::-webkit-scrollbar-thumb:hover { background:var(--dim); }
+
     .eq-body { flex:1; overflow:auto; padding:12px 14px; min-height:0; }
 
     /* Control bar. Same look as .ctrl-strip but page-local, so spacing can
@@ -56,7 +67,49 @@
     }
 
     /* Section shell — one per top-to-bottom block. */
-    .eq-section { background:var(--surface); border:1px solid var(--border); border-radius:6px; margin-bottom:12px; }
+    .eq-section {
+      position:relative;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; margin-bottom:12px;
+    }
+
+    /* Header controls. Both sit beside the panel name rather than at the far
+       right: the headers carry different control sets and a right-aligned
+       pair would land in a different place on every panel. */
+    .eq-help, .eq-fs {
+      flex:0 0 auto; cursor:pointer; user-select:none;
+      background:transparent; border:1px solid var(--border); border-radius:3px;
+      color:var(--dim); font-size:10px; line-height:1;
+      padding:2px 5px; font-family:inherit;
+    }
+    .eq-help:hover, .eq-fs:hover { color:var(--text); border-color:var(--dim); }
+    .eq-help.on { color:var(--accent); border-color:var(--accent); }
+
+    /* Full screen, matching the Ticker Analysis pattern (.ta-section.fs). */
+    .eq-section.fs {
+      position:fixed; inset:8px; z-index:300; margin:0;
+      display:flex; flex-direction:column;
+      box-shadow:0 8px 32px rgba(0,0,0,.7);
+    }
+    /* Whatever holds the visual takes the slack; control rows keep their
+       natural height. !important because the row-level height rules are more
+       specific than this selector. */
+    .eq-section.fs .eq-band-canvas,
+    .eq-section.fs .eq-canvas-wrap,
+    .eq-section.fs .eq-ts-wrap,
+    .eq-section.fs .eq-oi-canvas {
+      flex:1 1 auto !important; height:auto !important; min-height:0 !important;
+    }
+    .eq-section.fs .eq-gridwrap,
+    .eq-section.fs .eq-tbl-wrap,
+    .eq-section.fs .eq-rails {
+      flex:1 1 auto; min-height:0; overflow:auto; max-height:none;
+    }
+
+    /* The note is a popover over the bottom of its panel, not a block in the
+       flow. On some panels it was a third of the height, and that space is
+       space the visual should have — so it overlays rather than reflows, and
+       opening it costs the chart nothing. */
     .eq-section-hdr {
       display:flex; align-items:center; gap:8px; flex-wrap:wrap;
       padding:6px 10px; border-bottom:1px solid var(--border);
@@ -236,7 +289,14 @@
        row-6 band panels, so it gets its own height. */
     .eq-oi-canvas { height:330px; }
 
-    .eq-note { font-size:10px; color:var(--dim); padding:0 10px 8px; line-height:1.5; }
+    .eq-note {
+      position:absolute; left:0; right:0; bottom:0; z-index:20;
+      max-height:78%; overflow:auto;
+      background:var(--raised); border-top:1px solid var(--border);
+      border-bottom-left-radius:6px; border-bottom-right-radius:6px;
+      box-shadow:0 -6px 18px rgba(0,0,0,.45);
+      font-size:10px; color:var(--dim); padding:8px 10px; line-height:1.5;
+    }
     .eq-warn { color:var(--warning); }
 
     /* ── Row 3: ticker header ───────────────────────────────────────────
@@ -276,6 +336,7 @@
     .eq-cards {
       display:flex; gap:7px; overflow-x:auto; overflow-y:hidden;
       padding:8px 10px 10px; scrollbar-width:thin;
+      scrollbar-color:var(--border) var(--bg);
     }
     .eq-card {
       flex:0 0 auto; width:132px;
@@ -453,9 +514,15 @@
     <div class="eq-row">
 
       <!-- Scatter -->
-      <div class="eq-section">
+      <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
         <div class="eq-section-hdr">
           <span class="eq-section-title">Cross-section</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
           <span class="eq-section-sub" x-text="csSubtitle()"></span>
           <div class="eq-spacer"></div>
           <span class="eq-section-sub" x-show="cs" x-text="cs ? cs.n_tickers + ' tickers' : ''"></span>
@@ -540,7 +607,7 @@
             <div class="ps-val t" style="font-size:10px">strikes/expiry</div></div>
         </div>
 
-        <div class="eq-note">
+        <div class="eq-note" x-show="note" x-cloak>
           Size is <code>median_n_strikes_clean</code> — surviving strikes per fitted
           expiry, a liquidity <em>proxy</em>. This database has no volume, ADV or
           market-cap column and no sector table, so the spec's "colour by sector,
@@ -550,9 +617,15 @@
       </div>
 
       <!-- Universe distribution -->
-      <div class="eq-section">
+      <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
         <div class="eq-section-hdr">
           <span class="eq-section-title">Universe distribution</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
           <span class="eq-section-sub" x-text="xCol()"></span>
         </div>
 
@@ -574,7 +647,7 @@
             <div class="ps-val t" x-text="us && us.dispersion_percentile != null ? us.dispersion_percentile.toFixed(0) + '%' : '—'"></div></div>
         </div>
 
-        <div class="eq-note">
+        <div class="eq-note" x-show="note" x-cloak>
           If the median ticker sits at +0.4σ, a ticker at +2.0σ is part of a
           market-wide move, not a name-specific opportunity — same number,
           different trade. Stats are over the
@@ -585,10 +658,16 @@
     </div>
 
     <!-- ── Row 2: scanner ─────────────────────────────────────────────── -->
-    <div class="eq-section">
+    <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
       <div class="eq-section-hdr">
         <span class="eq-section-title" style="cursor:pointer" @click="scanOpen = !scanOpen"
               x-text="(scanOpen ? '▾ ' : '▸ ') + 'Scanner'"></span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
         <span class="eq-section-sub" x-text="scan ? scan.n_rows + ' rows' + (scan.truncated ? ' (truncated)' : '') : ''"></span>
         <div class="eq-spacer"></div>
         <template x-if="scanOpen">
@@ -708,7 +787,7 @@
             </div>
           </div>
 
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span class="eq-fab" style="font-size:11px"></span>
             marks a cell whose <em>own</em> nodes the smile fit fabricated —
             <code>skew_30d_25p_atm</code> is marked when 25p@30d or atm@30d did
@@ -773,9 +852,15 @@
 
     <!-- ── Row 4: today, what's unusual ───────────────────────────────── -->
     <template x-if="selectedTicker">
-      <div class="eq-section">
+      <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
         <div class="eq-section-hdr">
           <span class="eq-section-title">Today, what's unusual</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
           <span class="eq-section-sub"
                 x-text="unusual ? ('ranked by |z| over ' + unusual.n_ranked + ' metrics · ' + zWindow + 'd') : ''"></span>
           <div class="eq-spacer"></div>
@@ -807,7 +892,7 @@
                 x-cloak>Nothing to rank — no metric has both a value and a z at this snapshot.</span>
         </div>
 
-        <div class="eq-note">
+        <div class="eq-note" x-show="note" x-cloak>
           With ~600 metrics per name, this is the entry point: the server
           ranks every metric that has a value and a score, and only the top
           <span x-text="unusualLimit"></span> come back.
@@ -829,9 +914,15 @@
       <div class="eq-row53">
 
         <!-- Rails -->
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Where it sits</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub" x-text="histWindow.toUpperCase() + ' distribution'"></span>
             <div class="eq-spacer"></div>
             <span class="eq-section-sub" x-show="railsLoading" x-cloak>loading…</span>
@@ -874,6 +965,8 @@
 
             <div class="eq-section-sub" x-show="!railsLoading && !railRows().length" x-cloak
                  style="padding:6px 0">No rails — add one below.</div>
+            <div class="eq-section-sub eq-warn" x-show="railMissingNote()" x-cloak
+                 style="padding:6px 0" x-text="railMissingNote()"></div>
             <div class="eq-section-sub eq-warn" x-show="railsError" x-cloak x-text="railsError"></div>
           </div>
 
@@ -893,7 +986,7 @@
             <button class="btn" @click="addRail()">+</button>
           </div>
 
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             Outer bar is P5–P95, the box is P25–P75, the tick is the median and
             the bright mark is today. When today falls outside P5–P95 the track
             stretches to contain it rather than pinning it to the end, so a
@@ -915,9 +1008,15 @@
         </div>
 
         <!-- Time series -->
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">History</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <div class="seg">
               <template x-for="m in ['daily','intraday']" :key="'sm-'+m">
                 <div class="seg-btn" :class="{on: seriesMode === m}"
@@ -984,7 +1083,7 @@
           <div class="panel-error" x-show="serError" x-cloak x-text="serError"
                style="margin:0 10px 8px"></div>
 
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span x-show="seriesCoverageNote()" x-text="seriesCoverageNote()"
                   class="eq-warn" style="display:block"></span>
             <span x-show="candleDroppedText()" x-text="candleDroppedText()"
@@ -1008,9 +1107,15 @@
       <div class="eq-row3">
 
         <!-- Tent -->
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Tent</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub">1×2 put ratio</span>
             <div class="eq-spacer"></div>
             <span class="eq-lbl">Tenor</span>
@@ -1035,7 +1140,7 @@
             <div class="panel-error" x-show="tentError" x-cloak x-text="tentError"></div>
           </div>
 
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span x-show="tentNote()" x-text="tentNote()"
                   style="display:block"></span>
             <span x-show="tentGapNote()" x-text="tentGapNote()"
@@ -1053,9 +1158,15 @@
         </div>
 
         <!-- Skew curve -->
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Skew curve</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub" x-text="cbSubtitle('skew')"></span>
             <div class="eq-spacer"></div>
             <!-- The same control as the tent's, bound to the same tenor. One
@@ -1076,7 +1187,7 @@
             <canvas id="eq-cb-skew"></canvas>
             <div class="panel-error" x-show="cbError.skew" x-cloak x-text="cbError.skew"></div>
           </div>
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             IV by delta at this tenor, today against the band. put_delta is
             put-convention throughout: 25 is a 25Δ put, 75 is a 25Δ <em>call</em>.
             The band is a pointwise envelope across prior sessions, not a set of
@@ -1086,9 +1197,15 @@
         </div>
 
         <!-- Term structure / skew term structure -->
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Term</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <div class="seg">
               <div class="seg-btn" :class="{on: termKind === 'term'}"
                    @click="setTermKind('term')"
@@ -1116,7 +1233,7 @@
             <div class="panel-error" x-show="cbError[termKind]" x-cloak
                  x-text="cbError[termKind]"></div>
           </div>
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <template x-if="termKind === 'term'">
               <span>IV by tenor, with the white dashed line the ATM term structure
                 from <code>equity_atm</code> — evaluated at k=0, not put_delta 50.</span>
@@ -1136,9 +1253,15 @@
     <template x-if="selectedTicker">
       <div class="eq-row2">
 
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Sticky-strike vs sticky-delta</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub"
                   x-text="sticky ? sticky.prev_date + ' → ' + sticky.date + ' · ' + sticky.dte + 'd' : ''"></span>
             <div class="eq-spacer"></div>
@@ -1148,7 +1271,7 @@
             <canvas id="eq-sticky"></canvas>
             <div class="panel-error" x-show="stickyError" x-cloak x-text="stickyError"></div>
           </div>
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span x-show="stickyNote()" x-text="stickyNote()"
                   style="display:block;margin-bottom:3px"></span>
             Skew that is rich because flow bid the wings mean-reverts on its own.
@@ -1158,9 +1281,15 @@
           </div>
         </div>
 
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Surface grid</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <div class="seg">
               <template x-for="v in gridViews" :key="'gv-'+v.k">
                 <div class="seg-btn" :class="{on: gridView === v.k}"
@@ -1201,7 +1330,7 @@
             <div class="panel-error" x-show="gridError" x-cloak x-text="gridError"></div>
           </div>
 
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span x-show="gridDirectNote()" x-text="gridDirectNote()"
                   style="display:block;margin-bottom:3px"></span>
             Rows are tenors, columns are put_delta. Blue above, pink below —
@@ -1219,9 +1348,15 @@
     <template x-if="selectedTicker">
       <div class="eq-row2">
 
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Path</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub"
                   x-text="tscat ? (tscat.n_points + ' sessions · ' + histWindow.toUpperCase()) : ''"></span>
             <div class="eq-spacer"></div>
@@ -1280,7 +1415,7 @@
             <canvas id="eq-tscat"></canvas>
             <div class="panel-error" x-show="tscatError" x-cloak x-text="tscatError"></div>
           </div>
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             One dot per prior session for this ticker. Older sessions are a
             uniform dim blue — they are context, not individually readable —
             and the most recent 10 run faint to bright pink, with today
@@ -1290,9 +1425,15 @@
           </div>
         </div>
 
-        <div class="eq-section">
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
             <span class="eq-section-title">Spot–vol</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub"
                   x-text="svol ? (svol.dte + 'd · ' + histWindow.toUpperCase()) : ''"></span>
             <div class="eq-spacer"></div>
@@ -1302,7 +1443,7 @@
             <canvas id="eq-svol"></canvas>
             <div class="panel-error" x-show="svolError" x-cloak x-text="svolError"></div>
           </div>
-          <div class="eq-note">
+          <div class="eq-note" x-show="note" x-cloak>
             <span x-show="svolNote()" x-text="svolNote()"
                   style="display:block;margin-bottom:3px"></span>
             Today is hollow because it is a part-session move measured against
@@ -1314,10 +1455,16 @@
 
     <!-- ── Row 9: open interest, collapsed ────────────────────────────── -->
     <template x-if="selectedTicker">
-      <div class="eq-section">
+      <div class="eq-section" x-data="{ fs:false, note:false }"
+           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
         <div class="eq-section-hdr">
           <span class="eq-section-title" style="cursor:pointer" @click="toggleOi()"
                 x-text="(oiOpen ? '▾ ' : '▸ ') + 'Open interest'"></span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
           <span class="eq-section-sub"
                 x-text="oiOpen && oiDate ? oiDate : 'positioning · periodic check'"></span>
           <template x-if="oiOpen">
@@ -1404,7 +1551,7 @@
               <div class="panel-error" x-show="oiError" x-cloak x-text="oiError"></div>
             </div>
 
-            <div class="eq-note">
+            <div class="eq-note" x-show="note" x-cloak>
               <span x-show="oiNote" x-text="oiNote" class="eq-warn"
                     style="display:block;margin-bottom:3px"></span>
               <span x-show="oiRefNote()" x-text="oiRefNote()"

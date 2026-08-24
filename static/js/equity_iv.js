@@ -570,14 +570,15 @@ document.addEventListener('alpine:init', () => {
     unusual: null, unusualLoading: false, unusualError: '',
     unusualLimit: 40,
 
-    /* The rail set is configurable; this is the default eight. They are the
-     * ones that answer "is this name's surface shaped normally" — level,
-     * both skew wings, term, the risk reversal, the zero-cost width, the
-     * variance premium and the convexity. Any that the catalog does not have
-     * are dropped at load rather than erroring. */
-    railMetrics: ['skew_30d_25p_atm', 'skew_30d_10p_atm', 'iv_30d_atm',
-                  'term_ratio_30d_90d', 'rr_30d_25d', 'zc_width_sigma_30d',
-                  'vrp_1m', 'convexity_30d_25p_atm_25c'],
+    /* Empty until the server answers, which is deliberate: the default set
+     * used to be written out here AND in the router, and the two drifted —
+     * names that the catalog did not have were dropped silently on the way
+     * through, so the panel quietly rendered a shorter set than either list
+     * described. The first /rails call now omits `metrics` entirely and
+     * adopts whatever came back, with the slots that resolved to nothing
+     * named on screen. */
+    railMetrics: [],
+    railDefaults: null,
     rails: null, railsLoading: false, railsError: '',
     railFam: 'skew', railBase: 'skew_30d_25p_atm',
 
@@ -698,6 +699,20 @@ document.addEventListener('alpine:init', () => {
     /* The ticker header sticks beneath the control bar, and the bar's height
      * depends on how it wraps — which depends on the viewport. Measured rather
      * than guessed, so the two never overlap at an awkward width. */
+    /* Called after any change that resizes a panel — full-screen in or out,
+     * a note popover opening over a chart. Chart.js instances are responsive
+     * and listen for window resize, so one synthetic event re-measures every
+     * chart on the page without this having to know which ones exist.
+     *
+     * nextTick lets Alpine apply the class, rAF lets the browser lay out
+     * against it; firing before either leaves the chart sized to the old box.
+     */
+    relayout() {
+      this.$nextTick(() => requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'));
+      }));
+    },
+
     syncCtrlHeight() {
       const el = document.getElementById('eq-ctrl');
       if (!el) return;
@@ -722,6 +737,8 @@ document.addEventListener('alpine:init', () => {
      * down instead of costing it one row. Pruned once, here, against what
      * the catalog actually returned. */
     pruneTickerDefaults() {
+      // railMetrics starts empty and is filled from the server's resolution,
+      // so there is nothing to prune on the first pass.
       this.railMetrics = this.railMetrics.filter(c => this.byCol[c]);
       this.seriesSpecs = this.seriesSpecs.filter(s => this.byCol[s.b]);
       if (!this.seriesSpecs.length) {
@@ -1533,17 +1550,26 @@ document.addEventListener('alpine:init', () => {
 
     async loadRails() {
       if (!this.selectedTicker || !this.date || !this.snapshot) return;
-      if (!this.railMetrics.length) { this.rails = null; return; }
       this.railsLoading = true; this.railsError = '';
       try {
-        const j = await eqGetJson('/api/equity-iv/rails?' + new URLSearchParams({
-          ticker: this.selectedTicker, metrics: this.railMetrics.join(','),
+        const q = new URLSearchParams({
+          ticker: this.selectedTicker,
           date: this.date, snapshot: this.snapshot,
           window: this.histWindow, z_window: String(this.zWindow),
           exclude_extrapolated: String(this.excludeExtrap),
-        }));
+        });
+        // Omitted on the first call so the server's slot resolution decides
+        // the set; sent thereafter so an edited set survives a reload.
+        if (this.railMetrics.length) q.set('metrics', this.railMetrics.join(','));
+        const j = await eqGetJson('/api/equity-iv/rails?' + q);
         if (j.error) { this.railsError = j.error; this.rails = null; }
-        else { this.rails = j; }
+        else {
+          this.rails = j;
+          if (j.defaults) {
+            this.railDefaults = j.defaults;
+            this.railMetrics = j.rails.map(r => r.column_name);
+          }
+        }
       } catch (e) {
         this.railsError = String(e.message || e); this.rails = null;
       } finally {
@@ -1638,6 +1664,16 @@ document.addEventListener('alpine:init', () => {
     removeRail(i) {
       this.railMetrics.splice(i, 1);
       if (this.railMetrics.length) this.loadRails(); else this.rails = null;
+    },
+
+    /** Default slots the catalog had no column for. Named, not dropped. */
+    railMissingNote() {
+      if (!this.railDefaults) return '';
+      const miss = this.railDefaults.filter(s => !s.column).map(s => s.slot);
+      if (!miss.length) return '';
+      return `No catalog column for: ${miss.join(', ')}. Those rails are absent `
+           + `rather than substituted — add one from the picker if you know the `
+           + `real column name.`;
     },
 
     // ── Row 5b: time series ──────────────────────────────────────────────
@@ -2581,7 +2617,10 @@ document.addEventListener('alpine:init', () => {
               data: xy(j.prev), parsing: false,
               borderColor: this.rgba('#8a8a8a', 0.85), borderWidth: 1,
               borderDash: [5, 3], pointRadius: 0, tension: 0, order: 2 },
-            { label: `${j.prev_date} re-read at today's spot`,
+            // Named for what it MEANS, not for how it was built. This is the
+            // counterfactual and the most important line on the panel: the
+            // prior smile with nothing changed except where spot sits.
+            { label: `${j.prev_date} smile, if only spot moved`,
               data: xy(j.shifted), parsing: false,
               borderColor: this.rgba(EQ_BLUE, 0.55), borderWidth: 1,
               borderDash: [2, 2], pointRadius: 0, tension: 0, order: 2 },

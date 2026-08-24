@@ -1426,11 +1426,46 @@ async def unusual(
     }
 
 
-RAILS_DEFAULT = (
-    "skew_30d_25p_atm", "skew_30d_10p_atm", "iv_30d_atm",
-    "term_ratio_30d_90d", "rr_30d_25d", "zc_width_sigma_30d",
-    "vrp_1m", "convexity_30d_25p_atm_25c",
+# The default rail set, as SLOTS rather than a flat list of names.
+#
+# The flat version silently dropped any name the catalog did not have, which
+# is how "rr_30d_25d" and "convexity_30d_25p_atm_25c" vanished from the panel
+# without a word — the set just came back two rails shorter than it was
+# written to be. Each slot now carries candidates and a label, resolution is
+# reported in the payload, and a slot that resolves to nothing is named on
+# screen instead of disappearing.
+#
+# Order is the reading order: both put wings, then the call wing, then level,
+# term, curvature, and the three that price the trade rather than describe
+# the surface.
+RAILS_SLOTS = (
+    ("25Δ put skew",     ("skew_30d_25p_atm",)),
+    ("10Δ put skew",     ("skew_30d_10p_atm",)),
+    ("25Δ call skew",    ("skew_30d_atm_25c", "skew_30d_25c_atm",
+                          "skew_30d_atm_25c_", "callskew_30d_atm_25c")),
+    ("ATM IV",           ("iv_30d_atm",)),
+    ("term 7d/30d",      ("term_ratio_7d_30d", "term_ratio_7d_21d",
+                          "term_ratio_14d_30d")),
+    ("put convexity",    ("convex_30d_10p_25p_atm", "convexity_30d_10p_25p_atm",
+                          "convex_30d_10p_25p", "convexity_30d_10p_25p_atm_")),
+    ("zero-cost width",  ("zc_width_sigma_30d",)),
+    ("VRP 1m",           ("vrp_1m", "vrp_1m_", "vrp_21d")),
+    ("spot-vol β 1m",    ("spotvol_beta_1m",)),
 )
+
+
+def _resolve_rail_slots(cat):
+    """[(label, column_or_None)] for the default rail set.
+
+    Resolved against the CATALOG rather than the live column list, because a
+    rail needs the catalog's units and description to render, not just a
+    backing column.
+    """
+    out = []
+    for label, cands in RAILS_SLOTS:
+        hit = next((c for c in cands if c in cat["by_col"]), None)
+        out.append((label, hit))
+    return out
 
 
 @router.get("/rails")
@@ -1477,11 +1512,16 @@ async def rails(
     if not pool:
         return {"error": "OI database not configured", "rails": []}
 
-    cat  = await _catalog(pool)
-    cols = [c.strip() for c in metrics.split(",") if c.strip()] if metrics \
-        else [c for c in RAILS_DEFAULT if c in cat["by_col"]]
+    cat = await _catalog(pool)
+    slots = None
+    if metrics:
+        cols = [c.strip() for c in metrics.split(",") if c.strip()]
+    else:
+        slots = _resolve_rail_slots(cat)
+        cols = [c for _lbl, c in slots if c]
     if not cols:
-        return {"error": "No usable rail metrics", "rails": []}
+        return {"error": "No usable rail metrics", "rails": [],
+                "defaults": [{"slot": l, "column": c} for l, c in (slots or [])]}
     entries = [_entry(cat, c) for c in cols]
     _reject_z_form(entries, "A rail", "Pass the base column — each rail "
                    "already shows its daily-baseline z beside the bar.")
@@ -1591,6 +1631,11 @@ async def rails(
         "rails": out,
         "exclude_extrapolated": bool(exclude_extrapolated),
         "z_source": "daily_baseline",
+        # Which default slot each rail came from, and which found nothing.
+        # Returned only when the caller took the defaults; an explicit metric
+        # list is its own answer.
+        "defaults": ([{"slot": l, "column": c} for l, c in slots]
+                     if slots is not None else None),
         "baseline": {
             "snapshot": BASELINE_SNAPSHOT, "z_window": z_window,
             "first": any_stat.get("first"), "last": any_stat.get("last"),
