@@ -47,6 +47,11 @@ def check_sql(sql, args):
 #      notice because mid-session the current day's 1545 row does not exist
 #      yet -- the window was clean by accident and dirty after the close.
 #   2. a rolling window frame ending at CURRENT ROW instead of 1 PRECEDING.
+#
+# The z windows these were written for are gone -- equity_metrics_z stores the
+# score now. They still guard the PERCENTILE and BAND windows, which this page
+# does still compute and which have the same requirement, and they still stand
+# watch over the derivation being reintroduced.
 def _check_contamination(sql):
     flat = " ".join(sql.split())
     is_baseline = ("bl_days AS" in flat or "stddev_samp" in flat
@@ -334,26 +339,28 @@ async def main():
                              env_lo=0.05, env_hi=0.95,
                              exclude_extrapolated=False, pool=pool)))
 
-    # Panels that cannot derive a rolling z must REFUSE a stored z column
-    # rather than quietly serving the same-snapshot one. Asserted, because a
-    # silent fallback here looks identical to a correct answer.
-    must_400.append(("series rejects a stored z column",
-                     eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
-                                mode="daily", snapshot=None, date=None,
-                                live_snapshot=None, include_today=True, window="1y",
-                                z_window=63, envelope=True, env_window=20,
-                                env_lo=0.05, env_hi=0.95,
-                                exclude_extrapolated=False, pool=pool)))
-    must_400.append(("rails rejects a stored z column",
-                     eiv.rails(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
-                               date=None, snapshot=None, window="1y",
-                               z_window=63, exclude_extrapolated=True,
-                               pool=pool)))
-    must_400.append(("scanner rejects mixed z windows",
-                     eiv.scanner(columns="skew_30d_25p_atm_z_63,iv_30d_atm_z_252",
-                                 date=None, snapshot=None, filter=[], sort=None,
-                                 dir="desc", limit=10,
-                                 exclude_extrapolated=True, pool=pool)))
+    # These three were must-refuse while the page DERIVED its z: a stored z
+    # column could not be re-derived per point, and two z windows in one
+    # request needed two baselines. Reading the stored column removes both
+    # constraints -- a z column is now just a column -- so they are ordinary
+    # requests and are asserted to SUCCEED.
+    cases.append(("series accepts a stored z column",
+                  eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
+                             mode="daily", snapshot=None, date=None,
+                             live_snapshot=None, include_today=True, window="1y",
+                             z_window=63, envelope=True, env_window=20,
+                             env_lo=0.05, env_hi=0.95,
+                             exclude_extrapolated=False, pool=pool)))
+    cases.append(("rails accepts a stored z column",
+                  eiv.rails(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
+                            date=None, snapshot=None, window="1y",
+                            z_window=63, exclude_extrapolated=True,
+                            pool=pool)))
+    cases.append(("scanner accepts mixed z windows",
+                  eiv.scanner(columns="skew_30d_25p_atm_z_63,iv_30d_atm_z_252",
+                              date=None, snapshot=None, filter=[], sort=None,
+                              dir="desc", limit=10,
+                              exclude_extrapolated=True, pool=pool)))
 
     # ── the universe half, which reads z the same way ────────────────────
     for zc in ("skew_30d_25p_atm_z_63", "skew_30d_25p_atm"):

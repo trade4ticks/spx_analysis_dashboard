@@ -42,11 +42,10 @@ from datetime import date as date_type
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_oi_pool
+from app.metrics_config import BASELINE_SNAPSHOT, BASELINE_MIN_N
 from app.routers.equity_iv import (
-    BASELINE_SNAPSHOT, BASELINE_MIN_N, METRICS_TABLE,
-    _base_entry, _baseline_for, _catalog, _entry, _extrap_expr, _first_live,
-    _jsonable, _meta, _resolve_slice, _session_span_days, _window_start,
-    _z_from, _z_window_of,
+    METRICS_TABLE, _catalog, _entry, _expr, _extrap_expr, _first_live,
+    _from_clause, _jsonable, _meta, _needs_z, _resolve_slice, _window_start,
 )
 
 router = APIRouter(tags=["equity-iv"])
@@ -1001,27 +1000,6 @@ async def surface_grid(
 
 # ── Row 8: time-scatter ─────────────────────────────────────────────────────
 
-def _rolling_z_sql(entry, cat, p_zw):
-    """(select_expr, window_expr) for a per-date rolling z of one metric.
-
-    The same shape /universe-stats uses: each date scored against ITS OWN
-    prior sessions via a window frame ending one row before the current one.
-    A single baseline taken at the end of the span would let this year's
-    prices set the threshold that judges the start of it, and on a scatter
-    whose whole subject is the PATH through time that is not a small error —
-    it would bend the trajectory toward the recent regime.
-    """
-    be = _base_entry(cat, entry)
-    v  = 'v."{}"'.format(be["column_name"])
-    if entry["form"] == "base":
-        return v, ""
-    return (f"(CASE WHEN count({v}) OVER w >= {BASELINE_MIN_N} "
-            f"THEN ({v} - avg({v}) OVER w) / NULLIF(stddev_samp({v}) OVER w, 0) "
-            f"END)",
-            f" WINDOW w AS (ORDER BY v.trade_date "
-            f"ROWS BETWEEN ${p_zw} PRECEDING AND 1 PRECEDING)")
-
-
 @router.get("/time-scatter")
 async def time_scatter(
     ticker:               str  = Query(...),
@@ -1045,114 +1023,67 @@ async def time_scatter(
     comes from the selected snapshot and is flagged, so the live reading is
     placed on the path rather than mixed into it.
 
-    A z axis is rolled forward per date rather than scored against one
-    baseline — see _rolling_z_sql.
+    A z axis reads equity_metrics_z, which carries a z per (ticker,
+    trade_date, snapshot) scored against that ticker's 1545 daily series. The
+    per-date rolling window this endpoint used to build is exactly what that
+    column now stores, so the axis is a column read.
     """
     if not pool:
         return {"error": "OI database not configured", "points": []}
 
     cat = await _catalog(pool)
     ex_, ey = _entry(cat, x), _entry(cat, y)
-    zs = [e for e in (ex_, ey) if e["form"] != "base"]
+    needs = _needs_z([ex_, ey])
 
-    zw = _z_window_of(zs) if zs else 63
+    def axis(e):
+        col = _expr(e)
+        if exclude_extrapolated:
+            col = f"CASE WHEN {_extrap_expr(e)} THEN NULL ELSE {col} END"
+        return col
 
     async with pool.acquire() as conn:
-        d, snap = await _resolve_slice(conn, date, snapshot)
-        start = _window_start(d, window)
+        d_, snap = await _resolve_slice(conn, date, snapshot)
+        start = _window_start(d_, window)
 
-        # The rolling frame needs history before the display window opens, or
-        # the earliest dots come back unscored. Only a z axis needs it, and
-        # only a z axis binds z_window at all — binding it unconditionally
-        # left a parameter no placeholder referenced, which asyncpg rejects.
-        warm = None
-        if zs and start is not None:
-            warm = date_type.fromordinal(
-                start.toordinal() - _session_span_days(zw))
-
-        # The history: daily closes only, so the path is one observation per
+        # History: daily closes only, so the path is one observation per
         # session rather than a cloud thickened by intraday buckets.
-        params = [ticker, BASELINE_SNAPSHOT, d]
+        params = [ticker, BASELINE_SNAPSHOT, d_]
         where  = "m.ticker = $1 AND m.snapshot = $2 AND m.trade_date < $3"
-        if warm is not None:
-            params.append(warm)
-            where += f" AND m.trade_date >= ${len(params)}"
-        elif start is not None:
+        if start is not None:
             params.append(start)
             where += f" AND m.trade_date >= ${len(params)}"
-
-        p_zw = None
-        if zs:
-            params.append(zw)
-            p_zw = len(params)
-
-        xsel, xwin = _rolling_z_sql(ex_, cat, p_zw)
-        ysel, ywin = _rolling_z_sql(ey, cat, p_zw)
-        win = xwin or ywin        # one frame serves both; they share a window
-
-        # The warm-up rows exist only to fill the rolling frame; they are
-        # trimmed back off here so the scatter shows the requested window and
-        # not the extra span the z needed to be computable.
-        cut = ""
-        if warm is not None:
-            params.append(start)
-            cut = f"WHERE b.trade_date >= ${len(params)}"
-
-        bx, by = _base_entry(cat, ex_), _base_entry(cat, ey)
-        inner_sel = ["m.trade_date"]
-        for be in {bx["column_name"]: bx, by["column_name"]: by}.values():
-            col = 'm."{}"'.format(be["column_name"])
-            if exclude_extrapolated:
-                col = f"CASE WHEN {_extrap_expr(be)} THEN NULL ELSE {col} END"
-            inner_sel.append('{} AS "{}"'.format(col, be["column_name"]))
 
         rows = await conn.fetch(
-            f"WITH v AS (SELECT {', '.join(inner_sel)} "
-            f" FROM {METRICS_TABLE} m WHERE {where}), "
-            f"b AS (SELECT v.trade_date, {xsel} AS xv, {ysel} AS yv FROM v{win}) "
-            f"SELECT b.trade_date, b.xv, b.yv FROM b {cut} "
-            f"ORDER BY b.trade_date",
+            f"SELECT m.trade_date, {axis(ex_)} AS xv, {axis(ey)} AS yv "
+            f"{_from_clause(needs)} WHERE {where} "
+            f"ORDER BY m.trade_date",
             *params,
         )
 
-        # Today, at the selected snapshot, scored on the same rule.
-        stats = await _baseline_for(conn, cat, [ex_, ey], ticker, d, zw)
-        tsel = []
-        for be in {bx["column_name"]: bx, by["column_name"]: by}.values():
-            col = 'm."{}"'.format(be["column_name"])
-            if exclude_extrapolated:
-                col = f"CASE WHEN {_extrap_expr(be)} THEN NULL ELSE {col} END"
-            tsel.append('{} AS "{}"'.format(col, be["column_name"]))
+        # Today, at the selected snapshot, read exactly the same way.
         trow = await conn.fetchrow(
-            f"SELECT {', '.join(tsel)} FROM {METRICS_TABLE} m "
+            f"SELECT {axis(ex_)} AS xv, {axis(ey)} AS yv "
+            f"{_from_clause(needs)} "
             f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
-            ticker, d, snap,
+            ticker, d_, snap,
         )
-
-    def today_val(entry, be):
-        if trow is None or trow[be["column_name"]] is None:
-            return None
-        raw = float(trow[be["column_name"]])
-        if entry["form"] == "base":
-            return raw
-        return _z_from(stats, entry["column_name"], raw)
 
     points = [{"date": str(r["trade_date"]),
                "x": None if r["xv"] is None else float(r["xv"]),
                "y": None if r["yv"] is None else float(r["yv"]),
                "today": False}
               for r in rows]
-    tx, ty = today_val(ex_, bx), today_val(ey, by)
+    tx = None if trow is None or trow["xv"] is None else float(trow["xv"])
+    ty = None if trow is None or trow["yv"] is None else float(trow["yv"])
     if tx is not None or ty is not None:
-        points.append({"date": str(d), "x": tx, "y": ty, "today": True})
+        points.append({"date": str(d_), "x": tx, "y": ty, "today": True})
 
     return {
-        "ticker": ticker, "date": str(d), "snapshot": snap, "window": window,
+        "ticker": ticker, "date": str(d_), "snapshot": snap, "window": window,
         "x": _meta(ex_), "y": _meta(ey),
         "points": points,
         "n_points": sum(1 for p in points if p["x"] is not None and p["y"] is not None),
-        "z_window": zw,
-        "z_source": "rolling_daily_baseline" if zs else None,
+        "z_source": "stored" if needs else None,
         "exclude_extrapolated": bool(exclude_extrapolated),
     }
 

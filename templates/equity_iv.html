@@ -491,10 +491,15 @@
            close series, whatever bucket is selected. That is invisible while
            the two agree, and load-bearing the moment they do not, so it is
            stated on screen rather than left in a docstring. -->
-      <span class="eq-state up" x-show="onIntradaySnapshot" x-cloak
-            :title="zBasisNote()"
+      <!-- Not a warning: the stored z is scored against 1545 dailies at every
+           bucket. It flags the drift that comes with that — an intraday
+           reading measured against closes carries the session's mean
+           bucket-versus-close offset, uniform within a bucket, so it shifts
+           the distribution rather than reordering tickers inside it. -->
+      <span class="eq-state" x-show="onIntradaySnapshot" x-cloak
+            :title="zBasisNote() + ' An intraday reading measured against 1545 closes carries the mean bucket-vs-close drift of the session. That drift is uniform within a bucket, so it shifts the distribution rather than reordering tickers within it.'"
             style="cursor:help">
-        <span>scored vs</span><b>1545 daily</b>
+        <span>z vs</span><b>1545 daily</b>
       </span>
 
       <div class="ctrl-div"></div>
@@ -802,12 +807,10 @@
             can still carry a perfectly real 30-day skew reading if the two nodes
             it needs both trade.
             <span x-show="scan && scan.z_source" style="display:block;margin-top:4px">
-              A <code>_z_</code> column here is computed against that ticker's
-              <strong x-text="scan && scan.baseline ? scan.baseline.snapshot + ' daily closes' : 'daily closes'"></strong>
-              over
-              <strong x-text="scan && scan.baseline ? scan.baseline.z_window + ' sessions' : ''"></strong>
-              ending at the prior session — not against the selected bucket's own
-              history. Filters and sorts run on that same derived value, so
+              A <code>_z_</code> column here is read from
+              <code>equity_metrics_z</code>, which scores every snapshot against
+              that ticker's 1545 daily series and excludes the scored date from
+              its own window. Filters and sorts run on the stored column, so
               "skew z &gt; 1.5" selects from the whole universe rather than from
               whatever a page of rows happened to contain.
             </span>

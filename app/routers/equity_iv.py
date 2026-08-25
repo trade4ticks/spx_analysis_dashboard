@@ -31,47 +31,27 @@ equity_metrics holds the ~234 base columns; equity_metrics_z holds the ~368
 z columns, PK-joined on (ticker, trade_date, snapshot). The catalog's `form`
 says which: 'base' -> equity_metrics, 'z_63' / 'z_252' -> equity_metrics_z.
 
-equity_metrics_z is, with one exception, NO LONGER READ. Its values are
-scored per (ticker, trade_date, snapshot) — each snapshot against its own
-history — and the intraday grid only begins 2026-08-24. At the 1200 bucket
-that made every stored z null or meaningless: the scanner's z column came
-back all em-dashes, the card strip reported nothing scoreable, and every
-rail read 100th percentile because a value ranked against one same-bucket
-observation is its own maximum.
+equity_metrics_z is READ for every z on this page. It stores each snapshot's
+z against the ticker's 1545 daily series, with the scored date excluded from
+its own window — which is the definition this router previously computed for
+itself, and the reason that derivation is gone.
 
-So a z is now DERIVED at query time against the ticker's daily-close
-baseline (see BASELINE_SNAPSHOT), which is what makes +1.8σ mean one thing
-whichever snapshot is on screen. A z column name still selects the score and
-still names the window — the catalog row is the whitelist entry and the
-window label — but the stored value behind it is not what comes back.
+Expect two things from the change. 1545 z-scores grow slightly in magnitude,
+around 3-4% on SPY, because removing self-inclusion stops each value pulling
+its own mean toward itself. And intraday buckets now carry a z immediately
+instead of NULL, since they are scored against 1545 history rather than their
+own — with the mean bucket-versus-close drift of the session baked in, which
+is uniform within a bucket and so shifts the distribution rather than
+reordering tickers inside it.
 
-The exception is /series, which fetches the stored z as `z_stored` ONLY when
-the plotted bucket is the baseline bucket, so a divergence between the two
-estimators is visible rather than hidden. /rails and /series reject a z
-column outright: neither can derive one without a rolling window, and
-serving the stored value there would reintroduce the bug quietly.
+BASELINE_SNAPSHOT and BASELINE_MIN_N come from app/metrics_config.py, vendored
+verbatim from the metrics project and diffed by scripts/check_vendored.py. Two
+copies of a baseline definition is what produced two divergent estimators the
+first time.
 
-Extrapolated nodes
-------------------
-equity_surface writes a node even when the target delta falls outside the
-fitted smile's domain — the spline returns its boundary value and the row is
-written anyway, flagged `extrapolated`. equity_metrics carries the same fact
-per node as extrap_{wing}_{tenor}d booleans, plus extrap_rate_short as a
-per-ticker summary over tenors <= 30.
-
-This is load-bearing, not cosmetic. The rate varies enormously by name (SPY
-0.0%, AAPL 2.6%, T 21.6% on one date), so a metric built on a fabricated node
-inherits the fabrication silently, and a cross-sectional skew ranking that
-ignores it puts thin chains at the top — T's wing slope reads four times
-flatter than AAPL's because the spline hit its boundary, not because T has
-flat skew.
-
-Every endpoint here resolves which node flags a metric depends on
-(_flags_for) and returns them alongside the value, so the caller can mark or
-exclude. With exclude_extrapolated on, the offending VALUE is nulled rather
-than the row dropped: the scatter needs both axes but the histogram needs
-only x, and nulling per-axis lets one payload serve both without either
-silently losing tickers the other still wants.
+What this page still computes, because equity_metrics does not carry it:
+percentile ranks and P5-P95 bands, the rolling envelope on /series, and
+everything read off equity_surface.
 
 Nulls
 -----
@@ -349,273 +329,44 @@ def _window_start(d, window: str):
 
 # ── the daily baseline ───────────────────────────────────────────────────────
 #
-# Every z and every percentile on this page is measured against the DAILY
-# CLOSE series, whatever snapshot is on screen. This is the page's single
-# scoring rule and it exists for two reasons.
+# equity_metrics_z now stores exactly this definition: every snapshot's z
+# scored against the ticker's 1545 daily series, with the scored date excluded
+# from its own window. So the dashboard reads it rather than recomputing it,
+# and the derivation that used to live here is gone — _baseline_cte, _z_expr,
+# _baseline_for, _z_from, _daily_baseline, _base_entry, _baseline_join,
+# _session_span_days and _reject_z_form with it.
 #
-# The first is arithmetic. Scoring a snapshot against its own history means an
-# 11:25 reading is ranked against prior 11:25 readings, and the intraday grid
-# only starts on 2026-08-24. At the 1200 bucket that distribution is one
-# observation deep, so every value is simultaneously the minimum and the
-# maximum of it: percentile 100, z undefined, and a page that looks broken
-# because it IS measuring nothing.
+# The two constants come from the metrics project's own config, vendored
+# verbatim as app/metrics_config.py and diffed by scripts/check_vendored.py.
+# Re-declaring them here is what produced two divergent estimators the first
+# time; a local copy would move that duplication rather than remove it.
 #
-# The second survives the intraday history growing, which is why the rule is
-# permanent rather than a stopgap. Five-minute observations inside a session
-# are heavily autocorrelated, so a hundred bars carry nowhere near a hundred
-# observations' worth of information — the effective sample size is closer to
-# the number of SESSIONS than the number of bars. A z computed off the bar
-# count would keep looking confident while being backed by a fraction of the
-# evidence it claims.
-#
-# Scoring everything against the same daily distribution also keeps +1.8σ
-# meaning one thing across the page. A user switching snapshots is asking
-# "where is this now", not "re-scale the axis under me".
-
-BASELINE_SNAPSHOT = "1545"
-
-# Strictly fewer than this many observations and a mean and a standard
-# deviation are noise wearing a measurement's clothes. Returning null beats
-# returning a confident number off n=3 — that is the failure this whole
-# module exists to stop, and it would recur silently at small n.
-BASELINE_MIN_N = 20
+# What this page still computes for itself, because equity_metrics does not
+# carry it: percentile ranks and P5–P95 bands (rails, unusual, tent), the
+# rolling envelope on /series, and everything read off equity_surface — the
+# per-node grid views, the curve bands and the sticky-strike counterfactual.
+# Those are not z-scores and have no stored equivalent.
+from app.metrics_config import BASELINE_SNAPSHOT, BASELINE_MIN_N
 
 
-def _session_span_days(z_window: int) -> int:
-    """Calendar days that comfortably contain `z_window` trading sessions.
+def _needs_z(entries) -> bool:
+    """True when any entry lives in equity_metrics_z, so the join is needed."""
+    return any(e["form"] != "base" for e in entries)
 
-    Sessions run about 252 a year, so 2x + 30 clears the requirement with
-    room for holidays and a stretch of missing captures. It bounds the scan;
-    row_number() does the actual selecting, so an over-generous bound costs
-    a little IO and cannot change the answer.
+
+def _z_column(cat: dict, base_col: str, z_window: int):
+    """The stored z column for a base metric at this window, or None.
+
+    Not every metric is z-scored — metrics_config excludes whole families,
+    price levels and fallback rates among them, on the grounds that a rolling
+    z of a trending level is not a reading anyone wants. A base column with no
+    z variant returns None and the caller renders it as absent.
     """
-    return z_window * 2 + 30
-
-
-def _base_entry(cat: dict, entry: dict) -> dict:
-    """The base-form entry a z entry derives from (or the entry itself).
-
-    The baseline is always computed from the BASE column's daily closes.
-    equity_metrics_z is never read for it: those values are stored per
-    (ticker, trade_date, snapshot) and carry the same-snapshot scoring this
-    replaces, so building a daily baseline out of them would re-import the
-    bug it is meant to remove.
-    """
-    if entry["form"] == "base":
-        return entry
-    base = cat["by_col"].get(entry["base_column"] or "")
-    if base is None:
-        raise HTTPException(
-            400, f"{entry['column_name']} has no base column in the catalog, "
-                 f"so no daily baseline can be built for it")
-    return base
-
-
-def _baseline_cte(cat, z_entries, as_of, z_window, params, ticker=None):
-    """SQL for a per-ticker daily-close baseline. Returns (cte_sql, zmap).
-
-    `zmap` maps a z column name to its index, so callers build the score with
-    _z_expr(). The CTE yields one row per ticker with mu/sd/n per metric.
-
-    STRICTLY BEFORE `as_of`. If today's own close is inside the window it is
-    being scored against, the z is contaminated — the value pulls the mean
-    toward itself and inflates the sd, so every reading is shaded toward
-    ordinary. At n=252 that is a rounding error; at n=20 it is most of a
-    sigma. It also has to be all-or-nothing rather than "exclude it when it
-    exists", because a window that silently changes definition at 15:45 every
-    day is worse than either rule consistently applied.
-
-    The window is a fixed number of SESSIONS, shared by every metric in the
-    call, not each metric's last N non-null observations. /unusual ranks
-    metrics against each other by |z|, and that comparison is only meaningful
-    if the windows cover the same span: a sparse metric taking its last 63
-    observations would reach back years and be scored against a different
-    market than the metric beside it. A metric thin inside the window gets a
-    smaller n, which is reported, rather than a quietly longer window.
-    """
-    bases, zmap = [], {}
-    for e in z_entries:
-        if e["column_name"] in zmap:
-            continue
-        zmap[e["column_name"]] = len(bases)
-        bases.append(_base_entry(cat, e))
-
-    params.append(BASELINE_SNAPSHOT);                     p_snap = len(params)
-    params.append(as_of);                                 p_asof = len(params)
-    params.append(date_type.fromordinal(
-        as_of.toordinal() - _session_span_days(z_window))); p_min = len(params)
-    params.append(z_window);                              p_n = len(params)
-
-    tk = ""
-    if ticker is not None:
-        params.append(ticker)
-        tk = f"AND ticker = ${len(params)} "
-
-    aggs = []
-    for i, be in enumerate(bases):
-        v  = 'b."{}"'.format(be["column_name"])
-        # Fabricated observations never enter the baseline. A "normal range"
-        # partly built out of values the spline invented is not a range the
-        # market ever traded.
-        ok = "NOT " + _extrap_expr(be, "b")
-        aggs += [
-            f"avg({v}) FILTER (WHERE {ok}) AS mu{i}",
-            f"stddev_samp({v}) FILTER (WHERE {ok}) AS sd{i}",
-            f"count({v}) FILTER (WHERE {ok}) AS n{i}",
-        ]
-
-    cte = (
-        f"bl_days AS ("
-        f" SELECT ticker, trade_date,"
-        f" row_number() OVER (PARTITION BY ticker ORDER BY trade_date DESC) AS rn"
-        f" FROM {METRICS_TABLE}"
-        f" WHERE snapshot = ${p_snap} AND trade_date < ${p_asof}"
-        f" AND trade_date >= ${p_min} {tk}"
-        f"), "
-        f"bl AS ("
-        f" SELECT b.ticker,"
-        # The real span the baseline covers, reported to the client. This is
-        # not decoration: bl_last is what proves the window stops before
-        # today. If it ever equals the date on screen, the exclusion broke.
-        f" min(b.trade_date) AS bl_first, max(b.trade_date) AS bl_last,"
-        f" count(*) AS bl_sessions,"
-        f" {', '.join(aggs)}"
-        f" FROM {METRICS_TABLE} b"
-        f" JOIN bl_days d ON d.ticker = b.ticker AND d.trade_date = b.trade_date"
-        f" WHERE b.snapshot = ${p_snap} AND d.rn <= ${p_n}"
-        f" GROUP BY b.ticker"
-        f")"
-    )
-    return cte, zmap
-
-
-def _z_expr(cat, entry, zmap, alias="m", bl="bl"):
-    """A metric's SQL value, with z forms scored against the daily baseline.
-
-    A base metric is itself. A z metric becomes (today - mu) / sigma, which
-    is why the whole page can stop reading equity_metrics_z: the score is
-    derived at query time from the base column and the baseline, so it means
-    the same thing at 09:45 as at the close.
-
-    NULLIF guards a zero sigma (a metric constant across the window) and the
-    n floor guards a window too thin to describe anything. Both yield NULL,
-    which the client already renders as absent.
-    """
-    if entry["form"] == "base":
-        return '{}."{}"'.format(alias, entry["column_name"])
-    i  = zmap[entry["column_name"]]
-    be = _base_entry(cat, entry)
-    return (f'(CASE WHEN {bl}.n{i} >= {BASELINE_MIN_N} THEN '
-            f'({alias}."{be["column_name"]}" - {bl}.mu{i}) '
-            f'/ NULLIF({bl}.sd{i}, 0) END)')
-
-
-def _z_window_of(z_entries) -> int:
-    """The baseline length implied by a set of z columns.
-
-    The universe endpoints take column NAMES, not a z_window parameter — the
-    client encodes the window in the name (`..._z_63` / `..._z_252`) because
-    that is what the catalog calls the column. So the window is read back off
-    the form rather than passed alongside, which also means the two can never
-    disagree about which one was asked for.
-
-    Mixed windows in one request would need two baselines, and no caller does
-    it — the page has a single Z-window control. Rejected explicitly rather
-    than silently scored against whichever one was seen first.
-    """
-    wins = {e["form"] for e in z_entries if e["form"] != "base"}
-    if not wins:
-        return 63
-    if len(wins) > 1:
-        raise HTTPException(
-            400, f"Mixed z windows in one request ({', '.join(sorted(wins))}). "
-                 f"Every z column in a request must share a window.")
-    form = wins.pop()
-    try:
-        return int(form.split("_")[-1])
-    except ValueError:
-        raise HTTPException(400, f"Unrecognised z form: {form!r}")
-
-
-def _reject_z_form(entries, panel: str, instead: str):
-    """Refuse a stored z column where only a derived score is meaningful.
-
-    equity_metrics_z is scored per (ticker, trade_date, snapshot), which is
-    the same-snapshot scoring this module exists to replace. The panels that
-    can derive a z do; the ones that would have to read the stored column
-    say so instead of quietly serving a number that means something
-    different at 11:25 than at the close.
-
-    This is a closed door rather than a silent fallback because the failure
-    it prevents is invisible: a z column plotted from the stored table looks
-    exactly like a correct one.
-    """
-    bad = [e["column_name"] for e in entries if e["form"] != "base"]
-    if bad:
-        raise HTTPException(
-            400,
-            f"{panel} takes base metric columns, not stored z columns "
-            f"({', '.join(bad)}). Those are scored per (date, snapshot), so on "
-            f"an intraday bucket they measure against that bucket's own "
-            f"history. {instead}")
-
-
-def _baseline_join(bl="bl", alias="m"):
-    """LEFT JOIN, not JOIN: a ticker with no usable history still has today's
-    values, and dropping its row entirely would make a thin name look absent
-    from the universe rather than unscored."""
-    return f"LEFT JOIN {bl} ON {bl}.ticker = {alias}.ticker"
-
-
-async def _baseline_for(conn, cat, entries, ticker, as_of, z_window):
-    """{column_name: {mu, sigma, n}} for one ticker, one query.
-
-    Used by the panels that need the baseline as DATA — to show it in a
-    footer, to derive a z in Python, or to build a percentile — rather than
-    as a SQL expression. Keyed by the entry's own column name so a caller
-    can look up either a base or a z column and get the same answer, since
-    they share a baseline by construction.
-    """
-    if not entries:
-        return {}
-    params: list = []
-    cte, zmap = _baseline_cte(cat, entries, as_of, z_window, params, ticker=ticker)
-    sel = ["bl_first", "bl_last", "bl_sessions"]
-    for col, i in zmap.items():
-        sel += [f"mu{i}", f"sd{i}", f"n{i}"]
-    row = await conn.fetchrow(f"WITH {cte} SELECT {', '.join(sel)} FROM bl", *params)
-
-    out = {}
-    for col, i in zmap.items():
-        if row is None:
-            out[col] = {"mu": None, "sigma": None, "n": 0,
-                        "first": None, "last": None, "sessions": 0}
-            continue
-        n  = int(row[f"n{i}"] or 0)
-        mu = row[f"mu{i}"]
-        sd = row[f"sd{i}"]
-        thin = n < BASELINE_MIN_N
-        out[col] = {
-            # Below the floor the numbers are withheld, not shown small: a mu
-            # off n=3 renders identically to one off n=250 and there is
-            # nothing on screen to tell them apart. `n` still comes back so
-            # the client can say why the score is missing.
-            "mu":       None if mu is None or thin else float(mu),
-            "sigma":    None if sd is None or thin else float(sd),
-            "n":        n,
-            "first":    _jsonable(row["bl_first"]),
-            "last":     _jsonable(row["bl_last"]),
-            "sessions": int(row["bl_sessions"] or 0),
-        }
-    return out
-
-
-def _z_from(baseline: dict, col: str, v):
-    """(v - mu) / sigma, or None when the value or the baseline is unusable."""
-    b = baseline.get(col)
-    if v is None or not b or b["mu"] is None or not b["sigma"]:
-        return None
-    return (v - b["mu"]) / b["sigma"]
+    want = f"z_{z_window}"
+    for e in cat["by_col"].values():
+        if e["form"] == want and e["base_column"] == base_col:
+            return e
+    return None
 
 
 @router.get("/catalog")
@@ -683,12 +434,9 @@ async def cross_section(
     value whose metric depends on a fabricated node is nulled — per axis, so
     the histogram keeps every ticker whose x survives even when its y did not.
 
-    A z-form axis is DERIVED here against each ticker's daily-close baseline
-    rather than read from equity_metrics_z — see BASELINE_SNAPSHOT. The
-    stored column is scored per (date, snapshot), so on an intraday bucket
-    the default preset (skew z on x) plotted a z against that bucket's own
-    one-day history. Deriving it keeps the scatter agreeing with the rails
-    and the scanner about what +1.8σ means.
+    A z-form axis is READ from equity_metrics_z. That column now stores every
+    snapshot's z against the ticker's 1545 daily series with the scored date
+    excluded, which is the definition this router used to compute for itself.
     """
     if not pool:
         return {"error": "OI database not configured", "points": []}
@@ -698,43 +446,29 @@ async def cross_section(
     esize  = _entry(cat, size)  if size  else None
     ecolor = _entry(cat, color) if color else None
     used   = [e for e in (ex, ey, esize, ecolor) if e]
-    zs     = [e for e in used if e["form"] != "base"]
+
+    sel = [
+        "m.ticker",
+        f"{_expr(ex)} AS x",
+        f"{_expr(ey)} AS y",
+        f"{_extrap_expr(ex)} AS x_extrap",
+        f"{_extrap_expr(ey)} AS y_extrap",
+    ]
+    sel += ['m."{0}" AS {0}'.format(c) for c in CONTEXT_COLS]
+    if esize:
+        sel.append(f"{_expr(esize)} AS size_v")
+    if ecolor:
+        sel += [f"{_expr(ecolor)} AS color_v",
+                f"{_extrap_expr(ecolor)} AS color_extrap"]
 
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
-
-        params: list = []
-        cte, zmap = ("", {})
-        if zs:
-            cte, zmap = _baseline_cte(cat, zs, d, _z_window_of(zs), params)
-
-        def col(e):
-            return _z_expr(cat, e, zmap)
-
-        sel = [
-            "m.ticker",
-            f"{col(ex)} AS x",
-            f"{col(ey)} AS y",
-            f"{_extrap_expr(ex)} AS x_extrap",
-            f"{_extrap_expr(ey)} AS y_extrap",
-        ]
-        sel += ['m."{0}" AS {0}'.format(c) for c in CONTEXT_COLS]
-        if esize:
-            sel.append(f"{col(esize)} AS size_v")
-        if ecolor:
-            sel += [f"{col(ecolor)} AS color_v",
-                    f"{_extrap_expr(ecolor)} AS color_extrap"]
-
-        params += [d, snap]
-        pd_, ps_ = len(params) - 1, len(params)
         rows = await conn.fetch(
-            (f"WITH {cte} " if cte else "")
-            + f"SELECT {', '.join(sel)} "
-            + f"{_from_clause(False)} "
-            + (f"{_baseline_join()} " if zs else "")
-            + f"WHERE m.trade_date = ${pd_} AND m.snapshot = ${ps_} "
-            + f"ORDER BY m.ticker",
-            *params,
+            f"SELECT {', '.join(sel)} "
+            f"{_from_clause(_needs_z(used))} "
+            f"WHERE m.trade_date = $1 AND m.snapshot = $2 "
+            f"ORDER BY m.ticker",
+            d, snap,
         )
 
     points, n_x_excl, n_y_excl = [], 0, 0
@@ -768,11 +502,7 @@ async def cross_section(
         "n_tickers": len(points),
         "excluded":  {"x": n_x_excl, "y": n_y_excl,
                       "active": bool(exclude_extrapolated)},
-        "z_source":  "daily_baseline" if zs else None,
-        "baseline":  ({"snapshot": BASELINE_SNAPSHOT,
-                       "z_window": _z_window_of(zs),
-                       "min_n": BASELINE_MIN_N,
-                       "through": "prior session"} if zs else None),
+        "z_source":  "stored" if _needs_z(used) else None,
     }
 
 
@@ -799,115 +529,59 @@ async def universe_stats(
 
     Two populations, deliberately:
 
-      history  prior sessions at the daily close (BASELINE_SNAPSHOT). When
-               the metric is a z column the z is rolled forward per date with
-               a window function — each date scored against ITS OWN prior
-               `z_window` sessions, never against the whole span. Scoring the
-               history with one baseline taken at the end would let the last
-               year of prices set the threshold that judges the start of it.
-      today    the SELECTED snapshot, scored against the daily baseline
-               through the prior session. That is what makes an 11:25 count
-               comparable to the daily counts beside it.
+      history  prior sessions at the daily close (BASELINE_SNAPSHOT).
+      today    the SELECTED snapshot.
 
-    This split is why the history stops before today rather than including
-    it. The old shape filtered every date to the selected snapshot, so at an
-    intraday bucket the "historical average" was an average over the one day
-    intraday capture has existed. It also means hot_count_avg no longer
-    counts today — at ~250 dates that moves it negligibly, and today is now
-    measured on a different basis, so averaging it in would mix the two.
+    Both read the stored z, which is scored against the ticker's 1545 daily
+    series whatever bucket it sits in -- so an 11:25 count is comparable with
+    the daily counts beside it without this endpoint rescoring anything.
+
+    The history stops before today because today is the row being placed
+    against it, and hot_count_avg therefore excludes today. At ~250 dates
+    that moves it negligibly, and today is measured at a different bucket, so
+    averaging it in would mix two populations to save a rounding error.
     """
     if not pool:
         return {"error": "OI database not configured"}
 
     cat = await _catalog(pool)
     e   = _entry(cat, metric)
-    be  = _base_entry(cat, e)
-    zw  = _z_window_of([e]) if e["form"] != "base" else None
 
-    # The daily close of the BASE column, with fabricated observations nulled
-    # rather than their rows dropped.
-    val = f'm."{be["column_name"]}"'
+    # Fabricated observations are nulled rather than their rows dropped, so a
+    # ticker thin on this metric leaves the others in the cross-section alone.
+    val = _expr(e)
     if exclude_extrapolated:
-        val = f'CASE WHEN {_extrap_expr(be)} THEN NULL ELSE {val} END'
+        val = f'CASE WHEN {_extrap_expr(e)} THEN NULL ELSE {val} END'
 
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
         start   = _window_start(d, window)
-        # The rolling window needs history BEFORE the display window starts,
-        # or the first dates come back unscored.
-        warm = None
-        if start is not None:
-            warm = date_type.fromordinal(
-                start.toordinal() - _session_span_days(zw or 63))
-
         params = [hot, BASELINE_SNAPSHOT, d]
         where  = "m.snapshot = $2 AND m.trade_date < $3"
-        if warm is not None:
-            params.append(warm)
-            where += f" AND m.trade_date >= ${len(params)}"
-
-        if zw is None:
-            expr = "b.v"
-            roll = ""
-        else:
-            params.append(zw)
-            p_zw = len(params)
-            roll = (f", avg(v) OVER w AS mu, stddev_samp(v) OVER w AS sd, "
-                    f"count(v) OVER w AS n_w")
-            expr = (f"(CASE WHEN b.n_w >= {BASELINE_MIN_N} "
-                    f"THEN (b.v - b.mu) / NULLIF(b.sd, 0) END)")
-
-        cut = ""
         if start is not None:
             params.append(start)
-            cut = f"WHERE b.trade_date >= ${len(params)}"
-
-        # ROWS BETWEEN <zw> PRECEDING AND 1 PRECEDING is the rule stated as
-        # SQL: the frame ends one row BEFORE the current session, so a date is
-        # never one of the observations scoring it.
-        win = ""
-        if zw is not None:
-            win = (f" WINDOW w AS (PARTITION BY ticker ORDER BY trade_date "
-                   f"ROWS BETWEEN ${p_zw} PRECEDING AND 1 PRECEDING)")
+            where += f" AND m.trade_date >= ${len(params)}"
 
         rows = await conn.fetch(
-            f"WITH v AS ("
-            f" SELECT m.ticker, m.trade_date, {val} AS v"
-            f" {_from_clause(False)} WHERE {where}"
-            f"), "
-            f"b AS ("
-            f" SELECT ticker, trade_date, v{roll} FROM v{win}"
-            f") "
-            f"SELECT b.trade_date,"
-            f" count({expr})                                          AS n,"
-            f" count(*) FILTER (WHERE {expr} > $1)                     AS n_hot,"
-            f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {expr})     AS med,"
-            f" stddev_samp({expr})                                     AS disp "
-            f"FROM b {cut} "
-            f"GROUP BY b.trade_date ORDER BY b.trade_date",
+            f"SELECT m.trade_date,"
+            f" count({val})                                       AS n,"
+            f" count(*) FILTER (WHERE {val} > $1)                  AS n_hot,"
+            f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {val})  AS med,"
+            f" stddev_samp({val})                                  AS disp "
+            f"{_from_clause(e['form'] != 'base')} WHERE {where} "
+            f"GROUP BY m.trade_date ORDER BY m.trade_date",
             *params,
         )
 
-        # Today, at the selected snapshot, against the daily baseline.
-        tparams: list = [hot]
-        tcte, tzmap = ("", {})
-        if zw is not None:
-            tcte, tzmap = _baseline_cte(cat, [e], d, zw, tparams)
-        texpr = _z_expr(cat, e, tzmap)
-        if exclude_extrapolated:
-            texpr = f"CASE WHEN {_extrap_expr(e)} THEN NULL ELSE {texpr} END"
-        tparams += [d, snap]
-        td, ts = len(tparams) - 1, len(tparams)
+        # Today, at the selected snapshot.
         trow = await conn.fetchrow(
-            (f"WITH {tcte} " if tcte else "")
-            + f"SELECT count({texpr}) AS n,"
-            + f" count(*) FILTER (WHERE {texpr} > $1) AS n_hot,"
-            + f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {texpr}) AS med,"
-            + f" stddev_samp({texpr}) AS disp "
-            + f"{_from_clause(False)} "
-            + (f"{_baseline_join()} " if zw is not None else "")
-            + f"WHERE m.trade_date = ${td} AND m.snapshot = ${ts}",
-            *tparams,
+            f"SELECT count({val}) AS n,"
+            f" count(*) FILTER (WHERE {val} > $1) AS n_hot,"
+            f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {val}) AS med,"
+            f" stddev_samp({val}) AS disp "
+            f"{_from_clause(e['form'] != 'base')} "
+            f"WHERE m.trade_date = $2 AND m.snapshot = $3",
+            hot, d, snap,
         )
 
     series = [{"date": str(r["trade_date"]), "n": r["n"], "n_hot": r["n_hot"],
@@ -938,9 +612,8 @@ async def universe_stats(
         "dispersion_percentile": disp_pct,
         "n_dates": len(series),
         "series": series,
-        "z_source": "daily_baseline" if zw else None,
-        "history_basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session",
-                          "z_window": zw, "rolling": zw is not None},
+        "z_source": "stored" if e["form"] != "base" else None,
+        "history_basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session"},
     }
 
 
@@ -958,15 +631,9 @@ _NULL_OPS   = {"isnull": "IS NULL", "notnull": "IS NOT NULL"}
 _TEXT_UNITS = {"text", "timestamp"}
 
 
-def _filter_sql(entry: dict, op: str, raw: str, params: list, expr: str = None) -> str:
-    """One `col:op:value` clause, with the value parameterized.
-
-    `expr` lets the caller substitute a derived expression for the column —
-    the scanner passes the daily-baseline z so that filtering and sorting on
-    a z column mean the same thing as reading one.
-    """
-    if expr is None:
-        expr = _expr(entry)
+def _filter_sql(entry: dict, op: str, raw: str, params: list) -> str:
+    """One `col:op:value` clause, with the value parameterized."""
+    expr = _expr(entry)
     if op in _NULL_OPS:
         return f"{expr} {_NULL_OPS[op]}"
 
@@ -1017,16 +684,10 @@ async def scanner(
     never an extreme one, and letting it sort to the top of a descending scan
     is how an absent value gets read as a signal.
 
-    A z column is DERIVED against each ticker's daily-close baseline rather
-    than read from equity_metrics_z — see BASELINE_SNAPSHOT. The stored
-    column is scored per (date, snapshot), so on an intraday bucket every z
-    cell came back empty and every z filter matched nothing.
-
-    Deriving it in SQL rather than in Python after the fetch is what keeps
-    `filter=..._z_63:gt:1.5`, the ORDER BY and the LIMIT all meaning what
-    they say. Scoring after the rows came back would filter a page of results
-    instead of the universe, and "top 300 by skew z" would quietly become
-    "300 arbitrary tickers, sorted".
+    A z column is READ from equity_metrics_z, which now stores every
+    snapshot's z against the ticker's 1545 daily series. Filters and ORDER BY
+    run on the stored column, so `filter=..._z_63:gt:1.5`, the sort and the
+    LIMIT all select from the universe rather than from a page of rows.
     """
     if not pool:
         return {"error": "OI database not configured", "rows": []}
@@ -1037,9 +698,6 @@ async def scanner(
         raise HTTPException(400, "columns is empty")
     entries = [_entry(cat, c) for c in cols]
 
-    # Parse filters before touching SQL: the baseline CTE has to cover every
-    # z column in the request — selected, filtered or sorted on — and its
-    # parameters have to be bound before any filter value's.
     parsed = []
     for f in filter:
         parts = f.split(":", 2)
@@ -1050,33 +708,23 @@ async def scanner(
 
     se   = _entry(cat, sort) if sort else None
     used = entries + [p[0] for p in parsed] + ([se] if se else [])
-    zs   = [e for e in used if e["form"] != "base"]
+
+    sel = ["m.ticker"]
+    for i, e in enumerate(entries):
+        sel.append(f"{_expr(e)} AS v{i}")
+        sel.append(f"{_extrap_expr(e)} AS e{i}")
+    sel += ['m."{0}" AS {0}'.format(c) for c in CONTEXT_COLS]
+
+    params: list = []
+    where = [_filter_sql(fe, op, raw, params) for fe, op, raw in parsed]
+
+    order = "m.ticker"
+    if se:
+        order = (f"{_expr(se)} {'DESC' if dir.lower() == 'desc' else 'ASC'} "
+                 f"NULLS LAST, m.ticker")
 
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
-
-        params: list = []
-        cte, zmap = ("", {})
-        if zs:
-            cte, zmap = _baseline_cte(cat, zs, d, _z_window_of(zs), params)
-
-        def col(e):
-            return _z_expr(cat, e, zmap)
-
-        sel = ["m.ticker"]
-        for i, e in enumerate(entries):
-            sel.append(f"{col(e)} AS v{i}")
-            sel.append(f"{_extrap_expr(e)} AS e{i}")
-        sel += ['m."{0}" AS {0}'.format(c) for c in CONTEXT_COLS]
-
-        where = [_filter_sql(fe, op, raw, params, expr=col(fe))
-                 for fe, op, raw in parsed]
-
-        order = "m.ticker"
-        if se:
-            order = (f"{col(se)} {'DESC' if dir.lower() == 'desc' else 'ASC'} "
-                     f"NULLS LAST, m.ticker")
-
         params += [d, snap, limit]
         nd, ns, nl = len(params) - 2, len(params) - 1, len(params)
         clause = f"m.trade_date = ${nd} AND m.snapshot = ${ns}"
@@ -1084,13 +732,11 @@ async def scanner(
             clause += " AND " + " AND ".join(where)
 
         rows = await conn.fetch(
-            (f"WITH {cte} " if cte else "")
-            + f"SELECT {', '.join(sel)} "
-            + f"{_from_clause(False)} "
-            + (f"{_baseline_join()} " if zs else "")
-            + f"WHERE {clause} "
-            + f"ORDER BY {order} "
-            + f"LIMIT ${nl}",
+            f"SELECT {', '.join(sel)} "
+            f"{_from_clause(_needs_z(used))} "
+            f"WHERE {clause} "
+            f"ORDER BY {order} "
+            f"LIMIT ${nl}",
             *params,
         )
 
@@ -1119,11 +765,7 @@ async def scanner(
         "n_rows":    len(out),
         "truncated": len(out) >= limit,
         "exclude_extrapolated": bool(exclude_extrapolated),
-        "z_source":  "daily_baseline" if zs else None,
-        "baseline":  ({"snapshot": BASELINE_SNAPSHOT,
-                       "z_window": _z_window_of(zs),
-                       "min_n": BASELINE_MIN_N,
-                       "through": "prior session"} if zs else None),
+        "z_source":  "stored" if _needs_z(used) else None,
     }
 
 
@@ -1247,30 +889,20 @@ async def unusual(
     extreme today" has to be answered by the server before the user has to
     know which column to ask about.
 
-    BOTH numbers on a card come from the daily close series (see
-    BASELINE_SNAPSHOT), whatever snapshot is on screen:
+    The two numbers on a card come from different places:
 
-      z           (today - mu) / sigma against the last `z_window` sessions,
-                  derived here rather than read from equity_metrics_z. The
-                  stored column is scored per (date, snapshot), so at an
-                  intraday bucket it is a z against that bucket's own short
-                  history -- which is why this strip used to report "no
-                  metric has both a value and a z" at 1200.
+      z           READ from equity_metrics_z, which scores every snapshot
+                  against the ticker's 1545 daily series over `z_window`
+                  sessions, excluding the scored date from its own window.
 
-      percentile  rank within the daily closes over the page's history
-                  window. Also the reason 100th percentile came back for
-                  everything: ranked against one same-bucket observation,
-                  every value is its own maximum.
+      percentile  computed here, because equity_metrics carries no percentile
+                  rank. Over the page's history window of daily closes,
+                  ending at the prior session -- today is the thing being
+                  ranked, and a value inside its own distribution is at the
+                  100th percentile by construction.
 
-    Both windows END AT THE PRIOR SESSION. Today is the thing being scored,
-    so letting it into the distribution scoring it drags the answer toward
-    ordinary -- and guarantees the top of any ranking is at the 100th
-    percentile by construction.
-
-    Note the two windows differ on purpose: z uses `z_window` sessions
-    because that is what a sigma means here, while the percentile uses the
-    page's history window because that is the span the rails and the charts
-    are showing. They answer different questions.
+    The two windows differ on purpose: a sigma means `z_window` sessions,
+    while the percentile spans what the rails and the charts are showing.
 
     A metric whose own nodes are extrapolated today is excluded from the
     ranking under the toggle rather than shown with a marker: this list is
@@ -1287,10 +919,10 @@ async def unusual(
     form = f"z_{z_window}"
     fams = {f.strip() for f in families.split(",") if f.strip()} if families else None
 
-    # The candidate set stays "base columns the catalog gives a z variant at
-    # this window". The z column is no longer READ -- its existence is the
-    # loader's judgment about which metrics are worth scoring, and that
-    # curation is worth keeping even now that the score is derived.
+    # Base columns the catalog gives a z variant at this window. Metrics
+    # without one are excluded from z-scoring upstream on purpose -- a rolling
+    # z of a trending price level is not a reading anyone wants -- so their
+    # absence here is the same judgment, not a gap.
     pairs = []
     for e in cat["by_col"].values():
         if e["form"] != form:
@@ -1305,15 +937,15 @@ async def unusual(
         return {"error": f"No {form} columns in the catalog", "cards": []}
 
     sel = ["m.extrap_rate_short"]
-    for i, (be, _ze) in enumerate(pairs):
-        sel += [f"{_expr(be)} AS b{i}", f"{_extrap_expr(be)} AS e{i}"]
+    for i, (be, ze) in enumerate(pairs):
+        sel += [f"{_expr(be)} AS b{i}", f"{_expr(ze)} AS z{i}",
+                f"{_extrap_expr(be)} AS e{i}"]
 
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
 
-        # Today's values only -- no join to equity_metrics_z anywhere.
         row = await conn.fetchrow(
-            f"SELECT {', '.join(sel)} {_from_clause(False)} "
+            f"SELECT {', '.join(sel)} {_from_clause(True)} "
             f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
             ticker, d, snap,
         )
@@ -1321,25 +953,20 @@ async def unusual(
             return {"ticker": ticker, "date": str(d), "snapshot": snap,
                     "cards": [], "error": f"No row for {ticker}"}
 
-        bases = [be for be, _ in pairs]
-        base_stats = await _baseline_for(conn, cat, bases, ticker, d, z_window)
-
         ranked, n_thin = [], 0
         for i, (be, ze) in enumerate(pairs):
-            bv, ex = row[f"b{i}"], row[f"e{i}"]
+            bv, zv, ex = row[f"b{i}"], row[f"z{i}"], row[f"e{i}"]
             if bv is None:
                 continue
-            v  = float(bv)
-            zv = _z_from(base_stats, be["column_name"], v)
             if zv is None:
-                # A live value with no score: the baseline is thinner than
-                # BASELINE_MIN_N, or flat across the window. Counted, not
-                # ranked -- ranking it at z=0 would bury a real reading in
-                # the middle of the strip as though it had been measured.
+                # A live value with no stored score: the window held fewer
+                # than BASELINE_MIN_N observations. Counted, not ranked --
+                # ranking it at z=0 would bury a real reading mid-strip as
+                # though it had been measured.
                 n_thin += 1
                 continue
-            ranked.append({"base": be, "z_entry": ze, "value": v,
-                           "z": zv, "extrap": bool(ex)})
+            ranked.append({"base": be, "z_entry": ze, "value": float(bv),
+                           "z": float(zv), "extrap": bool(ex)})
         ranked.sort(key=lambda c: abs(c["z"]), reverse=True)
 
         shown = [c for c in ranked if not (exclude_extrapolated and c["extrap"])]
@@ -1378,9 +1005,6 @@ async def unusual(
         else:
             start = _window_start(d, window)
 
-    def stat(c):
-        return base_stats.get(c["base"]["column_name"], {})
-
     cards = [{
         "column":      c["base"]["column_name"],
         "z_column":    c["z_entry"]["column_name"],
@@ -1393,12 +1017,10 @@ async def unusual(
         "z":           c["z"],
         "percentile":  c.get("percentile"),
         "pct_n":       c.get("pct_n"),
-        "z_n":         stat(c).get("n"),
         "extrap":      c["extrap"],
         "extrap_flags": c["base"]["extrap_flags"],
     } for c in shown]
 
-    any_stat = next(iter(base_stats.values()), {})
     return {
         "ticker": ticker, "date": str(d), "snapshot": snap,
         "z_window": z_window, "window": window,
@@ -1408,13 +1030,10 @@ async def unusual(
         "n_unscored_thin_baseline": n_thin,
         "exclude_extrapolated": bool(exclude_extrapolated),
         "extrap_rate": row["extrap_rate_short"],
-        "z_source": "daily_baseline",
+        "z_source": "stored",
         "baseline": {
             "snapshot": BASELINE_SNAPSHOT,
             "z_window": z_window,
-            "first":    any_stat.get("first"),
-            "last":     any_stat.get("last"),
-            "sessions": any_stat.get("sessions", 0),
             "min_n":    BASELINE_MIN_N,
         },
         "percentile_basis": {
@@ -1500,10 +1119,13 @@ async def rails(
     Today's MARKER still comes from the selected snapshot. That is the whole
     point -- an 11:25 reading placed against the daily distribution.
 
-    The z beside the bar is the daily-baseline z over `z_window` sessions,
-    the same number /unusual and the scanner show. It is a label, not the
-    bar's geometry: "where in the range" and "how many sigma" answer
-    different questions, and the header chips speak in sigma.
+    The z beside the bar is READ from equity_metrics_z at the same
+    (date, snapshot) as the marker — the same number /unusual and the scanner
+    show. It is a label, not the bar's geometry: "where in the range" and
+    "how many sigma" answer different questions.
+
+    The DISTRIBUTION is still computed here, because equity_metrics carries a
+    z but no percentile rank and no P5–P95.
 
     Extrapolated observations are dropped from the distribution AND from
     today's marker under the toggle. Leaving them in the history would
@@ -1523,23 +1145,23 @@ async def rails(
         return {"error": "No usable rail metrics", "rails": [],
                 "defaults": [{"slot": l, "column": c} for l, c in (slots or [])]}
     entries = [_entry(cat, c) for c in cols]
-    _reject_z_form(entries, "A rail", "Pass the base column — each rail "
-                   "already shows its daily-baseline z beside the bar.")
+    # The z column beside each rail, where the catalog has one.
+    zcols = [_z_column(cat, e["column_name"], z_window) for e in entries]
 
     out = []
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
         start   = _window_start(d, window)
 
-        # One baseline query covers every rail.
-        stats = await _baseline_for(conn, cat, entries, ticker, d, z_window)
-
-        # Today's values at the SELECTED snapshot, one row.
+        # Today's values and their stored z, at the SELECTED snapshot.
         sel = []
         for i, e in enumerate(entries):
             sel += [f"{_expr(e)} AS v{i}", f"{_extrap_expr(e)} AS x{i}"]
+            if zcols[i] is not None:
+                sel.append(f"{_expr(zcols[i])} AS z{i}")
         cur = await conn.fetchrow(
-            f"SELECT {', '.join(sel)} {_from_clause(False)} "
+            f"SELECT {', '.join(sel)} "
+            f"{_from_clause(_needs_z(entries) or any(z is not None for z in zcols))} "
             f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
             ticker, d, snap,
         )
@@ -1609,14 +1231,16 @@ async def rails(
             den = int(prow[f"d{i}"] or 0)
             pct = (int(prow[f"l{i}"] or 0) / den) if den else None
 
-        st = stats.get(e["column_name"], {})
+        zv = None
+        if zcols[i] is not None and cur is not None and cur[f"z{i}"] is not None:
+            zv = float(cur[f"z{i}"])
         out.append({
             **_meta(e),
             "value":      shown,
             "raw_value":  None if v is None else float(v),
             "extrap":     ex,
-            "z":          _z_from(stats, e["column_name"], shown),
-            "z_n":        st.get("n"),
+            "z":          zv,
+            "z_column":   zcols[i]["column_name"] if zcols[i] is not None else None,
             "percentile": pct,
             "p5":  _f(dist, f"p5_{i}"),  "p25": _f(dist, f"p25_{i}"),
             "p50": _f(dist, f"p50_{i}"), "p75": _f(dist, f"p75_{i}"),
@@ -1624,13 +1248,12 @@ async def rails(
             "n":   int(dist[f"n{i}"]) if dist and dist[f"n{i}"] else 0,
         })
 
-    any_stat = next(iter(stats.values()), {})
     return {
         "ticker": ticker, "date": str(d), "snapshot": snap,
         "window": window, "z_window": z_window,
         "rails": out,
         "exclude_extrapolated": bool(exclude_extrapolated),
-        "z_source": "daily_baseline",
+        "z_source": "stored",
         # Which default slot each rail came from, and which found nothing.
         # Returned only when the caller took the defaults; an explicit metric
         # list is its own answer.
@@ -1638,8 +1261,7 @@ async def rails(
                      if slots is not None else None),
         "baseline": {
             "snapshot": BASELINE_SNAPSHOT, "z_window": z_window,
-            "first": any_stat.get("first"), "last": any_stat.get("last"),
-            "sessions": any_stat.get("sessions", 0), "min_n": BASELINE_MIN_N,
+            "min_n": BASELINE_MIN_N,
         },
         "distribution_basis": {
             "snapshot": BASELINE_SNAPSHOT, "window": window,
@@ -1658,29 +1280,13 @@ def _f(row, key):
 # BASELINE_SNAPSHOT and deliberately a separate name: the caller may plot a
 # different bucket's closes, and the baseline scoring them stays at 1545
 # regardless. Aliased rather than re-typed so the two cannot drift.
+# The bucket the daily VIEW plots by default. Deliberately the same value as
+# BASELINE_SNAPSHOT and deliberately a separate name: the caller may plot a
+# different bucket's closes, and the z beside each point is scored against
+# 1545 regardless — that is now a property of the stored column rather than
+# something this module arranges.
 DAILY_SNAPSHOT = BASELINE_SNAPSHOT
 SERIES_MAX     = 4
-
-
-async def _daily_baseline(conn, cat, entry, ticker, as_of, z_window):
-    """(mu, sigma, n) for one metric over the DAILY close series.
-
-    Thin wrapper over _baseline_for() so /series shares one implementation
-    with every other panel. It used to have its own, and that copy had both
-    of the bugs the shared one is written to avoid:
-
-      * it scored against `trade_date <= as_of`, so today's own close sat
-        inside the window judging it — and only escaped that mid-session,
-        before the 15:45 row was captured. A window that changes definition
-        at the close every day is worse than either rule applied
-        consistently.
-      * it took each metric's last N NON-NULL observations rather than the
-        last N sessions, so a sparse metric was quietly scored against a
-        longer and older stretch of market than the metric beside it.
-    """
-    return (await _baseline_for(conn, cat, [entry], ticker, as_of, z_window)) \
-        .get(entry["column_name"], {"mu": None, "sigma": None, "n": 0,
-                                    "first": None, "last": None, "sessions": 0})
 
 
 def _quantile(sorted_vals, p):
@@ -1778,21 +1384,26 @@ async def series(
     segment. The flag is set the same way in every mode: the point belongs to
     the anchor date and is not that date's settled close.
 
-    What a partial point must NEVER do is help score itself:
-
-      * it is kept out of the rolling envelope's history, so the band it sits
-        against is built from settled sessions only. Its own band still
-        renders, because the envelope was already trailing — computed from
-        history strictly before each point.
-      * the z baseline never sees it. _baseline_for reads BASELINE_SNAPSHOT
-        strictly before the anchor date, so the yardstick is prior sessions
-        whatever the live point does.
+    A partial point is kept out of the rolling envelope's history, so the band
+    it sits against is built from settled sessions only. Its own band still
+    renders, because the envelope was already trailing — computed from history
+    strictly before each point. Its z is the stored one for that row, which is
+    scored against 1545 dailies excluding the scored date, so the live point
+    cannot enter its own yardstick either.
 
     Once the close lands, the settled 1545 row IS the point and nothing is
     appended — the partial reading is replaced by the real one rather than
     left sitting beside it.
 
-    z in every mode comes from the daily baseline — see _daily_baseline().
+    z is READ from equity_metrics_z per row. Every snapshot's stored z is
+    scored against the ticker's 1545 daily series, so the number means the
+    same thing on the daily and intraday views without this endpoint
+    rescoring anything.
+
+    One consequence worth expecting on the intraday view: an intraday reading
+    measured against 1545 closes carries the mean bucket-versus-close drift of
+    the session. That drift is uniform within a bucket, so it shifts the
+    distribution rather than reordering tickers within it.
     """
     if not pool:
         return {"error": "OI database not configured", "series": []}
@@ -1808,8 +1419,6 @@ async def series(
     if len(cols) > SERIES_MAX:
         raise HTTPException(400, f"At most {SERIES_MAX} series, got {len(cols)}")
     entries = [_entry(cat, c) for c in cols]
-    _reject_z_form(entries, "A series", "Pass the base column — every point "
-                   "already carries its daily-baseline z.")
 
     out = []
     appended_live = False
@@ -1819,24 +1428,13 @@ async def series(
         start      = _window_start(as_of, window)
 
         for e in entries:
-            zcol = None
-            for cand in cat["by_col"].values():
-                if cand["form"] == f"z_{z_window}" and cand["base_column"] == e["column_name"]:
-                    zcol = cand
-                    break
+            zcol = _z_column(cat, e["column_name"], z_window)
 
             sel = ["m.trade_date", "m.snapshot", f"{_expr(e)} AS v",
                    f"{_extrap_expr(e)} AS ex"]
-            # z_stored is a like-for-like check on the derived score, so it is
-            # only fetched when the plotted bucket IS the baseline bucket.
-            # Reading it at any other snapshot would compare the derived daily
-            # z against that bucket's own same-snapshot z — two different
-            # measurements, displayed as though one were a check on the other.
-            needs_z = bool(zcol) and mode == "daily" \
-                and daily_snap == BASELINE_SNAPSHOT
-            want_stored = needs_z
-            if want_stored:
+            if zcol is not None:
                 sel.append(f"{_expr(zcol)} AS zs")
+            needs_z = (e["form"] != "base") or zcol is not None
 
             where = ["m.ticker = $1"]
             args  = [ticker]
@@ -1868,25 +1466,17 @@ async def series(
                 *args,
             )
 
-            # Note the baseline takes neither daily_snap nor live_snap. The
-            # caller may plot any bucket; the yardstick is 1545 closes strictly
-            # before the anchor date either way.
-            bl = await _daily_baseline(conn, cat, e, ticker, as_of, z_window)
-            mu, sd, n_base = bl["mu"], bl["sigma"], bl["n"]
-
-            def zof(v, _mu=mu, _sd=sd):
-                if v is None or _mu is None or not _sd:
-                    return None
-                return (v - _mu) / _sd
-
             # In daily mode the settled close may simply not exist yet.
             live_row = None
             settled_today = any(r["trade_date"] == as_of for r in rows)
             if (include_today and mode == "daily" and not settled_today
                     and live_snap != daily_snap):
+                lsel = [f"{_expr(e)} AS v", f"{_extrap_expr(e)} AS ex"]
+                if zcol is not None:
+                    lsel.append(f"{_expr(zcol)} AS zs")
                 live_row = await conn.fetchrow(
-                    f"SELECT m.trade_date, m.snapshot, {_expr(e)} AS v, "
-                    f"{_extrap_expr(e)} AS ex {_from_clause(False)} "
+                    f"SELECT m.trade_date, m.snapshot, {', '.join(lsel)} "
+                    f"{_from_clause(needs_z)} "
                     f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
                     ticker, as_of, live_snap,
                 )
@@ -1912,18 +1502,23 @@ async def series(
                 return td == as_of and snap_ != BASELINE_SNAPSHOT
 
             if mode == "candle":
-                by_day, last_snap = {}, {}
+                by_day, last_snap, last_z = {}, {}, {}
                 for r in rows:
                     if r["v"] is None or (exclude_extrapolated and r["ex"]):
                         continue
                     by_day.setdefault(r["trade_date"], []).append(float(r["v"]))
                     last_snap[r["trade_date"]] = r["snapshot"]   # rows are ordered
+                    # The bar's z is the stored z of its CLOSING bucket, not a
+                    # re-score of the close: the bar is a summary of readings
+                    # that were each already scored.
+                    last_z[r["trade_date"]] = (
+                        None if zcol is None or r["zs"] is None else float(r["zs"]))
                 pts = []
                 for dd in sorted(by_day):
                     vs = by_day[dd]                   # already snapshot-ordered
                     pts.append({"t": dd.isoformat(), "o": vs[0], "h": max(vs),
                                 "l": min(vs), "c": vs[-1], "n": len(vs),
-                                "z": zof(vs[-1]),
+                                "z": last_z.get(dd),
                                 # A bar whose last bucket is not the close is a
                                 # bar of a session still being written.
                                 "partial": is_partial(dd, last_snap.get(dd)),
@@ -1940,13 +1535,13 @@ async def series(
                     v     = None if r["v"] is None else float(r["v"])
                     ex    = bool(r["ex"])
                     shown = None if (v is None or (exclude_extrapolated and ex)) else v
+                    zv = (None if zcol is None or r["zs"] is None
+                          else float(r["zs"]))
                     p = {"t": r["trade_date"].isoformat(), "v": shown, "extrap": ex,
-                         "z": zof(shown),
+                         "z": zv,
                          "partial": is_partial(r["trade_date"], r["snapshot"])}
                     if mode == "intraday" or p["partial"]:
                         p["snapshot"] = r["snapshot"]
-                    if want_stored:
-                        p["z_stored"] = None if r["zs"] is None else float(r["zs"])
                     pts.append(p)
 
                 if live_row is not None and live_row["v"] is not None:
@@ -1957,8 +1552,9 @@ async def series(
                     # construction, and taking it from the parameter means the
                     # label cannot disagree with what was asked for.
                     pts.append({"t": as_of.isoformat(), "v": shown, "extrap": ex,
-                                "z": zof(shown), "partial": True,
-                                "snapshot": live_snap})
+                                "z": (None if zcol is None or live_row["zs"] is None
+                                      else float(live_row["zs"])),
+                                "partial": True, "snapshot": live_snap})
                     appended_live = True
 
                 closes = [p["v"] for p in pts]
@@ -1978,13 +1574,11 @@ async def series(
                 "first_date": pts[0]["t"] if pts else None,
                 "last_date":  pts[-1]["t"] if pts else None,
                 "n_partial":  sum(1 for p in pts if p.get("partial")),
-                "baseline":   {"mu": mu, "sigma": sd, "n": n_base,
-                               "snapshot": BASELINE_SNAPSHOT,
-                               "first": bl["first"], "last": bl["last"],
-                               "sessions": bl["sessions"],
-                               "as_of": as_of.isoformat(),
-                               "z_window": z_window},
-                "z_stored_column": zcol["column_name"] if want_stored else None,
+                "baseline":   {"snapshot": BASELINE_SNAPSHOT,
+                               "z_window": z_window,
+                               "min_n": BASELINE_MIN_N,
+                               "as_of": as_of.isoformat()},
+                "z_column": zcol["column_name"] if zcol is not None else None,
             })
 
     return {
@@ -2001,7 +1595,7 @@ async def series(
             # point, and nothing is appended.
             "settled":  live_snap == BASELINE_SNAPSHOT,
         },
-        "z_source": "daily_baseline",
+        "z_source": "stored",
         "envelope": ({"on": True, "window": env_window, "lo": env_lo, "hi": env_hi}
                      if envelope else {"on": False}),
         "exclude_extrapolated": bool(exclude_extrapolated),
