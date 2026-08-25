@@ -127,15 +127,25 @@ const EQ_SPOT_LABEL = '__eq_spot_reference__';
  *
  * The last one is permanently available: it answers, at a glance, whether the
  * tickers at the edge of the scatter are opportunities or artifacts. */
+/* Preset axis pairs. The column names here are LITERALS, which makes them the
+ * one place on the page a rename lands with no catalog lookup to catch it —
+ * vrp_1m and rv_1m sat here after RV_WINDOWS became tenor-derived, and
+ * applyPreset's "column not found, leave the axis alone" turned that into two
+ * buttons that changed x and silently kept the previous y.
+ *
+ * Three things now stand between that and a repeat: applyPreset resolves
+ * through the alias map, a failed resolve SAYS so instead of retaining, and
+ * scripts/check_tenor_retarget.py asserts every name here against the real
+ * catalog. */
 const EQ_PRESETS = [
   { label: 'skew z × 5d return',     why: 'is skew rich because spot fell?',
     x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'log_ret_1w', z: false } },
   { label: 'skew z × term ratio',    why: 'rich skew in contango vs backwardation',
     x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'term_ratio_30d_90d', z: false } },
   { label: 'skew z × VRP',           why: 'rich wings with a vol premium, or without',
-    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'vrp_1m', z: false } },
+    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'vrp_30d', z: false } },
   { label: 'IV z × RV z',            why: 'implied stretched relative to what is realising',
-    x: { b: 'iv_30d_atm', z: true },        y: { b: 'rv_1m', z: true } },
+    x: { b: 'iv_30d_atm', z: true },        y: { b: 'rv_30d', z: true } },
   { label: 'skew z × spot-vol β',    why: 'which rich-skew names double-hit on a down move',
     x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'spotvol_beta_1m', z: false } },
   { label: 'zc width z × skew z',    why: 'do vol-space and trade-native readings agree',
@@ -762,6 +772,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── scatter ──────────────────────────────────────────────────────────
     presets: EQ_PRESETS,
+    presetNote: '',
     activePreset: EQ_PRESETS[0].label,
     xFam: 'skew', xBase: 'skew_30d_25p_atm', xZ: true,
     yFam: 'realized_vol', yBase: 'log_ret_1w', yZ: false,
@@ -829,6 +840,7 @@ document.addEventListener('alpine:init', () => {
       await this.loadCatalog();
       if (this.catError) return;
       this.pruneTickerDefaults();
+      this.checkPresets();
       await this.loadCalendar();
       await this.reloadAll();
     },
@@ -1015,6 +1027,7 @@ document.addEventListener('alpine:init', () => {
 
     onAxisChange() {
       this.activePreset = '';
+      this.presetNote = '';
       this.loadCrossSection();
     },
 
@@ -1023,17 +1036,54 @@ document.addEventListener('alpine:init', () => {
       // Applying 30d columns while the control reads 7d would leave the page
       // saying one thing and showing another, which is the divergence the
       // single tenor control exists to prevent.
+      //
+      // The alias runs FIRST, because a name that no longer exists cannot be
+      // retargeted — retarget() returns its input unchanged for anything it
+      // cannot resolve, which is indistinguishable from "already correct".
+      const missed = [];
       const setAxis = (which, spec) => {
-        const col = this.retarget(spec.b, this.pageTenor);
+        const col = this.retarget(this.aliasIfMissing(spec.b), this.pageTenor);
         const m = this.byCol[col];
-        if (!m) return;
+        if (!m) {
+          // Retaining the previous axis here is what made this take several
+          // clicks to notice: the button appeared to do half its job. Say it.
+          missed.push(`${which}: ${spec.b}`);
+          return;
+        }
         if (which === 'x') { this.xFam = m.family; this.xBase = col; this.xZ = spec.z && this.hasZ(col); }
         else               { this.yFam = m.family; this.yBase = col; this.yZ = spec.z && this.hasZ(col); }
       };
       setAxis('x', p.x);
       setAxis('y', p.y);
-      this.activePreset = p.label;
+      if (missed.length) {
+        this.presetNote = `"${p.label}" could not set ${missed.join(' and ')} — `
+          + `no such column in the catalog, so that axis still shows what it did `
+          + `before. The preset names a column that has been renamed or removed.`;
+        this.activePreset = '';
+      } else {
+        this.presetNote = '';
+        this.activePreset = p.label;
+      }
       this.loadCrossSection();
+    },
+
+    /* Every preset checked once, at load, against the catalog that actually
+     * came back. A literal column name is the one thing on this page with no
+     * lookup behind it, so it is the one thing a rename can break silently —
+     * and finding out on the third click of a button that half-works is a bad
+     * way to find out. */
+    checkPresets() {
+      const bad = [];
+      for (const p of this.presets) {
+        for (const [which, spec] of [['x', p.x], ['y', p.y]]) {
+          const col = this.aliasIfMissing(spec.b);
+          if (!this.byCol[col]) bad.push(`${p.label} (${which}: ${spec.b})`);
+        }
+      }
+      this.presetNote = bad.length
+        ? `Presets naming columns the catalog does not have: ${bad.join('; ')}. `
+          + `Those buttons will not set that axis.`
+        : '';
     },
 
     /** Selecting re-renders the scatter to move the highlight ring. The

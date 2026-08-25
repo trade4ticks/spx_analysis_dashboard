@@ -569,6 +569,11 @@
                  :title="p.why" @click="applyPreset(p)" x-text="p.label"></div>
           </template>
         </div>
+        <!-- A preset that cannot resolve one of its columns used to leave that
+             axis untouched and say nothing, so the button looked like it had
+             half-worked. -->
+        <div class="eq-note eq-warn" x-show="presetNote" x-cloak
+             style="padding:4px 10px 0" x-text="presetNote"></div>
 
         <div class="eq-axisrow">
           <span class="eq-lbl">X</span>

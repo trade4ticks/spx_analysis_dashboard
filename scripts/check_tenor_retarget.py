@@ -1,4 +1,4 @@
-"""Prove the page-tenor retarget rule against the real column catalog.
+"""Prove the retarget rule AND the preset literals against the real catalog.
 
 The page has one tenor and every metric-name-bearing control follows it, which
 means a rule for turning `skew_30d_25p_atm` into its 21d equivalent. That rule
@@ -155,7 +155,19 @@ const out = payload.cases.map(c => {
   try { return comp.retarget(c[0], c[1]); }
   catch (e) { return '<<threw: ' + e.message + '>>'; }
 });
-console.log(JSON.stringify({ok:true, out}));
+// Preset axis columns are LITERALS -- the one place on this page a column
+// name appears with no catalog lookup behind it, and so the one place a
+// rename lands silently. Resolved exactly as applyPreset does, alias first.
+const presets = (comp.presets || []).map(p => {
+  const one = (spec) => {
+    try {
+      const col = comp.aliasIfMissing(spec.b);
+      return comp.byCol[col] ? null : spec.b;
+    } catch (e) { return spec.b; }
+  };
+  return { label: p.label, x: one(p.x), y: one(p.y) };
+});
+console.log(JSON.stringify({ok:true, out, presets}));
 """
 
 
@@ -210,6 +222,19 @@ def main() -> int:
         return 1
 
     bad = 0
+
+    # A preset naming a column the catalog lacks leaves that axis untouched
+    # when clicked, so the button half-works -- which is how vrp_1m and rv_1m
+    # survived the RV-window rename until three clicks made the pattern
+    # visible.
+    for p in data.get("presets", []):
+        for axis in ("x", "y"):
+            if p[axis]:
+                bad += 1
+                print(f"\n  preset {p['label']!r} names {p[axis]!r} on {axis}")
+                print(f"    the catalog has no such column, and no alias for it;")
+                print(f"    that button will leave the {axis} axis untouched")
+
     for (col, tenor, want, why), got in zip(CASES, data["out"]):
         if got == want:
             continue
@@ -219,6 +244,7 @@ def main() -> int:
         print(f"    want {want}   ({why})")
 
     print(f"\ncatalog columns: {len(by_col)}")
+    print(f"presets checked: {len(data.get('presets', []))}")
     print(f"retarget cases : {len(CASES)}, failed: {bad}")
     return 1 if bad else 0
 
