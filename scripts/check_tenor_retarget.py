@@ -142,12 +142,18 @@ const sb = {
               documentElement: { style: { setProperty(){} } } },
   Alpine: { data: (n,f) => { if (!comp) { try { comp = f(); } catch(e){} } },
             store: () => ({}), magic: () => {}, directive: () => {} },
-  fetch: () => Promise.resolve({ ok:false, json: async () => ({}) }),
+  fetch: (u) => { sb.__urls.push(String(u));
+    return Promise.resolve({ ok:true,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ structures: [], aliases: {},
+                           pair_families: [], pair_for_tenor: {} }),
+      text: async () => '{}' }); },
   localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
   Chart: function(){ return {destroy(){}, update(){}}; },
   setTimeout, clearTimeout, setInterval, clearInterval,
   requestAnimationFrame: () => 0,
 };
+sb.__urls = [];
 sb.window = sb; sb.globalThis = sb; sb.self = sb;
 vm.createContext(sb);
 try { vm.runInContext(fs.readFileSync(process.argv[2],'utf8'), sb, {filename:'eq'}); }
@@ -182,7 +188,19 @@ const presets = (comp.presets || []).map(p => {
   };
   return { label: p.label, x: one(p.x), y: one(p.y) };
 });
-console.log(JSON.stringify({ok:true, out, presets}));
+// The page must list presets at THEIR OWN tenor. `tenor` on /structures is an
+// override for a caller reading one at a horizon it was not written for, and
+// the page passing its current tenor stamped it onto every preset -- silently
+// discarding the horizon a saved preset carried. Asserting the resolver alone
+// would have missed this: the resolver was correct, the caller was not.
+let listUrl = null;
+try {
+  comp.pageTenor = 7;
+  const p = comp.loadStructures();
+  if (p && p.then) { /* fire-and-forget: the URL is already recorded */ }
+  listUrl = sb.__urls.filter(u => u.includes('/structures')).pop() || null;
+} catch (e) { listUrl = '<<threw: ' + e.message + '>>'; }
+console.log(JSON.stringify({ok:true, out, presets, listUrl}));
 """
 
 
@@ -242,6 +260,17 @@ def main() -> int:
         return 1
 
     bad = 0
+
+    # The client's own call, not just the resolver behind it.
+    list_url = data.get("listUrl")
+    if list_url is None:
+        bad += 1
+        print("\n  the page never called /structures -- the check below is vacuous")
+    elif "tenor=" in list_url:
+        bad += 1
+        print(f"\n  the page lists presets with a tenor override: {list_url}")
+        print("    that stamps the page's current tenor onto every preset and")
+        print("    discards the one each was saved with. Omit the parameter.")
 
     # A preset naming a column the catalog lacks leaves that axis untouched
     # when clicked, so the button half-works -- which is how vrp_1m and rv_1m

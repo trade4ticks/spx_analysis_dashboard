@@ -88,7 +88,8 @@ def _row_to_preset(r) -> dict:
 
 @router.get("/structures")
 async def list_structures(
-    tenor: int = Query(None, description="resolve at this tenor instead"),
+    tenor: int = Query(None, description="OVERRIDE: resolve every preset at "
+                                        "this tenor instead of its own"),
     pool=Depends(get_oi_pool),
 ):
     """Built-ins and saved presets, every column resolved against the catalog.
@@ -102,6 +103,14 @@ async def list_structures(
     Anything that does not resolve comes back named in `unresolved` rather
     than dropped. A preset quietly one column short is a preset that looks
     like it worked.
+
+    `tenor` OVERRIDES every preset's own, and is for a caller that wants one
+    preset read at a horizon it was not written for -- the brief-builder
+    asking "what would Put Ratio look like at 30d". The page must NOT pass it
+    when listing: doing so stamps the page's current tenor onto every preset
+    and erases the one each was saved with, which is exactly what made a copy
+    saved at 7d come back as whatever the page happened to be showing. A
+    preset's tenor is part of the preset.
     """
     if not pool:
         return {"error": "OI database not configured", "structures": []}

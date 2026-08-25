@@ -543,6 +543,36 @@ async def main():
             if r["tenor"] != t:
                 failed += 1
                 print(f"  PRESET  {p['name']} asked for {t}d, resolved {r['tenor']}d")
+    # A preset's TENOR is part of the preset. Listing without an override
+    # must return each preset's own; the override is for a caller asking to
+    # read one at a horizon it was not written for.
+    #
+    # This was live: the page passed its current tenor on every list, which
+    # stamped it onto every preset and silently discarded the horizon a
+    # saved preset carried. It hid behind the built-in, whose own tenor is
+    # 21 -- so at 21 the override was a no-op and the feature looked fine.
+    _saved_at_7 = {
+        "key": "user:1", "id": 1, "name": "probe", "note": None,
+        "tenor": 7, "builtin": False,
+        "rails": [{"b": "zc_width_sigma_7d", "w": 63}],
+        "scanner_columns": [], "scanner_filters": [],
+        "scanner_sort": None, "scatter_x": None, "scatter_y": None,
+    }
+    kept = resolve_preset(real_cat, _saved_at_7, None)
+    if kept["tenor"] != 7:
+        failed += 1
+        print(f"  PRESET  a preset saved at 7d listed as {kept['tenor']}d "
+              f"with no override -- its own tenor was discarded")
+    if kept["rails"][0]["b"] != "zc_width_sigma_7d":
+        failed += 1
+        print(f"  PRESET  and its columns moved with it: "
+              f"{kept['rails'][0]['b']}")
+    forced = resolve_preset(real_cat, _saved_at_7, 30)
+    if forced["tenor"] != 30 or forced["rails"][0]["b"] != "zc_width_sigma_30d":
+        failed += 1
+        print(f"  PRESET  an explicit override did not take: "
+              f"{forced['tenor']}d / {forced['rails'][0]['b']}")
+
     # The earnings filter must let NULL through: an ETF has no earnings date,
     # and a plain "> 20" on NULL is false in SQL, so a filter meant to exclude
     # events would exclude the entire ETF universe.

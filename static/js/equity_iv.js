@@ -890,8 +890,11 @@ document.addEventListener('alpine:init', () => {
 
     async loadStructures() {
       try {
-        const j = await eqGetJson('/api/equity-iv/structures?tenor='
-          + encodeURIComponent(this.pageTenor));
+        // No `tenor` parameter. That is an OVERRIDE, and passing the page's
+        // current tenor here re-stamps every preset with it — which silently
+        // discarded the tenor a preset was saved at. Each comes back resolved
+        // at its own.
+        const j = await eqGetJson('/api/equity-iv/structures');
         if (j.error) { this.structureNote = j.error; return; }
         this.structures = j.structures || [];
         // Anything a preset names that the catalog does not have is reported
@@ -2784,10 +2787,13 @@ document.addEventListener('alpine:init', () => {
       // against last week's return" — and retargeting it to another tenor
       // leaves it the same pair. The buttons carry no tenor, so un-lighting
       // one on a tenor change would say the selection had been abandoned when
-      // it had only moved. The same holds for the active STRUCTURE, which is
-      // re-resolved at the new tenor rather than dropped.
+      // it had only moved.
+      //
+      // The structure list is NOT reloaded here. Each preset is resolved at
+      // its own tenor, and the live controls have just been retargeted to the
+      // new one — re-listing would only re-stamp the presets with the page
+      // tenor, which is the bug that lost a saved preset's horizon.
 
-      this.loadStructures();
       this.reloadAll();
     },
 
