@@ -71,6 +71,9 @@ router = APIRouter(tags=["equity-iv"])
 METRICS_TABLE = "equity_metrics"
 Z_TABLE       = "equity_metrics_z"
 CATALOG_TABLE = "equity_metrics_catalog"
+ATM_TABLE       = "equity_atm"
+EARNINGS_TABLE  = "earnings_calendar"
+EARNINGS_COVERAGE_TABLE = "earnings_coverage"
 
 # Tenors the surface is fitted at. Used to sanity-check a tenor parsed out of
 # a column name before it is turned into an extrap flag name.
@@ -808,10 +811,31 @@ async def ticker_header(
 ):
     """The thin sticky header: spot, ATM IV, RV, and the state chips.
 
-    `days_to_earnings` is currently NULL on every row — no calendar source is
-    wired up — so it is returned as null and must render as absent. That is
-    the same contract every other metric has, and the reason it is not
-    special-cased into a zero.
+    `days_to_earnings` counts to the next earnings_calendar date at or after
+    the trade date. The SESSION for that same date comes from the same row via
+    the same LATERAL, not from a second lookup: a session attached to a
+    different date than the count counts to would be worse than showing none,
+    and would look entirely normal.
+
+    bmo / amc matters at short horizons. A report before the open on day D
+    moves D's session; after the close on D it moves D+1's. At one or two days
+    out that is the difference between the event landing inside a structure's
+    life or outside it, which is a different trade rather than a nuance.
+
+    'unknown' is returned as-is and the client renders the day count with no
+    session marker. A ticker with no calendar row gets nulls and renders
+    absent, the same contract every other metric has here.
+
+    `has_earnings` comes along from earnings_coverage because "no date" has
+    two causes that look identical on screen: a fund that never reports, and a
+    stock whose last confirmed date has passed — Yahoo publishes only the next
+    one, so the calendar runs out rather than continuing. Both render absent,
+    which is right, but the tooltip can say which, and only one of them is a
+    reason to go and refresh the calendar.
+
+    Note the count is CALENDAR days, not trading days. metrics_config is
+    explicit about why: trading days would make every historical value depend
+    on the exchange calendar and shift on recompute.
 
     `source` distinguishes a 'live' row, captured at an arbitrary instant and
     rounded to the grid bucket, from an 'exact' row out of the anchored
@@ -830,11 +854,26 @@ async def ticker_header(
     for key, col in resolved.items():
         if col:
             sel.append('m."{}" AS {}'.format(col, key))
+    sel += ["nxt.earnings_date", "nxt.earnings_session", "cov.has_earnings"]
+
+    # The same LATERAL backfill_days_to_earnings.py uses, so the date this
+    # resolves to is the date the stored count counted to. LATERAL rather than
+    # a correlated scalar subquery so it stops at the first row via
+    # ix_earnings_calendar_lookup instead of scanning every future date.
+    nxt_join = (
+        f"LEFT JOIN LATERAL ("
+        f"  SELECT ec.earnings_date, ec.earnings_session "
+        f"  FROM {EARNINGS_TABLE} ec "
+        f"  WHERE ec.ticker = m.ticker AND ec.earnings_date >= m.trade_date "
+        f"  ORDER BY ec.earnings_date LIMIT 1"
+        f") nxt ON TRUE "
+        f"LEFT JOIN {EARNINGS_COVERAGE_TABLE} cov ON cov.ticker = m.ticker"
+    )
 
     async with pool.acquire() as conn:
         d, snap = await _resolve_slice(conn, date, snapshot)
         row = await conn.fetchrow(
-            f"SELECT {', '.join(sel)} FROM {METRICS_TABLE} m "
+            f"SELECT {', '.join(sel)} FROM {METRICS_TABLE} m {nxt_join} "
             f"WHERE m.ticker = $1 AND m.trade_date = $2 AND m.snapshot = $3",
             ticker, d, snap,
         )
@@ -858,6 +897,20 @@ async def ticker_header(
         "term_state": None if term is None else ("contango" if term < 1 else "backwardation"),
         "px_vs_50dma":   g("px_vs_50dma"),
         "days_to_earnings": g("days_to_earn"),
+        "earnings_date":    _jsonable(row["earnings_date"]),
+        # 'bmo' | 'amc' | 'unknown' | None. Passed through rather than mapped:
+        # 'unknown' is a real state the calendar records, and collapsing it to
+        # null would make "we do not know when in the day" indistinguishable
+        # from "there is no scheduled report".
+        "earnings_session": row["earnings_session"],
+        # NULL when the ticker is not in earnings_coverage at all.
+        "has_earnings":     row["has_earnings"],
+        # The stored count and the count implied by the row the session came
+        # from. They agree when the backfill has run; when they do not, the
+        # pill would be pairing a day count with a different date's session.
+        "earnings_days_calc": (
+            None if row["earnings_date"] is None
+            else (row["earnings_date"] - d).days),
         "spotvol_beta":  g("spotvol_beta"),
         "spotvol_r2":    g("spotvol_r2"),
         "extrap_rate":   row["extrap_rate_short"],
@@ -1339,6 +1392,7 @@ async def series(
     ticker:               str   = Query(...),
     metrics:              str   = Query(..., description="CSV of columns, max 4"),
     mode:                 str   = Query("daily", description="daily|intraday|candle"),
+    spot:                 bool  = Query(True, description="the background spot reference"),
     snapshot:             str   = Query(None, description="daily mode bucket"),
     date:                 str   = Query(None, description="anchor date; default latest"),
     live_snapshot:        str   = Query(None, description="the page's selected bucket"),
@@ -1395,6 +1449,15 @@ async def series(
     appended — the partial reading is replaced by the real one rather than
     left sitting beside it.
 
+    A faint spot reference rides behind the metrics, off
+    equity_atm.underlying_price for the plotted (date, snapshot) — the daily
+    view takes each session's 1545 value, the intraday view each bucket's. It
+    is chrome: its own hidden scale, no axis labels, drawn behind the band and
+    the lines, absent from the legend and from the metric picker, and
+    switchable off. Its own scale because spot runs in the hundreds while
+    these metrics run 0.05 to 1.1, and one shared axis would flatten every
+    metric to a line.
+
     z is READ from equity_metrics_z per row. Every snapshot's stored z is
     scored against the ticker's 1545 daily series, so the number means the
     same thing on the daily and intraday views without this endpoint
@@ -1422,10 +1485,35 @@ async def series(
 
     out = []
     appended_live = False
+    spot_points = []
     async with pool.acquire() as conn:
         as_of, live_snap = await _resolve_slice(conn, date, live_snapshot)
         daily_snap = snapshot or DAILY_SNAPSHOT
         start      = _window_start(as_of, window)
+
+        def slice_predicate(alias="m"):
+            """The (date, snapshot) window every series in this call plots.
+
+            Built once and used by both the metric queries and the spot query,
+            so the reference line cannot end up covering a different span than
+            the thing it sits behind.
+            """
+            where = [f"{alias}.ticker = $1"]
+            args  = [ticker]
+            args.append(as_of)
+            p_asof = len(args)
+            where.append(f"{alias}.trade_date <= ${p_asof}")
+            if mode == "daily":
+                args.append(daily_snap)
+                where.append(f"{alias}.snapshot = ${len(args)}")
+            else:
+                args.append(live_snap)
+                where.append(f"({alias}.trade_date < ${p_asof} "
+                             f"OR {alias}.snapshot <= ${len(args)})")
+            if start:
+                args.append(start)
+                where.append(f"{alias}.trade_date >= ${len(args)}")
+            return where, args
 
         for e in entries:
             zcol = _z_column(cat, e["column_name"], z_window)
@@ -1436,28 +1524,10 @@ async def series(
                 sel.append(f"{_expr(zcol)} AS zs")
             needs_z = (e["form"] != "base") or zcol is not None
 
-            where = ["m.ticker = $1"]
-            args  = [ticker]
-            # Upper-bounded at the anchor date. Without this the chart ran to
-            # whatever the newest capture was, so picking an earlier date moved
-            # every other panel on the page and left this one alone.
-            args.append(as_of)
-            p_asof = len(args)
-            where.append(f"m.trade_date <= ${p_asof}")
-            if mode == "daily":
-                args.append(daily_snap)
-                where.append(f"m.snapshot = ${len(args)}")
-            else:
-                # The anchor date is truncated at the selected bucket, so the
-                # intraday line stops where the page says it is rather than
-                # running ahead to the newest capture. Snapshots are
-                # zero-padded HHMM text, so this ordering is chronological.
-                args.append(live_snap)
-                where.append(f"(m.trade_date < ${p_asof} "
-                             f"OR m.snapshot <= ${len(args)})")
-            if start:
-                args.append(start)
-                where.append(f"m.trade_date >= ${len(args)}")
+            # Upper-bounded at the anchor date, and on the intraday views
+            # truncated at the selected bucket, so the chart shows the world as
+            # of what the page says rather than running to the newest capture.
+            where, args = slice_predicate("m")
 
             rows = await conn.fetch(
                 f"SELECT {', '.join(sel)} {_from_clause(needs_z)} "
@@ -1581,6 +1651,42 @@ async def series(
                 "z_column": zcol["column_name"] if zcol is not None else None,
             })
 
+        if spot:
+            # underlying_price is a property of the (ticker, trade_date,
+            # snapshot) row and repeats across every dte in equity_atm, so the
+            # grouping collapses that repetition rather than choosing among
+            # differing values. max() over identical values is just "the one".
+            swhere, sargs = slice_predicate("a")
+            srows = await conn.fetch(
+                f"SELECT a.trade_date, a.snapshot, max(a.underlying_price) AS v "
+                f"FROM {ATM_TABLE} a WHERE {' AND '.join(swhere)} "
+                f"GROUP BY a.trade_date, a.snapshot "
+                f"ORDER BY a.trade_date, a.snapshot",
+                *sargs,
+            )
+            if mode == "candle":
+                # One value per session, the closing bucket's — the bars are
+                # daily, so the reference behind them has to be too.
+                by_day = {}
+                for r in srows:
+                    if r["v"] is not None:
+                        by_day[r["trade_date"]] = float(r["v"])
+                spot_points = [{"t": dd.isoformat(), "v": v}
+                               for dd, v in sorted(by_day.items())]
+            else:
+                for r in srows:
+                    if r["v"] is None:
+                        continue
+                    p = {"t": r["trade_date"].isoformat(), "v": float(r["v"])}
+                    # Labelled exactly as the metric points are, so the client
+                    # places it in the same slot rather than on a parallel axis
+                    # of its own.
+                    if mode == "intraday" or (
+                            r["trade_date"] == as_of
+                            and r["snapshot"] != BASELINE_SNAPSHOT):
+                        p["snapshot"] = r["snapshot"]
+                    spot_points.append(p)
+
     return {
         "ticker": ticker, "mode": mode, "window": window, "z_window": z_window,
         "snapshot": daily_snap if mode == "daily" else None,
@@ -1596,6 +1702,11 @@ async def series(
             "settled":  live_snap == BASELINE_SNAPSHOT,
         },
         "z_source": "stored",
+        # Chrome, not a series: no catalog entry, no legend row, its own hidden
+        # scale. The client draws it behind everything and reads it out in the
+        # tooltip, which is the only place its absolute level is legible.
+        "spot": {"on": bool(spot), "points": spot_points,
+                 "source": f"{ATM_TABLE}.underlying_price"},
         "envelope": ({"on": True, "window": env_window, "lo": env_lo, "hi": env_hi}
                      if envelope else {"on": False}),
         "exclude_extrapolated": bool(exclude_extrapolated),

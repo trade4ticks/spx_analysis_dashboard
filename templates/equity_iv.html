@@ -1038,6 +1038,10 @@
                         + 'so a marker is never inside the distribution judging it.'">
               Envelope
             </div>
+            <div class="chip" :class="{on: seriesSpot}" @click="toggleSeriesSpot()"
+                 title="A faint grey line of the underlying behind the metrics, so a skew or IV move can be read against what spot was doing. Its own hidden scale — spot runs in the hundreds while these metrics run 0.05 to 1.1, and one shared axis would flatten every metric. No axis is drawn for it; hover to read its level.">
+              Spot
+            </div>
             <div class="eq-spacer"></div>
             <span class="eq-section-sub" x-show="serLoading" x-cloak>loading…</span>
           </div>
@@ -1094,6 +1098,13 @@
             <span x-show="livePointNote()" x-text="livePointNote()"
                   style="display:block"></span>
             <span x-show="baselineNote()" x-text="baselineNote()" style="display:block"></span>
+            The faint grey line is the underlying, from
+            <code>equity_atm.underlying_price</code> at each plotted
+            (date, snapshot) — the daily view takes each session's 1545 value,
+            the intraday view each bucket's. It has its own hidden scale and no
+            axis of its own; hover to read its level. It is background
+            reference, not a plottable series, so it is absent from the metric
+            picker and from the legend.
             Candles are the daily OHLC <em>of the metric</em> — open, high, low
             and close across that day's intraday buckets, coloured blue when the
             metric rose through the day and pink when it fell. That is not the

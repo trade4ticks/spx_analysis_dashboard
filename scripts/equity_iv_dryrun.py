@@ -74,6 +74,13 @@ class Row(dict):
             return dict.__getitem__(self, k)
         if k in ("trade_date",):
             return datetime.date(2026, 8, 24)
+        # earnings_calendar is DATE NOT NULL + TEXT; the catch-all float below
+        # made the header's day arithmetic fail on a fixture value rather than
+        # on anything real.
+        if k == "earnings_date":
+            return datetime.date(2026, 9, 5)
+        if k == "earnings_session":
+            return "amc"
         if k == "snapshot":
             return "1545"
         if k == "captured_at":
@@ -311,7 +318,8 @@ async def main():
                                          window=win,
                                          z_window=63, envelope=envon,
                                          env_window=63, env_lo=0.10, env_hi=0.90,
-                                         exclude_extrapolated=True, pool=pool)))
+                                         exclude_extrapolated=True, spot=True,
+                                         pool=pool)))
     # The live-point paths: anchored date + selected bucket, in every mode,
     # and with the append suppressed.
     for mode in ("daily", "intraday", "candle"):
@@ -323,13 +331,15 @@ async def main():
                                      include_today=True, window="1y",
                                      z_window=63, envelope=True, env_window=63,
                                      env_lo=0.10, env_hi=0.90,
-                                     exclude_extrapolated=True, pool=pool)))
+                                     exclude_extrapolated=True, spot=True,
+                                     pool=pool)))
     cases.append(("series live suppressed",
                   eiv.series(ticker="AAPL", metrics="iv_30d_atm", mode="daily",
                              snapshot=None, date=None, live_snapshot="1200",
                              include_today=False, window="all", z_window=63,
                              envelope=False, env_window=63, env_lo=0.10,
-                             env_hi=0.90, exclude_extrapolated=True, pool=pool)))
+                             env_hi=0.90, exclude_extrapolated=True, spot=True,
+                             pool=pool)))
 
     cases.append(("series alt snapshot, no z_stored",
                   eiv.series(ticker="AAPL", metrics="skew_30d_25p_atm",
@@ -337,7 +347,7 @@ async def main():
                              live_snapshot=None, include_today=True, window="1y",
                              z_window=63, envelope=True, env_window=20,
                              env_lo=0.05, env_hi=0.95,
-                             exclude_extrapolated=False, pool=pool)))
+                             exclude_extrapolated=False, spot=True, pool=pool)))
 
     # These three were must-refuse while the page DERIVED its z: a stored z
     # column could not be re-derived per point, and two z windows in one
@@ -350,7 +360,7 @@ async def main():
                              live_snapshot=None, include_today=True, window="1y",
                              z_window=63, envelope=True, env_window=20,
                              env_lo=0.05, env_hi=0.95,
-                             exclude_extrapolated=False, pool=pool)))
+                             exclude_extrapolated=False, spot=True, pool=pool)))
     cases.append(("rails accepts a stored z column",
                   eiv.rails(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
                             date=None, snapshot=None, window="1y",
@@ -497,9 +507,55 @@ async def main():
                     snapshot=None, date="2026-08-24", live_snapshot="1200",
                     include_today=True, window="1y", z_window=63,
                     envelope=True, env_window=63, env_lo=0.10, env_hi=0.90,
-                    exclude_extrapolated=True, pool=pool)
+                    exclude_extrapolated=True, spot=True, pool=pool)
         base.update(kw)
         return await eiv.series(**base)
+
+    # ── the header's earnings pill ───────────────────────────────────────
+    hj = await eiv.ticker_header(ticker="AAPL", date="2026-08-24",
+                                 snapshot=None, pool=pool)
+    if hj.get("earnings_session") != "amc":
+        failed += 1
+        print(f"  HEADER  earnings_session came back {hj.get('earnings_session')!r}")
+    if hj.get("earnings_days_calc") != 12:
+        failed += 1
+        print(f"  HEADER  earnings_days_calc {hj.get('earnings_days_calc')!r}, want 12")
+
+    # ── the spot reference on /series ────────────────────────────────────
+    for md in ("daily", "intraday", "candle"):
+        sj = await eiv.series(ticker="AAPL", metrics="iv_30d_atm", mode=md,
+                              snapshot=None, date="2026-08-24",
+                              live_snapshot="1200", include_today=True,
+                              window="1y", z_window=63, envelope=True,
+                              env_window=63, env_lo=0.10, env_hi=0.90,
+                              exclude_extrapolated=True, spot=True, pool=pool)
+        sp = sj.get("spot") or {}
+        if not sp.get("on"):
+            failed += 1
+            print(f"  SPOT  {md}: not on by default")
+        elif not sp.get("points"):
+            failed += 1
+            print(f"  SPOT  {md}: no points returned")
+        else:
+            # It has to share the metric points' label space, or the client
+            # places it in slots of its own and the reference drifts.
+            def lab(p):
+                return f"{p['t']} {p['snapshot']}" if p.get("snapshot") else p["t"]
+            mlabels = {lab(p) for p in sj["series"][0]["points"]}
+            slabels = {lab(p) for p in sp["points"]}
+            if not (slabels & mlabels):
+                failed += 1
+                print(f"  SPOT  {md}: labels share nothing with the metric "
+                      f"points -- {sorted(slabels)[:3]} vs {sorted(mlabels)[:3]}")
+    off = await eiv.series(ticker="AAPL", metrics="iv_30d_atm", mode="daily",
+                           snapshot=None, date=None, live_snapshot=None,
+                           include_today=True, window="1y", z_window=63,
+                           envelope=False, env_window=63, env_lo=0.10,
+                           env_hi=0.90, exclude_extrapolated=True, spot=False,
+                           pool=pool)
+    if (off.get("spot") or {}).get("points"):
+        failed += 1
+        print("  SPOT  spot=False still returned points")
 
     r = await one()
     pts = r["series"][0]["points"]

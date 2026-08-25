@@ -44,14 +44,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.db import get_oi_pool
 from app.metrics_config import BASELINE_SNAPSHOT, BASELINE_MIN_N
 from app.routers.equity_iv import (
-    METRICS_TABLE, _catalog, _entry, _expr, _extrap_expr, _first_live,
-    _from_clause, _jsonable, _meta, _needs_z, _resolve_slice, _window_start,
+    ATM_TABLE, METRICS_TABLE, _catalog, _entry, _expr, _extrap_expr,
+    _first_live, _from_clause, _jsonable, _meta, _needs_z, _resolve_slice,
+    _window_start,
 )
 
 router = APIRouter(tags=["equity-iv"])
 
 SURFACE_TABLE = "equity_surface"
-ATM_TABLE     = "equity_atm"
 
 _axes_cache: dict | None = None
 

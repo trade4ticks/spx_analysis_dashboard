@@ -51,6 +51,15 @@ const EQ_TS_PANES = 3;
  * metric that has no such direction. */
 const EQ_SERIES_COLORS = ['#3498db', '#e84393', '#f0a30a', '#9b8ec4'];
 
+/* The spot reference's dataset label. Distinctive enough that no catalog
+ * column can collide with it, so the tooltip can recognise the reference
+ * without matching against a name a user could plausibly plot.
+ *
+ * The first version used a literal NUL as the sentinel prefix, which put a
+ * real 0x00 byte in the source and made git treat the whole file as binary --
+ * no diff, no blame, on a 160KB file. Cleverness is not worth that. */
+const EQ_SPOT_LABEL = '__eq_spot_reference__';
+
 /* Preset axis pairs — the questions asked most often. Clicking through two
  * family dropdowns and two metric dropdowns every time is friction, so these
  * sit above the manual pickers. Columns verified against the catalog.
@@ -600,6 +609,7 @@ document.addEventListener('alpine:init', () => {
     seriesMode: 'daily',       // daily | intraday
     seriesChart: 'line',       // line | candle
     seriesEnvelope: true,
+    seriesSpot: true,          // the faint underlying reference behind it all
     envLo: 0.10, envHi: 0.90, envWindow: 63,
 
     // ── rows 6–9 state ──────────────────────────────────────────────────
@@ -1453,13 +1463,8 @@ document.addEventListener('alpine:init', () => {
       });
 
       out.push({
-        k: 'Earnings',
-        v: h.days_to_earnings == null ? '—' : this.fmt(h.days_to_earnings, 'days'),
-        tone: '',
-        title: h.days_to_earnings == null
-          ? 'days_to_earnings is NULL for every row — no earnings calendar is wired up yet. '
-            + 'It renders as absent, not as zero.'
-          : 'Trading days to the next earnings date.',
+        k: 'Earnings', v: this.earningsText(), tone: this.earningsTone(),
+        title: this.earningsTitle(),
       });
 
       out.push({
@@ -1494,6 +1499,77 @@ document.addEventListener('alpine:init', () => {
       });
 
       return out;
+    },
+
+    /* "12d BMO" — the count, and which session of that day carries the move.
+     *
+     * A report before the open on day D moves D's session; after the close on
+     * D it moves D+1's. At one or two days out that is the difference between
+     * the event landing inside a structure's life or outside it, which is a
+     * different trade rather than a detail.
+     *
+     * 'unknown' renders as the count alone. It is a real state the calendar
+     * records — a scheduled report whose time Yahoo did not give — and
+     * printing "UNKNOWN" beside the number would spend the reader's attention
+     * on the absence of a fact rather than on the fact. A ticker with no
+     * calendar row at all, which is every ETF, renders absent as before. */
+    earningsText() {
+      const h = this.hdr;
+      if (!h || h.days_to_earnings == null) return '—';
+      const days = `${this.fmt(h.days_to_earnings, 'days')}d`;
+      const s = (h.earnings_session || '').toLowerCase();
+      return (s === 'bmo' || s === 'amc') ? `${days} ${s.toUpperCase()}` : days;
+    },
+
+    /* Coloured only inside the window where the session actually decides
+     * something. Past that it is a date, and a coloured date is noise. */
+    earningsTone() {
+      const h = this.hdr;
+      if (!h || h.days_to_earnings == null) return '';
+      return h.days_to_earnings <= 2 ? 'down' : '';
+    },
+
+    earningsTitle() {
+      const h = this.hdr;
+      if (!h || h.days_to_earnings == null) {
+        // Two different facts that look identical on screen. Only one of them
+        // is a reason to go and refresh the calendar.
+        if (h && h.has_earnings === false) {
+          return 'This ticker does not report earnings — a fund. Absent is '
+               + 'the correct reading, and there is nothing to refresh.';
+        }
+        if (h && h.has_earnings === true) {
+          return 'No date at or after today, but this ticker DOES report. '
+               + 'Yahoo publishes only the next date, so the calendar has run '
+               + 'out rather than ended — run fetch_earnings_calendar.py.';
+        }
+        return 'No scheduled earnings date for this ticker, and no coverage '
+             + 'row to say whether that is because it does not report or '
+             + 'because the calendar has not reached it.';
+      }
+      const s = (h.earnings_session || '').toLowerCase();
+      const when = s === 'bmo'
+        ? `Before the open on ${h.earnings_date} — that session's own move.`
+        : s === 'amc'
+          ? `After the close on ${h.earnings_date} — the move lands the `
+            + `following session.`
+          : `Session unknown: the calendar has ${h.earnings_date} but not the `
+            + `time of day, so whether the move lands on that session or the `
+            + `next is undetermined.`;
+      // CALENDAR days, said explicitly: the obvious reading of a number
+      // beside an options page is trading days, and it is not that.
+      let t = `${h.days_to_earnings} calendar day(s) to ${h.earnings_date}. ${when}`;
+      // The count comes from equity_metrics; the session comes from the
+      // calendar row the count counts to. If those disagree the pill would be
+      // pairing a number with a different date's session.
+      if (h.earnings_days_calc != null
+          && h.earnings_days_calc !== h.days_to_earnings) {
+        t += `  MISMATCH: the stored count is ${h.days_to_earnings} but the `
+           + `calendar row this session came from is ${h.earnings_days_calc} `
+           + `days out. The session may belong to a different date than the `
+           + `count — run backfill_days_to_earnings.py.`;
+      }
+      return t;
     },
 
     /* The bucket says 15:45; a live capture may have happened at 15:47:31.
@@ -1700,6 +1776,7 @@ document.addEventListener('alpine:init', () => {
           window: this.histWindow,
           z_window: String(this.zWindow),
           envelope: String(this.seriesEnvelope),
+          spot: String(this.seriesSpot),
           env_window: String(this.envWindow),
           env_lo: String(this.envLo), env_hi: String(this.envHi),
           exclude_extrapolated: String(this.excludeExtrap),
@@ -1743,6 +1820,11 @@ document.addEventListener('alpine:init', () => {
 
     toggleEnvelope() {
       this.seriesEnvelope = !this.seriesEnvelope;
+      this.loadSeries();
+    },
+
+    toggleSeriesSpot() {
+      this.seriesSpot = !this.seriesSpot;
       this.loadSeries();
     },
 
@@ -2028,6 +2110,32 @@ document.addEventListener('alpine:init', () => {
                       color: colr, axis: yid });
         }
 
+        /* The spot reference. Its own scale, `ySpot`, with display:false —
+         * spot runs in the hundreds while these metrics run 0.05 to 1.1, so a
+         * shared axis would flatten every metric into a flat line at the
+         * bottom. No labels on either side: it is chrome, and its absolute
+         * level is readable in the tooltip instead.
+         *
+         * order 9 puts it behind the envelope (3) and the lines (1). Chart.js
+         * draws higher `order` first. */
+        const spotPts = (this.seriesSpot && this.ser.spot && this.ser.spot.on)
+          ? (this.ser.spot.points || []) : [];
+        let spotByIndex = null;
+        if (spotPts.length) {
+          spotByIndex = new Array(labels.length).fill(null);
+          for (const p of spotPts) {
+            const i = slot.get(this.pointLabel(p));
+            if (i != null) spotByIndex[i] = p;
+          }
+          datasets.push({
+            label: EQ_SPOT_LABEL, yAxisID: 'ySpot',
+            data: spotByIndex.map(p => p == null ? null : p.v),
+            borderColor: 'rgba(150,150,150,0.45)', borderWidth: 1,
+            pointRadius: 0, pointHoverRadius: 0, tension: 0,
+            spanGaps: true, fill: false, order: 9,
+          });
+        }
+
         // Each axis is labelled in the units of the first series on it. A
         // twin axis exists precisely because the two series are in different
         // units, so formatting both scales the same way defeats it.
@@ -2063,6 +2171,9 @@ document.addEventListener('alpine:init', () => {
                   grid: { drawOnChartArea: false },
                 },
               } : {}),
+              // Hidden entirely: no ticks, no title, no gridlines, and it
+              // takes no layout width on either side.
+              ...(spotByIndex ? { ySpot: { display: false } } : {}),
             },
             plugins: {
               legend: { display: false },
@@ -2090,6 +2201,12 @@ document.addEventListener('alpine:init', () => {
     },
 
     seriesTooltip(item, meta, candle) {
+      // The reference's whole point is that its level is legible without an
+      // axis, so it reads out here even though it is not a plottable series.
+      if (item.dataset.label === EQ_SPOT_LABEL) {
+        return item.parsed.y == null ? null
+             : `spot  ${this.fmt(item.parsed.y, 'price')}`;
+      }
       // Two hidden datasets per candle series; one line row is enough.
       const mi = candle ? Math.floor(item.datasetIndex / 2) : null;
       const m = candle ? meta[mi] : meta.find(x => x.col === item.dataset.label);
