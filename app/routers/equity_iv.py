@@ -221,7 +221,8 @@ def _flags_for(entry: dict, extrap_cols: set) -> list:
 
     Tenors come from the column NAME when it carries them (term_ratio_30d_90d
     spans two), and fall back to the catalog's single `tenor` otherwise —
-    vrp_1m is a 30d metric whose name says "1m". Wings come from WING_NODES.
+    Wings come from WING_NODES; the tenor comes from the catalog rather than
+    the name, since a name can carry a window label that is not its tenor.
     Returns [] for a metric with no surface-node dependency.
     """
     wings = WING_NODES.get(entry["wing"] or "", ())
@@ -797,8 +798,13 @@ HEADER_CANDIDATES = {
     "term_ratio":    ("term_ratio_30d_90d", "term_ratio_30d_60d"),
     "px_vs_50dma":   ("px_vs_50dma", "price_vs_50dma", "spot_vs_50dma"),
     "days_to_earn":  ("days_to_earnings",),
-    "spotvol_beta":  ("spotvol_beta_1m", "spotvol_beta_3m"),
-    "spotvol_r2":    ("spotvol_r2_1m", "spotvol_r2_3m"),
+    # spot_vol gained the tenor grid, so the columns are now
+    # spotvol_{stat}_{tenor}d_{window}. The old flat names are kept as
+    # fallbacks so the chip survives either side of the migration.
+    "spotvol_beta":  ("spotvol_beta_30d_1m", "spotvol_beta_1m",
+                      "spotvol_beta_30d_3m", "spotvol_beta_3m"),
+    "spotvol_r2":    ("spotvol_r2_30d_1m", "spotvol_r2_1m",
+                      "spotvol_r2_30d_3m", "spotvol_r2_3m"),
 }
 
 
@@ -1125,7 +1131,7 @@ RAILS_SLOTS = (
     # RV-window migration lands. Both listed so the panel works either side
     # of it -- the candidate list is exactly what that mechanism is for.
     ("VRP",              ("vrp_30d", "vrp_1m", "vrp_21d")),
-    ("spot-vol β 1m",    ("spotvol_beta_1m",)),
+    ("spot-vol β",       ("spotvol_beta_30d_1m", "spotvol_beta_1m")),
 )
 
 

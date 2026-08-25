@@ -54,20 +54,21 @@ CASES = [
     ("zc_short_delta_30d", 21, "zc_short_delta_21d",
      "the other half of that collision"),
 
-    # vrp used to be the standing example of a family that could NOT
-    # retarget: it lived at 7/30/90 under 1w/1m/3m labels carrying no {t}d
-    # token. RV_WINDOWS is now derived from TENORS upstream, so vrp_1m is
-    # vrp_30d and the family spans the grid -- and the token-swap rule picked
-    # it up with no change here, which is the property worth asserting.
-    ("vrp_30d", 21, "vrp_21d", "vrp retargets now that the family spans the grid"),
+    # vrp, realized_vol and spot_vol were all standing examples of families
+    # that could NOT retarget -- they lived at partial tenor sets under
+    # 1w/1m/3m labels carrying no {t}d token. All three now derive from TENORS
+    # upstream and span the grid, and the token-swap rule picked every one of
+    # them up with NO change to the rule. That is the property worth asserting.
+    ("vrp_30d", 21, "vrp_21d", "vrp gained the grid"),
     ("vrp_ratio_30d", 7, "vrp_ratio_7d",
      "and its sibling, which shares (vrp, atm, 30) with it -- the collision "
      "the stem-based rule exists to survive"),
-
-    # spot_vol is the remaining family that cannot follow: built at 30d alone,
-    # and named with a lookback label rather than a tenor token.
-    ("spotvol_beta_1m", 21, "spotvol_beta_1m", "spot_vol is built at 30d only"),
-    ("spotvol_beta_3m", 7, "spotvol_beta_3m", "the 3m window likewise"),
+    ("rv_30d", 7, "rv_7d", "realized_vol gained the grid"),
+    ("log_ret_30d", 7, "log_ret_7d", "and the return windows with it"),
+    ("spotvol_beta_30d_1m", 21, "spotvol_beta_21d_1m",
+     "spot_vol gained the grid: the TENOR token moves and the 1m regression "
+     "window, which is a different axis, does not"),
+    ("spotvol_r2_30d_3m", 90, "spotvol_r2_90d_3m", "likewise for the 3m window"),
 
     # PAIR families. These carry tenor = null, so the token branch would
     # return them unchanged -- which is wrong in a way that is easy to defend
@@ -92,10 +93,14 @@ CASES = [
     ("term_slope_7d_14d_atm", 21, "term_slope_14d_30d_atm",
      "and the same for the atm slope"),
 
-    # No tenor and no pair -- never retargeted.
-    ("log_ret_1m", 21, "log_ret_1m", "a lookback window"),
+    # No tenor and no pair -- never retargeted. With every tenor-bearing
+    # family now spanning the grid, these are the only real columns left that
+    # hold still, which is why the scanner's automatic lock still matters.
+    ("log_ret_d", 21, "log_ret_d",
+     "a one-day return has no tenor analogue; TENORS starts at 7"),
     ("days_to_earnings", 21, "days_to_earnings", "calendar"),
     ("spot", 21, "spot", "a price level"),
+    ("extrap_rate_short", 21, "extrap_rate_short", "a chain-wide quality summary"),
 
     # Identity.
     ("skew_21d_25p_atm", 21, "skew_21d_25p_atm", "already at the page tenor"),

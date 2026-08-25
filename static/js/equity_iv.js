@@ -106,10 +106,17 @@ const EQ_COLUMN_ALIASES = {
   vrp_ratio_1m: 'vrp_ratio_30d', vrp_ratio_1w: 'vrp_ratio_7d',
   vrp_ratio_3m: 'vrp_ratio_90d',
   rv_1m: 'rv_30d', rv_1w: 'rv_7d', rv_3m: 'rv_90d',
+  log_ret_1w: 'log_ret_7d', log_ret_1m: 'log_ret_30d',
+  spotvol_beta_1m: 'spotvol_beta_30d_1m', spotvol_r2_1m: 'spotvol_r2_30d_1m',
+  spotvol_beta_3m: 'spotvol_beta_30d_3m', spotvol_r2_3m: 'spotvol_r2_30d_3m',
+  vov_30d_1m: 'vov_30d_1m',
   // and the reverse, for a page running against a database that has not
   // migrated yet.
   vrp_30d: 'vrp_1m', vrp_7d: 'vrp_1w', vrp_90d: 'vrp_3m',
   rv_30d: 'rv_1m', rv_7d: 'rv_1w', rv_90d: 'rv_3m',
+  log_ret_7d: 'log_ret_1w', log_ret_30d: 'log_ret_1m',
+  spotvol_beta_30d_1m: 'spotvol_beta_1m', spotvol_r2_30d_1m: 'spotvol_r2_1m',
+  spotvol_beta_30d_3m: 'spotvol_beta_3m', spotvol_r2_30d_3m: 'spotvol_r2_3m',
 };
 
 /* The spot reference's dataset label. Distinctive enough that no catalog
@@ -139,7 +146,7 @@ const EQ_SPOT_LABEL = '__eq_spot_reference__';
  * catalog. */
 const EQ_PRESETS = [
   { label: 'skew z × 5d return',     why: 'is skew rich because spot fell?',
-    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'log_ret_1w', z: false } },
+    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'log_ret_7d', z: false } },
   { label: 'skew z × term ratio',    why: 'rich skew in contango vs backwardation',
     x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'term_ratio_30d_90d', z: false } },
   { label: 'skew z × VRP',           why: 'rich wings with a vol premium, or without',
@@ -147,7 +154,7 @@ const EQ_PRESETS = [
   { label: 'IV z × RV z',            why: 'implied stretched relative to what is realising',
     x: { b: 'iv_30d_atm', z: true },        y: { b: 'rv_30d', z: true } },
   { label: 'skew z × spot-vol β',    why: 'which rich-skew names double-hit on a down move',
-    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'spotvol_beta_1m', z: false } },
+    x: { b: 'skew_30d_25p_atm', z: true },  y: { b: 'spotvol_beta_30d_1m', z: false } },
   { label: 'zc width z × skew z',    why: 'do vol-space and trade-native readings agree',
     x: { b: 'zc_width_sigma_30d', z: true }, y: { b: 'skew_30d_25p_atm', z: true } },
   { label: 'skew z × extrapolation', why: 'are the outliers real, or just thin chains?',
@@ -731,7 +738,7 @@ document.addEventListener('alpine:init', () => {
     // fighting over one pair of controls.
     tscat: null, tscatLoading: false, tscatError: '',
     tsFamX: 'skew', tsBaseX: 'skew_30d_25p_atm', tsZX: true,
-    tsFamY: 'realized_vol', tsBaseY: 'log_ret_1w', tsZY: false,
+    tsFamY: 'realized_vol', tsBaseY: 'log_ret_7d', tsZY: false,
     svol: null, svolLoading: false, svolError: '',
 
     // Row 9 — collapsed by default. This is a periodic-curiosity section,
@@ -775,7 +782,7 @@ document.addEventListener('alpine:init', () => {
     presetNote: '',
     activePreset: EQ_PRESETS[0].label,
     xFam: 'skew', xBase: 'skew_30d_25p_atm', xZ: true,
-    yFam: 'realized_vol', yBase: 'log_ret_1w', yZ: false,
+    yFam: 'realized_vol', yBase: 'log_ret_7d', yZ: false,
     colorBase: '',
     cs: null, us: null,
     csLoading: false, csError: '',
@@ -2528,10 +2535,13 @@ document.addEventListener('alpine:init', () => {
      * vrp_ratio_1m are both (vrp, atm, 30). So the stem has to carry the
      * identity, and the tenor token inside the NAME is what gets swapped.
      *
-     * The candidate is then VERIFIED against the catalog rather than trusted,
-     * because not every family spans every tenor — of the nine that carry one,
-     * only seven span all six. spot_vol exists at 30 alone, and vrp only at
-     * 7/30/90 under 1w/1m/3m labels carrying no {t}d token at all.
+     * The candidate is then VERIFIED against the catalog rather than trusted.
+     * Every tenor-bearing family spans all six TODAY, so on real data this
+     * check no longer fires — but it fired on vrp, realized_vol and spot_vol
+     * until each gained the grid, and the columns carrying no tenor at all
+     * (spot, log_ret_d, days_to_earnings, the quality summaries) still stop
+     * here. scripts/check_tenor_retarget.py keeps a synthetic partial-span
+     * family so that removing this check cannot pass unnoticed.
      *
      * A column that cannot retarget is KEPT, not blanked. vrp_1m at page tenor
      * 21 is still the right variance-premium reading — it is a
@@ -2674,11 +2684,11 @@ document.addEventListener('alpine:init', () => {
       const off = (this.railMetrics || []).map(r => r.b)
                     .filter(c => this.isPinnedTenor(c));
       if (!off.length) return '';
-      return `Not at the page tenor: ${off.join(', ')}. Those families are not `
-           + `built at ${this.pageTenor}d — spot-vol exists at 30d only, and vrp `
-           + `at 7/30/90 as a realized-versus-implied window rather than a slice `
-           + `of the surface. Kept rather than dropped, because they are still `
-           + `the right reading.`;
+      return `Not at the page tenor: ${off.join(', ')}. Either the family is `
+           + `not built at ${this.pageTenor}d, or the rail is locked. Kept `
+           + `rather than dropped — a metric that cannot follow is usually `
+           + `still the right reading, and dropping it would lose information `
+           + `to enforce a consistency that does not apply to it.`;
     },
 
     /* The surface's fitted tenor list. equity_surface carries 17 tenors and

@@ -103,7 +103,16 @@ RV_WINDOWS = [(_tenor_label(_t), _trading_days(_t), _t) for _t in TENORS]
 # quietly means something else.
 assert [n for _, n, _ in RV_WINDOWS] == [5, 10, 15, 21, 42, 63], RV_WINDOWS
 
-RET_WINDOWS = [("d", 1), ("1w", 5), ("1m", 21)]
+# (label, trading-day window, matched calendar tenor). Derived from RV_WINDOWS
+# so the calendar->trading-day mapping has ONE definition: log_ret_14d and
+# rv_14d must span the same ten sessions or a VRP and a return read on the same
+# dashboard tenor would describe different horizons.
+#
+# log_ret_d stays as it is and carries tenor=None. A one-day return has no
+# tenor analogue — there is no 1-calendar-day option tenor to match it to, and
+# TENORS deliberately starts at 7 — so it is a fixed quantity that happens to
+# live in this family, not a gap in the grid.
+RET_WINDOWS = [("d", 1, None)] + [(_l, _n, _t) for _l, _n, _t in RV_WINDOWS]
 SPOTVOL_WINDOWS = [("1m", 21), ("3m", 63)]
 VOV_WINDOW = 21
 
@@ -304,10 +313,23 @@ for _t in TENORS:
 # the session's close does not exist; using it would put a full day of
 # lookahead into vrp, which is precisely the bias that makes a VRP backtest
 # look good and live trading not.
-for _lbl, _n in RET_WINDOWS:
+for _lbl, _n, _tenor in RET_WINDOWS:
+    _extra = ("" if _tenor is None else
+              f" Named for the {_tenor}-CALENDAR-day tenor it matches, not for "
+              f"its {_n}-session window — same mapping as rv_{_lbl}, so a "
+              f"return and a realized vol read at the same dashboard tenor "
+              f"span the same sessions.")
+    _one = (" A ONE-DAY return, with no tenor analogue: TENORS starts at 7 and "
+            "there is no 1-calendar-day option tenor to pair it with. It does "
+            "not retarget with the page tenor, by design."
+            if _tenor is None else "")
     _add(Col(f"log_ret_{_lbl}", "realized_vol", "DOUBLE PRECISION",
-             "log_return", f"{_n}-trading-day log return, closes through T-1.",
-             f"ln(close[T-1] / close[T-1-{_n}])"))
+             "log_return",
+             f"{_n}-trading-day log return, closes through T-1.{_extra}{_one}",
+             f"ln(close[T-1] / close[T-1-{_n}])"
+             + ("" if _tenor is None
+                else f"; {_tenor} calendar days -> {_n} trading days"),
+             tenor=_tenor))
 
 # THE NAME IS CALENDAR DAYS, THE WINDOW IS TRADING DAYS. rv_14d is a TEN
 # trading-day window, because the 14 matches the 14-CALENDAR-day tenor it is
@@ -390,38 +412,110 @@ for _lbl, _n, _tenor in RV_WINDOWS:
              f"{_tenor} calendar days -> {_n} trading days",
              tenor=_tenor, wing="atm"))
 
-_add(Col("vov_30d_1m", "spot_vol",
-         "DOUBLE PRECISION", "vol_decimal",
-         "Vol of vol: annualised stdev of the daily change in 30d ATM IV over "
-         "21 trading days, snapshot-aligned.",
-         "stdev(diff(iv_30d_atm), ddof=1) over 21td * sqrt(252)",
-         tenor=30, wing="atm"))
+# --- Spot-vol: DAILY quantities, repeated across the session ----------------
+# Every column below is a rolling statistic of the DAILY baseline ATM IV series.
+# It takes one value per session and is identical at every 5-minute bucket in
+# it — the same shape as rv_{t}d, and for the same reason: a 21-day rolling
+# regression is a property of the ticker, not an observation of this bucket.
+#
+# Until 2026-08-25 they were computed from the ROW'S OWN snapshot's history,
+# which meant the regression could only fill at a bucket that already had months
+# of itself. Every one of these was NULL at every intraday bucket.
+_DAILY_ASOF = (
+    "DAILY QUANTITY, CARRIED ACROSS THE SESSION: computed from the "
+    f"{BASELINE_SNAPSHOT} daily series, so it is identical at every snapshot on "
+    "a given trade_date rather than NULL away from the close. The as-of date is "
+    f"trade_date at {BASELINE_SNAPSHOT} — that row IS the day's daily "
+    "observation — and the PRIOR trading day at every other bucket, where the "
+    "day's observation has not happened yet. No column records this; it is a "
+    "rule over (trade_date, snapshot), and the OHLC-derived families carry the "
+    "same property with a different cutoff (closes through T-1 at every "
+    "bucket).")
 
-for _lbl, _n in SPOTVOL_WINDOWS:
-    _add(Col(f"spotvol_beta_{_lbl}", "spot_vol", "DOUBLE PRECISION",
-             "vol_per_log_return",
-             f"Rolling OLS beta of the change in 30d ATM IV on the underlying "
-             f"log return, {_n}td, snapshot-aligned. Beta rather than "
-             f"correlation because it has magnitude: -1.8 says a 1% drop "
-             f"lifts ATM IV by 1.8 vol points, which is what sizes a short-vega "
-             f"position. A correlation of -0.7 does not.",
-             f"OLS slope of d(iv_30d_atm) on d(ln underlying_price) over {_n}td",
-             tenor=30, wing="atm"))
-    _add(Col(f"spotvol_r2_{_lbl}", "spot_vol", "DOUBLE PRECISION", "ratio",
-             f"R-squared of the {_lbl} spot-vol regression. A low-R2 beta is "
-             f"not a beta — read them together or not at all.",
-             "R^2 of the same regression", tenor=30, wing="atm"))
+# TWO WINDOW DIMENSIONS, and only one of them is a tenor. This family used to
+# expose the wrong one.
+#
+#   spotvol_beta_{TENOR}d_{WINDOW}
+#                 |          `-- ESTIMATION window, 21td or 63td of daily
+#                 |              observations. A statistical sample-size
+#                 |              choice, NOT a tenor. Keeps its period label
+#                 |              precisely to mark that it does not retarget.
+#                 `------------- the ATM IV whose change is being explained.
+#                                A real tenor; retargets with the page control.
+#
+# Before 2026-08-25 the tenor was hardcoded to 30d and invisible in the name,
+# so only the estimation window showed. That is backwards for the reading these
+# exist to support: short-dated ATM IV moves FAR more per unit spot move than
+# long-dated, and beta_7d typically runs 2-3x beta_90d in magnitude. Sizing a
+# 7 DTE short-vega position off a beta estimated on 30-day IV understates the
+# vega P&L of a gap by that factor.
+#
+# The naming rule this settles, across the whole table:
+#     {t}d in a name  -> option tenor, retargets
+#     a period label  -> estimation window, fixed
+# log_ret_d is the one exception, and it is a fixed 1-day quantity, not a tenor.
+_SPOTVOL_TENOR_NOTE = (
+    "The TENOR here is which ATM IV is being explained and retargets with the "
+    "page tenor; the trailing period label is the ESTIMATION window and does "
+    "not. Short-dated ATM IV responds far more strongly to spot than "
+    "long-dated, so the 7d and 90d readings are different numbers answering "
+    "different questions, not noisy versions of each other.")
 
-_add(Col("downside_semivol_1m", "realized_vol", "DOUBLE PRECISION",
-         "vol_decimal",
-         "Annualised stdev of close-close log returns over DOWN days only, "
-         "21td window, closes through T-1. The '1m' here is the OLD label "
-         "convention and is NOT tenor-matched: it is the same 21-trading-day "
-         "window as rv_30d, but this metric has no tenor of its own and does "
-         "not retarget with the dashboard's tenor control. Kept unrenamed "
-         "because renaming it would break readers for no gain.",
-         "stdev(r for r in 21td returns if r < 0, ddof=1) * sqrt(252); "
-         "21td, equivalent to the 30d tenor window"))
+for _t in TENORS:
+    _tl = _tenor_label(_t)
+    _add(Col(f"vov_{_tl}_1m", "spot_vol", "DOUBLE PRECISION", "vol_decimal",
+             f"Vol of vol: annualised stdev of the daily change in {_t}d ATM "
+             f"IV over {VOV_WINDOW} trading days. Rises sharply as the tenor "
+             f"shortens — which is the reading: it says whether a short-vega "
+             f"mark will whip around, and a 90d vov does not answer that for "
+             f"a 7d position. {_SPOTVOL_TENOR_NOTE} {_DAILY_ASOF}",
+             f"stdev(diff(iv_{_tl}_atm at the daily baseline), ddof=1) over "
+             f"{VOV_WINDOW}td * sqrt(252)",
+             tenor=_t, wing="atm"))
+
+for _t in TENORS:
+    _tl = _tenor_label(_t)
+    for _lbl, _n in SPOTVOL_WINDOWS:
+        _add(Col(f"spotvol_beta_{_tl}_{_lbl}", "spot_vol", "DOUBLE PRECISION",
+                 "vol_per_log_return",
+                 f"Rolling OLS beta of the change in {_t}d ATM IV on the "
+                 f"underlying log return, estimated over {_n} trading days. "
+                 f"Beta rather than correlation because it has magnitude: "
+                 f"-1.8 says a 1% drop lifts {_t}d ATM IV by 1.8 vol points, "
+                 f"which is what sizes a short-vega position. A correlation "
+                 f"of -0.7 does not. Both sides are read at the SAME instant "
+                 f"on the same daily series — that pairing is the point, and "
+                 f"is why the regressor is the baseline underlying return "
+                 f"rather than log_ret_d, which is a day out of step. "
+                 f"{_SPOTVOL_TENOR_NOTE} {_DAILY_ASOF}",
+                 f"OLS slope of d(iv_{_tl}_atm) on d(ln underlying_price) "
+                 f"over {_n}td, both at the {BASELINE_SNAPSHOT} daily "
+                 f"baseline",
+                 tenor=_t, wing="atm"))
+        _add(Col(f"spotvol_r2_{_tl}_{_lbl}", "spot_vol", "DOUBLE PRECISION",
+                 "ratio",
+                 f"R-squared of the {_t}d / {_lbl} spot-vol regression. A "
+                 f"low-R2 beta is not a beta — read them together or not at "
+                 f"all. Expect R2 to FALL as the tenor shortens: short-dated "
+                 f"IV carries more event and pin noise that spot does not "
+                 f"explain, so a large beta_7d with a weak R2 is a wide "
+                 f"estimate rather than a strong relationship. "
+                 f"{_DAILY_ASOF}",
+                 f"R^2 of the same regression", tenor=_t, wing="atm"))
+
+for _lbl, _n, _tenor in RV_WINDOWS:
+    _add(Col(f"downside_semivol_{_lbl}", "realized_vol", "DOUBLE PRECISION",
+             "vol_decimal",
+             f"Annualised stdev of close-close log returns over DOWN days "
+             f"only, {_n} TRADING days, closes through T-1. Same estimator "
+             f"shape and same window mapping as rv_{_lbl}, so the pair "
+             f"rv_{_lbl} / downside_semivol_{_lbl} is a like-for-like "
+             f"read on how much of the realized vol came from the downside. "
+             f"Named for the {_tenor}-CALENDAR-day tenor, not the "
+             f"{_n}-session window.",
+             f"stdev(r for r in {_n}td returns if r < 0, ddof=1) * sqrt(252); "
+             f"{_tenor} calendar days -> {_n} trading days",
+             tenor=_tenor))
 
 # --- Quality ----------------------------------------------------------------
 for _t in TENORS:
