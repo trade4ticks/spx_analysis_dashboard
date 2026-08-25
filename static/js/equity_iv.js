@@ -80,6 +80,40 @@ const EQ_PAIR_RE = /_(\d+)d_(\d+)d/;
  * shift, and a page-level toggle can only show one of those at a time. */
 const EQ_WINDOWS = ['val', 63, 252];
 
+/* The NEUTRAL default scanner set, and the set a structure is cleared back to.
+ *
+ * It answers "what is this name's vol doing" without assuming a trade: level,
+ * shape on BOTH sides, term regime, premium, and the one confounder that
+ * invalidates all of them. It used to open on zc_width_sigma and the put-side
+ * skew, which is a put ratio's set — so selecting the Put Ratio preset swapped
+ * one arbitrary set for another instead of adding anything.
+ *
+ * Deliberately absent, because they belong to presets rather than to a page
+ * with nothing selected: zc_width_sigma and spotvol_beta (put ratio), convex
+ * (broken-wing butterfly).
+ *
+ * Two pairings earn their double entry:
+ *   iv val AND z    a z alone cannot tell a 12-vol name from an 80-vol one
+ *   vrp AND rv      arithmetically rv = iv - vrp, so this third column is
+ *                   readability rather than information. vrp_ratio_30d
+ *                   (iv/rv) would carry the same convenience AND be
+ *                   scale-free, which a vol-point difference is not: iv 60 /
+ *                   rv 57 and iv 12 / rv 9 both read vrp 3.
+ */
+const EQ_DEFAULT_SCAN_COLS = [
+  { b: 'spot',               w: 'val', lock: false },
+  { b: 'iv_30d_atm',         w: 'val', lock: false },
+  { b: 'iv_30d_atm',         w: 63,    lock: false },
+  { b: 'skew_30d_25p_atm',   w: 63,    lock: false },
+  { b: 'skew_30d_atm_25c',   w: 63,    lock: false },
+  { b: 'rr_30d_25',          w: 63,    lock: false },
+  { b: 'term_ratio_30d_90d', w: 'val', lock: false },
+  { b: 'vrp_30d',            w: 'val', lock: false },
+  { b: 'rv_30d',             w: 'val', lock: false },
+  { b: 'days_to_earnings',   w: 'val', lock: false },
+];
+const EQ_DEFAULT_TENOR = 30;
+
 const EQ_SPOT_LABEL = '__eq_spot_reference__';
 
 /* Preset axis pairs — the questions asked most often. Clicking through two
@@ -668,7 +702,7 @@ document.addEventListener('alpine:init', () => {
      * nothing saying so. Comparing a structure's cost at one tenor against a
      * distribution built at another is not a subtle error, and the page was
      * inviting it. */
-    pageTenor: 30,
+    pageTenor: EQ_DEFAULT_TENOR,
     tenors: EQ_TENORS,
     /* The tenor list as STATE, not derived from whichever payload happens to
      * have arrived. The select's options are rendered from this by x-for, and
@@ -765,22 +799,9 @@ document.addEventListener('alpine:init', () => {
 
     // ── scanner ──────────────────────────────────────────────────────────
     scanOpen: true,
-    /* Each column is {b, w, lock}: base column, its OWN z window, and whether
-     * a tenor change moves it. `w` is 'val' | 63 | 252.
-     *
-     * The default set opens with one of each window on the two columns where
-     * the comparison matters most, because that IS the demonstration: INTC's
-     * zc_width_sigma reading +1.20 on 63 and -0.13 on 252 says the width has
-     * been tight for a quarter and today is a recovery toward the annual norm,
-     * not an excursion above it. Neither number alone says that. */
-    scanCols: [
-      { b: 'skew_30d_25p_atm',   w: 63,    lock: false },
-      { b: 'zc_width_sigma_30d', w: 63,    lock: false },
-      { b: 'zc_width_sigma_30d', w: 252,   lock: false },
-      { b: 'iv_30d_atm',         w: 'val', lock: false },
-      { b: 'term_ratio_30d_90d', w: 'val', lock: false },
-      { b: 'vrp_30d',            w: 'val', lock: false },
-    ],
+    // Each column is {b, w, lock}: base column, its OWN z window, and whether
+    // a tenor change moves it. `w` is 'val' | 63 | 252.
+    scanCols: EQ_DEFAULT_SCAN_COLS.map(c => ({ ...c })),
     scanFilters: [],
     scanSort: '', scanDir: 'desc',
     scan: null, scanLoading: false, scanError: '',
@@ -915,6 +936,40 @@ document.addEventListener('alpine:init', () => {
      * already retargeted every {t}d name in it to that tenor — so a preset is
      * a starting point rather than a fixed snapshot, and moving the tenor
      * afterwards moves the whole bundle with it. */
+    /* Toggle. Clicking the active chip clears rather than re-applying it.
+     *
+     * Without this a structure was a one-way door: its FILTERS narrow the
+     * scanner, and with no way off the preset the tickers it excluded could
+     * only be got back by reloading the page. A control that can only be
+     * turned on is not a control. */
+    toggleStructure(s) {
+      if (s && this.activeStructure === s.key) this.clearStructure();
+      else this.applyStructure(s);
+    },
+
+    /* Back to the neutral page: the default columns, NO filters, the default
+     * tenor, and the server's own rail set.
+     *
+     * Restoring the DEFAULTS rather than whatever was on screen before the
+     * preset is the predictable choice — "clear" meaning "undo one step" would
+     * depend on how you arrived, and after two presets in a row nobody knows
+     * what it would restore. */
+    clearStructure() {
+      this.activeStructure = '';
+      this.structureName = '';
+      this.structureNote = '';
+      this.pageTenor = EQ_DEFAULT_TENOR;
+      this.scanCols = EQ_DEFAULT_SCAN_COLS.map(c => ({ ...c }));
+      this.scanFilters = [];
+      this.scanSort = '';
+      this.scanDir = 'desc';
+      // Emptied so /rails resolves its own default slots again, the same way
+      // it does on a cold load.
+      this.railMetrics = [];
+      this.railDefaults = null;
+      this.reloadAll();
+    },
+
     applyStructure(s) {
       if (!s) return;
       this.pageTenor = s.tenor;

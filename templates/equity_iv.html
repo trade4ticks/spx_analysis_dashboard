@@ -574,7 +574,11 @@
       <template x-for="s in structures" :key="s.key">
         <span class="eq-struct" :class="{on: activeStructure === s.key, builtin: s.builtin}"
               :title="structureTitle(s)">
-          <span @click="applyStructure(s)" x-text="s.name"></span>
+          <!-- Toggle, not apply: clicking the active chip clears. A preset's
+               filters narrow the scanner, and with no way off it the tickers
+               they excluded could only be recovered by reloading. -->
+          <span @click="toggleStructure(s)" x-text="s.name"
+                :title="activeStructure === s.key ? 'Click to clear this structure' : ''"></span>
           <span class="eq-struct-b" x-show="s.builtin"
                 title="Built-ins are fixed. This loads it and names a copy so you can save your own."
                 @click="duplicateStructure(s)">⧉</span>
@@ -584,6 +588,12 @@
         </span>
       </template>
       <span class="eq-section-sub" x-show="!structures.length" x-cloak>none loaded</span>
+      <!-- An explicit way out as well as the toggle: the toggle is only
+           discoverable once you know the chip is a toggle. -->
+      <button class="btn" x-show="activeStructure" x-cloak @click="clearStructure()"
+              title="Back to the neutral default: default columns, no filters, tenor 30.">
+        ✕ Clear
+      </button>
 
       <div class="eq-spacer"></div>
       <input class="eq-sel" style="max-width:170px" x-model="structureName"
@@ -818,6 +828,10 @@
 
           <template x-if="scanFilters.length">
             <div class="eq-chips">
+              <span class="eq-section-sub" style="align-self:center">
+                filtering<span x-show="activeStructure" x-cloak
+                  x-text="' (from ' + (structures.find(s => s.key === activeStructure) || {}).name + ')'"></span>:
+              </span>
               <template x-for="(f, i) in scanFilters" :key="'sf-'+i">
                 <span class="eq-chip filt">
                   <span x-text="resolveCol(f) + ' ' + f.op + ' ' + f.v"></span>

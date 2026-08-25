@@ -193,6 +193,18 @@ const presets = (comp.presets || []).map(p => {
 // the page passing its current tenor stamped it onto every preset -- silently
 // discarding the horizon a saved preset carried. Asserting the resolver alone
 // would have missed this: the resolver was correct, the caller was not.
+// The neutral default scanner set: it has to resolve against the catalog, and
+// it has to stay neutral. Both are checked because both have already gone
+// wrong -- literals go stale after a rename, and the set opened on a put
+// ratio's own columns, so selecting that preset swapped one arbitrary set for
+// another rather than adding anything.
+let defaultCols = null;
+try {
+  comp.clearStructure && null;                    // presence, not a call
+  defaultCols = (comp.scanCols || []).map(c => c.b);
+} catch (e) { defaultCols = null; }
+let hasClear = typeof comp.clearStructure === 'function'
+            && typeof comp.toggleStructure === 'function';
 let listUrl = null;
 try {
   comp.pageTenor = 7;
@@ -200,7 +212,7 @@ try {
   if (p && p.then) { /* fire-and-forget: the URL is already recorded */ }
   listUrl = sb.__urls.filter(u => u.includes('/structures')).pop() || null;
 } catch (e) { listUrl = '<<threw: ' + e.message + '>>'; }
-console.log(JSON.stringify({ok:true, out, presets, listUrl}));
+console.log(JSON.stringify({ok:true, out, presets, listUrl, defaultCols, hasClear}));
 """
 
 
@@ -260,6 +272,32 @@ def main() -> int:
         return 1
 
     bad = 0
+
+    # ── the neutral default scanner set ──────────────────────────────
+    STRUCTURE_SPECIFIC = ("zc_width_sigma", "spotvol_beta", "convex")
+    cols = data.get("defaultCols")
+    if not cols:
+        bad += 1
+        print("\n  the component exposes no default scanner columns")
+    else:
+        for c in cols:
+            if c not in by_col:
+                bad += 1
+                print(f"\n  default scanner column {c!r} is not in the catalog")
+        # A default set is what the page shows with NOTHING selected, so it
+        # must not presume a trade. These three each belong to one structure.
+        for c in cols:
+            for tag in STRUCTURE_SPECIFIC:
+                if c.startswith(tag):
+                    bad += 1
+                    print(f"\n  default scanner column {c!r} is specific to one")
+                    print(f"    structure -- a preset should ADD that, not find")
+                    print(f"    it already there")
+
+    if not data.get("hasClear"):
+        bad += 1
+        print("\n  no clearStructure()/toggleStructure() on the component:")
+        print("    a structure's filters would be a one-way door")
 
     # The client's own call, not just the resolver behind it.
     list_url = data.get("listUrl")
