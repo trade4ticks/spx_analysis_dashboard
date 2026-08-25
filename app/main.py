@@ -17,7 +17,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures
 
 BASE_DIR = Path(__file__).parent.parent  # project root
 
@@ -139,6 +139,9 @@ app.include_router(equity_iv.router,        prefix="/api/equity-iv")
 # Same prefix: the surface panels are the same page, split by which tables
 # they read (equity_surface / equity_atm rather than the metric layer).
 app.include_router(equity_iv_surface.router, prefix="/api/equity-iv")
+# Structure presets: same page, same prefix; kept separate because a
+# later brief-builder reads app/equity_presets.py without the routers.
+app.include_router(equity_structures.router, prefix="/api/equity-iv")
 
 
 @app.get("/today")

@@ -65,6 +65,8 @@ from datetime import date as date_type, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_oi_pool
+from app.equity_presets import COLUMN_ALIASES, PAIR_FAMILIES, PAIR_FOR_TENOR
+from app.metrics_config import TENORS as TENORS_GRID
 
 router = APIRouter(tags=["equity-iv"])
 
@@ -394,6 +396,14 @@ async def catalog(pool=Depends(get_oi_pool)):
         "wings":    sorted({m["wing"] for m in metrics if m["wing"]}),
         "units":    sorted({m["units"] for m in metrics if m["units"]}),
         "forms":    ["base", "z_63", "z_252"],
+        "tenors_grid": list(TENORS_GRID),
+        # The two tables the tenor-retarget rule needs. Defined once in
+        # app/equity_presets.py and shipped from here, so the algorithm is
+        # written per runtime but its DATA is not duplicated -- which is the
+        # half of it that actually drifts.
+        "aliases":       COLUMN_ALIASES,
+        "pair_families": sorted(PAIR_FAMILIES),
+        "pair_for_tenor": {str(k): list(v) for k, v in PAIR_FOR_TENOR.items()},
     }
 
 

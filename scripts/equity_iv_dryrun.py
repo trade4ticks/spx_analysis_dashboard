@@ -20,6 +20,8 @@ from fastapi import HTTPException
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.routers.equity_iv as eiv
 import app.routers.equity_iv_surface as eivs
+import app.routers.equity_structures as eivp
+from app.metrics_config import BASE_COLUMNS as _MC_BASE, Z_COLUMNS as _MC_Z
 
 SEEN, BAD = [], []
 
@@ -523,6 +525,33 @@ async def main():
                     exclude_extrapolated=True, spot=True, pool=pool)
         base.update(kw)
         return await eiv.series(**base)
+
+    # ── structure presets ────────────────────────────────────────────────
+    # Every built-in must resolve every column it names at every tenor. A
+    # preset one rail short looks exactly like one that worked.
+    from app.equity_presets import BUILTIN_STRUCTURES, resolve_preset
+    real_cat = {c.name: {"column_name": c.name, "family": c.family,
+                         "tenor": c.tenor, "wing": c.wing, "form": c.form}
+                for c in list(_MC_BASE) + list(_MC_Z)}
+    for p in BUILTIN_STRUCTURES:
+        for t in (7, 14, 21, 30, 60, 90):
+            r = resolve_preset(real_cat, p, t)
+            if r["unresolved"]:
+                failed += 1
+                names = ", ".join(u["column"] for u in r["unresolved"])
+                print(f"  PRESET  {p['name']} @ {t}d cannot resolve: {names}")
+            if r["tenor"] != t:
+                failed += 1
+                print(f"  PRESET  {p['name']} asked for {t}d, resolved {r['tenor']}d")
+    # The earnings filter must let NULL through: an ETF has no earnings date,
+    # and a plain "> 20" on NULL is false in SQL, so a filter meant to exclude
+    # events would exclude the entire ETF universe.
+    for p in BUILTIN_STRUCTURES:
+        for f in p.get("scanner_filters", []):
+            if f["b"] == "days_to_earnings" and not f["op"].startswith("nullor"):
+                failed += 1
+                print(f"  PRESET  {p['name']} filters days_to_earnings with "
+                      f"{f['op']!r}, which drops every ETF")
 
     # ── the header's earnings pill ───────────────────────────────────────
     hj = await eiv.ticker_header(ticker="AAPL", date="2026-08-24",

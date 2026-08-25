@@ -49,6 +49,25 @@
       box-shadow:0 4px 12px rgba(0,0,0,.45);
     }
     .eq-lbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
+
+    /* The structure bar. Not sticky — the page control strip above it is, and
+       two stacked sticky bars eat the top third of a laptop screen. */
+    .eq-structbar { position:static; box-shadow:none; }
+    .eq-struct {
+      display:inline-flex; align-items:center; gap:5px;
+      background:var(--surface); border:1px solid var(--border); border-radius:10px;
+      padding:3px 5px 3px 10px; font-size:10px; color:var(--muted);
+      white-space:nowrap; user-select:none; cursor:pointer; transition:all .1s;
+    }
+    .eq-struct:hover { border-color:var(--dim); color:var(--text); }
+    .eq-struct.on {
+      background:rgba(52,152,219,.14); border-color:var(--accent);
+      color:var(--accent); font-weight:600;
+    }
+    /* Built-ins are visibly not editable: dashed, like the pinned preset. */
+    .eq-struct.builtin { border-style:dashed; }
+    .eq-struct-b { cursor:pointer; opacity:.5; padding:0 3px; font-weight:700; }
+    .eq-struct-b:hover { opacity:1; }
     .eq-spacer { margin-left:auto; }
 
     /* Dark native dropdowns. The option/optgroup background is the part that
@@ -544,6 +563,37 @@
       <div class="eq-spacer"></div>
       <button class="btn" @click="reloadAll()">↺ Refresh</button>
     </div>
+
+    <!-- Structures. A named bundle that sets the tenor, the rails, the
+         scanner's columns and filters, and the scatter axes for one trade.
+         Deliberately NOT a panel: a per-structure panel would duplicate the
+         tent, sticky-strike and rails into a second place and need rebuilding
+         for every new structure. -->
+    <div class="eq-ctrl eq-structbar">
+      <span class="eq-lbl">Structure</span>
+      <template x-for="s in structures" :key="s.key">
+        <span class="eq-struct" :class="{on: activeStructure === s.key, builtin: s.builtin}"
+              :title="structureTitle(s)">
+          <span @click="applyStructure(s)" x-text="s.name"></span>
+          <span class="eq-struct-b" x-show="s.builtin"
+                title="Built-ins are fixed. This loads it and names a copy so you can save your own."
+                @click="duplicateStructure(s)">⧉</span>
+          <span class="eq-struct-b" x-show="!s.builtin"
+                title="Delete this saved preset"
+                @click="deleteStructure(s)">×</span>
+        </span>
+      </template>
+      <span class="eq-section-sub" x-show="!structures.length" x-cloak>none loaded</span>
+
+      <div class="eq-spacer"></div>
+      <input class="eq-sel" style="max-width:170px" x-model="structureName"
+             placeholder="save current as…"
+             title="Saves the tenor, rails, scanner columns and filters, and the scatter axes exactly as they stand.">
+      <button class="btn" @click="saveStructure()" :disabled="structureSaving"
+              x-text="structureSaving ? 'saving…' : 'Save'"></button>
+    </div>
+    <div class="eq-note eq-warn" x-show="structureNote" x-cloak
+         style="padding:0 2px 10px" x-text="structureNote"></div>
 
     <!-- ── Row 1: cross-sectional scatter + universe distribution ─────── -->
     <div class="eq-row">

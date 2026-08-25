@@ -65,29 +65,12 @@ const EQ_TENORS = [7, 14, 21, 30, 60, 90];
  * 30d one in the header and call both "spot-vol beta". */
 const EQ_SPOTVOL_TENOR = 30;
 
-/* Families whose column is a PAIR of tenors, not one. "The term ratio at
- * tenor 7" is not defined, so these cannot token-swap — but pinning them is
- * not right either: 30/90 read beside a 7-day structure is quietly answering
- * a different question than the rest of the row.
- *
- * So they map. 7 goes to 7/30 rather than 7/14 because two very short fits
- * sitting close together are both noisy and the contango signal is clearer
- * over a wider gap — and it puts a column to use that otherwise has no
- * consumer. 14 and 21 share 14/30 because there is no 21-day member of the
- * pair set. 30 and above stay at 30/90.
- *
- * term_slope carries the same pairs plus a delta suffix, so it takes the same
- * map: the pair is the part that answers "over what span", and the delta is
- * orthogonal to the page tenor. */
-const EQ_PAIR_FAMILIES = new Set(['term_ratio', 'term_slope']);
-const EQ_PAIR_FOR_TENOR = {
-  7:  [7, 30],
-  14: [14, 30],
-  21: [14, 30],
-  30: [30, 90],
-  60: [30, 90],
-  90: [30, 90],
-};
+/* The tenor-pair map and the rename alias map are DEFINED in
+ * app/equity_presets.py and arrive from /catalog. The retarget ALGORITHM is
+ * written once per runtime -- the page cannot round-trip on every tenor click
+ * -- but the data it reads is single-sourced, which is the half that actually
+ * drifts. scripts/check_tenor_retarget.py asserts the two implementations
+ * return the same answer for every case. */
 const EQ_PAIR_RE = /_(\d+)d_(\d+)d/;
 
 /* Per-column z window. 'val' is the raw column; 63 and 252 are the stored z
@@ -97,35 +80,6 @@ const EQ_PAIR_RE = /_(\d+)d_(\d+)d/;
  * shift, and a page-level toggle can only show one of those at a time. */
 const EQ_WINDOWS = ['val', 63, 252];
 
-/* Upstream renames, so a default written before a migration still resolves
- * after it. TRANSITIONAL — RV_WINDOWS became tenor-derived, turning the
- * 1w/1m/3m realized-vol and VRP labels into 7d/30d/90d. Delete once that has
- * run everywhere. */
-const EQ_COLUMN_ALIASES = {
-  vrp_1m: 'vrp_30d', vrp_1w: 'vrp_7d', vrp_3m: 'vrp_90d',
-  vrp_ratio_1m: 'vrp_ratio_30d', vrp_ratio_1w: 'vrp_ratio_7d',
-  vrp_ratio_3m: 'vrp_ratio_90d',
-  rv_1m: 'rv_30d', rv_1w: 'rv_7d', rv_3m: 'rv_90d',
-  log_ret_1w: 'log_ret_7d', log_ret_1m: 'log_ret_30d',
-  spotvol_beta_1m: 'spotvol_beta_30d_1m', spotvol_r2_1m: 'spotvol_r2_30d_1m',
-  spotvol_beta_3m: 'spotvol_beta_30d_3m', spotvol_r2_3m: 'spotvol_r2_30d_3m',
-  vov_30d_1m: 'vov_30d_1m',
-  // and the reverse, for a page running against a database that has not
-  // migrated yet.
-  vrp_30d: 'vrp_1m', vrp_7d: 'vrp_1w', vrp_90d: 'vrp_3m',
-  rv_30d: 'rv_1m', rv_7d: 'rv_1w', rv_90d: 'rv_3m',
-  log_ret_7d: 'log_ret_1w', log_ret_30d: 'log_ret_1m',
-  spotvol_beta_30d_1m: 'spotvol_beta_1m', spotvol_r2_30d_1m: 'spotvol_r2_1m',
-  spotvol_beta_30d_3m: 'spotvol_beta_3m', spotvol_r2_30d_3m: 'spotvol_r2_3m',
-};
-
-/* The spot reference's dataset label. Distinctive enough that no catalog
- * column can collide with it, so the tooltip can recognise the reference
- * without matching against a name a user could plausibly plot.
- *
- * The first version used a literal NUL as the sentinel prefix, which put a
- * real 0x00 byte in the source and made git treat the whole file as binary --
- * no diff, no blame, on a 160KB file. Cleverness is not worth that. */
 const EQ_SPOT_LABEL = '__eq_spot_reference__';
 
 /* Preset axis pairs — the questions asked most often. Clicking through two
@@ -701,6 +655,11 @@ document.addEventListener('alpine:init', () => {
     // term panel render into separate canvases, and the term panel's kind is
     // a toggle between two questions rather than two series.
     cb: {}, cbLoading: {}, cbError: {},
+    // From /catalog, which loads before any control that can retarget.
+    aliases: {},
+    pairFamilies: [],
+    pairForTenor: {},
+
     /* ONE tenor for the page. Every panel that has a tenor follows it.
      *
      * It used to be per-panel — the tent had a picker, the skew curve had its
@@ -780,6 +739,23 @@ document.addEventListener('alpine:init', () => {
     // ── scatter ──────────────────────────────────────────────────────────
     presets: EQ_PRESETS,
     presetNote: '',
+
+    /* Structure presets: a named bundle that reconfigures the page for one
+     * trade — tenor, rails, scanner columns and filters, scatter axes.
+     *
+     * Not a panel. A per-structure panel would duplicate the tent,
+     * sticky-strike and rails into a second place and need rebuilding for
+     * every new structure; this is a preset over controls that already exist.
+     *
+     * The definitions live server-side in app/equity_presets.py and arrive
+     * already RESOLVED against the catalog, because column names in a preset
+     * are literals and literals are the one thing on this page with no lookup
+     * behind them. */
+    structures: [],
+    activeStructure: '',
+    structureNote: '',
+    structureName: '',
+    structureSaving: false,
     activePreset: EQ_PRESETS[0].label,
     xFam: 'skew', xBase: 'skew_30d_25p_atm', xZ: true,
     yFam: 'realized_vol', yBase: 'log_ret_7d', yZ: false,
@@ -848,6 +824,7 @@ document.addEventListener('alpine:init', () => {
       if (this.catError) return;
       this.pruneTickerDefaults();
       this.checkPresets();
+      await this.loadStructures();
       await this.loadCalendar();
       await this.reloadAll();
     },
@@ -901,10 +878,143 @@ document.addEventListener('alpine:init', () => {
         this.byCol = by;
         this.baseByFamily = byFam;
         this.zBases = zb;
+        this.aliases = j.aliases || {};
+        this.pairFamilies = j.pair_families || [];
+        this.pairForTenor = j.pair_for_tenor || {};
+        if (j.tenors_grid && j.tenors_grid.length) this.tenors = j.tenors_grid;
       } catch (e) {
         this.catError = String(e.message || e);
         this.csError = this.catError;
       }
+    },
+
+    async loadStructures() {
+      try {
+        const j = await eqGetJson('/api/equity-iv/structures?tenor='
+          + encodeURIComponent(this.pageTenor));
+        if (j.error) { this.structureNote = j.error; return; }
+        this.structures = j.structures || [];
+        // Anything a preset names that the catalog does not have is reported
+        // rather than dropped: a structure quietly one rail short is a
+        // structure that looks like it worked.
+        const bad = this.structures.flatMap(s =>
+          (s.unresolved || []).map(u => `${s.name}/${u.where}: ${u.column}`));
+        this.structureNote = bad.length
+          ? `Unresolved columns: ${bad.join('; ')}. Those controls will be short `
+            + `an entry — the preset names a column the catalog does not have.`
+          : '';
+      } catch (e) {
+        this.structureNote = String(e.message || e);
+      }
+    },
+
+    /* Apply one. The preset's tenor becomes the PAGE tenor, and the server has
+     * already retargeted every {t}d name in it to that tenor — so a preset is
+     * a starting point rather than a fixed snapshot, and moving the tenor
+     * afterwards moves the whole bundle with it. */
+    applyStructure(s) {
+      if (!s) return;
+      this.pageTenor = s.tenor;
+      this.activeStructure = s.key;
+      this.structureName = s.builtin ? `${s.name} copy` : s.name;
+
+      if (s.rails && s.rails.length) {
+        this.railMetrics = s.rails.map(r => ({ b: r.b, w: r.w || this.zWindow }));
+      }
+      if (s.scanner_columns && s.scanner_columns.length) {
+        this.scanCols = s.scanner_columns.map(c => ({
+          b: c.b, w: c.w == null ? 'val' : c.w, lock: !!c.lock,
+        }));
+      }
+      this.scanFilters = (s.scanner_filters || []).map(f => ({
+        b: f.b, w: f.w == null ? 'val' : f.w, op: f.op, v: f.v,
+      }));
+      if (s.scanner_sort) {
+        this.scanSort = this.resolveCol(s.scanner_sort);
+        this.scanDir = s.scanner_sort.dir || 'desc';
+      }
+      const ax = (spec, which) => {
+        if (!spec) return;
+        const m = this.byCol[spec.b];
+        if (!m) return;
+        if (which === 'x') { this.xFam = m.family; this.xBase = spec.b; this.xZ = !!spec.z && this.hasZ(spec.b); }
+        else               { this.yFam = m.family; this.yBase = spec.b; this.yZ = !!spec.z && this.hasZ(spec.b); }
+      };
+      ax(s.scatter_x, 'x');
+      ax(s.scatter_y, 'y');
+      this.activePreset = '';
+      this.presetNote = '';
+
+      this.reloadAll();
+    },
+
+    /** The current configuration, in the shape the server stores. */
+    currentStructureBody() {
+      return {
+        tenor: this.pageTenor,
+        rails: this.railMetrics.map(r => ({ b: r.b, w: r.w })),
+        scanner_columns: this.scanCols.map(c => ({ b: c.b, w: c.w, lock: !!c.lock })),
+        scanner_filters: this.scanFilters.map(f => ({ b: f.b, w: f.w, op: f.op, v: f.v })),
+        scanner_sort: this.scanSort
+          ? { b: this.scanSort, w: 'val', dir: this.scanDir } : null,
+        scatter_x: { b: this.xBase, z: this.xZ },
+        scatter_y: { b: this.yBase, z: this.yZ },
+      };
+    },
+
+    async saveStructure() {
+      const name = (this.structureName || '').trim();
+      if (!name) { this.structureNote = 'Give the preset a name first.'; return; }
+      this.structureSaving = true;
+      try {
+        const r = await fetch('/api/equity-iv/structures', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, ...this.currentStructureBody() }),
+        });
+        if (!r.ok) {
+          const t = await r.text();
+          let detail = t;
+          try { detail = JSON.parse(t).detail || t; } catch (e) { /* not JSON */ }
+          this.structureNote = detail;
+          return;
+        }
+        this.structureNote = '';
+        await this.loadStructures();
+        const hit = this.structures.find(s => s.name === name);
+        if (hit) this.activeStructure = hit.key;
+      } catch (e) {
+        this.structureNote = String(e.message || e);
+      } finally {
+        this.structureSaving = false;
+      }
+    },
+
+    async deleteStructure(s) {
+      // Built-ins are not rows, so there is nothing to delete -- and the
+      // button is not offered for them.
+      if (!s || s.builtin || s.id == null) return;
+      try {
+        const r = await fetch(`/api/equity-iv/structures/${s.id}`, { method: 'DELETE' });
+        if (!r.ok) { this.structureNote = `Delete failed: ${r.status}`; return; }
+        if (this.activeStructure === s.key) this.activeStructure = '';
+        await this.loadStructures();
+      } catch (e) {
+        this.structureNote = String(e.message || e);
+      }
+    },
+
+    /** Load a built-in, then save it under a new name. Built-ins stay fixed. */
+    duplicateStructure(s) {
+      this.applyStructure(s);
+      this.structureName = `${s.name} copy`;
+    },
+
+    structureTitle(s) {
+      const bits = [s.note || s.name, `tenor ${s.tenor}d`];
+      if (s.rails) bits.push(`${s.rails.length} rails`);
+      if (s.scanner_columns) bits.push(`${s.scanner_columns.length} scanner columns`);
+      if (s.builtin) bits.push('built-in — duplicate it to edit');
+      return bits.join('\n');
     },
 
     async loadCalendar() {
@@ -954,7 +1064,7 @@ document.addEventListener('alpine:init', () => {
      * present, so this can never override a live column. */
     aliasIfMissing(col) {
       if (this.byCol[col]) return col;
-      const alias = EQ_COLUMN_ALIASES[col];
+      const alias = this.aliases[col];
       return (alias && this.byCol[alias]) ? alias : col;
     },
 
@@ -2556,8 +2666,8 @@ document.addEventListener('alpine:init', () => {
 
       // Pair families first: they carry tenor = null, so the token branch
       // below would return them unchanged and they would silently pin.
-      if (EQ_PAIR_FAMILIES.has(m.family)) {
-        const want = EQ_PAIR_FOR_TENOR[tenor];
+      if (this.pairFamilies.includes(m.family)) {
+        const want = this.pairForTenor[String(tenor)];
         if (!want) return col;
         const cand = col.replace(EQ_PAIR_RE, `_${want[0]}d_${want[1]}d`);
         const hit = this.byCol[cand];
@@ -2580,7 +2690,7 @@ document.addEventListener('alpine:init', () => {
     canRetarget(col) {
       const m = this.byCol[col];
       if (!m) return false;
-      if (EQ_PAIR_FAMILIES.has(m.family)) return true;
+      if (this.pairFamilies.includes(m.family)) return true;
       if (m.tenor == null) return false;
       return this.tenors.some(t => t !== m.tenor && this.retarget(col, t) !== col);
     },
@@ -2674,8 +2784,10 @@ document.addEventListener('alpine:init', () => {
       // against last week's return" — and retargeting it to another tenor
       // leaves it the same pair. The buttons carry no tenor, so un-lighting
       // one on a tenor change would say the selection had been abandoned when
-      // it had only moved.
+      // it had only moved. The same holds for the active STRUCTURE, which is
+      // re-resolved at the new tenor rather than dropped.
 
+      this.loadStructures();
       this.reloadAll();
     },
 

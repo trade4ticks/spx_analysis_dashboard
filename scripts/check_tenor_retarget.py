@@ -34,6 +34,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.equity_presets import (  # noqa: E402
+    COLUMN_ALIASES, PAIR_FAMILIES, PAIR_FOR_TENOR, retarget as py_retarget,
+)
 from app.metrics_config import BASE_COLUMNS, Z_COLUMNS  # noqa: E402
 
 JS = ROOT / "static" / "js" / "equity_iv.js"
@@ -156,6 +159,13 @@ if (!comp || typeof comp.retarget !== 'function') {
 const payload = JSON.parse(fs.readFileSync(process.argv[3],'utf8'));
 comp.byCol = payload.byCol;
 comp.pageTenor = 30;
+// The client reads these from /catalog now, so the harness supplies what
+// the endpoint would -- seeded from the PYTHON definitions, so that if the
+// two runtimes ever disagree it is because their algorithms differ and not
+// because they were handed different tables.
+comp.aliases = payload.aliases;
+comp.pairFamilies = payload.pairFamilies;
+comp.pairForTenor = payload.pairForTenor;
 const out = payload.cases.map(c => {
   try { return comp.retarget(c[0], c[1]); }
   catch (e) { return '<<threw: ' + e.message + '>>'; }
@@ -212,8 +222,13 @@ def main() -> int:
         hp = os.path.join(d, "h.js")
         pp = os.path.join(d, "p.json")
         open(hp, "w", encoding="utf-8").write(HARNESS)
-        json.dump({"byCol": by_col, "cases": [[c, t] for c, t, _w, _y in CASES]},
-                  open(pp, "w", encoding="utf-8"))
+        json.dump({
+            "byCol": by_col,
+            "cases": [[c, t] for c, t, _w, _y in CASES],
+            "aliases": COLUMN_ALIASES,
+            "pairFamilies": sorted(PAIR_FAMILIES),
+            "pairForTenor": {str(k): list(v) for k, v in PAIR_FOR_TENOR.items()},
+        }, open(pp, "w", encoding="utf-8"))
         r = subprocess.run(["node", hp, str(JS), pp],
                            capture_output=True, text=True, timeout=120)
 
@@ -241,16 +256,28 @@ def main() -> int:
                 print(f"    that button will leave the {axis} axis untouched")
 
     for (col, tenor, want, why), got in zip(CASES, data["out"]):
-        if got == want:
-            continue
-        bad += 1
-        print(f"\n  {col} @ {tenor}d")
-        print(f"    got  {got}")
-        print(f"    want {want}   ({why})")
+        if got != want:
+            bad += 1
+            print(f"\n  {col} @ {tenor}d")
+            print(f"    got  {got}")
+            print(f"    want {want}   ({why})")
+
+        # PARITY. The rule is written twice -- JavaScript for the page,
+        # which cannot round-trip on every tenor click, and Python for the
+        # server and the brief that will read a preset's metric list. Two
+        # implementations of one rule is what produced two divergent z
+        # estimators earlier in this project; the difference is that this
+        # pair is checked on every case, so a divergence cannot ship.
+        py = py_retarget(by_col, col, tenor)
+        if py != got:
+            bad += 1
+            print(f"\n  PARITY {col} @ {tenor}d")
+            print(f"    javascript {got}")
+            print(f"    python     {py}")
 
     print(f"\ncatalog columns: {len(by_col)}")
     print(f"presets checked: {len(data.get('presets', []))}")
-    print(f"retarget cases : {len(CASES)}, failed: {bad}")
+    print(f"retarget cases : {len(CASES)} (JS + Python parity), failed: {bad}")
     return 1 if bad else 0
 
 
