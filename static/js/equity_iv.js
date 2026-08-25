@@ -65,6 +65,53 @@ const EQ_TENORS = [7, 14, 21, 30, 60, 90];
  * 30d one in the header and call both "spot-vol beta". */
 const EQ_SPOTVOL_TENOR = 30;
 
+/* Families whose column is a PAIR of tenors, not one. "The term ratio at
+ * tenor 7" is not defined, so these cannot token-swap — but pinning them is
+ * not right either: 30/90 read beside a 7-day structure is quietly answering
+ * a different question than the rest of the row.
+ *
+ * So they map. 7 goes to 7/30 rather than 7/14 because two very short fits
+ * sitting close together are both noisy and the contango signal is clearer
+ * over a wider gap — and it puts a column to use that otherwise has no
+ * consumer. 14 and 21 share 14/30 because there is no 21-day member of the
+ * pair set. 30 and above stay at 30/90.
+ *
+ * term_slope carries the same pairs plus a delta suffix, so it takes the same
+ * map: the pair is the part that answers "over what span", and the delta is
+ * orthogonal to the page tenor. */
+const EQ_PAIR_FAMILIES = new Set(['term_ratio', 'term_slope']);
+const EQ_PAIR_FOR_TENOR = {
+  7:  [7, 30],
+  14: [14, 30],
+  21: [14, 30],
+  30: [30, 90],
+  60: [30, 90],
+  90: [30, 90],
+};
+const EQ_PAIR_RE = /_(\d+)d_(\d+)d/;
+
+/* Per-column z window. 'val' is the raw column; 63 and 252 are the stored z
+ * windows. Held per column rather than page-wide because the DISAGREEMENT
+ * between the two windows is the reading: a name stretched on both is at an
+ * extreme, a name stretched on one and flat on the other is in a regime
+ * shift, and a page-level toggle can only show one of those at a time. */
+const EQ_WINDOWS = ['val', 63, 252];
+
+/* Upstream renames, so a default written before a migration still resolves
+ * after it. TRANSITIONAL — RV_WINDOWS became tenor-derived, turning the
+ * 1w/1m/3m realized-vol and VRP labels into 7d/30d/90d. Delete once that has
+ * run everywhere. */
+const EQ_COLUMN_ALIASES = {
+  vrp_1m: 'vrp_30d', vrp_1w: 'vrp_7d', vrp_3m: 'vrp_90d',
+  vrp_ratio_1m: 'vrp_ratio_30d', vrp_ratio_1w: 'vrp_ratio_7d',
+  vrp_ratio_3m: 'vrp_ratio_90d',
+  rv_1m: 'rv_30d', rv_1w: 'rv_7d', rv_3m: 'rv_90d',
+  // and the reverse, for a page running against a database that has not
+  // migrated yet.
+  vrp_30d: 'vrp_1m', vrp_7d: 'vrp_1w', vrp_90d: 'vrp_3m',
+  rv_30d: 'rv_1m', rv_7d: 'rv_1w', rv_90d: 'rv_3m',
+};
+
 /* The spot reference's dataset label. Distinctive enough that no catalog
  * column can collide with it, so the tooltip can recognise the reference
  * without matching against a name a user could plausibly plot.
@@ -611,6 +658,9 @@ document.addEventListener('alpine:init', () => {
      * described. The first /rails call now omits `metrics` entirely and
      * adopts whatever came back, with the slots that resolved to nothing
      * named on screen. */
+    /* Each rail is {b, w}: the base column and its own z window. Same
+     * argument as the scanner's — the 63/252 disagreement is the reading, so
+     * a few of each in one panel says more than either alone. */
     railMetrics: [],
     railDefaults: null,
     rails: null, railsLoading: false, railsError: '',
@@ -721,17 +771,27 @@ document.addEventListener('alpine:init', () => {
 
     // ── scanner ──────────────────────────────────────────────────────────
     scanOpen: true,
+    /* Each column is {b, w, lock}: base column, its OWN z window, and whether
+     * a tenor change moves it. `w` is 'val' | 63 | 252.
+     *
+     * The default set opens with one of each window on the two columns where
+     * the comparison matters most, because that IS the demonstration: INTC's
+     * zc_width_sigma reading +1.20 on 63 and -0.13 on 252 says the width has
+     * been tight for a quarter and today is a recovery toward the annual norm,
+     * not an excursion above it. Neither number alone says that. */
     scanCols: [
-      { b: 'skew_30d_25p_atm', z: true },
-      { b: 'zc_width_sigma_30d', z: true },
-      { b: 'iv_30d_atm', z: false },
-      { b: 'term_ratio_30d_90d', z: false },
-      { b: 'vrp_1m', z: false },
+      { b: 'skew_30d_25p_atm',   w: 63,    lock: false },
+      { b: 'zc_width_sigma_30d', w: 63,    lock: false },
+      { b: 'zc_width_sigma_30d', w: 252,   lock: false },
+      { b: 'iv_30d_atm',         w: 'val', lock: false },
+      { b: 'term_ratio_30d_90d', w: 'val', lock: false },
+      { b: 'vrp_30d',            w: 'val', lock: false },
     ],
     scanFilters: [],
     scanSort: '', scanDir: 'desc',
     scan: null, scanLoading: false, scanError: '',
     pickFam: 'skew', pickBase: 'skew_30d_25p_atm', pickZ: true,
+    windows: EQ_WINDOWS,
     filterDraft: false,
     filtFam: 'skew', filtBase: 'skew_30d_25p_atm', filtZ: true,
     filtOp: 'gt', filtVal: '1.5',
@@ -782,7 +842,7 @@ document.addEventListener('alpine:init', () => {
     pruneTickerDefaults() {
       // railMetrics starts empty and is filled from the server's resolution,
       // so there is nothing to prune on the first pass.
-      this.railMetrics = this.railMetrics.filter(c => this.byCol[c]);
+      this.railMetrics = this.railMetrics.filter(r => this.byCol[r.b]);
       this.seriesSpecs = this.seriesSpecs.filter(s => this.byCol[s.b]);
       if (!this.seriesSpecs.length) {
         const first = this.firstMetric(this.families[0] || '');
@@ -792,6 +852,16 @@ document.addEventListener('alpine:init', () => {
       if (!this.byCol[this.serBase]) this.serBase = this.firstMetric(this.serFam);
       if (!this.byCol[this.tsBaseX]) this.tsBaseX = this.firstMetric(this.tsFamX);
       if (!this.byCol[this.tsBaseY]) this.tsBaseY = this.firstMetric(this.tsFamY);
+
+      // Scanner columns and filters go through the alias first, then drop if
+      // they still do not resolve -- a column the catalog has never heard of
+      // would 400 the whole scan rather than cost it one column.
+      this.scanCols = this.scanCols
+        .map(c => ({ ...c, b: this.aliasIfMissing(c.b) }))
+        .filter(c => this.byCol[c.b]);
+      this.scanFilters = this.scanFilters
+        .map(f => ({ ...f, b: this.aliasIfMissing(f.b) }))
+        .filter(f => this.byCol[f.b]);
     },
 
     async loadCatalog() {
@@ -857,6 +927,17 @@ document.addEventListener('alpine:init', () => {
     },
 
     hasZ(base) { return !!this.zBases[base]; },
+
+    /* Names that moved upstream, so a default written for one side of a
+     * migration still resolves on the other. TRANSITIONAL: delete once the
+     * RV-window rename has run everywhere. The catalog is the arbiter — an
+     * alias is only used when the written name is absent and the alias is
+     * present, so this can never override a live column. */
+    aliasIfMissing(col) {
+      if (this.byCol[col]) return col;
+      const alias = EQ_COLUMN_ALIASES[col];
+      return (alias && this.byCol[alias]) ? alias : col;
+    },
 
     /** Base column + the val/z toggle -> the column actually queried. */
     resolve(base, useZ) {
@@ -938,11 +1019,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     applyPreset(p) {
+      // The preset's columns are written at one tenor; the PAGE tenor wins.
+      // Applying 30d columns while the control reads 7d would leave the page
+      // saying one thing and showing another, which is the divergence the
+      // single tenor control exists to prevent.
       const setAxis = (which, spec) => {
-        const m = this.byCol[spec.b];
+        const col = this.retarget(spec.b, this.pageTenor);
+        const m = this.byCol[col];
         if (!m) return;
-        if (which === 'x') { this.xFam = m.family; this.xBase = spec.b; this.xZ = spec.z && this.hasZ(spec.b); }
-        else               { this.yFam = m.family; this.yBase = spec.b; this.yZ = spec.z && this.hasZ(spec.b); }
+        if (which === 'x') { this.xFam = m.family; this.xBase = col; this.xZ = spec.z && this.hasZ(col); }
+        else               { this.yFam = m.family; this.yBase = col; this.yZ = spec.z && this.hasZ(col); }
       };
       setAxis('x', p.x);
       setAxis('y', p.y);
@@ -1019,6 +1105,34 @@ document.addEventListener('alpine:init', () => {
       return p ? p.why : `${this.xCol()} × ${this.yCol()}`;
     },
 
+    /* Why the scatter is empty, when it is. A pair plots only where BOTH
+     * axes have a value, so one all-null axis empties the whole panel while
+     * looking identical to a data outage. Naming the axis and its count turns
+     * a blank chart into a fact about the data. */
+    scatterEmptyNote() {
+      if (!this.cs || this.csLoading || this.csError) return '';
+      const all = this.cs.points || [];
+      if (!all.length) return `No rows at ${this.date} ${this.snapshot}.`;
+      const plotted = all.filter(p => p.x != null && p.y != null).length;
+      if (plotted) return '';
+      const nx = all.filter(p => p.x == null).length;
+      const ny = all.filter(p => p.y == null).length;
+      const ex = this.cs.excluded || {};
+      const bits = [];
+      if (nx === all.length) bits.push(`${this.xCol()} is null for all ${all.length}`);
+      else if (nx) bits.push(`${this.xCol()} null for ${nx}`);
+      if (ny === all.length) bits.push(`${this.yCol()} is null for all ${all.length}`);
+      else if (ny) bits.push(`${this.yCol()} null for ${ny}`);
+      let s = `Nothing to plot: ${bits.join('; ')}.`;
+      if (ex.active && (ex.x || ex.y)) {
+        s += `  ${(ex.x || 0) + (ex.y || 0)} value(s) were dropped by "exclude `
+           + `extrapolated" — turning it off may restore the pair.`;
+      }
+      s += `  A pair plots only where both axes have a value, so one empty `
+         + `axis empties the panel.`;
+      return s;
+    },
+
     scatterCounts() {
       if (!this.cs) return { plotted: '—', nulls: '—', fabricated: '—' };
       const pts = this.cs.points;
@@ -1043,6 +1157,10 @@ document.addEventListener('alpine:init', () => {
 
       const pts = this.cs.points.filter(p => p.x != null && p.y != null);
       EQ_PTS.scatter = pts;
+      // Returning here leaves an empty canvas: no points, no axes, no message
+      // — which reads as a broken page rather than as an empty result, and
+      // says nothing about WHICH axis emptied it. The panel now reports that
+      // instead. skew z x spot-vol beta rendered exactly this way.
       if (!pts.length) return;
 
       const sizes = pts.map(p => p.size).filter(v => v != null);
@@ -1244,18 +1362,21 @@ document.addEventListener('alpine:init', () => {
     // ── scanner ──────────────────────────────────────────────────────────
 
     colHeader(c) {
-      return this.resolve(c.b, c.z).replace('_z_63', '·z63').replace('_z_252', '·z252');
+      return this.resolveCol(c).replace('_z_63', '·z63').replace('_z_252', '·z252');
     },
 
     addScanCol() {
-      const col = { b: this.pickBase, z: this.pickZ && this.hasZ(this.pickBase) };
-      if (this.scanCols.some(c => c.b === col.b && c.z === col.z)) return;
+      // The page z-window is the DEFAULT for a newly added column, not a
+      // constraint on it: the column carries its own from here.
+      const w = (this.pickZ && this.hasZ(this.pickBase)) ? this.zWindow : 'val';
+      const col = { b: this.pickBase, w, lock: false };
+      if (this.scanCols.some(c => c.b === col.b && c.w === col.w)) return;
       this.scanCols.push(col);
       this.loadScanner();
     },
 
     removeScanCol(i) {
-      const gone = this.resolve(this.scanCols[i].b, this.scanCols[i].z);
+      const gone = this.resolveCol(this.scanCols[i]);
       this.scanCols.splice(i, 1);
       if (this.scanSort === gone) this.scanSort = '';
       this.loadScanner();
@@ -1271,7 +1392,7 @@ document.addEventListener('alpine:init', () => {
     commitFilter() {
       const f = {
         b: this.filtBase,
-        z: this.filtZ && this.hasZ(this.filtBase),
+        w: (this.filtZ && this.hasZ(this.filtBase)) ? this.zWindow : 'val',
         op: this.filtOp,
         v: (this.filtOp === 'isnull' || this.filtOp === 'notnull') ? '' : this.filtVal,
       };
@@ -1298,14 +1419,14 @@ document.addEventListener('alpine:init', () => {
       this.scanLoading = true; this.scanError = '';
       try {
         const q = new URLSearchParams({
-          columns: this.scanCols.map(c => this.resolve(c.b, c.z)).join(','),
+          columns: this.scanCols.map(c => this.resolveCol(c)).join(','),
           date: this.date, snapshot: this.snapshot,
           dir: this.scanDir,
           exclude_extrapolated: String(this.excludeExtrap),
         });
         if (this.scanSort) q.set('sort', this.scanSort);
         for (const f of this.scanFilters) {
-          q.append('filter', `${this.resolve(f.b, f.z)}:${f.op}:${f.v}`);
+          q.append('filter', `${this.resolveCol(f)}:${f.op}:${f.v}`);
         }
         const j = await eqGetJson('/api/equity-iv/scanner?' + q.toString());
         if (j.error) { this.scanError = j.error; this.scan = null; }
@@ -1669,14 +1790,19 @@ document.addEventListener('alpine:init', () => {
         });
         // Omitted on the first call so the server's slot resolution decides
         // the set; sent thereafter so an edited set survives a reload.
-        if (this.railMetrics.length) q.set('metrics', this.railMetrics.join(','));
+        if (this.railMetrics.length) {
+          q.set('metrics', this.railMetrics.map(r => r.b).join(','));
+          q.set('z_windows', this.railMetrics.map(r => r.w || this.zWindow).join(','));
+        }
         const j = await eqGetJson('/api/equity-iv/rails?' + q);
         if (j.error) { this.railsError = j.error; this.rails = null; }
         else {
           this.rails = j;
           if (j.defaults) {
             this.railDefaults = j.defaults;
-            this.railMetrics = j.rails.map(r => r.column_name);
+            this.railMetrics = j.rails.map(r => ({
+              b: r.column_name, w: r.z_window || this.zWindow,
+            }));
           }
         }
       } catch (e) {
@@ -1765,8 +1891,16 @@ document.addEventListener('alpine:init', () => {
     },
 
     addRail() {
-      if (!this.railBase || this.railMetrics.includes(this.railBase)) return;
-      this.railMetrics.push(this.railBase);
+      if (!this.railBase) return;
+      if (this.railMetrics.some(r => r.b === this.railBase)) return;
+      this.railMetrics.push({ b: this.railBase, w: this.zWindow });
+      this.loadRails();
+    },
+
+    setRailWindow(i, w) {
+      const r = this.railMetrics[i];
+      if (!r || r.w === w) return;
+      r.w = w;
       this.loadRails();
     },
 
@@ -2358,13 +2492,86 @@ document.addEventListener('alpine:init', () => {
      */
     retarget(col, tenor) {
       const m = this.byCol[col];
-      if (!m || m.tenor == null || m.tenor === tenor) return col;
+      if (!m) return col;
+
+      // Pair families first: they carry tenor = null, so the token branch
+      // below would return them unchanged and they would silently pin.
+      if (EQ_PAIR_FAMILIES.has(m.family)) {
+        const want = EQ_PAIR_FOR_TENOR[tenor];
+        if (!want) return col;
+        const cand = col.replace(EQ_PAIR_RE, `_${want[0]}d_${want[1]}d`);
+        const hit = this.byCol[cand];
+        if (!hit || hit.family !== m.family || hit.form !== m.form) return col;
+        return cand;
+      }
+
+      if (m.tenor == null || m.tenor === tenor) return col;
       const token = `${m.tenor}d`;
       if (!col.includes(token)) return col;      // vrp_1m, spotvol_beta_1m
       const cand = col.replace(token, `${tenor}d`);
       const hit = this.byCol[cand];
       if (!hit || hit.family !== m.family || hit.form !== m.form) return col;
       return cand;
+    },
+
+    /* Can this column follow the tenor at all? Used to LOCK the ones that
+     * cannot, visibly, rather than leaving them to sit still and look like
+     * everything else. */
+    canRetarget(col) {
+      const m = this.byCol[col];
+      if (!m) return false;
+      if (EQ_PAIR_FAMILIES.has(m.family)) return true;
+      if (m.tenor == null) return false;
+      return this.tenors.some(t => t !== m.tenor && this.retarget(col, t) !== col);
+    },
+
+    /** The column a spec resolves to: base, or the stored z at its window. */
+    resolveCol(spec) {
+      if (!spec || !spec.b) return '';
+      if (spec.w === 'val' || spec.w == null) return spec.b;
+      const cand = `${spec.b}_z_${spec.w}`;
+      return this.byCol[cand] ? cand : spec.b;
+    },
+
+    /** Short label for a window, for chips and headers. */
+    windowLabel(w) { return w === 'val' || w == null ? 'val' : `z${w}`; },
+
+    hasWindow(base, w) {
+      return w === 'val' || !!this.byCol[`${base}_z_${w}`];
+    },
+
+    /* A spec is locked when the user pinned it, OR when it simply cannot
+     * follow — vrp_1m, spotvol_beta_1m, anything whose family does not span
+     * the grid. Both render as a lock, because from the reader's side they
+     * are the same fact: this column is not moving with the tenor. */
+    isLocked(spec) {
+      return !!(spec && (spec.lock || !this.canRetarget(spec.b)));
+    },
+
+    lockReason(spec) {
+      if (!spec) return '';
+      if (!this.canRetarget(spec.b)) {
+        return `${spec.b} cannot follow the tenor — its family is not built `
+             + `across the grid — so it is locked and shown as such rather than `
+             + `quietly sitting still.`;
+      }
+      return spec.lock
+        ? `Locked: stays at ${spec.b} through tenor changes, as a fixed `
+          + `reference the retargeting columns are read against.`
+        : `Follows the page tenor. Click to lock it here.`;
+    },
+
+    toggleLock(i) {
+      const c = this.scanCols[i];
+      if (!this.canRetarget(c.b)) return;   // already locked by nature
+      c.lock = !c.lock;
+    },
+
+    setColWindow(i, w) {
+      const c = this.scanCols[i];
+      if (c.w === w || !this.hasWindow(c.b, w)) return;
+      c.w = w;
+      this.loadScanner();
     },
 
     /** True when a column sits at a tenor other than the page's. */
@@ -2378,26 +2585,44 @@ document.addEventListener('alpine:init', () => {
       if (!isFinite(t) || t === this.pageTenor) return;
       this.pageTenor = t;
 
-      // Every metric-name-bearing control moves with it. The scatter follows
-      // because its axes are the same catalog columns; the Path panel does
-      // NOT, because its axes are the user's own pick and retargeting them
-      // would be forcing a tenor on a panel that has none.
-      this.railMetrics = this.railMetrics.map(c => this.retarget(c, t));
-      this.scanCols = this.scanCols.map(c => ({ ...c, b: this.retarget(c.b, t) }));
-      this.scanFilters = this.scanFilters.map(f => ({ ...f, b: this.retarget(f.b, t) }));
+      // Every metric-name-bearing control moves with it, EXCEPT the ones a
+      // lock holds in place — that is the point of the lock: a fixed
+      // reference the retargeting columns are read against.
+      this.railMetrics = this.railMetrics.map(r => ({ ...r, b: this.retarget(r.b, t) }));
+      this.scanCols = this.scanCols.map(c =>
+        this.isLocked(c) ? c : { ...c, b: this.retarget(c.b, t) });
+      this.scanFilters = this.scanFilters.map(f =>
+        f.lock ? f : { ...f, b: this.retarget(f.b, t) });
       if (this.scanSort) this.scanSort = this.retarget(this.scanSort, t);
+
       this.xBase = this.retarget(this.xBase, t);
       this.yBase = this.retarget(this.yBase, t);
       const xm = this.byCol[this.xBase]; if (xm) this.xFam = xm.family;
       const ym = this.byCol[this.yBase]; if (ym) this.yFam = ym.family;
-      this.activePreset = '';
+
+      // The History pane and the Path panel were in neither list. Both plot
+      // catalog columns, so both follow — leaving History on a 30d default
+      // while everything above it moved is the mixture this control exists to
+      // remove.
+      this.seriesSpecs = this.seriesSpecs.map(s => ({ ...s, b: this.retarget(s.b, t) }));
+      this.tsBaseX = this.retarget(this.tsBaseX, t);
+      this.tsBaseY = this.retarget(this.tsBaseY, t);
+      const tx = this.byCol[this.tsBaseX]; if (tx) this.tsFamX = tx.family;
+      const ty = this.byCol[this.tsBaseY]; if (ty) this.tsFamY = ty.family;
+
+      // activePreset is NOT cleared. A preset is a conceptual pair — "skew z
+      // against last week's return" — and retargeting it to another tenor
+      // leaves it the same pair. The buttons carry no tenor, so un-lighting
+      // one on a tenor change would say the selection had been abandoned when
+      // it had only moved.
 
       this.reloadAll();
     },
 
     /** Rails sitting at a tenor other than the page's, named for the note. */
     pinnedRailNote() {
-      const off = (this.railMetrics || []).filter(c => this.isPinnedTenor(c));
+      const off = (this.railMetrics || []).map(r => r.b)
+                    .filter(c => this.isPinnedTenor(c));
       if (!off.length) return '';
       return `Not at the page tenor: ${off.join(', ')}. Those families are not `
            + `built at ${this.pageTenor}d — spot-vol exists at 30d only, and vrp `

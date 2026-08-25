@@ -54,16 +54,45 @@ CASES = [
     ("zc_short_delta_30d", 21, "zc_short_delta_21d",
      "the other half of that collision"),
 
-    # Families that do not span the grid. Keeping the column is the point:
-    # these are still the right reading at any page tenor.
-    ("spotvol_beta_1m", 21, "spotvol_beta_1m", "spot_vol is built at 30d only"),
-    ("vrp_1m", 21, "vrp_1m", "vrp exists at 7/30/90 and carries no {t}d token"),
-    ("vrp_1m", 7, "vrp_1m",
-     "even where the family HAS a 7 tenor, the 1w/1m/3m label is a lookback "
-     "window rather than a surface slice, so it is left alone"),
+    # vrp used to be the standing example of a family that could NOT
+    # retarget: it lived at 7/30/90 under 1w/1m/3m labels carrying no {t}d
+    # token. RV_WINDOWS is now derived from TENORS upstream, so vrp_1m is
+    # vrp_30d and the family spans the grid -- and the token-swap rule picked
+    # it up with no change here, which is the property worth asserting.
+    ("vrp_30d", 21, "vrp_21d", "vrp retargets now that the family spans the grid"),
+    ("vrp_ratio_30d", 7, "vrp_ratio_7d",
+     "and its sibling, which shares (vrp, atm, 30) with it -- the collision "
+     "the stem-based rule exists to survive"),
 
-    # No tenor at all -- never retargeted.
-    ("term_ratio_7d_30d", 21, "term_ratio_7d_30d", "a tenor PAIR, tenor is null"),
+    # spot_vol is the remaining family that cannot follow: built at 30d alone,
+    # and named with a lookback label rather than a tenor token.
+    ("spotvol_beta_1m", 21, "spotvol_beta_1m", "spot_vol is built at 30d only"),
+    ("spotvol_beta_3m", 7, "spotvol_beta_3m", "the 3m window likewise"),
+
+    # PAIR families. These carry tenor = null, so the token branch would
+    # return them unchanged -- which is wrong in a way that is easy to defend
+    # and still wrong: a term ratio IS a pair, but 30/90 read beside a 7-day
+    # structure is quietly answering a different question than the rest of the
+    # row. They map instead, and the map is asserted in full because it is a
+    # judgement rather than a derivation.
+    #
+    # 7 -> 7/30 rather than 7/14: two very short fits sitting close together
+    # are both noisy and the contango signal is clearer over a wider gap.
+    # 21 -> 14/30 because there is no 21-day member of the pair set.
+    ("term_ratio_30d_90d", 7,  "term_ratio_7d_30d",  "pair map: 7"),
+    ("term_ratio_30d_90d", 14, "term_ratio_14d_30d", "pair map: 14"),
+    ("term_ratio_30d_90d", 21, "term_ratio_14d_30d", "pair map: 21 shares 14/30"),
+    ("term_ratio_7d_30d",  30, "term_ratio_30d_90d", "pair map: 30"),
+    ("term_ratio_7d_30d",  60, "term_ratio_30d_90d", "pair map: 60"),
+    ("term_ratio_7d_30d",  90, "term_ratio_30d_90d", "pair map: 90"),
+    # term_slope takes the same pair map and keeps its delta suffix: the pair
+    # answers "over what span", the delta is orthogonal to the page tenor.
+    ("term_slope_30d_90d_25p", 7, "term_slope_7d_30d_25p",
+     "the pair moves, the 25p wing does not"),
+    ("term_slope_7d_14d_atm", 21, "term_slope_14d_30d_atm",
+     "and the same for the atm slope"),
+
+    # No tenor and no pair -- never retargeted.
     ("log_ret_1m", 21, "log_ret_1m", "a lookback window"),
     ("days_to_earnings", 21, "days_to_earnings", "calendar"),
     ("spot", 21, "spot", "a price level"),

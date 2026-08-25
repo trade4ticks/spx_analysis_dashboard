@@ -299,11 +299,24 @@ async def main():
     for win in ("3m", "1y", "all"):
         for ex in (True, False):
             cases.append((f"rails window={win} excl={ex}",
-                          eiv.rails(ticker="AAPL", metrics=None, date=None,
+                          eiv.rails(ticker="AAPL", metrics=None, z_windows=None, date=None,
                                     snapshot=None, window=win, z_window=63,
                                     exclude_extrapolated=ex, pool=pool)))
+    # A per-rail window, mixed: the whole point is that two rails can sit in
+    # one panel on different windows.
+    cases.append(("rails mixed z windows",
+                  eiv.rails(ticker="AAPL", metrics="iv_30d_atm,rv_21d,skew_30d_25p_atm",
+                            z_windows="63,252,", date=None, snapshot=None,
+                            window="1y", z_window=63,
+                            exclude_extrapolated=True, pool=pool)))
+    must_400.append(("rails rejects an unknown z window",
+                     eiv.rails(ticker="AAPL", metrics="iv_30d_atm",
+                               z_windows="99", date=None, snapshot=None,
+                               window="1y", z_window=63,
+                               exclude_extrapolated=True, pool=pool)))
+
     cases.append(("rails explicit metrics",
-                  eiv.rails(ticker="AAPL", metrics="iv_30d_atm,rv_21d", date=None,
+                  eiv.rails(ticker="AAPL", metrics="iv_30d_atm,rv_21d", z_windows=None, date=None,
                             snapshot=None, window="1y", z_window=252,
                             exclude_extrapolated=True, pool=pool)))
 
@@ -363,7 +376,7 @@ async def main():
                              exclude_extrapolated=False, spot=True, pool=pool)))
     cases.append(("rails accepts a stored z column",
                   eiv.rails(ticker="AAPL", metrics="skew_30d_25p_atm_z_63",
-                            date=None, snapshot=None, window="1y",
+                            z_windows=None, date=None, snapshot=None, window="1y",
                             z_window=63, exclude_extrapolated=True,
                             pool=pool)))
     cases.append(("scanner accepts mixed z windows",

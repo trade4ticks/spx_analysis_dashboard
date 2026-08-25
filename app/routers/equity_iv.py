@@ -1121,7 +1121,10 @@ RAILS_SLOTS = (
     ("put convexity",    ("convex_30d_10p_25p_atm", "convexity_30d_10p_25p_atm",
                           "convex_30d_10p_25p", "convexity_30d_10p_25p_atm_")),
     ("zero-cost width",  ("zc_width_sigma_30d",)),
-    ("VRP 1m",           ("vrp_1m", "vrp_1m_", "vrp_21d")),
+    # vrp_30d is the post-rename name; vrp_1m is the same column before the
+    # RV-window migration lands. Both listed so the panel works either side
+    # of it -- the candidate list is exactly what that mechanism is for.
+    ("VRP",              ("vrp_30d", "vrp_1m", "vrp_21d")),
     ("spot-vol β 1m",    ("spotvol_beta_1m",)),
 )
 
@@ -1144,6 +1147,7 @@ def _resolve_rail_slots(cat):
 async def rails(
     ticker:               str  = Query(...),
     metrics:              str  = Query(None, description="CSV of base columns"),
+    z_windows:            str  = Query(None, description="CSV, one per metric"),
     date:                 str  = Query(None),
     snapshot:             str  = Query(None),
     window:               str  = Query("1y"),
@@ -1172,6 +1176,13 @@ async def rails(
     Today's MARKER still comes from the selected snapshot. That is the whole
     point -- an 11:25 reading placed against the daily distribution.
 
+    `z_windows` sets the window PER RAIL, parallel to `metrics`, falling back
+    to `z_window` for any position it does not cover. A rail's window is a
+    property of that rail because the disagreement between 63 and 252 is
+    itself the reading — a metric stretched on both is at an extreme, one
+    stretched on the short window alone is in a regime shift — and a single
+    page-level window can only ever show one of those.
+
     The z beside the bar is READ from equity_metrics_z at the same
     (date, snapshot) as the marker — the same number /unusual and the scanner
     show. It is a label, not the bar's geometry: "where in the range" and
@@ -1198,8 +1209,21 @@ async def rails(
         return {"error": "No usable rail metrics", "rails": [],
                 "defaults": [{"slot": l, "column": c} for l, c in (slots or [])]}
     entries = [_entry(cat, c) for c in cols]
-    # The z column beside each rail, where the catalog has one.
-    zcols = [_z_column(cat, e["column_name"], z_window) for e in entries]
+
+    # One window per rail, defaulting to the page's for anything unspecified.
+    wins = []
+    given = [w.strip() for w in z_windows.split(",")] if z_windows else []
+    for i in range(len(entries)):
+        raw = given[i] if i < len(given) else ""
+        try:
+            wins.append(int(raw))
+        except ValueError:
+            wins.append(z_window)
+    bad = [w for w in wins if w not in (63, 252)]
+    if bad:
+        raise HTTPException(400, f"z_windows must be 63 or 252, got {bad}")
+
+    zcols = [_z_column(cat, e["column_name"], w) for e, w in zip(entries, wins)]
 
     out = []
     async with pool.acquire() as conn:
@@ -1293,6 +1317,7 @@ async def rails(
             "raw_value":  None if v is None else float(v),
             "extrap":     ex,
             "z":          zv,
+            "z_window":   wins[i],
             "z_column":   zcols[i]["column_name"] if zcols[i] is not None else None,
             "percentile": pct,
             "p5":  _f(dist, f"p5_{i}"),  "p25": _f(dist, f"p25_{i}"),

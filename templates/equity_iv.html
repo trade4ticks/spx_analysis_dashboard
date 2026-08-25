@@ -206,6 +206,18 @@
       padding:2px 4px 2px 9px; font-size:10px; color:var(--accent); white-space:nowrap;
     }
     .eq-chip.filt { background:rgba(232,67,147,.12); border-color:#e84393; color:#e84393; }
+    /* Lock. Two states that read the same from the outside and differ in
+       whether they can be changed: a user pin, and a column whose family is
+       not built across the tenor grid so it could not follow anyway. The
+       second is dimmed and inert rather than hidden — "not moving" is the
+       fact worth showing, and the reason belongs in the tooltip. */
+    .eq-lockbtn { cursor:pointer; font-size:9px; opacity:.45; user-select:none; }
+    .eq-lockbtn:hover { opacity:1; }
+    .eq-lockbtn.on { opacity:.95; }
+    .eq-lockbtn.fixed { cursor:default; opacity:.5; }
+    .eq-lockmark { font-size:8px; margin-right:3px; opacity:.7; }
+    .eq-lockmark.fixed { opacity:.45; }
+
     .eq-chip-x { cursor:pointer; padding:0 4px; font-weight:700; opacity:.7; }
     .eq-chip-x:hover { opacity:1; }
 
@@ -374,6 +386,11 @@
       font-size:10px; color:var(--muted); white-space:nowrap;
       overflow:hidden; text-overflow:ellipsis; cursor:default;
     }
+    /* The rail's own z window. Small, because it is a qualifier on the rail
+       rather than a control anyone hunts for. */
+    .eq-rail-w { font-size:8px; margin-left:4px; }
+    .eq-rail-w span { padding:0 3px; }
+
     .eq-rail-x { cursor:pointer; opacity:.35; padding-left:4px; font-weight:700; }
     .eq-rail-x:hover { opacity:1; color:#e84393; }
 
@@ -611,6 +628,12 @@
             <div class="spinner-dot"></div><span>loading</span>
           </div>
           <div class="panel-error" x-show="csError" x-cloak x-text="csError"></div>
+          <!-- An empty pair used to render as a bare canvas: no points, no
+               axes, no message, which reads as a broken page rather than as
+               an empty result. -->
+          <div class="hm-empty" x-show="scatterEmptyNote()" x-cloak
+               style="padding:0 14px;text-align:center;line-height:1.6"
+               x-text="scatterEmptyNote()"></div>
         </div>
 
         <div class="panel-stats">
@@ -714,9 +737,25 @@
       <template x-if="scanOpen">
         <div>
           <div class="eq-chips">
-            <template x-for="(c, i) in scanCols" :key="'sc-'+c.b+c.z">
+            <!-- Window and lock are per column, and both are the same kind of
+                 state: something this column does that its neighbours need
+                 not. 63 against 252 is the reading — a name stretched on both
+                 is at an extreme, one stretched on the short window alone is
+                 in a regime shift — and a page-level toggle can only ever show
+                 one of those at a time. -->
+            <template x-for="(c, i) in scanCols" :key="'sc-'+c.b+c.w">
               <span class="eq-chip">
-                <span x-text="resolve(c.b, c.z)"></span>
+                <span class="eq-lockbtn" :class="{on: isLocked(c), fixed: !canRetarget(c.b)}"
+                      @click="toggleLock(i)" :title="lockReason(c)"
+                      x-text="isLocked(c) ? '🔒' : '🔓'"></span>
+                <span x-text="c.b"></span>
+                <span class="p-seg">
+                  <template x-for="w in windows" :key="'cw-'+i+'-'+w">
+                    <span :class="{on: c.w === w}" @click="setColWindow(i, w)"
+                          :style="hasWindow(c.b, w) ? '' : 'opacity:.3;cursor:not-allowed'"
+                          x-text="windowLabel(w)"></span>
+                  </template>
+                </span>
                 <span class="eq-chip-x" @click="removeScanCol(i)">×</span>
               </span>
             </template>
@@ -726,7 +765,7 @@
             <div class="eq-chips">
               <template x-for="(f, i) in scanFilters" :key="'sf-'+i">
                 <span class="eq-chip filt">
-                  <span x-text="resolve(f.b, f.z) + ' ' + f.op + ' ' + f.v"></span>
+                  <span x-text="resolveCol(f) + ' ' + f.op + ' ' + f.v"></span>
                   <span class="eq-chip-x" @click="removeScanFilter(i)">×</span>
                 </span>
               </template>
@@ -772,11 +811,14 @@
               <thead>
                 <tr>
                   <th @click="sortBy('__ticker')">Ticker</th>
-                  <template x-for="c in scanCols" :key="'th-'+c.b+c.z">
-                    <th :class="{on: scanSort === resolve(c.b, c.z)}"
-                        :title="headerTitle(resolve(c.b, c.z))"
-                        @click="sortBy(resolve(c.b, c.z))"
-                        x-text="colHeader(c) + (scanSort === resolve(c.b, c.z) ? (scanDir === 'desc' ? ' ▾' : ' ▴') : '')"></th>
+                  <template x-for="c in scanCols" :key="'th-'+c.b+c.w">
+                    <th :class="{on: scanSort === resolveCol(c)}"
+                        :title="headerTitle(resolveCol(c)) + '\n\n' + lockReason(c)"
+                        @click="sortBy(resolveCol(c))">
+                      <span x-show="isLocked(c)" class="eq-lockmark"
+                            :class="{fixed: !canRetarget(c.b)}">🔒</span><span
+                        x-text="colHeader(c) + (scanSort === resolveCol(c) ? (scanDir === 'desc' ? ' ▾' : ' ▴') : '')"></span>
+                    </th>
                   </template>
                   <th>Spot</th>
                 </tr>
@@ -788,10 +830,10 @@
                       <span x-text="r.ticker"></span><span class="eq-chain"
                             :class="chainClass(r)" x-show="chainClass(r)">•</span>
                     </td>
-                    <template x-for="c in scanCols" :key="'td-'+r.ticker+c.b+c.z">
-                      <td :class="cellClass(r, resolve(c.b, c.z))"
-                          :title="cellTitle(r, resolve(c.b, c.z))"
-                          x-text="cellText(r, resolve(c.b, c.z))"></td>
+                    <template x-for="c in scanCols" :key="'td-'+r.ticker+c.b+c.w">
+                      <td :class="cellClass(r, resolveCol(c))"
+                          :title="cellTitle(r, resolveCol(c))"
+                          x-text="cellText(r, resolveCol(c))"></td>
                     </template>
                     <td x-text="r.spot != null ? r.spot.toFixed(2) : '—'"></td>
                   </tr>
@@ -949,6 +991,12 @@
               <div class="eq-rail">
                 <div class="eq-rail-name" :title="railTitle(r)">
                   <span x-text="r.column_name"></span>
+                  <span class="p-seg eq-rail-w">
+                    <template x-for="w in [63, 252]" :key="'rw-'+i+'-'+w">
+                      <span :class="{on: r.z_window === w}" @click="setRailWindow(i, w)"
+                            x-text="w"></span>
+                    </template>
+                  </span>
                   <span class="eq-rail-x" @click="removeRail(i)">×</span>
                 </div>
 
