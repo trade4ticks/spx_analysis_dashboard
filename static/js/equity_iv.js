@@ -51,6 +51,20 @@ const EQ_TS_PANES = 3;
  * metric that has no such direction. */
 const EQ_SERIES_COLORS = ['#3498db', '#e84393', '#f0a30a', '#9b8ec4'];
 
+/* The tenors the METRIC layer is built at. Not the same list as the surface's
+ * — equity_surface is fitted at 17 tenors — so the surface panels snap a page
+ * tenor to their nearest fitted one, while the metric columns must land on one
+ * of these exactly or not at all. */
+const EQ_TENORS = [7, 14, 21, 30, 60, 90];
+
+/* The spot-vol panel's fixed tenor. It is tenor-agnostic as a PANEL -- it asks
+ * "how hard does a down move hit vol in this name", not "at 21 days" -- and
+ * 30d is both the conventional reading and the tenor the stored
+ * spotvol_beta_1m behind the header chip is built at. Pinning it keeps the two
+ * agreeing; following the page tenor would put a 7d beta on the chart beside a
+ * 30d one in the header and call both "spot-vol beta". */
+const EQ_SPOTVOL_TENOR = 30;
+
 /* The spot reference's dataset label. Distinctive enough that no catalog
  * column can collide with it, so the tooltip can recognise the reference
  * without matching against a name a user could plausibly plot.
@@ -620,8 +634,16 @@ document.addEventListener('alpine:init', () => {
     // term panel render into separate canvases, and the term panel's kind is
     // a toggle between two questions rather than two series.
     cb: {}, cbLoading: {}, cbError: {},
-    cbDte: 30,                 // the tenor every per-tenor panel in 6–8 uses
-    cbDteChosen: false,        // true once resolved against the real tenor list
+    /* ONE tenor for the page. Every panel that has a tenor follows it.
+     *
+     * It used to be per-panel — the tent had a picker, the skew curve had its
+     * own, the rails carried tenors baked into their column names — so the
+     * page could show a 30d tent above 21d rails above a 14d skew reading with
+     * nothing saying so. Comparing a structure's cost at one tenor against a
+     * distribution built at another is not a subtle error, and the page was
+     * inviting it. */
+    pageTenor: 30,
+    tenors: EQ_TENORS,
     /* The tenor list as STATE, not derived from whichever payload happens to
      * have arrived. The select's options are rendered from this by x-for, and
      * a <select> whose value is bound before its options exist falls back to
@@ -2287,7 +2309,7 @@ document.addEventListener('alpine:init', () => {
       this.cbLoading[kind] = true; this.cbError[kind] = '';
       try {
         const j = await eqGetJson('/api/equity-iv/curve-band?' + this._sq({
-          kind, dte: this.cbDte, wing: this.cbWing,
+          kind, dte: this.pageTenor, wing: this.cbWing,
           deltas: this.termDeltas.join(','),
         }));
         if (j.error) { this.cbError[kind] = j.error; this.cb[kind] = null; }
@@ -2314,46 +2336,86 @@ document.addEventListener('alpine:init', () => {
       this.loadCurveBand(k);
     },
 
-    setCbDte(v) {
-      const n = parseInt(v, 10);
-      if (!isFinite(n) || n === this.cbDte) return;
-      this.cbDte = n;
-      this.cbDteChosen = true;
-      this.loadCurveBand('skew');
-      this.loadTent();
-      this.loadSticky();
-      this.loadSpotVol();
+    /* Retarget a metric column to another tenor.
+     *
+     * The rule, and why it is not simply "look up the same family and wing at
+     * the new tenor": that key is AMBIGUOUS. zc_width_sigma_21d and
+     * zc_short_delta_21d are both (structure, short, 21); vrp_1m and
+     * vrp_ratio_1m are both (vrp, atm, 30). So the stem has to carry the
+     * identity, and the tenor token inside the NAME is what gets swapped.
+     *
+     * The candidate is then VERIFIED against the catalog rather than trusted,
+     * because not every family spans every tenor — of the nine that carry one,
+     * only seven span all six. spot_vol exists at 30 alone, and vrp only at
+     * 7/30/90 under 1w/1m/3m labels carrying no {t}d token at all.
+     *
+     * A column that cannot retarget is KEPT, not blanked. vrp_1m at page tenor
+     * 21 is still the right variance-premium reading — it is a
+     * realized-versus-implied window, not a slice of the surface — and
+     * dropping the rail would lose information to enforce a consistency that
+     * does not apply to it. The panel names those so the mixture is visible
+     * rather than assumed away.
+     */
+    retarget(col, tenor) {
+      const m = this.byCol[col];
+      if (!m || m.tenor == null || m.tenor === tenor) return col;
+      const token = `${m.tenor}d`;
+      if (!col.includes(token)) return col;      // vrp_1m, spotvol_beta_1m
+      const cand = col.replace(token, `${tenor}d`);
+      const hit = this.byCol[cand];
+      if (!hit || hit.family !== m.family || hit.form !== m.form) return col;
+      return cand;
     },
 
-    /** Adopt the surface's real tenor list, and settle the default once. */
+    /** True when a column sits at a tenor other than the page's. */
+    isPinnedTenor(col) {
+      const m = this.byCol[col];
+      return !!(m && m.tenor != null && m.tenor !== this.pageTenor);
+    },
+
+    setPageTenor(v) {
+      const t = parseInt(v, 10);
+      if (!isFinite(t) || t === this.pageTenor) return;
+      this.pageTenor = t;
+
+      // Every metric-name-bearing control moves with it. The scatter follows
+      // because its axes are the same catalog columns; the Path panel does
+      // NOT, because its axes are the user's own pick and retargeting them
+      // would be forcing a tenor on a panel that has none.
+      this.railMetrics = this.railMetrics.map(c => this.retarget(c, t));
+      this.scanCols = this.scanCols.map(c => ({ ...c, b: this.retarget(c.b, t) }));
+      this.scanFilters = this.scanFilters.map(f => ({ ...f, b: this.retarget(f.b, t) }));
+      if (this.scanSort) this.scanSort = this.retarget(this.scanSort, t);
+      this.xBase = this.retarget(this.xBase, t);
+      this.yBase = this.retarget(this.yBase, t);
+      const xm = this.byCol[this.xBase]; if (xm) this.xFam = xm.family;
+      const ym = this.byCol[this.yBase]; if (ym) this.yFam = ym.family;
+      this.activePreset = '';
+
+      this.reloadAll();
+    },
+
+    /** Rails sitting at a tenor other than the page's, named for the note. */
+    pinnedRailNote() {
+      const off = (this.railMetrics || []).filter(c => this.isPinnedTenor(c));
+      if (!off.length) return '';
+      return `Not at the page tenor: ${off.join(', ')}. Those families are not `
+           + `built at ${this.pageTenor}d — spot-vol exists at 30d only, and vrp `
+           + `at 7/30/90 as a realized-versus-implied window rather than a slice `
+           + `of the surface. Kept rather than dropped, because they are still `
+           + `the right reading.`;
+    },
+
+    /* The surface's fitted tenor list. equity_surface carries 17 tenors and
+     * the metric layer six, so a page tenor is snapped to the nearest fitted
+     * one by the surface endpoints; this is kept so a panel can report which
+     * tenor it actually drew when those differ. */
     adoptDtes(list) {
       if (!list || !list.length) return;
       if (this.dteOptions.length !== list.length
           || this.dteOptions.some((t, i) => t !== list[i])) {
         this.dteOptions = [...list];
       }
-      if (this.cbDteChosen) return;
-      this.cbDteChosen = true;
-      const want = this.pickDefaultDte(list);
-      if (want !== this.cbDte) {
-        this.cbDte = want;
-        this.loadCurveBand('skew');
-        this.loadTent();
-        this.loadSticky();
-        this.loadSpotVol();
-      }
-    },
-
-    /* 0DTE is a poor default: the fit is least reliable at the shortest
-     * tenor and it is the first thing anyone sees. 30 is the working tenor
-     * for this style; if the surface does not carry it, the nearest tenor of
-     * at least 7 days wins, and only an all-sub-7 surface can land on 0. */
-    pickDefaultDte(list) {
-      if (!list || !list.length) return this.cbDte;
-      const usable = list.filter(t => t >= 7);
-      const pool = usable.length ? usable : list;
-      return pool.reduce((a, t) =>
-        Math.abs(t - 30) < Math.abs(a - 30) ? t : a, pool[0]);
     },
 
     /* The wings the skew-term view can be drawn at, in put convention.
@@ -2529,20 +2591,16 @@ document.addEventListener('alpine:init', () => {
       this.tentLoading = true; this.tentError = '';
       try {
         const j = await eqGetJson('/api/equity-iv/tent?' + this._sq({
-          dte: this.cbDte, long_delta: this.tentLongDelta,
+          dte: this.pageTenor, long_delta: this.tentLongDelta,
         }));
         if (j.error) { this.tentError = j.error; this.tent = null; }
         else {
           this.tent = j;
           if (j.available) this.adoptDtes(j.available.dtes);
-          // Adopt the tenor the server actually RESOLVED. It snaps the request
-          // to the nearest fitted tenor, and if that differs from what was
-          // asked for, the control has to move with it or the label and the
-          // chart disagree with nothing on screen to say so.
-          if (j.dte != null && j.dte !== this.cbDte) {
-            this.cbDte = j.dte;
-            this.cbDteChosen = true;
-          }
+          // The page control does NOT move to whatever the server snapped to.
+          // The metric columns are pinned to the page tenor, so letting the
+          // surface's nearest-fitted answer drag it would silently repoint
+          // every rail. The panel reports the drawn tenor instead.
           this.renderTent();
         }
       } catch (e) {
@@ -2767,7 +2825,7 @@ document.addEventListener('alpine:init', () => {
       this.stickyLoading = true; this.stickyError = '';
       try {
         const j = await eqGetJson('/api/equity-iv/sticky-strike?'
-          + this._sq({ dte: this.cbDte }));
+          + this._sq({ dte: this.pageTenor }));
         if (j.error) { this.stickyError = j.error; this.sticky = null; }
         else { this.sticky = j; this.renderSticky(); }
       } catch (e) {
@@ -3227,7 +3285,7 @@ document.addEventListener('alpine:init', () => {
       this.svolLoading = true; this.svolError = '';
       try {
         const j = await eqGetJson('/api/equity-iv/spot-vol?'
-          + this._sq({ dte: this.cbDte }));
+          + this._sq({ dte: EQ_SPOTVOL_TENOR }));
         if (j.error) { this.svolError = j.error; this.svol = null; }
         else { this.svol = j; this.renderSpotVol(); }
       } catch (e) {

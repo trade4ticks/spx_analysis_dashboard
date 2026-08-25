@@ -471,6 +471,19 @@
 
       <div class="ctrl-div"></div>
 
+      <!-- One tenor for the page. It used to be per-panel, which let a 30d
+           tent sit above 21d rails above a 14d skew reading with nothing on
+           screen saying so — and comparing a structure's cost at one tenor
+           against a distribution built at another is the mistake that invites.
+           Panels without a tenor (surface grid, spot-vol, path) ignore it. -->
+      <span class="eq-lbl">Tenor</span>
+      <div class="seg">
+        <template x-for="t in tenors" :key="'pt-'+t">
+          <div class="seg-btn" :class="{on: pageTenor === t}"
+               @click="setPageTenor(t)" x-text="t + 'd'"></div>
+        </template>
+      </div>
+
       <span class="eq-lbl">Z window</span>
       <div class="seg">
         <template x-for="w in [63, 252]" :key="w">
@@ -970,6 +983,8 @@
                  style="padding:6px 0">No rails — add one below.</div>
             <div class="eq-section-sub eq-warn" x-show="railMissingNote()" x-cloak
                  style="padding:6px 0" x-text="railMissingNote()"></div>
+            <div class="eq-section-sub" x-show="pinnedRailNote()" x-cloak
+                 style="padding:6px 0" x-text="pinnedRailNote()"></div>
             <div class="eq-section-sub eq-warn" x-show="railsError" x-cloak x-text="railsError"></div>
           </div>
 
@@ -1132,20 +1147,13 @@
                     x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub">1×2 put ratio</span>
             <div class="eq-spacer"></div>
-            <span class="eq-lbl">Tenor</span>
-            <!-- The options come from state and the DOM value is re-asserted
-                 once they have rendered. A <select> whose value is bound
-                 before its options exist silently falls back to the first
-                 option, which is how this read 0d while every panel drew 30d.
-                 x-effect re-runs when dteOptions or cbDte changes; $nextTick
-                 defers the write until after x-for has emitted them. -->
-            <select class="eq-sel" style="max-width:80px"
-                    @change="setCbDte($event.target.value)"
-                    x-effect="dteOptions.length; $nextTick(() => { $el.value = String(cbDte); })">
-              <template x-for="t in dteOptions" :key="'td-'+t">
-                <option :value="t" x-text="t + 'd'"></option>
-              </template>
-            </select>
+            <!-- The surface is fitted at 17 tenors and the metric layer at six,
+                 so the server snaps the page tenor to its nearest fitted one.
+                 When those differ the panel says which it drew rather than the
+                 page control moving, which would repoint every rail. -->
+            <span class="eq-section-sub" x-show="tent && tent.dte !== pageTenor"
+                  x-cloak class="eq-warn"
+                  x-text="tent ? 'drawn at ' + tent.dte + 'd (nearest fitted)' : ''"></span>
             <span class="eq-section-sub" x-show="tentLoading" x-cloak>loading…</span>
           </div>
 
@@ -1188,18 +1196,6 @@
                     x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub" x-text="cbSubtitle('skew')"></span>
             <div class="eq-spacer"></div>
-            <!-- The same control as the tent's, bound to the same tenor. One
-                 tenor is a page-level idea ("what am I trading"), so it is
-                 shared; the control appears on both panels so it can be
-                 changed from wherever you are looking. -->
-            <span class="eq-lbl">Tenor</span>
-            <select class="eq-sel" style="max-width:80px"
-                    @change="setCbDte($event.target.value)"
-                    x-effect="dteOptions.length; $nextTick(() => { $el.value = String(cbDte); })">
-              <template x-for="t in dteOptions" :key="'sd-'+t">
-                <option :value="t" x-text="t + 'd'"></option>
-              </template>
-            </select>
             <span class="eq-section-sub" x-show="cbLoading.skew" x-cloak>loading…</span>
           </div>
           <div class="eq-ts-wrap eq-band-canvas">
@@ -1454,7 +1450,8 @@
                     :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
                     x-text="fs ? '⤡' : '⤢'"></button>
             <span class="eq-section-sub"
-                  x-text="svol ? (svol.dte + 'd · ' + histWindow.toUpperCase()) : ''"></span>
+                  :title="'Fixed at ' + (svol ? svol.dte : 30) + 'd rather than following the page tenor. This panel asks how hard a down move hits vol in this name, not how it does at the traded tenor — and 30d is the tenor the stored spotvol_beta behind the header chip is built at.'"
+                  x-text="svol ? (svol.dte + 'd fixed · ' + histWindow.toUpperCase()) : ''"></span>
             <div class="eq-spacer"></div>
             <span class="eq-section-sub" x-show="svolLoading" x-cloak>loading…</span>
           </div>
