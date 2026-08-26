@@ -83,6 +83,8 @@ class Row(dict):
             return datetime.date(2026, 9, 5)
         if k == "earnings_session":
             return "amc"
+        if k == "ticker":
+            return "AAPL"
         if k == "snapshot":
             return "1545"
         if k == "captured_at":
@@ -419,6 +421,12 @@ async def main():
                                                   snapshot=None, sessions=20,
                                                   exclude_extrapolated=ex,
                                                   pool=pool)))
+    cases.append(("universe-spot-breadth",
+                  eiv.universe_spot_breadth(date=None, snapshot=None, pool=pool)))
+    cases.append(("universe-spot-breadth pinned slice",
+                  eiv.universe_spot_breadth(date="2026-08-24", snapshot="1200",
+                                            pool=pool)))
+
     # Contango is a property of a tenor PAIR. Counting it on a single-tenor
     # column would silently compare a vol level against 1.0.
     must_400.append(("term-state rejects a non-pair metric",

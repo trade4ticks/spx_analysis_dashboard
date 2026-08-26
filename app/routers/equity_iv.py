@@ -77,6 +77,11 @@ ATM_TABLE       = "equity_atm"
 EARNINGS_TABLE  = "earnings_calendar"
 EARNINGS_COVERAGE_TABLE = "earnings_coverage"
 
+# The benchmarks the spot-breadth panel is read against. Broad-market ETFs
+# rather than sector funds: the panel counts the whole universe, so the
+# reference has to span it.
+SPOT_BREADTH_REFS = ("SPY", "QQQ", "IWM")
+
 # Tenors the surface is fitted at. Used to sanity-check a tenor parsed out of
 # a column name before it is turned into an extrap flag name.
 TENORS = (7, 14, 21, 30, 60, 90)
@@ -532,9 +537,16 @@ async def universe_stats(
 ):
     """The numbers beside the universe histogram.
 
-    Returns today's count above +`hot`, that count's own historical average
-    over the window, today's universe median, and where today's cross-name
-    DISPERSION ranks among the window's dispersions.
+    Returns today's counts BEYOND EACH TAIL (above +`hot` and below -`hot`),
+    the upper count's own historical average over the window, today's
+    universe median, and where today's cross-name DISPERSION ranks among the
+    window's dispersions.
+
+    Both tails because breadth in one direction is not the complement of
+    breadth in the other: 8% rich and 6% cheap is a dispersed universe, 8%
+    rich and 0% cheap is a directional one, and a single line cannot tell
+    those apart. `hot` is symmetric by construction -- a separate `cold`
+    threshold would let the two lines answer different questions.
 
     The point of all four: if the median ticker sits at +0.4 sigma, a ticker
     at +2.0 is part of a market-wide move rather than a name-specific
@@ -580,6 +592,7 @@ async def universe_stats(
             f"SELECT m.trade_date,"
             f" count({val})                                       AS n,"
             f" count(*) FILTER (WHERE {val} > $1)                  AS n_hot,"
+            f" count(*) FILTER (WHERE {val} < -$1)                 AS n_cold,"
             f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {val})  AS med,"
             f" stddev_samp({val})                                  AS disp "
             f"{_from_clause(e['form'] != 'base')} WHERE {where} "
@@ -591,6 +604,7 @@ async def universe_stats(
         trow = await conn.fetchrow(
             f"SELECT count({val}) AS n,"
             f" count(*) FILTER (WHERE {val} > $1) AS n_hot,"
+            f" count(*) FILTER (WHERE {val} < -$1) AS n_cold,"
             f" percentile_cont(0.5) WITHIN GROUP (ORDER BY {val}) AS med,"
             f" stddev_samp({val}) AS disp "
             f"{_from_clause(e['form'] != 'base')} "
@@ -599,11 +613,13 @@ async def universe_stats(
         )
 
     series = [{"date": str(r["trade_date"]), "n": r["n"], "n_hot": r["n_hot"],
+               "n_cold": r["n_cold"],
                "median": r["med"], "dispersion": r["disp"]} for r in rows]
 
     today = None
     if trow is not None and trow["n"]:
         today = {"date": str(d), "n": trow["n"], "n_hot": trow["n_hot"],
+                 "n_cold": trow["n_cold"],
                  "median": trow["med"], "dispersion": trow["disp"]}
 
     hot_avg = (sum(s["n_hot"] for s in series) / len(series)) if series else None
@@ -628,6 +644,171 @@ async def universe_stats(
         "series": series,
         "z_source": "stored" if e["form"] != "base" else None,
         "history_basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session"},
+    }
+
+
+@router.get("/universe-spot-breadth")
+async def universe_spot_breadth(
+    date:     str = Query(None),
+    snapshot: str = Query(None),
+    pool=Depends(get_oi_pool),
+):
+    """How much of the universe is up, bucket by bucket, TODAY.
+
+    Every other panel on this page reads a vol metric. This one reads price,
+    and it is the only panel that moves through the session: `log_ret_*` is a
+    settled daily-close series ending at the PRIOR session's close, so at
+    11:25 it still reports yesterday's move and will keep reporting it until
+    tonight's close is written. Nothing else here answers "what is the tape
+    doing right now".
+
+    TWO ANCHORS, because they are different questions:
+
+      vs prior close   the overnight gap plus the day. Available from the
+                       first bucket, since last night's close is settled.
+      vs today's open  the day alone, gap removed. 60% above yesterday's
+                       close with 45% above the open is a market that gapped
+                       up and has been sold since.
+
+    The open comes from `underlying_ohlc.open`, NOT from the 0935 snapshot.
+    The first snapshot bucket is minutes into the session and already carries
+    whatever moved in those minutes; the daily bar's open is the auction
+    print. They are not the same number and only one of them is the open.
+
+    The cost of that choice: `underlying_ohlc` is a DAILY table, so today's
+    row does not exist until the bar is written after the close. The
+    open-anchored series is therefore absent for the whole live session and
+    `open_pending` says so, rather than the panel silently drawing one line
+    and looking complete.
+
+    FUNDS ARE NOT IN THE BREADTH COUNT. `earnings_coverage.has_earnings` is
+    false for a fund -- the one discriminator this database has -- and index
+    ETFs are weighted baskets OF the universe being counted, so including
+    them double-counts their constituents and compresses the very dispersion
+    the panel exists to show. They come back separately as `refs`, which is
+    the useful role for them: SPY/QQQ/IWM are the benchmark the breadth
+    number is read against.
+
+    SPLITS. `underlying_ohlc` is back-adjusted -- every historical price is
+    restated onto the CURRENT share scale -- while a snapshot's
+    `underlying_price` is the as-traded quote. Those agree except across a
+    split, where the adjusted close is on the far side of the ratio and the
+    comparison would read as a 50% or 100% move. Any ticker with a split
+    printed on either session is dropped and counted in `n_split`, rather
+    than de-adjusted: at one or two names on the rare day it costs nothing,
+    and a wrong breadth number is worse than a slightly smaller one.
+    """
+    if not pool:
+        return {"error": "OI database not configured", "series": []}
+
+    # `spot` is a fixed column name, not user input, so it needs no whitelist
+    # pass -- but it is checked against the live column set anyway, because
+    # "the column vanished upstream" should be a sentence rather than a
+    # Postgres error surfacing through the panel as a blank canvas.
+    cat = await _catalog(pool)
+    if "spot" not in cat["live_metric_cols"]:
+        return {"error": "equity_metrics carries no `spot` column",
+                "series": [], "refs": []}
+    spot = 'm."spot"'
+
+    # Both sessions' split flags, and the two reference prices, per ticker.
+    # `prev` is the previous session across the whole table rather than per
+    # ticker: a ticker that did not print yesterday has no comparison to make
+    # and should drop out, not silently reach further back for one.
+    ref_cte = (
+        "WITH prev AS ("
+        "  SELECT max(trade_date) AS d FROM underlying_ohlc WHERE trade_date < $1"
+        "), ref AS ("
+        "  SELECT o.ticker, o.close AS prev_close, t.open AS open_px,"
+        "         (COALESCE(o.splits, 0) <> 0 OR COALESCE(t.splits, 0) <> 0)"
+        "           AS split"
+        "  FROM underlying_ohlc o"
+        "  JOIN prev p ON o.trade_date = p.d"
+        "  LEFT JOIN underlying_ohlc t"
+        "    ON t.ticker = o.ticker AND t.trade_date = $1"
+        ")"
+    )
+
+    # A fund is has_earnings = false. NULL means "not in coverage at all",
+    # which is a gap in the table rather than a statement that it is a fund,
+    # so those stay in the stock count where they would have been anyway.
+    is_fund = "cov.has_earnings IS FALSE"
+
+    async with pool.acquire() as conn:
+        d_, snap = await _resolve_slice(conn, date, snapshot)
+
+        rows = await conn.fetch(
+            f"{ref_cte} "
+            f"SELECT m.snapshot,"
+            f" count(*) FILTER (WHERE NOT r.split AND NOT {is_fund}"
+            f"   AND {spot} IS NOT NULL AND r.prev_close IS NOT NULL)"
+            f"     AS n_close,"
+            f" count(*) FILTER (WHERE NOT r.split AND NOT {is_fund}"
+            f"   AND {spot} > r.prev_close)"
+            f"     AS n_up_close,"
+            f" count(*) FILTER (WHERE NOT r.split AND NOT {is_fund}"
+            f"   AND {spot} IS NOT NULL AND r.open_px IS NOT NULL)"
+            f"     AS n_open,"
+            f" count(*) FILTER (WHERE NOT r.split AND NOT {is_fund}"
+            f"   AND {spot} > r.open_px)"
+            f"     AS n_up_open,"
+            f" count(*) FILTER (WHERE r.split) AS n_split,"
+            f" count(*) FILTER (WHERE {is_fund}) AS n_fund "
+            f"FROM {METRICS_TABLE} m "
+            f"JOIN ref r ON r.ticker = m.ticker "
+            f"LEFT JOIN {EARNINGS_COVERAGE_TABLE} cov ON cov.ticker = m.ticker "
+            f"WHERE m.trade_date = $1 AND m.snapshot <= $2 "
+            f"GROUP BY m.snapshot ORDER BY m.snapshot",
+            d_, snap,
+        )
+
+        # The benchmarks, as themselves. Same two anchors so the reference
+        # marker sits on the same scale as the line it is read against.
+        refs = await conn.fetch(
+            f"{ref_cte} "
+            f"SELECT m.snapshot, m.ticker, {spot} AS px,"
+            f" r.prev_close, r.open_px "
+            f"FROM {METRICS_TABLE} m "
+            f"JOIN ref r ON r.ticker = m.ticker "
+            f"WHERE m.trade_date = $1 AND m.snapshot <= $2 "
+            f"  AND m.ticker = ANY($3) AND NOT r.split "
+            f"ORDER BY m.ticker, m.snapshot",
+            d_, snap, list(SPOT_BREADTH_REFS),
+        )
+
+    def _pct(n, d):
+        return (100.0 * n / d) if d else None
+
+    series = [{
+        "snapshot":   r["snapshot"],
+        "n":          int(r["n_close"] or 0),
+        "pct_close":  _pct(r["n_up_close"] or 0, r["n_close"] or 0),
+        "n_open":     int(r["n_open"] or 0),
+        "pct_open":   _pct(r["n_up_open"] or 0, r["n_open"] or 0),
+    } for r in rows]
+
+    by_ticker: dict = {}
+    for r in refs:
+        px, pc, op = r["px"], r["prev_close"], r["open_px"]
+        by_ticker.setdefault(r["ticker"], []).append({
+            "snapshot": r["snapshot"],
+            "vs_close": (100.0 * (px / pc - 1.0)) if px and pc else None,
+            "vs_open":  (100.0 * (px / op - 1.0)) if px and op else None,
+        })
+
+    last = rows[-1] if rows else None
+    return {
+        "date": str(d_), "snapshot": snap,
+        "series": series,
+        "refs": [{"ticker": t, "points": p} for t, p in sorted(by_ticker.items())],
+        # True while the daily bar for today has not been written, which is
+        # the whole live session. The client draws the close-anchored line
+        # regardless and labels the other one pending.
+        "open_pending": not any(s["n_open"] for s in series),
+        "n_split": int(last["n_split"] or 0) if last is not None else 0,
+        "n_fund":  int(last["n_fund"] or 0) if last is not None else 0,
+        "basis": {"open": "underlying_ohlc.open", "close": "prior session close",
+                  "funds": "excluded from breadth; returned as refs"},
     }
 
 

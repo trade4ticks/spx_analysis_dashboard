@@ -205,6 +205,21 @@ try {
 } catch (e) { defaultCols = null; }
 let hasClear = typeof comp.clearStructure === 'function'
             && typeof comp.toggleStructure === 'function';
+/* The universe row's own stems. These retarget like anything else, and one
+   of them -- the scatter's return axis -- is what a hand-written "5d return"
+   subtitle used to contradict. Resolving all six tenors here is what stops a
+   stem from silently keeping its original when the swap fails. */
+let stems = {};
+try {
+  const t = comp.pageTenor;
+  for (const n of [7, 14, 21, 30, 60, 90]) {
+    comp.pageTenor = n;
+    stems[n] = { hist: comp.histCol(), breadth: comp.breadthCol(),
+                 skew: comp.skewCol(), ret: comp.retCol(),
+                 vrp: comp.vrpCol(), term: comp.termCol() };
+  }
+  comp.pageTenor = t;
+} catch (e) { stems = { error: String(e && e.message || e) }; }
 let listUrl = null;
 try {
   comp.pageTenor = 7;
@@ -212,7 +227,7 @@ try {
   if (p && p.then) { /* fire-and-forget: the URL is already recorded */ }
   listUrl = sb.__urls.filter(u => u.includes('/structures')).pop() || null;
 } catch (e) { listUrl = '<<threw: ' + e.message + '>>'; }
-console.log(JSON.stringify({ok:true, out, presets, listUrl, defaultCols, hasClear}));
+console.log(JSON.stringify({ok:true, out, presets, listUrl, defaultCols, hasClear, stems}));
 """
 
 
@@ -272,6 +287,50 @@ def main() -> int:
         return 1
 
     bad = 0
+
+    # ── the universe row's stems ─────────────────────────────────────
+    stems = data.get("stems") or {}
+    if "error" in stems:
+        bad += 1
+        print(f"\n  universe stems threw: {stems['error']}")
+    elif not stems:
+        bad += 1
+        print("\n  the component exposes no universe stems")
+    else:
+        for tenor, got in sorted(stems.items(), key=lambda kv: int(kv[0])):
+            for role, col in sorted(got.items()):
+                if col not in by_col:
+                    bad += 1
+                    print(f"\n  universe stem {role!r} at tenor {tenor} "
+                          f"resolves to {col!r}, which is not in the catalog")
+            # The three metric stems must stay THREE metrics. The row was
+            # over-indexed on one family precisely because nothing checked.
+            fams = {r: by_col[got[r]]["family"] for r in ("hist", "breadth", "skew")
+                    if got.get(r) in by_col}
+            if len(set(fams.values())) < len(fams):
+                bad += 1
+                print(f"\n  at tenor {tenor} the histogram, breadth and scatter "
+                      f"stems collapse onto shared families: {fams}")
+        # The contango pair is deliberately NOT tenor-following: a shape needs
+        # two fixed points, and a moving pair can never show a divergence.
+        terms = {got["term"] for got in stems.values() if "term" in got}
+        if len(terms) != 1:
+            bad += 1
+            print(f"\n  the scatter's term-state colour column moves with the "
+                  f"tenor ({sorted(terms)}); it is meant to be pinned")
+
+    # No hand-written horizon anywhere near the universe scatter. This is the
+    # exact defect being guarded: a literal "5d return" label sat under a
+    # 21-trading-day number as soon as the page tenor left 7d.
+    tpl = (ROOT / "templates" / "equity_iv.html").read_text(encoding="utf-8")
+    import re as _re
+    # HTML comments only, stripped: the comment explaining WHY the horizon is
+    # never hand-written necessarily quotes the string it is banning.
+    tpl = _re.sub(r"<!--.*?-->", "", tpl, flags=_re.S)
+    for m in _re.finditer(r"\b\d+d? return\b", tpl):
+        bad += 1
+        print(f"\n  templates/equity_iv.html hand-writes a return horizon: "
+              f"{m.group(0)!r} -- show the resolved column instead")
 
     # ── the neutral default scanner set ──────────────────────────────
     STRUCTURE_SPECIFIC = ("zc_width_sigma", "spotvol_beta", "convex")

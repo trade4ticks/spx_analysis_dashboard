@@ -150,8 +150,9 @@
        take. 2x2 rather than a column of four: at one-quarter width a time
        series is unreadable, and the two scatters need aspect ratio more than
        they need width. */
-    .eq-quad { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; align-content:start; }
-    @media (max-width:1400px) { .eq-quad { grid-template-columns:minmax(0,1fr); } }
+    .eq-quad { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px; align-content:start; }
+    @media (max-width:1700px) { .eq-quad { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+    @media (max-width:1100px) { .eq-quad { grid-template-columns:minmax(0,1fr); } }
     .eq-quad > .eq-section { margin-bottom:0; display:flex; flex-direction:column; }
     .eq-quad-canvas { height:150px; flex:1 1 auto; min-height:120px; }
     /* The quad's headers carry more chrome than their width allows at the
@@ -736,41 +737,56 @@
         </div>
       </div>
 
-      <!-- Four global panels in the footprint the single distribution panel
-           used to take. Deliberately four DIFFERENT forms: four histograms
-           would be dull and would carry one kind of information four times.
+      <!-- Six panels describing the UNIVERSE — every ticker covered at this
+           date and snapshot — in the footprint the single distribution panel
+           used to take. Not "the market": nothing here is index-weighted and
+           the index ETFs are deliberately kept out of the counts, so these
+           are equal-weight statements about the covered names and nothing
+           more. SPY appears once, as a reference marker, and never in a
+           denominator.
 
-           All follow the page tenor. NONE follow the structure preset — they
-           are market state at the selected horizon, not anything about a
-           trade, which is why they read the headline metric rather than the
-           scatter's x axis. -->
+           Deliberately different FORMS rather than six histograms, and three
+           different metric families rather than one read six ways. The row
+           was over-indexed on put skew — histogram, breadth line and scatter
+           x axis all moved together, so a quiet day in skew left the whole
+           row saying nothing. Now: the level (ATM IV), the smile's asymmetry
+           (the 25-delta risk reversal), the level-against-price relationship
+           (put skew × return), the curve shape, the tape, and the premium.
+
+           All follow the page tenor where they have one. NONE follow the
+           structure preset — they are universe state at the selected
+           horizon, not anything about a trade, which is why they name their
+           own metrics rather than reading the scatter's axes. -->
       <div class="eq-quad">
 
         <!-- (a) today's distribution -->
         <div class="eq-section" x-data="{ fs:false, note:false }"
              :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
-            <span class="eq-section-title">Universe</span>
+            <span class="eq-section-title">IV level</span>
             <span class="eq-help" :class="{on: note}" @click="note = !note"
                   title="Why this panel is built the way it is">?</span>
             <button class="eq-fs" @click="fs = !fs; relayout()"
                     :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
                     x-text="fs ? '⤡' : '⤢'"></button>
-            <span class="eq-section-sub" x-text="headlineCol()"></span>
+            <span class="eq-section-sub" x-text="histCol()"></span>
           </div>
           <div class="eq-ts-wrap eq-quad-canvas">
             <canvas id="eq-hist"></canvas>
           </div>
           <div class="eq-note" x-show="note" x-cloak>
-            Today's distribution across the universe, median marked. If the
-            median ticker sits at +0.4σ, a ticker at +2.0σ is riding a
-            market-wide move rather than standing out on its own — same number,
-            different trade. Nothing else on the page answers "is this ticker
-            unusual, or is everything unusual".
+            Today's distribution of ATM IV z across the universe, median
+            marked. If the median ticker sits at +0.4σ, a ticker at +2.0σ is
+            riding a universe-wide move rather than standing out on its own —
+            same number, different trade. Nothing else on the page answers
+            "is this ticker unusual, or is everything unusual".
+            The LEVEL rather than the skew, because the skew is already the
+            subject of the two panels beside it.
+            <span x-text="breadthSigmaNote()"></span>
           </div>
         </div>
 
-        <!-- (b) breadth over time -->
+        <!-- (b) breadth over time, both tails -->
         <div class="eq-section" x-data="{ fs:false, note:false }"
              :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
@@ -780,7 +796,7 @@
             <button class="eq-fs" @click="fs = !fs; relayout()"
                     :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
                     x-text="fs ? '⤡' : '⤢'"></button>
-            <span class="eq-section-sub">% above +1.5σ · 60 sessions</span>
+            <span class="eq-section-sub" x-text="breadthCol() + ' · 60 sessions'"></span>
             <span class="eq-section-sub" x-show="breadthLoading" x-cloak>…</span>
           </div>
           <div class="eq-ts-wrap eq-quad-canvas">
@@ -793,20 +809,31 @@
             already a distribution, and repeating that form would add a shape
             rather than a fact. This one says whether TODAY'S distribution is
             itself unusual, which a histogram of today cannot.
+            Both tails, because breadth one way is not the complement of the
+            other — 8% rich with 6% cheap is a dispersed universe, 8% rich
+            with 0% cheap is a directional one.
+            The risk reversal rather than the skew, so this is wing asymmetry
+            as a raw vol difference rather than the scatter's slope measured
+            again in different units.
+            <span x-text="breadthSigmaNote()"
+                  style="display:block;margin-top:3px"></span>
           </div>
         </div>
 
-        <!-- (c) skew against spot -->
+        <!-- (c) skew against the return -->
         <div class="eq-section" x-data="{ fs:false, note:false }"
              :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
-            <span class="eq-section-title">Skew × spot</span>
+            <span class="eq-section-title">Skew × return</span>
             <span class="eq-help" :class="{on: note}" @click="note = !note"
                   title="Why this panel is built the way it is">?</span>
             <button class="eq-fs" @click="fs = !fs; relayout()"
                     :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
                     x-text="fs ? '⤡' : '⤢'"></button>
-            <span class="eq-section-sub">z × 5d return</span>
+            <!-- The RESOLVED column names, never a hand-written horizon: a
+                 literal "5d return" here sat under a 21-day number the
+                 moment the page tenor moved off 7d. -->
+            <span class="eq-section-sub" x-text="'z × ' + retCol()"></span>
             <span class="eq-section-sub" x-show="gscatLoading" x-cloak>…</span>
           </div>
           <div class="eq-ts-wrap eq-quad-canvas">
@@ -814,18 +841,27 @@
             <div class="panel-error" x-show="gscatError" x-cloak x-text="gscatError"></div>
           </div>
           <div class="eq-note" x-show="note" x-cloak>
-            The adverse-selection check at market level: are the rich-skew names
-            the ones that fell? A tight cluster with a flat y-axis is a
-            different market from a downward slope.
+            The adverse-selection check at universe level: are the rich-skew
+            names the ones that fell? A tight cluster with a flat y-axis is a
+            different universe from a downward slope.
             Coloured by term state — blue contango, pink backwardation — and
-            NOT by sector: this database has no sector table, nor a volume, ADV
-            or market-cap column. Term state is the regime filter and the third
-            axis of the same question, so it adds a dimension rather than
-            decorating one.
+            NOT by sector: this database has no sector table, nor a volume,
+            ADV or market-cap column. Term state is the regime filter and the
+            third axis of the same question, so it adds a dimension rather
+            than decorating one.
+            <span style="display:block;margin-top:3px">
+              The y axis follows the page tenor. Read it as what it is:
+              <span x-text="(gscat &amp;&amp; gscat.y &amp;&amp; gscat.y.description) || ''"></span>
+              It runs through the PRIOR session's close, so it does not
+              contain today — comparing it against a live spot to back out a
+              starting price gives the wrong answer, because the return does
+              not end where the spot is. The spot panel below is the one that
+              moves intraday.
+            </span>
           </div>
         </div>
 
-        <!-- (d) term state over time -->
+        <!-- (d) term state over time, both pairs -->
         <div class="eq-section" x-data="{ fs:false, note:false }"
              :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
           <div class="eq-section-hdr">
@@ -844,10 +880,88 @@
           <div class="eq-note" x-show="note" x-cloak>
             <span x-show="termNote()" x-text="termNote()"
                   style="display:block;margin-bottom:3px"></span>
-            One line and a 50% rule rather than a stacked pair: contango and
+            Two lines and a 50% rule rather than stacked pairs: contango and
             backwardation sum to the covered universe, so a stack would spend
             half the panel drawing the complement of the other half. A term
             ratio is near/far, so below 1 is contango.
+            The two pairs are FIXED at 7/30 and 30/90 and do not follow the
+            page tenor — the subject is the shape of the curve, and a shape
+            needs two points on it. The front pair moving while the body
+            holds is an event calendar; both moving together is a vol shock.
+          </div>
+        </div>
+
+        <!-- (e) spot breadth, today only -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Tape</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
+            <span class="eq-section-sub">% up · day so far</span>
+            <span class="eq-section-sub" x-show="spotB &amp;&amp; spotB.open_pending"
+                  x-cloak style="color:#e84393">open pending</span>
+            <span class="eq-section-sub" x-show="spotBLoading" x-cloak>…</span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-spotb"></canvas>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            <span x-show="spotBNote()" x-text="spotBNote()"
+                  style="display:block;margin-bottom:3px"></span>
+            The only panel here that moves through the session. Every other
+            metric on this row is either a vol reading at the selected bucket
+            or — in the scatter's case — a settled daily-close series that
+            will not change until tonight.
+            Two anchors: against last night's close is the gap plus the day,
+            against today's open is the day alone. 60% above the close with
+            45% above the open is a universe that gapped up and has been sold
+            since, which one line cannot say.
+            The open comes from underlying_ohlc's daily bar, not the 0935
+            snapshot — that bucket is minutes into the session and already
+            carries whatever moved in them. The cost is that the daily bar is
+            not written until after the close, so the open-anchored line is
+            absent for the whole live session and says "open pending" rather
+            than substituting a number that is not the open.
+            SPY/QQQ/IWM ride along on a second axis as their own percent
+            moves, and are NOT in the breadth count: an index ETF is a
+            weighted basket of the names being counted, so including it would
+            double-count its constituents. Breadth at 40% with SPY up half a
+            percent is a narrow tape.
+          </div>
+        </div>
+
+        <!-- (f) VRP breadth -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Premium</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
+            <span class="eq-section-sub" x-text="vrpCol() + ' > 0 · 60 sessions'"></span>
+            <span class="eq-section-sub" x-show="vrpLoading" x-cloak>…</span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-vrpb"></canvas>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            <span x-show="vrpNote()" x-text="vrpNote()"
+                  style="display:block;margin-bottom:3px"></span>
+            What share of the universe is being paid to sell vol at the page
+            tenor. The LEVEL is the reading here, not the tail: 80% is a
+            universe where short vol is the default and the edge is in
+            picking; 45% is one where it is a position.
+            No z on this line — a positive premium is a fact about the number
+            itself, not about where the number sits in its own history, and
+            scoring it would have turned "is it paid" into "is it paid more
+            than usual", which the breadth panel already asks of another
+            metric.
           </div>
         </div>
       </div>

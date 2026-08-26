@@ -36,8 +36,8 @@ const EQ_CHARTS = {
   // rather than orphaning it on an element the new one is about to take.
   'cb-skew': null, 'cb-term': null, 'cb-skew_term': null,
   tent: null, sticky: null, tscat: null, svol: null, oi: null,
-  // The four global panels.
-  breadth: null, gscat: null, termstate: null,
+  // The six universe panels.
+  breadth: null, gscat: null, termstate: null, spotb: null, vrpb: null,
 };
 /* Per-render point metadata the tooltip and the label plugin need, kept off
  * the reactive object for the same reason. */
@@ -116,17 +116,52 @@ const EQ_DEFAULT_SCAN_COLS = [
 ];
 const EQ_DEFAULT_TENOR = 30;
 
-/* The HEADLINE metric for the four global panels.
+/* The metrics the six universe panels read.
  *
- * Named once, and deliberately NOT the scatter's x axis, which is what the
+ * Named here, and deliberately NOT the scatter's x axis, which is what the
  * histogram used to follow: a structure preset sets the scatter axes, and
- * these four are meant to describe the market rather than the trade. Tying
- * them to a control a preset moves would have made "is everything unusual"
- * change its subject when a structure was selected.
+ * these are meant to describe the universe rather than the trade. Tying them
+ * to a control a preset moves would have made "is everything unusual" change
+ * its subject when a structure was selected.
  *
- * The put wing at the page tenor, because that is the reading the whole page
- * is organised around. It retargets with the tenor like anything else. */
-const EQ_HEADLINE_STEM = 'skew_30d_25p_atm';
+ * THREE stems rather than one, because one metric read three ways is one
+ * fact drawn three times. Put skew alone made the row a skew dashboard:
+ * the histogram, the breadth line and the scatter's x axis all moved
+ * together, so a day when skew was quiet left the whole row saying nothing.
+ * Split across the level, the smile's asymmetry, and the level-vs-price
+ * relationship, the three answer different questions and can disagree —
+ * which is when the row is worth reading.
+ *
+ *   histogram  ATM IV. The level. Where the universe's vol actually sits.
+ *   breadth    the 25-delta risk reversal. Wing asymmetry as a RAW vol
+ *              difference, not a slope, so it is not the scatter's skew
+ *              measured again in different units.
+ *   scatter    put skew, against the return. The adverse-selection check,
+ *              which is the one place the put wing is the right subject.
+ *
+ * All three retarget with the page tenor like anything else. */
+const EQ_HIST_STEM    = 'iv_30d_atm';
+const EQ_BREADTH_STEM = 'rr_30d_25';
+const EQ_SCATTER_STEM = 'skew_30d_25p_atm';
+
+/* The return the universe scatter plots against. It retargets too -- the two
+ * scatters on this page were reading different horizons while one of them
+ * carried a hand-written "5d return" label, which went stale the moment the
+ * page tenor moved off 7d. Nothing here names a horizon in prose again; the
+ * subtitle shows the resolved column and the note quotes the catalog. */
+const EQ_SCATTER_RET  = 'log_ret_7d';
+
+/* The two term pairs the contango panel draws. FIXED, not tenor-following:
+ * the panel's subject is the SHAPE of the curve, and a shape needs at least
+ * two points on it. 7/30 is the front end, where earnings and event risk
+ * live and where backwardation shows up first; 30/90 is the body, which
+ * moves later and less. Watching them diverge is the reading -- one line
+ * retargeting under the page tenor would have shown a different pair each
+ * time the tenor changed and never a divergence. */
+const EQ_TERM_PAIRS = [
+  { col: 'term_ratio_7d_30d',  label: '7/30',  color: 'pink' },
+  { col: 'term_ratio_30d_90d', label: '30/90', color: 'blue' },
+];
 
 const EQ_SPOT_LABEL = '__eq_spot_reference__';
 
@@ -738,12 +773,14 @@ document.addEventListener('alpine:init', () => {
     grid: null, gridLoading: false, gridError: '',
     gridView: 'iv_minus_atm',
 
-    /* The four global panels. All follow the page tenor and NONE follow the
-     * structure preset: they are market state at the selected horizon, not
+    /* The six universe panels. All follow the page tenor and NONE follow the
+     * structure preset: they are universe state at the selected horizon, not
      * anything about a trade. */
-    breadth: null, breadthLoading: false,
-    gscat: null, gscatLoading: false, gscatError: '',
-    termState: null, termLoading: false,
+    bs: null, breadthLoading: false,
+    spotB: null, spotBLoading: false,
+    vrpB: null, vrpLoading: false,
+    gscat: null, gscatLoading: false, gscatError: '', histLoading: false,
+    termState: [], termLoading: false,
 
     // Row 8. The Path panel has its OWN axis pickers rather than following
     // the Cross-section ones. Sharing them meant scrolling up to change this
@@ -1322,7 +1359,10 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.csLoading = false;
       }
-      this.loadUniverseStats();
+      // The histogram used to hang off this call, back when it followed the
+      // scatter's x axis. It names its own metric now and loads with the
+      // rest of the universe row, so pulling it from here is what stops the
+      // page fetching /universe-stats twice on every reload.
     },
 
     /** `live` rows were captured at an arbitrary instant and rounded to the
@@ -1338,6 +1378,68 @@ document.addEventListener('alpine:init', () => {
      * is already a distribution, and a second one would add a shape rather
      * than a fact. This one answers whether today's distribution is itself
      * unusual, which a histogram cannot. */
+    /* Shared shape for the four small percent-of-universe time series.
+     * They differ only in their data and their labels, and four copies of a
+     * Chart config diverge silently -- one of them keeps an axis the others
+     * lost, and nobody notices until the panels stop being comparable. */
+    pctLineChart(el, labels, sets, opts = {}) {
+      const self = this;
+      return new Chart(el.getContext('2d'), {
+        type: 'line',
+        data: { labels, datasets: sets.map(s => ({
+          label: s.label, data: s.data,
+          borderColor: s.color, borderWidth: 1.25, tension: 0,
+          borderDash: s.dash || [],
+          // Today marked and hollow, for the reason the History line marks
+          // it: at an intraday bucket it is a partial session, and a solid
+          // dot would claim a settled reading.
+          pointRadius: s.data.map((_, i) =>
+            (opts.markLast && i === s.data.length - 1) ? 3.5 : 0),
+          pointBackgroundColor: EQ_SURF,
+          pointBorderColor: s.color, pointBorderWidth: 1.5,
+          fill: s.fill ? { target: 'origin', above: self.rgba(s.color, 0.10) } : false,
+          spanGaps: !!s.spanGaps,
+        })) },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          layout: { padding: { right: 8 } },
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { grid: { display: false },
+                 ticks: { maxTicksLimit: 4, maxRotation: 0, font: { size: 8 } } },
+            y: Object.assign({
+                 grid: { color: 'rgba(255,255,255,0.05)' },
+                 ticks: { callback: v => v.toFixed(0) + '%', font: { size: 8 },
+                          maxTicksLimit: 4 },
+               }, opts.y || {}),
+          },
+          plugins: {
+            // A legend, because these panels now carry two lines each and an
+            // unlabelled pair is a decoration.
+            legend: { display: sets.length > 1, position: 'bottom',
+                      labels: { boxWidth: 8, boxHeight: 8, font: { size: 8 },
+                                padding: 4, usePointStyle: true,
+                                pointStyle: 'line' } },
+            tooltip: { callbacks: {
+              label: it => it.parsed.y == null ? ''
+                : `${it.dataset.label}: ${it.parsed.y.toFixed(1)}%`,
+            } },
+          },
+        },
+      });
+    },
+
+    /* (b) Breadth over time, BOTH TAILS. A line rather than a second
+     * histogram: the panel beside it is already a distribution, and
+     * repeating that form would add a shape rather than a fact. This one
+     * says whether today's distribution is itself unusual, which a histogram
+     * of today cannot.
+     *
+     * Two lines because breadth in one direction is not the complement of
+     * the other. 8% rich with 6% cheap is a dispersed universe -- plenty to
+     * pick from on both sides; 8% rich with 0% cheap is a directional one,
+     * where the rich names are rich because everything is. Same top line,
+     * opposite trade. */
     renderBreadth() {
       if (typeof Chart === 'undefined') return;
       if (EQ_CHARTS.breadth) { EQ_CHARTS.breadth.destroy(); EQ_CHARTS.breadth = null; }
@@ -1346,42 +1448,117 @@ document.addEventListener('alpine:init', () => {
         if (!el) return;
         const b = this.breadthSeries();
         if (!b.length) return;
-        const today = this.us && this.us.today && this.us.today.n
-          ? 100 * (this.us.today.n_hot || 0) / this.us.today.n : null;
-        const labels = b.map(r => r.date).concat(today == null ? [] : ['today']);
-        const data = b.map(r => r.pct).concat(today == null ? [] : [today]);
-        const self = this;
-        EQ_CHARTS.breadth = new Chart(el.getContext('2d'), {
-          type: 'line',
-          data: { labels, datasets: [{
-            label: 'breadth', data,
-            borderColor: EQ_BLUE, borderWidth: 1.25, tension: 0,
-            // Today marked, and hollow for the same reason the History line
-            // marks it: at an intraday bucket it is a partial session.
-            pointRadius: data.map((_, i) => i === data.length - 1 && today != null ? 3.5 : 0),
-            pointBackgroundColor: EQ_SURF, pointBorderColor: EQ_PINK,
-            pointBorderWidth: 1.5,
-            fill: { target: 'origin', above: self.rgba(EQ_BLUE, 0.10) },
-          }] },
-          options: {
-            responsive: true, maintainAspectRatio: false, animation: false,
-            layout: { padding: { right: 8 } },
-            interaction: { mode: 'index', intersect: false },
-            scales: {
-              x: { grid: { display: false },
-                   ticks: { maxTicksLimit: 4, maxRotation: 0, font: { size: 8 } } },
-              y: { grid: { color: 'rgba(255,255,255,0.05)' },
-                   ticks: { callback: v => v.toFixed(0) + '%', font: { size: 8 },
-                            maxTicksLimit: 4 } },
-            },
-            plugins: {
-              legend: { display: false },
-              tooltip: { callbacks: {
-                label: it => `${it.parsed.y.toFixed(1)}% above +1.5σ`,
-              } },
-            },
-          },
-        });
+        const t = this.breadthToday();
+        const labels = b.map(r => r.date).concat(t ? ['today'] : []);
+        EQ_CHARTS.breadth = this.pctLineChart(el, labels, [
+          { label: 'rich  > +1.5σ', color: EQ_BLUE, fill: true,
+            data: b.map(r => r.hot).concat(t ? [t.hot] : []) },
+          { label: 'cheap < −1.5σ', color: EQ_PINK,
+            data: b.map(r => r.cold).concat(t ? [t.cold] : []) },
+        ], { markLast: !!t, y: { min: 0 } });
+      });
+    },
+
+    /* (f) VRP breadth. /universe-stats with the threshold at zero, so
+     * `n_hot` is the count of names with a POSITIVE premium -- no z, no
+     * second endpoint, the raw column against zero.
+     *
+     * The level is the reading here, not the tail: this asks how broadly the
+     * usual short-vol trade is being paid at the page tenor. 80% is a
+     * universe where selling vol is the default and edge comes from picking;
+     * 45% is one where it is a position. */
+    renderVrpBreadth() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.vrpb) { EQ_CHARTS.vrpb.destroy(); EQ_CHARTS.vrpb = null; }
+      this.$nextTick(() => {
+        const el = document.getElementById('eq-vrpb');
+        if (!el || !this.vrpB) return;
+        const s = (this.vrpB.series || []).slice(-60).filter(r => r.n);
+        if (!s.length) return;
+        const pct = r => 100 * (r.n_hot || 0) / r.n;
+        const t = this.vrpB.today && this.vrpB.today.n ? pct(this.vrpB.today) : null;
+        EQ_CHARTS.vrpb = this.pctLineChart(el,
+          s.map(r => r.date).concat(t == null ? [] : ['today']),
+          [{ label: 'VRP > 0', color: EQ_BLUE, fill: true,
+             data: s.map(pct).concat(t == null ? [] : [t]) }],
+          { markLast: t != null, y: { min: 0, max: 100, ticks: {
+              callback: v => v + '%', font: { size: 8 }, stepSize: 50 } } });
+      });
+    },
+
+    /* (e) Spot breadth today, bucket by bucket.
+     *
+     * The only panel on this row that moves through the session. Two
+     * anchors, drawn on the same axis so the gap between them IS the
+     * reading: both at 60% is a universe that opened up and held, 60% and
+     * 45% is one that gapped up and has been sold since.
+     *
+     * The open-anchored line is dashed and usually absent -- the daily bar
+     * it comes from is not written until after the close. The panel says
+     * pending rather than substituting the 0935 snapshot, which is a price
+     * minutes into the session and not the auction print.
+     *
+     * SPY/QQQ/IWM ride along as their own percent moves rather than sitting
+     * in the breadth count: an index ETF is a weighted basket OF the names
+     * being counted, so including it double-counts its constituents. Read as
+     * a reference it is the useful thing -- breadth at 40% with SPY up half
+     * a percent is a narrow tape. */
+    renderSpotBreadth() {
+      if (typeof Chart === 'undefined') return;
+      if (EQ_CHARTS.spotb) { EQ_CHARTS.spotb.destroy(); EQ_CHARTS.spotb = null; }
+      this.$nextTick(() => {
+        const el = document.getElementById('eq-spotb');
+        if (!el || !this.spotB) return;
+        const s = this.spotB.series || [];
+        if (!s.length) return;
+        const labels = s.map(r => r.snapshot);
+        const sets = [
+          { label: 'above prior close', color: EQ_BLUE, fill: true,
+            data: s.map(r => r.pct_close), spanGaps: true },
+        ];
+        // Only drawn once the daily bar exists. An all-null dataset would
+        // put a legend entry on the panel for a line that is not there.
+        if (!this.spotB.open_pending) {
+          sets.push({ label: 'above open', color: EQ_PINK, dash: [4, 3],
+                      data: s.map(r => r.pct_open), spanGaps: true });
+        }
+        const c = this.pctLineChart(el, labels, sets,
+          { y: { min: 0, max: 100, ticks: { callback: v => v + '%',
+                 font: { size: 8 }, stepSize: 50 } } });
+        // The benchmarks on a SECOND axis: they are percent MOVES, a
+        // fraction of a percent wide, while the lines are percentages of the
+        // universe running 0-100. Sharing one axis would flatten them onto
+        // the floor.
+        const refs = this.spotB.refs || [];
+        if (refs.length) {
+          const byIdx = new Map(labels.map((l, i) => [l, i]));
+          const grey = ['#8a8a8a', '#b0b0b0', '#6f6f6f'];
+          refs.forEach((r, i) => {
+            const data = labels.map(() => null);
+            r.points.forEach(p => {
+              const k = byIdx.get(p.snapshot);
+              if (k != null && p.vs_close != null) data[k] = p.vs_close;
+            });
+            c.data.datasets.push({
+              label: r.ticker, data, yAxisID: 'y2', spanGaps: true,
+              borderColor: grey[i % grey.length], borderWidth: 1,
+              borderDash: [2, 2], pointRadius: 0, tension: 0, fill: false,
+            });
+          });
+          c.options.scales.y2 = {
+            position: 'right', grid: { display: false },
+            ticks: { callback: v => v.toFixed(1) + '%', font: { size: 8 },
+                     maxTicksLimit: 3, color: '#8a8a8a' },
+          };
+          c.options.plugins.tooltip.callbacks.label = it =>
+            it.parsed.y == null ? ''
+              : it.dataset.yAxisID === 'y2'
+                ? `${it.dataset.label}: ${it.parsed.y >= 0 ? '+' : ''}`
+                  + `${it.parsed.y.toFixed(2)}%`
+                : `${it.dataset.label}: ${it.parsed.y.toFixed(1)}%`;
+          c.update('none');
+        }
+        EQ_CHARTS.spotb = c;
       });
     },
 
@@ -1425,8 +1602,14 @@ document.addEventListener('alpine:init', () => {
               tooltip: { callbacks: {
                 label: it => {
                   const p = pts[it.dataIndex];
-                  return p ? `${p.ticker}  ${self.fmtShort(p.x, 'z_score')}σ / `
-                           + `${(p.y * 100).toFixed(1)}%` : '';
+                  if (!p) return '';
+                  // The y column by name, because the horizon follows the
+                  // page tenor -- a bare "%" here was what let a stale "5d
+                  // return" label sit under a 21-day number.
+                  const yn = (self.gscat && self.gscat.y
+                              && self.gscat.y.column_name) || 'return';
+                  return `${p.ticker}  ${self.fmtShort(p.x, 'z_score')}σ / `
+                       + `${(p.y * 100).toFixed(1)}% ${yn}`;
                 },
               } },
               eqZeroLines: { x: true, y: true },
@@ -1437,87 +1620,95 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
-    /* (d) Contango share over 20 sessions, as a filled area. A stacked pair
-     * would spend half the panel drawing the complement of the other half —
-     * the two shares sum to the covered universe, so one line and a 50% rule
-     * says the same thing with less ink. */
+    /* (d) Contango share over 20 sessions, for both term pairs.
+     *
+     * Neither line is stacked against its complement: contango and
+     * backwardation sum to the covered universe, so a stack would spend half
+     * the panel drawing the other half's mirror. A term ratio is near/far,
+     * so below 1 is contango.
+     *
+     * TWO pairs, and neither follows the page tenor. The subject is the
+     * SHAPE of the curve, and a shape needs two points on it: 7/30 is the
+     * front end, where earnings and event risk show up first, and 30/90 is
+     * the body, which moves later and less. A single tenor-following line
+     * would have drawn a different pair every time the tenor changed and
+     * never a divergence between them. */
     renderTermState() {
       if (typeof Chart === 'undefined') return;
       if (EQ_CHARTS.termstate) { EQ_CHARTS.termstate.destroy(); EQ_CHARTS.termstate = null; }
       this.$nextTick(() => {
         const el = document.getElementById('eq-termstate');
-        if (!el || !this.termState) return;
-        const j = this.termState;
-        const rows = j.series.concat(j.today ? [j.today] : []);
-        const pct = rows.map(r => r.n ? 100 * r.n_contango / r.n : null);
-        if (!pct.filter(v => v != null).length) return;
-        const self = this;
-        EQ_CHARTS.termstate = new Chart(el.getContext('2d'), {
-          type: 'line',
-          data: {
-            labels: rows.map((r, i) => (j.today && i === rows.length - 1) ? 'today' : r.date),
-            datasets: [{
-              label: 'contango %', data: pct,
-              borderColor: EQ_BLUE, borderWidth: 1.25, tension: 0,
-              pointRadius: pct.map((_, i) =>
-                (j.today && i === pct.length - 1) ? 3.5 : 0),
-              pointBackgroundColor: EQ_SURF, pointBorderColor: EQ_PINK,
-              pointBorderWidth: 1.5,
-              fill: { target: 'origin', above: self.rgba(EQ_BLUE, 0.12) },
-            }],
-          },
-          options: {
-            responsive: true, maintainAspectRatio: false, animation: false,
-            layout: { padding: { right: 8 } },
-            interaction: { mode: 'index', intersect: false },
-            scales: {
-              x: { grid: { display: false },
-                   ticks: { maxTicksLimit: 4, maxRotation: 0, font: { size: 8 } } },
-              y: { min: 0, max: 100,
-                   grid: { color: 'rgba(255,255,255,0.05)' },
-                   ticks: { callback: v => v + '%', font: { size: 8 },
-                            stepSize: 50 } },
-            },
-            plugins: {
-              legend: { display: false },
-              tooltip: { callbacks: {
-                label: it => it.parsed.y == null ? ''
-                  : `${it.parsed.y.toFixed(0)}% contango`,
-              } },
-            },
-          },
+        const got = (this.termState || []).filter(j => j && j.series.length);
+        if (!el || !got.length) return;
+        const pct = r => (r && r.n) ? 100 * r.n_contango / r.n : null;
+        // The pairs are fetched independently, so their date arrays can
+        // differ by a session if one metric is thin on a day. Keyed by date
+        // rather than by index, which would slide one line against the other.
+        const dates = Array.from(new Set(
+          got.flatMap(j => j.series.map(r => r.date)))).sort();
+        const anyToday = got.some(j => j.today);
+        const labels = dates.concat(anyToday ? ['today'] : []);
+        const sets = got.map(j => {
+          const by = new Map(j.series.map(r => [r.date, pct(r)]));
+          const data = dates.map(dt => (by.has(dt) ? by.get(dt) : null));
+          if (anyToday) data.push(j.today ? pct(j.today) : null);
+          return { label: j.pair.label,
+                   color: j.pair.color === 'pink' ? EQ_PINK : EQ_BLUE,
+                   fill: j.pair.color === 'blue', spanGaps: true, data };
+        });
+        EQ_CHARTS.termstate = this.pctLineChart(el, labels, sets, {
+          markLast: anyToday,
+          y: { min: 0, max: 100, ticks: { callback: v => v + '%',
+               font: { size: 8 }, stepSize: 50 } },
         });
       });
     },
 
-    /** The headline metric at the page tenor: skew's put wing. */
-    headlineCol() { return this.retarget(EQ_HEADLINE_STEM, this.pageTenor); },
-    headlineZ()   { return this.resolve(this.headlineCol(), true); },
+    /* The three universe stems, resolved at the page tenor. Each panel names
+     * its own so no two panels can quietly become the same panel. */
+    histCol()    { return this.retarget(EQ_HIST_STEM, this.pageTenor); },
+    histZ()      { return this.resolve(this.histCol(), true); },
+    breadthCol() { return this.retarget(EQ_BREADTH_STEM, this.pageTenor); },
+    breadthZ()   { return this.resolve(this.breadthCol(), true); },
+    skewCol()    { return this.retarget(EQ_SCATTER_STEM, this.pageTenor); },
+    skewZ()      { return this.resolve(this.skewCol(), true); },
+    retCol()     { return this.retarget(EQ_SCATTER_RET, this.pageTenor); },
+    vrpCol()     { return this.retarget('vrp_30d', this.pageTenor); },
 
-    /** The term-ratio pair the page tenor maps to. */
-    termCol() { return this.retarget('term_ratio_30d_90d', this.pageTenor); },
+    /** The term-ratio pair that colours the scatter: the body of the curve. */
+    termCol() { return 'term_ratio_30d_90d'; },
 
     async loadGlobalPanels() {
       await Promise.all([
-        this.loadGlobalScatter(), this.loadTermState(),
+        this.loadUniverseStats(), this.loadBreadth(), this.loadGlobalScatter(),
+        this.loadTermState(), this.loadSpotBreadth(), this.loadVrpBreadth(),
       ]);
     },
 
-    /* (c) Skew against spot, one dot per ticker. The adverse-selection check
-     * at market level: are the rich-skew names the ones that fell? A tight
-     * cluster with a flat y is a different market from a downward slope.
+    /* (c) Skew against the return, one dot per ticker. The adverse-selection
+     * check at universe level: are the rich-skew names the ones that fell? A
+     * tight cluster with a flat y is a different universe from a downward
+     * slope.
      *
      * Coloured by TERM STATE, not sector. There is no sector table in this
-     * database — no volume, ADV or market-cap column either — so the spec's
+     * database -- no volume, ADV or market-cap column either -- so the spec's
      * "colour by sector" has no source. Term state is the nearest thing that
      * adds a dimension rather than decoration: it is the regime filter, and
-     * it is the third axis of the same question. */
+     * it is the third axis of the same question.
+     *
+     * The y axis retargets with the page tenor, so at 30d it plots the
+     * 21-trading-day return and at 7d the 5-day one. Note what that return
+     * IS, because it is easy to misread: log_ret_Nd runs through the PRIOR
+     * session's close, so it does not contain today. Comparing it against a
+     * live spot to back out a starting price gives the wrong answer -- the
+     * return does not end where the spot is. Panel (e) is the one that moves
+     * intraday; this one is settled. */
     async loadGlobalScatter() {
       if (!this.date || !this.snapshot || this.catError) return;
       this.gscatLoading = true; this.gscatError = '';
       try {
         const q = new URLSearchParams({
-          x: this.headlineZ(), y: 'log_ret_7d',
+          x: this.skewZ(), y: this.retCol(),
           date: this.date, snapshot: this.snapshot,
           exclude_extrapolated: String(this.excludeExtrap),
         });
@@ -1534,95 +1725,233 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    /* (d) Contango share over the last 20 sessions. The regime filter's
-     * CHANGE is the informative part — 6% to 31% backwardated is a market
-     * repricing the front end, which a single day's reading cannot say. */
-    async loadTermState() {
-      if (!this.date || !this.snapshot || this.catError) return;
-      const col = this.termCol();
-      if (!this.byCol[col]) { this.termState = null; return; }
-      this.termLoading = true;
-      try {
-        const j = await eqGetJson('/api/equity-iv/universe-term-state?'
-          + new URLSearchParams({
-            metric: col, date: this.date, snapshot: this.snapshot,
-            sessions: '20',
-            exclude_extrapolated: String(this.excludeExtrap),
-          }));
-        if (!j.error) { this.termState = j; this.renderTermState(); }
-      } catch (e) {
-        this.termState = null;
-      } finally {
-        this.termLoading = false;
-      }
-    },
-
-    /* Feeds panels (a) the histogram and (b) breadth over time, which are the
-     * same payload read two ways: `today` is the distribution, `series` is
-     * n_hot per session.
+    /* (b) Breadth over 60 sessions, on the risk reversal.
      *
-     * On the HEADLINE metric, not the scatter's x axis. It followed x until
-     * now, and a structure preset sets the scatter axes — so selecting one
-     * silently changed what "is everything unusual" was about. These panels
-     * describe the market; they must not move when the trade does.
-     *
-     * The window is fixed at 3M rather than following the page's history
-     * control: breadth is asked over ~60 sessions, and a 2Y series drawn into
-     * a panel this size is a smear. */
-    async loadUniverseStats() {
+     * Its own fetch rather than a second read of the histogram's payload:
+     * the two panels now name different metrics, and sharing one response
+     * was what made them the same panel twice. It also frees the histogram's
+     * window control, which had been pinned to 3M so this line would fit. */
+    async loadBreadth() {
       if (!this.date || !this.snapshot || this.catError) return;
-      const col = this.headlineZ();
-      if (!this.byCol[col]) { this.us = null; return; }
+      const col = this.breadthZ();
+      if (!this.byCol[col]) { this.bs = null; return; }
       this.breadthLoading = true;
       try {
-        const q = new URLSearchParams({
-          metric: col, date: this.date, snapshot: this.snapshot,
-          window: '3m',
-          exclude_extrapolated: String(this.excludeExtrap),
-        });
-        const j = await eqGetJson('/api/equity-iv/universe-stats?' + q.toString());
-        this.us = j.error ? null : j;
-        if (this.us) { this.renderHistogram(); this.renderBreadth(); }
+        const j = await eqGetJson('/api/equity-iv/universe-stats?'
+          + new URLSearchParams({
+            metric: col, date: this.date, snapshot: this.snapshot,
+            window: '3m',
+            exclude_extrapolated: String(this.excludeExtrap),
+          }));
+        this.bs = j.error ? null : j;
+        if (this.bs) this.renderBreadth();
       } catch (e) {
-        this.us = null;
+        this.bs = null;
       } finally {
         this.breadthLoading = false;
       }
     },
 
-    /** The last N sessions of breadth, as {date, pct}. */
+    /* (d) Contango share over 20 sessions, for BOTH term pairs. The regime
+     * filter's CHANGE is the informative part -- 6% to 31% backwardated is a
+     * universe repricing the front end, which a single day cannot say -- and
+     * two pairs turn that into a shape: the front end going backwardated
+     * while the body holds is an event calendar, both going together is a
+     * vol shock. */
+    async loadTermState() {
+      if (!this.date || !this.snapshot || this.catError) return;
+      this.termLoading = true;
+      try {
+        const got = await Promise.all(EQ_TERM_PAIRS.map(async p => {
+          if (!this.byCol[p.col]) return null;
+          try {
+            const j = await eqGetJson('/api/equity-iv/universe-term-state?'
+              + new URLSearchParams({
+                metric: p.col, date: this.date, snapshot: this.snapshot,
+                sessions: '20',
+                exclude_extrapolated: String(this.excludeExtrap),
+              }));
+            return j.error ? null : Object.assign({ pair: p }, j);
+          } catch (e) { return null; }
+        }));
+        this.termState = got.filter(Boolean);
+        if (this.termState.length) this.renderTermState();
+      } finally {
+        this.termLoading = false;
+      }
+    },
+
+    /* (e) Spot breadth, today only. The one panel on this row that moves
+     * through the session: every metric beside it is either a vol reading at
+     * the selected bucket or -- in the scatter's case -- a settled daily
+     * close series that will not change until tonight.
+     *
+     * Two anchors. Against last night's close is the gap plus the day;
+     * against today's open is the day alone. 60% above yesterday's close
+     * with 45% above the open is a universe that gapped up and has been sold
+     * since, and one line cannot say that.
+     *
+     * The open comes from the daily bar, which is not written until after
+     * the close -- so for the whole live session the open-anchored line is
+     * absent and says so. Drawing the 0935 snapshot in its place would have
+     * filled the gap with a number that is not the open. */
+    async loadSpotBreadth() {
+      if (!this.date || !this.snapshot) return;
+      this.spotBLoading = true;
+      try {
+        const j = await eqGetJson('/api/equity-iv/universe-spot-breadth?'
+          + new URLSearchParams({ date: this.date, snapshot: this.snapshot }));
+        this.spotB = j.error ? null : j;
+        if (this.spotB) this.renderSpotBreadth();
+      } catch (e) {
+        this.spotB = null;
+      } finally {
+        this.spotBLoading = false;
+      }
+    },
+
+    /* (f) VRP breadth: how much of the universe is paid to sell vol at the
+     * page tenor, over 60 sessions.
+     *
+     * No new endpoint -- this is /universe-stats reading the RAW vrp column
+     * with the threshold at zero, so `n_hot` is the count above zero by
+     * construction. A dedicated endpoint would have been the same GROUP BY
+     * with a different name on it. */
+    async loadVrpBreadth() {
+      if (!this.date || !this.snapshot || this.catError) return;
+      const col = this.vrpCol();
+      if (!this.byCol[col]) { this.vrpB = null; return; }
+      this.vrpLoading = true;
+      try {
+        const j = await eqGetJson('/api/equity-iv/universe-stats?'
+          + new URLSearchParams({
+            metric: col, date: this.date, snapshot: this.snapshot,
+            window: '3m', hot: '0',
+            exclude_extrapolated: String(this.excludeExtrap),
+          }));
+        this.vrpB = j.error ? null : j;
+        if (this.vrpB) this.renderVrpBreadth();
+      } catch (e) {
+        this.vrpB = null;
+      } finally {
+        this.vrpLoading = false;
+      }
+    },
+
+    async loadUniverseStats() {
+      if (!this.date || !this.snapshot || this.catError) return;
+      const col = this.histZ();
+      if (!this.byCol[col]) { this.us = null; return; }
+      this.histLoading = true;
+      try {
+        const q = new URLSearchParams({
+          metric: col, date: this.date, snapshot: this.snapshot,
+          window: this.histWindow,
+          exclude_extrapolated: String(this.excludeExtrap),
+        });
+        const j = await eqGetJson('/api/equity-iv/universe-stats?' + q.toString());
+        this.us = j.error ? null : j;
+        if (this.us) this.renderHistogram();
+      } catch (e) {
+        this.us = null;
+      } finally {
+        this.histLoading = false;
+      }
+    },
+
+    /* The last N sessions of breadth, as {date, hot, cold}. Both tails: 8%
+     * rich with 6% cheap is a dispersed universe and 8% rich with 0% cheap
+     * is a directional one, and one line cannot tell those apart. */
     breadthSeries(n = 60) {
-      const s = (this.us && this.us.series) || [];
+      const s = (this.bs && this.bs.series) || [];
       return s.slice(-n)
         .filter(r => r.n)
-        .map(r => ({ date: r.date, pct: 100 * (r.n_hot || 0) / r.n }));
+        .map(r => ({ date: r.date,
+                     hot:  100 * (r.n_hot  || 0) / r.n,
+                     cold: 100 * (r.n_cold || 0) / r.n }));
+    },
+
+    /* Today's point, taken at the SELECTED snapshot rather than from the
+     * history array, which stops before today by construction. */
+    breadthToday() {
+      const t = this.bs && this.bs.today;
+      if (!t || !t.n) return null;
+      return { hot: 100 * (t.n_hot || 0) / t.n, cold: 100 * (t.n_cold || 0) / t.n };
     },
 
     breadthNote() {
       const b = this.breadthSeries();
       if (!b.length) return '';
-      const today = this.us && this.us.today && this.us.today.n
-        ? 100 * (this.us.today.n_hot || 0) / this.us.today.n : null;
-      const avg = b.reduce((a, r) => a + r.pct, 0) / b.length;
-      const cur = today == null ? b[b.length - 1].pct : today;
-      return `${cur.toFixed(0)}% of the universe above +1.5σ on `
-           + `${this.headlineCol()}, against ${avg.toFixed(0)}% averaged over `
-           + `${b.length} sessions. The histogram beside it is today; this says `
-           + `whether today is itself unusual.`;
+      const t = this.breadthToday();
+      const cur = t || b[b.length - 1];
+      const avg = b.reduce((a, r) => a + r.hot, 0) / b.length;
+      return `${cur.hot.toFixed(0)}% of the universe above +1.5σ on `
+           + `${this.breadthCol()} and ${cur.cold.toFixed(0)}% below −1.5σ, `
+           + `against ${avg.toFixed(0)}% rich averaged over ${b.length} `
+           + `sessions. Both tails wide is dispersion; one tail wide is a `
+           + `direction.`;
+    },
+
+    /* σ HERE IS NOT THE σ ON THE TENT PANEL. This one is a z-score: the
+     * ticker's own reading against its trailing daily history of the same
+     * metric, so "+1.5σ" means 1.5 standard deviations rich RELATIVE TO
+     * ITSELF. The tent panel's "sigma" is a move size in price terms
+     * (atm_iv × √(dte/365)) and shares nothing with it but the letter. */
+    breadthSigmaNote() {
+      return 'σ is the stored z-score — the ticker against its own trailing '
+           + 'daily history of this metric, not the tent panel\'s move-size '
+           + 'sigma (atm_iv × √(dte/365)). Same letter, unrelated quantity.';
+    },
+
+    /* Today's spot-breadth readings, for the header line. */
+    spotBNote() {
+      const j = this.spotB;
+      if (!j || !j.series.length) return '';
+      const last = j.series[j.series.length - 1];
+      let s = `${(last.pct_close ?? 0).toFixed(0)}% of ${last.n} stocks above `
+            + `last night's close at ${last.snapshot}`;
+      s += j.open_pending
+        ? `. The open-anchored line is pending: underlying_ohlc writes today's `
+        + `daily bar after the close, so the open is not available yet.`
+        : `, ${(last.pct_open ?? 0).toFixed(0)}% above today's open.`;
+      if (j.n_fund) s += ` ${j.n_fund} funds excluded from the count and shown `
+                       + `as reference markers instead.`;
+      if (j.n_split) s += ` ${j.n_split} dropped for a split on either session.`;
+      return s;
+    },
+
+    vrpNote() {
+      const s = (this.vrpB && this.vrpB.series) || [];
+      const rows = s.slice(-60).filter(r => r.n);
+      if (!rows.length) return '';
+      const pct = r => 100 * (r.n_hot || 0) / r.n;
+      const t = this.vrpB.today && this.vrpB.today.n ? pct(this.vrpB.today) : null;
+      const cur = t == null ? pct(rows[rows.length - 1]) : t;
+      const avg = rows.reduce((a, r) => a + pct(r), 0) / rows.length;
+      return `${cur.toFixed(0)}% of the universe carries a positive premium on `
+           + `${this.vrpCol()}, against ${avg.toFixed(0)}% over ${rows.length} `
+           + `sessions. Below the average, the usual short-vol trade is being `
+           + `paid less than usual across the board — which is a fact about `
+           + `the universe, not about any one name in it.`;
     },
 
     termNote() {
-      const j = this.termState;
-      if (!j || !j.series.length) return '';
-      const pct = r => r.n ? 100 * r.n_contango / r.n : null;
-      const now = j.today ? pct(j.today) : pct(j.series[j.series.length - 1]);
-      const then = pct(j.series[0]);
-      if (now == null || then == null) return '';
-      const d = now - then;
-      return `${now.toFixed(0)}% of the universe in contango on `
-           + `${j.metric.column_name}, from ${then.toFixed(0)}% ${j.series.length} `
-           + `sessions ago — ${d >= 0 ? '+' : ''}${d.toFixed(0)} points. The `
-           + `change is the reading; a single day's level is not.`;
+      const got = (this.termState || []).filter(j => j && j.series.length);
+      if (!got.length) return '';
+      const pct = r => (r && r.n) ? 100 * r.n_contango / r.n : null;
+      const parts = got.map(j => {
+        const now  = j.today ? pct(j.today) : pct(j.series[j.series.length - 1]);
+        const then = pct(j.series[0]);
+        if (now == null || then == null) return null;
+        const dl = now - then;
+        return `${j.pair.label} at ${now.toFixed(0)}% `
+             + `(${dl >= 0 ? '+' : ''}${dl.toFixed(0)} pts)`;
+      }).filter(Boolean);
+      if (!parts.length) return '';
+      return `In contango: ${parts.join(', ')} over ${got[0].series.length} `
+           + `sessions. The front pair moving while the body holds is an event `
+           + `calendar; both moving together is a vol shock. The change is the `
+           + `reading, not either level.`;
     },
 
     csSubtitle() {
