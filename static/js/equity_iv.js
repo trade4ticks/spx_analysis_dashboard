@@ -1524,40 +1524,59 @@ document.addEventListener('alpine:init', () => {
           sets.push({ label: 'above open', color: EQ_PINK, dash: [4, 3],
                       data: s.map(r => r.pct_open), spanGaps: true });
         }
+        // -4/104 rather than 0/100: the benchmark lines sit AT 0 and 100 by
+        // construction, and on a scale that ends exactly there they render
+        // as half-width strokes clipped by the plot edge.
         const c = this.pctLineChart(el, labels, sets,
-          { y: { min: 0, max: 100, ticks: { callback: v => v + '%',
+          { y: { min: -4, max: 104, ticks: { callback: v => v + '%',
                  font: { size: 8 }, stepSize: 50 } } });
-        // The benchmarks on a SECOND axis: they are percent MOVES, a
-        // fraction of a percent wide, while the lines are percentages of the
-        // universe running 0-100. Sharing one axis would flatten them onto
-        // the floor.
+
+        /* The benchmarks, ON THE SAME AXIS. They were on a second y axis
+         * because a percent MOVE and a percent OF THE UNIVERSE are different
+         * quantities — but that axis cost horizontal space the plot needed
+         * more, on the one panel here that already carries the most lines.
+         *
+         * So they are converted rather than accommodated: each index is
+         * plotted as whether it is above its own prior close, which is a
+         * 0-or-100 reading on exactly the scale the breadth lines use. That
+         * is the comparison the panel exists for — SPY pinned at 100 with
+         * breadth at 40% is a narrow tape, and reading it off one axis is
+         * more direct than reading it across two.
+         *
+         * The magnitude is not lost, only unplotted: the tooltip carries the
+         * actual percent move, which is where a precise value belongs
+         * anyway. Stepped, because a binary state does not interpolate. */
         const refs = this.spotB.refs || [];
         if (refs.length) {
           const byIdx = new Map(labels.map((l, i) => [l, i]));
           const grey = ['#8a8a8a', '#b0b0b0', '#6f6f6f'];
+          const dash = [[5, 3], [2, 3], [8, 3]];
           refs.forEach((r, i) => {
             const data = labels.map(() => null);
+            const moves = labels.map(() => null);
             r.points.forEach(p => {
               const k = byIdx.get(p.snapshot);
-              if (k != null && p.vs_close != null) data[k] = p.vs_close;
+              if (k != null && p.vs_close != null) {
+                data[k] = p.vs_close > 0 ? 100 : 0;
+                moves[k] = p.vs_close;
+              }
             });
             c.data.datasets.push({
-              label: r.ticker, data, yAxisID: 'y2', spanGaps: true,
+              label: r.ticker, data, spanGaps: true, stepped: true,
+              // The move itself, carried alongside for the tooltip.
+              eqMoves: moves,
               borderColor: grey[i % grey.length], borderWidth: 1,
-              borderDash: [2, 2], pointRadius: 0, tension: 0, fill: false,
+              borderDash: dash[i % dash.length], pointRadius: 0,
+              fill: false,
             });
           });
-          c.options.scales.y2 = {
-            position: 'right', grid: { display: false },
-            ticks: { callback: v => v.toFixed(1) + '%', font: { size: 8 },
-                     maxTicksLimit: 3, color: '#8a8a8a' },
+          c.options.plugins.tooltip.callbacks.label = it => {
+            if (it.parsed.y == null) return '';
+            const mv = it.dataset.eqMoves && it.dataset.eqMoves[it.dataIndex];
+            if (mv == null) return `${it.dataset.label}: ${it.parsed.y.toFixed(1)}%`;
+            return `${it.dataset.label}: ${mv > 0 ? 'above' : 'below'} prior `
+                 + `close (${mv >= 0 ? '+' : ''}${mv.toFixed(2)}%)`;
           };
-          c.options.plugins.tooltip.callbacks.label = it =>
-            it.parsed.y == null ? ''
-              : it.dataset.yAxisID === 'y2'
-                ? `${it.dataset.label}: ${it.parsed.y >= 0 ? '+' : ''}`
-                  + `${it.parsed.y.toFixed(2)}%`
-                : `${it.dataset.label}: ${it.parsed.y.toFixed(1)}%`;
           c.update('none');
         }
         EQ_CHARTS.spotb = c;

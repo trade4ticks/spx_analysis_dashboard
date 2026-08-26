@@ -143,8 +143,20 @@
     /* Even halves. The scatter had 60% for 121 points, which is more room
        than a cloud that size needs; the six panels beside it needed width
        more than it did. */
-    .eq-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
-    @media (max-width:1100px) { .eq-row { grid-template-columns:minmax(0,1fr); } }
+    .eq-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+              gap:12px; margin-bottom:12px; }
+    /* The row's gap to the Scanner belongs to the ROW, not to the section
+       inside it. .eq-section carries margin-bottom:12px for the stacked case,
+       and a grid row sizes items by their OUTER height — so the scatter's
+       visible box ended 12px above the row's bottom while the quad, stretched
+       to the full row, ran all the way down to the Scanner. The two halves
+       looked misaligned by exactly one section margin. */
+    .eq-row > .eq-section, .eq-row > .eq-quad { margin-bottom:0; }
+    @media (max-width:1100px) {
+      .eq-row { grid-template-columns:minmax(0,1fr); }
+      /* Stacked again, so the halves need their own separation back. */
+      .eq-row > .eq-section { margin-bottom:12px; }
+    }
 
     .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
     /* Down ~20% from 420. At half width the cloud is denser, so the height
@@ -952,11 +964,15 @@
             not written until after the close, so the open-anchored line is
             absent for the whole live session and says "open pending" rather
             than substituting a number that is not the open.
-            SPY/QQQ/IWM ride along on a second axis as their own percent
-            moves, and are NOT in the breadth count: an index ETF is a
-            weighted basket of the names being counted, so including it would
-            double-count its constituents. Breadth at 40% with SPY up half a
-            percent is a narrow tape.
+            SPY/QQQ/IWM ride along as stepped lines at 100% or 0% — above or
+            below their own prior close — and are NOT in the breadth count:
+            an index ETF is a weighted basket of the names being counted, so
+            including it would double-count its constituents. Read against
+            the breadth line on the same axis, that IS the panel's question:
+            SPY pinned at 100 with breadth at 40% is a narrow tape. They sat
+            on a second y-axis as percent moves until the axis itself proved
+            more expensive than the precision — the move is in the tooltip,
+            which is where an exact number belongs anyway.
           </div>
         </div>
 
