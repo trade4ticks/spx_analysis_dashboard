@@ -1351,7 +1351,9 @@ document.addEventListener('alpine:init', () => {
           this.cs = j;
           this.slice = { date: j.date, snapshot: j.snapshot, source: this.dominantSource(j.points) };
           this.renderScatter();
-          this.renderHistogram();
+          // NOT renderHistogram(). That panel reads its own metric from
+          // /universe-stats now; re-rendering it on a cross-section load was
+          // the tie that made it follow the scatter's x axis.
         }
       } catch (e) {
         this.csError = String(e.message || e);
@@ -2125,12 +2127,21 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    /* Today's distribution of the histogram's OWN metric.
+     *
+     * It used to bin `this.cs.points` -- the cross-section scatter's payload
+     * -- so the panel plotted the scatter's x axis whatever the header said,
+     * and a structure preset moved it. Repointing /universe-stats moved the
+     * summary numbers and left the bars behind, which is why the axis label
+     * and the header disagreed: the label was right. */
     renderHistogram() {
       const el = document.getElementById('eq-hist');
-      if (!el || !this.cs) return;
+      if (!el || !this.us) return;
       if (EQ_CHARTS.hist) { EQ_CHARTS.hist.destroy(); EQ_CHARTS.hist = null; }
 
-      const rows = this.cs.points.filter(p => p.x != null);
+      const rows = (this.us.today_rows || [])
+        .filter(r => r.v != null)
+        .map(r => ({ ticker: r.ticker, x: r.v }));
       if (!rows.length) return;
       const vals = rows.map(p => p.x);
       const lo = Math.min(...vals), hi = Math.max(...vals);
@@ -2156,7 +2167,7 @@ document.addEventListener('alpine:init', () => {
       let medIdx = Math.floor((median - lo) / width);
       if (medIdx >= nBins) medIdx = nBins - 1;
 
-      const units = this.xUnits();
+      const units = (this.us.metric && this.us.metric.units) || this.xUnits();
       const self = this;
       EQ_CHARTS.hist = new Chart(el, {
         type: 'bar',
@@ -2179,7 +2190,9 @@ document.addEventListener('alpine:init', () => {
             x: {
               grid: { display: false },
               ticks: { font: { size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
-              title: { display: true, text: self.xCol(), color: '#777', font: { size: 9 } },
+              // No axis title: the panel header already names the column,
+              // and a title row costs more height here than it carries.
+              // Tick values stay -- they are the scale, not a restatement.
             },
             y: {
               grid: { color: 'rgba(255,255,255,0.06)' },

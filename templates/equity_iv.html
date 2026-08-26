@@ -140,33 +140,41 @@
     /* Row 1: scatter ~60% / distribution ~40%. minmax(0,·) so a wide chart
        cannot push the grid past the viewport — panels must not assume a
        fixed width, the rows are expected to be rearranged later. */
-    .eq-row { display:grid; grid-template-columns:minmax(0,60fr) minmax(0,40fr); gap:12px; }
+    /* Even halves. The scatter had 60% for 121 points, which is more room
+       than a cloud that size needs; the six panels beside it needed width
+       more than it did. */
+    .eq-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
     @media (max-width:1100px) { .eq-row { grid-template-columns:minmax(0,1fr); } }
 
     .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
-    .eq-canvas-scatter { height:420px; }
+    /* Down ~20% from 420. At half width the cloud is denser, so the height
+       that made it legible at 60% is no longer what sets the panel. */
+    .eq-canvas-scatter { height:336px; }
 
-    /* Six panels in the column beside the cross-section scatter. TWO across
-       and three down, never three across: this column is 40% of the page, so
-       a third column would halve each panel's width, and a time series with
-       a legend at that width is a smear. Six panels also do not need more
-       page — the scatter beside them is 420px of canvas plus its axis rows,
-       and the block used to stop well short of that, leaving the space
-       under it empty. It grows DOWN into that space instead.
+    /* Six panels in the half of the row beside the cross-section scatter.
+       THREE across and two down, against the scatter's height.
+
+       Three columns at half the page is a wider panel than two columns at
+       40% of it, and wider than tall is the shape these charts want: five of
+       the six are time series, which spend width on sessions and height only
+       on a range. The earlier three-column attempt was narrower per panel
+       than two because the block was 40% of the page, not because of the
+       column count -- the column count was never the problem, the share was.
 
        Rows are 1fr against the block's stretched height rather than a fixed
        pixel height, so the panels divide whatever the scatter column turns
        out to be instead of being tuned to it and drifting when the controls
        above the scatter reflow. */
-    .eq-quad { display:grid; grid-template-columns:repeat(2, minmax(0,1fr));
+    .eq-quad { display:grid; grid-template-columns:repeat(3, minmax(0,1fr));
                grid-auto-rows:minmax(0,1fr); gap:8px; height:100%; }
+    @media (max-width:1500px) { .eq-quad { grid-template-columns:repeat(2, minmax(0,1fr)); } }
     @media (max-width:1100px) {
       .eq-quad { grid-template-columns:minmax(0,1fr);
                  grid-auto-rows:auto; height:auto; }
       .eq-quad-canvas { min-height:150px; }
     }
     /* min-height:0 on both, or a flex/grid child refuses to shrink below its
-       content and the three rows push past the height they were given. */
+       content and the rows push past the height they were given. */
     .eq-quad > .eq-section { margin-bottom:0; display:flex; flex-direction:column;
                              min-height:0; }
     .eq-quad-canvas { flex:1 1 auto; min-height:104px; }

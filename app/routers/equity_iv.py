@@ -600,6 +600,24 @@ async def universe_stats(
             *params,
         )
 
+        # Today's per-ticker readings, for the histogram's bars.
+        #
+        # These have to come from HERE rather than from /cross-section. The
+        # panel used to bin the scatter's payload, so it silently plotted
+        # whatever the scatter's x axis was -- including whatever a structure
+        # preset had just set it to. One column at ~500 rows is a smaller
+        # response than the two-column cross-section it replaces.
+        # No `hot` here, so the placeholders start at $1: an unused $1 is not
+        # merely wasteful, Postgres cannot infer its type and the whole
+        # statement fails to prepare.
+        vrows = await conn.fetch(
+            f"SELECT m.ticker, {val} AS v "
+            f"{_from_clause(e['form'] != 'base')} "
+            f"WHERE m.trade_date = $1 AND m.snapshot = $2 AND {val} IS NOT NULL "
+            f"ORDER BY m.ticker",
+            d, snap,
+        )
+
         # Today, at the selected snapshot.
         trow = await conn.fetchrow(
             f"SELECT count({val}) AS n,"
@@ -642,6 +660,7 @@ async def universe_stats(
         "dispersion_percentile": disp_pct,
         "n_dates": len(series),
         "series": series,
+        "today_rows": [{"ticker": r["ticker"], "v": r["v"]} for r in vrows],
         "z_source": "stored" if e["form"] != "base" else None,
         "history_basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session"},
     }

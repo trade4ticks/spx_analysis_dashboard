@@ -319,6 +319,28 @@ def main() -> int:
             print(f"\n  the scatter's term-state colour column moves with the "
                   f"tenor ({sorted(terms)}); it is meant to be pinned")
 
+    # The histogram must read its OWN payload. It binned the cross-section
+    # scatter's points for long enough that repointing the endpoint moved the
+    # summary numbers and left the bars on the scatter's x axis -- which a
+    # structure preset then moved. Nothing about the panel's header or its
+    # fetch revealed that; only the axis label did, by disagreeing.
+    js = (ROOT / "static" / "js" / "equity_iv.js").read_text(encoding="utf-8")
+    i = js.find("renderHistogram() {")
+    if i < 0:
+        bad += 1
+        print("\n  no renderHistogram() in the shipped JS")
+    else:
+        body = js[i:js.find("\n    },", i)]
+        if "this.cs" in body:
+            bad += 1
+            print("\n  renderHistogram() reads this.cs — the universe histogram")
+            print("    is binning the cross-section scatter's payload again, so")
+            print("    it plots the scatter's x axis whatever its header says")
+        if "this.us" not in body:
+            bad += 1
+            print("\n  renderHistogram() never reads this.us — it is not binning")
+            print("    the metric /universe-stats was asked for")
+
     # No hand-written horizon anywhere near the universe scatter. This is the
     # exact defect being guarded: a literal "5d return" label sat under a
     # 21-trading-day number as soon as the page tenor left 7d.
