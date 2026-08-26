@@ -1500,11 +1500,13 @@ document.addEventListener('alpine:init', () => {
      * pending rather than substituting the 0935 snapshot, which is a price
      * minutes into the session and not the auction print.
      *
-     * SPY/QQQ/IWM ride along as their own percent moves rather than sitting
-     * in the breadth count: an index ETF is a weighted basket OF the names
-     * being counted, so including it double-counts its constituents. Read as
-     * a reference it is the useful thing -- breadth at 40% with SPY up half
-     * a percent is a narrow tape. */
+     * NO INDEX REFERENCE. SPY/QQQ/IWM were here as benchmark lines, first on
+     * a second y axis and then converted onto this one, and both cost the
+     * plot width it needed more. The row is an IV view; what the indices did
+     * is a question with better answers elsewhere, and borrowing one in was
+     * solving a problem this panel does not have. Funds are still counted
+     * OUT of the breadth denominator -- an index ETF is a weighted basket of
+     * the names being counted -- they are just not drawn. */
     renderSpotBreadth() {
       if (typeof Chart === 'undefined') return;
       if (EQ_CHARTS.spotb) { EQ_CHARTS.spotb.destroy(); EQ_CHARTS.spotb = null; }
@@ -1524,62 +1526,9 @@ document.addEventListener('alpine:init', () => {
           sets.push({ label: 'above open', color: EQ_PINK, dash: [4, 3],
                       data: s.map(r => r.pct_open), spanGaps: true });
         }
-        // -4/104 rather than 0/100: the benchmark lines sit AT 0 and 100 by
-        // construction, and on a scale that ends exactly there they render
-        // as half-width strokes clipped by the plot edge.
-        const c = this.pctLineChart(el, labels, sets,
-          { y: { min: -4, max: 104, ticks: { callback: v => v + '%',
+        EQ_CHARTS.spotb = this.pctLineChart(el, labels, sets,
+          { y: { min: 0, max: 100, ticks: { callback: v => v + '%',
                  font: { size: 8 }, stepSize: 50 } } });
-
-        /* The benchmarks, ON THE SAME AXIS. They were on a second y axis
-         * because a percent MOVE and a percent OF THE UNIVERSE are different
-         * quantities — but that axis cost horizontal space the plot needed
-         * more, on the one panel here that already carries the most lines.
-         *
-         * So they are converted rather than accommodated: each index is
-         * plotted as whether it is above its own prior close, which is a
-         * 0-or-100 reading on exactly the scale the breadth lines use. That
-         * is the comparison the panel exists for — SPY pinned at 100 with
-         * breadth at 40% is a narrow tape, and reading it off one axis is
-         * more direct than reading it across two.
-         *
-         * The magnitude is not lost, only unplotted: the tooltip carries the
-         * actual percent move, which is where a precise value belongs
-         * anyway. Stepped, because a binary state does not interpolate. */
-        const refs = this.spotB.refs || [];
-        if (refs.length) {
-          const byIdx = new Map(labels.map((l, i) => [l, i]));
-          const grey = ['#8a8a8a', '#b0b0b0', '#6f6f6f'];
-          const dash = [[5, 3], [2, 3], [8, 3]];
-          refs.forEach((r, i) => {
-            const data = labels.map(() => null);
-            const moves = labels.map(() => null);
-            r.points.forEach(p => {
-              const k = byIdx.get(p.snapshot);
-              if (k != null && p.vs_close != null) {
-                data[k] = p.vs_close > 0 ? 100 : 0;
-                moves[k] = p.vs_close;
-              }
-            });
-            c.data.datasets.push({
-              label: r.ticker, data, spanGaps: true, stepped: true,
-              // The move itself, carried alongside for the tooltip.
-              eqMoves: moves,
-              borderColor: grey[i % grey.length], borderWidth: 1,
-              borderDash: dash[i % dash.length], pointRadius: 0,
-              fill: false,
-            });
-          });
-          c.options.plugins.tooltip.callbacks.label = it => {
-            if (it.parsed.y == null) return '';
-            const mv = it.dataset.eqMoves && it.dataset.eqMoves[it.dataIndex];
-            if (mv == null) return `${it.dataset.label}: ${it.parsed.y.toFixed(1)}%`;
-            return `${it.dataset.label}: ${mv > 0 ? 'above' : 'below'} prior `
-                 + `close (${mv >= 0 ? '+' : ''}${mv.toFixed(2)}%)`;
-          };
-          c.update('none');
-        }
-        EQ_CHARTS.spotb = c;
       });
     },
 
@@ -1935,8 +1884,7 @@ document.addEventListener('alpine:init', () => {
         ? `. The open-anchored line is pending: underlying_ohlc writes today's `
         + `daily bar after the close, so the open is not available yet.`
         : `, ${(last.pct_open ?? 0).toFixed(0)}% above today's open.`;
-      if (j.n_fund) s += ` ${j.n_fund} funds excluded from the count and shown `
-                       + `as reference markers instead.`;
+      if (j.n_fund) s += ` ${j.n_fund} funds excluded from the count.`;
       if (j.n_split) s += ` ${j.n_split} dropped for a split on either session.`;
       return s;
     },

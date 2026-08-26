@@ -77,11 +77,6 @@ ATM_TABLE       = "equity_atm"
 EARNINGS_TABLE  = "earnings_calendar"
 EARNINGS_COVERAGE_TABLE = "earnings_coverage"
 
-# The benchmarks the spot-breadth panel is read against. Broad-market ETFs
-# rather than sector funds: the panel counts the whole universe, so the
-# reference has to span it.
-SPOT_BREADTH_REFS = ("SPY", "QQQ", "IWM")
-
 # Tenors the surface is fitted at. Used to sanity-check a tenor parsed out of
 # a column name before it is turned into an extrap flag name.
 TENORS = (7, 14, 21, 30, 60, 90)
@@ -704,9 +699,10 @@ async def universe_spot_breadth(
     false for a fund -- the one discriminator this database has -- and index
     ETFs are weighted baskets OF the universe being counted, so including
     them double-counts their constituents and compresses the very dispersion
-    the panel exists to show. They come back separately as `refs`, which is
-    the useful role for them: SPY/QQQ/IWM are the benchmark the breadth
-    number is read against.
+    the panel exists to show. They are counted out and reported as
+    `n_fund`, not returned: this row is about implied vol across the covered
+    names, and an index reference belongs on a market view built for that
+    rather than borrowed into this one.
 
     SPLITS. `underlying_ohlc` is back-adjusted -- every historical price is
     restated onto the CURRENT share scale -- while a snapshot's
@@ -727,7 +723,7 @@ async def universe_spot_breadth(
     cat = await _catalog(pool)
     if "spot" not in cat["live_metric_cols"]:
         return {"error": "equity_metrics carries no `spot` column",
-                "series": [], "refs": []}
+                "series": []}
     spot = 'm."spot"'
 
     # Both sessions' split flags, and the two reference prices, per ticker.
@@ -781,20 +777,6 @@ async def universe_spot_breadth(
             d_, snap,
         )
 
-        # The benchmarks, as themselves. Same two anchors so the reference
-        # marker sits on the same scale as the line it is read against.
-        refs = await conn.fetch(
-            f"{ref_cte} "
-            f"SELECT m.snapshot, m.ticker, {spot} AS px,"
-            f" r.prev_close, r.open_px "
-            f"FROM {METRICS_TABLE} m "
-            f"JOIN ref r ON r.ticker = m.ticker "
-            f"WHERE m.trade_date = $1 AND m.snapshot <= $2 "
-            f"  AND m.ticker = ANY($3) AND NOT r.split "
-            f"ORDER BY m.ticker, m.snapshot",
-            d_, snap, list(SPOT_BREADTH_REFS),
-        )
-
     def _pct(n, d):
         return (100.0 * n / d) if d else None
 
@@ -806,20 +788,10 @@ async def universe_spot_breadth(
         "pct_open":   _pct(r["n_up_open"] or 0, r["n_open"] or 0),
     } for r in rows]
 
-    by_ticker: dict = {}
-    for r in refs:
-        px, pc, op = r["px"], r["prev_close"], r["open_px"]
-        by_ticker.setdefault(r["ticker"], []).append({
-            "snapshot": r["snapshot"],
-            "vs_close": (100.0 * (px / pc - 1.0)) if px and pc else None,
-            "vs_open":  (100.0 * (px / op - 1.0)) if px and op else None,
-        })
-
     last = rows[-1] if rows else None
     return {
         "date": str(d_), "snapshot": snap,
         "series": series,
-        "refs": [{"ticker": t, "points": p} for t, p in sorted(by_ticker.items())],
         # True while the daily bar for today has not been written, which is
         # the whole live session. The client draws the close-anchored line
         # regardless and labels the other one pending.
@@ -827,7 +799,7 @@ async def universe_spot_breadth(
         "n_split": int(last["n_split"] or 0) if last is not None else 0,
         "n_fund":  int(last["n_fund"] or 0) if last is not None else 0,
         "basis": {"open": "underlying_ohlc.open", "close": "prior session close",
-                  "funds": "excluded from breadth; returned as refs"},
+                  "funds": "excluded from breadth"},
     }
 
 
