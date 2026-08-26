@@ -145,6 +145,20 @@
 
     .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
     .eq-canvas-scatter { height:420px; }
+
+    /* Four panels in the footprint the single distribution panel used to
+       take. 2x2 rather than a column of four: at one-quarter width a time
+       series is unreadable, and the two scatters need aspect ratio more than
+       they need width. */
+    .eq-quad { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; align-content:start; }
+    @media (max-width:1400px) { .eq-quad { grid-template-columns:minmax(0,1fr); } }
+    .eq-quad > .eq-section { margin-bottom:0; display:flex; flex-direction:column; }
+    .eq-quad-canvas { height:150px; flex:1 1 auto; min-height:120px; }
+    /* The quad's headers carry more chrome than their width allows at the
+       normal size, so everything in them shrinks. */
+    .eq-quad .eq-section-hdr { padding:4px 7px; gap:5px; }
+    .eq-quad .eq-section-title { font-size:11px; }
+    .eq-quad .eq-section-sub { font-size:9px; }
     .eq-canvas-hist    { height:260px; }
     /* Same idiom as theme.css's .panel-body canvas: absolute inside a sized
        wrapper, so Chart.js's responsive resize has a stable box to measure
@@ -722,43 +736,119 @@
         </div>
       </div>
 
-      <!-- Universe distribution -->
-      <div class="eq-section" x-data="{ fs:false, note:false }"
-           :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
-        <div class="eq-section-hdr">
-          <span class="eq-section-title">Universe distribution</span>
+      <!-- Four global panels in the footprint the single distribution panel
+           used to take. Deliberately four DIFFERENT forms: four histograms
+           would be dull and would carry one kind of information four times.
+
+           All follow the page tenor. NONE follow the structure preset — they
+           are market state at the selected horizon, not anything about a
+           trade, which is why they read the headline metric rather than the
+           scatter's x axis. -->
+      <div class="eq-quad">
+
+        <!-- (a) today's distribution -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Universe</span>
             <span class="eq-help" :class="{on: note}" @click="note = !note"
                   title="Why this panel is built the way it is">?</span>
             <button class="eq-fs" @click="fs = !fs; relayout()"
                     :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
                     x-text="fs ? '⤡' : '⤢'"></button>
-          <span class="eq-section-sub" x-text="xCol()"></span>
+            <span class="eq-section-sub" x-text="headlineCol()"></span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-hist"></canvas>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            Today's distribution across the universe, median marked. If the
+            median ticker sits at +0.4σ, a ticker at +2.0σ is riding a
+            market-wide move rather than standing out on its own — same number,
+            different trade. Nothing else on the page answers "is this ticker
+            unusual, or is everything unusual".
+          </div>
         </div>
 
-        <div class="eq-canvas-wrap eq-canvas-hist">
-          <canvas id="eq-hist"></canvas>
-          <div class="panel-error" x-show="csError" x-cloak x-text="csError"></div>
+        <!-- (b) breadth over time -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Breadth</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
+            <span class="eq-section-sub">% above +1.5σ · 60 sessions</span>
+            <span class="eq-section-sub" x-show="breadthLoading" x-cloak>…</span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-breadth"></canvas>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            <span x-show="breadthNote()" x-text="breadthNote()"
+                  style="display:block;margin-bottom:3px"></span>
+            A line rather than a second histogram: the panel beside it is
+            already a distribution, and repeating that form would add a shape
+            rather than a fact. This one says whether TODAY'S distribution is
+            itself unusual, which a histogram of today cannot.
+          </div>
         </div>
 
-        <div class="panel-stats">
-          <div class="ps"><div class="ps-lbl">Above +1.5σ</div>
-            <div class="ps-val a" x-text="us && us.today ? us.today.n_hot : '—'"></div></div>
-          <div class="ps"><div class="ps-lbl">Its hist. avg</div>
-            <div class="ps-val" x-text="us && us.hot_count_avg != null ? us.hot_count_avg.toFixed(1) : '—'"></div></div>
-        </div>
-        <div class="panel-stats">
-          <div class="ps"><div class="ps-lbl">Universe median</div>
-            <div class="ps-val p" x-text="us && us.today && us.today.median != null ? fmtShort(us.today.median, xUnits()) : '—'"></div></div>
-          <div class="ps"><div class="ps-lbl">Dispersion pctile</div>
-            <div class="ps-val t" x-text="us && us.dispersion_percentile != null ? us.dispersion_percentile.toFixed(0) + '%' : '—'"></div></div>
+        <!-- (c) skew against spot -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Skew × spot</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
+            <span class="eq-section-sub">z × 5d return</span>
+            <span class="eq-section-sub" x-show="gscatLoading" x-cloak>…</span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-gscat"></canvas>
+            <div class="panel-error" x-show="gscatError" x-cloak x-text="gscatError"></div>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            The adverse-selection check at market level: are the rich-skew names
+            the ones that fell? A tight cluster with a flat y-axis is a
+            different market from a downward slope.
+            Coloured by term state — blue contango, pink backwardation — and
+            NOT by sector: this database has no sector table, nor a volume, ADV
+            or market-cap column. Term state is the regime filter and the third
+            axis of the same question, so it adds a dimension rather than
+            decorating one.
+          </div>
         </div>
 
-        <div class="eq-note" x-show="note" x-cloak>
-          If the median ticker sits at +0.4σ, a ticker at +2.0σ is part of a
-          market-wide move, not a name-specific opportunity — same number,
-          different trade. Stats are over the
-          <span x-text="histWindow.toUpperCase()"></span> window
-          (<span x-text="us ? us.n_dates : 0"></span> dates).
+        <!-- (d) term state over time -->
+        <div class="eq-section" x-data="{ fs:false, note:false }"
+             :class="{fs: fs}" @keydown.escape.window="fs = false; note = false">
+          <div class="eq-section-hdr">
+            <span class="eq-section-title">Contango</span>
+            <span class="eq-help" :class="{on: note}" @click="note = !note"
+                  title="Why this panel is built the way it is">?</span>
+            <button class="eq-fs" @click="fs = !fs; relayout()"
+                    :title="fs ? 'Exit full screen (Esc)' : 'Full screen'"
+                    x-text="fs ? '⤡' : '⤢'"></button>
+            <span class="eq-section-sub">% of universe · 20 sessions</span>
+            <span class="eq-section-sub" x-show="termLoading" x-cloak>…</span>
+          </div>
+          <div class="eq-ts-wrap eq-quad-canvas">
+            <canvas id="eq-termstate"></canvas>
+          </div>
+          <div class="eq-note" x-show="note" x-cloak>
+            <span x-show="termNote()" x-text="termNote()"
+                  style="display:block;margin-bottom:3px"></span>
+            One line and a 50% rule rather than a stacked pair: contango and
+            backwardation sum to the covered universe, so a stack would spend
+            half the panel drawing the complement of the other half. A term
+            ratio is near/far, so below 1 is contango.
+          </div>
         </div>
       </div>
     </div>

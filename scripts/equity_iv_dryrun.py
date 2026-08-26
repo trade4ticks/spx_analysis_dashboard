@@ -171,10 +171,19 @@ def seed_catalog():
     add("median_n_strikes_clean", "base", fam="liquidity")
     by_col["median_n_strikes_clean"]["units"] = "count"
 
+    # term_ratio is a PAIR family: family "term_ratio" and tenor None, not a
+    # single-tenor column. The seed filed it under the default family with a
+    # tenor, which made a pair-only endpoint reject it and a pair member it
+    # maps to absent entirely -- a fixture disagreeing with the real catalog
+    # about the exact property under test.
+    for col in ("term_ratio_7d_14d", "term_ratio_14d_30d",
+                "term_ratio_30d_90d", "term_ratio_7d_30d"):
+        add(col, "base", fam="term_ratio")
+        by_col[col]["wing"] = "atm"
+
     for col, wing, tenor in (("skew_30d_25p_atm", "25p_atm", 30),
                              ("iv_30d_atm", "atm", 30),
-                             ("rr_30d_25d", "25d", 30),
-                             ("term_ratio_30d_90d", None, 30),
+                             ("rr_30d_25", "25d", 30),
                              ("rv_21d", None, None)):
         add(col, "base", wing=wing, tenor=tenor)
         by_col[col]["extrap_flags"] = (
@@ -402,6 +411,21 @@ async def main():
                                     snapshot=None, size=None,
                                     color="rv_21d_z_252",
                                     exclude_extrapolated=True, pool=pool)))
+
+    for m in ("term_ratio_30d_90d", "term_ratio_7d_30d"):
+        for ex in (True, False):
+            cases.append((f"universe-term-state {m} excl={ex}",
+                          eiv.universe_term_state(metric=m, date=None,
+                                                  snapshot=None, sessions=20,
+                                                  exclude_extrapolated=ex,
+                                                  pool=pool)))
+    # Contango is a property of a tenor PAIR. Counting it on a single-tenor
+    # column would silently compare a vol level against 1.0.
+    must_400.append(("term-state rejects a non-pair metric",
+                     eiv.universe_term_state(metric="skew_30d_25p_atm", date=None,
+                                             snapshot=None, sessions=20,
+                                             exclude_extrapolated=True,
+                                             pool=pool)))
 
     for metric in ("skew_30d_25p_atm_z_63", "iv_30d_atm"):
         for win in ("3m", "all"):

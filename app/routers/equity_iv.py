@@ -631,6 +631,81 @@ async def universe_stats(
     }
 
 
+@router.get("/universe-term-state")
+async def universe_term_state(
+    metric:               str  = Query(..., description="a term_ratio column"),
+    date:                 str  = Query(None),
+    snapshot:             str  = Query(None),
+    sessions:             int  = Query(20, ge=2, le=250),
+    exclude_extrapolated: bool = Query(True),
+    pool=Depends(get_oi_pool),
+):
+    """What fraction of the universe is in contango, session by session.
+
+    The regime filter's CHANGE carries more than its level. A single day at
+    31% backwardated is a number; 6% to 31% over a week is the market
+    repricing the front end, and only the series shows that.
+
+    A term ratio is near/far, so BELOW 1 is contango — the far tenor is
+    richer. Ties at exactly 1.0 are counted as backwardation rather than
+    dropped: a flat curve is not contango, and silently discarding them would
+    make the two shares not sum to the covered universe.
+
+    History runs at the daily close and stops before the anchor date, with
+    today taken at the selected snapshot — the same two-population split the
+    rest of the page uses, for the same reason: an 11:25 reading and a set of
+    closes are different populations and should not be averaged together.
+    """
+    if not pool:
+        return {"error": "OI database not configured", "series": []}
+
+    cat = await _catalog(pool)
+    e   = _entry(cat, metric)
+    if e["family"] != "term_ratio":
+        raise HTTPException(
+            400, f"{metric} is {e['family']}, not term_ratio — contango is a "
+                 f"property of a tenor PAIR and this endpoint counts it.")
+
+    val = _expr(e)
+    if exclude_extrapolated:
+        val = f"CASE WHEN {_extrap_expr(e)} THEN NULL ELSE {val} END"
+
+    counts = (f" count({val})                                  AS n,"
+              f" count(*) FILTER (WHERE {val} < 1.0)            AS n_contango")
+
+    async with pool.acquire() as conn:
+        d_, snap = await _resolve_slice(conn, date, snapshot)
+        rows = await conn.fetch(
+            f"SELECT m.trade_date, {counts} "
+            f"{_from_clause(e['form'] != 'base')} "
+            f"WHERE m.snapshot = $1 AND m.trade_date < $2 "
+            f"GROUP BY m.trade_date ORDER BY m.trade_date DESC LIMIT $3",
+            BASELINE_SNAPSHOT, d_, sessions,
+        )
+        trow = await conn.fetchrow(
+            f"SELECT {counts} {_from_clause(e['form'] != 'base')} "
+            f"WHERE m.snapshot = $1 AND m.trade_date = $2",
+            snap, d_,
+        )
+
+    series = [{"date": str(r["trade_date"]), "n": int(r["n"] or 0),
+               "n_contango": int(r["n_contango"] or 0)}
+              for r in reversed(rows)]
+    today = None
+    if trow is not None and trow["n"]:
+        today = {"date": str(d_), "n": int(trow["n"]),
+                 "n_contango": int(trow["n_contango"] or 0), "today": True}
+
+    return {
+        "date": str(d_), "snapshot": snap, "metric": _meta(e),
+        "sessions": sessions,
+        "series": series,
+        "today": today,
+        "basis": {"snapshot": BASELINE_SNAPSHOT, "through": "prior session"},
+        "exclude_extrapolated": bool(exclude_extrapolated),
+    }
+
+
 # Scanner filter operators. Kept as an explicit table rather than passed
 # through, for the same reason column names are: the op reaches SQL as text.
 _OPS        = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "eq": "=", "ne": "<>"}
