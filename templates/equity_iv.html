@@ -146,20 +146,38 @@
     .eq-canvas-wrap { position:relative; padding:8px 10px 4px; }
     .eq-canvas-scatter { height:420px; }
 
-    /* Four panels in the footprint the single distribution panel used to
-       take. 2x2 rather than a column of four: at one-quarter width a time
-       series is unreadable, and the two scatters need aspect ratio more than
-       they need width. */
-    .eq-quad { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px; align-content:start; }
-    @media (max-width:1700px) { .eq-quad { grid-template-columns:repeat(2, minmax(0,1fr)); } }
-    @media (max-width:1100px) { .eq-quad { grid-template-columns:minmax(0,1fr); } }
-    .eq-quad > .eq-section { margin-bottom:0; display:flex; flex-direction:column; }
-    .eq-quad-canvas { height:150px; flex:1 1 auto; min-height:120px; }
+    /* Six panels in the column beside the cross-section scatter. TWO across
+       and three down, never three across: this column is 40% of the page, so
+       a third column would halve each panel's width, and a time series with
+       a legend at that width is a smear. Six panels also do not need more
+       page — the scatter beside them is 420px of canvas plus its axis rows,
+       and the block used to stop well short of that, leaving the space
+       under it empty. It grows DOWN into that space instead.
+
+       Rows are 1fr against the block's stretched height rather than a fixed
+       pixel height, so the panels divide whatever the scatter column turns
+       out to be instead of being tuned to it and drifting when the controls
+       above the scatter reflow. */
+    .eq-quad { display:grid; grid-template-columns:repeat(2, minmax(0,1fr));
+               grid-auto-rows:minmax(0,1fr); gap:8px; height:100%; }
+    @media (max-width:1100px) {
+      .eq-quad { grid-template-columns:minmax(0,1fr);
+                 grid-auto-rows:auto; height:auto; }
+      .eq-quad-canvas { min-height:150px; }
+    }
+    /* min-height:0 on both, or a flex/grid child refuses to shrink below its
+       content and the three rows push past the height they were given. */
+    .eq-quad > .eq-section { margin-bottom:0; display:flex; flex-direction:column;
+                             min-height:0; }
+    .eq-quad-canvas { flex:1 1 auto; min-height:104px; }
     /* The quad's headers carry more chrome than their width allows at the
        normal size, so everything in them shrinks. */
     .eq-quad .eq-section-hdr { padding:4px 7px; gap:5px; }
     .eq-quad .eq-section-title { font-size:11px; }
     .eq-quad .eq-section-sub { font-size:9px; }
+    /* The rows no longer grow to fit an opened note, so the note scrolls
+       inside its panel instead of being clipped by it. */
+    .eq-quad .eq-note { max-height:60%; overflow-y:auto; }
     .eq-canvas-hist    { height:260px; }
     /* Same idiom as theme.css's .panel-body canvas: absolute inside a sized
        wrapper, so Chart.js's responsive resize has a stable box to measure
