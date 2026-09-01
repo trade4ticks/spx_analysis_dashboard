@@ -19,11 +19,25 @@ WHAT IS ALLOWED. Names may appear in:
     pipeline's own documentation map, whose whole job is to list them. It is
     checked for drift by check_vendored.py instead, which is the right check
     for a file that is supposed to be a list of names.
+  * app/scalp_columns.py -- the declared exception, on the same terms
+    app/equity_presets.py holds for the IV page. 232 metrics cannot all be
+    rendered, so SOMETHING has to say which ones the table opens on. What
+    makes it safe is that the names there are CANDIDATES resolved against the
+    live catalog at request time, with an unresolvable role dropped and
+    reported rather than rendered empty -- and that this script verifies every
+    one of them against metric_docs, so a rename upstream fails the build.
   * comments and docstrings, where a name is an EXAMPLE rather than a lookup.
     A metric named in prose cannot silently return nulls.
 
-So this scans executable string literals only, and only in the two files that
+So this scans executable string literals only, and only in the files that
 could actually query with one.
+
+IT ALSO CHECKS THE FILTER SET. The candidates endpoint declares the
+pipeline's five read-time thresholds as explicit query parameters, because
+FastAPI can only validate what it can see. That is a second list that can go
+stale: a threshold added to DEFAULT_FILTERS and not declared here would be
+unreachable from the page while looking, from the config, as though it were
+in force.
 """
 from __future__ import annotations
 
@@ -145,8 +159,84 @@ def self_test() -> int:
     return bad
 
 
+def check_column_roles() -> int:
+    """Every name in scalp_columns must be one metric_docs recognises.
+
+    This is what buys the exception. A candidate list is only safer than a
+    hardcoded column if something notices when a candidate stops existing --
+    otherwise a role silently falls through to its second choice, or to
+    nothing, and the table quietly loses a column.
+
+    Templates are checked by FORMATTING them with a variant, horizon and
+    statistic the pipeline emits, so a family that has been renamed or had its
+    suffix moved fails rather than being checked as a string with braces in it.
+    """
+    from app import scalp_columns
+
+    bad = 0
+    for name in scalp_columns.literals():
+        if scalp_metric_docs.describe(name) is None:
+            bad += 1
+            print(f"\n  app/scalp_columns.py names {name!r}, which metric_docs")
+            print("    does not recognise. Either it was renamed upstream and")
+            print("    the candidate is stale, or it never existed.")
+    for name in scalp_columns.template_examples():
+        if scalp_metric_docs.describe(name) is None:
+            bad += 1
+            print(f"\n  a template in app/scalp_columns.py produces {name!r},")
+            print("    which metric_docs does not recognise — the family has")
+            print("    been renamed or its shape has changed.")
+
+    # A role with neither candidates nor templates can never resolve, so it is
+    # a column that will always be reported missing.
+    for r in scalp_columns.ROLES:
+        if not r.candidates and not r.templates:
+            bad += 1
+            print(f"\n  role {r.key!r} has no candidates and no templates")
+        if not r.note:
+            bad += 1
+            print(f"\n  role {r.key!r} has no note — every column on this page")
+            print("    has to say what it is for")
+
+        # A role key that is ALSO a metric name makes the merge ambiguous.
+        # Role keys and the raw metric names the column chooser adds share one
+        # namespace in the response, so "is this column a role or a metric?"
+        # has to be answerable, and a key like `trades_per_min` -- which is
+        # both -- means it is not.
+        if scalp_metric_docs.describe(r.key) is not None:
+            bad += 1
+            print(f"\n  role key {r.key!r} is also a metric name. Role keys and")
+            print("    chooser-added metric names share a namespace, so this")
+            print("    makes a column's own identity ambiguous. Rename the")
+            print("    role — the metric keeps its name.")
+    return bad
+
+
+def check_filter_params() -> int:
+    """The endpoint's declared thresholds must still be the pipeline's set."""
+    import inspect
+    from app import scalp_config
+    from app.routers import equities_scalp as sc
+
+    declared = set(inspect.signature(sc.candidates).parameters)
+    expected = set(scalp_config.DEFAULT_FILTERS)
+    bad = 0
+    for missing in sorted(expected - declared):
+        bad += 1
+        print(f"\n  DEFAULT_FILTERS has {missing!r} and /candidates does not")
+        print("    declare it. The threshold would look active in the config")
+        print("    and be unreachable from the page.")
+    for extra in sorted(set(sc._FILTER_ROLES) - expected):
+        bad += 1
+        print(f"\n  /candidates joins {extra!r} to a column, but it is not in")
+        print("    DEFAULT_FILTERS — a filter with no threshold behind it.")
+    return bad
+
+
 def main() -> int:
     bad = self_test()
+    bad += check_column_roles()
+    bad += check_filter_params()
     findings: list[str] = []
     checked = 0
     for p in PY_TARGETS:

@@ -52,6 +52,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.routers import equities_scalp as sc            # noqa: E402
+from app import scalp_config                            # noqa: E402
 
 BAD: list[str] = []
 
@@ -63,10 +64,64 @@ FAKE_METRICS = [
     "noise_bps_tw_mid_10s_median", "noise_bps_tw_mid_10s_rms",
     "noise_bps_tw_mid_30s_rms", "noise_bps_last_mid_10s_p75",
     "noise_bps_bid_side_5s_mean",
-    "ratio_tw_mid_10s", "ratio_last_mid_30s",
+    "ratio_tw_mid_10s", "ratio_tw_mid_10s_rms", "ratio_last_mid_30s",
     "move_rate_tw_mid_10s", "move_bps_tw_mid_10s",
+    "reference_price",
+    # Undocumented ON PURPOSE. The catalog must carry it, unlinked, rather
+    # than dropping it: a metric that exists and is not shown is worse than
+    # one shown without a definition, since only the second is visible as a
+    # gap. metric_docs has no entry for this shape.
+    "some_future_metric_nobody_documented",
 ]
+UNDOCUMENTED = "some_future_metric_nobody_documented"
 FAKE_DATES = [datetime.date(2026, 8, 28), datetime.date(2026, 8, 27)]
+
+# Enough symbols to sort, and deliberately not all alike: one passes every
+# filter, one is too tight to trade, one is sparsely quoted, and one has a
+# missing ratio so the null-ordering assertion has something to order.
+FAKE_SYMBOLS = ["AAAA", "BBBB", "CCCC", "DDDD", "EEEE"]
+
+
+def _pivot_row(symbol: str, i: int, names: list[str]) -> dict:
+    """One pivoted row, with values shaped like the metric each column holds.
+
+    A fake that answers 1.25 to everything cannot exercise a filter: every row
+    passes or every row fails, and the thresholds are never the thing under
+    test.
+    """
+    row = {"symbol": symbol}
+    for j, name in enumerate(names):
+        if name.startswith("noise_bps"):
+            # EEEE is quiet enough to trip min_noise_bps; CCCC is too noisy
+            # for max_noise_bps.
+            v = {0: 2.0, 1: 3.0, 2: 9.9, 3: 1.4, 4: 0.05}[i]
+        elif name.startswith("ratio"):
+            v = None if symbol == "DDDD" else {0: 4.0, 1: 2.5, 2: 0.4, 3: 0.0,
+                                               4: 40.0}[i]
+        elif name.startswith("quote_bucket_coverage"):
+            v = {0: 0.99, 1: 0.95, 2: 0.90, 3: 0.33, 4: 0.97}[i]
+        elif name.startswith("spread_cents"):
+            v = {0: 8.0, 1: 7.5, 2: 4.0, 3: 6.0, 4: 9.0}[i]
+        elif name.startswith("spread_bps"):
+            v = 6.0 + i
+        elif name.startswith("move_rate"):
+            v = {0: 0.62, 1: 0.55, 2: 0.71, 3: 0.09, 4: 0.40}[i]
+        elif name.startswith("move_bps"):
+            v = 1.0 + i * 0.3
+        elif name == "trades_per_min":
+            v = {0: 45.0, 1: 22.0, 2: 60.0, 3: 3.0, 4: 18.0}[i]
+        elif name == "trade_size_median":
+            v = 40.0 + i * 5
+        elif name == "two_sided_balance":
+            v = 0.9 - i * 0.1
+        elif name == "off_exchange_share":
+            v = 0.35 + i * 0.02
+        elif name == "reference_price":
+            v = 100.0 + i * 50
+        else:
+            v = 1.25
+        row[f"v{j}"] = v
+    return row
 
 
 # ── column types, from the pipeline's DDL in scalp/db.py ────────────────────
@@ -87,9 +142,21 @@ _BIND_RE = re.compile(
 
 
 def _type_problem(column: str, value):
-    """None if `value` can bind to `column`, else why not."""
+    """None if `value` can bind to `column`, else why not.
+
+    A list is checked ELEMENT-WISE, not rejected. `column = ANY($n)` is the
+    normal way to pass a set of dates or symbols, and the element type is what
+    asyncpg binds — so a list of dates on a DATE column is right and a list of
+    strings on one is the same defect as a bare string.
+    """
     if value is None:
         return None                      # NULL binds to anything
+    if isinstance(value, (list, tuple)):
+        for element in value:
+            problem = _type_problem(column, element)
+            if problem:
+                return f"a list containing {problem}"
+        return None
     if column in DATE_COLUMNS:
         # datetime is a SUBCLASS of date, so it would pass a naive isinstance
         # and then silently drop its time component. A DATE column wants a
@@ -103,11 +170,7 @@ def _type_problem(column: str, value):
         if not isinstance(value, datetime.datetime):
             return f"{type(value).__name__}, but this is a TIMESTAMP column"
     elif column in TEXT_COLUMNS:
-        if isinstance(value, (list, tuple)):
-            bad = [v for v in value if not isinstance(v, str)]
-            if bad:
-                return f"a list containing {type(bad[0]).__name__}, not str"
-        elif not isinstance(value, str):
+        if not isinstance(value, str):
             return f"{type(value).__name__}, but this is a TEXT column"
     return None
 
@@ -161,6 +224,9 @@ def self_test_binds() -> int:
         ("symbol", "FDX", False, "a ticker"),
         ("symbol", 3, True, "a number as a ticker"),
         ("symbol", ["FDX", "LLY"], False, "a ticker list"),
+        ("symbol", ["FDX", 7], True, "a ticker list with a number in it"),
+        ("trade_date", [datetime.date(2026, 8, 28)], False, "a date list"),
+        ("trade_date", ["2026-08-28"], True, "a list of date strings"),
         ("bucket_start", "2026-08-28 09:45", True, "a timestamp as a string"),
         ("bucket_start", datetime.datetime(2026, 8, 28, 9, 45), False,
          "a real timestamp"),
@@ -188,6 +254,24 @@ class Conn:
             return []
         if "DISTINCT trade_date" in sql:
             return [{"trade_date": d} for d in FAKE_DATES]
+        if "DISTINCT metric" in sql:
+            return [{"metric": m} for m in FAKE_METRICS]
+        if "GROUP BY m.symbol" in sql:
+            # The pivot. The fake knows which metric each vN column came from,
+            # because the names were bound in order -- so it can answer with
+            # values shaped like that metric rather than a constant, which is
+            # what makes the filter and sort assertions mean anything.
+            names = [a for a in args[1:-1]]
+            return [_pivot_row(sym, i, names)
+                    for i, sym in enumerate(FAKE_SYMBOLS)]
+        if "trade_date = ANY(" in sql:
+            # The sparkline history.
+            out = []
+            for sym in FAKE_SYMBOLS:
+                for dt in FAKE_DATES:
+                    out.append({"trade_date": dt, "symbol": sym,
+                                "value": 1.5 + len(sym) * 0.1})
+            return out
         if "GROUP BY metric" in sql:
             return [{"metric": m, "n": 587,
                      # One deliberately all-null metric: an all-null column and
@@ -274,6 +358,23 @@ async def run() -> int:
                   f"{bool(looks_generated)}")
             fails += 1
 
+    # ── nothing is filtered out of the catalog ───────────────────────────
+    if UNDOCUMENTED not in got:
+        print(f"  {UNDOCUMENTED!r} is in the database and not in the catalog.")
+        print("    An undocumented metric must appear unlinked, not vanish —")
+        print("    a metric that exists and is not shown is worse than one")
+        print("    shown without a definition.")
+        fails += 1
+    else:
+        entry = next(m for m in j["metrics"] if m["metric"] == UNDOCUMENTED)
+        if entry["href"] is not None or entry["tooltip"] is not None:
+            print("  an undocumented metric was given a link or a definition")
+            fails += 1
+        if UNDOCUMENTED not in (j.get("undocumented") or []):
+            print("  an undocumented metric is not reported as undocumented,")
+            print("    so nothing on the page marks it as a gap")
+            fails += 1
+
     # ── the default variant ──────────────────────────────────────────────
     dn = j.get("default_noise")
     if dn is None:
@@ -308,6 +409,8 @@ async def run() -> int:
         print("  an unknown date did not fall back to the latest")
         fails += 1
 
+    fails += await check_candidates()
+
     for b in BAD:
         print(f"  {b}")
     fails += len(BAD)
@@ -315,6 +418,118 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_candidates() -> int:
+    """The ranked table: resolution, the filter join, and the pass count."""
+    fails = 0
+
+    c = await sc.candidates(date=None, noise=None, columns=None, extra=None,
+                            sort=None, desc=True, limit=600, spark_sessions=10,
+                            min_spread_cents=None, min_trades_per_min=None,
+                            max_noise_bps=None, min_noise_bps=None,
+                            min_quote_bucket_coverage=None, pool=Pool())
+
+    if not c.get("rows"):
+        print("  /candidates returned no rows against a populated fake")
+        return fails + 1
+
+    keys = [col["key"] for col in c["columns"]]
+
+    # THE VARIANT MOVES FIVE COLUMNS. Noise alone would leave coverage and the
+    # decomposition at whatever horizon happened to resolve first, which reads
+    # as a comparison and is not one.
+    v = c["variant"]
+    for k in ("noise", "ratio", "coverage", "move_rate", "move_bps"):
+        if k not in keys:
+            continue
+        got = next(col["metric"] for col in c["columns"] if col["key"] == k)
+        if f"_{v['horizon_s']}s" not in got:
+            print(f"  {k} resolved to {got}, which is not at the selected "
+                  f"{v['horizon_s']}s horizon")
+            fails += 1
+
+    # Every filter must be joined to a column, or the pass count is a number
+    # about filters that did not all run.
+    for fk in scalp_config.DEFAULT_FILTERS:
+        if fk not in sc._FILTER_ROLES:
+            print(f"  the filter {fk!r} has no column to apply to — it would")
+            print("    move a slider and change nothing")
+            fails += 1
+    if c.get("inert_filters"):
+        print(f"  filters that did not run: {c['inert_filters']} — with the "
+              f"full fake catalog every one should apply")
+        fails += 1
+
+    # Failing rows are RETAINED, below the passing ones. They are the only
+    # evidence that can say whether a threshold sits in the right place.
+    if c["n_total"] <= c["n_pass"] and c["n_pass"] == len(c["rows"]):
+        pass                                 # everything passed; fine
+    seen_fail = False
+    for r in c["rows"]:
+        if not r["passes"]:
+            seen_fail = True
+        elif seen_fail:
+            print("  a passing row sorts below a failing one")
+            fails += 1
+            break
+
+    # Nulls last in both directions, or a name with no measurement lands where
+    # the best one belongs.
+    for descending in (True, False):
+        cc = await sc.candidates(date=None, noise=None, columns=None,
+                                 extra=None, sort="ratio", desc=descending,
+                                 limit=600, spark_sessions=0,
+                                 min_spread_cents=None, min_trades_per_min=None,
+                                 max_noise_bps=None, min_noise_bps=None,
+                                 min_quote_bucket_coverage=None, pool=Pool())
+        vals = [r["values"].get("ratio") for r in cc["rows"] if r["passes"]]
+        nulls = [i for i, x in enumerate(vals) if x is None]
+        reals = [i for i, x in enumerate(vals) if x is not None]
+        if nulls and reals and min(nulls) < max(reals):
+            print(f"  desc={descending}: a null ratio sorts above a real one")
+            fails += 1
+
+    # A role that cannot resolve is REPORTED, not dropped in silence.
+    thin = await sc.candidates(date=None, noise=None, columns="ratio,nonsense",
+                               extra=None, sort=None, desc=True, limit=10,
+                               spark_sessions=0,
+                               min_spread_cents=None, min_trades_per_min=None,
+                               max_noise_bps=None, min_noise_bps=None,
+                               min_quote_bucket_coverage=None, pool=Pool())
+    if "missing" not in thin:
+        print("  /candidates does not report which roles failed to resolve")
+        fails += 1
+
+    # An unknown extra column must be ignored rather than becoming a column of
+    # nulls -- the exact failure the no-hardcoding rule exists for.
+    ex = await sc.candidates(date=None, noise=None, columns="ratio",
+                             extra="not_a_real_metric", sort=None, desc=True,
+                             limit=10, spark_sessions=0,
+                             min_spread_cents=None, min_trades_per_min=None,
+                             max_noise_bps=None, min_noise_bps=None,
+                             min_quote_bucket_coverage=None, pool=Pool())
+    if any(col["key"] == "not_a_real_metric" for col in ex["columns"]):
+        print("  an extra column that is not in the database became a column")
+        print("    of nulls rather than being refused")
+        fails += 1
+
+    # A moved slider has to reach the response, or the page is showing the
+    # pipeline's threshold while claiming to show the user's.
+    tight = await sc.candidates(date=None, noise=None, columns=None, extra=None,
+                                sort=None, desc=True, limit=600,
+                                spark_sessions=0,
+                                min_spread_cents=999.0, min_trades_per_min=None,
+                                max_noise_bps=None, min_noise_bps=None,
+                                min_quote_bucket_coverage=None, pool=Pool())
+    if tight["thresholds"]["min_spread_cents"] != 999.0:
+        print("  a supplied threshold did not override the pipeline default")
+        fails += 1
+    if tight["n_pass"] != 0:
+        print("  an impossible threshold still passed rows")
+        fails += 1
+
+    return fails
 
 
 # ── against the real database ────────────────────────────────────────────────

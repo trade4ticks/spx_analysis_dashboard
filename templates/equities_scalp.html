@@ -180,6 +180,70 @@
     .sc-tag.on { border-color:var(--accent); color:var(--accent); }
     .sc-tag.warn { border-color:#e84393; color:#e84393; }
 
+    .sc-sel, .sc-inp {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:11px; padding:3px 6px; border-radius:4px; max-width:230px;
+    }
+    .sc-btn {
+      background:var(--raised); border:1px solid var(--border); color:var(--muted);
+      font-size:11px; padding:3px 9px; border-radius:4px; cursor:pointer;
+    }
+    .sc-btn:hover { color:var(--text); }
+    .sc-btn.on { border-color:var(--accent); color:var(--accent); }
+    .sc-chk {
+      display:flex; align-items:center; gap:4px; font-size:10.5px;
+      color:var(--muted); cursor:pointer; white-space:nowrap;
+    }
+    .sc-sort { color:var(--accent); font-size:9px; }
+
+    /* The chooser. A dense chip grid rather than a list: 232 rows is a
+       scroll, 232 chips is a glance. */
+    .sc-chooser { border-bottom:1px solid var(--border); background:var(--bg); }
+    .sc-chooser-hd {
+      display:flex; align-items:center; gap:10px; padding:7px 11px;
+      border-bottom:1px solid var(--border);
+    }
+    .sc-chooser-hd .sc-panel-sub { max-width:52ch; line-height:1.5; }
+    .sc-chooser-body {
+      display:flex; flex-wrap:wrap; gap:4px; padding:9px 11px;
+      max-height:190px; overflow-y:auto;
+    }
+    .sc-chip {
+      display:inline-flex; align-items:center; gap:4px;
+      font-size:10px; padding:2px 6px; border-radius:3px;
+      border:1px solid var(--border); color:var(--muted); cursor:pointer;
+      white-space:nowrap;
+    }
+    .sc-chip:hover { color:var(--text); }
+    .sc-chip.on { border-color:var(--accent); color:var(--accent); }
+    .sc-chip input { margin:0; }
+    .sc-chip-x { color:#e84393; font-weight:600; }
+
+    .sc-warn {
+      font-size:10.5px; color:var(--muted); line-height:1.6;
+      padding:6px 11px; border-bottom:1px solid var(--border);
+      background:rgba(52,152,219,0.05);
+    }
+    .sc-warn b { color:var(--text); }
+    .sc-warn.bad { background:rgba(232,67,147,0.07); }
+    .sc-warn.bad b { color:#e84393; }
+
+    /* An excluded row is dimmed, not hidden — but it still has to be legible,
+       since reading why it failed is the point of keeping it. */
+    .sc-table tbody tr.fail td { opacity:0.44; }
+    .sc-table td.dim { color:var(--border); }
+    .sc-spark { display:block; }
+
+    .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
+    .sc-reject {
+      display:inline-flex; align-items:baseline; gap:5px;
+      font-size:10px; color:var(--muted);
+      border:1px solid var(--border); border-radius:3px; padding:2px 7px;
+    }
+    .sc-reject b { color:#e84393; font-variant-numeric:tabular-nums; }
+    .sc-reject.zero { opacity:0.5; }
+    .sc-reject.zero b { color:var(--muted); }
+
     [x-cloak] { display:none !important; }
   </style>
 </head>
@@ -343,19 +407,165 @@
       <div class="sc-panel" id="candidates">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Ranked candidates</span>
-          <span class="sc-panel-sub">one row per symbol passing the filters</span>
+          <span class="sc-panel-sub"
+                x-text="cand ? (cand.n_pass + ' pass of ' + cand.n_total) : ''"></span>
+          <span class="sc-spacer"></span>
+
+          <!-- ONE control, five columns. Noise, the ratio over it, the quote
+               coverage at that horizon and both halves of the decomposition
+               all move together — they have to, or the row compares a 10s
+               noise against 30s coverage and looks like a comparison. -->
+          <span class="sc-panel-sub">variant</span>
+          <select class="sc-sel" x-model="noise" @change="loadCandidates()">
+            <template x-for="m in (meta.noise_metrics || [])" :key="m">
+              <option :value="m" x-text="m"></option>
+            </template>
+          </select>
+
+          <label class="sc-chk" title="Rows that failed a threshold are kept so
+                                       the threshold can be judged against what
+                                       it excludes.">
+            <input type="checkbox" x-model="showFails" >
+            <span>show excluded</span>
+          </label>
+
+          <button class="sc-btn" @click="chooserOpen = !chooserOpen"
+                  :class="{on: chooserOpen}">columns</button>
+          <span class="sc-panel-sub" x-show="candLoading" x-cloak>…</span>
         </div>
-        <div class="sc-panel-body">
-          <div class="sc-stub">
-            <span class="sc-stub-tag">phase 2</span>
-            <b>Ticker, price, spread ¢/bps, noise, ratio, quote coverage, trades/min, size, balance, off-exchange, 10-day ratio sparkline, traded marker.</b>
-            Quote coverage is a first-class column rather than a diagnostic:
-            noise is measured between consecutive <em>observed</em> buckets, so
-            a name at 0.33 coverage has observations ~30s apart at a nominal
-            10s horizon and its "10s noise" is really 30s noise. Coverage is
-            the only thing that makes that comparable.
-            Move-rate and move-bps sit beside the ratio, since noise conflates
-            them and loses to the first term on sparse names.
+
+        <!-- ── the column chooser ──────────────────────────────────────
+             The default set is twelve of ~232. The rest are not hidden,
+             they are one click away, and the list shows the whole catalog
+             with what is already on screen ticked — filtering those out
+             would mean hunting for a column after turning it off. -->
+        <div class="sc-chooser" x-show="chooserOpen" x-cloak>
+          <div class="sc-chooser-hd">
+            <input class="sc-inp" type="text" x-model="chooserFilter"
+                   placeholder="filter metrics…">
+            <span class="sc-panel-sub"
+                  x-text="chooserRows().length + ' of ' + (meta.metrics || []).length"></span>
+            <span class="sc-spacer"></span>
+            <span class="sc-panel-sub">
+              Twelve columns by default because 232 is not a table. Roles are
+              resolved against this date's catalog, so one that cannot resolve
+              is dropped and named rather than rendered empty.
+            </span>
+          </div>
+          <div class="sc-chooser-body">
+            <template x-for="r in chooserRows()" :key="r.metric">
+              <label class="sc-chip" :class="{on: r.asRole || r.asExtra}"
+                     :title="r.tooltip || 'no definition in metric_docs'">
+                <input type="checkbox"
+                       :checked="!!(r.asRole || r.asExtra)"
+                       :disabled="!!r.asRole"
+                       @change="toggleExtra(r.metric)">
+                <span x-text="r.metric"></span>
+                <!-- An unlinked chip is a metric the pipeline emits and the
+                     documentation does not cover. Visible as a gap rather
+                     than absent. -->
+                <span class="sc-chip-x" x-show="!r.href" x-cloak
+                      title="no entry in metric_docs">?</span>
+              </label>
+            </template>
+          </div>
+        </div>
+
+        <!-- A role that could not resolve on this date. Named, not dropped:
+             "this name has no 5s coverage" is a fact about the data. -->
+        <div class="sc-warn" x-show="cand && cand.missing && cand.missing.length"
+             x-cloak>
+          <b>No column for:</b>
+          <span x-text="(cand.missing || []).join(', ')"></span>
+          — nothing in this date's catalog can play those roles at the selected
+          variant.
+        </div>
+        <!-- A filter with no column did NOT run, and a pass count that does
+             not say so is a number about filters that did not all apply. -->
+        <div class="sc-warn bad"
+             x-show="cand && cand.inert_filters && cand.inert_filters.length"
+             x-cloak>
+          <b>Filters not applied:</b>
+          <span x-text="(cand.inert_filters || []).join(', ')"></span>
+          — the column each one thresholds is absent, so the pass count above
+          is not the count those filters would give.
+        </div>
+
+        <div class="sc-panel-body" style="padding:0">
+          <div class="sc-empty" x-show="candError" x-cloak x-text="candError"></div>
+          <div class="sc-empty" x-show="!candError && cand && !visibleRows().length"
+               x-cloak>
+            <div class="sc-empty-hd">Nothing passes these thresholds</div>
+            <div>
+              That is a finding, not an empty table. Tick <em>show excluded</em>
+              to see which threshold is doing the work.
+            </div>
+          </div>
+
+          <div class="sc-scroll" style="max-height:560px"
+               x-show="cand && visibleRows().length" x-cloak>
+            <table class="sc-table">
+              <thead><tr>
+                <th @click="setSort('symbol')" style="cursor:pointer">ticker</th>
+                <template x-for="c in (cand ? cand.columns : [])" :key="c.key">
+                  <th class="sc-num" style="cursor:pointer"
+                      @click="setSort(c.key)"
+                      :title="colMeta(c).metric + ' — ' + colMeta(c).note">
+                    <span x-text="colLabel(c)"></span>
+                    <span class="sc-sort" x-show="cand.rows.length && sortKey === c.key"
+                          x-cloak x-text="sortDesc ? '▾' : '▴'"></span>
+                  </th>
+                </template>
+                <!-- STABILITY, not level. The ratio column says what the name
+                     reads today; this says whether it read the same yesterday. -->
+                <th x-show="cand && cand.spark_metric" x-cloak
+                    :title="'10-session history of ' + (cand ? cand.spark_metric : '')">
+                  ratio · 10d
+                </th>
+              </tr></thead>
+              <tbody>
+                <template x-for="row in visibleRows()" :key="row.symbol">
+                  <tr :class="{fail: !row.passes}" :title="failNote(row)">
+                    <td>
+                      <b x-text="row.symbol"></b>
+                      <span class="sc-tag warn" x-show="!row.passes" x-cloak
+                            style="margin-left:5px">excluded</span>
+                    </td>
+                    <template x-for="c in (cand ? cand.columns : [])" :key="c.key">
+                      <td class="sc-num"
+                          :class="{dim: row.values[c.key] == null}"
+                          x-text="fmtVal(c, row.values[c.key])"></td>
+                    </template>
+                    <td x-show="cand && cand.spark_metric" x-cloak>
+                      <svg width="54" height="14" class="sc-spark"
+                           :title="sparkSwing(row) ? ('high/low ' + sparkSwing(row).toFixed(1) + '× over the window') : 'not enough history'">
+                        <path :d="sparkPath(row)" fill="none"
+                              :stroke="sparkSwing(row) > 5 ? '#e84393' : '#3498db'"
+                              stroke-width="1.2"></path>
+                      </svg>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="sc-panel-body" x-show="cand" x-cloak style="padding-top:0">
+          <!-- Which threshold is doing the work. The sliders are worth having
+               only if it is visible what each one costs. -->
+          <div class="sc-rejects">
+            <template x-for="(n, k) in (cand ? cand.rejected : {})" :key="k">
+              <span class="sc-reject" :class="{zero: !n}">
+                <span x-text="filterLabel(k)"></span>
+                <b x-text="n"></b>
+              </span>
+            </template>
+          </div>
+          <div class="sc-panel-sub" style="margin-top:6px; line-height:1.7">
+            Counts are rows excluded by each threshold; a row failing two is
+            counted in both. The realised $/min marker the brief asks for waits
+            on the fills upload — there is nothing to join against yet.
           </div>
         </div>
       </div>

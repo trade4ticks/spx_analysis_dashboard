@@ -33,7 +33,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_scalp_pool, pool_status
-from app import scalp_config, scalp_metric_docs
+from app import scalp_config, scalp_columns, scalp_metric_docs
 
 router = APIRouter()
 
@@ -244,6 +244,241 @@ async def meta(
         "filters": _filter_block(),
         "undocumented": scalp_metric_docs.undocumented(
             [e["metric"] for e in catalog]),
+    }
+
+
+# ── which filter constrains which column ────────────────────────────────────
+#
+# The pipeline's DEFAULT_FILTERS are named for what they threshold, not for the
+# metric they threshold it on, so the join lives here. Kept as a table rather
+# than a chain of ifs because the failure it prevents is a filter silently
+# doing nothing: a threshold whose column did not resolve must be REPORTED, not
+# skipped, or the pass count is a number about a filter that never ran.
+_FILTER_ROLES = {
+    "min_spread_cents":           ("spread_cents", "min"),
+    "min_trades_per_min":         ("arrivals", "min"),
+    "max_noise_bps":              ("noise", "max"),
+    "min_noise_bps":              ("noise", "min"),
+    "min_quote_bucket_coverage":  ("coverage", "min"),
+}
+
+
+@router.get("/candidates")
+async def candidates(
+    date:     str = Query(None),
+    noise:    str = Query(None, description="the selected noise metric"),
+    columns:  str = Query(None, description="comma-separated role keys"),
+    extra:    str = Query(None, description="comma-separated raw metric names"),
+    sort:     str = Query(None, description="role key or raw metric name"),
+    desc:     bool = Query(True),
+    limit:    int = Query(600, ge=1, le=5000),
+    spark_sessions: int = Query(10, ge=0, le=60),
+    # The pipeline's five read-time thresholds, declared rather than collected
+    # from **kwargs -- FastAPI validates what it can see, and a typo'd query
+    # parameter should be a 422 rather than a filter that silently did not run.
+    # scripts/check_scalp_metrics.py fails the build if this set stops matching
+    # DEFAULT_FILTERS, so a threshold added upstream cannot go unexposed.
+    min_spread_cents:          float = Query(None),
+    min_trades_per_min:        float = Query(None),
+    max_noise_bps:             float = Query(None),
+    min_noise_bps:             float = Query(None),
+    min_quote_bucket_coverage: float = Query(None),
+    pool=Depends(get_scalp_pool),
+):
+    """One row per symbol, with the filters applied at READ time.
+
+    EVERY SYMBOL IS STORED whether it passes or not, and this endpoint is what
+    makes that worth something: it returns the pass/fail decision per row and
+    the count each threshold rejected, so a threshold can be judged against the
+    names it is excluding rather than trusted. A filter that runs in the
+    pipeline can only ever be confirmed by its own output.
+
+    THE PIVOT HAPPENS IN SQL. daily_metrics is long, and the alternative --
+    fetching 232 metrics x 587 symbols and reshaping here -- ships 136,000 rows
+    to build 587. The FILTER aggregate does it in one pass, and every metric
+    name is a bound parameter rather than interpolated text.
+
+    THE VARIANT SELECTOR MOVES FIVE COLUMNS. Noise, the ratio over it, the
+    quote coverage at that horizon, and both halves of the move-rate
+    decomposition. They cannot be chosen independently without the row becoming
+    incoherent: noise is measured between consecutive OBSERVED buckets, so a
+    10s noise reading beside 30s coverage compares two different things while
+    looking like a comparison.
+    """
+    if pool is None:
+        return _no_db({"rows": [], "columns": []})
+
+    want = _as_date(date)
+    v = h = stat = None
+    if noise:
+        parsed = _parse_variant(noise)
+        if parsed:
+            v, h, stat = parsed["variant"], parsed["horizon_s"], parsed["statistic"]
+
+    keys = [k.strip() for k in columns.split(",") if k.strip()] if columns else None
+    extras = [e.strip() for e in extra.split(",") if e.strip()] if extra else []
+
+    async with pool.acquire() as conn:
+        available_dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT 90")]
+        if not available_dates:
+            return {"connected": True, "date": None, "rows": [], "columns": [],
+                    "note": "daily_metrics is empty — the pipeline has not "
+                            "written a session yet."}
+        d = want if want in available_dates else available_dates[0]
+
+        # What this date actually holds, so a role resolves against reality
+        # rather than against what the docs say could exist.
+        present = {r["metric"] for r in await conn.fetch(
+            "SELECT DISTINCT metric FROM daily_metrics WHERE trade_date = $1", d)}
+
+        if noise is None:
+            noise = _default_noise(
+                [m for m in present
+                 if (_parse_variant(m) or {}).get("kind") == "noise_bps"])
+            parsed = _parse_variant(noise) if noise else None
+            if parsed:
+                v, h, stat = (parsed["variant"], parsed["horizon_s"],
+                              parsed["statistic"])
+
+        got = scalp_columns.resolve_all(present, v, h, stat, keys)
+        col_map = dict(got["columns"])
+        # Anything picked from the column chooser rides alongside the roles,
+        # keyed by its own name so the two cannot collide.
+        for e in extras:
+            if e in present:
+                col_map.setdefault(e, e)
+
+        if not col_map:
+            return {"connected": True, "date": str(d), "rows": [], "columns": [],
+                    "missing": got["missing"],
+                    "note": "No requested column resolved against this date."}
+
+        # ── the pivot ────────────────────────────────────────────────────
+        order = list(col_map)                       # stable key order
+        metrics = [col_map[k] for k in order]
+        params: list = [d]
+        sel = ["m.symbol"]
+        for i, name in enumerate(metrics):
+            params.append(name)
+            sel.append(f"max(m.value) FILTER (WHERE m.metric = ${len(params)}) "
+                       f"AS v{i}")
+        params.append(metrics)
+        rows = await conn.fetch(
+            f"SELECT {', '.join(sel)} FROM daily_metrics m "
+            f"WHERE m.trade_date = $1 AND m.metric = ANY(${len(params)}) "
+            f"GROUP BY m.symbol ORDER BY m.symbol",
+            *params,
+        )
+
+        # ── the ratio's own history, for the stability sparkline ─────────
+        #
+        # STABILITY, NOT LEVEL. Today's ratio is already a column; what the
+        # sparkline adds is whether the name reads the same way tomorrow. A
+        # metric whose value swings by an order of magnitude between sessions
+        # is measuring the measurement.
+        spark: dict[str, list] = {}
+        spark_dates: list[str] = []
+        ratio_col = col_map.get("ratio")
+        if ratio_col and spark_sessions:
+            window = available_dates[:spark_sessions]
+            srows = await conn.fetch(
+                "SELECT trade_date, symbol, value FROM daily_metrics "
+                "WHERE metric = $1 AND trade_date = ANY($2) "
+                "ORDER BY symbol, trade_date",
+                ratio_col, window,
+            )
+            spark_dates = [str(x) for x in sorted(window)]
+            idx = {dt: i for i, dt in enumerate(spark_dates)}
+            for r in srows:
+                arr = spark.setdefault(r["symbol"], [None] * len(spark_dates))
+                arr[idx[str(r["trade_date"])]] = r["value"]
+
+    # ── read-time filtering ──────────────────────────────────────────────
+    supplied = {
+        "min_spread_cents": min_spread_cents,
+        "min_trades_per_min": min_trades_per_min,
+        "max_noise_bps": max_noise_bps,
+        "min_noise_bps": min_noise_bps,
+        "min_quote_bucket_coverage": min_quote_bucket_coverage,
+    }
+    # The pipeline's value unless the caller moved the slider. Defaults come
+    # from the vendored config, so they cannot drift from what the ranking
+    # upstream used.
+    thresholds = {k: float(vv) for k, vv in scalp_config.DEFAULT_FILTERS.items()}
+    for k, vv in supplied.items():
+        if vv is not None and k in thresholds:
+            thresholds[k] = float(vv)
+
+    active, inert = {}, []
+    for fk, (role_key, direction) in _FILTER_ROLES.items():
+        if role_key in col_map:
+            active[fk] = (order.index(role_key), direction, thresholds[fk])
+        else:
+            # A threshold whose column is absent did NOT run. Saying so is the
+            # difference between "12 names pass" and "12 names pass, and one of
+            # your four filters was not applied".
+            inert.append(fk)
+
+    out, rejected = [], {fk: 0 for fk in active}
+    for r in rows:
+        vals = {k: r[f"v{i}"] for i, k in enumerate(order)}
+        fails = []
+        for fk, (i, direction, thr) in active.items():
+            x = r[f"v{i}"]
+            if x is None:
+                fails.append(fk)
+            elif direction == "min" and x < thr:
+                fails.append(fk)
+            elif direction == "max" and x > thr:
+                fails.append(fk)
+        for fk in fails:
+            rejected[fk] += 1
+        out.append({"symbol": r["symbol"], "values": vals,
+                    "passes": not fails, "fails": fails,
+                    "spark": spark.get(r["symbol"])})
+
+    # ── sort ─────────────────────────────────────────────────────────────
+    #
+    # Failing rows sort BELOW passing ones rather than being dropped. They are
+    # the only evidence that can say whether a threshold sits in the right
+    # place, and a filter that hides its own rejects cannot be judged.
+    sort_key = sort if sort in col_map else ("ratio" if "ratio" in col_map
+                                             else order[0])
+    # Nulls sort last in BOTH directions. A missing measurement is not a small
+    # value, and letting it float to the top of an ascending sort would put the
+    # names with no data where the best ones belong.
+    sign = -1.0 if desc else 1.0
+
+    def _sk(row):
+        x = row["values"].get(sort_key)
+        return (0 if row["passes"] else 1, x is None,
+                sign * x if x is not None else 0.0)
+
+    out.sort(key=_sk)
+
+    n_pass = sum(1 for r in out if r["passes"])
+    return {
+        "connected": True,
+        "date": str(d),
+        "noise": noise,
+        "variant": {"variant": v, "horizon_s": h, "statistic": stat},
+        "columns": [{"key": k, "metric": col_map[k],
+                     **({"role": True} if k in scalp_columns.BY_KEY
+                        else {"role": False})}
+                    for k in order],
+        "roles": scalp_columns.describe_roles(keys),
+        "missing": got["missing"],
+        "rows": out[:limit],
+        "n_total": len(out),
+        "n_pass": n_pass,
+        "n_shown": min(len(out), limit),
+        "thresholds": thresholds,
+        "rejected": rejected,
+        "inert_filters": inert,
+        "spark_dates": spark_dates,
+        "spark_metric": ratio_col,
     }
 
 
