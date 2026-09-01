@@ -73,6 +73,29 @@
       width:1px; align-self:stretch; background:var(--border); margin:0 10px;
     }
 
+    /* Which session is on screen. Louder than the jump links beside it, and
+       much louder than the site chrome it moved out of: every number on this
+       page is a statement about one session, so reading the wrong date is
+       the error with the widest blast radius. */
+    .sc-state {
+      display:flex; align-items:baseline; gap:5px;
+      padding:2px 8px; border-radius:4px;
+      background:var(--raised); border:1px solid var(--border);
+      white-space:nowrap;
+    }
+    .sc-state-date {
+      font-size:12px; font-weight:600; color:var(--text);
+      font-variant-numeric:tabular-nums; letter-spacing:0.2px;
+    }
+    .sc-state-n {
+      font-size:12px; font-weight:600; color:var(--accent);
+      font-variant-numeric:tabular-nums;
+    }
+    .sc-state-lbl { font-size:10px; color:var(--muted); }
+    .sc-state-sep { color:var(--border); }
+    .sc-state.bad { border-color:rgba(232,67,147,0.45); }
+    .sc-state.bad .sc-state-date { color:#e84393; }
+
     /* ── panels ────────────────────────────────────────────────────────── */
     .sc-panel {
       background:var(--surface); border:1px solid var(--border);
@@ -166,11 +189,11 @@
   <div class="topbar">
     <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
     {% set nav_active = "/equities-scalp" %}{% include "_nav.html" %}
-    <div class="topbar-right">
-      <span x-text="meta.date || '—'"></span>
-      <span style="color:var(--border)"> · </span>
-      <span x-text="meta.symbols ? meta.symbols + ' symbols' : 'not loaded'"></span>
-    </div>
+    <!-- The date and symbol count used to sit here, in topbar-right. That
+         strip is site chrome — it looks the same on every page and reads as
+         decoration, which is why the two numbers that say WHICH SESSION this
+         page is showing went unnoticed in it. They are page state, so they
+         live in the page's own bar. -->
   </div>
 
   <div class="sc-body">
@@ -190,9 +213,35 @@
       <a href="#calibration">Calibration</a>
       <a href="#distributions">Distributions</a>
       <a href="#drift">Over time</a>
+
+      <!-- ── which session this is ────────────────────────────────────
+           At the right of the page's OWN bar, not the site's. The date is
+           the loudest thing on this strip on purpose: every number below it
+           is a statement about one session, and reading yesterday's ranking
+           as today's is the mistake the page has to make hard. -->
       <span class="sc-spacer"></span>
-      <span class="sc-panel-sub" x-show="!meta.connected" x-cloak
-            style="color:#e84393">not connected</span>
+      <div class="sc-state" x-show="meta.connected && meta.date" x-cloak>
+        <span class="sc-state-date" x-text="meta.date"></span>
+        <span class="sc-state-sep">·</span>
+        <span class="sc-state-n" x-text="meta.symbols"></span>
+        <span class="sc-state-lbl">symbols</span>
+        <span class="sc-state-sep">·</span>
+        <span class="sc-state-n" x-text="meta.metrics.length"></span>
+        <span class="sc-state-lbl">metrics</span>
+      </div>
+      <!-- Three states, and the first two are not the same absence: a
+           database that is not there needs a different response from a
+           pipeline that has not run. -->
+      <div class="sc-state" x-show="loading" x-cloak>
+        <span class="sc-state-lbl">loading…</span>
+      </div>
+      <div class="sc-state bad" x-show="!loading && !meta.connected" x-cloak>
+        <span class="sc-state-date">not connected</span>
+      </div>
+      <div class="sc-state bad" x-show="!loading && meta.connected && !meta.date"
+           x-cloak>
+        <span class="sc-state-date">no session yet</span>
+      </div>
     </div>
 
     <!-- ══ SECTION 1 — USE ═══════════════════════════════════════════════ -->
