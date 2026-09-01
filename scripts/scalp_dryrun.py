@@ -323,6 +323,60 @@ class Conn:
         check_sql(sql, args)
         if self.empty:
             return []
+        # INTRADAY FIRST, because its queries share prefixes with several
+        # below — "DISTINCT trade_date" in particular. The looser branch
+        # swallowed the intraday date list and handed back the daily fixture's
+        # two dates, so the repeatability matrix keyed on dates it had no rows
+        # for and came out entirely null. Third time branch ordering in this
+        # fake has produced a silently empty result.
+        if "FROM intraday_monthly" in sql:
+            import datetime as _dt
+            out = []
+            for mo in (_dt.date(2026, 8, 1), _dt.date(2026, 7, 1)):
+                for b in range(26):
+                    row = {"bucket_key": mo,
+                           "t": _dt.time(9 + (30 + b * 15) // 60,
+                                         (30 + b * 15) % 60),
+                           # 10 and 11 on purpose: the partial-month count the
+                           # panel has to surface.
+                           "sessions": 10 + (b % 2),
+                           "trades": 4000 + b}
+                    for k in args[0:0] or []:
+                        pass
+                    for k in ("spread_cents", "spread_bps", "noise", "ratio",
+                              "coverage", "move_rate", "move_bps", "arrivals",
+                              "trade_size", "balance"):
+                        row[k] = 1.0 + b * 0.2 + (0.5 if mo.month == 7 else 0)
+                    out.append(row)
+            return out
+        if "FROM intraday_metrics" in sql and "DISTINCT trade_date" in sql:
+            return [{"trade_date": d} for d in HEALTH_DATES]
+        if "FROM intraday_metrics" in sql and "count(*) AS sessions" in sql:
+            import datetime as _dt
+            out = []
+            for b in range(26):
+                row = {"t": _dt.time(9 + (30 + b * 15) // 60, (30 + b * 15) % 60),
+                       "sessions": 11}
+                for k in ("spread_cents", "spread_bps", "noise", "ratio",
+                          "coverage", "move_rate", "move_bps", "arrivals",
+                          "trade_size", "balance"):
+                    row[k] = 1.0 + b * 0.3
+                out.append(row)
+            return out
+        if "FROM intraday_metrics" in sql:
+            import datetime as _dt
+            return [{"trade_date": d,
+                     "t": _dt.time(9 + (30 + b * 15) // 60, (30 + b * 15) % 60),
+                     "v": 1.0 + b * 0.3 + i * 0.05}
+                    for i, d in enumerate(HEALTH_DATES) for b in range(26)]
+        if "min(entry_ts)" in sql:
+            import datetime as _dt
+            return [{"trade_date": HEALTH_DATES[0],
+                     "first_entry": _dt.time(9, 40),
+                     "last_exit": _dt.time(13, 30), "trips": 12}]
+        if "FROM provenance" in sql:
+            return [{"item": "trade_retained_share", "value": 0.94},
+                    {"item": "rows_raw", "value": 812345.0}]
         # MOST SPECIFIC FIRST. /meta and /candidates take the newest dates with
         # a literal LIMIT; /health takes a parameterised one because its span
         # depends on the trailing window. Testing the looser pattern first
@@ -665,6 +719,7 @@ async def run() -> int:
     fails += await check_calibration()
     fails += await check_narrowing()
     fails += await check_geometry_and_series()
+    fails += await check_ticker_detail()
 
     for b in BAD:
         print(f"  {b}")
@@ -673,6 +728,99 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_ticker_detail() -> int:
+    """P3, in BOTH scopes — the monthly one shipped rendering blank cells."""
+    fails = 0
+
+    for scope in ("sessions", "months"):
+        j = await sc.ticker_detail(symbol="FDX", date=None, sessions=10,
+                                   scope=scope, pool=Pool())
+        where = f"scope={scope}"
+
+        # THE BUG. The heat range was derived on the client from `repeat`,
+        # which is empty in monthly scope, so every cell rendered blank while
+        # the counts beside them were right and nothing errored. The scale now
+        # comes from the server, and it has to be present and usable in BOTH
+        # scopes or the chart is invisible again.
+        hr = j.get("heat_range")
+        if not hr:
+            print(f"  {where}: no heat_range — the heatmap has no colour "
+                  f"scale and every cell renders blank")
+            fails += 1
+        elif hr["hi"] <= hr["lo"]:
+            print(f"  {where}: heat_range is degenerate ({hr}) — every cell "
+                  f"would take the same colour")
+            fails += 1
+
+        # missing_roles in BOTH scopes: present in one and absent in the other
+        # is how a reader concludes the monthly view reads columns it does not.
+        if "missing_roles" not in j:
+            print(f"  {where}: no missing_roles, so the header cannot say "
+                  f"which columns are not stored intraday")
+            fails += 1
+
+        if scope == "months":
+            months = j.get("months") or []
+            if not months:
+                print("  months scope returned no months")
+                fails += 1
+                continue
+            # SESSION COUNTS, which is the point of the monthly view existing.
+            if not all(m.get("sessions") for m in months):
+                print(f"  a month reports no session count: "
+                      f"{[(m['scope'], m['sessions']) for m in months]}")
+                fails += 1
+            for m in months:
+                if not m["buckets"]:
+                    print(f"  month {m['scope']} has no buckets")
+                    fails += 1
+                    break
+                if all(b.get("ratio") is None for b in m["buckets"]):
+                    print(f"  month {m['scope']}: every bucket's ratio is "
+                          f"null, so the chart is blank whatever the scale")
+                    fails += 1
+                    break
+                if not all("sessions" in b for b in m["buckets"]):
+                    print(f"  month {m['scope']}: buckets carry no per-bucket "
+                          f"session count")
+                    fails += 1
+                    break
+            # The monthly query must read ONLY the resolved intraday columns.
+            # Reading one that is not stored is how a scope silently returns
+            # nulls for the column the chart is drawn from.
+            stored = {n for n, _ in scalp_config.INTRADAY_COLUMNS}
+            for name in j["columns"].values():
+                if name not in stored:
+                    print(f"  months scope resolved {name!r}, which is not an "
+                          f"intraday column — it would read as null")
+                    fails += 1
+        else:
+            if not j.get("profile"):
+                print("  sessions scope returned no profile")
+                fails += 1
+            if not j.get("repeat"):
+                print("  sessions scope returned no repeatability matrix")
+                fails += 1
+            if not j.get("traded_hours"):
+                print("  sessions scope returned no traded hours, so the "
+                      "shading the panel exists for cannot be drawn")
+                fails += 1
+
+    # A symbol nobody asked about must be refused, not guessed at.
+    try:
+        await sc.ticker_detail(symbol="  ", date=None, sessions=10,
+                               scope="sessions", pool=Pool())
+    except Exception as exc:
+        if getattr(exc, "status_code", None) != 400:
+            print(f"  an empty symbol raised {type(exc).__name__}, not a 400")
+            fails += 1
+    else:
+        print("  an empty symbol was accepted")
+        fails += 1
+
+    return fails
 
 
 async def check_geometry_and_series() -> int:

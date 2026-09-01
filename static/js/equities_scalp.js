@@ -462,16 +462,18 @@ document.addEventListener('alpine:init', () => {
      * rather than an absolute one: the question is whether the good window
      * lands in the same place, and a fixed scale would render a name whose
      * ratios are all small as a uniform blank. */
+    /* The colour scale comes from the SERVER, computed over exactly the
+     * values it sent.
+     *
+     * This used to be derived here from `td.repeat`, which is empty in
+     * monthly scope — so the monthly heatmap rendered every cell blank while
+     * the session counts beside it were correct, and nothing errored. A scale
+     * taken from a different field than the one being coloured is a coupling
+     * invisible from either end, and moving it beside the data removes the
+     * possibility rather than fixing the instance. */
     tdRange() {
-      const v = [];
-      for (const row of ((this.td && this.td.repeat) || [])) {
-        for (const c of row.cells) if (c != null) v.push(c);
-      }
-      if (!v.length) return null;
-      v.sort((a, b) => a - b);
-      // 5th to 95th, so one extreme session does not flatten every other cell.
-      return { lo: v[Math.floor(v.length * 0.05)],
-               hi: v[Math.floor(v.length * 0.95)] };
+      const r = this.td && this.td.heat_range;
+      return (r && r.hi > r.lo) ? r : null;
     },
 
     tdCell(v) {

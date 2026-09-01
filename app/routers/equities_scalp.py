@@ -1350,6 +1350,26 @@ async def series(
 # and its columns are generated from config.INTRADAY_COLUMNS by the pipeline's
 # own DDL -- so naming them here would be a second copy of a schema, and the
 # check_vendored drift gate is what keeps the first one honest.
+def _heat_range(values):
+    """The 5th-95th percentile of what is ABOUT TO BE PLOTTED.
+
+    Computed here, beside the data, rather than derived on the client from
+    whichever field happens to be populated. The first version had the client
+    scale the heatmap against `repeat`, which is empty in monthly scope — so
+    the monthly chart rendered every cell blank while the numbers beside it
+    were correct, and nothing failed. A colour scale taken from a different
+    field than the one being coloured is a coupling that cannot be seen from
+    either side.
+
+    5th to 95th so one extreme session does not flatten every other cell.
+    """
+    v = sorted(x for x in values if x is not None)
+    if not v:
+        return None
+    return {"lo": v[int(len(v) * 0.05)], "hi": v[min(len(v) - 1, int(len(v) * 0.95))],
+            "n": len(v)}
+
+
 INTRADAY_TABLE = "intraday_metrics"
 INTRADAY_MONTHLY_TABLE = "intraday_monthly"
 
@@ -1430,17 +1450,27 @@ async def ticker_detail(
             months: dict = {}
             for r in rows:
                 months.setdefault(str(r["bucket_key"]), []).append(r)
+            heat_vals = []
             profile = [{
                 "scope": mk,
                 "sessions": max(int(x["sessions"] or 0) for x in rs),
                 "buckets": [{"t": str(x["t"]), "sessions": int(x["sessions"] or 0),
                              **{k: x[k] for k in cols}} for x in rs],
             } for mk, rs in sorted(months.items())]
+            for pm in profile:
+                heat_vals.extend(b.get("ratio") for b in pm["buckets"])
             return {
                 "connected": True, "symbol": sym, "scope": "months",
                 "columns": {k: c for k, c in cols.items()},
                 "months": profile,
                 "repeat": [],
+                # The scale for the cells this response is sending.
+                "heat_range": _heat_range(heat_vals),
+                "heat_metric": ratio_col,
+                # Returned in BOTH scopes. The header reports it, and a field
+                # present in one mode and absent in the other is how a reader
+                # concludes the monthly view is reading columns it is not.
+                "missing_roles": got["missing"],
                 # Repeated at the top level as well as per bucket: a reader
                 # scanning the chart should not have to hover to find out the
                 # month is half a month.
@@ -1517,6 +1547,9 @@ async def ticker_detail(
                      **{k: r[k] for k in cols}} for r in prows],
         "repeat": matrix,
         "repeat_metric": ratio_col,
+        "heat_range": _heat_range(
+            [c for row in matrix for c in row["cells"]]),
+        "heat_metric": ratio_col,
         "traded_hours": [{"date": str(r["trade_date"]),
                           "first": str(r["first_entry"]),
                           "last": str(r["last_exit"]),
