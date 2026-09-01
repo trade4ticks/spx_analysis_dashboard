@@ -1,4 +1,3 @@
-import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.templating import Jinja2Templates
 
+from app.assets import asset
 from app.db import init_pool, close_pool, verify_pools
 
 # Raise multipart upload limit from 1MB to 200MB for backtest file uploads
@@ -75,50 +75,10 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.keep_trailing_newline = True
 
 
-# ── Cache-busting off a CONTENT HASH ──────────────────────────────────────
-# Templates used to hard-code "?v=NN" and a human had to remember to bump it
-# on every JS edit. Forgetting once costs a debugging round: the browser
-# keeps serving the previous bundle, the symptom looks like a code bug, and
-# nothing about the page tells you which version you are actually running.
-# That happened, so the number is now derived rather than maintained.
-#
-# Hash is of file CONTENT, not mtime: a redeploy that rewrites files without
-# changing them must not invalidate a warm cache, and an edit that happens to
-# preserve mtime must not be missed.
-#
-# Cached in-process, keyed on (mtime_ns, size), so the common case is a stat
-# rather than a read. A dev editing a file gets a new hash on the next request
-# without a restart.
-_ASSET_CACHE: dict = {}
-
-
-def asset(path: str) -> str:
-    """URL for a file under /static, with a content-hash cache-buster.
-
-    Usage in a template:  <script src="{{ asset('js/app.js') }}"></script>
-    Unknown files degrade to an unversioned URL rather than raising — a
-    missing asset should surface as a 404 in the network tab, not a 500 on
-    the whole page.
-    """
-    rel = str(path).lstrip("/")
-    full = BASE_DIR / "static" / rel
-    try:
-        st = full.stat()
-    except OSError:
-        return f"/static/{rel}"
-    stamp = (st.st_mtime_ns, st.st_size)
-    hit = _ASSET_CACHE.get(rel)
-    if hit and hit[0] == stamp:
-        return hit[1]
-    try:
-        digest = hashlib.sha256(full.read_bytes()).hexdigest()[:10]
-    except OSError:
-        return f"/static/{rel}"
-    url = f"/static/{rel}?v={digest}"
-    _ASSET_CACHE[rel] = (stamp, url)
-    return url
-
-
+# Cache-busting static URLs. The implementation lives in app/assets.py so a
+# build gate can import it without importing every router — see that module,
+# and scripts/check_rendered_assets.py, which exists because a template
+# shipped a script tag with an empty src and nothing could see it.
 templates.env.globals["asset"] = asset
 
 app.include_router(meta.router,       prefix="/api/meta")

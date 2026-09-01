@@ -1188,9 +1188,29 @@
     </div>
   </div>
 
-  <script src=    </div>
-  </div>
-
   <script src={{ asset('js/equities_scalp.js') }}></script>
+  <!-- ── the bundle has to prove it loaded ────────────────────────────────
+       This page shipped with a mangled script tag: `<script src=` with an
+       empty attribute, which swallowed the following </div> and made the
+       browser request a URL literally named "</div". The layout rendered
+       intact, no console error was obvious, and the only signal was a 404
+       for a nonsense path in the server log.
+       An empty page that looks fine is the worst failure mode this app has,
+       so the bundle sets a sentinel and this checks it. Covers a missing
+       src, a 404, and a syntax error in the bundle alike — all three of
+       which otherwise render exactly this same empty page. -->
+  <script>
+    window.addEventListener('DOMContentLoaded', function () {
+      if (window.__scalpLoaded) return;
+      var b = document.createElement('div');
+      b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+        'background:#e84393;color:#fff;font:600 13px/1.6 sans-serif;' +
+        'padding:10px 14px;text-align:center';
+      b.textContent = 'equities_scalp.js did not load — every panel below is '
+        + 'empty for that reason, not because there is no data. Check the '
+        + 'network tab for the script request.';
+      document.body.appendChild(b);
+    });
+  </script>
 </body>
 </html>

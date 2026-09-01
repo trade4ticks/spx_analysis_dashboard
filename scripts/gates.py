@@ -53,6 +53,11 @@ GATES = [
     _s("check_alpine_refs.py",
        note="every Alpine call resolves to a component member"),
     _s("check_asset_versions.py", note="static assets are content-hashed"),
+    # Renders each page with the REAL asset() and looks at the OUTPUT. The
+    # four gates above it all passed while a template shipped a script tag
+    # with an empty src — none of them looked at rendered markup.
+    _s("check_rendered_assets.py",
+       note="every rendered src/href resolves; tags balance"),
     Gate("node --check", [], note="the page JS parses"),   # filled in below
 
     # ── the equity IV page ───────────────────────────────────────────────

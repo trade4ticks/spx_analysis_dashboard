@@ -15,7 +15,7 @@ silently runs the previous bundle. The symptom is indistinguishable from a
 logic bug -- a fix that "does not work", stack traces pointing at code that no
 longer exists, and no way to tell from the page which version is loaded.
 
-The number is now DERIVED. `asset()` in app/main.py hashes the file's contents
+The number is now DERIVED. `asset()` in app/assets.py hashes the file's contents
 and appends the digest, so the URL cannot disagree with the file. This gate no
 longer checks that anyone remembered anything; it checks that the mechanism is
 still in place and that nothing has drifted back to a hard-coded version.
@@ -85,14 +85,20 @@ def main() -> int:
                 )
 
     main_py = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    # The IMPLEMENTATION moved to app/assets.py so a render gate could import
+    # it without pulling in every router; main.py still does the registering.
+    # Two files now, and this checks the one that owns each half — reading
+    # main.py for the hashing was what made this gate fail on a move that
+    # changed no behaviour at all.
+    assets_py = (ROOT / "app" / "assets.py").read_text(encoding="utf-8")
     if 'templates.env.globals["asset"]' not in main_py:
         problems.append(
             "app/main.py: the asset() Jinja global is no longer registered — "
             "every {{ asset(...) }} call would raise at render time"
         )
-    if "hashlib.sha256" not in main_py:
+    if "hashlib.sha256" not in assets_py:
         problems.append(
-            "app/main.py: asset() no longer hashes file contents — "
+            "app/assets.py: asset() no longer hashes file contents — "
             "the cache-buster would stop tracking the file"
         )
 

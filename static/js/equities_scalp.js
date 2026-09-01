@@ -813,3 +813,8 @@ document.addEventListener('alpine:init', () => {
     },
   }));
 });
+
+// The sentinel the page checks. LAST LINE, deliberately: a syntax error
+// anywhere above stops execution before this runs, so the banner fires for a
+// broken bundle as well as an absent one.
+window.__scalpLoaded = true;
