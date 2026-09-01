@@ -297,6 +297,29 @@
       margin-bottom:3px;
     }
 
+    /* The repeatability heatmap. No numbers in the cells: at 26 buckets x 11
+       sessions the SHAPE is the message — whether the bright band lands in
+       the same column each row — and a figure per cell is unreadable ink.
+       Values are on hover. */
+    .sc-heatwrap { overflow-x:auto; }
+    .sc-heat { border-collapse:collapse; }
+    .sc-heat th {
+      font-size:9px; font-weight:400; color:var(--muted); text-align:right;
+      padding:0 6px 0 0; white-space:nowrap; position:sticky; left:0;
+      background:var(--surface);
+    }
+    .sc-heat td {
+      width:15px; height:13px; padding:0;
+      border:1px solid rgba(0,0,0,0.3);
+    }
+    .sc-heat-axis td {
+      border:0; height:auto; font-size:8px; color:var(--muted);
+      vertical-align:top; white-space:nowrap;
+    }
+
+    .sc-pick { cursor:pointer; border-bottom:1px dotted var(--border); }
+    .sc-pick:hover { color:var(--accent); border-bottom-color:var(--accent); }
+
     .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
     .sc-reject {
       display:inline-flex; align-items:baseline; gap:5px;
@@ -684,7 +707,14 @@
                 <template x-for="row in visibleRows()" :key="row.symbol">
                   <tr :class="{fail: !row.passes}" :title="failNote(row)">
                     <td>
-                      <b x-text="row.symbol"></b>
+                      <!-- Opens this name in Ticker detail and scrolls to it.
+                           The ranked table answers "which name"; the detail
+                           panel answers "when in the day", and going from one
+                           to the other by retyping the ticker is the join a
+                           reader should not have to make by hand. -->
+                      <b class="sc-pick" @click="pickTicker(row.symbol)"
+                         :title="'Open ' + row.symbol + ' in Ticker detail'"
+                         x-text="row.symbol"></b>
                       <span class="sc-tag warn" x-show="!row.passes" x-cloak
                             style="margin-left:5px">excluded</span>
                     </td>
@@ -732,16 +762,230 @@
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Ticker detail</span>
           <span class="sc-panel-sub">session profile · repeatability · comparison · provenance</span>
+          <span class="sc-spacer"></span>
+          <input class="sc-inp" type="text" x-model="tdSymbol"
+                 placeholder="ticker" style="max-width:110px"
+                 @change="loadTickerDetail()">
+          <select class="sc-sel" x-model="tdScope" @change="loadTickerDetail()"
+                  style="max-width:170px">
+            <option value="sessions">last sessions</option>
+            <option value="months">by month (rollup)</option>
+          </select>
+          <span class="sc-panel-sub" x-show="tdLoading" x-cloak>…</span>
+          <span class="sc-panel-sub" x-show="td && td.missing_roles && td.missing_roles.length"
+                x-cloak :title="'Not in the intraday column subset: '
+                                + (td.missing_roles || []).join(', ')"
+                x-text="'(' + (td.missing_roles || []).length + ' columns not stored intraday)'"></span>
         </div>
         <div class="sc-panel-body">
-          <div class="sc-stub">
-            <span class="sc-stub-tag">phase 3</span>
-            <b>When in the day this name is worth sitting in, and whether that window repeats.</b>
-            Session profile with actual trading hours shaded; a repeatability
-            heatmap of sessions × 15-minute buckets; a comparison against names
-            whose outcomes are already known; and provenance — what share of
-            the tape the row was computed from, which condition codes were
-            dropped, crossed quotes, records lost to same-timestamp collapsing.
+          <div class="sc-empty" x-show="!tdSymbol" x-cloak>
+            <div class="sc-empty-hd">No ticker selected</div>
+            <div>
+              Type one above, or click a row in the ranked table.
+            </div>
+          </div>
+          <div class="sc-warn bad" x-show="tdError" x-cloak
+               style="border-radius:4px" x-text="tdError"></div>
+          <div class="sc-empty" x-show="td && !td.profile.length && !td.months"
+               x-cloak x-text="td.note || 'No intraday rows for this ticker.'"></div>
+
+          <template x-if="td && td.profile && td.profile.length">
+            <div>
+              <!-- ── session profile ─────────────────────────────────────
+                   A daily average cannot say WHEN. A name whose ratio
+                   averages 4.0 might be 4.0 all day, or 8 in the first hour
+                   and 1.5 through the middle — only the second is tradeable,
+                   and only in the first hour. -->
+              <div class="sc-panel-sub" style="line-height:1.7; max-width:88ch">
+                Averaged over <b x-text="td.sessions"></b> sessions.
+                Green shading is when this name was <b>actually traded</b>, one
+                band per session — the panel exists because the good window may
+                not be the window being used.
+                <span x-show="!td.traded_hours.length" x-cloak>
+                  Nothing traded in this name yet, so no shading.
+                </span>
+              </div>
+              <div style="height:280px; position:relative; margin-top:8px">
+                <canvas id="sc-profile"></canvas>
+              </div>
+
+              <!-- ── repeatability ───────────────────────────────────────
+                   The profile is an average and averages hide movement. A
+                   good hour that lands somewhere different each day is not
+                   something to plan a morning around. -->
+              <div style="margin-top:16px" x-show="td.repeat.length" x-cloak>
+                <div class="sc-panel-sub" style="margin-bottom:5px">
+                  <b>Does the good window repeat?</b>
+                  Rows are sessions, columns 15-minute buckets, colour is
+                  <span x-text="td.repeat_metric"></span> scaled to this
+                  ticker's own 5th–95th percentile — an absolute scale would
+                  render a name whose ratios are all small as a uniform blank.
+                  Hatched cells have no data for that bucket.
+                </div>
+                <div class="sc-heatwrap">
+                  <table class="sc-heat">
+                    <tbody>
+                      <template x-for="row in td.repeat" :key="row.date">
+                        <tr>
+                          <th x-text="row.date.slice(5)"></th>
+                          <template x-for="(c, j) in row.cells" :key="j">
+                            <td :style="tdCell(c)"
+                                :title="row.date + ' ' + td.buckets[j] + ' = '
+                                        + (c == null ? 'no data' : c.toFixed(2))"></td>
+                          </template>
+                        </tr>
+                      </template>
+                      <tr class="sc-heat-axis">
+                        <th></th>
+                        <template x-for="(b, j) in td.buckets" :key="'b'+j">
+                          <td><span x-show="j % 4 === 0" x-cloak
+                                    x-text="b.slice(0,5)"></span></td>
+                        </template>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="sc-warn" style="border-radius:4px; margin-top:7px"
+                     x-show="tdRepeatNote()" x-cloak x-text="tdRepeatNote()"></div>
+              </div>
+
+              <!-- ── provenance ──────────────────────────────────────────
+                   What this symbol-day was computed FROM. A row built on 94%
+                   of the tape is a different row from one built on all of it,
+                   and reading a markdown file to find that out is what this
+                   replaces. -->
+              <div style="margin-top:16px" x-show="td.provenance.length" x-cloak>
+                <div class="sc-panel-sub" style="margin-bottom:5px">
+                  <b>Provenance</b> for <span x-text="td.date"></span> —
+                  <span x-text="td.provenance_note"></span>
+                </div>
+                <div class="sc-rejects">
+                  <template x-for="p in provRows()" :key="p.item">
+                    <span class="sc-reject zero" :title="p.item">
+                      <span x-text="p.item"></span>
+                      <b style="color:var(--accent)"
+                         x-text="p.pct || (p.value == null ? '—'
+                                 : (Math.abs(p.value) >= 1000
+                                    ? Math.round(p.value).toLocaleString()
+                                    : p.value.toFixed(2)))"></b>
+                    </span>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── monthly scope ─────────────────────────────────────────
+               SESSIONS PER MONTH, ALWAYS. August holds 10–11 sessions
+               rather than 21 because the data starts mid-month, and a
+               partial month plotted like a full one is a shape drawn from
+               half the evidence. -->
+          <template x-if="td && td.months && td.months.length">
+            <div>
+              <div class="sc-warn" style="border-radius:4px">
+                <b>Sessions contributing to each month:</b>
+                <template x-for="m in td.months" :key="m.scope">
+                  <span class="sc-reject" style="margin-left:5px"
+                        :class="{zero: m.sessions >= 18}">
+                    <span x-text="m.scope.slice(0,7)"></span>
+                    <b x-text="m.sessions"></b>
+                  </span>
+                </template>
+                <span style="display:block; margin-top:4px; color:var(--muted)"
+                      x-text="td.note"></span>
+              </div>
+              <div class="sc-heatwrap" style="margin-top:9px">
+                <table class="sc-heat">
+                  <tbody>
+                    <template x-for="m in td.months" :key="m.scope">
+                      <tr>
+                        <th x-text="m.scope.slice(0,7) + ' (' + m.sessions + ')'"></th>
+                        <template x-for="(b, j) in m.buckets" :key="j">
+                          <td :style="tdCell(b.ratio)"
+                              :title="m.scope.slice(0,7) + ' ' + b.t + ' — '
+                                      + b.sessions + ' sessions, ratio '
+                                      + (b.ratio == null ? '—' : b.ratio.toFixed(2))"></td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── comparison ────────────────────────────────────────────
+               4.2 is not good or bad. It is near a name that worked or near
+               one that did not, and that is the only reading available until
+               there are enough sessions for anything else. -->
+          <div style="margin-top:18px; border-top:1px solid var(--border); padding-top:12px">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+              <span class="sc-panel-title">Compare against known outcomes</span>
+              <input class="sc-inp" type="text" x-model="cmpSymbols"
+                     placeholder="FDX,LLY,DLTR,LITE" style="max-width:260px"
+                     @change="loadCompare()">
+              <button class="sc-btn" @click="loadCompare()">compare</button>
+              <input class="sc-inp" type="text" x-model="cmpFilter"
+                     placeholder="filter metrics…" style="max-width:150px"
+                     x-show="cmp" x-cloak>
+              <span class="sc-spacer"></span>
+              <span class="sc-panel-sub" x-show="cmp && cmp.absent.length" x-cloak
+                    style="color:#e84393"
+                    x-text="'absent on ' + cmp.date + ': ' + cmp.absent.join(', ')"></span>
+            </div>
+
+            <template x-if="cmp && cmp.metrics.length">
+              <div class="sc-scroll" style="max-height:420px; margin-top:9px">
+                <table class="sc-table">
+                  <thead><tr>
+                    <th>metric</th>
+                    <template x-for="s in cmp.symbols" :key="s">
+                      <th class="sc-num" x-text="s"></th>
+                    </template>
+                  </tr></thead>
+                  <tbody>
+                    <!-- Realised results FIRST. Every metric below is read
+                         against these, so putting them at the bottom would
+                         mean scrolling past the numbers to find the ones
+                         that give them meaning. -->
+                    <tr style="background:var(--raised)">
+                      <td><b>$/min realised</b></td>
+                      <template x-for="s in cmp.symbols" :key="'p'+s">
+                        <td class="sc-num sc-rho"
+                            :class="cmp.traded[s] && cmp.traded[s].pnl_per_min >= 0 ? 'strong' : 'bad'"
+                            x-text="cmp.traded[s] && cmp.traded[s].pnl_per_min != null
+                                    ? (cmp.traded[s].pnl_per_min >= 0 ? '+' : '')
+                                      + cmp.traded[s].pnl_per_min.toFixed(2)
+                                    : 'not traded'"></td>
+                      </template>
+                    </tr>
+                    <tr style="background:var(--raised)">
+                      <td><b>round trips</b></td>
+                      <template x-for="s in cmp.symbols" :key="'t'+s">
+                        <td class="sc-num"
+                            x-text="cmp.traded[s] ? cmp.traded[s].trips : '—'"></td>
+                      </template>
+                    </tr>
+                    <template x-for="r in cmpRows()" :key="r.metric">
+                      <tr>
+                        <td>
+                          <a class="sc-metric-link" :href="r.href" target="_blank"
+                             rel="noopener" :title="r.tooltip" x-text="r.metric"></a>
+                        </td>
+                        <template x-for="s in cmp.symbols" :key="r.metric + s">
+                          <td class="sc-num"
+                              :class="{dim: r.values[s] == null}"
+                              x-text="r.values[s] == null ? '—'
+                                      : (Math.abs(r.values[s]) >= 1000
+                                         ? Math.round(r.values[s]).toLocaleString()
+                                         : r.values[s].toFixed(3))"></td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
           </div>
         </div>
       </div>

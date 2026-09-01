@@ -69,7 +69,10 @@ FAKE_METRICS = [
     # missing half.
     "noise_bps_tw_mid_5s_rms", "ratio_tw_mid_5s_rms",
     "quote_bucket_coverage_5s", "move_rate_tw_mid_5s", "move_bps_tw_mid_5s",
-    "noise_bps_tw_mid_10s_median", "noise_bps_tw_mid_10s_rms",
+    # THE MEDIAN IS THE UNSUFFIXED FORM. The fixture carried
+    # "noise_bps_tw_mid_10s_median" — a name the pipeline never emits — so
+    # every median assertion here was testing a shape that does not exist.
+    "noise_bps_tw_mid_10s", "noise_bps_tw_mid_10s_rms",
     "noise_bps_tw_mid_30s_rms", "noise_bps_last_mid_10s_p75",
     "noise_bps_bid_side_5s_mean",
     "ratio_tw_mid_10s", "ratio_tw_mid_10s_rms", "ratio_last_mid_30s",
@@ -245,6 +248,35 @@ def check_sql(sql: str, args: tuple) -> None:
         pass
     except Exception as exc:
         BAD.append(f"unparseable SQL: {exc} — {flat[:110]}")
+
+
+def self_test_fixture_is_real() -> int:
+    """Every fake metric must be a name the pipeline could actually emit.
+
+    The fixture carried "noise_bps_tw_mid_10s_median" for weeks. No such
+    metric exists — the median is the UNSUFFIXED form — so every median
+    assertion in this file was passing against a shape production never
+    produces, and the by-statistic grouping bug it should have caught went
+    straight through.
+
+    metric_docs is the authority for what can exist, the same one
+    check_scalp_metrics uses. The deliberately-undocumented entry is exempt
+    because being undocumented is the property it exists to test.
+    """
+    from app import scalp_metric_docs as docs
+    bad = 0
+    for m in FAKE_METRICS:
+        if m == UNDOCUMENTED:
+            continue
+        if docs.describe(m) is None:
+            print(f"  SELF-TEST: fixture metric {m!r} is not a name the "
+                  f"pipeline can emit — metric_docs does not recognise it, so "
+                  f"every assertion about it is about fiction")
+            bad += 1
+    if not bad:
+        print(f"self-test: all {len(FAKE_METRICS) - 1} fixture metrics are "
+              f"shapes the pipeline can emit")
+    return bad
 
 
 def self_test_binds() -> int:
@@ -505,7 +537,7 @@ class Pool:
 
 
 async def run() -> int:
-    fails = self_test_binds()
+    fails = self_test_binds() + self_test_fixture_is_real()
 
     # ── state 1: no pool at all ──────────────────────────────────────────
     j = await sc.meta(date=None, pool=None)
@@ -583,7 +615,7 @@ async def run() -> int:
     if dn is None:
         print("  no default noise variant chosen")
         fails += 1
-    elif dn.endswith("_median"):
+    elif (sc._parse_variant(dn) or {}).get("statistic") == "median":
         print(f"  the default noise variant is a MEDIAN ({dn}). It reads 0.0")
         print("    on sparse-quote names, which sorts the least tradeable")
         print("    names to the top of the ranking.")
@@ -609,8 +641,8 @@ async def run() -> int:
             fails += 1
 
     # It must also degrade rather than invent when nothing preferred exists.
-    only_median = sc._default_noise(["noise_bps_tw_mid_10s_median"])
-    if only_median != "noise_bps_tw_mid_10s_median":
+    only_median = sc._default_noise(["noise_bps_tw_mid_10s"])
+    if only_median != "noise_bps_tw_mid_10s":
         print("  with only a median available the default is not it — the")
         print("    preference has become a requirement")
         fails += 1
@@ -1224,7 +1256,8 @@ async def run_live() -> int:
             else:
                 print("  malformed date   refused with 400")
 
-        if (j.get("default_noise") or "").endswith("_median"):
+        if (sc._parse_variant(j.get("default_noise") or "")
+                or {}).get("statistic") == "median":
             print("  the live default noise variant is a MEDIAN — it reads 0.0")
             print("    on sparse-quote names and sorts them to the top")
             fails += 1

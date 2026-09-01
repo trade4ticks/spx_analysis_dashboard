@@ -14,7 +14,7 @@
 
 const SC_BLUE = '#3498db';
 const SC_PINK = '#e84393';
-const SC_CHARTS = { geom: null, overlay: null, mult: {} };
+const SC_CHARTS = { geom: null, overlay: null, mult: {}, profile: null };
 
 /* Constant-ratio lines for the spread-against-noise scatter.
  *
@@ -47,6 +47,31 @@ const scRatioLines = {
         ctx.textAlign = 'right';
         ctx.fillText('ratio ' + r, x.getPixelForValue(x1) - 3, py - 3);
       }
+    }
+    ctx.restore();
+  },
+};
+
+/* The hours actually traded, shaded behind the session profile.
+ *
+ * The panel's whole point is that the good window may not be the window being
+ * used — two sessions ended at 13:30 and 14:34 while both spread and noise
+ * recover into the close. Drawn BEHIND the lines so it reads as ground rather
+ * than as another series, and as one band per session so a day that stopped
+ * early is visible as itself rather than averaged away. */
+const scTradedHours = {
+  id: 'scTradedHours',
+  beforeDatasetsDraw(chart, args, opts) {
+    const bands = (opts && opts.bands) || [];
+    if (!bands.length) return;
+    const {ctx, scales: {x, y}} = chart;
+    ctx.save();
+    for (const b of bands) {
+      if (b.from == null || b.to == null) continue;
+      const x0 = x.getPixelForValue(b.from);
+      const x1 = x.getPixelForValue(b.to);
+      ctx.fillStyle = 'rgba(78,201,160,0.10)';
+      ctx.fillRect(x0, y.top, Math.max(1, x1 - x0), y.bottom - y.top);
     }
     ctx.restore();
   },
@@ -174,6 +199,16 @@ document.addEventListener('alpine:init', () => {
     stab: null,
     stabLoading: false,
     stabFilter: '',
+
+    // ── P3 ticker detail ────────────────────────────────────────────────
+    tdSymbol: '',
+    td: null,
+    tdLoading: false,
+    tdError: '',
+    tdScope: 'sessions',
+    cmp: null,
+    cmpSymbols: '',
+    cmpFilter: '',
 
     // ── data health ─────────────────────────────────────────────────────
     health: null,
@@ -320,6 +355,190 @@ document.addEventListener('alpine:init', () => {
                  + `count — a metric family stopped being written`);
       }
       return parts.join('. ');
+    },
+
+    // ── P3 ticker detail ────────────────────────────────────────────────
+
+    async loadTickerDetail() {
+      const sym = (this.tdSymbol || '').trim().toUpperCase();
+      if (!sym) { this.td = null; return; }
+      this.tdLoading = true; this.tdError = '';
+      try {
+        const q = new URLSearchParams({ symbol: sym, scope: this.tdScope });
+        if (this.meta.date) q.set('date', this.meta.date);
+        const j = await scGetJson('/api/equities-scalp/ticker-detail?' + q);
+        if (j.error) { this.tdError = j.error; this.td = null; }
+        else { this.td = j; this.renderProfile(); }
+      } catch (e) {
+        this.tdError = String(e.message || e); this.td = null;
+      } finally { this.tdLoading = false; }
+    },
+
+    pickTicker(sym) {
+      this.tdSymbol = sym;
+      this.loadTickerDetail();
+      const el = document.getElementById('detail');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
+    /* Minutes since midnight, so a clock time can be a linear x. A category
+     * axis would space 09:30 and 15:45 evenly with everything between and
+     * make a gap in the data look like continuous trading. */
+    tdMins(t) {
+      const p = String(t || '').split(':');
+      return p.length < 2 ? null : (+p[0]) * 60 + (+p[1]);
+    },
+
+    tdBands() {
+      const h = (this.td && this.td.traded_hours) || [];
+      return h.map(x => ({ from: this.tdMins(x.first), to: this.tdMins(x.last) }));
+    },
+
+    renderProfile() {
+      if (typeof Chart === 'undefined' || !this.td) return;
+      if (SC_CHARTS.profile) { SC_CHARTS.profile.destroy(); SC_CHARTS.profile = null; }
+      this.$nextTick(() => {
+        const el = document.getElementById('sc-profile');
+        const rows = (this.td.profile || []);
+        if (!el || !rows.length) return;
+        const self = this;
+        const pt = k => rows.map(r => ({ x: self.tdMins(r.t), y: r[k] }))
+                            .filter(p => p.x != null && p.y != null);
+        const sets = [];
+        if (this.td.columns.spread_bps)
+          sets.push({ label: 'spread bps', data: pt('spread_bps'),
+                      borderColor: SC_BLUE, yAxisID: 'y' });
+        if (this.td.columns.noise)
+          sets.push({ label: 'noise bps', data: pt('noise'),
+                      borderColor: SC_PINK, yAxisID: 'y' });
+        if (this.td.columns.ratio)
+          sets.push({ label: 'ratio', data: pt('ratio'),
+                      borderColor: '#4ec9a0', yAxisID: 'y2', borderDash: [4, 3] });
+        SC_CHARTS.profile = new Chart(el.getContext('2d'), {
+          type: 'line',
+          data: { datasets: sets.map(s => Object.assign({
+            borderWidth: 1.4, tension: 0, pointRadius: 0, parsing: false,
+            spanGaps: true, fill: false }, s)) },
+          options: {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            interaction: { mode: 'nearest', axis: 'x', intersect: false },
+            scales: {
+              x: { type: 'linear', min: 9 * 60 + 30, max: 16 * 60,
+                   ticks: { stepSize: 60, font: { size: 9 },
+                            callback: v => String(Math.floor(v / 60)).padStart(2, '0')
+                                           + ':' + String(v % 60).padStart(2, '0') },
+                   grid: { color: 'rgba(255,255,255,0.05)' } },
+              // SPREAD AND NOISE SHARE AN AXIS. Where they converge there is
+              // nothing to capture, and separate axes would rescale them into
+              // looking parallel. The ratio gets its own because it is a
+              // different quantity, not a third bps series.
+              y: { position: 'left', grid: { color: 'rgba(255,255,255,0.05)' },
+                   ticks: { font: { size: 9 } },
+                   title: { display: true, text: 'bps', color: '#777',
+                            font: { size: 9 } } },
+              y2: { position: 'right', grid: { display: false },
+                    ticks: { font: { size: 9 }, color: '#4ec9a0' },
+                    title: { display: true, text: 'ratio', color: '#4ec9a0',
+                             font: { size: 9 } } },
+            },
+            plugins: {
+              legend: { position: 'bottom',
+                        labels: { boxWidth: 9, font: { size: 9 },
+                                  usePointStyle: true, pointStyle: 'line' } },
+              scTradedHours: { bands: this.tdBands() },
+              tooltip: { callbacks: { title: it => {
+                const v = it[0].parsed.x;
+                return String(Math.floor(v / 60)).padStart(2, '0') + ':'
+                     + String(v % 60).padStart(2, '0');
+              } } },
+            },
+          },
+          plugins: [scTradedHours],
+        });
+      });
+    },
+
+    /* The repeatability heatmap's colour. Scaled to the matrix's OWN range
+     * rather than an absolute one: the question is whether the good window
+     * lands in the same place, and a fixed scale would render a name whose
+     * ratios are all small as a uniform blank. */
+    tdRange() {
+      const v = [];
+      for (const row of ((this.td && this.td.repeat) || [])) {
+        for (const c of row.cells) if (c != null) v.push(c);
+      }
+      if (!v.length) return null;
+      v.sort((a, b) => a - b);
+      // 5th to 95th, so one extreme session does not flatten every other cell.
+      return { lo: v[Math.floor(v.length * 0.05)],
+               hi: v[Math.floor(v.length * 0.95)] };
+    },
+
+    tdCell(v) {
+      if (v == null) return 'background:repeating-linear-gradient(45deg,'
+                          + 'transparent,transparent 3px,rgba(255,255,255,.05) 3px,'
+                          + 'rgba(255,255,255,.05) 6px)';
+      const r = this.tdRange();
+      if (!r || r.hi <= r.lo) return '';
+      const t = Math.max(0, Math.min(1, (v - r.lo) / (r.hi - r.lo)));
+      return `background:rgba(78,201,160,${(0.08 + t * 0.82).toFixed(3)})`;
+    },
+
+    /* Whether the good window actually repeats, as a number.
+     *
+     * Per session, which bucket held the highest ratio; then how tightly those
+     * cluster. A consistent shape is a name to plan a morning around; a best
+     * hour that wanders is not, however good the average looks. */
+    tdRepeatNote() {
+      const rows = (this.td && this.td.repeat) || [];
+      const buckets = (this.td && this.td.buckets) || [];
+      const best = [];
+      for (const row of rows) {
+        let bi = null, bv = null;
+        row.cells.forEach((c, i) => { if (c != null && (bv == null || c > bv)) { bv = c; bi = i; } });
+        if (bi != null) best.push(bi);
+      }
+      if (best.length < 3) return '';
+      const mean = best.reduce((a, b) => a + b, 0) / best.length;
+      const sd = Math.sqrt(best.reduce((a, b) => a + (b - mean) ** 2, 0) / best.length);
+      const at = buckets[Math.round(mean)] || '';
+      const spread = sd * 15;   // buckets are 15 minutes
+      return `Across ${best.length} sessions the best bucket averages `
+           + `${at.slice(0, 5)}, with a spread of ±${spread.toFixed(0)} minutes. `
+           + (spread <= 45
+              ? 'That is a window to plan a morning around.'
+              : 'That wanders too much to plan around — the average profile '
+                + 'above is hiding a window that is not in the same place '
+                + 'twice.');
+    },
+
+    async loadCompare() {
+      const syms = (this.cmpSymbols || '').trim();
+      if (!syms) { this.cmp = null; return; }
+      try {
+        const q = new URLSearchParams({ symbols: syms });
+        if (this.meta.date) q.set('date', this.meta.date);
+        const j = await scGetJson('/api/equities-scalp/compare?' + q);
+        this.cmp = j.error ? null : j;
+      } catch (e) { this.cmp = null; }
+    },
+
+    cmpRows() {
+      const q = (this.cmpFilter || '').toLowerCase();
+      const rows = (this.cmp && this.cmp.metrics) || [];
+      return q ? rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0) : rows;
+    },
+
+    /* Provenance as a share of the tape, which is the reading. "0.94" beside
+     * an item name is a number; "94% of the tape retained" is a fact about
+     * whether the row above it can be trusted. */
+    provRows() {
+      const p = (this.td && this.td.provenance) || [];
+      return p.map(r => ({
+        item: r.item, value: r.value,
+        pct: /share|rate/.test(r.item) && r.value != null && r.value <= 1
+             ? (r.value * 100).toFixed(1) + '%' : null,
+      }));
     },
 
     // ── fills ───────────────────────────────────────────────────────────

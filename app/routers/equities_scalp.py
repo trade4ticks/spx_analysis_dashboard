@@ -59,11 +59,30 @@ _VARIANT_RE = re.compile(
 
 
 def _parse_variant(metric: str) -> dict | None:
+    """The shape of a generated metric name.
+
+    THE UNSUFFIXED FORM IS THE MEDIAN. `noise_bps_tw_mid_10s` with no suffix
+    is the median absolute change -- metric_docs says so in as many words --
+    and only mean/p75/p90/rms are spelled out. Returning statistic=None for it
+    was wrong in a way that cost two things:
+
+      * the by-statistic stability table grouped on the suffix and therefore
+        DROPPED median entirely, which is conspicuous in a table whose whole
+        premise is that median is the unstable one;
+      * _default_noise's rule that median ranks below an unrecognised
+        statistic never fired, because nothing ever carried that name.
+
+    So the statistic is RESOLVED, not merely parsed. `suffix` keeps the raw
+    form for anything that needs to rebuild the column name.
+    """
     m = _VARIANT_RE.match(metric)
     if not m:
         return None
+    suffix = m.group("stat")
     return {"kind": m.group("kind"), "variant": m.group("variant"),
-            "horizon_s": int(m.group("horizon")), "statistic": m.group("stat")}
+            "horizon_s": int(m.group("horizon")),
+            "suffix": suffix,
+            "statistic": suffix or "median"}
 
 
 def _catalog_entry(metric: str) -> dict:
@@ -1325,6 +1344,253 @@ async def series(
     }
 
 
+# ── P3: one ticker in detail ────────────────────────────────────────────────
+#
+# EVERY COLUMN NAME COMES FROM THE VENDORED CONFIG. intraday_metrics is wide,
+# and its columns are generated from config.INTRADAY_COLUMNS by the pipeline's
+# own DDL -- so naming them here would be a second copy of a schema, and the
+# check_vendored drift gate is what keeps the first one honest.
+INTRADAY_TABLE = "intraday_metrics"
+INTRADAY_MONTHLY_TABLE = "intraday_monthly"
+
+
+def _intraday_cols() -> set:
+    return {name for name, _ in scalp_config.INTRADAY_COLUMNS}
+
+
+def _intraday_roles():
+    """The intraday subset resolved into roles, at the PINNED variant.
+
+    The pipeline pinned one variant, horizon and statistic when it built the
+    table; reading any other here would silently return nulls, so the pin is
+    read from the same constant the schema was generated from.
+    """
+    v = getattr(scalp_config, "INTRADAY_NOISE_VARIANT", None)
+    h = getattr(scalp_config, "INTRADAY_NOISE_HORIZON", None)
+    suffix = getattr(scalp_config, "INTRADAY_NOISE_STATISTIC", None)
+    return scalp_columns.resolve_all(_intraday_cols(), v, h, suffix)
+
+
+@router.get("/ticker-detail")
+async def ticker_detail(
+    symbol:   str = Query(...),
+    date:     str = Query(None),
+    sessions: int = Query(10, ge=1, le=60),
+    scope:    str = Query("sessions", description="sessions | months"),
+    pool=Depends(get_scalp_pool),
+):
+    """When in the day this name is worth sitting in, and whether it repeats.
+
+    THE SESSION PROFILE answers the question a daily average cannot: a name
+    whose ratio averages 4.0 might be 4.0 all day, or 8 in the first hour and
+    1.5 through the middle. Only the second is tradeable, and only in the
+    first hour.
+
+    THE REPEATABILITY HEATMAP asks whether that window lands in the same place
+    tomorrow. A good hour that moves around the session is not something to
+    plan a morning on, and the profile alone -- being an average -- hides
+    exactly that.
+
+    TWO SCOPES. `sessions` reads intraday_metrics, which retains 14 days.
+    `months` reads the intraday_monthly rollup, which is kept indefinitely and
+    is the only way to ask whether the shape has drifted over a quarter.
+
+    THE MONTHLY SCOPE REPORTS ITS SESSION COUNT PER BUCKET, always. August
+    holds 10-11 sessions rather than 21 because the data starts mid-month, and
+    a partial month plotted like a full one is a shape drawn from half the
+    evidence. The pipeline stores `sessions` for this reason; showing it is
+    the other half of that decision.
+    """
+    if pool is None:
+        return _no_db({"profile": [], "repeat": []})
+
+    sym = symbol.strip().upper()
+    if not sym:
+        raise HTTPException(400, "no symbol given.")
+
+    got = _intraday_roles()
+    cols = got["columns"]
+    if not cols:
+        return {"connected": True, "symbol": sym, "profile": [], "repeat": [],
+                "note": "no intraday column resolved against the pinned "
+                        "variant — the schema and the config disagree."}
+
+    ratio_col = cols.get("ratio")
+    want = _as_date(date)
+
+    async with pool.acquire() as conn:
+        if scope == "months":
+            sel = ", ".join(f'avg(m."{c}") AS "{k}"' for k, c in cols.items())
+            rows = await conn.fetch(
+                f"SELECT m.month::date AS bucket_key, m.bucket_time AS t, "
+                f" sum(m.sessions) AS sessions, sum(m.trades_total) AS trades, "
+                f" {sel} "
+                f"FROM {INTRADAY_MONTHLY_TABLE} m WHERE m.symbol = $1 "
+                f"GROUP BY 1, 2 ORDER BY 1, 2", sym)
+            months: dict = {}
+            for r in rows:
+                months.setdefault(str(r["bucket_key"]), []).append(r)
+            profile = [{
+                "scope": mk,
+                "sessions": max(int(x["sessions"] or 0) for x in rs),
+                "buckets": [{"t": str(x["t"]), "sessions": int(x["sessions"] or 0),
+                             **{k: x[k] for k in cols}} for x in rs],
+            } for mk, rs in sorted(months.items())]
+            return {
+                "connected": True, "symbol": sym, "scope": "months",
+                "columns": {k: c for k, c in cols.items()},
+                "months": profile,
+                "repeat": [],
+                # Repeated at the top level as well as per bucket: a reader
+                # scanning the chart should not have to hover to find out the
+                # month is half a month.
+                "session_counts": {p["scope"]: p["sessions"] for p in profile},
+                "note": "Monthly rollup. Session counts are shown because a "
+                        "partial month is not a quiet one — August starts "
+                        "mid-month in this data.",
+            }
+
+        dates = [r["trade_date"] for r in await conn.fetch(
+            f"SELECT DISTINCT trade_date FROM {INTRADAY_TABLE} "
+            f"WHERE symbol = $1 ORDER BY trade_date DESC LIMIT $2",
+            sym, sessions)]
+        if not dates:
+            return {"connected": True, "symbol": sym, "profile": [],
+                    "repeat": [], "dates": [],
+                    "note": f"no intraday rows for {sym}. The table retains "
+                            f"{getattr(scalp_config, 'INTRADAY_RETENTION_DAYS', 14)} "
+                            f"days; older sessions are rebuilt from parquet."}
+        dates = sorted(dates)
+        d_ = want if want in dates else dates[-1]
+
+        sel = ", ".join(f'avg(m."{c}") AS "{k}"' for k, c in cols.items())
+        prows = await conn.fetch(
+            f"SELECT m.bucket_start::time AS t, count(*) AS sessions, {sel} "
+            f"FROM {INTRADAY_TABLE} m "
+            f"WHERE m.symbol = $1 AND m.trade_date = ANY($2) "
+            f"GROUP BY 1 ORDER BY 1", sym, dates)
+
+        rrows = []
+        if ratio_col:
+            rrows = await conn.fetch(
+                f'SELECT m.trade_date, m.bucket_start::time AS t, '
+                f' m."{ratio_col}" AS v '
+                f"FROM {INTRADAY_TABLE} m "
+                f"WHERE m.symbol = $1 AND m.trade_date = ANY($2) "
+                f"ORDER BY m.trade_date, 2", sym, dates)
+
+        # WHEN I ACTUALLY TRADED IT. The profile's whole point is that the
+        # good window may not be the window being used, and that comparison
+        # needs both drawn on the same axis.
+        await _ensure_fills(conn)
+        hours = await conn.fetch(
+            "SELECT trade_date, min(entry_ts)::time AS first_entry, "
+            " max(exit_ts)::time AS last_exit, sum(trips) AS trips "
+            "FROM (SELECT f.trade_date, f.entry_ts, f.exit_ts, 1 AS trips "
+            "      FROM fills f WHERE f.symbol = $1) x "
+            "GROUP BY trade_date ORDER BY trade_date", sym)
+
+        prov = await conn.fetch(
+            "SELECT item, value FROM provenance "
+            "WHERE symbol = $1 AND trade_date = $2 ORDER BY item", sym, d_)
+
+    buckets = [str(r["t"]) for r in prows]
+    idx = {b: i for i, b in enumerate(buckets)}
+    matrix = []
+    for dt in dates:
+        row = [None] * len(buckets)
+        matrix.append({"date": str(dt), "cells": row})
+    dpos = {str(dt): i for i, dt in enumerate(dates)}
+    for r in rrows:
+        i, j = dpos.get(str(r["trade_date"])), idx.get(str(r["t"]))
+        if i is not None and j is not None:
+            matrix[i]["cells"][j] = r["v"]
+
+    return {
+        "connected": True, "symbol": sym, "scope": "sessions",
+        "date": str(d_), "dates": [str(x) for x in dates],
+        "sessions": len(dates),
+        "columns": {k: c for k, c in cols.items()},
+        "missing_roles": got["missing"],
+        "buckets": buckets,
+        "profile": [{"t": str(r["t"]), "sessions": int(r["sessions"] or 0),
+                     **{k: r[k] for k in cols}} for r in prows],
+        "repeat": matrix,
+        "repeat_metric": ratio_col,
+        "traded_hours": [{"date": str(r["trade_date"]),
+                          "first": str(r["first_entry"]),
+                          "last": str(r["last_exit"]),
+                          "trips": int(r["trips"] or 0)} for r in hours],
+        "provenance": [{"item": r["item"], "value": r["value"]} for r in prov],
+        # A row computed from 94% of the tape is a different row from one
+        # computed from all of it, and reading a markdown file to find that
+        # out is what this replaces.
+        "provenance_note":
+            "What this symbol-day was computed FROM: condition-code drops, "
+            "crossed quotes, records lost to same-timestamp collapsing and "
+            "auction minutes trimmed.",
+    }
+
+
+@router.get("/compare")
+async def compare(
+    symbols: str = Query(..., description="comma-separated"),
+    date:    str = Query(None),
+    pool=Depends(get_scalp_pool),
+):
+    """Several tickers' daily metrics side by side.
+
+    Against names whose OUTCOMES ARE KNOWN, which is the only way a number on
+    an unknown candidate means anything yet: 4.2 is not good or bad, it is
+    near FDX or near LITE. Realised results are joined in for exactly that
+    reason and pooled across all sessions, since the comparison is with the
+    name's record and not with one day of it.
+    """
+    if pool is None:
+        return _no_db({"rows": []})
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not syms:
+        raise HTTPException(400, "no symbols given.")
+
+    want = _as_date(date)
+    async with pool.acquire() as conn:
+        dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT 90")]
+        if not dates:
+            return {"connected": True, "rows": [], "note": "no sessions."}
+        d_ = want if want in dates else dates[0]
+        rows = await conn.fetch(
+            "SELECT symbol, metric, value FROM daily_metrics "
+            "WHERE trade_date = $1 AND symbol = ANY($2)", d_, syms)
+        await _ensure_fills(conn)
+        traded = {r["symbol"]: dict(r) for r in await conn.fetch(
+            "SELECT symbol, sum(trips) AS trips, sum(net_pnl) AS net_pnl, "
+            " sum(net_pnl) / NULLIF(sum(attention_minutes), 0) AS pnl_per_min "
+            "FROM fills_daily WHERE symbol = ANY($1) GROUP BY symbol", syms)}
+
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r["metric"], {})[r["symbol"]] = r["value"]
+
+    return {
+        "connected": True, "date": str(d_), "symbols": syms,
+        "metrics": [{"metric": m,
+                     **scalp_metric_docs.header_link(m),
+                     "variant": _parse_variant(m),
+                     "values": {s: by[m].get(s) for s in syms}}
+                    for m in sorted(by)],
+        "traded": {s: ({"trips": int(t["trips"] or 0),
+                        "net_pnl": float(t["net_pnl"] or 0.0),
+                        "pnl_per_min": (float(t["pnl_per_min"])
+                                        if t["pnl_per_min"] is not None else None)}
+                       if (t := traded.get(s)) else None) for s in syms},
+        # Named rather than dropped: a symbol absent from this date is a fact
+        # about the date, not an empty column to puzzle over.
+        "absent": [s for s in syms if not any(s in v for v in by.values())],
+    }
+
+
 # ── which filter constrains which column ────────────────────────────────────
 #
 # The pipeline's DEFAULT_FILTERS are named for what they threshold, not for the
@@ -1391,7 +1657,7 @@ async def candidates(
     if noise:
         parsed = _parse_variant(noise)
         if parsed:
-            v, h, stat = parsed["variant"], parsed["horizon_s"], parsed["statistic"]
+            v, h, stat = parsed["variant"], parsed["horizon_s"], parsed["suffix"]
 
     keys = [k.strip() for k in columns.split(",") if k.strip()] if columns else None
     extras = [e.strip() for e in extra.split(",") if e.strip()] if extra else []
@@ -1418,7 +1684,7 @@ async def candidates(
             parsed = _parse_variant(noise) if noise else None
             if parsed:
                 v, h, stat = (parsed["variant"], parsed["horizon_s"],
-                              parsed["statistic"])
+                              parsed["suffix"])
 
         got = scalp_columns.resolve_all(present, v, h, stat, keys)
         col_map = dict(got["columns"])
