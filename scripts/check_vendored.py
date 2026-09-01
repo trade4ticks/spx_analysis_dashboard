@@ -34,6 +34,19 @@ OI_ROOT = Path(os.getenv("OI_PROJECT_ROOT", ROOT.parent / "Open_Interest"))
 # (vendored path, source path relative to OI_ROOT)
 VERBATIM = [
     ("app/metrics_config.py", "lib/metrics_config.py"),
+    # The equities-scalp pipeline owns both of these. The dashboard must not
+    # import from scalp/ -- `rm -rf scalp/` has to leave this app standing --
+    # so they are copied, and copied WHOLE so this script can diff them.
+    #
+    # scalp_config carries DEFAULT_FILTERS and FILTER_RANGES, which are the
+    # thresholds the page's sliders open on and the bounds they move through.
+    # A trimmed copy of those would be a threshold sitting here at last
+    # month's value while the pipeline used another, with nothing to notice.
+    ("app/scalp_config.py", "scalp/config.py"),
+    # scalp_metric_docs turns a metric name into its definition and its
+    # anchor in METRICS.md, which is what makes every column header a link.
+    # It also has to stay in step with the metric set for the same reason.
+    ("app/scalp_metric_docs.py", "scalp/metric_docs.py"),
 ]
 
 

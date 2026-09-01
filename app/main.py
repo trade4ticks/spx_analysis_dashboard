@@ -17,7 +17,7 @@ try:
     MultiPartParser.spool_max_size = 200 * 1024 * 1024   # 200MB spool
 except (ImportError, AttributeError):
     pass
-from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures
+from app.routers import meta, skew, term, historical, concavity, skew_slope, term_slope, raw, heatmap, today, ai_explorer, research, research2, oi_signals, oi_analysis, oi_portfolios, backtest_iv, ticker_analysis, ticker_chain, factor_trades, equity_iv, equity_iv_surface, equity_structures, equities_scalp
 
 BASE_DIR = Path(__file__).parent.parent  # project root
 
@@ -142,6 +142,11 @@ app.include_router(equity_iv_surface.router, prefix="/api/equity-iv")
 # Structure presets: same page, same prefix; kept separate because a
 # later brief-builder reads app/equity_presets.py without the routers.
 app.include_router(equity_structures.router, prefix="/api/equity-iv")
+# Equities Scalp reads its OWN database (equities_scalp), not the IV or
+# factor ones. Its absence is not an error for this app -- the pool is
+# optional and the page reports "not connected" -- so registration is
+# unconditional and the endpoint answers either way.
+app.include_router(equities_scalp.router,   prefix="/api/equities-scalp")
 
 
 @app.get("/today")
@@ -192,6 +197,11 @@ async def ticker_analysis_page(request: Request):
 @app.get("/equity-iv")
 async def equity_iv_page(request: Request):
     return templates.TemplateResponse(request, "equity_iv.html")
+
+
+@app.get("/equities-scalp")
+async def equities_scalp_page(request: Request):
+    return templates.TemplateResponse(request, "equities_scalp.html")
 
 
 @app.get("/backtest-iv-analysis")

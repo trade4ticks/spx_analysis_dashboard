@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Equities Scalp</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <style>
+    /* ── Equities Scalp — page-scoped styles ─────────────────────────────
+       Everything prefixed `.sc-` so nothing here leaks onto another page.
+       Colours come from theme.css tokens; the two accents this project uses
+       are --accent blue (#3498db) and #e84393 pink. */
+
+    .sc-body { flex:1; overflow:auto; min-height:0; }
+
+    /* ── the mode split ────────────────────────────────────────────────
+       The page answers two different questions and they are read at
+       different times — one at 9am to pick names, one at a weekend to ask
+       whether the tool measures anything. Scrolling from one into the other
+       should feel like a change of mode rather than a change of topic, so
+       the research half sits on its own background band across the full
+       width, not merely under a heading. */
+    .sc-mode { padding:14px; }
+    .sc-mode-research {
+      background:
+        linear-gradient(180deg, rgba(232,67,147,0.05), rgba(232,67,147,0.02) 120px, transparent 380px),
+        var(--bg-alt, #191919);
+      border-top:1px solid var(--border);
+      box-shadow:inset 0 12px 24px -18px rgba(0,0,0,0.9);
+    }
+
+    .sc-mode-hdr { display:flex; align-items:baseline; gap:12px; margin-bottom:4px; }
+    .sc-mode-hdr h2 { font-size:17px; margin:0; letter-spacing:0.2px; }
+    .sc-mode-use h2      { color:var(--accent); }
+    .sc-mode-research h2 { color:#e84393; }
+    .sc-mode-hdr .sc-when {
+      font-size:11px; color:var(--muted); text-transform:uppercase;
+      letter-spacing:0.8px;
+    }
+    .sc-mode-lead {
+      font-size:12px; color:var(--muted); line-height:1.65;
+      max-width:78ch; margin:0 0 14px;
+    }
+    .sc-mode-lead strong { color:var(--text); font-weight:600; }
+
+    /* ── sticky jump bar ───────────────────────────────────────────────
+       The two groups are separated by a rule rather than merely spaced: the
+       whole point of the page's structure is that the halves are different
+       modes, and a jump bar that lists eleven links in one run would be the
+       first thing to contradict that. */
+    .sc-jump {
+      position:sticky; top:0; z-index:30;
+      display:flex; align-items:center; gap:2px; flex-wrap:wrap;
+      background:var(--surface); border-bottom:1px solid var(--border);
+      padding:6px 14px; font-size:11px;
+    }
+    .sc-jump a {
+      color:var(--muted); text-decoration:none; padding:4px 8px;
+      border-radius:4px; white-space:nowrap;
+    }
+    .sc-jump a:hover { color:var(--text); background:var(--raised); }
+    .sc-jump .sc-jump-lbl {
+      color:var(--text); font-weight:600; padding:4px 8px 4px 0;
+      letter-spacing:0.3px;
+    }
+    .sc-jump .sc-jump-lbl.use { color:var(--accent); }
+    .sc-jump .sc-jump-lbl.res { color:#e84393; }
+    .sc-jump .sc-jump-div {
+      width:1px; align-self:stretch; background:var(--border); margin:0 10px;
+    }
+
+    /* ── panels ────────────────────────────────────────────────────────── */
+    .sc-panel {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; margin-bottom:12px;
+    }
+    .sc-panel-hdr {
+      display:flex; align-items:center; gap:8px;
+      padding:7px 11px; border-bottom:1px solid var(--border);
+    }
+    .sc-panel-title { font-size:12px; font-weight:600; }
+    .sc-panel-sub { font-size:10px; color:var(--muted); }
+    .sc-spacer { flex:1; }
+    .sc-panel-body { padding:11px; }
+
+    /* A section that exists in the brief but is not built yet. Deliberately
+       loud rather than tasteful: an unbuilt panel that looks finished is
+       worse than no panel, because it reads as a measurement. */
+    .sc-stub {
+      border:1px dashed var(--border); border-radius:6px;
+      padding:14px; color:var(--muted); font-size:11.5px; line-height:1.7;
+      background:repeating-linear-gradient(135deg,
+        transparent, transparent 9px,
+        rgba(255,255,255,0.012) 9px, rgba(255,255,255,0.012) 18px);
+    }
+    .sc-stub b { color:var(--text); font-weight:600; display:block; margin-bottom:3px; }
+    .sc-stub-tag {
+      display:inline-block; font-size:9px; letter-spacing:0.9px;
+      text-transform:uppercase; color:#e84393;
+      border:1px solid rgba(232,67,147,0.4); border-radius:3px;
+      padding:1px 5px; margin-bottom:6px;
+    }
+
+    /* ── the not-connected / no-data states ────────────────────────────
+       Two states, never one. A missing database and a night the pipeline
+       did not run need different actions from whoever is reading this at
+       9am, and collapsing them into "no data" loses that. */
+    .sc-empty {
+      padding:22px 14px; text-align:center; color:var(--muted);
+      font-size:12px; line-height:1.8;
+    }
+    .sc-empty .sc-empty-hd { color:var(--text); font-size:13px; font-weight:600; }
+    .sc-empty code {
+      background:var(--raised); padding:1px 5px; border-radius:3px;
+      font-size:11px; color:var(--text);
+    }
+
+    /* ── filter bar ────────────────────────────────────────────────────── */
+    .sc-filters { display:flex; align-items:flex-end; gap:18px; flex-wrap:wrap; }
+    .sc-filter { min-width:160px; }
+    .sc-filter-lbl {
+      display:flex; justify-content:space-between; gap:10px;
+      font-size:10.5px; color:var(--muted); margin-bottom:3px;
+    }
+    .sc-filter-lbl b { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+    .sc-filter input[type=range] { width:100%; accent-color:var(--accent); }
+    .sc-filter-rng { display:flex; justify-content:space-between; font-size:9px; color:var(--border); }
+    .sc-count {
+      font-size:11px; color:var(--muted); padding-bottom:2px;
+    }
+    .sc-count b { color:var(--accent); font-size:15px; font-variant-numeric:tabular-nums; }
+
+    /* ── tables ────────────────────────────────────────────────────────── */
+    .sc-table { width:100%; border-collapse:collapse; font-size:11px; }
+    .sc-table th {
+      text-align:left; font-weight:600; color:var(--muted);
+      padding:5px 8px; border-bottom:1px solid var(--border);
+      position:sticky; top:0; background:var(--surface); white-space:nowrap;
+    }
+    .sc-table td { padding:4px 8px; border-bottom:1px solid rgba(255,255,255,0.04); }
+    .sc-table tbody tr:hover { background:var(--raised); }
+    .sc-num { text-align:right; font-variant-numeric:tabular-nums; }
+    /* Column headers link to the metric's definition. A metric name is not
+       self-explanatory and the definitions already exist. */
+    .sc-table th a, .sc-metric-link { color:var(--muted); text-decoration:none; border-bottom:1px dotted var(--border); }
+    .sc-table th a:hover, .sc-metric-link:hover { color:var(--accent); border-bottom-color:var(--accent); }
+    .sc-scroll { max-height:420px; overflow:auto; }
+
+    .sc-tag {
+      display:inline-block; font-size:9px; padding:1px 5px; border-radius:3px;
+      border:1px solid var(--border); color:var(--muted);
+    }
+    .sc-tag.on { border-color:var(--accent); color:var(--accent); }
+    .sc-tag.warn { border-color:#e84393; color:#e84393; }
+
+    [x-cloak] { display:none !important; }
+  </style>
+</head>
+
+<body x-data="equitiesScalp" x-init="init()">
+
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    {% set nav_active = "/equities-scalp" %}{% include "_nav.html" %}
+    <div class="topbar-right">
+      <span x-text="meta.date || '—'"></span>
+      <span style="color:var(--border)"> · </span>
+      <span x-text="meta.symbols ? meta.symbols + ' symbols' : 'not loaded'"></span>
+    </div>
+  </div>
+
+  <div class="sc-body">
+
+    <!-- ── jump bar ──────────────────────────────────────────────────── -->
+    <div class="sc-jump">
+      <span class="sc-jump-lbl use">Use</span>
+      <a href="#health">Data health</a>
+      <a href="#candidates">Candidates</a>
+      <a href="#detail">Ticker detail</a>
+      <a href="#now">Right now</a>
+      <span class="sc-jump-div"></span>
+      <span class="sc-jump-lbl res">Research</span>
+      <a href="#geometry">Spread × noise</a>
+      <a href="#correlation">Correlation</a>
+      <a href="#stability">Rank stability</a>
+      <a href="#calibration">Calibration</a>
+      <a href="#distributions">Distributions</a>
+      <a href="#drift">Over time</a>
+      <span class="sc-spacer"></span>
+      <span class="sc-panel-sub" x-show="!meta.connected" x-cloak
+            style="color:#e84393">not connected</span>
+    </div>
+
+    <!-- ══ SECTION 1 — USE ═══════════════════════════════════════════════ -->
+    <div class="sc-mode sc-mode-use">
+      <div class="sc-mode-hdr">
+        <h2>Use</h2><span class="sc-when">read at 9am</span>
+      </div>
+      <p class="sc-mode-lead">
+        What to trade today. The constraint this page exists for is
+        <strong>finding tickers</strong> — performance varies about tenfold by
+        name, and picking by eye each morning is what this replaces.
+      </p>
+
+      <!-- not connected / no data. Two distinct states, never merged. -->
+      <div class="sc-panel" x-show="!loading && !meta.connected" x-cloak>
+        <div class="sc-empty">
+          <div class="sc-empty-hd">Not connected to the scalp database</div>
+          <div x-text="meta.error"></div>
+          <div style="margin-top:8px">
+            Everything else on this dashboard is unaffected — this page reads
+            its own database and nothing else does.
+          </div>
+        </div>
+      </div>
+      <div class="sc-panel" x-show="!loading && meta.connected && !meta.date" x-cloak>
+        <div class="sc-empty">
+          <div class="sc-empty-hd">No session in the database yet</div>
+          <div x-text="meta.note || 'daily_metrics is empty.'"></div>
+          <div style="margin-top:8px">
+            The database is reachable, so this is a pipeline that has not run
+            rather than a connection problem.
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.1 filter bar -->
+      <div class="sc-panel" x-show="meta.connected && meta.date" x-cloak>
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Filters</span>
+          <span class="sc-panel-sub">read-time only — never triggers a recompute</span>
+          <span class="sc-spacer"></span>
+          <span class="sc-count">
+            <span x-show="passCount === null">—</span>
+            <b x-show="passCount !== null" x-text="passCount"></b>
+            <span x-show="passCount !== null"
+                  x-text="' of ' + (meta.symbols || 0) + ' pass'"></span>
+          </span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-filters">
+            <template x-for="k in filterKeys" :key="k">
+              <div class="sc-filter">
+                <div class="sc-filter-lbl">
+                  <span x-text="filterLabel(k)"></span>
+                  <b x-text="fmtFilter(k, filters[k])"></b>
+                </div>
+                <input type="range" :min="range(k).min" :max="range(k).max"
+                       :step="range(k).step" x-model.number="filters[k]"
+                       @change="onFilterChange()">
+                <div class="sc-filter-rng">
+                  <span x-text="fmtFilter(k, range(k).min)"></span>
+                  <span x-text="fmtFilter(k, range(k).max)"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+          <!-- The reason the failing rows are kept, said once where the
+               sliders are, because it is the thing that makes the sliders
+               worth having. -->
+          <div class="sc-panel-sub" style="margin-top:10px; line-height:1.7; max-width:80ch">
+            The pipeline computes and stores every symbol regardless of whether
+            it passes. Moving a slider re-queries; rows for names that fail are
+            still in the database, and they are the only data that can say
+            whether a threshold is set in the right place.
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.2 data health -->
+      <div class="sc-panel" id="health">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Data health</span>
+          <span class="sc-panel-sub">last ~10 sessions</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-stub">
+            <span class="sc-stub-tag">phase 2</span>
+            <b>Per date: symbol count, median distinct exchange codes, median trades/min against trailing, fetch rejects.</b>
+            Exists because of a real failure: a fetch returned only Nasdaq's
+            prints — missing NYSE, ARCA, BATS, EDGX and IEX — and the only
+            symptom was trades/min reading 37% low. One red row is the whole
+            point, and it matters most once the nightly job runs unattended
+            and nobody is looking for it.
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.3 / 1.4 ranked candidates -->
+      <div class="sc-panel" id="candidates">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Ranked candidates</span>
+          <span class="sc-panel-sub">one row per symbol passing the filters</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-stub">
+            <span class="sc-stub-tag">phase 2</span>
+            <b>Ticker, price, spread ¢/bps, noise, ratio, quote coverage, trades/min, size, balance, off-exchange, 10-day ratio sparkline, traded marker.</b>
+            Quote coverage is a first-class column rather than a diagnostic:
+            noise is measured between consecutive <em>observed</em> buckets, so
+            a name at 0.33 coverage has observations ~30s apart at a nominal
+            10s horizon and its "10s noise" is really 30s noise. Coverage is
+            the only thing that makes that comparable.
+            Move-rate and move-bps sit beside the ratio, since noise conflates
+            them and loses to the first term on sparse names.
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.5 ticker detail -->
+      <div class="sc-panel" id="detail">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Ticker detail</span>
+          <span class="sc-panel-sub">session profile · repeatability · comparison · provenance</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-stub">
+            <span class="sc-stub-tag">phase 3</span>
+            <b>When in the day this name is worth sitting in, and whether that window repeats.</b>
+            Session profile with actual trading hours shaded; a repeatability
+            heatmap of sessions × 15-minute buckets; a comparison against names
+            whose outcomes are already known; and provenance — what share of
+            the tape the row was computed from, which condition codes were
+            dropped, crossed quotes, records lost to same-timestamp collapsing.
+          </div>
+        </div>
+      </div>
+
+      <!-- 1.6 intraday -->
+      <div class="sc-panel" id="now">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Right now</span>
+          <span class="sc-panel-sub">15-minute delayed</span>
+          <span class="sc-spacer"></span>
+          <span class="sc-tag warn">not yet connected</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-stub">
+            <span class="sc-stub-tag">shell only</span>
+            <b>Watchlist with "vs normal", a 30-minute sparkline and a state label.</b>
+            "vs normal" compares this five minutes against the name's own
+            10-day median <em>for the same clock time</em> — against a daily
+            average every name looks like it is deteriorating at noon, because
+            every name is. Tape and book views are placeholders: a 15-minute
+            delay is fine for "is this name in a good state" and useless for
+            reading a tape.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ SECTION 2 — RESEARCH ══════════════════════════════════════════ -->
+    <div class="sc-mode sc-mode-research">
+      <div class="sc-mode-hdr">
+        <h2>Research</h2><span class="sc-when">read at weekends</span>
+      </div>
+      <p class="sc-mode-lead">
+        Everything below tests the tool rather than using it.
+        <strong>spread ÷ noise is an untested hypothesis.</strong> It comes
+        from one observation made while trading — that stocks moving faster
+        than their spread are untradeable — and the entire pipeline is
+        organised around it. If nothing separates, that is the finding.
+      </p>
+
+      <!-- 2.2's neighbour, and the one panel that is real in this phase:
+           the metric set as the database actually holds it. -->
+      <div class="sc-panel" id="correlation" x-show="meta.connected && meta.date" x-cloak>
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Metric catalog</span>
+          <span class="sc-panel-sub"
+                x-text="meta.metrics.length + ' metrics on ' + meta.date + ' — read from the database, not declared here'"></span>
+          <span class="sc-spacer"></span>
+          <span class="sc-tag" x-show="meta.undocumented && meta.undocumented.length" x-cloak
+                :class="{warn: true}"
+                x-text="meta.undocumented.length + ' undocumented'"></span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-scroll">
+            <table class="sc-table">
+              <thead><tr>
+                <th>metric</th><th>section</th><th>variant</th>
+                <th class="sc-num">horizon</th><th>statistic</th>
+                <th class="sc-num">symbols</th><th class="sc-num">non-null</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="m in meta.metrics" :key="m.metric">
+                  <tr>
+                    <td>
+                      <a class="sc-metric-link" :href="m.href" target="_blank"
+                         rel="noopener" :title="m.tooltip" x-text="m.metric"></a>
+                    </td>
+                    <td x-text="m.section || '—'"></td>
+                    <td x-text="m.variant ? m.variant.variant : '—'"></td>
+                    <td class="sc-num" x-text="m.variant ? m.variant.horizon_s + 's' : '—'"></td>
+                    <td x-text="m.variant && m.variant.statistic ? m.variant.statistic : '—'"></td>
+                    <td class="sc-num" x-text="m.n"></td>
+                    <!-- An all-null column and an absent one look identical in
+                         a pivot, and only one of them means something broke. -->
+                    <td class="sc-num" :style="m.n_value === 0 ? 'color:#e84393' : ''"
+                        x-text="m.n_value"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="sc-panel-sub" style="margin-top:10px; line-height:1.7; max-width:80ch">
+            The correlation matrix goes here in phase 4 — about 75 noise
+            columns, most measuring nearly the same thing. If two variants
+            correlate at 0.97 across the universe, one is redundant, and no
+            trade data is needed to find that out.
+          </div>
+        </div>
+      </div>
+
+      <div class="sc-panel" id="geometry">
+        <div class="sc-panel-hdr"><span class="sc-panel-title">Spread against noise</span></div>
+        <div class="sc-panel-body"><div class="sc-stub">
+          <span class="sc-stub-tag">phase 4</span>
+          <b>Every candidate as a point, constant-ratio lines running diagonally.</b>
+          "Good" becomes a direction rather than a number, which is the
+          geometry a ranked table hides — whether an unknown candidate sits in
+          a known winner's neighbourhood or a known loser's. Traded names
+          coloured by outcome.
+        </div></div>
+      </div>
+
+      <div class="sc-panel" id="stability">
+        <div class="sc-panel-hdr"><span class="sc-panel-title">Rank stability</span></div>
+        <div class="sc-panel-body"><div class="sc-stub">
+          <span class="sc-stub-tag">phase 4</span>
+          <b>How far a ticker's rank moves day to day, per metric. No trade data needed.</b>
+          A metric whose top 20 reshuffles every session is measuring noise in
+          the measurement rather than a property of the stock — one name read
+          0.069 bps then 1.727 with nothing changing, because the median
+          statistic flipped across a boundary.
+        </div></div>
+      </div>
+
+      <div class="sc-panel" id="calibration">
+        <div class="sc-panel-hdr"><span class="sc-panel-title">Calibration against realised results</span></div>
+        <div class="sc-panel-body"><div class="sc-stub">
+          <span class="sc-stub-tag">phase 5 — needs the fills upload</span>
+          <b>Rank correlation of each metric against actual $/min, sorted.</b>
+          With a handful of tickers and ~75 candidate metrics something will
+          correlate by chance, so this is a table to watch over weeks rather
+          than a verdict — the sample size shown prominently and the weakness
+          made visible rather than implied.
+        </div></div>
+      </div>
+
+      <div class="sc-panel" id="distributions">
+        <div class="sc-panel-hdr"><span class="sc-panel-title">Distributions</span></div>
+        <div class="sc-panel-body"><div class="sc-stub">
+          <span class="sc-stub-tag">phase 4</span>
+          <b>Trade size through the session, gaps between trades, which side is consumed, best-bid lifetime.</b>
+          Round lots are price-tiered, so the odd-lot bands differ by name and
+          their share rises midday — the middle of the day is not only quieter,
+          the arrivals are smaller, and a 5-share print cannot fill a 50-share
+          order.
+        </div></div>
+      </div>
+
+      <div class="sc-panel" id="drift">
+        <div class="sc-panel-hdr"><span class="sc-panel-title">Stability over time</span></div>
+        <div class="sc-panel-body"><div class="sc-stub">
+          <span class="sc-stub-tag">phase 4</span>
+          <b>Noise across all sessions as small multiples on identical axes, and spread against noise on one axis.</b>
+          Separates level from stability. Where the two lines converge there is
+          nothing to capture, however wide the spread looks in cents.
+        </div></div>
+      </div>
+    </div>
+  </div>
+
+  <script src={{ asset('js/equities_scalp.js') }}></script>
+</body>
+</html>
