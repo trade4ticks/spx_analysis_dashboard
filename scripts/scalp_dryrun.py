@@ -60,7 +60,8 @@ BAD: list[str] = []
 # several variants, horizons and statistics, plus fixed flow/spread names.
 FAKE_METRICS = [
     "spread_bps_tw", "spread_cents_tw", "trades_per_min", "trade_size_median",
-    "two_sided_balance", "off_exchange_share", "quote_bucket_coverage_10s",
+    "two_sided_balance", "off_exchange_share", "unidentified_exchange_share",
+    "quote_bucket_coverage_10s",
     "noise_bps_tw_mid_10s_median", "noise_bps_tw_mid_10s_rms",
     "noise_bps_tw_mid_30s_rms", "noise_bps_last_mid_10s_p75",
     "noise_bps_bid_side_5s_mean",
@@ -75,6 +76,32 @@ FAKE_METRICS = [
 ]
 UNDOCUMENTED = "some_future_metric_nobody_documented"
 FAKE_DATES = [datetime.date(2026, 8, 28), datetime.date(2026, 8, 27)]
+
+# A longer run for the health panel, newest last. 2026-08-24 is the BROKEN
+# session: arrivals 37% below trailing and eleven symbols short, which is the
+# shape of the failure the panel exists for. Without a bad date in the fixture
+# the panel would be asserted to work having never flagged anything.
+HEALTH_DATES = [datetime.date(2026, 8, d) for d in
+                (10, 11, 12, 13, 14, 17, 18, 19, 20, 21, 24)]
+BROKEN_DATE = datetime.date(2026, 8, 24)
+# A NORMAL date missing eight symbols: index ETFs that returned quotes with no
+# trades and were correctly refused at fetch. 579/587 is 98.6% and must be
+# VISIBLE without being FLAGGED — the system working is not an incident, and a
+# panel that reddens on it is one nobody reads.
+REFUSED_DATE = datetime.date(2026, 8, 20)
+UNIVERSE_N = 587
+MISSING = {BROKEN_DATE: 60, REFUSED_DATE: 8}
+
+
+def _health_median(day, metric):
+    """The per-date median the fake reports for a watched metric."""
+    if metric == "trades_per_min":
+        return 24.0 * (0.63 if day == BROKEN_DATE else 1.0)
+    if metric == "off_exchange_share":
+        return 0.38
+    if metric == "unidentified_exchange_share":
+        return 0.02
+    return 1.0
 
 # Enough symbols to sort, and deliberately not all alike: one passes every
 # filter, one is too tight to trade, one is sparsely quoted, and one has a
@@ -252,8 +279,29 @@ class Conn:
         check_sql(sql, args)
         if self.empty:
             return []
+        # MOST SPECIFIC FIRST. /meta and /candidates take the newest dates with
+        # a literal LIMIT; /health takes a parameterised one because its span
+        # depends on the trailing window. Testing the looser pattern first
+        # swallowed the health query and handed it two dates, which is not
+        # enough to have a trailing baseline at all — the panel then looked
+        # empty rather than wrong.
+        if "DISTINCT trade_date" in sql and "LIMIT $1" in sql:
+            return [{"trade_date": x} for x in reversed(HEALTH_DATES)]
         if "DISTINCT trade_date" in sql:
             return [{"trade_date": d} for d in FAKE_DATES]
+        if "GROUP BY trade_date, metric" in sql:
+            return [{"trade_date": day, "metric": m,
+                     "med": _health_median(day, m), "n": UNIVERSE_N}
+                    for day in HEALTH_DATES for m in args[1]]
+        if "count(DISTINCT symbol)" in sql and "GROUP BY trade_date" in sql:
+            return [{"trade_date": day,
+                     "n_symbols": UNIVERSE_N - MISSING.get(day, 0),
+                     "n_metrics": len(FAKE_METRICS)} for day in HEALTH_DATES]
+        if "FROM universe u" in sql:
+            return [{"trade_date": day, "symbol": f"X{i:03d}"}
+                    for day, n in MISSING.items() for i in range(n)]
+        if "FROM universe" in sql:
+            return [{"trade_date": day, "n": UNIVERSE_N} for day in HEALTH_DATES]
         if "DISTINCT metric" in sql:
             return [{"metric": m} for m in FAKE_METRICS]
         if "GROUP BY m.symbol" in sql:
@@ -410,6 +458,7 @@ async def run() -> int:
         fails += 1
 
     fails += await check_candidates()
+    fails += await check_health()
 
     for b in BAD:
         print(f"  {b}")
@@ -418,6 +467,104 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_health() -> int:
+    """The data-health panel: does it actually flag the failure it exists for."""
+    fails = 0
+    j = await sc.health(sessions=10, trailing=10, pool=Pool())
+    rows = j.get("rows") or []
+    if not rows:
+        print("  /health returned no rows against a populated fake")
+        return 1
+
+    # Newest first: at 9am the row that matters is last night's, and putting it
+    # last means scrolling to find out whether the data is usable.
+    if rows[0]["date"] < rows[-1]["date"]:
+        print("  /health rows are oldest-first — last night's session should")
+        print("    be the first thing on screen")
+        fails += 1
+
+    broken = next((r for r in rows if r["date"] == str(BROKEN_DATE)), None)
+    if broken is None:
+        print(f"  the broken session {BROKEN_DATE} is not in the response")
+        return fails + 1
+
+    # THE WHOLE POINT. A 37% drop in arrivals is the signal that took an hour
+    # to find by hand.
+    if "arrivals" not in broken["flags"]:
+        ch = broken["metrics"].get("arrivals", {}).get("change")
+        print(f"  the 37%-low session was NOT flagged (change={ch}). This is")
+        print("    the exact failure the panel exists for.")
+        fails += 1
+    if "coverage" not in broken["flags"]:
+        print("  eleven missing symbols did not trip the coverage flag")
+        fails += 1
+    if broken["missing_n"] != MISSING[BROKEN_DATE] or not broken["missing_sample"]:
+        print("  missing symbols are counted but not named — 'eight missing'")
+        print("    is a number; naming them is what says whether the refusal")
+        print("    was correct")
+        fails += 1
+
+    # Eight correctly-refused ETFs must be VISIBLE and NOT flagged. Both
+    # halves matter: silent is the thing being fixed, and red is the thing
+    # that makes a panel ignorable.
+    refused = next((r for r in rows if r["date"] == str(REFUSED_DATE)), None)
+    if refused is None:
+        print(f"  {REFUSED_DATE} is not in the response")
+        fails += 1
+    else:
+        if refused["missing_n"] != MISSING[REFUSED_DATE]:
+            print(f"  {REFUSED_DATE}: eight correctly-refused symbols are not")
+            print("    reported — this is the gap that should stop being")
+            print("    something to rediscover")
+            fails += 1
+        if "coverage" in refused["flags"]:
+            print(f"  {REFUSED_DATE}: 579 of 587 was flagged. That is the")
+            print("    system working, and reddening on it makes the panel")
+            print("    ignorable.")
+            fails += 1
+
+    # A healthy session must NOT be flagged, or the panel is noise and gets
+    # ignored, which is worse than not having it.
+    healthy = [r for r in rows if r["date"] != str(BROKEN_DATE)
+               and r["metrics"].get("arrivals", {}).get("n_trailing", 0) >= 3]
+    noisy = [r["date"] for r in healthy
+             if r["flags"] and r["date"] != str(REFUSED_DATE)]
+    if noisy:
+        print(f"  healthy sessions were flagged: {noisy}. A panel that cries")
+        print("    wolf is one nobody reads.")
+        fails += 1
+
+    # Self-inclusion, checked on the WINDOW rather than on the value.
+    #
+    # Comparing the baseline against the day's own reading does not work: the
+    # baseline is a MEDIAN, and one outlier among ten barely moves it, so a
+    # date sitting inside its own window produces a number indistinguishable
+    # from a correct one. The window SIZE is the thing that cannot lie — a
+    # baseline built from `trailing` strictly-earlier sessions has at most
+    # `trailing` entries, and including the date itself makes it one more.
+    trailing_n = j.get("trailing")
+    for r in rows:
+        n = (r["metrics"].get("arrivals") or {}).get("n_trailing")
+        if n is not None and trailing_n is not None and n > trailing_n:
+            print(f"  {r['date']}: baseline has {n} sessions for a window of")
+            print(f"    {trailing_n} — the date is inside the history it is")
+            print("    being scored against")
+            fails += 1
+            break
+
+    # Fetch rejections are not persisted, and the response must SAY that
+    # rather than return zero, which would read as "there were none".
+    if j.get("fetch_rejects") is not None:
+        print("  /health reports a fetch-reject count, but nothing in the")
+        print("    pipeline persists one")
+        fails += 1
+    if not j.get("fetch_rejects_note"):
+        print("  the absence of fetch-reject data is silent")
+        fails += 1
+
+    return fails
 
 
 async def check_candidates() -> int:

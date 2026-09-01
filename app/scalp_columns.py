@@ -147,7 +147,29 @@ ROLES: tuple[Role, ...] = (
          higher_better=False,
          note="Printed to a TRF or the ADF rather than to a lit venue — "
               "volume that was never available to a resting limit order."),
+
+    # ── health only, off the ranked table by default ────────────────────
+    #
+    # These three are what the data-health panel watches. There is no
+    # distinct-exchange-count metric and there deliberately will not be:
+    # fetch.py already refuses any symbol-day under MIN_EXCHANGE_CODES, so a
+    # Nasdaq-only pull never reaches compute, and a count metric would measure
+    # a condition the guard prevents. What DID surface that failure was
+    # trades/min reading 37% below trailing, so the panel watches the
+    # quantities that move when the tape is wrong rather than one that
+    # describes the tape directly.
+    Role("unidentified", "unidentified venue", "share",
+         candidates=("unidentified_exchange_share",),
+         default=False,
+         higher_better=False,
+         note="Share printed on exchange code 78, which is absent from the "
+              "vendor's enum. A jump means the venue mix changed under us."),
 )
+
+# The health panel's columns. `arrivals` is the one that actually caught a
+# broken fetch; the two share metrics are what say whether the VENUE MIX moved,
+# which is the cause rather than the symptom.
+HEALTH_KEYS = ("arrivals", "off_exchange", "unidentified")
 
 BY_KEY = {r.key: r for r in ROLES}
 DEFAULT_KEYS = tuple(r.key for r in ROLES if r.default)

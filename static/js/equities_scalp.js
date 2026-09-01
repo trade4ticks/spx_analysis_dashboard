@@ -34,6 +34,10 @@ document.addEventListener('alpine:init', () => {
     // answers and the second one is a finding.
     passCount: null,
 
+    // ── data health ─────────────────────────────────────────────────────
+    health: null,
+    healthLoading: false,
+
     // ── the ranked table ────────────────────────────────────────────────
     cand: null,
     candLoading: false,
@@ -70,7 +74,9 @@ document.addEventListener('alpine:init', () => {
         // defaults are, and there would then be nothing to reset to.
         this.filters = Object.assign({}, f.defaults || {});
         this.noise = j.default_noise || '';
-        if (this.meta.connected && this.meta.date) await this.loadCandidates();
+        if (this.meta.connected && this.meta.date) {
+          await Promise.all([this.loadCandidates(), this.loadHealth()]);
+        }
       } catch (e) {
         this.meta.connected = false;
         this.meta.error = String(e.message || e);
@@ -108,6 +114,67 @@ document.addEventListener('alpine:init', () => {
     onFilterChange() { this.loadCandidates(); },
 
     // ── the ranked table ────────────────────────────────────────────────
+
+    async loadHealth() {
+      if (!this.meta.connected) return;
+      this.healthLoading = true;
+      try {
+        const j = await scGetJson('/api/equities-scalp/health?sessions=10');
+        this.health = j.error ? null : j;
+      } catch (e) {
+        this.health = null;
+      } finally {
+        this.healthLoading = false;
+      }
+    },
+
+    healthCols() { return (this.health && this.health.watched) || []; },
+
+    /* A change against trailing, as a signed percentage. The SIGN is kept —
+     * arrivals collapsing and arrivals doubling are different problems, and
+     * an absolute value would render them identically. */
+    fmtChange(ch) {
+      if (ch == null) return '—';
+      const p = ch * 100;
+      return (p >= 0 ? '+' : '') + p.toFixed(0) + '%';
+    },
+
+    /* Amber below the flag threshold, red at or above it. Two levels rather
+     * than one because a 20% move is worth a look and a 37% move is the
+     * incident this panel was built for. */
+    changeClass(ch) {
+      if (ch == null) return '';
+      const thr = (this.health && this.health.thresholds.move) || 0.25;
+      const a = Math.abs(ch);
+      if (a >= thr) return 'bad';
+      if (a >= thr * 0.6) return 'warn';
+      return '';
+    },
+
+    /* The row's own summary. A red cell says a number moved; this says what
+     * that means, which is what stops the panel needing to be interpreted
+     * from scratch every morning. */
+    healthNote(r) {
+      const parts = [];
+      if (r.flags.indexOf('coverage') >= 0) {
+        parts.push(`${r.n_symbols} of ${r.universe_n} symbols — a compute run `
+                 + `that did not finish looks exactly like this`);
+      } else if (r.missing_n) {
+        parts.push(`${r.missing_n} symbol${r.missing_n === 1 ? '' : 's'} absent `
+                 + `(${(r.missing_sample || []).slice(0, 6).join(' ')}${r.missing_n > 6 ? ' …' : ''}) `
+                 + `— refused at fetch, no data, or not computed; the pipeline `
+                 + `does not record which`);
+      }
+      if (r.flags.indexOf('arrivals') >= 0) {
+        parts.push('arrivals moved against their own history — this is the '
+                 + 'shape a venue-incomplete fetch took last time');
+      }
+      if (r.flags.indexOf('n_metrics') >= 0) {
+        parts.push(`${r.n_metrics} distinct metrics, short of the trailing `
+                 + `count — a metric family stopped being written`);
+      }
+      return parts.join('. ');
+    },
 
     async loadCandidates() {
       if (!this.meta.connected || !this.meta.date) return;

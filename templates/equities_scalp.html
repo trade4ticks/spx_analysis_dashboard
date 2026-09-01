@@ -234,6 +234,15 @@
     .sc-table td.dim { color:var(--border); }
     .sc-spark { display:block; }
 
+    .sc-of { color:var(--border); font-size:9px; margin-left:1px; }
+    /* The move sits under its level, smaller and dimmer until it matters. */
+    .sc-chg {
+      display:block; font-size:9px; color:var(--muted);
+      font-variant-numeric:tabular-nums;
+    }
+    .sc-num.bad, .sc-chg.bad { color:#e84393; font-weight:600; }
+    .sc-chg.warn { color:#d9a441; }
+
     .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
     .sc-reject {
       display:inline-flex; align-items:baseline; gap:5px;
@@ -388,17 +397,107 @@
       <div class="sc-panel" id="health">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Data health</span>
-          <span class="sc-panel-sub">last ~10 sessions</span>
+          <span class="sc-panel-sub"
+                x-text="health ? ('last ' + health.rows.length + ' sessions, each against the ' + health.trailing + ' before it') : 'last ~10 sessions'"></span>
+          <span class="sc-spacer"></span>
+          <span class="sc-panel-sub" x-show="healthLoading" x-cloak>…</span>
+          <!-- The count of flagged sessions, so the panel can be read without
+               being read: zero here means nothing below needs attention. -->
+          <span class="sc-tag"
+                x-show="health && health.rows.length" x-cloak
+                :class="{warn: health.rows.some(r => r.flags.length)}"
+                x-text="health.rows.filter(r => r.flags.length).length + ' flagged'"></span>
         </div>
-        <div class="sc-panel-body">
-          <div class="sc-stub">
-            <span class="sc-stub-tag">phase 2</span>
-            <b>Per date: symbol count, median distinct exchange codes, median trades/min against trailing, fetch rejects.</b>
-            Exists because of a real failure: a fetch returned only Nasdaq's
-            prints — missing NYSE, ARCA, BATS, EDGX and IEX — and the only
-            symptom was trades/min reading 37% low. One red row is the whole
-            point, and it matters most once the nightly job runs unattended
-            and nobody is looking for it.
+
+        <div class="sc-panel-body" style="padding:0">
+          <div class="sc-empty" x-show="!health" x-cloak>
+            No sessions to check yet.
+          </div>
+          <div class="sc-scroll" style="max-height:320px" x-show="health" x-cloak>
+            <table class="sc-table">
+              <thead><tr>
+                <th>session</th>
+                <th class="sc-num" title="Symbols in daily_metrics against the universe that was qualified or retained for that date.">symbols</th>
+                <th class="sc-num" title="Distinct metrics written. Short of the trailing count means a metric family stopped being computed — a different failure from a missing symbol.">metrics</th>
+                <template x-for="w in healthCols()" :key="w.key">
+                  <th class="sc-num"
+                      :title="w.metric + ' — median across symbols, with its move against the trailing median beneath'">
+                    <span x-text="w.key"></span>
+                  </th>
+                </template>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in (health ? health.rows : [])" :key="r.date">
+                  <tr :class="{fail: r.flags.length}">
+                    <td>
+                      <b x-text="r.date"></b>
+                      <span class="sc-tag warn" x-show="r.flags.length" x-cloak
+                            style="margin-left:5px" x-text="r.flags.join(' ')"></span>
+                    </td>
+                    <td class="sc-num"
+                        :class="{bad: r.flags.indexOf('coverage') >= 0}">
+                      <span x-text="r.n_symbols"></span><!--
+                      --><span class="sc-of" x-show="r.universe_n" x-cloak
+                               x-text="'/' + r.universe_n"></span>
+                    </td>
+                    <td class="sc-num"
+                        :class="{bad: r.flags.indexOf('n_metrics') >= 0}"
+                        x-text="r.n_metrics"></td>
+                    <!-- The level and its move in ONE cell. Two columns per
+                         metric doubled the header count and put the number
+                         that matters — the move — furthest from its label. -->
+                    <template x-for="w in healthCols()" :key="w.key">
+                      <td class="sc-num">
+                        <span x-text="r.metrics[w.key] && r.metrics[w.key].value != null
+                                      ? r.metrics[w.key].value.toFixed(2) : '—'"></span>
+                        <span class="sc-chg"
+                              :class="changeClass(r.metrics[w.key] && r.metrics[w.key].change)"
+                              x-text="fmtChange(r.metrics[w.key] && r.metrics[w.key].change)"></span>
+                      </td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- One line per flagged session saying what the red actually means.
+               A coloured cell says a number moved; nothing about it says
+               whether that is a broken fetch or a killed compute run. -->
+          <template x-for="r in (health ? health.rows.filter(x => x.flags.length) : [])"
+                    :key="'n' + r.date">
+            <div class="sc-warn bad">
+              <b x-text="r.date"></b> — <span x-text="healthNote(r)"></span>
+            </div>
+          </template>
+        </div>
+
+        <div class="sc-panel-body" style="padding-top:9px">
+          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+            This exists because of a real failure: a fetch returned only
+            Nasdaq's prints — missing NYSE, ARCA, BATS, EDGX and IEX — and the
+            only symptom was trades/min reading 37% low. It took an hour to
+            diagnose, and once the nightly job runs unattended it will happen
+            again with nobody looking for it.
+            <span style="display:block;margin-top:5px">
+              There is deliberately <b>no distinct-exchange-code column</b>:
+              <code>fetch.py</code> already refuses any symbol-day under its
+              minimum and does not write it, so a Nasdaq-only pull cannot reach
+              compute at all. A count would measure a condition the guard
+              prevents. What actually surfaced the problem was a rate moving
+              against its own history, so that is what this watches.
+            </span>
+            <span style="display:block;margin-top:5px"
+                  x-show="health && health.fetch_rejects_note" x-cloak>
+              <b>No fetch-rejection count.</b>
+              <span x-text="health.fetch_rejects_note"></span>
+            </span>
+            <span style="display:block;margin-top:5px">
+              Each session is scored against the ones <em>before</em> it and
+              never itself — a bad day inside its own baseline partly excuses
+              itself, and at ten sessions one outlier moves the median it is
+              being measured against.
+            </span>
           </div>
         </div>
       </div>

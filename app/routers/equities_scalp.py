@@ -247,6 +247,205 @@ async def meta(
     }
 
 
+# How far a median has to move against its own trailing history before the
+# panel calls it out.
+#
+# 0.25 because the failure that motivated this panel read 37% low and took an
+# hour to find. A threshold at 0.35 would have caught that one and nothing
+# milder; at 0.15 a quiet Friday trips it and the row stops meaning anything.
+# This is a GUESS between the only two numbers there is evidence for, and it
+# is written here rather than buried so it can be moved when there is a second
+# incident to calibrate against.
+HEALTH_MOVE_THRESHOLD = 0.25
+
+# Universe coverage below this is called out. Eight ETFs correctly refused out
+# of 587 is 98.6%, and that should NOT light up -- it is the system working.
+# A killed compute run is what this is for.
+HEALTH_COVERAGE_FLOOR = 0.97
+
+
+@router.get("/health")
+async def health(
+    sessions: int = Query(10, ge=2, le=60),
+    trailing: int = Query(10, ge=2, le=60),
+    pool=Depends(get_scalp_pool),
+):
+    """Is the data any good, per session, over the last few.
+
+    THE FAILURE THIS EXISTS FOR happened once: a fetch returned only Nasdaq's
+    prints -- no NYSE, ARCA, BATS, EDGX or IEX -- and the only symptom was
+    trades/min reading 37% below trailing. It took an hour to diagnose. Once
+    the nightly job runs unattended it will happen again and nobody will be
+    looking for it, so one red row is the entire point.
+
+    WHAT IT WATCHES, AND WHY NOT AN EXCHANGE COUNT. There is no
+    distinct-exchange-count metric and there should not be: fetch.py already
+    refuses any symbol-day under MIN_EXCHANGE_CODES and does not write it, so a
+    Nasdaq-only pull cannot reach compute at all. A count metric would measure
+    a condition the guard prevents, and its only consumer would be a panel
+    watching for something that can no longer happen. What actually surfaced
+    the problem was a RATE moving against its own history, so that is what this
+    watches -- arrivals per minute, plus the two venue shares that move when
+    the mix changes underneath.
+
+    EACH DATE IS SCORED AGAINST THE SESSIONS BEFORE IT, never including
+    itself. A bad day that contributes to its own baseline is a bad day that
+    partly excuses itself, and with a ten-session window one outlier moves the
+    median it is being compared against.
+
+    COVERAGE IS TWO DIFFERENT QUESTIONS. Symbols present against the universe
+    catches a compute run that died partway; distinct metrics against the
+    trailing mode catches a metric family that stopped being written. They fail
+    independently and neither implies the other.
+
+    FETCH REJECTIONS ARE NOT AVAILABLE. fetch.py counts thin-tape, empty and
+    errored symbol-days and PRINTS them at the end of a run; nothing is
+    written to the database or to a file, so there is no per-date rejection
+    count to read. What this returns instead is the symbols that are in the
+    universe for a date and absent from daily_metrics, which is the union of
+    every reason a symbol-day did not land -- refused at fetch, no data, or a
+    compute run that was killed. It is honest about not being attributable.
+    """
+    if pool is None:
+        return _no_db({"rows": []})
+
+    span = sessions + trailing
+    async with pool.acquire() as conn:
+        dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT $1", span)]
+        if not dates:
+            return {"connected": True, "rows": [],
+                    "note": "daily_metrics is empty — the pipeline has not "
+                            "written a session yet."}
+        dates = sorted(dates)
+
+        present = {r["metric"] for r in await conn.fetch(
+            "SELECT DISTINCT metric FROM daily_metrics WHERE trade_date = $1",
+            dates[-1])}
+        got = scalp_columns.resolve_all(present, None, None, None,
+                                        list(scalp_columns.HEALTH_KEYS))
+        watched = got["columns"]                  # role key -> metric name
+        names = list(watched.values())
+
+        med_rows = await conn.fetch(
+            "SELECT trade_date, metric, "
+            " percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS med, "
+            " count(value) AS n "
+            "FROM daily_metrics "
+            "WHERE trade_date = ANY($1) AND metric = ANY($2) "
+            "GROUP BY trade_date, metric",
+            dates, names,
+        ) if names else []
+
+        # Index-only on the PK's leading columns, so counting every symbol on
+        # every date costs a range scan rather than a heap read.
+        cov_rows = await conn.fetch(
+            "SELECT trade_date, count(DISTINCT symbol) AS n_symbols, "
+            " count(DISTINCT metric) AS n_metrics "
+            "FROM daily_metrics WHERE trade_date = ANY($1) GROUP BY trade_date",
+            dates,
+        )
+        uni_rows = await conn.fetch(
+            "SELECT trade_date, count(*) AS n FROM universe "
+            "WHERE trade_date = ANY($1) AND (qualified OR retained) "
+            "GROUP BY trade_date",
+            dates,
+        )
+        # Named, not just counted. "Eight missing" is a number; "eight ETFs"
+        # is the difference between a correct refusal and a broken run.
+        gap_rows = await conn.fetch(
+            "SELECT u.trade_date, u.symbol FROM universe u "
+            "WHERE u.trade_date = ANY($1) AND (u.qualified OR u.retained) "
+            "  AND NOT EXISTS (SELECT 1 FROM daily_metrics m "
+            "                  WHERE m.trade_date = u.trade_date "
+            "                    AND m.symbol = u.symbol) "
+            "ORDER BY u.trade_date, u.symbol",
+            dates,
+        )
+
+    by_date: dict = {str(x): {"date": str(x)} for x in dates}
+    for r in med_rows:
+        by_date[str(r["trade_date"])].setdefault("med", {})[r["metric"]] = r["med"]
+    for r in cov_rows:
+        e = by_date[str(r["trade_date"])]
+        e["n_symbols"] = int(r["n_symbols"] or 0)
+        e["n_metrics"] = int(r["n_metrics"] or 0)
+    for r in uni_rows:
+        by_date[str(r["trade_date"])]["universe_n"] = int(r["n"] or 0)
+    for r in gap_rows:
+        by_date[str(r["trade_date"])].setdefault("gap", []).append(r["symbol"])
+
+    ordered = [by_date[str(x)] for x in dates]
+
+    def _median(xs):
+        xs = sorted(x for x in xs if x is not None)
+        if not xs:
+            return None
+        m = len(xs) // 2
+        return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+    out = []
+    for i, e in enumerate(ordered):
+        # Strictly earlier sessions only. A date in its own baseline partly
+        # excuses itself, and at ten sessions one outlier moves the median it
+        # is measured against.
+        hist = ordered[max(0, i - trailing):i]
+        row = {
+            "date": e["date"],
+            "n_symbols": e.get("n_symbols", 0),
+            "n_metrics": e.get("n_metrics", 0),
+            "universe_n": e.get("universe_n"),
+            "missing_n": len(e.get("gap", [])),
+            "missing_sample": e.get("gap", [])[:12],
+            "metrics": {}, "flags": [],
+        }
+        uni = e.get("universe_n")
+        row["coverage"] = (e.get("n_symbols", 0) / uni) if uni else None
+
+        for key, name in watched.items():
+            today = (e.get("med") or {}).get(name)
+            base = _median([(h.get("med") or {}).get(name) for h in hist])
+            change = None
+            if today is not None and base:
+                change = (today - base) / base
+            row["metrics"][key] = {"metric": name, "value": today,
+                                   "trailing": base, "change": change,
+                                   "n_trailing": len(hist)}
+            if change is not None and abs(change) >= HEALTH_MOVE_THRESHOLD:
+                row["flags"].append(key)
+
+        # A metric family that stopped being written. Independent of symbol
+        # coverage: a full symbol list with a short metric list is a compute
+        # change, not a fetch problem.
+        modal = _median([h.get("n_metrics") for h in hist])
+        if modal and row["n_metrics"] and row["n_metrics"] < modal * 0.95:
+            row["flags"].append("n_metrics")
+        if row["coverage"] is not None and row["coverage"] < HEALTH_COVERAGE_FLOOR:
+            row["flags"].append("coverage")
+        out.append(row)
+
+    return {
+        "connected": True,
+        # Newest first, since the row that matters at 9am is last night's.
+        "rows": list(reversed(out[-sessions:])),
+        "watched": [{"key": k, "metric": m} for k, m in watched.items()],
+        "unresolved": got["missing"],
+        "trailing": trailing,
+        "thresholds": {"move": HEALTH_MOVE_THRESHOLD,
+                       "coverage": HEALTH_COVERAGE_FLOOR},
+        # Stated rather than silently omitted: a panel that shows no rejections
+        # would otherwise read as "there were none".
+        "fetch_rejects": None,
+        "fetch_rejects_note":
+            "fetch.py counts thin-tape, empty and errored symbol-days and "
+            "prints them at the end of a run — nothing is persisted, so there "
+            "is no per-date rejection count to read. The missing-symbol column "
+            "is the union of every reason a symbol-day did not land, including "
+            "a compute run that was killed, and cannot attribute them.",
+    }
+
+
 # ── which filter constrains which column ────────────────────────────────────
 #
 # The pipeline's DEFAULT_FILTERS are named for what they threshold, not for the
