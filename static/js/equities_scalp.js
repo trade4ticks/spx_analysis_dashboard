@@ -84,6 +84,73 @@ document.addEventListener('alpine:init', () => {
     calibTarget: 'dollars_per_min',
     calibFilter: '',
 
+    /* ── sorting, shared by every research table ─────────────────────────
+     *
+     * Only the ranked candidates table sorted, and the tables that most need
+     * it are the ones that do not: rank stability's own banner points at
+     * top-20 retention as the column to read, and there was no way to order
+     * by it.
+     *
+     * One mechanism rather than three, because three would diverge — one
+     * table would keep nulls-last and the others would lose it, and a metric
+     * with no measurement would sort into the position the best one belongs
+     * in.
+     *
+     * DEFAULTS ARE THE PANEL'S OWN CONCLUSION. Rank stability opens on
+     * top-20 held, because its banner says rank_corr is flat and the range
+     * lives in the other column — opening on rank_corr would contradict the
+     * sentence directly above the table. */
+    sorts: {
+      stab:  { key: 'top_retention', desc: true },
+      calib: { key: 'abs_rho',       desc: true },
+      fills: { key: 'trade_date',    desc: true },
+    },
+    corrOrder: 'cluster',
+
+    setSortOn(table, key) {
+      const s = this.sorts[table];
+      if (!s) return;
+      if (s.key === key) s.desc = !s.desc;
+      else { s.key = key; s.desc = true; }
+    },
+
+    sortMark(table, key) {
+      const s = this.sorts[table];
+      if (!s || s.key !== key) return '';
+      return s.desc ? '▾' : '▴';
+    },
+
+    /* `abs_x` sorts by magnitude, and a dotted key reaches into a nested
+     * object — worst_jump.places is the only thing on these tables that is
+     * not a top-level field, and special-casing it would be the start of
+     * three different accessors. */
+    sortVal(row, key) {
+      if (key.startsWith('abs_')) {
+        const v = this.sortVal(row, key.slice(4));
+        return v == null ? null : Math.abs(v);
+      }
+      return key.split('.').reduce((o, k) => (o == null ? null : o[k]), row);
+    },
+
+    sortRows(rows, table) {
+      const s = this.sorts[table];
+      if (!s) return rows;
+      const sign = s.desc ? -1 : 1;
+      return rows.slice().sort((a, b) => {
+        const x = this.sortVal(a, s.key), y = this.sortVal(b, s.key);
+        // NULLS LAST IN BOTH DIRECTIONS. A missing measurement is not a small
+        // value, and letting it float to the top of an ascending sort puts
+        // the names with no data where the best ones belong.
+        if (x == null || y == null) {
+          return (x == null && y == null) ? 0 : (x == null ? 1 : -1);
+        }
+        if (typeof x === 'string' || typeof y === 'string') {
+          return sign * String(x).localeCompare(String(y));
+        }
+        return sign * (x < y ? -1 : x > y ? 1 : 0);
+      });
+    },
+
     // ── 2.1 geometry / 2.6 over time ────────────────────────────────────
     /* Passing names only, BY DEFAULT.
      *
@@ -350,8 +417,13 @@ document.addEventListener('alpine:init', () => {
 
     calibRows() {
       const q = (this.calibFilter || '').toLowerCase();
-      const rows = (this.calib && this.calib.rows) || [];
-      return q ? rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0) : rows;
+      let rows = (this.calib && this.calib.rows) || [];
+      if (q) rows = rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0);
+      return this.sortRows(rows, 'calib');
+    },
+
+    fillsRows() {
+      return this.sortRows((this.fills && this.fills.rows) || [], 'fills');
     },
 
     /* How many sessions before this table means anything.
@@ -393,6 +465,46 @@ document.addEventListener('alpine:init', () => {
     /* One cell of the matrix. |rho| drives opacity and the sign drives the
      * hue, so a block of near-duplicates reads as a solid square rather than
      * as a number to be compared. */
+    /* The matrix is ordered, not sorted.
+     *
+     * Its default leaf ordering comes from hierarchical clustering and is the
+     * reason the blocks are adjacent — sorting the rows alphabetically would
+     * destroy the one thing the picture shows. So this offers an ordering
+     * CHOICE instead, and says what each one costs:
+     *
+     *   cluster     families adjacent; the blocks are readable
+     *   redundancy  most-duplicated first; answers "what can I delete"
+     *   name        alphabetical; find a specific metric, blocks scattered
+     */
+    corrIndices() {
+      const c = this.corr;
+      if (!c || !c.matrix.length) return [];
+      const n = c.metrics.length;
+      const idx = Array.from({ length: n }, (_, i) => i);
+      if (this.corrOrder === 'name') {
+        return idx.sort((a, b) => c.metrics[a].localeCompare(c.metrics[b]));
+      }
+      if (this.corrOrder === 'redundancy') {
+        const mean = idx.map(i => {
+          let s = 0;
+          for (let j = 0; j < n; j++) if (j !== i) s += Math.abs(c.matrix[i][j]);
+          return n > 1 ? s / (n - 1) : 0;
+        });
+        return idx.sort((a, b) => mean[b] - mean[a]);
+      }
+      return idx;
+    },
+
+    /* How duplicated one metric is, for the ordering above and the tooltip. */
+    corrMean(i) {
+      const c = this.corr;
+      if (!c) return 0;
+      const n = c.metrics.length;
+      let s = 0;
+      for (let j = 0; j < n; j++) if (j !== i) s += Math.abs(c.matrix[i][j]);
+      return n > 1 ? s / (n - 1) : 0;
+    },
+
     corrCell(v) {
       const a = Math.min(1, Math.abs(v));
       const c = v >= 0 ? '52,152,219' : '232,67,147';
@@ -474,8 +586,34 @@ document.addEventListener('alpine:init', () => {
 
     stabRows() {
       const q = (this.stabFilter || '').toLowerCase();
+      let rows = (this.stab && this.stab.rows) || [];
+      if (q) rows = rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0);
+      return this.sortRows(rows, 'stab');
+    },
+
+    /* Does one statistic hold its head better than another?
+     *
+     * The comparison the banner makes possible once the table can be ordered
+     * by top-20 retention. Grouped by the STATISTIC suffix, because that is
+     * what calibration said separates and rank correlation was too flat to
+     * confirm or deny — median against rms is the specific question, and a
+     * median of medians is the honest summary at this spread. */
+    stabByStat() {
       const rows = (this.stab && this.stab.rows) || [];
-      return q ? rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0) : rows;
+      const by = {};
+      for (const r of rows) {
+        const v = r.variant;
+        const stat = (v && v.statistic) || null;
+        if (!stat || r.top_retention == null) continue;
+        (by[stat] = by[stat] || []).push(r.top_retention);
+      }
+      const out = Object.keys(by).map(stat => {
+        const v = by[stat].slice().sort((a, b) => a - b);
+        return { stat, n: v.length,
+                 median: v[Math.floor(v.length / 2)],
+                 lo: v[0], hi: v[v.length - 1] };
+      });
+      return out.sort((a, b) => b.median - a.median);
     },
 
     /* Below 0.5 a metric is re-drawing its ranking every morning. That is

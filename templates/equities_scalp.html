@@ -200,6 +200,10 @@
       color:var(--muted); cursor:pointer; white-space:nowrap;
     }
     .sc-sort { color:var(--accent); font-size:9px; }
+    /* Sortable headers look clickable. Only the ranked candidates table did,
+       and the tables that most needed it were the ones that did not. */
+    .sc-sortable { cursor:pointer; user-select:none; }
+    .sc-sortable:hover { color:var(--text); }
 
     /* The chooser. A dense chip grid rather than a list: 232 rows is a
        scroll, 232 chips is a glance. */
@@ -333,6 +337,7 @@
       <a href="#geometry">Spread × noise</a>
       <a href="#correlation">Correlation</a>
       <a href="#stability">Rank stability</a>
+      <a href="#fills">Results</a>
       <a href="#calibration">Calibration</a>
       <a href="#distributions">Distributions</a>
       <a href="#drift">Over time</a>
@@ -605,10 +610,13 @@
             <template x-for="r in chooserRows()" :key="r.metric">
               <label class="sc-chip" :class="{on: r.asRole || r.asExtra}"
                      :title="r.tooltip || 'no definition in metric_docs'">
+                <!-- A ROLE COLUMN CAN BE TURNED OFF TOO. It was disabled
+                     here, which left toggleRole() with no caller and left the
+                     default twelve as the only twelve — the chooser could add
+                     columns and never remove one. -->
                 <input type="checkbox"
                        :checked="!!(r.asRole || r.asExtra)"
-                       :disabled="!!r.asRole"
-                       @change="toggleExtra(r.metric)">
+                       @change="r.asRole ? toggleRole(r.asRole) : toggleExtra(r.metric)">
                 <span x-text="r.metric"></span>
                 <!-- An unlinked chip is a metric the pipeline emits and the
                      documentation does not cover. Visible as a gap rather
@@ -940,17 +948,65 @@
                   of the list is the part that gets traded.
                 </span>
               </div>
+              <!-- ── does one statistic hold its head better than another? ──
+                   The comparison the sortable table makes possible, and the
+                   one that was written off when rank correlation came back
+                   flat. Calibration said the STATISTIC separates and the
+                   variant does not; this asks the same question of a
+                   different quantity, with no trade data involved. -->
+              <div class="sc-chance" x-show="stabByStat().length > 1" x-cloak
+                   style="border-color:rgba(52,152,219,0.35); background:rgba(52,152,219,0.05); margin-bottom:9px">
+                <div class="sc-chance-hd" style="color:var(--accent)">
+                  Top-20 retention by statistic
+                </div>
+                <table class="sc-table" style="width:auto">
+                  <thead><tr>
+                    <th>statistic</th>
+                    <th class="sc-num">median held</th>
+                    <th class="sc-num">range</th>
+                    <th class="sc-num">metrics</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="s in stabByStat()" :key="s.stat">
+                      <tr>
+                        <td><b x-text="s.stat"></b></td>
+                        <td class="sc-num sc-rho" :class="stabClass(s.median)"
+                            x-text="(s.median*100).toFixed(0) + '%'"></td>
+                        <td class="sc-num" style="color:var(--muted)"
+                            x-text="(s.lo*100).toFixed(0) + '–' + (s.hi*100).toFixed(0) + '%'"></td>
+                        <td class="sc-num" x-text="s.n"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="sc-panel-sub" style="margin-top:7px; line-height:1.7; max-width:80ch">
+                  Medians, because the spread within each statistic is wide
+                  enough that a mean would be moved by one metric. A clear
+                  ordering here is a SECOND line of evidence for the
+                  calibration result, arrived at from market data alone —
+                  overlapping ranges are not, however the medians order.
+                </div>
+              </div>
+
               <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
                 <span x-text="stab.note"></span>
               </div>
               <div class="sc-scroll" style="max-height:420px; margin-top:9px">
                 <table class="sc-table">
                   <thead><tr>
-                    <th>metric</th>
-                    <th class="sc-num" title="Average Spearman between consecutive sessions' rankings across the whole universe.">rank corr</th>
-                    <th class="sc-num" title="Share of each session's top 20 still in the top 20 the next day. The only part of the ordering anyone trades.">top-20 held</th>
-                    <th class="sc-num">pairs</th>
-                    <th>largest single-name move</th>
+                    <th class="sc-sortable" @click="setSortOn('stab','metric')">
+                      metric <span class="sc-sort" x-text="sortMark('stab','metric')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('stab','rank_corr')"
+                        title="Average Spearman between consecutive sessions' rankings across the whole universe.">
+                      rank corr <span class="sc-sort" x-text="sortMark('stab','rank_corr')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('stab','top_retention')"
+                        title="Share of each session's top 20 still in the top 20 the next day. The only part of the ordering anyone trades — and the default sort, because the banner above says the range lives here.">
+                      top-20 held <span class="sc-sort" x-text="sortMark('stab','top_retention')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('stab','pairs')">
+                      pairs <span class="sc-sort" x-text="sortMark('stab','pairs')"></span></th>
+                    <th class="sc-sortable" @click="setSortOn('stab','abs_worst_jump.places')">
+                      largest single-name move
+                      <span class="sc-sort" x-text="sortMark('stab','abs_worst_jump.places')"></span></th>
                   </tr></thead>
                   <tbody>
                     <template x-for="r in stabRows()" :key="r.metric">
@@ -982,6 +1038,16 @@
           <span class="sc-panel-sub"
                 x-text="corr ? (corr.metrics.length + ' metrics across ' + corr.n_symbols + ' symbols on ' + corr.date) : 'no trade data needed'"></span>
           <span class="sc-spacer"></span>
+          <!-- ORDERING, not sorting. The default leaf order comes from
+               hierarchical clustering and is why the blocks are adjacent;
+               sorting the rows alphabetically would destroy the one thing the
+               picture shows. So the choice is explicit and each option says
+               what it costs. -->
+          <select class="sc-sel" x-model="corrOrder" style="max-width:150px">
+            <option value="cluster">order: clustered</option>
+            <option value="redundancy">order: most duplicated</option>
+            <option value="name">order: by name</option>
+          </select>
           <select class="sc-sel" x-model="corrFamily" @change="loadCorrelation()">
             <option value="">all metrics</option>
             <option value="noise_bps">noise only</option>
@@ -1042,12 +1108,15 @@
               <div class="sc-corrwrap">
                 <table class="sc-corr">
                   <tbody>
-                    <template x-for="(row, i) in corr.matrix" :key="i">
+                    <template x-for="i in corrIndices()" :key="i">
                       <tr>
-                        <th :title="corr.metrics[i]" x-text="corr.metrics[i]"></th>
-                        <template x-for="(v, j) in row" :key="j">
-                          <td :style="corrCell(v)"
-                              :title="corr.metrics[i] + ' × ' + corr.metrics[j] + ' = ' + v.toFixed(3)"></td>
+                        <th :title="corr.metrics[i] + ' — mean |ρ| to the rest: '
+                                    + corrMean(i).toFixed(2)"
+                            x-text="corr.metrics[i]"></th>
+                        <template x-for="j in corrIndices()" :key="j">
+                          <td :style="corrCell(corr.matrix[i][j])"
+                              :title="corr.metrics[i] + ' × ' + corr.metrics[j]
+                                      + ' = ' + corr.matrix[i][j].toFixed(3)"></td>
                         </template>
                       </tr>
                     </template>
@@ -1065,6 +1134,120 @@
         </div>
       </div>
 
+      <!-- ── fills upload ─────────────────────────────────────────────
+           In the RESEARCH half rather than the Use half: uploading a
+           statement is a weekend act, and nothing above it depends on
+           having done so. -->
+      <div class="sc-panel" id="fills">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Realised results</span>
+          <span class="sc-panel-sub"
+                x-text="fills ? (fills.totals.trips + ' round trips · '
+                        + fills.totals.symbols + ' tickers · '
+                        + fills.totals.sessions + ' sessions') : 'nothing uploaded yet'"></span>
+          <span class="sc-spacer"></span>
+          <span class="sc-panel-sub" x-show="fills && fills.totals.trips" x-cloak
+                :class="{}"
+                x-text="(fills.totals.net_pnl >= 0 ? '+$' : '-$')
+                        + Math.abs(fills.totals.net_pnl).toFixed(2) + ' net'"></span>
+          <label class="sc-btn on" style="cursor:pointer">
+            <span x-text="uploading ? 'parsing…' : 'upload statement'"></span>
+            <input type="file" accept=".csv,.xlsx,.xlsm" style="display:none"
+                   @change="uploadFills($event)" :disabled="uploading">
+          </label>
+        </div>
+
+        <div class="sc-panel-body">
+          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+            A Schwab account statement, CSV or XLSX. Rows are filtered to
+            <code>TRD</code> and parsed into <b>round trips</b> — a position
+            going flat to non-flat to flat, however many prints that takes.
+            Re-uploading a session <b>replaces</b> it rather than adding to it,
+            so a corrected statement is authoritative. The raw file is kept so
+            a parser fix can be re-run without exporting again.
+          </div>
+
+          <div class="sc-warn bad" x-show="uploadError" x-cloak
+               style="margin-top:9px; border-radius:4px">
+            <b>Could not parse.</b> <span x-text="uploadError"></span>
+          </div>
+
+          <template x-if="uploadResult">
+            <div style="margin-top:10px">
+              <div class="sc-rejects">
+                <span class="sc-reject zero">round trips
+                  <b style="color:var(--accent)" x-text="uploadResult.report.trips"></b></span>
+                <span class="sc-reject zero">sessions
+                  <b style="color:var(--accent)" x-text="uploadResult.replaced_dates.length"></b></span>
+                <span class="sc-reject zero">rows read
+                  <b style="color:var(--accent)" x-text="uploadResult.report.rows_trade"></b></span>
+                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unclosed}">unclosed
+                  <b x-text="uploadResult.report.n_unclosed"></b></span>
+                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unparsed}">unreadable
+                  <b x-text="uploadResult.report.n_unparsed"></b></span>
+              </div>
+              <!-- Surfaced at upload time, not buried in a log. An unclosed
+                   position corrupted a session's statistics once and was not
+                   found for hours. -->
+              <template x-for="issue in uploadIssues()" :key="issue.text">
+                <div class="sc-warn" :class="{bad: issue.level === 'bad'}"
+                     style="margin-top:6px; border-radius:4px"
+                     x-text="issue.text"></div>
+              </template>
+              <div class="sc-panel-sub" style="margin-top:6px"
+                   x-show="uploadResult.archived" x-cloak
+                   x-text="'archived: ' + uploadResult.archived"></div>
+            </div>
+          </template>
+
+          <div class="sc-scroll" style="max-height:260px; margin-top:10px"
+               x-show="fills && fills.rows.length" x-cloak>
+            <table class="sc-table">
+              <thead><tr>
+                <th class="sc-sortable" @click="setSortOn('fills','trade_date')">
+                  session <span class="sc-sort" x-text="sortMark('fills','trade_date')"></span></th>
+                <th class="sc-sortable" @click="setSortOn('fills','symbol')">
+                  ticker <span class="sc-sort" x-text="sortMark('fills','symbol')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','trips')">
+                  trips <span class="sc-sort" x-text="sortMark('fills','trips')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','net_pnl')">
+                  net P&amp;L <span class="sc-sort" x-text="sortMark('fills','net_pnl')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','win_rate')">
+                  win <span class="sc-sort" x-text="sortMark('fills','win_rate')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','attention_minutes')"
+                    title="Wall clock from the first entry to the last exit — what the session was actually rationed by, not the sum of hold durations.">
+                  minutes <span class="sc-sort" x-text="sortMark('fills','attention_minutes')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','dollars_per_min')">
+                  $/min <span class="sc-sort" x-text="sortMark('fills','dollars_per_min')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','trips_per_min')">
+                  trips/min <span class="sc-sort" x-text="sortMark('fills','trips_per_min')"></span></th>
+                <th class="sc-num sc-sortable" @click="setSortOn('fills','median_hold_s')">
+                  median hold <span class="sc-sort" x-text="sortMark('fills','median_hold_s')"></span></th>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in fillsRows()"
+                          :key="r.trade_date + r.symbol">
+                  <tr>
+                    <td x-text="r.trade_date"></td>
+                    <td><b x-text="r.symbol"></b></td>
+                    <td class="sc-num" x-text="r.trips"></td>
+                    <td class="sc-num" :class="{bad: r.net_pnl < 0}"
+                        x-text="(r.net_pnl >= 0 ? '+' : '') + r.net_pnl.toFixed(2)"></td>
+                    <td class="sc-num" x-text="r.win_rate != null ? (r.win_rate*100).toFixed(0)+'%' : '—'"></td>
+                    <td class="sc-num" x-text="r.attention_minutes != null ? r.attention_minutes.toFixed(0) : '—'"></td>
+                    <td class="sc-num" :class="{bad: r.dollars_per_min < 0}"
+                        x-text="r.dollars_per_min != null ? r.dollars_per_min.toFixed(2) : '—'"></td>
+                    <td class="sc-num" x-text="r.trips_per_min != null ? r.trips_per_min.toFixed(2) : '—'"></td>
+                    <td class="sc-num" x-text="r.median_hold_s != null ? r.median_hold_s.toFixed(0)+'s' : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 2.4 calibration ─────────────────────────────────── -->
       <div class="sc-panel" id="calibration">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Calibration against realised results</span>
@@ -1194,10 +1377,24 @@
               <div class="sc-scroll" style="max-height:420px; margin-top:10px">
                 <table class="sc-table">
                   <thead><tr>
-                    <th>metric</th><th>section</th>
-                    <th class="sc-num">ρ</th>
-                    <th class="sc-num">n</th>
-                    <th class="sc-num">p</th>
+                    <th class="sc-sortable" @click="setSortOn('calib','metric')">
+                      metric <span class="sc-sort" x-text="sortMark('calib','metric')"></span></th>
+                    <th class="sc-sortable" @click="setSortOn('calib','section')">
+                      section <span class="sc-sort" x-text="sortMark('calib','section')"></span></th>
+                    <!-- Two ways to order by rho, because they answer
+                         different questions: |ρ| ranks by strength whatever
+                         the sign, ρ separates the metrics that help from the
+                         ones that hurt. -->
+                    <th class="sc-num sc-sortable" @click="setSortOn('calib','abs_rho')"
+                        title="Order by strength, ignoring sign.">
+                      |ρ| <span class="sc-sort" x-text="sortMark('calib','abs_rho')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('calib','rho')"
+                        title="Order by signed value — positive at one end, negative at the other.">
+                      ρ <span class="sc-sort" x-text="sortMark('calib','rho')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('calib','n')">
+                      n <span class="sc-sort" x-text="sortMark('calib','n')"></span></th>
+                    <th class="sc-num sc-sortable" @click="setSortOn('calib','p')">
+                      p <span class="sc-sort" x-text="sortMark('calib','p')"></span></th>
                   </tr></thead>
                   <tbody>
                     <template x-for="r in calibRows()" :key="r.metric">
@@ -1207,6 +1404,8 @@
                              rel="noopener" :title="r.tooltip" x-text="r.metric"></a>
                         </td>
                         <td x-text="r.section || '—'"></td>
+                        <td class="sc-num" style="color:var(--muted)"
+                            x-text="Math.abs(r.rho).toFixed(3)"></td>
                         <td class="sc-num sc-rho" :class="rhoClass(r.rho)"
                             x-text="(r.rho >= 0 ? '+' : '') + r.rho.toFixed(3)"></td>
                         <td class="sc-num" x-text="r.n"></td>

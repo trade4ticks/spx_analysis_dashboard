@@ -58,6 +58,10 @@ GATES = [
     # with an empty src — none of them looked at rendered markup.
     _s("check_rendered_assets.py",
        note="every rendered src/href resolves; tags balance"),
+    # The OTHER direction from check_alpine_refs: a handler with no caller is
+    # what a panel deleted from its template leaves behind.
+    _s("check_orphaned_handlers.py",
+       note="no component method is left with nothing calling it"),
     Gate("node --check", [], note="the page JS parses"),   # filled in below
 
     # ── the equity IV page ───────────────────────────────────────────────
