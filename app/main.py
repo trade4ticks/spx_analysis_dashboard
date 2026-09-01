@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.templating import Jinja2Templates
 
-from app.db import init_pool, close_pool
+from app.db import init_pool, close_pool, verify_pools
 
 # Raise multipart upload limit from 1MB to 200MB for backtest file uploads
 try:
@@ -25,6 +25,12 @@ BASE_DIR = Path(__file__).parent.parent  # project root
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_pool()
+    # Refuses to start on a pool that was configured, did not fail, and is
+    # absent -- the signature of an assignment that bound a local instead of
+    # the module-level name. That combination cannot come from the
+    # environment, so it is a code fault and should be loud, not a page
+    # quietly reporting itself unavailable.
+    verify_pools()
     yield
     await close_pool()
 

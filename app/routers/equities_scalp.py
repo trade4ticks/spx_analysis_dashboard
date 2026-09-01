@@ -31,7 +31,7 @@ import re
 
 from fastapi import APIRouter, Depends, Query
 
-from app.db import get_scalp_pool
+from app.db import get_scalp_pool, pool_status
 from app import scalp_config, scalp_metric_docs
 
 router = APIRouter()
@@ -80,17 +80,32 @@ def _catalog_entry(metric: str) -> dict:
 
 
 def _no_db(extra: dict | None = None) -> dict:
-    """The not-connected state, spelled out.
+    """The not-connected state, spelled out — with the startup reason.
 
     Distinguished from "no data for this date" deliberately: one is a missing
     database and the other is a night the pipeline did not run, and they need
     different actions from whoever is reading the page at 9am.
+
+    The REASON is carried through from startup rather than guessed at here. A
+    missing database, wrong credentials and a wiring fault produced identical
+    output once, and telling them apart cost an hour of elimination. The pool
+    layer already knows which one it was; this just stops throwing that away.
     """
+    st = pool_status().get("equities_scalp") or {}
+    if not st.get("configured"):
+        why = ("No DSN is configured. It derives from DATABASE_URL by default; "
+               "set SCALP_DATABASE_URL if the database lives elsewhere.")
+    elif st.get("error"):
+        why = f"Connecting failed at startup — {st['error']}"
+    else:
+        # verify_pools() refuses to start on this, so reaching it means the
+        # guard was bypassed rather than that the state is normal.
+        why = ("Configured, no recorded failure, and no pool. That is a wiring "
+               "fault rather than an environment one.")
     out = {
         "connected": False,
-        "error": f"No connection to the {scalp_config.PG_DB!r} database. The "
-                 f"pipeline creates it on first run; set SCALP_DATABASE_URL if "
-                 f"it lives somewhere other than the dashboard's own server.",
+        "error": f"No connection to the {scalp_config.PG_DB!r} database. {why}",
+        "reason": st or None,
         "dates": [], "latest_date": None, "metrics": [],
     }
     out.update(extra or {})
