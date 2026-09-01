@@ -298,9 +298,18 @@ document.addEventListener('alpine:init', () => {
 
     fmtFilter(k, v) {
       if (v == null) return '—';
-      // Coverage is a share, not a rate; everything else reads better at one
-      // decimal than at the step's own precision.
+      // Coverage is a share, not a rate.
       if (k.indexOf('coverage') >= 0) return (v * 100).toFixed(0) + '%';
+      // Dollar volume runs to eight figures; printing it in full makes the
+      // slider label wider than the slider.
+      if (k.indexOf('dollar_vol') >= 0) {
+        return v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M'
+             : v >= 1e3 ? '$' + (v / 1e3).toFixed(0) + 'k'
+             : '$' + v.toFixed(0);
+      }
+      if (k.indexOf('shares') >= 0 && v >= 1000) {
+        return (v / 1000).toFixed(0) + 'k';
+      }
       const step = this.range(k).step || 0.1;
       return step >= 1 ? String(Math.round(v)) : Number(v).toFixed(1);
     },

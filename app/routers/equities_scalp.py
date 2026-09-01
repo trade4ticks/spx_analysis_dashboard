@@ -1636,6 +1636,10 @@ _FILTER_ROLES = {
     "min_spread_bps":             ("spread_bps", "min"),
     "min_trades_per_min":         ("arrivals", "min"),
     "min_shares_per_min":         ("shares", "min"),
+    # A DERIVED key, not a role. The constraint evaluator resolves both, so a
+    # computed column is screenable on the same terms as a stored one — which
+    # is the point of the derived table existing.
+    "min_dollar_vol_per_min":     ("dollar_vol_per_min", "min"),
     "max_noise_bps":              ("noise", "max"),
     "min_noise_bps":              ("noise", "min"),
     "min_quote_bucket_coverage":  ("coverage", "min"),
@@ -1662,12 +1666,16 @@ _FILTER_ROLES = {
 # Marked separately in the response so the page can label them as the
 # dashboard's opinion rather than the pipeline's.
 DASHBOARD_FILTERS = {
-    "min_spread_bps":     0.0,
-    "min_shares_per_min": 0.0,
+    "min_spread_bps":         0.0,
+    "min_shares_per_min":     0.0,
+    "min_dollar_vol_per_min": 0.0,
 }
 DASHBOARD_FILTER_RANGES = {
-    "min_spread_bps":     (0.0, 40.0, 0.5),
-    "min_shares_per_min": (0.0, 20000.0, 100.0),
+    "min_spread_bps":         (0.0, 40.0, 0.5),
+    "min_shares_per_min":     (0.0, 20000.0, 100.0),
+    # To $10M a minute, in $10k steps. Wide because the universe spans an
+    # $8 name and an $1,100 one and a share count says nothing about which.
+    "min_dollar_vol_per_min": (0.0, 10_000_000.0, 10_000.0),
 }
 
 
@@ -1741,6 +1749,7 @@ async def candidates(
     # Dashboard-owned, not in the pipeline's DEFAULT_FILTERS.
     min_spread_bps:            float = Query(None),
     min_shares_per_min:        float = Query(None),
+    min_dollar_vol_per_min:    float = Query(None),
     pool=Depends(get_scalp_pool),
 ):
     """One row per symbol, with the filters applied at READ time.
@@ -1909,6 +1918,7 @@ async def candidates(
         "min_quote_bucket_coverage": min_quote_bucket_coverage,
         "min_spread_bps": min_spread_bps,
         "min_shares_per_min": min_shares_per_min,
+        "min_dollar_vol_per_min": min_dollar_vol_per_min,
     }
     # The pipeline's value unless the caller moved the slider. Defaults come
     # from the vendored config, so they cannot drift from what the ranking
@@ -2040,18 +2050,35 @@ async def candidates(
     filter_meta = {}
     for fk, (role_key, direction) in _FILTER_ROLES.items():
         role = scalp_columns.BY_KEY.get(role_key)
+        deriv = scalp_columns.BY_DERIVED.get(role_key)
         metric = col_map.get(role_key)
         link = scalp_metric_docs.header_link(metric) if metric else {}
+        if deriv and role_key in derived_map:
+            # A derived column has no single metric to link, so its parts are
+            # named instead — otherwise the "?" would offer no definition at
+            # all for the column the strategy cares most about.
+            metric = " × ".join(deriv.parts)
         filter_meta[fk] = {
             "role": role_key, "direction": direction,
             "metric": metric,
-            "label": role.label if role else role_key,
-            "units": role.units if role else None,
-            "why": role.note if role else "",
-            "definition": link.get("tooltip"),
+            "label": (role.label if role else
+                      deriv.label if deriv else role_key),
+            "units": (role.units if role else
+                      deriv.units if deriv else None),
+            "why": (role.note if role else deriv.note if deriv else ""),
+            # A derived column has no metric_docs entry of its own, so its
+            # definition is assembled from its PARTS' definitions rather than
+            # left empty — the "?" on the column this strategy cares most
+            # about would otherwise be the one with nothing behind it.
+            "definition": (
+                " × ".join(
+                    (scalp_metric_docs.describe(pn) or (None, pn))[1]
+                    for pn in deriv.parts)
+                if deriv else link.get("tooltip")),
             "href": link.get("href"),
+            "parts": list(deriv.parts) if deriv else None,
             "source": "dashboard" if fk in DASHBOARD_FILTERS else "pipeline",
-            "applied": role_key in col_map,
+            "applied": role_key in col_map or role_key in derived_map,
         }
 
     return {
@@ -2189,8 +2216,12 @@ def _filter_block() -> dict:
         # ten cents on a $100 stock and on a $1,000 stock are the same cents
         # and a tenth of the opportunity — the cents floor is a backstop, not
         # the main filter.
-        "keys": ["min_spread_bps", "min_spread_cents", "max_noise_bps",
-                 "min_noise_bps", "min_quote_bucket_coverage",
+        # THE TWO NUMBERS THIS STRATEGY WAS SELECTED ON BY HAND LEAD: spread
+        # as a percentage of price, and dollar volume. Everything after them
+        # is the noise work, which is elaboration on top and belongs after.
+        "keys": ["min_spread_bps", "min_dollar_vol_per_min",
+                 "min_spread_cents", "max_noise_bps", "min_noise_bps",
+                 "min_quote_bucket_coverage",
                  "min_trades_per_min", "min_shares_per_min"],
         "dashboard": sorted(DASHBOARD_FILTERS),
         "ratio_guard": scalp_config.MIN_NOISE_BPS_FOR_RATIO,

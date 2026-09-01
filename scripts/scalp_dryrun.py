@@ -766,6 +766,7 @@ async def _cand(**over):
                 max_noise_bps=None, min_noise_bps=None,
                 min_quote_bucket_coverage=None,
                 min_spread_bps=None, min_shares_per_min=None,
+                min_dollar_vol_per_min=None,
                 filters=None,
                 pool=Pool())
     args.update(over)

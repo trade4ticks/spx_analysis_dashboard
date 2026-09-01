@@ -231,6 +231,20 @@ def check_filter_params() -> int:
     # whether it passes — but it still needs a default, a slider range and a
     # declared query parameter. What it must not be is a column join with no
     # threshold behind it at all.
+    # EVERY FILTER MUST POINT AT SOMETHING THAT EXISTS. A typo in a target
+    # makes the filter permanently inert: it resolves to nothing, is reported
+    # as not-applied, and looks like a column absent from the data rather than
+    # a name that was never right.
+    from app import scalp_columns as cols
+    for fk, (target, direction) in sc._FILTER_ROLES.items():
+        if target not in cols.BY_KEY and target not in cols.BY_DERIVED:
+            bad += 1
+            print(f"\n  filter {fk!r} thresholds {target!r}, which is neither")
+            print("    a role nor a derived column — it can never apply.")
+        if direction not in ("min", "max"):
+            bad += 1
+            print(f"\n  filter {fk!r} has direction {direction!r}")
+
     owned = expected | set(sc.DASHBOARD_FILTERS)
     for extra in sorted(set(sc._FILTER_ROLES) - owned):
         bad += 1
