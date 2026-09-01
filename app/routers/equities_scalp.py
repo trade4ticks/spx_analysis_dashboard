@@ -759,6 +759,20 @@ async def calibration(
             f" count(DISTINCT trade_date) AS sessions "
             f"FROM fills_daily WHERE {target} IS NOT NULL")
 
+        # Every metric with a declared direction, across the WHOLE universe on
+        # the latest session. Used below to ask whether the contradicting ones
+        # are separate findings or one variable wearing several names — a
+        # question the 40-ticker-day fills sample is far too small to answer,
+        # and 587 symbols is not.
+        directed = sorted({c for r in scalp_columns.ROLES
+                           if r.higher_better is not None for c in r.candidates})
+        latest = await conn.fetchval(
+            "SELECT max(trade_date) FROM daily_metrics")
+        uni_rows = await conn.fetch(
+            "SELECT symbol, metric, value FROM daily_metrics "
+            "WHERE trade_date = $1 AND metric = ANY($2) AND value IS NOT NULL",
+            latest, directed) if latest and directed else []
+
     # `target` is interpolated above, which is safe ONLY because it was
     # checked against CALIB_TARGETS first -- a whitelist, not an escape.
     by_metric: dict = {}
@@ -828,6 +842,55 @@ async def calibration(
             })
     contradictions.sort(key=lambda c: -abs(c["rho"]))
 
+    # ── are these separate findings, or one confound? ────────────────────
+    #
+    # FOUR contradictions is a different object from one. Four independently
+    # broken premises would be remarkable; four metrics that co-vary across
+    # the universe pointing the same way is ONE uncontrolled variable, and
+    # reading them as four warnings would be reading them wrong.
+    #
+    # So this measures whether the contradicting metrics are mutually ranked:
+    # the mean |Spearman| among every pair of them, across the full universe
+    # on the latest session. That is a fact about the METRICS and needs no
+    # fills at all, which is why it can be said at n=40 when nothing else can.
+    #
+    # It deliberately does NOT name a cause. What the shared factor IS -- tight
+    # liquid institutionally-traded names is the obvious candidate -- is a
+    # hypothesis the data here cannot settle, and stating it as a finding
+    # would be exactly the overreach the rest of this panel exists to prevent.
+    by_sym: dict = {}
+    for r in uni_rows:
+        by_sym.setdefault(r["metric"], {})[r["symbol"]] = r["value"]
+
+    coherence = None
+    if len(contradictions) >= 2:
+        names = [c["metric"] for c in contradictions if c["metric"] in by_sym]
+        pairs, shared_n = [], 0
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = by_sym[names[i]], by_sym[names[j]]
+                shared = sorted(set(a) & set(b))
+                if len(shared) < 20:
+                    continue
+                rho = _spearman([a[s] for s in shared], [b[s] for s in shared])
+                if rho is not None:
+                    pairs.append({"a": names[i], "b": names[j],
+                                  "rho": rho, "n": len(shared)})
+                    shared_n = max(shared_n, len(shared))
+        if pairs:
+            mean_abs = sum(abs(p["rho"]) for p in pairs) / len(pairs)
+            coherence = {
+                "n_metrics": len(names),
+                "n_pairs": len(pairs),
+                "universe": shared_n,
+                "mean_abs_rho": mean_abs,
+                "pairs": sorted(pairs, key=lambda p: -abs(p["rho"]))[:10],
+                # The threshold is a reading aid, not a test. Above it, the
+                # set behaves like one measurement; below it, they really are
+                # separate and each deserves its own explanation.
+                "coherent": mean_abs >= 0.4,
+            }
+
     n_pairs = max((r["n"] for r in out), default=0)
     n_metrics = len(out)
     # THE NUMBER THAT KEEPS THIS HONEST. How many of these metrics would clear
@@ -853,6 +916,7 @@ async def calibration(
                    "sessions": int(sample["sessions"] or 0)},
         "expected_by_chance": expected,
         "contradictions": contradictions,
+        "contradiction_coherence": coherence,
         "note":
             "Spearman rank correlation across ticker-days. Read the "
             "expected-by-chance column first: with this many metrics and this "

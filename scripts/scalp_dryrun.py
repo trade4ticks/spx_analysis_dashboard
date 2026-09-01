@@ -425,7 +425,15 @@ class Conn:
 
     async def fetchval(self, sql, *args):
         check_sql(sql, args)
-        return 0 if self.empty else 587
+        if self.empty:
+            return None if "max(" in sql else 0
+        # A scalar's TYPE follows its column. Returning a number for
+        # max(trade_date) makes the fake hand a date column an int, which
+        # is a bind error in production and was one here — the bind check
+        # caught it as soon as an endpoint started using it.
+        if "max(trade_date)" in sql:
+            return FAKE_DATES[0]
+        return 587
 
     async def execute(self, sql, *args):
         # DDL carries no placeholders; check_sql's arity test would read

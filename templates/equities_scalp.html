@@ -167,6 +167,11 @@
     .sc-table td { padding:4px 8px; border-bottom:1px solid rgba(255,255,255,0.04); }
     .sc-table tbody tr:hover { background:var(--raised); }
     .sc-num { text-align:right; font-variant-numeric:tabular-nums; }
+    /* A HEADER MUST MATCH ITS COLUMN. `.sc-table th` sets text-align:left and
+       outranks a bare `.sc-num` on specificity, so every numeric header was
+       rendering left over right-aligned figures — the class was present on
+       fourteen of them and doing nothing. One rule fixes all of them. */
+    .sc-table th.sc-num { text-align:right; }
     /* Column headers link to the metric's definition. A metric name is not
        self-explanatory and the definitions already exist. */
     .sc-table th a, .sc-metric-link { color:var(--muted); text-decoration:none; border-bottom:1px dotted var(--border); }
@@ -826,7 +831,10 @@
           <span class="sc-panel-sub"
                 x-text="cand ? (geomPoints().length + ' candidates on ' + cand.date) : ''"></span>
           <span class="sc-spacer"></span>
-          <label class="sc-chk">
+          <label class="sc-chk" title="Unfiltered, the sparse-quote names
+                 collapse toward zero noise and stretch the log axis to 1e-10,
+                 which spends the whole plot on rows the filters already
+                 excluded.">
             <input type="checkbox" x-model="geomOnly" @change="renderGeometry()">
             <span>passing only</span>
           </label>
@@ -841,6 +849,13 @@
           </div>
           <div class="sc-panel-sub" style="margin-top:8px; line-height:1.75; max-width:88ch">
             <span x-text="geomNote()"></span>
+            <span style="display:block; margin-top:5px" x-show="geomOnly" x-cloak>
+              Showing passing names only. Untick to see what the filters
+              excluded — expect the axis to stretch toward 1e-10, because the
+              sparse-quote names whose noise collapses to zero are most of
+              what is being excluded, and they are why that reading is a
+              deliberate question rather than the opening one.
+            </span>
             <span style="display:block; margin-top:5px">
               <b>Log axes on both, so the dashed constant-ratio lines are
               straight.</b> That is the point of the panel: it turns "good"
@@ -877,6 +892,31 @@
 
           <template x-if="stab && stab.rows.length">
             <div>
+              <!-- WHAT THIS PANEL CANNOT DO, said before the table rather
+                   than left to be inferred from a column of 0.97s. -->
+              <div class="sc-warn" x-show="stabSpread() && stabSpread().flat"
+                   x-cloak style="border-radius:4px; margin-bottom:8px">
+                <b>Nothing separates here.</b>
+                Every metric scores between
+                <b x-text="stabSpread().lo.toFixed(3)"></b> and
+                <b x-text="stabSpread().hi.toFixed(3)"></b>. At this universe
+                size day-to-day rank correlation is high for nearly
+                everything, so that band is the <em>null</em> and not a
+                finding — this panel separates metrics only when one is
+                genuinely unstable, and today none is.
+                <span style="display:block; margin-top:4px"
+                      x-show="stabSpread().topBand > stabSpread().band" x-cloak>
+                  Top-20 retention has more spread
+                  (<span x-text="(stabSpread().topLo*100).toFixed(0)"></span>–<span
+                    x-text="(stabSpread().topHi*100).toFixed(0)"></span>%) and is
+                  the column to read, since the head of the list is the part
+                  that gets traded — but it is not a clean split either.
+                </span>
+                <span style="display:block; margin-top:4px; color:var(--muted)">
+                  So this is not a second line of evidence for the calibration
+                  result. That result stands alone.
+                </span>
+              </div>
               <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
                 <span x-text="stab.note"></span>
               </div>
@@ -1032,7 +1072,7 @@
                 <div class="sc-chance-hd">How much of this is chance</div>
                 <table class="sc-table" style="width:auto">
                   <thead><tr>
-                    <th>|ρ| at least</th>
+                    <th class="sc-num">|ρ| at least</th>
                     <th class="sc-num">expected by chance</th>
                     <th class="sc-num">observed</th>
                   </tr></thead>
@@ -1070,7 +1110,44 @@
                    the reason the column is on the page, which is worth
                    seeing before the ranked list rather than at whatever row
                    |ρ| puts it on. -->
-              <template x-for="c in (calib.contradictions || [])" :key="c.metric">
+              <!-- ONE callout when the contradicting metrics are largely the
+                   same measurement, several when they are not. Four separate
+                   warnings would read as four broken premises; the evidence
+                   says one uncontrolled variable. -->
+              <div class="sc-warn bad" x-show="contraGrouped()" x-cloak
+                   style="margin-top:8px; border-radius:4px">
+                <b>These point the same way because they are the same thing</b>
+                <span style="display:block; margin-top:3px"
+                      x-text="contraNote()"></span>
+                <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:5px">
+                  <template x-for="c in (calib.contradictions || [])" :key="c.metric">
+                    <span class="sc-reject" :title="c.note">
+                      <span x-text="c.metric"></span>
+                      <b x-text="(c.rho >= 0 ? '+' : '') + c.rho.toFixed(3)"></b>
+                    </span>
+                  </template>
+                </div>
+                <div style="margin-top:6px; color:var(--muted)">
+                  Strongest pairwise agreement among them:
+                  <template x-for="p in (calib.contradiction_coherence.pairs || []).slice(0,3)"
+                            :key="p.a + p.b">
+                    <span style="display:block">
+                      <span x-text="p.a"></span> ×
+                      <span x-text="p.b"></span> =
+                      <b x-text="(p.rho >= 0 ? '+' : '') + p.rho.toFixed(2)"></b>
+                    </span>
+                  </template>
+                </div>
+                <div style="margin-top:6px; color:var(--muted)">
+                  What the shared variable IS cannot be settled from this data.
+                  Treat it as one thing to control for as sessions accumulate,
+                  not as a set of premises to abandon.
+                </div>
+              </div>
+
+              <!-- Separate callouts only when they are genuinely separate. -->
+              <template x-for="c in (contraGrouped() ? [] : (calib.contradictions || []))"
+                        :key="c.metric">
                 <div class="sc-warn bad" style="margin-top:8px; border-radius:4px">
                   <b x-text="c.metric"></b>
                   at <b x-text="(c.rho >= 0 ? '+' : '') + c.rho.toFixed(3)"></b>

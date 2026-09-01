@@ -85,7 +85,17 @@ document.addEventListener('alpine:init', () => {
     calibFilter: '',
 
     // ── 2.1 geometry / 2.6 over time ────────────────────────────────────
-    geomOnly: false,
+    /* Passing names only, BY DEFAULT.
+     *
+     * Unfiltered, the sparse-quote names crush everything into one corner:
+     * their noise collapses toward zero, the log x-axis stretches down to
+     * 1e-10 to hold them, and the structure the panel exists to show is a
+     * dot. Those names are exactly what the filters exclude, so drawing them
+     * by default spends the whole plot on the rows already ruled out.
+     *
+     * The unfiltered view answers "what did the filters exclude", which is a
+     * deliberate question and not the opening one. */
+    geomOnly: true,
     ser: null,
     serLoading: false,
     serSymbols: '',
@@ -411,6 +421,34 @@ document.addEventListener('alpine:init', () => {
       } catch (e) { this.stab = null; } finally { this.stabLoading = false; }
     },
 
+    /* WHAT A HIGH SCORE HERE DOES NOT MEAN.
+     *
+     * Measured on the real universe, day-to-day rank correlation came back at
+     * 0.95-0.99 for nearly every metric — reference_price 0.999, spreads
+     * 0.97-0.99, every noise family at 0.957, with no separation between
+     * median and rms. That is the NULL for a universe this size and this
+     * stable, not a finding, and reading it as one would turn a panel that
+     * separates nothing into a second line of evidence it cannot provide.
+     *
+     * Computed from the data rather than asserted: if the whole column sits
+     * in a narrow band, the panel says so itself. */
+    stabSpread() {
+      const rows = (this.stab && this.stab.rows) || [];
+      const v = rows.map(r => r.rank_corr).filter(x => x != null);
+      if (v.length < 5) return null;
+      const lo = Math.min(...v), hi = Math.max(...v);
+      const t = rows.map(r => r.top_retention).filter(x => x != null);
+      return {
+        lo, hi, band: hi - lo,
+        // Under 0.1 of spread across every metric there is nothing to pick
+        // between them on this axis.
+        flat: (hi - lo) < 0.1,
+        topLo: t.length ? Math.min(...t) : null,
+        topHi: t.length ? Math.max(...t) : null,
+        topBand: t.length ? Math.max(...t) - Math.min(...t) : null,
+      };
+    },
+
     stabRows() {
       const q = (this.stabFilter || '').toLowerCase();
       const rows = (this.stab && this.stab.rows) || [];
@@ -638,6 +676,47 @@ document.addEventListener('alpine:init', () => {
           },
         });
       });
+    },
+
+    /* One callout or several.
+     *
+     * Four contradictions is a different object from one. Four independently
+     * broken premises would be remarkable; four metrics that co-vary across
+     * the universe and point the same way is ONE uncontrolled variable, and
+     * listing them separately reads as the first when the evidence says the
+     * second. The server measures which it is — mean |rho| among the
+     * contradicting metrics across the whole universe, which needs no fills
+     * and so can be said at a sample size where nothing else can. */
+    contraGrouped() {
+      const c = this.calib;
+      return !!(c && (c.contradictions || []).length >= 2
+                && c.contradiction_coherence
+                && c.contradiction_coherence.coherent);
+    },
+
+    contraNote() {
+      const c = this.calib;
+      if (!c) return '';
+      const co = c.contradiction_coherence;
+      const n = (c.contradictions || []).length;
+      if (!co) {
+        return `${n} metric${n === 1 ? '' : 's'} correlate against the `
+             + `direction the column claims.`;
+      }
+      const pct = (co.mean_abs_rho).toFixed(2);
+      if (co.coherent) {
+        return `${n} metrics correlate against the direction their columns `
+             + `claim — and they correlate with EACH OTHER at a mean |ρ| of `
+             + `${pct} across ${co.universe} symbols. That is the signature of `
+             + `one uncontrolled variable rather than ${n} broken premises: `
+             + `they are largely the same measurement, so they were always `
+             + `going to agree. Which variable is not answerable from this `
+             + `data.`;
+      }
+      return `${n} metrics correlate against the direction their columns claim, `
+           + `and they are only weakly related to each other (mean |ρ| ${pct} `
+           + `across ${co.universe} symbols). So these are ${n} separate `
+           + `things to explain rather than one.`;
     },
 
     rhoClass(rho) {
