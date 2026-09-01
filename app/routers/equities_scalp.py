@@ -862,33 +862,66 @@ async def calibration(
     for r in uni_rows:
         by_sym.setdefault(r["metric"], {})[r["symbol"]] = r["value"]
 
-    coherence = None
+    # NEVER A BARE None. The first version returned None whenever the
+    # computation did not produce a number, and the client only rendered the
+    # coherence figure inside the grouped callout -- so a mean below the
+    # threshold, an empty query and an exception all produced the same thing:
+    # the old ungrouped layout, with the number nowhere on the page. That is
+    # the same failure shape as the empty script tag. The page looked fine and
+    # quietly was not doing the thing.
+    #
+    # So this always returns a STATUS and a REASON, and the client always
+    # renders it.
+    coherence = {"status": "not_applicable",
+                 "reason": "fewer than two metrics contradict their column's "
+                           "declared direction, so there is nothing to group."}
     if len(contradictions) >= 2:
-        names = [c["metric"] for c in contradictions if c["metric"] in by_sym]
-        pairs, shared_n = [], 0
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                a, b = by_sym[names[i]], by_sym[names[j]]
-                shared = sorted(set(a) & set(b))
-                if len(shared) < 20:
-                    continue
-                rho = _spearman([a[s] for s in shared], [b[s] for s in shared])
-                if rho is not None:
-                    pairs.append({"a": names[i], "b": names[j],
-                                  "rho": rho, "n": len(shared)})
-                    shared_n = max(shared_n, len(shared))
-        if pairs:
-            mean_abs = sum(abs(p["rho"]) for p in pairs) / len(pairs)
+        try:
+            names = [c["metric"] for c in contradictions if c["metric"] in by_sym]
+            absent = [c["metric"] for c in contradictions
+                      if c["metric"] not in by_sym]
+            pairs, shared_n = [], 0
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a, b = by_sym[names[i]], by_sym[names[j]]
+                    shared = sorted(set(a) & set(b))
+                    if len(shared) < 20:
+                        continue
+                    rho = _spearman([a[s] for s in shared], [b[s] for s in shared])
+                    if rho is not None:
+                        pairs.append({"a": names[i], "b": names[j],
+                                      "rho": rho, "n": len(shared)})
+                        shared_n = max(shared_n, len(shared))
+            if not pairs:
+                coherence = {
+                    "status": "unavailable",
+                    "reason": (f"none of the {len(contradictions)} contradicting "
+                               f"metrics share 20+ symbols on {latest} — "
+                               f"{len(absent)} were absent from the universe "
+                               f"query entirely. The grouping cannot be "
+                               f"decided, so they are shown separately."),
+                    "absent": absent,
+                }
+            else:
+                mean_abs = sum(abs(p["rho"]) for p in pairs) / len(pairs)
+                coherence = {
+                    # The threshold is a READING AID, not a test. Both sides of
+                    # it report the same number; only the sentence changes.
+                    "status": "coherent" if mean_abs >= 0.4 else "separate",
+                    "n_metrics": len(names),
+                    "n_pairs": len(pairs),
+                    "universe": shared_n,
+                    "mean_abs_rho": mean_abs,
+                    "threshold": 0.4,
+                    "absent": absent,
+                    "pairs": sorted(pairs, key=lambda p: -abs(p["rho"]))[:10],
+                }
+        except Exception as exc:                          # noqa: BLE001
+            # Surfaced, not swallowed. A silent fall-through to the old layout
+            # is indistinguishable from the feature never having shipped.
             coherence = {
-                "n_metrics": len(names),
-                "n_pairs": len(pairs),
-                "universe": shared_n,
-                "mean_abs_rho": mean_abs,
-                "pairs": sorted(pairs, key=lambda p: -abs(p["rho"]))[:10],
-                # The threshold is a reading aid, not a test. Above it, the
-                # set behaves like one measurement; below it, they really are
-                # separate and each deserves its own explanation.
-                "coherent": mean_abs >= 0.4,
+                "status": "error",
+                "reason": f"{type(exc).__name__}: {exc}",
             }
 
     n_pairs = max((r["n"] for r in out), default=0)

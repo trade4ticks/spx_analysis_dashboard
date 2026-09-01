@@ -434,19 +434,42 @@ document.addEventListener('alpine:init', () => {
      * in a narrow band, the panel says so itself. */
     stabSpread() {
       const rows = (this.stab && this.stab.rows) || [];
-      const v = rows.map(r => r.rank_corr).filter(x => x != null);
+      const v = rows.map(r => r.rank_corr).filter(x => x != null)
+                    .sort((a, b) => a - b);
       if (v.length < 5) return null;
-      const lo = Math.min(...v), hi = Math.max(...v);
-      const t = rows.map(r => r.top_retention).filter(x => x != null);
+      const q = p => v[Math.min(v.length - 1, Math.floor(p * v.length))];
+      const t = rows.map(r => r.top_retention).filter(x => x != null)
+                    .sort((a, b) => a - b);
+      const tq = p => t.length ? t[Math.min(t.length - 1, Math.floor(p * t.length))] : null;
       return {
-        lo, hi, band: hi - lo,
-        // Under 0.1 of spread across every metric there is nothing to pick
-        // between them on this axis.
-        flat: (hi - lo) < 0.1,
-        topLo: t.length ? Math.min(...t) : null,
-        topHi: t.length ? Math.max(...t) : null,
-        topBand: t.length ? Math.max(...t) - Math.min(...t) : null,
+        n: v.length,
+        lo: v[0], hi: v[v.length - 1],
+        // MEDIAN AND IQR, not min and max. The first version tested
+        // (max - min) < 0.1 and the banner never appeared: across 232
+        // metrics one outlier is enough to widen the range past any
+        // threshold, so a min/max test asks "is every metric alike"
+        // when the question is "are nearly all of them alike".
+        p25: q(0.25), median: q(0.5), p75: q(0.75),
+        iqr: q(0.75) - q(0.25),
+        // The plainest statement of the same thing, and the one the banner
+        // leads with.
+        shareHigh: v.filter(x => x >= 0.9).length / v.length,
+        topLo: t.length ? t[0] : null,
+        topHi: t.length ? t[t.length - 1] : null,
+        topP25: tq(0.25), topP75: tq(0.75),
+        topIqr: t.length ? tq(0.75) - tq(0.25) : null,
       };
+    },
+
+    /* Whether this panel is separating anything today.
+     *
+     * Nearly all metrics above 0.9 with a narrow interquartile range means
+     * the column is the NULL for a universe this size, not a finding — and
+     * that has to be said whether it is true or not, because a column of
+     * 0.97s left to be inferred from reads as evidence it is not. */
+    stabIsNull() {
+      const s = this.stabSpread();
+      return !!(s && s.shareHigh >= 0.8 && s.iqr < 0.1);
     },
 
     stabRows() {
@@ -687,36 +710,68 @@ document.addEventListener('alpine:init', () => {
      * second. The server measures which it is — mean |rho| among the
      * contradicting metrics across the whole universe, which needs no fills
      * and so can be said at a sample size where nothing else can. */
+    contraCoh() { return (this.calib && this.calib.contradiction_coherence) || null; },
+
+    /* Grouped ONLY when the evidence says so — but the evidence is reported
+     * either way. The first version rendered the coherence figure inside the
+     * grouped callout, so a mean below the threshold hid the very number that
+     * decides the question. Reporting gated behind the conclusion is the same
+     * defect as a guard that reports healthy about the wrong thing. */
     contraGrouped() {
-      const c = this.calib;
-      return !!(c && (c.contradictions || []).length >= 2
-                && c.contradiction_coherence
-                && c.contradiction_coherence.coherent);
+      const c = this.contraCoh();
+      return !!(c && c.status === 'coherent');
+    },
+
+    contraShow() {
+      return !!(this.calib && (this.calib.contradictions || []).length >= 2);
+    },
+
+    contraHeading() {
+      const c = this.contraCoh();
+      if (!c) return 'Metrics correlating against their column\'s direction';
+      if (c.status === 'coherent')
+        return 'These point the same way because they are the same thing';
+      if (c.status === 'separate')
+        return 'These point the same way and are NOT the same thing';
+      if (c.status === 'error')
+        return 'Could not decide whether these are one thing or several';
+      return 'Metrics correlating against their column\'s direction';
     },
 
     contraNote() {
-      const c = this.calib;
-      if (!c) return '';
-      const co = c.contradiction_coherence;
-      const n = (c.contradictions || []).length;
-      if (!co) {
+      const cal = this.calib;
+      if (!cal) return '';
+      const c = this.contraCoh();
+      const n = (cal.contradictions || []).length;
+      if (!c || c.status === 'not_applicable') {
         return `${n} metric${n === 1 ? '' : 's'} correlate against the `
              + `direction the column claims.`;
       }
-      const pct = (co.mean_abs_rho).toFixed(2);
-      if (co.coherent) {
+      if (c.status === 'error') {
+        return `The coherence calculation failed — ${c.reason}. Without it `
+             + `there is no way to tell one uncontrolled variable from `
+             + `${n} broken premises, so they are listed separately below. `
+             + `This is a bug, not a finding.`;
+      }
+      if (c.status === 'unavailable') {
+        return c.reason;
+      }
+      const p = c.mean_abs_rho.toFixed(2);
+      if (c.status === 'coherent') {
         return `${n} metrics correlate against the direction their columns `
              + `claim — and they correlate with EACH OTHER at a mean |ρ| of `
-             + `${pct} across ${co.universe} symbols. That is the signature of `
-             + `one uncontrolled variable rather than ${n} broken premises: `
-             + `they are largely the same measurement, so they were always `
-             + `going to agree. Which variable is not answerable from this `
-             + `data.`;
+             + `${p} across ${c.universe} symbols, above the ${c.threshold} `
+             + `line. That is the signature of one uncontrolled variable `
+             + `rather than ${n} broken premises: they are largely the same `
+             + `measurement, so they were always going to agree. Which `
+             + `variable is not answerable from this data.`;
       }
       return `${n} metrics correlate against the direction their columns claim, `
-           + `and they are only weakly related to each other (mean |ρ| ${pct} `
-           + `across ${co.universe} symbols). So these are ${n} separate `
-           + `things to explain rather than one.`;
+           + `and their mean |ρ| with each other is ${p} across `
+           + `${c.universe} symbols — below the ${c.threshold} line. So on `
+           + `this evidence they are ${n} separate things to explain, not one `
+           + `confound. Watch the number as sessions accumulate: it is a `
+           + `property of the metrics, so it moves only if the universe does.`;
     },
 
     rhoClass(rho) {

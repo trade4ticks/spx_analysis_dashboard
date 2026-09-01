@@ -894,27 +894,50 @@
             <div>
               <!-- WHAT THIS PANEL CANNOT DO, said before the table rather
                    than left to be inferred from a column of 0.97s. -->
-              <div class="sc-warn" x-show="stabSpread() && stabSpread().flat"
-                   x-cloak style="border-radius:4px; margin-bottom:8px">
-                <b>Nothing separates here.</b>
-                Every metric scores between
-                <b x-text="stabSpread().lo.toFixed(3)"></b> and
-                <b x-text="stabSpread().hi.toFixed(3)"></b>. At this universe
-                size day-to-day rank correlation is high for nearly
-                everything, so that band is the <em>null</em> and not a
-                finding — this panel separates metrics only when one is
-                genuinely unstable, and today none is.
-                <span style="display:block; margin-top:4px"
-                      x-show="stabSpread().topBand > stabSpread().band" x-cloak>
-                  Top-20 retention has more spread
-                  (<span x-text="(stabSpread().topLo*100).toFixed(0)"></span>–<span
-                    x-text="(stabSpread().topHi*100).toFixed(0)"></span>%) and is
-                  the column to read, since the head of the list is the part
-                  that gets traded — but it is not a clean split either.
-                </span>
-                <span style="display:block; margin-top:4px; color:var(--muted)">
-                  So this is not a second line of evidence for the calibration
-                  result. That result stands alone.
+              <!-- ALWAYS shown, not only when the panel separates nothing.
+                   A column of 0.97s with no comment reads as a finding; the
+                   summary has to be there whichever way it comes out. -->
+              <div class="sc-warn" :class="{bad: stabIsNull()}"
+                   x-show="stabSpread()" x-cloak
+                   style="border-radius:4px; margin-bottom:8px">
+                <template x-if="stabIsNull()">
+                  <span>
+                    <b>Nothing separates here.</b>
+                    <span x-text="(stabSpread().shareHigh*100).toFixed(0)"></span>%
+                    of <span x-text="stabSpread().n"></span> metrics score above
+                    0.9, and the middle half sits between
+                    <b x-text="stabSpread().p25.toFixed(3)"></b> and
+                    <b x-text="stabSpread().p75.toFixed(3)"></b>
+                    (median <b x-text="stabSpread().median.toFixed(3)"></b>).
+                    At this universe size that band is the <em>null</em> and
+                    not a finding — this panel separates metrics only when one
+                    is genuinely unstable, and today none is. So it is not a
+                    second line of evidence for the calibration result; that
+                    result stands alone.
+                  </span>
+                </template>
+                <template x-if="!stabIsNull()">
+                  <span>
+                    <b>Something separates.</b>
+                    Only <span x-text="(stabSpread().shareHigh*100).toFixed(0)"></span>%
+                    of <span x-text="stabSpread().n"></span> metrics score above
+                    0.9, and the middle half spans
+                    <b x-text="stabSpread().p25.toFixed(3)"></b> to
+                    <b x-text="stabSpread().p75.toFixed(3)"></b>. Metrics near
+                    the bottom of this table are re-drawing their ranking every
+                    morning and cannot be traded off whatever they calibrate to.
+                  </span>
+                </template>
+                <span style="display:block; margin-top:4px; color:var(--muted)"
+                      x-show="stabSpread().topIqr != null" x-cloak>
+                  Top-20 retention spans
+                  <span x-text="(stabSpread().topLo*100).toFixed(0)"></span>–<span
+                    x-text="(stabSpread().topHi*100).toFixed(0)"></span>%
+                  (middle half
+                  <span x-text="(stabSpread().topP25*100).toFixed(0)"></span>–<span
+                    x-text="(stabSpread().topP75*100).toFixed(0)"></span>%).
+                  That is the column to read where this one is flat: the head
+                  of the list is the part that gets traded.
                 </span>
               </div>
               <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
@@ -1114,9 +1137,15 @@
                    same measurement, several when they are not. Four separate
                    warnings would read as four broken premises; the evidence
                    says one uncontrolled variable. -->
-              <div class="sc-warn bad" x-show="contraGrouped()" x-cloak
+              <!-- ONE callout, ALWAYS rendered when two or more metrics
+                   contradict. The heading and the wording change with the
+                   verdict; the coherence NUMBER is shown either way. Putting
+                   it inside the grouped branch meant a mean below the
+                   threshold hid the figure that decides the question — and an
+                   error hid that there had been one. -->
+              <div class="sc-warn bad" x-show="contraShow()" x-cloak
                    style="margin-top:8px; border-radius:4px">
-                <b>These point the same way because they are the same thing</b>
+                <b x-text="contraHeading()"></b>
                 <span style="display:block; margin-top:3px"
                       x-text="contraNote()"></span>
                 <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:5px">
@@ -1127,9 +1156,10 @@
                     </span>
                   </template>
                 </div>
-                <div style="margin-top:6px; color:var(--muted)">
-                  Strongest pairwise agreement among them:
-                  <template x-for="p in (calib.contradiction_coherence.pairs || []).slice(0,3)"
+                <div style="margin-top:6px; color:var(--muted)"
+                     x-show="contraCoh() && contraCoh().pairs" x-cloak>
+                  Pairwise agreement among them, strongest first:
+                  <template x-for="p in ((contraCoh() || {}).pairs || []).slice(0,4)"
                             :key="p.a + p.b">
                     <span style="display:block">
                       <span x-text="p.a"></span> ×
@@ -1138,7 +1168,8 @@
                     </span>
                   </template>
                 </div>
-                <div style="margin-top:6px; color:var(--muted)">
+                <div style="margin-top:6px; color:var(--muted)"
+                     x-show="contraGrouped()" x-cloak>
                   What the shared variable IS cannot be settled from this data.
                   Treat it as one thing to control for as sessions accumulate,
                   not as a set of premises to abandon.
@@ -1146,7 +1177,7 @@
               </div>
 
               <!-- Separate callouts only when they are genuinely separate. -->
-              <template x-for="c in (contraGrouped() ? [] : (calib.contradictions || []))"
+              <template x-for="c in (contraShow() ? [] : (calib.contradictions || []))"
                         :key="c.metric">
                 <div class="sc-warn bad" style="margin-top:8px; border-radius:4px">
                   <b x-text="c.metric"></b>

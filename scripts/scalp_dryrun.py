@@ -319,12 +319,26 @@ class Conn:
             # harness whose data has no signal cannot tell a working estimator
             # from one that returns zero.
             out = []
-            for i, sym in enumerate(FAKE_SYMBOLS):
-                for m in ("ratio_tw_mid_10s_rms", "spread_bps_tw",
-                          "trades_per_min"):
-                    x = {"ratio_tw_mid_10s_rms": float(i),
-                         "spread_bps_tw": float((i * 7) % 5),
-                         "trades_per_min": 3.0}[m]
+            for i, sym in enumerate(_CORR_SYMBOLS):
+                for m in ("ratio_tw_mid_10s_rms", "two_sided_balance",
+                          "trades_per_min", "spread_bps_tw",
+                          "quote_bucket_coverage_5s"):
+                    x = {
+                        # Ranks WITH the target: the metric that works.
+                        "ratio_tw_mid_10s_rms": float(i),
+                        # Two metrics that rank AGAINST the direction their
+                        # roles declare. Both are needed, because one
+                        # contradiction and two are different objects and only
+                        # the second exercises the grouping.
+                        "two_sided_balance": float(-i),
+                        "trades_per_min": float(-i) + (i % 2) * 0.1,
+                        "spread_bps_tw": float(i % 3),
+                        # CONSTANT on purpose: a metric with one value has no
+                        # ordering to correlate, and must come back as None
+                        # rather than 0.0 — a zero sorts among the real
+                        # answers and reads as "no relationship found".
+                        "quote_bucket_coverage_5s": 0.97,
+                    }[m]
                     out.append({"metric": m, "x": x, "y": float(i),
                                 "trade_date": FAKE_DATES[0], "symbol": sym})
             return out
@@ -351,6 +365,16 @@ class Conn:
                     for day, n in MISSING.items() for i in range(n)]
         if "FROM universe" in sql:
             return [{"trade_date": day, "n": UNIVERSE_N} for day in HEALTH_DATES]
+        if "SELECT symbol, metric, value" in sql and "metric = ANY($2)" in sql:
+            # The coherence probe: the contradicting metrics across the whole
+            # universe. Shaped so they rank together, which is the case the
+            # grouped callout exists for.
+            out = []
+            for i, s in enumerate(_CORR_SYMBOLS):
+                for m in args[1]:
+                    out.append({"symbol": s, "metric": m,
+                                "value": float(i) + (0.01 if "trades" in m else 0)})
+            return out
         if "SELECT symbol, metric, value" in sql:
             # For the correlation matrix. Two metrics are deliberately made
             # IDENTICAL up to a scale factor so the redundancy detector has
@@ -814,7 +838,7 @@ async def check_calibration() -> int:
 
     # A metric with one value everywhere has no ordering. None, not zero —
     # zero is a measurement and would sort it among the real answers.
-    flat = [r for r in rows if r["metric"] == "trades_per_min"]
+    flat = [r for r in rows if r["metric"] == "quote_bucket_coverage_5s"]
     if flat:
         print("  a constant metric was given a correlation. It has no ordering "
               "to correlate, and a zero here reads as 'no relationship "
@@ -848,6 +872,59 @@ async def check_calibration() -> int:
         print("  /calibration does not report metrics whose correlation "
               "contradicts the direction their column claims")
         fails += 1
+    if len(j.get("contradictions") or []) < 2:
+        print(f"  the fixture produced {len(j.get('contradictions') or [])} "
+              f"contradictions; two are needed or the grouping path is never "
+              f"exercised")
+        fails += 1
+
+    # ── the coherence figure must ALWAYS be reachable ────────────────────
+    #
+    # THE BUG THIS GUARDS. The first version returned None whenever the mean
+    # fell below the grouping threshold, and the client rendered the figure
+    # only inside the grouped callout -- so a below-threshold result, an empty
+    # query and an exception all produced the same thing: the old ungrouped
+    # layout with the number nowhere on the page. Reporting gated behind the
+    # conclusion it supports.
+    coh = j.get("contradiction_coherence")
+    if coh is None:
+        print("  contradiction_coherence is None. It must always carry a")
+        print("    status — a bare null is indistinguishable from the feature")
+        print("    never having shipped.")
+        fails += 1
+    elif "status" not in coh:
+        print(f"  contradiction_coherence has no status: {sorted(coh)}")
+        fails += 1
+    elif coh["status"] in ("coherent", "separate"):
+        if coh.get("mean_abs_rho") is None:
+            print(f"  status is {coh['status']} with no mean_abs_rho — the "
+                  f"number that decides the question is missing")
+            fails += 1
+        if not coh.get("pairs"):
+            print("  no pairwise agreements returned, so the grouping cannot "
+                  "be checked by eye")
+            fails += 1
+    elif not coh.get("reason"):
+        print(f"  status {coh['status']} carries no reason, so a failure is "
+              f"indistinguishable from a quiet result")
+        fails += 1
+
+    # EVERY status the server can emit must have a rendering path. A status
+    # the client does not know about falls through to whatever the default
+    # branch is, which is how a silent fall-through starts.
+    import re as _re
+    src = (ROOT / "app" / "routers" / "equities_scalp.py").read_text(encoding="utf-8")
+    js = (ROOT / "static" / "js" / "equities_scalp.js").read_text(encoding="utf-8")
+    emitted = set(_re.findall(r'"status":\s*"(\w+)"', src))
+    emitted |= set(_re.findall(r'"(\w+)" if mean_abs >= [\d.]+ else "(\w+)"', src)[0]
+                   if _re.findall(r'"(\w+)" if mean_abs >= [\d.]+ else "(\w+)"', src)
+                   else [])
+    for st in sorted(emitted):
+        if f"'{st}'" not in js and f'"{st}"' not in js:
+            print(f"  the server can emit contradiction status {st!r} and the")
+            print("    page has no branch for it — it would fall through to")
+            print("    the default wording and say the wrong thing")
+            fails += 1
 
     # The target is interpolated into SQL, so the whitelist is load-bearing.
     try:
