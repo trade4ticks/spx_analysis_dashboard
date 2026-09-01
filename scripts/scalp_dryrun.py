@@ -22,6 +22,23 @@ WHAT IT CHECKS, and why each one has a reason to exist:
     top of the ranking.
   * every SQL statement parses, and its placeholders match its arguments. An
     unused $1 cannot have its type inferred and fails to prepare at all.
+  * every bound argument has the PYTHON TYPE its column requires. asyncpg
+    binds by type and does not coerce, unlike psycopg2, so a date passed as a
+    string raises at bind time:
+
+        invalid input for query argument $1: '2026-08-28'
+        ('str' object has no attribute 'toordinal')
+
+    That shipped. The first version of this harness passed while the endpoint
+    500'd on its first real request, because a fake that accepts anything
+    cannot catch a type error -- it checked that the SQL was well formed and
+    never that the arguments could be bound to it.
+
+RUN IT LIVE WHERE THERE IS A DATABASE. `--live` calls the same endpoints
+against the real one and is the only thing that proves a query runs rather
+than merely parses. It SKIPS cleanly where no database is reachable, which is
+every development machine here, so the fake path above is what has to carry
+the type checking.
 """
 from __future__ import annotations
 
@@ -52,6 +69,49 @@ FAKE_METRICS = [
 FAKE_DATES = [datetime.date(2026, 8, 28), datetime.date(2026, 8, 27)]
 
 
+# ── column types, from the pipeline's DDL in scalp/db.py ────────────────────
+#
+# The point of this table is that asyncpg's error names neither the column nor
+# the endpoint, so knowing which parameter was wrong means reading the SQL by
+# eye. Here it is mechanical: the placeholder is matched to the column it is
+# compared against, and the argument's type is checked against what that column
+# accepts.
+DATE_COLUMNS = {"trade_date", "first_entered", "sticky_until"}
+TIMESTAMP_COLUMNS = {"bucket_start"}
+TIMESTAMPTZ_COLUMNS = {"run_ts"}
+TEXT_COLUMNS = {"symbol", "metric", "item", "variant"}
+
+# `column <op> $n`, and the ANY() form a symbol list uses.
+_BIND_RE = re.compile(
+    r"\b([a-z_]+)\s*(?:=|<|>|<=|>=|<>|!=)\s*(?:ANY\s*\()?\$(\d+)")
+
+
+def _type_problem(column: str, value):
+    """None if `value` can bind to `column`, else why not."""
+    if value is None:
+        return None                      # NULL binds to anything
+    if column in DATE_COLUMNS:
+        # datetime is a SUBCLASS of date, so it would pass a naive isinstance
+        # and then silently drop its time component. A DATE column wants a
+        # date.
+        if isinstance(value, datetime.datetime):
+            return ("a datetime, not a date — it binds, and silently discards "
+                    "the time")
+        if not isinstance(value, datetime.date):
+            return f"{type(value).__name__}, but this is a DATE column"
+    elif column in TIMESTAMP_COLUMNS | TIMESTAMPTZ_COLUMNS:
+        if not isinstance(value, datetime.datetime):
+            return f"{type(value).__name__}, but this is a TIMESTAMP column"
+    elif column in TEXT_COLUMNS:
+        if isinstance(value, (list, tuple)):
+            bad = [v for v in value if not isinstance(v, str)]
+            if bad:
+                return f"a list containing {type(bad[0]).__name__}, not str"
+        elif not isinstance(value, str):
+            return f"{type(value).__name__}, but this is a TEXT column"
+    return None
+
+
 def check_sql(sql: str, args: tuple) -> None:
     flat = " ".join(sql.split())
     used = {int(n) for n in re.findall(r"\$(\d+)", flat)}
@@ -63,6 +123,19 @@ def check_sql(sql: str, args: tuple) -> None:
     missing = set(range(1, max(used) + 1)) - used if used else set()
     if missing:
         BAD.append(f"unused placeholders {sorted(missing)} — {flat[:110]}")
+
+    # THE BIND CHECK. Every placeholder compared against a known column has to
+    # carry a value that column will accept.
+    for column, n in _BIND_RE.findall(flat):
+        idx = int(n) - 1
+        if idx >= len(args):
+            continue
+        problem = _type_problem(column, args[idx])
+        if problem:
+            BAD.append(
+                f"${n} binds to {column} as {problem}. asyncpg binds by type "
+                f"and will not coerce — {flat[:90]}")
+
     try:
         import sqlglot
         sqlglot.parse_one(re.sub(r"\$\d+", "'x'", flat), read="postgres")
@@ -70,6 +143,39 @@ def check_sql(sql: str, args: tuple) -> None:
         pass
     except Exception as exc:
         BAD.append(f"unparseable SQL: {exc} — {flat[:110]}")
+
+
+def self_test_binds() -> int:
+    """Prove the bind check fires. It was added because it was absent.
+
+    A harness that passes while the endpoint 500s is worse than no harness,
+    and the only defence is to make the check demonstrate itself.
+    """
+    bad = 0
+    cases = [
+        ("trade_date", "2026-08-28", True,  "a date as a string"),
+        ("trade_date", datetime.date(2026, 8, 28), False, "a real date"),
+        ("trade_date", datetime.datetime(2026, 8, 28, 9), True,
+         "a datetime where a date is wanted"),
+        ("trade_date", None, False, "NULL"),
+        ("symbol", "FDX", False, "a ticker"),
+        ("symbol", 3, True, "a number as a ticker"),
+        ("symbol", ["FDX", "LLY"], False, "a ticker list"),
+        ("bucket_start", "2026-08-28 09:45", True, "a timestamp as a string"),
+        ("bucket_start", datetime.datetime(2026, 8, 28, 9, 45), False,
+         "a real timestamp"),
+        ("value", "anything", False, "an unmapped column, left alone"),
+    ]
+    for column, value, should_flag, what in cases:
+        flagged = _type_problem(column, value) is not None
+        if flagged != should_flag:
+            verb = "was not flagged" if should_flag else "was flagged"
+            print(f"  SELF-TEST: {what} on {column} {verb}")
+            bad += 1
+    if not bad:
+        print("self-test: the bind check rejects a string date and accepts a "
+              "real one")
+    return bad
 
 
 class Conn:
@@ -112,7 +218,7 @@ class Pool:
 
 
 async def run() -> int:
-    fails = 0
+    fails = self_test_binds()
 
     # ── state 1: no pool at all ──────────────────────────────────────────
     j = await sc.meta(date=None, pool=None)
@@ -211,4 +317,90 @@ async def run() -> int:
     return 1 if fails else 0
 
 
+# ── against the real database ────────────────────────────────────────────────
+#
+# The fake above can only check what it knows to check. This calls the same
+# endpoints against the actual database, which is the only thing that proves a
+# query RUNS rather than merely parses -- the difference the string-date bug
+# lived in.
+#
+# It SKIPS rather than fails where no database is reachable. That is every
+# development machine here, and a check that cannot run is not a check that
+# failed; making it fail would only teach everyone to ignore its output. The
+# consequence is that the fake path has to carry the type checking, which is
+# why the bind check above exists at all.
+
+async def run_live() -> int:
+    from app import db
+
+    if db._scalp_dsn() is None:
+        print("SKIP --live: no DSN. It derives from DATABASE_URL; set that or "
+              "SCALP_DATABASE_URL.")
+        return 0
+
+    await db.init_pool()
+    pool = await db.get_scalp_pool()
+    if pool is None:
+        st = db.pool_status().get("equities_scalp", {})
+        print(f"SKIP --live: no pool — {st.get('error') or 'not configured'}")
+        await db.close_pool()
+        return 0
+
+    fails = 0
+    try:
+        j = await sc.meta(date=None, pool=pool)
+        if not j.get("connected"):
+            print(f"  live /meta reports not connected: {j.get('error')}")
+            return 1
+        if not j.get("date"):
+            print("  live /meta resolved no date — daily_metrics is empty.")
+            print("    Not a failure of this code; the pipeline has not run.")
+            return 0
+
+        print(f"  /meta            {j['date']}  {j['symbols']} symbols  "
+              f"{len(j['metrics'])} metrics")
+        print(f"  default variant  {j.get('default_noise')}")
+        print(f"  dates available  {len(j['dates'])}")
+        if j.get("undocumented"):
+            print(f"  undocumented     {len(j['undocumented'])}: "
+                  f"{', '.join(j['undocumented'][:6])}")
+
+        # THE REGRESSION, run for real. A pinned date arrives as a string from
+        # the query layer and has to reach the query as a date. Nothing but a
+        # live bind can prove it.
+        pinned = j["dates"][min(1, len(j["dates"]) - 1)]
+        j2 = await sc.meta(date=pinned, pool=pool)
+        if j2.get("date") != pinned:
+            print(f"  a pinned date did not round-trip: asked {pinned}, got "
+                  f"{j2.get('date')}")
+            fails += 1
+        else:
+            print(f"  pinned date      {pinned} bound and returned")
+
+        # And an unparseable one must be a 400 rather than a 500.
+        try:
+            await sc.meta(date="not-a-date", pool=pool)
+            print("  a malformed date was accepted rather than refused")
+            fails += 1
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 400:
+                print(f"  a malformed date raised {type(exc).__name__} rather "
+                      f"than a 400")
+                fails += 1
+            else:
+                print("  malformed date   refused with 400")
+
+        if (j.get("default_noise") or "").endswith("_median"):
+            print("  the live default noise variant is a MEDIAN — it reads 0.0")
+            print("    on sparse-quote names and sorts them to the top")
+            fails += 1
+    finally:
+        await db.close_pool()
+
+    print(f"\nlive endpoints checked: 1, failures: {fails}")
+    return 1 if fails else 0
+
+
+if "--live" in sys.argv:
+    sys.exit(asyncio.run(run_live()))
 sys.exit(asyncio.run(run()))

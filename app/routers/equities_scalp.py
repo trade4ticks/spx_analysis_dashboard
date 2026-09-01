@@ -27,9 +27,10 @@ ship five long rows to draw one wide one.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import re
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import get_scalp_pool, pool_status
 from app import scalp_config, scalp_metric_docs
@@ -77,6 +78,48 @@ def _catalog_entry(metric: str) -> dict:
         # is most of the flow and flicker set.
         "variant": _parse_variant(metric),
     }
+
+
+# ── dates cross the boundary as strings and must not stay that way ──────────
+#
+# asyncpg binds by TYPE, not by content: a DATE column needs a datetime.date
+# and it will not coerce a string, unlike psycopg2. The error it raises names
+# neither the column nor the endpoint --
+#
+#     invalid input for query argument $1: '2026-08-28'
+#     ('str' object has no attribute 'toordinal')
+#
+# -- and it happens at bind time, so it survives every check that stops at
+# whether the SQL parses.
+#
+# The trap here is specific and will recur through P2-P5: `dates` is stringified
+# for the JSON response, and the natural next line picks the anchor out of that
+# already-stringified list. The value is a string by the time it is bound, and
+# nothing in between looks wrong.
+#
+# So dates are kept as date objects for the whole of their life inside a
+# handler, and stringified once, at the response. Anything that arrives from a
+# query parameter goes through _as_date first.
+
+
+def _as_date(value, field: str = "date"):
+    """A query parameter to a datetime.date, or a 400 that says which field.
+
+    None passes through: an absent date means "the latest", which the caller
+    resolves. A date object passes through unchanged so this is safe to apply
+    twice.
+    """
+    if value is None or isinstance(value, _dt.date) and not isinstance(value, _dt.datetime):
+        return value
+    if isinstance(value, _dt.datetime):
+        return value.date()
+    try:
+        return _dt.date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            400, f"{field}={value!r} is not an ISO date (YYYY-MM-DD). "
+                 f"asyncpg binds a DATE column by type and will not coerce a "
+                 f"string, so this has to be resolved before the query.")
 
 
 def _no_db(extra: dict | None = None) -> dict:
@@ -131,11 +174,17 @@ async def meta(
     if pool is None:
         return _no_db()
 
+    want = _as_date(date)
+
     async with pool.acquire() as conn:
-        dates = [str(r["trade_date"]) for r in await conn.fetch(
+        # DATE OBJECTS, not strings. The stringified list below is for the
+        # response; the anchor is picked out of THIS one, so what gets bound is
+        # never the formatted copy.
+        available = [r["trade_date"] for r in await conn.fetch(
             "SELECT DISTINCT trade_date FROM daily_metrics "
             "ORDER BY trade_date DESC LIMIT 90")]
-        if not dates:
+        dates = [str(x) for x in available]
+        if not available:
             return {
                 "connected": True, "dates": [], "latest_date": None,
                 "metrics": [], "variants": [], "statistics": [], "horizons": [],
@@ -144,7 +193,7 @@ async def meta(
                         "— the pipeline has not written a session yet.",
             }
 
-        d = date if date in dates else dates[0]
+        d = want if want in available else available[0]
 
         rows = await conn.fetch(
             "SELECT metric, count(*) AS n, count(value) AS n_value "
@@ -180,7 +229,8 @@ async def meta(
     return {
         "connected": True,
         "dates": dates,
-        "date": d,
+        # Stringified HERE, at the response, and nowhere earlier.
+        "date": str(d),
         "latest_date": dates[0],
         "symbols": int(symbols or 0),
         "metrics": catalog,
