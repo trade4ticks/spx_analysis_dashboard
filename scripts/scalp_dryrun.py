@@ -62,6 +62,10 @@ FAKE_METRICS = [
     "spread_bps_tw", "spread_cents_tw", "trades_per_min", "trade_size_median",
     "two_sided_balance", "off_exchange_share", "unidentified_exchange_share",
     "shares_per_min",
+    # Not in any default column set, deliberately — the case that matters is a
+    # metric nobody chose in advance still being screenable, which is the
+    # whole principle.
+    "off_mid_bps",
     # The trade-price basis, so the roles that hold it fixed resolve and the
     # comparison column can be exercised rather than merely declared.
     "noise_bps_trade_price_5s_rms", "ratio_trade_price_5s_rms",
@@ -516,13 +520,25 @@ class Conn:
         if "DISTINCT metric" in sql:
             return [{"metric": m} for m in FAKE_METRICS]
         if "GROUP BY m.symbol" in sql:
-            # The pivot. The fake knows which metric each vN column came from,
-            # because the names were bound in order -- so it can answer with
-            # values shaped like that metric rather than a constant, which is
-            # what makes the filter and sort assertions mean anything.
+            # The pivot. Aliases are read OUT OF THE SQL rather than assumed
+            # from the bind list: the statement now also selects derived
+            # columns as `d_<key>` expressions, which are not columns and do
+            # not appear in the metric list. Assuming the shape is what made
+            # the first derived column a KeyError here rather than a finding.
+            aliases = re.findall(r"AS (v\d+|d_\w+)", sql)
             names = [a for a in args[1:-1]]
-            return [_pivot_row(sym, i, names)
-                    for i, sym in enumerate(FAKE_SYMBOLS)]
+            out = []
+            for i, sym in enumerate(FAKE_SYMBOLS):
+                row = _pivot_row(sym, i, names)
+                for a in aliases:
+                    if a.startswith("d_"):
+                        # A product of two of the bound metrics. The exact
+                        # value does not matter; that it is a NUMBER and
+                        # varies by symbol does, or nothing can screen on it.
+                        row[a] = (1000.0 + i * 250.0) * (10.0 + i)
+                    row.setdefault(a, None)
+                out.append(row)
+            return out
         if "trade_date = ANY(" in sql:
             # The sparkline history.
             out = []
@@ -750,6 +766,7 @@ async def _cand(**over):
                 max_noise_bps=None, min_noise_bps=None,
                 min_quote_bucket_coverage=None,
                 min_spread_bps=None, min_shares_per_min=None,
+                filters=None,
                 pool=Pool())
     args.update(over)
     return await sc.candidates(**args)
@@ -1389,6 +1406,76 @@ async def check_candidates() -> int:
         print(f"  ratio_trade resolved to {tr['metric']!r}, which is not the "
               f"trade-price basis — it would move with the variant selector "
               f"instead of holding still beside it")
+        fails += 1
+
+    # ── ANY column is screenable ─────────────────────────────────────────
+    #
+    # The principle: the pipeline stores every symbol whether it passes or
+    # not, so choosing four metrics in advance to be filterable defeats the
+    # reason nothing is dropped. Twice a metric was visible and unfilterable.
+    lo = (c.get("col_ranges") or {}).get("spread_bps", {}).get("min")
+    hi = (c.get("col_ranges") or {}).get("spread_bps", {}).get("max")
+    if lo is None or hi is None:
+        print("  no observed range for a displayed column, so the filter pane "
+              "would have to guess its slider bounds")
+        fails += 1
+    else:
+        mid = (lo + hi) / 2
+        cc = await _cand(filters=f"spread_bps:min:{mid}", spark_sessions=0)
+        if cc["n_pass"] >= c["n_pass"]:
+            print(f"  a custom constraint at the midpoint of the observed "
+                  f"range excluded nothing ({cc['n_pass']} vs {c['n_pass']})")
+            fails += 1
+        if not cc.get("constraints"):
+            print("  /candidates does not report which constraints are active")
+            fails += 1
+
+    # SCREENING ON A COLUMN PULLS IT IN. "Filterable" and "visible" must be
+    # the same set, or the page has two lists that drift.
+    hidden = "off_mid_bps"
+    pulled = await _cand(columns="ratio", filters=f"{hidden}:min:0",
+                         spark_sessions=0)
+    if not any(col["key"] == hidden for col in pulled["columns"]):
+        print(f"  screening on {hidden!r} did not add it to the table — "
+              f"filterable and visible are two different sets")
+        fails += 1
+
+    # A derived column must be computed, screenable and labelled as derived.
+    dv = next((col for col in c["columns"] if col.get("derived")), None)
+    if not dv:
+        print("  no derived column in the response — dollar volume per minute "
+              "is shares/min times price and neither is a product")
+        fails += 1
+    else:
+        vals = [r["values"].get(dv["key"]) for r in c["rows"]]
+        if not any(v is not None for v in vals):
+            print(f"  derived column {dv['key']} is null for every row")
+            fails += 1
+        dd = await _cand(filters=f"{dv['key']}:min:1e12", spark_sessions=0)
+        if dd["n_pass"] != 0:
+            print(f"  an impossible threshold on the derived column still "
+                  f"passed {dd['n_pass']} rows")
+            fails += 1
+
+    # A malformed clause must be refused, not skipped — a silently dropped
+    # screen makes the pass count a number about filters that did not run.
+    for bad_clause in ("spread_bps:between:4", "spread_bps:min:abc", "nonsense"):
+        try:
+            await _cand(filters=bad_clause, spark_sessions=0)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 400:
+                print(f"  {bad_clause!r} raised {type(exc).__name__}, not 400")
+                fails += 1
+        else:
+            print(f"  malformed filter {bad_clause!r} was accepted and "
+                  f"silently ignored")
+            fails += 1
+
+    # A constraint on a column that does not resolve is INERT and reported.
+    inert = await _cand(filters="not_a_metric_at_all:min:1", spark_sessions=0)
+    if not inert.get("inert_filters"):
+        print("  a constraint naming an unresolvable column was neither "
+              "applied nor reported")
         fails += 1
 
     # A moved slider has to reach the response, or the page is showing the

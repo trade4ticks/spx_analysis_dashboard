@@ -243,6 +243,13 @@ document.addEventListener('alpine:init', () => {
     openNote: '',
     // Adds the trade-price ratio and noise beside the midpoint ones.
     showTrade: false,
+    // ── the filter pane: ANY column, not a chosen few ───────────────────
+    paneOpen: false,
+    paneFilter: '',
+    // Custom constraints, as {key, op, value}. The named sliders are a
+    // shortcut into the SAME mechanism on the server, so nothing here has to
+    // know which four somebody picked in advance.
+    custom: [],
 
     async init() {
       try {
@@ -301,6 +308,74 @@ document.addEventListener('alpine:init', () => {
     onFilterChange() { this.loadCandidates(); },
 
     note(key) { this.openNote = (this.openNote === key) ? '' : key; },
+
+    // ── the filter pane ─────────────────────────────────────────────────
+
+    /* Every column the catalog knows, plus the derived ones — not the
+     * sixteen someone chose to display. Screening on any of them pulls it
+     * into the table, so "filterable" and "visible" are one set. */
+    paneRows() {
+      const q = (this.paneFilter || '').toLowerCase();
+      const ranges = (this.cand && this.cand.col_ranges) || {};
+      const shown = new Map(
+        ((this.cand && this.cand.columns) || []).map(c => [c.key, c]));
+      const derived = ((this.cand && this.cand.derived) || [])
+        .map(d => ({ key: d.key, label: d.label, tooltip: d.note,
+                     href: null, derived: true }));
+      const metrics = (this.meta.metrics || [])
+        .map(m => ({ key: m.metric, label: m.metric, tooltip: m.tooltip,
+                     href: m.href, derived: false }));
+      // Derived first, then anything already on screen, then the rest. The
+      // column you are looking at is the one you are most likely to screen on.
+      const all = derived.concat(metrics);
+      const rank = r => (r.derived ? 0 : (shown.has(r.key) ? 1 : 2));
+      return all
+        .filter(r => !q || r.key.toLowerCase().indexOf(q) >= 0)
+        .map(r => Object.assign({}, r, {
+          range: ranges[r.key] || null,
+          onScreen: shown.has(r.key),
+          applied: this.custom.filter(c => c.key === r.key),
+        }))
+        .sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+    },
+
+    addFilter(key, op) {
+      const r = ((this.cand && this.cand.col_ranges) || {})[key];
+      // Seeded at the observed median rather than at zero: a constraint that
+      // excludes nothing looks identical to one that did not apply, and a
+      // slider starting at an end of its range is the same problem.
+      const v = r ? Number(r.p50.toPrecision(4)) : 0;
+      if (this.custom.some(c => c.key === key && c.op === op)) return;
+      this.custom.push({ key, op, value: v });
+      this.loadCandidates();
+    },
+
+    removeFilter(i) { this.custom.splice(i, 1); this.loadCandidates(); },
+    clearFilters() { this.custom = []; this.loadCandidates(); },
+
+    filterChipLabel(c) {
+      const d = ((this.cand && this.cand.derived) || [])
+        .find(x => x.key === c.key);
+      const name = d ? d.label : c.key;
+      return `${name} ${c.op === 'min' ? '≥' : '≤'} ${c.value}`;
+    },
+
+    /* The sliders' own chips, so the quick bar and the pane read as one set
+     * of constraints rather than two mechanisms. */
+    sliderChips() {
+      const t = (this.cand && this.cand.thresholds) || {};
+      const d = (this.meta.filters && this.meta.filters.defaults) || {};
+      return this.filterKeys
+        .filter(k => t[k] != null && t[k] !== d[k])
+        .map(k => ({ key: k, label: this.filterLabel(k),
+                     value: this.fmtFilter(k, t[k]) }));
+    },
+
+    resetSlider(k) {
+      const d = (this.meta.filters && this.meta.filters.defaults) || {};
+      this.filters[k] = d[k];
+      this.loadCandidates();
+    },
 
     /* What a filter thresholds, why, and what the metric means — assembled
      * from the server's filter_meta rather than written on the page.
@@ -1275,11 +1350,15 @@ document.addEventListener('alpine:init', () => {
      * name where the column came from the chooser -- a raw metric has no
      * friendlier name and inventing one would hide which metric it is. */
     colLabel(c) {
+      if (c.derived) return c.label;
       const r = (this.cand && this.cand.roles || []).find(x => x.key === c.key);
       return r ? r.label : c.key;
     },
 
     colMeta(c) {
+      if (c.derived) {
+        return { note: c.note, href: null, metric: c.metric, units: c.units };
+      }
       const r = (this.cand && this.cand.roles || []).find(x => x.key === c.key);
       const m = (this.meta.metrics || []).find(x => x.metric === c.metric);
       return {
@@ -1295,6 +1374,14 @@ document.addEventListener('alpine:init', () => {
      * the number would render both the same way. */
     fmtVal(c, v) {
       if (v == null) return '—';
+      if (c.derived) {
+        if (c.units === 'money') {
+          return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+               : v >= 1e3 ? (v / 1e3).toFixed(0) + 'k'
+               : v.toFixed(0);
+        }
+        return v.toFixed(2);
+      }
       const u = this.colMeta(c).units;
       if (u === 'share') return (v * 100).toFixed(0) + '%';
       if (u === 'price') return v.toFixed(2);

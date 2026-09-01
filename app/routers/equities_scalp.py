@@ -1671,6 +1671,51 @@ DASHBOARD_FILTER_RANGES = {
 }
 
 
+# ── constraints: ANY column, not a chosen few ───────────────────────────────
+#
+# THE PRINCIPLE, and it is the reason nothing is dropped at compute time: the
+# pipeline computes 232 metrics and stores every symbol whether it passes or
+# not. Choosing four of those in advance to be screenable defeats that
+# entirely — twice a metric was visible in the table and unfilterable, and
+# both times the only fix was to hardcode one more.
+#
+# So a constraint is (key, op, value) where `key` is a role, a derived column
+# or ANY metric name in the catalog. Naming a metric in a constraint also
+# PULLS IT INTO the pivot, so screening on something automatically shows it.
+#
+# The named sliders are sugar over this, folded into the same list before
+# anything is evaluated — they are a shortcut into the mechanism, not a
+# parallel implementation.
+_OPS = {"min": lambda x, t: x >= t, "max": lambda x, t: x <= t}
+
+
+def _parse_constraints(raw: str | None) -> list[dict]:
+    """`key:op:value,key:op:value`. A malformed clause is a 400, not a skip.
+
+    Silently dropping one would produce a pass count computed from fewer
+    screens than the page is showing as active, which is the same defect as a
+    filter whose column did not resolve.
+    """
+    out = []
+    for clause in (raw or "").split(","):
+        clause = clause.strip()
+        if not clause:
+            continue
+        bits = clause.split(":")
+        if len(bits) != 3 or bits[1] not in _OPS:
+            raise HTTPException(
+                400, f"bad filter {clause!r} — expected key:min:value or "
+                     f"key:max:value")
+        try:
+            val = float(bits[2])
+        except ValueError:
+            raise HTTPException(400, f"filter {clause!r} has a non-numeric "
+                                     f"threshold")
+        out.append({"key": bits[0], "op": bits[1], "value": val,
+                    "source": "custom"})
+    return out
+
+
 @router.get("/candidates")
 async def candidates(
     date:     str = Query(None),
@@ -1681,6 +1726,8 @@ async def candidates(
     desc:     bool = Query(True),
     limit:    int = Query(600, ge=1, le=5000),
     spark_sessions: int = Query(10, ge=0, le=60),
+    # ANY column, as key:op:value. The named sliders below fold into this.
+    filters:  str = Query(None, description="key:min:value,key:max:value"),
     # The pipeline's five read-time thresholds, declared rather than collected
     # from **kwargs -- FastAPI validates what it can see, and a typo'd query
     # parameter should be a 422 rather than a filter that silently did not run.
@@ -1755,6 +1802,11 @@ async def candidates(
 
         got = scalp_columns.resolve_all(present, v, h, stat, keys)
         col_map = dict(got["columns"])
+
+        # Derived columns, wherever every part is present. A product missing a
+        # factor is not a smaller number, it is not a number.
+        derived_map = {d.key: d for d in scalp_columns.DERIVED
+                       if scalp_columns.derived_available(d, present)}
         # Anything picked from the column chooser rides alongside the roles,
         # keyed by its own name so the two cannot collide.
         for e in extras:
@@ -1767,15 +1819,42 @@ async def candidates(
                     "note": "No requested column resolved against this date."}
 
         # ── the pivot ────────────────────────────────────────────────────
+        #
+        # SCREENING ON A COLUMN PULLS IT IN. A constraint naming a metric that
+        # is not already displayed adds it to the pivot, so "filterable" and
+        # "visible" are the same set rather than two lists that drift.
+        constraints = _parse_constraints(filters)
+        for c in constraints:
+            k = c["key"]
+            if k in col_map or k in derived_map or k in scalp_columns.BY_KEY:
+                continue
+            if k in present:
+                col_map.setdefault(k, k)
+
         order = list(col_map)                       # stable key order
         metrics = [col_map[k] for k in order]
+        # Derived parts ride along in the same bind list; they are selected as
+        # an expression rather than a column, so they do not join `order`.
+        part_idx: dict = {}
         params: list = [d]
         sel = ["m.symbol"]
         for i, name in enumerate(metrics):
             params.append(name)
             sel.append(f"max(m.value) FILTER (WHERE m.metric = ${len(params)}) "
                        f"AS v{i}")
-        params.append(metrics)
+        for dk, dv in derived_map.items():
+            ex = []
+            for pname in dv.parts:
+                params.append(pname)
+                ex.append(f"max(m.value) FILTER (WHERE m.metric = ${len(params)})")
+                part_idx.setdefault(dk, []).append(pname)
+            joiner = " * " if dv.op == "mul" else " / NULLIF("
+            if dv.op == "mul":
+                sel.append(f"({' * '.join(ex)}) AS d_{dk}")
+            else:
+                sel.append(f"({ex[0]} / NULLIF({ex[1]}, 0)) AS d_{dk}")
+        params.append(metrics + [p for dv in derived_map.values()
+                                 for p in dv.parts])
         rows = await conn.fetch(
             f"SELECT {', '.join(sel)} FROM daily_metrics m "
             f"WHERE m.trade_date = $1 AND m.metric = ANY(${len(params)}) "
@@ -1840,37 +1919,57 @@ async def candidates(
         if vv is not None and k in thresholds:
             thresholds[k] = float(vv)
 
-    active, inert = {}, []
+    # ── one evaluation path ──────────────────────────────────────────────
+    #
+    # The named sliders fold into the SAME constraint list as anything typed
+    # into the pane. They are a shortcut, not a parallel implementation — the
+    # previous version evaluated them in their own loop, which is why adding
+    # a screen meant adding a query parameter, a role entry and a branch.
     for fk, (role_key, direction) in _FILTER_ROLES.items():
-        if role_key in col_map:
-            active[fk] = (order.index(role_key), direction, thresholds[fk])
-        else:
-            # A threshold whose column is absent did NOT run. Saying so is the
-            # difference between "12 names pass" and "12 names pass, and one of
-            # your four filters was not applied".
-            inert.append(fk)
+        constraints.append({"key": role_key, "op": direction,
+                            "value": thresholds[fk], "source": "slider",
+                            "slider": fk})
 
-    out, rejected = [], {fk: 0 for fk in active}
+    def _value_of(row_vals, drow, key):
+        if key in row_vals:
+            return row_vals[key]
+        if key in drow:
+            return drow[key]
+        return None
+
+    active, inert = [], []
+    for c in constraints:
+        k = c["key"]
+        resolved = (col_map.get(k) if k in col_map
+                    else (f"{'×'.join(derived_map[k].parts)}"
+                          if k in derived_map else None))
+        if resolved is None:
+            # A constraint whose column is absent DID NOT RUN. Reported, never
+            # skipped: a pass count that hides an inert screen is a number
+            # about filters that did not all apply.
+            inert.append({**c, "reason": (
+                f"no column for {k!r} on this date" if k not in present
+                else f"{k!r} is not a resolvable column here")})
+            continue
+        active.append({**c, "metric": resolved})
+
+    out, rejected = [], {}
     for r in rows:
         vals = {k: r[f"v{i}"] for i, k in enumerate(order)}
+        drow = {dk: r[f"d_{dk}"] for dk in derived_map}
         fails = []
-        for fk, (i, direction, thr) in active.items():
-            x = r[f"v{i}"]
-            if x is None:
-                fails.append(fk)
-            elif direction == "min" and x < thr:
-                fails.append(fk)
-            elif direction == "max" and x > thr:
-                fails.append(fk)
-        for fk in fails:
-            rejected[fk] += 1
+        for c in active:
+            x = _value_of(vals, drow, c["key"])
+            if x is None or not _OPS[c["op"]](x, c["value"]):
+                tag = c.get("slider") or f"{c['key']}:{c['op']}:{c['value']:g}"
+                fails.append(tag)
+        for tag in fails:
+            rejected[tag] = rejected.get(tag, 0) + 1
         t = traded.get(r["symbol"])
-        out.append({"symbol": r["symbol"], "values": vals,
+        out.append({"symbol": r["symbol"],
+                    "values": {**vals, **drow},
                     "passes": not fails, "fails": fails,
                     "spark": spark.get(r["symbol"]),
-                    # None rather than an empty object for a name never
-                    # traded: "no result" and "a result of zero" are different
-                    # readings and the colour ramp has to tell them apart.
                     "traded": ({"days": int(t["days"]),
                                 "trips": int(t["trips"] or 0),
                                 "net_pnl": float(t["net_pnl"] or 0.0),
@@ -1879,7 +1978,27 @@ async def candidates(
                                                 else None)}
                                if t else None)})
 
-    # ── sort ─────────────────────────────────────────────────────────────
+    # Every constraint that ran but rejected nothing still needs a zero, or
+    # the page cannot tell "this screen is loose" from "this screen is absent".
+    for c in active:
+        rejected.setdefault(c.get("slider")
+                            or f"{c['key']}:{c['op']}:{c['value']:g}", 0)
+
+    # ── the observed range of every column on screen ─────────────────────
+    #
+    # So the filter pane can offer a slider over the span the data actually
+    # occupies rather than a guessed one. Computed BEFORE filtering, over all
+    # rows, since a range taken from the survivors would shrink each time a
+    # threshold moved and make the control fight the user.
+    col_ranges = {}
+    for k in list(order) + list(derived_map):
+        v = sorted(x for x in (row["values"].get(k) for row in out)
+                   if x is not None)
+        if v:
+            col_ranges[k] = {"min": v[0], "max": v[-1],
+                             "p50": v[len(v) // 2], "n": len(v)}
+
+    # ── sort ─────────────────────────────────────────────────────────────    # ── sort ─────────────────────────────────────────────────────────────
     #
     # Failing rows sort BELOW passing ones rather than being dropped. They are
     # the only evidence that can say whether a threshold sits in the right
@@ -1942,10 +2061,21 @@ async def candidates(
         "filter_meta": filter_meta,
         "dashboard_filters": sorted(DASHBOARD_FILTERS),
         "variant": {"variant": v, "horizon_s": h, "statistic": stat},
-        "columns": [{"key": k, "metric": col_map[k],
-                     **({"role": True} if k in scalp_columns.BY_KEY
-                        else {"role": False})}
-                    for k in order],
+        # Derived columns join the display list here rather than in `order`,
+        # which is the bind order for the pivot and must stay in step with it.
+        "columns": ([{"key": k, "metric": col_map[k],
+                      "role": k in scalp_columns.BY_KEY,
+                      "derived": False} for k in order]
+                    + [{"key": dk, "metric": " × ".join(dv.parts),
+                        "role": False, "derived": True,
+                        "label": dv.label, "units": dv.units,
+                        "note": dv.note} for dk, dv in derived_map.items()]),
+        "derived": scalp_columns.describe_derived(),
+        # Everything screenable, so the pane lists columns rather than a
+        # curated few. Any of these can be named in `filters`; doing so pulls
+        # it into the table as well.
+        "col_ranges": col_ranges,
+        "constraints": active,
         "roles": scalp_columns.describe_roles(keys),
         "missing": got["missing"],
         "rows": out[:limit],
@@ -1955,6 +2085,7 @@ async def candidates(
         "thresholds": thresholds,
         "rejected": rejected,
         "inert_filters": inert,
+        "filters_applied": len(active),
         "spark_dates": spark_dates,
         "spark_metric": ratio_col,
         "n_traded": sum(1 for r in out if r["traded"]),

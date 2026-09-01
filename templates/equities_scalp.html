@@ -320,6 +320,25 @@
     /* The "?" affordance, and the note it opens. The page is dense and
        quiet by default; every explanation is one click away rather than
        occupying the space between a slider and the result it changes. */
+    /* The filter pane. A row per column, with its observed range, so a
+       threshold is set against the span the data occupies rather than a
+       guess. */
+    .sc-panebody { max-height:300px; overflow-y:auto; padding:4px 11px 9px; }
+    .sc-panerow {
+      display:flex; align-items:center; gap:8px; padding:3px 0;
+      border-bottom:1px solid rgba(255,255,255,0.035); font-size:10.5px;
+    }
+    .sc-panerow.on { background:rgba(52,152,219,0.06); }
+    .sc-panename { flex:0 0 250px; color:var(--muted); white-space:nowrap;
+                   overflow:hidden; text-overflow:ellipsis; }
+    .sc-panerow.on .sc-panename { color:var(--text); }
+    .sc-panerange { flex:0 0 170px; color:var(--border);
+                    font-variant-numeric:tabular-nums; }
+    .sc-panerow .sc-btn { padding:1px 7px; }
+    .sc-paneval { display:inline-flex; align-items:center; gap:3px;
+                  color:var(--accent); }
+    .sc-paneval .sc-inp { padding:1px 4px; }
+
     .sc-help {
       display:inline-block; width:13px; height:13px; line-height:13px;
       text-align:center; border-radius:50%; font-size:9px; cursor:pointer;
@@ -538,6 +557,23 @@
                 @click="note('cand')" title="How to read this table">?</span>
           <span class="sc-panel-sub"
                 x-text="cand ? (cand.n_pass + ' pass of ' + cand.n_total) : ''"></span>
+          <!-- What is applied, without opening anything. Sliders and pane
+               constraints chip identically because they are one mechanism on
+               the server; showing them as two lists would imply otherwise. -->
+          <template x-for="(c, i) in custom" :key="c.key + c.op">
+            <span class="sc-chip on" @click="removeFilter(i)"
+                  title="Remove this filter">
+              <span x-text="filterChipLabel(c)"></span>
+              <span class="sc-chip-x">×</span>
+            </span>
+          </template>
+          <template x-for="s in sliderChips()" :key="'s' + s.key">
+            <span class="sc-chip on" @click="resetSlider(s.key)"
+                  title="Reset to the pipeline default">
+              <span x-text="s.label + ' ' + s.value"></span>
+              <span class="sc-chip-x">×</span>
+            </span>
+          </template>
           <span class="sc-spacer"></span>
 
           <!-- ONE control, five columns. Noise, the ratio over it, the quote
@@ -565,9 +601,66 @@
           <button class="sc-btn" @click="toggleTrade()" :class="{on: showTrade}"
                   title="Add the trade-price noise and ratio beside the midpoint ones">
             vs trades</button>
+          <!-- ANY COLUMN, not a chosen few. The pipeline stores every symbol
+               whether it passes or not; picking four metrics in advance to be
+               screenable is what defeats that. -->
+          <button class="sc-btn" @click="paneOpen = !paneOpen"
+                  :class="{on: paneOpen || custom.length}"
+                  title="Filter on any of the 232 columns">
+            filters<span x-show="custom.length" x-cloak
+                         x-text="' (' + custom.length + ')'"></span></button>
           <button class="sc-btn" @click="chooserOpen = !chooserOpen"
                   :class="{on: chooserOpen}">columns</button>
           <span class="sc-panel-sub" x-show="candLoading" x-cloak>…</span>
+        </div>
+
+        <!-- ── the filter pane ────────────────────────────────────────
+             Every column with a min and a max, defaulting to off. Twice a
+             metric was visible in the table and unfilterable; the fix is not
+             another hardcoded slider, it is that the set of screenable
+             columns and the set of computed columns are the same set. -->
+        <div class="sc-chooser" x-show="paneOpen" x-cloak>
+          <div class="sc-chooser-hd">
+            <input class="sc-inp" type="text" x-model="paneFilter"
+                   placeholder="find a column…">
+            <span class="sc-panel-sub"
+                  x-text="paneRows().length + ' screenable'"></span>
+            <button class="sc-btn" @click="clearFilters()"
+                    x-show="custom.length" x-cloak>clear all</button>
+            <span class="sc-spacer"></span>
+            <span class="sc-panel-sub" style="max-width:46ch; line-height:1.5">
+              Seeded at each column's observed median, so a new constraint
+              starts where it separates rather than at an end of its range.
+            </span>
+          </div>
+          <div class="sc-panebody">
+            <template x-for="r in paneRows()" :key="r.key">
+              <div class="sc-panerow" :class="{on: r.applied.length}">
+                <span class="sc-panename" :title="r.tooltip || r.key">
+                  <span x-text="r.label"></span>
+                  <span class="sc-tag" x-show="r.derived" x-cloak>derived</span>
+                  <span class="sc-tag on" x-show="r.onScreen && !r.derived"
+                        x-cloak>shown</span>
+                </span>
+                <span class="sc-panerange" x-show="r.range" x-cloak
+                      x-text="r.range ? (r.range.min.toPrecision(3) + ' … '
+                              + r.range.max.toPrecision(3)) : ''"></span>
+                <span class="sc-panerange" x-show="!r.range" x-cloak
+                      style="color:var(--border)">not on this date</span>
+                <button class="sc-btn" @click="addFilter(r.key, 'min')"
+                        :disabled="!r.range" title="Minimum">≥</button>
+                <button class="sc-btn" @click="addFilter(r.key, 'max')"
+                        :disabled="!r.range" title="Maximum">≤</button>
+                <template x-for="(c, i) in r.applied" :key="c.op">
+                  <span class="sc-paneval">
+                    <span x-text="c.op === 'min' ? '≥' : '≤'"></span>
+                    <input class="sc-inp" type="number" x-model.number="c.value"
+                           @change="loadCandidates()" style="width:96px">
+                  </span>
+                </template>
+              </div>
+            </template>
+          </div>
         </div>
 
         <!-- ── the column chooser ──────────────────────────────────────
@@ -627,9 +720,9 @@
              x-show="cand && cand.inert_filters && cand.inert_filters.length"
              x-cloak>
           <b>Filters not applied:</b>
-          <span x-text="(cand.inert_filters || []).join(', ')"></span>
-          — the column each one thresholds is absent, so the pass count above
-          is not the count those filters would give.
+          <span x-text="(cand.inert_filters || [])
+                        .map(f => f.key + ' (' + f.reason + ')').join('; ')"></span>
+          — the pass count above is not the count those filters would give.
         </div>
 
         <div class="sc-panel-body" style="padding:0">

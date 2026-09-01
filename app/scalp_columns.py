@@ -212,6 +212,40 @@ ROLES: tuple[Role, ...] = (
 # which is the cause rather than the symptom.
 HEALTH_KEYS = ("arrivals", "off_exchange", "unidentified")
 
+# ── derived columns ─────────────────────────────────────────────────────────
+#
+# The pipeline stores components, not products. Dollar volume per minute is
+# shares_per_min x reference_price and neither the pipeline nor anything
+# downstream had it, despite it being one of the two numbers the strategy was
+# selected on BY HAND before any of this existed. Computed in the pivot, so
+# it costs one multiplication and no recompute.
+#
+# Kept as a declared table rather than a special case in the router: the next
+# derived column should be a two-line entry here, not another branch.
+@dataclass(frozen=True)
+class Derived:
+    key: str
+    label: str
+    units: str
+    parts: tuple[str, ...]      # metric names, in order
+    op: str                     # "mul" | "div"
+    higher_better: bool | None = None
+    note: str = ""
+
+
+DERIVED: tuple[Derived, ...] = (
+    Derived("dollar_vol_per_min", "$ vol/min", "money",
+            parts=("shares_per_min", "reference_price"), op="mul",
+            higher_better=True,
+            note="Shares per minute times the reference price. One of the two "
+                 "numbers this strategy was actually selected on by hand — "
+                 "spread as a percentage of price being the other — before any "
+                 "of the noise work existed. A book that turns over dollars is "
+                 "one a resting order gets filled in; share count alone says "
+                 "nothing about that at $8 or at $1,100."),
+)
+
+BY_DERIVED = {d.key: d for d in DERIVED}
 BY_KEY = {r.key: r for r in ROLES}
 DEFAULT_KEYS = tuple(r.key for r in ROLES if r.default)
 
@@ -221,7 +255,23 @@ def literals() -> list[str]:
     out: list[str] = []
     for r in ROLES:
         out.extend(r.candidates)
+    for d in DERIVED:
+        out.extend(d.parts)
     return out
+
+
+def derived_available(d: Derived, available: set) -> bool:
+    """A derived column needs EVERY part. A product missing a factor is not a
+    smaller number, it is not a number, so it is dropped rather than computed
+    from what happens to be there."""
+    return all(p in available for p in d.parts)
+
+
+def describe_derived() -> list[dict]:
+    return [{"key": d.key, "label": d.label, "units": d.units,
+             "parts": list(d.parts), "op": d.op,
+             "higher_better": d.higher_better, "note": d.note}
+            for d in DERIVED]
 
 
 def template_examples() -> list[str]:
