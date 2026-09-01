@@ -237,6 +237,12 @@ document.addEventListener('alpine:init', () => {
     // excludes, but they are off by default -- at 9am the question is what
     // to trade, not whether the filter is right.
     showFails: false,
+    // Which "?" is open. One at a time and keyed by name, so opening a second
+    // closes the first — a page with four expanded notes is the wall of prose
+    // this replaces.
+    openNote: '',
+    // Adds the trade-price ratio and noise beside the midpoint ones.
+    showTrade: false,
 
     async init() {
       try {
@@ -293,6 +299,33 @@ document.addEventListener('alpine:init', () => {
     },
 
     onFilterChange() { this.loadCandidates(); },
+
+    note(key) { this.openNote = (this.openNote === key) ? '' : key; },
+
+    /* What a filter thresholds, why, and what the metric means — assembled
+     * from the server's filter_meta rather than written on the page.
+     *
+     * The definitions come from metric_docs, which is the pipeline's own, so
+     * a "?" cannot drift from what the number actually is. This replaces four
+     * paragraphs that sat between the sliders and the table. */
+    filterNote(k) {
+      const m = ((this.cand && this.cand.filter_meta) || {})[k];
+      if (!m) return { why: '', definition: '', metric: '', href: null,
+                       source: '', applied: true };
+      return m;
+    },
+
+    filterSourceTag(k) {
+      const m = this.filterNote(k);
+      return m.source === 'dashboard' ? 'dashboard filter' : 'pipeline filter';
+    },
+
+    /* The columns the table asks for: the defaults, minus anything hidden,
+     * plus the trade-price pair when the comparison is on. */
+    toggleTrade() {
+      this.showTrade = !this.showTrade;
+      this.loadCandidates();
+    },
 
     // ── the ranked table ────────────────────────────────────────────────
 
@@ -1146,7 +1179,19 @@ document.addEventListener('alpine:init', () => {
       try {
         const q = new URLSearchParams({ date: this.meta.date });
         if (this.noise) q.set('noise', this.noise);
-        const cols = this.activeRoleKeys();
+        let cols = this.activeRoleKeys();
+        if (this.showTrade) {
+          // Inserted NEXT TO their midpoint counterparts rather than appended,
+          // because the reading is the disagreement between the pair and two
+          // columns eight apart are not compared.
+          const out = [];
+          for (const k of cols) {
+            out.push(k);
+            if (k === 'noise') out.push('noise_trade');
+            if (k === 'ratio') out.push('ratio_trade');
+          }
+          cols = out;
+        }
         if (cols.length) q.set('columns', cols.join(','));
         if (this.extraCols.length) q.set('extra', this.extraCols.join(','));
         if (this.sortKey) q.set('sort', this.sortKey);

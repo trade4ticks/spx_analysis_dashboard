@@ -148,6 +148,47 @@ ROLES: tuple[Role, ...] = (
          note="Printed to a TRF or the ADF rather than to a lit venue — "
               "volume that was never available to a resting limit order."),
 
+    Role("shares", "shares/min", "rate",
+         candidates=("shares_per_min",),
+         higher_better=True,
+         note="Shares per minute after excluded prints. Trades per minute "
+              "counts ARRIVALS and is blind to size — fifty one-lots a minute "
+              "is not fifty 200-share prints, and only the second is a book "
+              "a resting order gets filled against."),
+
+    # ── the trade-price basis, as a first-class alternative ─────────────
+    #
+    # Four of the five noise variants are built on QUOTE MIDPOINTS. On a thin
+    # book the midpoint moves when a resting order is pulled and the next
+    # level becomes the best -- one observed case moved a midpoint 19 cents in
+    # 30 seconds because a 29-share bid vanished, while the stock barely
+    # moved. Midpoint noise there is measuring order flicker, not price.
+    #
+    # `trade_price` is computed from actual fills and is immune to that. It
+    # was one row of fifteen in a table; these roles make it selectable as a
+    # column beside the midpoint reading, so the two can disagree visibly on a
+    # per-name basis. The variant is BAKED INTO THE TEMPLATE rather than taken
+    # from the selector, because the whole point is to hold it fixed while the
+    # other column moves.
+    Role("noise_trade", "noise (trades)", "bps",
+         templates=("noise_bps_trade_price_{h}s_{stat}",
+                    "noise_bps_trade_price_{h}s"),
+         default=False,
+         higher_better=False,
+         note="Noise measured from the last TRADE PRICE in each bucket rather "
+              "than the quote midpoint. Immune to a midpoint that jumps "
+              "because a small resting order was pulled — which on a thin "
+              "book is most of what midpoint noise measures."),
+
+    Role("ratio_trade", "ratio (trades)", "ratio",
+         templates=("ratio_trade_price_{h}s_{stat}", "ratio_trade_price_{h}s"),
+         default=False,
+         higher_better=True,
+         note="Spread over TRADE-PRICE noise. Read beside the midpoint ratio: "
+              "a name where the midpoint ratio is much the worse of the two "
+              "has a flickering book rather than a moving price, and that is "
+              "a different reason to avoid it — or not to."),
+
     # ── health only, off the ranked table by default ────────────────────
     #
     # These three are what the data-health panel watches. There is no

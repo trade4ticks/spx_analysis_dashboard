@@ -52,7 +52,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.routers import equities_scalp as sc            # noqa: E402
-from app import scalp_config                            # noqa: E402
+from app import scalp_columns, scalp_config             # noqa: E402
 
 BAD: list[str] = []
 
@@ -61,6 +61,10 @@ BAD: list[str] = []
 FAKE_METRICS = [
     "spread_bps_tw", "spread_cents_tw", "trades_per_min", "trade_size_median",
     "two_sided_balance", "off_exchange_share", "unidentified_exchange_share",
+    "shares_per_min",
+    # The trade-price basis, so the roles that hold it fixed resolve and the
+    # comparison column can be exercised rather than merely declared.
+    "noise_bps_trade_price_5s_rms", "ratio_trade_price_5s_rms",
     "quote_bucket_coverage_10s",
     # The pinned 5s family, complete. Adding only the noise column made the
     # coverage filter go INERT — the coverage role resolves at the selected
@@ -150,6 +154,8 @@ def _pivot_row(symbol: str, i: int, names: list[str]) -> dict:
             v = {0: 0.62, 1: 0.55, 2: 0.71, 3: 0.09, 4: 0.40}[i]
         elif name.startswith("move_bps"):
             v = 1.0 + i * 0.3
+        elif name == "shares_per_min":
+            v = {0: 9000.0, 1: 4400.0, 2: 12000.0, 3: 300.0, 4: 3600.0}[i]
         elif name == "trades_per_min":
             v = {0: 45.0, 1: 22.0, 2: 60.0, 3: 3.0, 4: 18.0}[i]
         elif name == "trade_size_median":
@@ -343,9 +349,12 @@ class Conn:
                            "trades": 4000 + b}
                     for k in args[0:0] or []:
                         pass
-                    for k in ("spread_cents", "spread_bps", "noise", "ratio",
-                              "coverage", "move_rate", "move_bps", "arrivals",
-                              "trade_size", "balance"):
+                    # EVERY ROLE KEY, derived. A hardcoded list here broke
+                    # the moment a role was added — the endpoint selects the
+                    # roles that resolve, so the fake has to answer for all of
+                    # them or a new column is a KeyError in the harness rather
+                    # than a finding about the code.
+                    for k in scalp_columns.BY_KEY:
                         row[k] = 1.0 + b * 0.2 + (0.5 if mo.month == 7 else 0)
                     out.append(row)
             return out
@@ -357,9 +366,7 @@ class Conn:
             for b in range(26):
                 row = {"t": _dt.time(9 + (30 + b * 15) // 60, (30 + b * 15) % 60),
                        "sessions": 11}
-                for k in ("spread_cents", "spread_bps", "noise", "ratio",
-                          "coverage", "move_rate", "move_bps", "arrivals",
-                          "trade_size", "balance"):
+                for k in scalp_columns.BY_KEY:
                     row[k] = 1.0 + b * 0.3
                 out.append(row)
             return out
@@ -730,6 +737,24 @@ async def run() -> int:
     return 1 if fails else 0
 
 
+async def _cand(**over):
+    """/candidates with every parameter defaulted.
+
+    Called with explicit kwargs at eight sites before this existed, so adding
+    a query parameter meant editing all eight — and missing one surfaced as a
+    FastAPI Query object reaching float() rather than as anything legible.
+    """
+    args = dict(date=None, noise=None, columns=None, extra=None, sort=None,
+                desc=True, limit=600, spark_sessions=10,
+                min_spread_cents=None, min_trades_per_min=None,
+                max_noise_bps=None, min_noise_bps=None,
+                min_quote_bucket_coverage=None,
+                min_spread_bps=None, min_shares_per_min=None,
+                pool=Pool())
+    args.update(over)
+    return await sc.candidates(**args)
+
+
 async def check_ticker_detail() -> int:
     """P3, in BOTH scopes — the monthly one shipped rendering blank cells."""
     fails = 0
@@ -827,11 +852,7 @@ async def check_geometry_and_series() -> int:
     """2.1's traded marker and 2.6's history."""
     fails = 0
 
-    c = await sc.candidates(date=None, noise=None, columns=None, extra=None,
-                            sort=None, desc=True, limit=600, spark_sessions=0,
-                            min_spread_cents=None, min_trades_per_min=None,
-                            max_noise_bps=None, min_noise_bps=None,
-                            min_quote_bucket_coverage=None, pool=Pool())
+    c = await _cand(spark_sessions=0)
     by = {r["symbol"]: r for r in c["rows"]}
 
     # None, not an empty object, for a name never traded. "No result" and "a
@@ -1223,11 +1244,7 @@ async def check_candidates() -> int:
     """The ranked table: resolution, the filter join, and the pass count."""
     fails = 0
 
-    c = await sc.candidates(date=None, noise=None, columns=None, extra=None,
-                            sort=None, desc=True, limit=600, spark_sessions=10,
-                            min_spread_cents=None, min_trades_per_min=None,
-                            max_noise_bps=None, min_noise_bps=None,
-                            min_quote_bucket_coverage=None, pool=Pool())
+    c = await _cand()
 
     if not c.get("rows"):
         print("  /candidates returned no rows against a populated fake")
@@ -1276,12 +1293,7 @@ async def check_candidates() -> int:
     # Nulls last in both directions, or a name with no measurement lands where
     # the best one belongs.
     for descending in (True, False):
-        cc = await sc.candidates(date=None, noise=None, columns=None,
-                                 extra=None, sort="ratio", desc=descending,
-                                 limit=600, spark_sessions=0,
-                                 min_spread_cents=None, min_trades_per_min=None,
-                                 max_noise_bps=None, min_noise_bps=None,
-                                 min_quote_bucket_coverage=None, pool=Pool())
+        cc = await _cand(sort="ratio", desc=descending, spark_sessions=0)
         vals = [r["values"].get("ratio") for r in cc["rows"] if r["passes"]]
         nulls = [i for i, x in enumerate(vals) if x is None]
         reals = [i for i, x in enumerate(vals) if x is not None]
@@ -1290,37 +1302,98 @@ async def check_candidates() -> int:
             fails += 1
 
     # A role that cannot resolve is REPORTED, not dropped in silence.
-    thin = await sc.candidates(date=None, noise=None, columns="ratio,nonsense",
-                               extra=None, sort=None, desc=True, limit=10,
-                               spark_sessions=0,
-                               min_spread_cents=None, min_trades_per_min=None,
-                               max_noise_bps=None, min_noise_bps=None,
-                               min_quote_bucket_coverage=None, pool=Pool())
+    thin = await _cand(columns="ratio,nonsense", limit=10, spark_sessions=0)
     if "missing" not in thin:
         print("  /candidates does not report which roles failed to resolve")
         fails += 1
 
     # An unknown extra column must be ignored rather than becoming a column of
     # nulls -- the exact failure the no-hardcoding rule exists for.
-    ex = await sc.candidates(date=None, noise=None, columns="ratio",
-                             extra="not_a_real_metric", sort=None, desc=True,
-                             limit=10, spark_sessions=0,
-                             min_spread_cents=None, min_trades_per_min=None,
-                             max_noise_bps=None, min_noise_bps=None,
-                             min_quote_bucket_coverage=None, pool=Pool())
+    ex = await _cand(columns="ratio", extra="not_a_real_metric", limit=10, spark_sessions=0)
     if any(col["key"] == "not_a_real_metric" for col in ex["columns"]):
         print("  an extra column that is not in the database became a column")
         print("    of nulls rather than being refused")
         fails += 1
 
+    # ── the ticker column must sort BY TICKER ────────────────────────────
+    #
+    # `symbol` is not a metric column, and the fallback treated it as an
+    # unknown key and sorted by ratio instead — so clicking the ticker header
+    # reordered the rows into an order with no relation to the column clicked.
+    for descending in (False, True):
+        ss = await _cand(sort="symbol", desc=descending, spark_sessions=0)
+        syms = [r["symbol"] for r in ss["rows"] if r["passes"]]
+        want = sorted(syms, reverse=descending)
+        if syms != want:
+            print(f"  sort=symbol desc={descending} gave {syms}, not {want} — "
+                  f"the ticker header sorts by something else")
+            fails += 1
+
+    # ── the dashboard's own filters ──────────────────────────────────────
+    #
+    # Spread in BPS is the primary screen: ten cents on a $100 stock and on a
+    # $1,000 stock are the same cents and a tenth of the opportunity.
+    for fk in ("min_spread_bps", "min_shares_per_min"):
+        if fk not in c.get("thresholds", {}):
+            print(f"  {fk} is not in the returned thresholds, so the page "
+                  f"cannot draw its slider")
+            fails += 1
+        if fk not in (c.get("rejected") or {}):
+            print(f"  {fk} rejected nothing and is not reported — it did not "
+                  f"run, and a pass count that hides that is a number about "
+                  f"filters that did not all apply")
+            fails += 1
+        tight = await _cand(spark_sessions=0, **{fk: 1e9})
+        if tight["n_pass"] != 0:
+            print(f"  an impossible {fk} still passed {tight['n_pass']} rows")
+            fails += 1
+
+    # ── every filter explains itself ─────────────────────────────────────
+    #
+    # The page puts a "?" beside each slider instead of a paragraph above the
+    # table, and it can only do that if the server says what each threshold
+    # thresholds and what the metric means.
+    fm = c.get("filter_meta") or {}
+    for fk in sc._FILTER_ROLES:
+        m = fm.get(fk)
+        if not m:
+            print(f"  no filter_meta for {fk!r} — the slider would have no "
+                  f"definition behind its '?'")
+            fails += 1
+            continue
+        if not m.get("why"):
+            print(f"  filter {fk!r} carries no reason for existing")
+            fails += 1
+        if m.get("applied") and not m.get("definition"):
+            print(f"  filter {fk!r} thresholds {m.get('metric')!r} with no "
+                  f"definition from metric_docs")
+            fails += 1
+        if (m.get("source") == "dashboard") != (fk in sc.DASHBOARD_FILTERS):
+            print(f"  filter {fk!r} is mislabelled as {m.get('source')!r} — "
+                  f"the page would present the dashboard's opinion as the "
+                  f"pipeline's, or the reverse")
+            fails += 1
+
+    # ── trade price as a first-class alternative ─────────────────────────
+    both = await _cand(columns="ratio,ratio_trade,noise,noise_trade",
+                       spark_sessions=0)
+    keys = [col["key"] for col in both["columns"]]
+    for k in ("ratio", "ratio_trade", "noise", "noise_trade"):
+        if k not in keys:
+            print(f"  {k} did not resolve, so the midpoint and trade-price "
+                  f"readings cannot be shown side by side")
+            fails += 1
+    tr = next((col for col in both["columns"] if col["key"] == "ratio_trade"),
+              None)
+    if tr and "trade_price" not in tr["metric"]:
+        print(f"  ratio_trade resolved to {tr['metric']!r}, which is not the "
+              f"trade-price basis — it would move with the variant selector "
+              f"instead of holding still beside it")
+        fails += 1
+
     # A moved slider has to reach the response, or the page is showing the
     # pipeline's threshold while claiming to show the user's.
-    tight = await sc.candidates(date=None, noise=None, columns=None, extra=None,
-                                sort=None, desc=True, limit=600,
-                                spark_sessions=0,
-                                min_spread_cents=999.0, min_trades_per_min=None,
-                                max_noise_bps=None, min_noise_bps=None,
-                                min_quote_bucket_coverage=None, pool=Pool())
+    tight = await _cand(spark_sessions=0, min_spread_cents=999.0)
     if tight["thresholds"]["min_spread_cents"] != 999.0:
         print("  a supplied threshold did not override the pipeline default")
         fails += 1

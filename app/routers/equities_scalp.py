@@ -1633,10 +1633,41 @@ async def compare(
 # skipped, or the pass count is a number about a filter that never ran.
 _FILTER_ROLES = {
     "min_spread_cents":           ("spread_cents", "min"),
+    "min_spread_bps":             ("spread_bps", "min"),
     "min_trades_per_min":         ("arrivals", "min"),
+    "min_shares_per_min":         ("shares", "min"),
     "max_noise_bps":              ("noise", "max"),
     "min_noise_bps":              ("noise", "min"),
     "min_quote_bucket_coverage":  ("coverage", "min"),
+}
+
+# ── filters this PAGE owns, beyond the pipeline's ───────────────────────────
+#
+# The pipeline's DEFAULT_FILTERS are what its own ranking applies. These two
+# are read-time screens the dashboard adds, and adding them here rather than
+# asking upstream is the point of filtering at read time: every symbol is
+# stored regardless, so a new screen costs a WHERE clause and no recompute.
+#
+# WHY SPREAD IN BPS IS THE PRIMARY ONE. Ten cents on a $100 stock and ten
+# cents on a $1,000 stock are the same cents and a tenth of the opportunity.
+# The cents filter stays because there IS an absolute floor below which
+# nothing is capturable whatever the percentage says, but it cannot be the
+# main screen.
+#
+# WHY SHARES/MIN SITS BESIDE TRADES/MIN. Arrivals per minute is blind to
+# size: fifty one-lots is not fifty 200-share prints, and only the second is
+# a book a resting order gets filled against. Added rather than substituted —
+# arrival COUNT still bounds how many chances there are.
+#
+# Marked separately in the response so the page can label them as the
+# dashboard's opinion rather than the pipeline's.
+DASHBOARD_FILTERS = {
+    "min_spread_bps":     0.0,
+    "min_shares_per_min": 0.0,
+}
+DASHBOARD_FILTER_RANGES = {
+    "min_spread_bps":     (0.0, 40.0, 0.5),
+    "min_shares_per_min": (0.0, 20000.0, 100.0),
 }
 
 
@@ -1660,6 +1691,9 @@ async def candidates(
     max_noise_bps:             float = Query(None),
     min_noise_bps:             float = Query(None),
     min_quote_bucket_coverage: float = Query(None),
+    # Dashboard-owned, not in the pipeline's DEFAULT_FILTERS.
+    min_spread_bps:            float = Query(None),
+    min_shares_per_min:        float = Query(None),
     pool=Depends(get_scalp_pool),
 ):
     """One row per symbol, with the filters applied at READ time.
@@ -1794,11 +1828,14 @@ async def candidates(
         "max_noise_bps": max_noise_bps,
         "min_noise_bps": min_noise_bps,
         "min_quote_bucket_coverage": min_quote_bucket_coverage,
+        "min_spread_bps": min_spread_bps,
+        "min_shares_per_min": min_shares_per_min,
     }
     # The pipeline's value unless the caller moved the slider. Defaults come
     # from the vendored config, so they cannot drift from what the ranking
     # upstream used.
     thresholds = {k: float(vv) for k, vv in scalp_config.DEFAULT_FILTERS.items()}
+    thresholds.update({k: float(v) for k, v in DASHBOARD_FILTERS.items()})
     for k, vv in supplied.items():
         if vv is not None and k in thresholds:
             thresholds[k] = float(vv)
@@ -1847,6 +1884,13 @@ async def candidates(
     # Failing rows sort BELOW passing ones rather than being dropped. They are
     # the only evidence that can say whether a threshold sits in the right
     # place, and a filter that hides its own rejects cannot be judged.
+    # SYMBOL IS NOT A METRIC COLUMN, and the fallback treated it as an
+    # unknown key and silently sorted by ratio instead — so clicking the
+    # ticker header reordered the rows into an order with no relation to the
+    # column that was clicked. Handled explicitly rather than by falling
+    # through, because a sort that quietly ignores its key is worse than one
+    # that refuses.
+    by_symbol = (sort == "symbol")
     sort_key = sort if sort in col_map else ("ratio" if "ratio" in col_map
                                              else order[0])
     # Nulls sort last in BOTH directions. A missing measurement is not a small
@@ -1859,13 +1903,44 @@ async def candidates(
         return (0 if row["passes"] else 1, x is None,
                 sign * x if x is not None else 0.0)
 
-    out.sort(key=_sk)
+    if by_symbol:
+        out.sort(key=lambda r: r["symbol"])
+        if desc:
+            out.reverse()
+        # Passing rows stay above failing ones in every ordering, so the top
+        # of the table is always the tradeable set.
+        out.sort(key=lambda r: 0 if r["passes"] else 1)
+    else:
+        out.sort(key=_sk)
 
     n_pass = sum(1 for r in out if r["passes"])
+    # Every filter carries WHAT IT THRESHOLDS and the metric's own
+    # definition, so the page can put a "?" beside each slider instead of a
+    # paragraph above the table. The definition comes from metric_docs, which
+    # is the pipeline's, so it cannot drift from what the number means.
+    filter_meta = {}
+    for fk, (role_key, direction) in _FILTER_ROLES.items():
+        role = scalp_columns.BY_KEY.get(role_key)
+        metric = col_map.get(role_key)
+        link = scalp_metric_docs.header_link(metric) if metric else {}
+        filter_meta[fk] = {
+            "role": role_key, "direction": direction,
+            "metric": metric,
+            "label": role.label if role else role_key,
+            "units": role.units if role else None,
+            "why": role.note if role else "",
+            "definition": link.get("tooltip"),
+            "href": link.get("href"),
+            "source": "dashboard" if fk in DASHBOARD_FILTERS else "pipeline",
+            "applied": role_key in col_map,
+        }
+
     return {
         "connected": True,
         "date": str(d),
         "noise": noise,
+        "filter_meta": filter_meta,
+        "dashboard_filters": sorted(DASHBOARD_FILTERS),
         "variant": {"variant": v, "horizon_s": h, "statistic": stat},
         "columns": [{"key": k, "metric": col_map[k],
                      **({"role": True} if k in scalp_columns.BY_KEY
@@ -1971,11 +2046,22 @@ def _filter_block() -> dict:
     not, and the rows that fail are the only evidence that can say whether a
     threshold is set correctly.
     """
+    defaults = dict(scalp_config.DEFAULT_FILTERS)
+    defaults.update(DASHBOARD_FILTERS)
+    ranges = dict(scalp_config.FILTER_RANGES)
+    ranges.update(DASHBOARD_FILTER_RANGES)
     return {
-        "defaults": dict(scalp_config.DEFAULT_FILTERS),
+        "defaults": defaults,
         "ranges": {k: {"min": lo, "max": hi, "step": st}
-                   for k, (lo, hi, st) in scalp_config.FILTER_RANGES.items()},
-        "keys": list(FILTER_KEYS),
+                   for k, (lo, hi, st) in ranges.items()},
+        # Ordered so the primary screen leads. Spread in BPS first, because
+        # ten cents on a $100 stock and on a $1,000 stock are the same cents
+        # and a tenth of the opportunity — the cents floor is a backstop, not
+        # the main filter.
+        "keys": ["min_spread_bps", "min_spread_cents", "max_noise_bps",
+                 "min_noise_bps", "min_quote_bucket_coverage",
+                 "min_trades_per_min", "min_shares_per_min"],
+        "dashboard": sorted(DASHBOARD_FILTERS),
         "ratio_guard": scalp_config.MIN_NOISE_BPS_FOR_RATIO,
         "read_time_only": True,
     }

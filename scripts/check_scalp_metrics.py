@@ -226,10 +226,29 @@ def check_filter_params() -> int:
         print(f"\n  DEFAULT_FILTERS has {missing!r} and /candidates does not")
         print("    declare it. The threshold would look active in the config")
         print("    and be unreachable from the page.")
-    for extra in sorted(set(sc._FILTER_ROLES) - expected):
+    # A filter may be the DASHBOARD's rather than the pipeline's — read-time
+    # screens are the whole point of storing every symbol regardless of
+    # whether it passes — but it still needs a default, a slider range and a
+    # declared query parameter. What it must not be is a column join with no
+    # threshold behind it at all.
+    owned = expected | set(sc.DASHBOARD_FILTERS)
+    for extra in sorted(set(sc._FILTER_ROLES) - owned):
         bad += 1
-        print(f"\n  /candidates joins {extra!r} to a column, but it is not in")
-        print("    DEFAULT_FILTERS — a filter with no threshold behind it.")
+        print(f"\n  /candidates joins {extra!r} to a column, but nothing")
+        print("    declares it — neither DEFAULT_FILTERS nor DASHBOARD_FILTERS.")
+    for k in sorted(sc.DASHBOARD_FILTERS):
+        if k not in declared:
+            bad += 1
+            print(f"\n  dashboard filter {k!r} has no query parameter, so it")
+            print("    is unreachable from the page.")
+        if k not in sc.DASHBOARD_FILTER_RANGES:
+            bad += 1
+            print(f"\n  dashboard filter {k!r} has no slider range, so the")
+            print("    page cannot draw its slider.")
+        if k in expected:
+            bad += 1
+            print(f"\n  {k!r} is declared by BOTH the pipeline and the")
+            print("    dashboard — one of them silently wins.")
     return bad
 
 

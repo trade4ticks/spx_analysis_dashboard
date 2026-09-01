@@ -317,6 +317,24 @@
       vertical-align:top; white-space:nowrap;
     }
 
+    /* The "?" affordance, and the note it opens. The page is dense and
+       quiet by default; every explanation is one click away rather than
+       occupying the space between a slider and the result it changes. */
+    .sc-help {
+      display:inline-block; width:13px; height:13px; line-height:13px;
+      text-align:center; border-radius:50%; font-size:9px; cursor:pointer;
+      border:1px solid var(--border); color:var(--muted); margin-left:3px;
+      user-select:none;
+    }
+    .sc-help:hover { color:var(--text); border-color:var(--muted); }
+    .sc-help.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .sc-note {
+      font-size:10.5px; color:var(--muted); line-height:1.65;
+      background:var(--bg); border:1px solid var(--border);
+      border-radius:4px; padding:7px 9px; max-width:78ch;
+    }
+    .sc-note b { color:var(--text); }
+
     .sc-pick { cursor:pointer; border-bottom:1px dotted var(--border); }
     .sc-pick:hover { color:var(--accent); border-bottom-color:var(--accent); }
 
@@ -351,10 +369,13 @@
     <!-- ── jump bar ──────────────────────────────────────────────────── -->
     <div class="sc-jump">
       <span class="sc-jump-lbl use">Use</span>
-      <a href="#health">Data health</a>
+      <!-- Same order as the page. Data health moved to the end of Use, so
+           the jump bar follows it — a bar that lists sections in a different
+           order from the page is worse than none. -->
       <a href="#candidates">Candidates</a>
       <a href="#detail">Ticker detail</a>
       <a href="#now">Right now</a>
+      <a href="#health">Data health</a>
       <span class="sc-jump-div"></span>
       <span class="sc-jump-lbl res">Research</span>
       <a href="#geometry">Spread × noise</a>
@@ -432,6 +453,8 @@
       <div class="sc-panel" x-show="meta.connected && meta.date" x-cloak>
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Filters</span>
+          <span class="sc-help" :class="{on: openNote === 'filters'}"
+                @click="note('filters')" title="Why these are read-time">?</span>
           <span class="sc-panel-sub">read-time only — never triggers a recompute</span>
           <span class="sc-spacer"></span>
           <span class="sc-count">
@@ -446,7 +469,15 @@
             <template x-for="k in filterKeys" :key="k">
               <div class="sc-filter">
                 <div class="sc-filter-lbl">
-                  <span x-text="filterLabel(k)"></span>
+                  <span>
+                    <span x-text="filterLabel(k)"></span>
+                    <!-- The definition is one click away, never on screen.
+                         Four paragraphs used to sit between these sliders and
+                         the table, so adjusting a threshold meant scrolling
+                         past prose to see what changed. -->
+                    <span class="sc-help" :class="{on: openNote === k}"
+                          @click="note(k)" title="What this filters, and why">?</span>
+                  </span>
                   <b x-text="fmtFilter(k, filters[k])"></b>
                 </div>
                 <input type="range" :min="range(k).min" :max="range(k).max"
@@ -456,125 +487,44 @@
                   <span x-text="fmtFilter(k, range(k).min)"></span>
                   <span x-text="fmtFilter(k, range(k).max)"></span>
                 </div>
+                <div class="sc-note" x-show="openNote === k" x-cloak>
+                  <div>
+                    <b x-text="filterNote(k).label"></b>
+                    <span class="sc-tag"
+                          :class="{warn: filterNote(k).source === 'dashboard'}"
+                          x-text="filterSourceTag(k)"></span>
+                  </div>
+                  <div style="margin-top:4px" x-show="filterNote(k).why" x-cloak
+                       x-text="filterNote(k).why"></div>
+                  <div style="margin-top:4px" x-show="filterNote(k).definition"
+                       x-cloak>
+                    <a class="sc-metric-link" :href="filterNote(k).href"
+                       target="_blank" rel="noopener"
+                       x-text="filterNote(k).metric"></a>
+                    — <span x-text="filterNote(k).definition"></span>
+                  </div>
+                  <!-- A threshold whose column is absent did not run, and a
+                       pass count that does not say so is a number about
+                       filters that did not all apply. -->
+                  <div style="margin-top:4px; color:#e84393"
+                       x-show="filterNote(k).applied === false" x-cloak>
+                    Not applied — no column resolved for it on this date.
+                  </div>
+                </div>
               </div>
             </template>
           </div>
-          <!-- The reason the failing rows are kept, said once where the
-               sliders are, because it is the thing that makes the sliders
-               worth having. -->
-          <div class="sc-panel-sub" style="margin-top:10px; line-height:1.7; max-width:80ch">
+          <div class="sc-note" x-show="openNote === 'filters'" x-cloak
+               style="margin-top:10px">
             The pipeline computes and stores every symbol regardless of whether
             it passes. Moving a slider re-queries; rows for names that fail are
             still in the database, and they are the only data that can say
             whether a threshold is set in the right place.
-          </div>
-        </div>
-      </div>
-
-      <!-- 1.2 data health -->
-      <div class="sc-panel" id="health">
-        <div class="sc-panel-hdr">
-          <span class="sc-panel-title">Data health</span>
-          <span class="sc-panel-sub"
-                x-text="health ? ('last ' + health.rows.length + ' sessions, each against the ' + health.trailing + ' before it') : 'last ~10 sessions'"></span>
-          <span class="sc-spacer"></span>
-          <span class="sc-panel-sub" x-show="healthLoading" x-cloak>…</span>
-          <!-- The count of flagged sessions, so the panel can be read without
-               being read: zero here means nothing below needs attention. -->
-          <span class="sc-tag"
-                x-show="health && health.rows.length" x-cloak
-                :class="{warn: health.rows.some(r => r.flags.length)}"
-                x-text="health.rows.filter(r => r.flags.length).length + ' flagged'"></span>
-        </div>
-
-        <div class="sc-panel-body" style="padding:0">
-          <div class="sc-empty" x-show="!health" x-cloak>
-            No sessions to check yet.
-          </div>
-          <div class="sc-scroll" style="max-height:320px" x-show="health" x-cloak>
-            <table class="sc-table">
-              <thead><tr>
-                <th>session</th>
-                <th class="sc-num" title="Symbols in daily_metrics against the universe that was qualified or retained for that date.">symbols</th>
-                <th class="sc-num" title="Distinct metrics written. Short of the trailing count means a metric family stopped being computed — a different failure from a missing symbol.">metrics</th>
-                <template x-for="w in healthCols()" :key="w.key">
-                  <th class="sc-num"
-                      :title="w.metric + ' — median across symbols, with its move against the trailing median beneath'">
-                    <span x-text="w.key"></span>
-                  </th>
-                </template>
-              </tr></thead>
-              <tbody>
-                <template x-for="r in (health ? health.rows : [])" :key="r.date">
-                  <tr :class="{fail: r.flags.length}">
-                    <td>
-                      <b x-text="r.date"></b>
-                      <span class="sc-tag warn" x-show="r.flags.length" x-cloak
-                            style="margin-left:5px" x-text="r.flags.join(' ')"></span>
-                    </td>
-                    <td class="sc-num"
-                        :class="{bad: r.flags.indexOf('coverage') >= 0}">
-                      <span x-text="r.n_symbols"></span><!--
-                      --><span class="sc-of" x-show="r.universe_n" x-cloak
-                               x-text="'/' + r.universe_n"></span>
-                    </td>
-                    <td class="sc-num"
-                        :class="{bad: r.flags.indexOf('n_metrics') >= 0}"
-                        x-text="r.n_metrics"></td>
-                    <!-- The level and its move in ONE cell. Two columns per
-                         metric doubled the header count and put the number
-                         that matters — the move — furthest from its label. -->
-                    <template x-for="w in healthCols()" :key="w.key">
-                      <td class="sc-num">
-                        <span x-text="r.metrics[w.key] && r.metrics[w.key].value != null
-                                      ? r.metrics[w.key].value.toFixed(2) : '—'"></span>
-                        <span class="sc-chg"
-                              :class="changeClass(r.metrics[w.key] && r.metrics[w.key].change)"
-                              x-text="fmtChange(r.metrics[w.key] && r.metrics[w.key].change)"></span>
-                      </td>
-                    </template>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- One line per flagged session saying what the red actually means.
-               A coloured cell says a number moved; nothing about it says
-               whether that is a broken fetch or a killed compute run. -->
-          <template x-for="r in (health ? health.rows.filter(x => x.flags.length) : [])"
-                    :key="'n' + r.date">
-            <div class="sc-warn bad">
-              <b x-text="r.date"></b> — <span x-text="healthNote(r)"></span>
-            </div>
-          </template>
-        </div>
-
-        <div class="sc-panel-body" style="padding-top:9px">
-          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
-            This exists because of a real failure: a fetch returned only
-            Nasdaq's prints — missing NYSE, ARCA, BATS, EDGX and IEX — and the
-            only symptom was trades/min reading 37% low. It took an hour to
-            diagnose, and once the nightly job runs unattended it will happen
-            again with nobody looking for it.
-            <span style="display:block;margin-top:5px">
-              There is deliberately <b>no distinct-exchange-code column</b>:
-              <code>fetch.py</code> already refuses any symbol-day under its
-              minimum and does not write it, so a Nasdaq-only pull cannot reach
-              compute at all. A count would measure a condition the guard
-              prevents. What actually surfaced the problem was a rate moving
-              against its own history, so that is what this watches.
-            </span>
-            <span style="display:block;margin-top:5px"
-                  x-show="health && health.fetch_rejects_note" x-cloak>
-              <b>No fetch-rejection count.</b>
-              <span x-text="health.fetch_rejects_note"></span>
-            </span>
-            <span style="display:block;margin-top:5px">
-              Each session is scored against the ones <em>before</em> it and
-              never itself — a bad day inside its own baseline partly excuses
-              itself, and at ten sessions one outlier moves the median it is
-              being measured against.
+            <span style="display:block; margin-top:4px">
+              Spread in <b>bps</b> is the primary screen. Ten cents on a $100
+              stock and ten cents on a $1,000 stock are the same cents and a
+              tenth of the opportunity; the cents floor stays as a backstop
+              below which nothing is capturable whatever the percentage says.
             </span>
           </div>
         </div>
@@ -584,6 +534,8 @@
       <div class="sc-panel" id="candidates">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Ranked candidates</span>
+          <span class="sc-help" :class="{on: openNote === 'cand'}"
+                @click="note('cand')" title="How to read this table">?</span>
           <span class="sc-panel-sub"
                 x-text="cand ? (cand.n_pass + ' pass of ' + cand.n_total) : ''"></span>
           <span class="sc-spacer"></span>
@@ -606,6 +558,13 @@
             <span>show excluded</span>
           </label>
 
+          <!-- TRADE PRICE AS A FIRST-CLASS ALTERNATIVE, not one row of
+               fifteen in a research table. Four of the five noise variants
+               are quote-midpoint based, and on a thin book the midpoint moves
+               when a small resting order is pulled — flicker, not price. -->
+          <button class="sc-btn" @click="toggleTrade()" :class="{on: showTrade}"
+                  title="Add the trade-price noise and ratio beside the midpoint ones">
+            vs trades</button>
           <button class="sc-btn" @click="chooserOpen = !chooserOpen"
                   :class="{on: chooserOpen}">columns</button>
           <span class="sc-panel-sub" x-show="candLoading" x-cloak>…</span>
@@ -623,10 +582,12 @@
             <span class="sc-panel-sub"
                   x-text="chooserRows().length + ' of ' + (meta.metrics || []).length"></span>
             <span class="sc-spacer"></span>
-            <span class="sc-panel-sub">
-              Twelve columns by default because 232 is not a table. Roles are
-              resolved against this date's catalog, so one that cannot resolve
-              is dropped and named rather than rendered empty.
+            <span class="sc-panel-sub"
+                  title="Twelve columns by default because 232 is not a table.
+                         Roles resolve against this date's catalog, so one that
+                         cannot resolve is dropped and named rather than
+                         rendered empty.">
+              twelve of 232 by default
             </span>
           </div>
           <div class="sc-chooser-body">
@@ -749,10 +710,23 @@
               </span>
             </template>
           </div>
-          <div class="sc-panel-sub" style="margin-top:6px; line-height:1.7">
-            Counts are rows excluded by each threshold; a row failing two is
-            counted in both. The realised $/min marker the brief asks for waits
-            on the fills upload — there is nothing to join against yet.
+          <div class="sc-note" x-show="openNote === 'cand'" x-cloak
+               style="margin-top:6px">
+            Counts above are rows excluded by each threshold; a row failing two
+            is counted in both.
+            <span style="display:block; margin-top:4px">
+              <b>vs trades</b> adds the trade-price noise and ratio beside the
+              midpoint ones. Four of the five noise variants are built on quote
+              midpoints, and on a thin book the midpoint moves when a small
+              resting order is pulled and the next level becomes the best — a
+              29-share bid vanishing moved one midpoint 19 cents in 30 seconds
+              while the stock barely moved. Where the two ratios disagree
+              sharply, the book is flickering rather than the price moving.
+            </span>
+            <span style="display:block; margin-top:4px">
+              Every column header carries its metric name and definition on
+              hover; the column chooser lists all 232.
+            </span>
           </div>
         </div>
       </div>
@@ -1011,6 +985,119 @@
           </div>
         </div>
       </div>
+
+      <!-- 1.2 data health — LAST in the Use section, deliberately.
+           It sat between the filters and the results, so adjusting a
+           threshold meant scrolling past it to see what changed. It is
+           something to check occasionally, not to read every morning. -->
+      <div class="sc-panel" id="health">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Data health</span>
+          <span class="sc-panel-sub"
+                x-text="health ? ('last ' + health.rows.length + ' sessions, each against the ' + health.trailing + ' before it') : 'last ~10 sessions'"></span>
+          <span class="sc-spacer"></span>
+          <span class="sc-panel-sub" x-show="healthLoading" x-cloak>…</span>
+          <!-- The count of flagged sessions, so the panel can be read without
+               being read: zero here means nothing below needs attention. -->
+          <span class="sc-tag"
+                x-show="health && health.rows.length" x-cloak
+                :class="{warn: health.rows.some(r => r.flags.length)}"
+                x-text="health.rows.filter(r => r.flags.length).length + ' flagged'"></span>
+        </div>
+
+        <div class="sc-panel-body" style="padding:0">
+          <div class="sc-empty" x-show="!health" x-cloak>
+            No sessions to check yet.
+          </div>
+          <div class="sc-scroll" style="max-height:320px" x-show="health" x-cloak>
+            <table class="sc-table">
+              <thead><tr>
+                <th>session</th>
+                <th class="sc-num" title="Symbols in daily_metrics against the universe that was qualified or retained for that date.">symbols</th>
+                <th class="sc-num" title="Distinct metrics written. Short of the trailing count means a metric family stopped being computed — a different failure from a missing symbol.">metrics</th>
+                <template x-for="w in healthCols()" :key="w.key">
+                  <th class="sc-num"
+                      :title="w.metric + ' — median across symbols, with its move against the trailing median beneath'">
+                    <span x-text="w.key"></span>
+                  </th>
+                </template>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in (health ? health.rows : [])" :key="r.date">
+                  <tr :class="{fail: r.flags.length}">
+                    <td>
+                      <b x-text="r.date"></b>
+                      <span class="sc-tag warn" x-show="r.flags.length" x-cloak
+                            style="margin-left:5px" x-text="r.flags.join(' ')"></span>
+                    </td>
+                    <td class="sc-num"
+                        :class="{bad: r.flags.indexOf('coverage') >= 0}">
+                      <span x-text="r.n_symbols"></span><!--
+                      --><span class="sc-of" x-show="r.universe_n" x-cloak
+                               x-text="'/' + r.universe_n"></span>
+                    </td>
+                    <td class="sc-num"
+                        :class="{bad: r.flags.indexOf('n_metrics') >= 0}"
+                        x-text="r.n_metrics"></td>
+                    <!-- The level and its move in ONE cell. Two columns per
+                         metric doubled the header count and put the number
+                         that matters — the move — furthest from its label. -->
+                    <template x-for="w in healthCols()" :key="w.key">
+                      <td class="sc-num">
+                        <span x-text="r.metrics[w.key] && r.metrics[w.key].value != null
+                                      ? r.metrics[w.key].value.toFixed(2) : '—'"></span>
+                        <span class="sc-chg"
+                              :class="changeClass(r.metrics[w.key] && r.metrics[w.key].change)"
+                              x-text="fmtChange(r.metrics[w.key] && r.metrics[w.key].change)"></span>
+                      </td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- One line per flagged session saying what the red actually means.
+               A coloured cell says a number moved; nothing about it says
+               whether that is a broken fetch or a killed compute run. -->
+          <template x-for="r in (health ? health.rows.filter(x => x.flags.length) : [])"
+                    :key="'n' + r.date">
+            <div class="sc-warn bad">
+              <b x-text="r.date"></b> — <span x-text="healthNote(r)"></span>
+            </div>
+          </template>
+        </div>
+
+        <div class="sc-panel-body" style="padding-top:9px">
+          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+            This exists because of a real failure: a fetch returned only
+            Nasdaq's prints — missing NYSE, ARCA, BATS, EDGX and IEX — and the
+            only symptom was trades/min reading 37% low. It took an hour to
+            diagnose, and once the nightly job runs unattended it will happen
+            again with nobody looking for it.
+            <span style="display:block;margin-top:5px">
+              There is deliberately <b>no distinct-exchange-code column</b>:
+              <code>fetch.py</code> already refuses any symbol-day under its
+              minimum and does not write it, so a Nasdaq-only pull cannot reach
+              compute at all. A count would measure a condition the guard
+              prevents. What actually surfaced the problem was a rate moving
+              against its own history, so that is what this watches.
+            </span>
+            <span style="display:block;margin-top:5px"
+                  x-show="health && health.fetch_rejects_note" x-cloak>
+              <b>No fetch-rejection count.</b>
+              <span x-text="health.fetch_rejects_note"></span>
+            </span>
+            <span style="display:block;margin-top:5px">
+              Each session is scored against the ones <em>before</em> it and
+              never itself — a bad day inside its own baseline partly excuses
+              itself, and at ten sessions one outlier moves the median it is
+              being measured against.
+            </span>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- ══ SECTION 2 — RESEARCH ══════════════════════════════════════════ -->
