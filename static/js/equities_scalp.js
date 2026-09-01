@@ -44,6 +44,14 @@ document.addEventListener('alpine:init', () => {
     calibTarget: 'dollars_per_min',
     calibFilter: '',
 
+    // ── 2.2 / 2.3, neither of which needs a single fill ─────────────────
+    corr: null,
+    corrLoading: false,
+    corrFamily: '',
+    stab: null,
+    stabLoading: false,
+    stabFilter: '',
+
     // ── data health ─────────────────────────────────────────────────────
     health: null,
     healthLoading: false,
@@ -89,6 +97,7 @@ document.addEventListener('alpine:init', () => {
             this.meta.date ? this.loadCandidates() : Promise.resolve(),
             this.meta.date ? this.loadHealth() : Promise.resolve(),
             this.loadFills(), this.loadCalibration(),
+            this.loadCorrelation(), this.loadStability(),
           ]);
         }
       } catch (e) {
@@ -310,6 +319,75 @@ document.addEventListener('alpine:init', () => {
         if (p * c.n_metrics < 1) return { need: n, have };
       }
       return null;
+    },
+
+    // ── 2.2 metric correlation ──────────────────────────────────────────
+
+    async loadCorrelation() {
+      this.corrLoading = true;
+      try {
+        const q = new URLSearchParams();
+        if (this.meta.date) q.set('date', this.meta.date);
+        if (this.corrFamily) q.set('family', this.corrFamily);
+        const j = await scGetJson('/api/equities-scalp/metric-correlation?' + q);
+        this.corr = j.error ? null : j;
+      } catch (e) { this.corr = null; } finally { this.corrLoading = false; }
+    },
+
+    /* One cell of the matrix. |rho| drives opacity and the sign drives the
+     * hue, so a block of near-duplicates reads as a solid square rather than
+     * as a number to be compared. */
+    corrCell(v) {
+      const a = Math.min(1, Math.abs(v));
+      const c = v >= 0 ? '52,152,219' : '232,67,147';
+      return `background:rgba(${c},${(a * a).toFixed(3)})`;
+    },
+
+    /* How much of the metric set is one metric wearing several names. The
+     * headline of this panel: 75 noise columns collapsing to a handful is
+     * the finding, not the matrix. */
+    corrSaving() {
+      const g = (this.corr && this.corr.redundant) || [];
+      if (!g.length) return null;
+      const inGroups = g.reduce((a, x) => a + x.length, 0);
+      return { groups: g.length, members: inGroups,
+               removable: inGroups - g.length,
+               of: (this.corr.metrics || []).length };
+    },
+
+    // ── 2.3 rank stability ──────────────────────────────────────────────
+
+    async loadStability() {
+      this.stabLoading = true;
+      try {
+        const j = await scGetJson('/api/equities-scalp/rank-stability?sessions=10');
+        this.stab = j.error ? null : j;
+      } catch (e) { this.stab = null; } finally { this.stabLoading = false; }
+    },
+
+    stabRows() {
+      const q = (this.stabFilter || '').toLowerCase();
+      const rows = (this.stab && this.stab.rows) || [];
+      return q ? rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0) : rows;
+    },
+
+    /* Below 0.5 a metric is re-drawing its ranking every morning. That is
+     * disqualifying whatever it calibrates to — a signal that cannot be acted
+     * on the next day is not one. */
+    stabClass(v) {
+      if (v == null) return '';
+      if (v >= 0.8) return 'strong';
+      if (v >= 0.5) return 'mid';
+      return 'bad';
+    },
+
+    /* The named worst mover, in words. A low average is a number; "AGX moved
+     * 431 places of 587" is the thing that gets looked into. */
+    jumpNote(r) {
+      const j = r.worst_jump;
+      if (!j) return '';
+      return `${j.symbol} moved ${j.places} places of ${j.of} between two `
+           + `sessions (${j.from.toFixed(3)} → ${j.to.toFixed(3)})`;
     },
 
     rhoClass(rho) {

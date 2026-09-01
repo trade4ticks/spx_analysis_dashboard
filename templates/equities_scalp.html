@@ -257,6 +257,22 @@
     .sc-rho.mid { color:var(--accent); }
     .sc-rho.strong { color:#4ec9a0; }
 
+    /* The correlation grid. No numbers in the cells: at 90x90 the shape is
+       the message and a number per cell is unreadable ink. Values are on
+       hover. */
+    .sc-corrwrap { overflow:auto; max-height:520px; margin-top:10px; }
+    .sc-corr { border-collapse:collapse; }
+    .sc-corr th {
+      font-size:8px; font-weight:400; color:var(--muted); text-align:right;
+      padding:0 5px 0 0; white-space:nowrap; position:sticky; left:0;
+      background:var(--surface); max-width:150px; overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .sc-corr td {
+      width:9px; height:9px; padding:0;
+      border:1px solid rgba(0,0,0,0.25);
+    }
+
     .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
     .sc-reject {
       display:inline-flex; align-items:baseline; gap:5px;
@@ -800,121 +816,148 @@
         </div></div>
       </div>
 
+      <!-- ── 2.3 rank stability ──────────────────────────────────────── -->
       <div class="sc-panel" id="stability">
-        <div class="sc-panel-hdr"><span class="sc-panel-title">Rank stability</span></div>
-        <div class="sc-panel-body"><div class="sc-stub">
-          <span class="sc-stub-tag">phase 4</span>
-          <b>How far a ticker's rank moves day to day, per metric. No trade data needed.</b>
-          A metric whose top 20 reshuffles every session is measuring noise in
-          the measurement rather than a property of the stock — one name read
-          0.069 bps then 1.727 with nothing changing, because the median
-          statistic flipped across a boundary.
-        </div></div>
-      </div>
-
-      <!-- ── fills upload ─────────────────────────────────────────────
-           In the RESEARCH half rather than the Use half: uploading a
-           statement is a weekend act, and nothing above it depends on
-           having done so. -->
-      <div class="sc-panel" id="fills">
         <div class="sc-panel-hdr">
-          <span class="sc-panel-title">Realised results</span>
+          <span class="sc-panel-title">Rank stability</span>
           <span class="sc-panel-sub"
-                x-text="fills ? (fills.totals.trips + ' round trips · '
-                        + fills.totals.symbols + ' tickers · '
-                        + fills.totals.sessions + ' sessions') : 'nothing uploaded yet'"></span>
+                x-text="stab ? (stab.rows.length + ' metrics over ' + stab.n_sessions + ' sessions — no trade data needed') : 'no trade data needed'"></span>
           <span class="sc-spacer"></span>
-          <span class="sc-panel-sub" x-show="fills && fills.totals.trips" x-cloak
-                :class="{}"
-                x-text="(fills.totals.net_pnl >= 0 ? '+$' : '-$')
-                        + Math.abs(fills.totals.net_pnl).toFixed(2) + ' net'"></span>
-          <label class="sc-btn on" style="cursor:pointer">
-            <span x-text="uploading ? 'parsing…' : 'upload statement'"></span>
-            <input type="file" accept=".csv,.xlsx,.xlsm" style="display:none"
-                   @change="uploadFills($event)" :disabled="uploading">
-          </label>
+          <input class="sc-inp" type="text" x-model="stabFilter"
+                 placeholder="filter…" style="max-width:130px">
+          <span class="sc-panel-sub" x-show="stabLoading" x-cloak>…</span>
         </div>
-
         <div class="sc-panel-body">
-          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
-            A Schwab account statement, CSV or XLSX. Rows are filtered to
-            <code>TRD</code> and parsed into <b>round trips</b> — a position
-            going flat to non-flat to flat, however many prints that takes.
-            Re-uploading a session <b>replaces</b> it rather than adding to it,
-            so a corrected statement is authoritative. The raw file is kept so
-            a parser fix can be re-run without exporting again.
-          </div>
+          <div class="sc-empty" x-show="!stab || !stab.rows.length" x-cloak
+               x-text="(stab && stab.note) || 'Not enough sessions yet.'"></div>
 
-          <div class="sc-warn bad" x-show="uploadError" x-cloak
-               style="margin-top:9px; border-radius:4px">
-            <b>Could not parse.</b> <span x-text="uploadError"></span>
-          </div>
-
-          <template x-if="uploadResult">
-            <div style="margin-top:10px">
-              <div class="sc-rejects">
-                <span class="sc-reject zero">round trips
-                  <b style="color:var(--accent)" x-text="uploadResult.report.trips"></b></span>
-                <span class="sc-reject zero">sessions
-                  <b style="color:var(--accent)" x-text="uploadResult.replaced_dates.length"></b></span>
-                <span class="sc-reject zero">rows read
-                  <b style="color:var(--accent)" x-text="uploadResult.report.rows_trade"></b></span>
-                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unclosed}">unclosed
-                  <b x-text="uploadResult.report.n_unclosed"></b></span>
-                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unparsed}">unreadable
-                  <b x-text="uploadResult.report.n_unparsed"></b></span>
+          <template x-if="stab && stab.rows.length">
+            <div>
+              <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+                <span x-text="stab.note"></span>
               </div>
-              <!-- Surfaced at upload time, not buried in a log. An unclosed
-                   position corrupted a session's statistics once and was not
-                   found for hours. -->
-              <template x-for="issue in uploadIssues()" :key="issue.text">
-                <div class="sc-warn" :class="{bad: issue.level === 'bad'}"
-                     style="margin-top:6px; border-radius:4px"
-                     x-text="issue.text"></div>
-              </template>
-              <div class="sc-panel-sub" style="margin-top:6px"
-                   x-show="uploadResult.archived" x-cloak
-                   x-text="'archived: ' + uploadResult.archived"></div>
+              <div class="sc-scroll" style="max-height:420px; margin-top:9px">
+                <table class="sc-table">
+                  <thead><tr>
+                    <th>metric</th>
+                    <th class="sc-num" title="Average Spearman between consecutive sessions' rankings across the whole universe.">rank corr</th>
+                    <th class="sc-num" title="Share of each session's top 20 still in the top 20 the next day. The only part of the ordering anyone trades.">top-20 held</th>
+                    <th class="sc-num">pairs</th>
+                    <th>largest single-name move</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="r in stabRows()" :key="r.metric">
+                      <tr>
+                        <td>
+                          <a class="sc-metric-link" :href="r.href" target="_blank"
+                             rel="noopener" :title="r.tooltip" x-text="r.metric"></a>
+                        </td>
+                        <td class="sc-num sc-rho" :class="stabClass(r.rank_corr)"
+                            x-text="r.rank_corr.toFixed(3)"></td>
+                        <td class="sc-num sc-rho" :class="stabClass(r.top_retention)"
+                            x-text="r.top_retention != null ? (r.top_retention*100).toFixed(0)+'%' : '—'"></td>
+                        <td class="sc-num" x-text="r.pairs"></td>
+                        <td class="sc-panel-sub" x-text="jumpNote(r)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </template>
-
-          <div class="sc-scroll" style="max-height:260px; margin-top:10px"
-               x-show="fills && fills.rows.length" x-cloak>
-            <table class="sc-table">
-              <thead><tr>
-                <th>session</th><th>ticker</th>
-                <th class="sc-num">trips</th>
-                <th class="sc-num">net P&amp;L</th>
-                <th class="sc-num">win</th>
-                <th class="sc-num" title="Wall clock from the first entry to the last exit — what the session was actually rationed by, not the sum of hold durations.">minutes</th>
-                <th class="sc-num">$/min</th>
-                <th class="sc-num">trips/min</th>
-                <th class="sc-num">median hold</th>
-              </tr></thead>
-              <tbody>
-                <template x-for="r in (fills ? fills.rows : [])"
-                          :key="r.trade_date + r.symbol">
-                  <tr>
-                    <td x-text="r.trade_date"></td>
-                    <td><b x-text="r.symbol"></b></td>
-                    <td class="sc-num" x-text="r.trips"></td>
-                    <td class="sc-num" :class="{bad: r.net_pnl < 0}"
-                        x-text="(r.net_pnl >= 0 ? '+' : '') + r.net_pnl.toFixed(2)"></td>
-                    <td class="sc-num" x-text="r.win_rate != null ? (r.win_rate*100).toFixed(0)+'%' : '—'"></td>
-                    <td class="sc-num" x-text="r.attention_minutes != null ? r.attention_minutes.toFixed(0) : '—'"></td>
-                    <td class="sc-num" :class="{bad: r.dollars_per_min < 0}"
-                        x-text="r.dollars_per_min != null ? r.dollars_per_min.toFixed(2) : '—'"></td>
-                    <td class="sc-num" x-text="r.trips_per_min != null ? r.trips_per_min.toFixed(2) : '—'"></td>
-                    <td class="sc-num" x-text="r.median_hold_s != null ? r.median_hold_s.toFixed(0)+'s' : '—'"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
         </div>
       </div>
 
-      <!-- ── 2.4 calibration ──────────────────────────────────────────── -->
+      <!-- ── 2.2 metric correlation ──────────────────────────────────── -->
+      <div class="sc-panel" id="correlation2">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Metric correlation</span>
+          <span class="sc-panel-sub"
+                x-text="corr ? (corr.metrics.length + ' metrics across ' + corr.n_symbols + ' symbols on ' + corr.date) : 'no trade data needed'"></span>
+          <span class="sc-spacer"></span>
+          <select class="sc-sel" x-model="corrFamily" @change="loadCorrelation()">
+            <option value="">all metrics</option>
+            <option value="noise_bps">noise only</option>
+            <option value="ratio">ratio only</option>
+            <option value="move">move rate / bps</option>
+            <option value="spread">spread only</option>
+          </select>
+          <span class="sc-panel-sub" x-show="corrLoading" x-cloak>…</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-empty" x-show="!corr || !corr.matrix.length" x-cloak
+               x-text="(corr && corr.note) || 'Nothing to correlate yet.'"></div>
+
+          <template x-if="corr && corr.matrix.length">
+            <div>
+              <!-- The finding, not the matrix. 75 noise columns collapsing to
+                   a handful is what this panel is for; the grid is how you
+                   see that it is true. -->
+              <div class="sc-chance" x-show="corrSaving()" x-cloak
+                   style="border-color:rgba(52,152,219,0.35); background:rgba(52,152,219,0.05)">
+                <div class="sc-chance-hd" style="color:var(--accent)">
+                  <span x-text="corrSaving().removable"></span> of
+                  <span x-text="corrSaving().of"></span> metrics carry no
+                  information the others do not
+                </div>
+                <div class="sc-panel-sub" style="line-height:1.7; max-width:82ch">
+                  <span x-text="corrSaving().groups"></span> groups whose
+                  members correlate above
+                  <span x-text="corr.cutoff"></span> with each other across
+                  <span x-text="corr.n_symbols"></span> symbols. Each group is
+                  one metric's worth of information under several names —
+                  knowable now, and never knowable from outcomes, because
+                  metrics this similar cannot be told apart by results at any
+                  sample size.
+                </div>
+                <div style="margin-top:7px; display:flex; flex-wrap:wrap; gap:5px">
+                  <template x-for="g in corr.redundant" :key="g[0]">
+                    <span class="sc-reject zero" style="font-size:9.5px"
+                          :title="g.join(', ')">
+                      <span x-text="g[0]"></span>
+                      <b style="color:var(--accent)" x-text="'+' + (g.length-1)"></b>
+                    </span>
+                  </template>
+                </div>
+              </div>
+
+              <!-- A metric with one value across the universe. Dropped from
+                   the matrix and named here: left in it becomes a row of
+                   zeros that reads as 'uncorrelated with everything'. -->
+              <div class="sc-warn bad" x-show="corr.constant && corr.constant.length"
+                   x-cloak style="margin-top:8px; border-radius:4px">
+                <b>Constant on this session:</b>
+                <span x-text="(corr.constant || []).join(', ')"></span>
+                — one value across every symbol, so there is no ordering to
+                correlate. Dropped from the grid rather than shown as zeros.
+              </div>
+
+              <div class="sc-corrwrap">
+                <table class="sc-corr">
+                  <tbody>
+                    <template x-for="(row, i) in corr.matrix" :key="i">
+                      <tr>
+                        <th :title="corr.metrics[i]" x-text="corr.metrics[i]"></th>
+                        <template x-for="(v, j) in row" :key="j">
+                          <td :style="corrCell(v)"
+                              :title="corr.metrics[i] + ' × ' + corr.metrics[j] + ' = ' + v.toFixed(3)"></td>
+                        </template>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="sc-panel-sub" style="margin-top:7px; line-height:1.7; max-width:88ch">
+                <span x-text="corr.note"></span>
+                Blue is positive, pink negative, opacity is |ρ|. Ordering is
+                hierarchical so families sit adjacent — unordered, a grid of
+                mostly-high correlations shows nothing.
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div class="sc-panel" id="calibration">
         <div class="sc-panel-hdr">
           <span class="sc-panel-title">Calibration against realised results</span>
@@ -977,6 +1020,24 @@
                   </span>
                 </div>
               </div>
+
+              <!-- A metric whose SIGN opposes the direction its column
+                   claims. Not a weak result — a result that disagrees with
+                   the reason the column is on the page, which is worth
+                   seeing before the ranked list rather than at whatever row
+                   |ρ| puts it on. -->
+              <template x-for="c in (calib.contradictions || [])" :key="c.metric">
+                <div class="sc-warn bad" style="margin-top:8px; border-radius:4px">
+                  <b x-text="c.metric"></b>
+                  at <b x-text="(c.rho >= 0 ? '+' : '') + c.rho.toFixed(3)"></b>
+                  — <span x-text="c.note"></span>
+                  <span style="display:block; margin-top:3px; color:var(--muted)">
+                    At n=<span x-text="c.n"></span> this is well inside what
+                    chance produces, so it is a thing to watch rather than a
+                    thing to act on. It stays visible until it goes away.
+                  </span>
+                </div>
+              </template>
 
               <div class="sc-scroll" style="max-height:420px; margin-top:10px">
                 <table class="sc-table">

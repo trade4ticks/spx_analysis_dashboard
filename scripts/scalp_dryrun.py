@@ -62,6 +62,13 @@ FAKE_METRICS = [
     "spread_bps_tw", "spread_cents_tw", "trades_per_min", "trade_size_median",
     "two_sided_balance", "off_exchange_share", "unidentified_exchange_share",
     "quote_bucket_coverage_10s",
+    # The pinned 5s family, complete. Adding only the noise column made the
+    # coverage filter go INERT — the coverage role resolves at the selected
+    # horizon, so a 5s variant needs 5s coverage — and the harness caught it.
+    # A partial family in a fixture silently disables whatever depends on the
+    # missing half.
+    "noise_bps_tw_mid_5s_rms", "ratio_tw_mid_5s_rms",
+    "quote_bucket_coverage_5s", "move_rate_tw_mid_5s", "move_bps_tw_mid_5s",
     "noise_bps_tw_mid_10s_median", "noise_bps_tw_mid_10s_rms",
     "noise_bps_tw_mid_30s_rms", "noise_bps_last_mid_10s_p75",
     "noise_bps_bid_side_5s_mean",
@@ -107,6 +114,11 @@ def _health_median(day, metric):
 # filter, one is too tight to trade, one is sparsely quoted, and one has a
 # missing ratio so the null-ordering assertion has something to order.
 FAKE_SYMBOLS = ["AAAA", "BBBB", "CCCC", "DDDD", "EEEE"]
+
+# The correlation and stability panels need more than five names to say
+# anything -- both refuse a sample under five, and a fixture that trips the
+# refusal tests the refusal rather than the estimator.
+_CORR_SYMBOLS = [f"S{i:02d}" for i in range(24)]
 
 
 def _pivot_row(symbol: str, i: int, names: list[str]) -> dict:
@@ -323,6 +335,39 @@ class Conn:
                     for day, n in MISSING.items() for i in range(n)]
         if "FROM universe" in sql:
             return [{"trade_date": day, "n": UNIVERSE_N} for day in HEALTH_DATES]
+        if "SELECT symbol, metric, value" in sql:
+            # For the correlation matrix. Two metrics are deliberately made
+            # IDENTICAL up to a scale factor so the redundancy detector has
+            # something real to find, and one is constant so the zero-variance
+            # branch is exercised rather than assumed.
+            out = []
+            for i, s in enumerate(_CORR_SYMBOLS):
+                for m in FAKE_METRICS:
+                    if m == "ratio_tw_mid_10s":
+                        v = float(i)
+                    elif m == "ratio_tw_mid_10s_rms":
+                        v = float(i) * 3.0 + 1.0        # perfectly co-ranked
+                    elif m == "spread_bps_tw":
+                        v = 7.0                          # constant
+                    else:
+                        v = float((i * 7 + len(m)) % 23)
+                    out.append({"symbol": s, "metric": m, "value": v})
+            return out
+        if "SELECT trade_date, symbol, metric, value" in sql:
+            # For rank stability. One metric ranks identically every session,
+            # one reverses completely -- so an estimator that returns a
+            # constant cannot pass.
+            out = []
+            for di, day in enumerate(HEALTH_DATES):
+                for i, s in enumerate(_CORR_SYMBOLS):
+                    for m in ("ratio_tw_mid_10s", "ratio_last_mid_30s"):
+                        if m == "ratio_tw_mid_10s":
+                            v = float(i)                     # stable
+                        else:
+                            v = float(i if di % 2 == 0 else -i)   # flips
+                        out.append({"trade_date": day, "symbol": s,
+                                    "metric": m, "value": v})
+            return out
         if "DISTINCT metric" in sql:
             return [{"metric": m} for m in FAKE_METRICS]
         if "GROUP BY m.symbol" in sql:
@@ -487,6 +532,22 @@ async def run() -> int:
         print(f"  the default noise variant {dn!r} is not in the database")
         fails += 1
 
+    # THE PIN IS SINGLE-SOURCE. The pipeline builds intraday_metrics around
+    # config.INTRADAY_NOISE_COLUMN, and the ranked table must open on the same
+    # variant — two panels disagreeing about which noise definition they mean
+    # is the defect two copies of a baseline produced on the IV page.
+    pin = getattr(scalp_config, "INTRADAY_NOISE_COLUMN", None)
+    if pin:
+        if pin not in FAKE_METRICS:
+            print(f"  the pipeline pins {pin!r} and the fixture does not carry")
+            print("    it, so this check cannot see whether the page follows")
+            fails += 1
+        elif dn != pin:
+            print(f"  the pipeline pins {pin!r} and the page defaults to {dn!r}")
+            print("    — the ranked table and the intraday view would be about")
+            print("    different noise definitions")
+            fails += 1
+
     # It must also degrade rather than invent when nothing preferred exists.
     only_median = sc._default_noise(["noise_bps_tw_mid_10s_median"])
     if only_median != "noise_bps_tw_mid_10s_median":
@@ -510,6 +571,7 @@ async def run() -> int:
     fails += await check_candidates()
     fails += await check_health()
     fails += await check_calibration()
+    fails += await check_narrowing()
 
     for b in BAD:
         print(f"  {b}")
@@ -518,6 +580,91 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_narrowing() -> int:
+    """2.2 and 2.3: the two panels that run without any trade data."""
+    fails = 0
+
+    # ── metric correlation ───────────────────────────────────────────────
+    c = await sc.metric_correlation(date=None, family=None, limit=90,
+                                    cutoff=0.97, pool=Pool())
+    if not c.get("matrix"):
+        print(f"  /metric-correlation returned no matrix: {c.get('note')}")
+        return 1
+
+    n = len(c["metrics"])
+    if len(c["matrix"]) != n or any(len(r) != n for r in c["matrix"]):
+        print("  the correlation matrix is not square against its labels")
+        fails += 1
+    diag = [c["matrix"][i][i] for i in range(n)]
+    if any(abs(x - 1.0) > 1e-6 for x in diag):
+        print(f"  the diagonal is not 1.0: {diag[:4]} — a metric does not "
+              f"correlate perfectly with itself, so the matrix is misaligned "
+              f"with its own labels")
+        fails += 1
+    for i in range(min(n, 12)):
+        for j in range(min(n, 12)):
+            if abs(c["matrix"][i][j] - c["matrix"][j][i]) > 1e-6:
+                print("  the matrix is not symmetric")
+                fails += 1
+                break
+
+    # A constant metric has no ordering. It must be DROPPED AND NAMED, not
+    # carried as a row of zeros that reads as 'uncorrelated with everything'.
+    if "spread_bps_tw" not in (c.get("constant") or []):
+        print("  a constant metric was not reported as constant. Left in, it "
+              "becomes a row of zeros that reads as a finding.")
+        fails += 1
+    if "spread_bps_tw" in c["metrics"]:
+        print("  a constant metric is still in the matrix")
+        fails += 1
+
+    # Two metrics that are one linear transform apart must be found redundant.
+    pair = {"ratio_tw_mid_10s", "ratio_tw_mid_10s_rms"}
+    if not any(pair <= set(g) for g in (c.get("redundant") or [])):
+        print(f"  two perfectly co-ranked metrics were not grouped as "
+              f"redundant: {c.get('redundant')}. That grouping is the whole "
+              f"output of this panel.")
+        fails += 1
+
+    # ── rank stability ───────────────────────────────────────────────────
+    s = await sc.rank_stability(sessions=10, top_n=20, pool=Pool())
+    rows = {r["metric"]: r for r in (s.get("rows") or [])}
+    if not rows:
+        print(f"  /rank-stability returned no rows: {s.get('note')}")
+        return fails + 1
+
+    stable = rows.get("ratio_tw_mid_10s")
+    flips = rows.get("ratio_last_mid_30s")
+    if not stable or not flips:
+        print(f"  expected both fixture metrics, got {sorted(rows)}")
+        return fails + 1
+
+    if stable["rank_corr"] < 0.99:
+        print(f"  a metric that ranks identically every session scored "
+              f"{stable['rank_corr']:.3f}, not ~1.0")
+        fails += 1
+    if flips["rank_corr"] > -0.99:
+        print(f"  a metric whose ordering reverses every session scored "
+              f"{flips['rank_corr']:.3f}, not ~-1.0. An estimator that cannot "
+              f"tell those two apart is measuring nothing.")
+        fails += 1
+    if s["rows"][0]["metric"] != "ratio_tw_mid_10s":
+        print("  rank stability is not sorted with the stable metric first")
+        fails += 1
+
+    # The named worst mover, which is what turns a low average into something
+    # to look at.
+    if not flips.get("worst_jump") or not flips["worst_jump"].get("symbol"):
+        print("  the largest single-name rank move is not named")
+        fails += 1
+    if stable["top_retention"] is None or stable["top_retention"] < 0.99:
+        print(f"  a perfectly stable metric retained "
+              f"{stable['top_retention']} of its top 20")
+        fails += 1
+
+    return fails
 
 
 async def check_calibration() -> int:
@@ -570,6 +717,14 @@ async def check_calibration() -> int:
     if not j.get("sample"):
         print("  the sample size is not returned, so the weakness is implied")
         print("    rather than visible")
+        fails += 1
+
+    # A metric whose SIGN opposes the direction its column claims. Derived
+    # from scalp_columns' declared `higher_better`, so it is checked wherever
+    # an expectation exists rather than for one metric by name.
+    if "contradictions" not in j:
+        print("  /calibration does not report metrics whose correlation "
+              "contradicts the direction their column claims")
         fails += 1
 
     # The target is interpolated into SQL, so the whitelist is load-bearing.

@@ -789,6 +789,45 @@ async def calibration(
 
     out.sort(key=lambda r: -abs(r["rho"]))
 
+    # ── metrics whose SIGN contradicts what the column claims ────────────
+    #
+    # scalp_columns declares `higher_better` for every role — that is the
+    # direction the strategy's premise says the metric should point. A
+    # correlation with the opposite sign is not a weak result, it is a result
+    # that disagrees with the reason the column is on the page, and it belongs
+    # above the ranked list rather than at whatever row |rho| happens to put
+    # it on.
+    #
+    # Derived from the declared direction rather than a list of metric names,
+    # so a role added later is checked without anything here changing.
+    direction = {}
+    for role in scalp_columns.ROLES:
+        if role.higher_better is None:
+            continue
+        for cand in role.candidates:
+            direction[cand] = (role.higher_better, role.key, role.label)
+
+    contradictions = []
+    for r in out:
+        got = direction.get(r["metric"])
+        if not got:
+            continue
+        higher_better, key, label = got
+        # win_rate and $/min are both "more is better"; a metric that is
+        # supposed to help should correlate positively with them.
+        expected_positive = higher_better
+        if (r["rho"] < 0) == expected_positive and abs(r["rho"]) >= 0.25:
+            contradictions.append({
+                "metric": r["metric"], "rho": r["rho"], "n": r["n"],
+                "role": key, "label": label,
+                "expected": "higher is better" if higher_better
+                            else "lower is better",
+                "note": f"{label} is on the ranked table because "
+                        f"{'more' if higher_better else 'less'} of it should "
+                        f"help. It correlates the other way.",
+            })
+    contradictions.sort(key=lambda c: -abs(c["rho"]))
+
     n_pairs = max((r["n"] for r in out), default=0)
     n_metrics = len(out)
     # THE NUMBER THAT KEEPS THIS HONEST. How many of these metrics would clear
@@ -813,12 +852,292 @@ async def calibration(
                    "symbols": int(sample["symbols"] or 0),
                    "sessions": int(sample["sessions"] or 0)},
         "expected_by_chance": expected,
+        "contradictions": contradictions,
         "note":
             "Spearman rank correlation across ticker-days. Read the "
             "expected-by-chance column first: with this many metrics and this "
             "few ticker-days, a list sorted by |rho| will always have "
             "something at the top. What matters is whether the same metric "
             "stays there as sessions accumulate — not its rank today.",
+    }
+
+
+# ── 2.2 / 2.3: narrowing the field without any trade data ───────────────────
+#
+# Both of these run on daily_metrics alone. That ordering is deliberate: with
+# ~232 metrics and 40 ticker-days of fills, the calibration cannot separate
+# metrics that are measuring the same thing, and it should not be asked to.
+# Redundancy and instability are properties of the METRICS, answerable across
+# 587 symbols without a single fill, and removing what they find is what leaves
+# calibration a field small enough for its sample size.
+
+def _rank_matrix(values):
+    """Columns ranked with ties averaged, as a numpy array.
+
+    Spearman across a whole matrix at once: rank each column, then take the
+    Pearson correlation of the ranks. numpy makes a 75 x 587 matrix instant
+    where a pairwise Python loop over 2,800 pairs would not be.
+    """
+    import numpy as np
+    a = np.asarray(values, dtype=float)
+    out = np.empty_like(a)
+    for j in range(a.shape[1]):
+        col = a[:, j]
+        ok = ~np.isnan(col)
+        r = np.full(col.shape, np.nan)
+        if ok.sum() >= 2:
+            vals = col[ok]
+            order = vals.argsort(kind="mergesort")
+            ranks = np.empty(len(vals), dtype=float)
+            ranks[order] = np.arange(1, len(vals) + 1, dtype=float)
+            # Ties averaged. The median statistic reads exactly 0.0 across
+            # every sparse-quote name, so a metric can arrive with dozens of
+            # identical values; ranking those arbitrarily would manufacture an
+            # ordering and then correlate it.
+            sv = vals[order]
+            i = 0
+            while i < len(sv):
+                k = i
+                while k + 1 < len(sv) and sv[k + 1] == sv[i]:
+                    k += 1
+                if k > i:
+                    ranks[order[i:k + 1]] = (i + k) / 2.0 + 1.0
+                i = k + 1
+            r[ok] = ranks
+        out[:, j] = r
+    return out
+
+
+@router.get("/metric-correlation")
+async def metric_correlation(
+    date:    str = Query(None),
+    family:  str = Query(None, description="only metrics whose name starts here"),
+    limit:   int = Query(90, ge=2, le=250),
+    cutoff:  float = Query(0.97, ge=0.5, le=1.0),
+    pool=Depends(get_scalp_pool),
+):
+    """Which metrics are measuring the same thing. NO TRADE DATA NEEDED.
+
+    ~232 columns, most of them one measurement at a different variant, horizon
+    or statistic. If two correlate at 0.97 across 587 symbols, one of them is
+    redundant, and that is knowable now rather than after enough sessions
+    accumulate to tell them apart on outcomes -- which, at their similarity,
+    would be never.
+
+    Returned as a matrix plus a LEAF ORDERING from hierarchical clustering, so
+    the blocks are adjacent and readable. Unordered, a 90x90 grid of mostly
+    high correlations shows nothing; ordered, the families separate visibly.
+
+    `redundant` is the actionable half: groups whose members all sit above the
+    cutoff with each other. Each group is one metric's worth of information.
+    """
+    if pool is None:
+        return _no_db({"metrics": [], "matrix": []})
+
+    want = _as_date(date)
+    async with pool.acquire() as conn:
+        dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT 90")]
+        if not dates:
+            return {"connected": True, "metrics": [], "matrix": [],
+                    "note": "daily_metrics is empty."}
+        d = want if want in dates else dates[0]
+        rows = await conn.fetch(
+            "SELECT symbol, metric, value FROM daily_metrics "
+            "WHERE trade_date = $1 AND value IS NOT NULL", d)
+
+    import numpy as np
+    by_metric: dict = {}
+    for r in rows:
+        if family and not r["metric"].startswith(family):
+            continue
+        by_metric.setdefault(r["metric"], {})[r["symbol"]] = r["value"]
+
+    # Symbols shared by every metric under consideration. A per-pair
+    # intersection would give each cell a different sample and make the matrix
+    # internally inconsistent -- two cells in the same row would not be
+    # comparable.
+    if not by_metric:
+        return {"connected": True, "date": str(d), "metrics": [], "matrix": [],
+                "note": "no metrics matched."}
+    common = set.intersection(*(set(v) for v in by_metric.values()))
+    names = sorted(by_metric)[:limit]
+    syms = sorted(common)
+    if len(syms) < 5 or len(names) < 2:
+        return {"connected": True, "date": str(d), "metrics": names,
+                "matrix": [], "n_symbols": len(syms),
+                "note": f"only {len(syms)} symbols carry every selected "
+                        f"metric — too few to correlate."}
+
+    mat = np.array([[by_metric[m][s] for m in names] for s in syms])
+    ranks = _rank_matrix(mat)
+    # Constant columns have zero variance and would produce NaN. Dropped and
+    # NAMED: a metric with one value across the universe is a finding.
+    sd = np.nanstd(ranks, axis=0)
+    keep = sd > 0
+    dropped = [n for n, k in zip(names, keep) if not k]
+    names = [n for n, k in zip(names, keep) if k]
+    ranks = ranks[:, keep]
+    if len(names) < 2:
+        return {"connected": True, "date": str(d), "metrics": names,
+                "matrix": [], "constant": dropped,
+                "note": "fewer than two non-constant metrics."}
+
+    C = np.corrcoef(ranks, rowvar=False)
+    C = np.nan_to_num(C, nan=0.0)
+
+    # Leaf ordering, so the blocks are adjacent.
+    order = list(range(len(names)))
+    try:
+        from scipy.cluster.hierarchy import linkage, leaves_list
+        from scipy.spatial.distance import squareform
+        dist = 1.0 - np.abs(C)
+        np.fill_diagonal(dist, 0.0)
+        dist = (dist + dist.T) / 2.0
+        order = list(leaves_list(linkage(squareform(dist, checks=False),
+                                         method="average")))
+    except Exception:
+        # scipy is a research-runner dependency and this panel should still
+        # render without it -- unordered is worse, not broken.
+        pass
+
+    names_o = [names[i] for i in order]
+    C_o = C[np.ix_(order, order)]
+
+    # Redundant groups: a chain of metrics each above the cutoff with the
+    # group's first member. Deliberately simple -- the point is "these three
+    # are one metric", not a clustering result.
+    used, groups = set(), []
+    for i, n in enumerate(names_o):
+        if n in used:
+            continue
+        members = [n]
+        for j in range(i + 1, len(names_o)):
+            if names_o[j] in used:
+                continue
+            if abs(C_o[i, j]) >= cutoff:
+                members.append(names_o[j])
+                used.add(names_o[j])
+        if len(members) > 1:
+            used.add(n)
+            groups.append(members)
+
+    return {
+        "connected": True, "date": str(d),
+        "metrics": names_o,
+        "matrix": [[round(float(x), 4) for x in row] for row in C_o],
+        "n_symbols": len(syms),
+        "cutoff": cutoff,
+        "redundant": groups,
+        "constant": dropped,
+        "families": sorted({(_parse_variant(m) or {}).get("kind") or m.split("_")[0]
+                            for m in by_metric}),
+        "note": "Spearman across symbols on one session. Ordered by "
+                "hierarchical clustering so the blocks are adjacent.",
+    }
+
+
+@router.get("/rank-stability")
+async def rank_stability(
+    sessions: int = Query(10, ge=3, le=60),
+    top_n:    int = Query(20, ge=5, le=100),
+    pool=Depends(get_scalp_pool),
+):
+    """Does a metric rank the same names tomorrow. NO TRADE DATA NEEDED.
+
+    A metric whose top 20 reshuffles every session is measuring noise in the
+    measurement rather than a property of the stock. That is disqualifying
+    regardless of how it calibrates -- a signal that cannot be acted on the
+    next morning is not a signal -- and it costs nothing but the metric's own
+    history to find out.
+
+    TWO NUMBERS, because they fail differently. The consecutive-session rank
+    correlation is the whole universe's ordering; top-N retention is the only
+    part of that ordering anyone trades. A metric can hold the bulk of the
+    universe in place while churning its head, and the second number is the
+    one that matters for a ranked table people read the first page of.
+
+    The real example this is built for: one name read 0.069 bps one session
+    and 1.727 the next with nothing changing about the stock, because the
+    median statistic flipped across a boundary. `worst_jump` reports the
+    largest single-name rank move so that shows up as a name rather than only
+    as a lower average.
+    """
+    if pool is None:
+        return _no_db({"rows": []})
+
+    async with pool.acquire() as conn:
+        dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT $1", sessions)]
+        if len(dates) < 2:
+            return {"connected": True, "rows": [], "n_sessions": len(dates),
+                    "note": "at least two sessions are needed to compare "
+                            "one ranking against another."}
+        dates = sorted(dates)
+        rows = await conn.fetch(
+            "SELECT trade_date, symbol, metric, value FROM daily_metrics "
+            "WHERE trade_date = ANY($1) AND value IS NOT NULL", dates)
+
+    per: dict = {}
+    for r in rows:
+        per.setdefault(r["metric"], {}).setdefault(
+            str(r["trade_date"]), {})[r["symbol"]] = r["value"]
+
+    out = []
+    for metric, by_date in per.items():
+        days = [by_date[str(x)] for x in dates if str(x) in by_date]
+        if len(days) < 2:
+            continue
+        rhos, retention, worst = [], [], None
+        for a, b in zip(days, days[1:]):
+            shared = sorted(set(a) & set(b))
+            if len(shared) < 5:
+                continue
+            rho = _spearman([a[s] for s in shared], [b[s] for s in shared])
+            if rho is not None:
+                rhos.append(rho)
+            # Top-N by value descending, on each side.
+            ta = [s for s in sorted(shared, key=lambda s: -a[s])[:top_n]]
+            tb = set(s for s in sorted(shared, key=lambda s: -b[s])[:top_n])
+            if ta:
+                retention.append(len(set(ta) & tb) / len(ta))
+            ra = {s: i for i, s in enumerate(sorted(shared, key=lambda s: -a[s]))}
+            rb = {s: i for i, s in enumerate(sorted(shared, key=lambda s: -b[s]))}
+            for s in shared:
+                jump = abs(ra[s] - rb[s])
+                if worst is None or jump > worst["places"]:
+                    worst = {"symbol": s, "places": jump,
+                             "from": a[s], "to": b[s], "of": len(shared)}
+        if not rhos:
+            continue
+        link = scalp_metric_docs.header_link(metric)
+        out.append({
+            "metric": metric,
+            "rank_corr": sum(rhos) / len(rhos),
+            "top_retention": (sum(retention) / len(retention)) if retention else None,
+            "pairs": len(rhos),
+            "worst_jump": worst,
+            "section": link.get("section"), "href": link.get("href"),
+            "tooltip": link.get("tooltip"),
+            "variant": _parse_variant(metric),
+        })
+
+    out.sort(key=lambda r: -(r["rank_corr"] or -1))
+    return {
+        "connected": True,
+        "rows": out,
+        "n_sessions": len(dates),
+        "dates": [str(x) for x in dates],
+        "top_n": top_n,
+        "note":
+            "Average Spearman between consecutive sessions' rankings, and the "
+            "share of each session's top "
+            f"{top_n} still there the next day. A metric near 1.0 ranks the "
+            "same names tomorrow; one near 0 is re-drawing the list every "
+            "morning and cannot be traded off regardless of how it "
+            "calibrates.",
     }
 
 
@@ -1057,18 +1376,29 @@ async def candidates(
     }
 
 
-# The variant the ranking opens on until calibration says otherwise.
+# The variant the ranking opens on. NO LONGER A GUESS.
 #
-# NOT the median statistic, and this is the one place a preference is
-# expressed. The median collapses to exactly 0.0 on a sparse-quote name -- when
-# more than half of consecutive buckets carry an identical midpoint, the median
-# change is zero by construction -- which makes the ratio infinite and sorts
-# the least tradeable names to the top. rms is the same measurement without
-# that failure.
+# Calibrated 2026-09-01 against 874 round trips over 3 sessions, 40
+# ticker-days. Nothing cleared |rho| >= 0.5 -- the best was +0.474 -- but at
+# |rho| >= 0.3 there were 136 against 14 expected by chance, so the signal is
+# real and diffuse rather than absent. The top six:
 #
-# Written as a PREFERENCE ORDER over what the database actually has, not as a
-# literal. If the preferred name is gone, the page opens on something real
-# rather than on a column of nulls.
+#     ratio_tw_mid_5s_rms      +0.474
+#     ratio_ask_side_5s_rms    +0.468
+#     ratio_last_mid_5s_rms    +0.467
+#     ratio_bid_side_5s_rms    +0.463
+#     ratio_last_mid_10s_rms   +0.463
+#     ratio_ask_side_10s_rms   +0.457
+#
+# WHAT THAT SETTLES. All six are rms. Five different midpoint definitions sit
+# within 0.017 of each other, which is far inside the noise at n=40 -- so the
+# STATISTIC separates and the VARIANT does not, and the ordering below
+# (statistic first, variant second) is what the evidence supports rather than
+# what seemed sensible. The horizon preference moves from 10s to 5s on the
+# same evidence: both 5s entries outrank their 10s counterparts.
+#
+# This is still 40 ticker-days. It is the best available answer, not a
+# settled one, and the calibration panel is where it gets revisited.
 _NOISE_PREFERENCE = ("tw_mid", "last_mid", "trade_price")
 # median is ranked BELOW an unrecognised statistic, on purpose. Everything else
 # here is taste; this one is a defect. Being unfamiliar is a reason to look at
@@ -1076,11 +1406,29 @@ _NOISE_PREFERENCE = ("tw_mid", "last_mid", "trade_price")
 # is supposed to exclude.
 _STAT_PREFERENCE = ("rms", "p75", "p90", "mean")
 _STAT_LAST = ("median",)
+# 5s, from the calibration above. Nearest-wins rather than exact, so a
+# pipeline that stops emitting 5s degrades to the closest horizon it does
+# emit instead of falling through to whatever sorts first alphabetically.
+_PREFERRED_HORIZON_S = 5
 
 
 def _default_noise(available: list[str]) -> str | None:
     if not available:
         return None
+
+    # THE PIN, IF THE PIPELINE HAS ONE. config.INTRADAY_NOISE_COLUMN is the
+    # variant intraday_metrics is built around, and the ranked table has to
+    # agree with it — two panels on one page disagreeing about which noise
+    # definition they mean is the same class of defect as two copies of a
+    # baseline, which produced two divergent z estimators on the IV page.
+    #
+    # Read from the vendored config rather than restated, so it cannot drift;
+    # check_vendored.py diffs that file against the pipeline's copy. The
+    # preference ordering below stays as the fallback for a config without a
+    # pin, and for a pin naming a column this date does not carry.
+    pinned = getattr(scalp_config, "INTRADAY_NOISE_COLUMN", None)
+    if pinned and pinned in available:
+        return pinned
     def score(metric: str):
         p = _parse_variant(metric) or {}
         v = p.get("variant") or ""
@@ -1097,7 +1445,7 @@ def _default_noise(available: list[str]) -> str | None:
             # between a number and a zero, so it decides first.
             stat_rank,
             _NOISE_PREFERENCE.index(v) if v in _NOISE_PREFERENCE else 99,
-            abs((p.get("horizon_s") or 0) - 10),   # 10s, nearest first
+            abs((p.get("horizon_s") or 0) - _PREFERRED_HORIZON_S),
             metric,
         )
     return sorted(available, key=score)[0]
