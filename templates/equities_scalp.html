@@ -243,6 +243,20 @@
     .sc-num.bad, .sc-chg.bad { color:#e84393; font-weight:600; }
     .sc-chg.warn { color:#d9a441; }
 
+    /* The chance table sits ABOVE the ranked list and is boxed, because the
+       ranked list is the thing that misleads and this is the correction. */
+    .sc-chance {
+      border:1px solid rgba(232,67,147,0.35); border-radius:5px;
+      background:rgba(232,67,147,0.05); padding:9px 11px;
+    }
+    .sc-chance-hd {
+      font-size:11px; font-weight:600; color:#e84393; margin-bottom:6px;
+    }
+    .sc-chance .sc-table th { background:transparent; }
+    .sc-rho { font-weight:600; }
+    .sc-rho.mid { color:var(--accent); }
+    .sc-rho.strong { color:#4ec9a0; }
+
     .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
     .sc-reject {
       display:inline-flex; align-items:baseline; gap:5px;
@@ -798,16 +812,200 @@
         </div></div>
       </div>
 
+      <!-- ── fills upload ─────────────────────────────────────────────
+           In the RESEARCH half rather than the Use half: uploading a
+           statement is a weekend act, and nothing above it depends on
+           having done so. -->
+      <div class="sc-panel" id="fills">
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Realised results</span>
+          <span class="sc-panel-sub"
+                x-text="fills ? (fills.totals.trips + ' round trips · '
+                        + fills.totals.symbols + ' tickers · '
+                        + fills.totals.sessions + ' sessions') : 'nothing uploaded yet'"></span>
+          <span class="sc-spacer"></span>
+          <span class="sc-panel-sub" x-show="fills && fills.totals.trips" x-cloak
+                :class="{}"
+                x-text="(fills.totals.net_pnl >= 0 ? '+$' : '-$')
+                        + Math.abs(fills.totals.net_pnl).toFixed(2) + ' net'"></span>
+          <label class="sc-btn on" style="cursor:pointer">
+            <span x-text="uploading ? 'parsing…' : 'upload statement'"></span>
+            <input type="file" accept=".csv,.xlsx,.xlsm" style="display:none"
+                   @change="uploadFills($event)" :disabled="uploading">
+          </label>
+        </div>
+
+        <div class="sc-panel-body">
+          <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+            A Schwab account statement, CSV or XLSX. Rows are filtered to
+            <code>TRD</code> and parsed into <b>round trips</b> — a position
+            going flat to non-flat to flat, however many prints that takes.
+            Re-uploading a session <b>replaces</b> it rather than adding to it,
+            so a corrected statement is authoritative. The raw file is kept so
+            a parser fix can be re-run without exporting again.
+          </div>
+
+          <div class="sc-warn bad" x-show="uploadError" x-cloak
+               style="margin-top:9px; border-radius:4px">
+            <b>Could not parse.</b> <span x-text="uploadError"></span>
+          </div>
+
+          <template x-if="uploadResult">
+            <div style="margin-top:10px">
+              <div class="sc-rejects">
+                <span class="sc-reject zero">round trips
+                  <b style="color:var(--accent)" x-text="uploadResult.report.trips"></b></span>
+                <span class="sc-reject zero">sessions
+                  <b style="color:var(--accent)" x-text="uploadResult.replaced_dates.length"></b></span>
+                <span class="sc-reject zero">rows read
+                  <b style="color:var(--accent)" x-text="uploadResult.report.rows_trade"></b></span>
+                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unclosed}">unclosed
+                  <b x-text="uploadResult.report.n_unclosed"></b></span>
+                <span class="sc-reject" :class="{zero: !uploadResult.report.n_unparsed}">unreadable
+                  <b x-text="uploadResult.report.n_unparsed"></b></span>
+              </div>
+              <!-- Surfaced at upload time, not buried in a log. An unclosed
+                   position corrupted a session's statistics once and was not
+                   found for hours. -->
+              <template x-for="issue in uploadIssues()" :key="issue.text">
+                <div class="sc-warn" :class="{bad: issue.level === 'bad'}"
+                     style="margin-top:6px; border-radius:4px"
+                     x-text="issue.text"></div>
+              </template>
+              <div class="sc-panel-sub" style="margin-top:6px"
+                   x-show="uploadResult.archived" x-cloak
+                   x-text="'archived: ' + uploadResult.archived"></div>
+            </div>
+          </template>
+
+          <div class="sc-scroll" style="max-height:260px; margin-top:10px"
+               x-show="fills && fills.rows.length" x-cloak>
+            <table class="sc-table">
+              <thead><tr>
+                <th>session</th><th>ticker</th>
+                <th class="sc-num">trips</th>
+                <th class="sc-num">net P&amp;L</th>
+                <th class="sc-num">win</th>
+                <th class="sc-num" title="Wall clock from the first entry to the last exit — what the session was actually rationed by, not the sum of hold durations.">minutes</th>
+                <th class="sc-num">$/min</th>
+                <th class="sc-num">trips/min</th>
+                <th class="sc-num">median hold</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in (fills ? fills.rows : [])"
+                          :key="r.trade_date + r.symbol">
+                  <tr>
+                    <td x-text="r.trade_date"></td>
+                    <td><b x-text="r.symbol"></b></td>
+                    <td class="sc-num" x-text="r.trips"></td>
+                    <td class="sc-num" :class="{bad: r.net_pnl < 0}"
+                        x-text="(r.net_pnl >= 0 ? '+' : '') + r.net_pnl.toFixed(2)"></td>
+                    <td class="sc-num" x-text="r.win_rate != null ? (r.win_rate*100).toFixed(0)+'%' : '—'"></td>
+                    <td class="sc-num" x-text="r.attention_minutes != null ? r.attention_minutes.toFixed(0) : '—'"></td>
+                    <td class="sc-num" :class="{bad: r.dollars_per_min < 0}"
+                        x-text="r.dollars_per_min != null ? r.dollars_per_min.toFixed(2) : '—'"></td>
+                    <td class="sc-num" x-text="r.trips_per_min != null ? r.trips_per_min.toFixed(2) : '—'"></td>
+                    <td class="sc-num" x-text="r.median_hold_s != null ? r.median_hold_s.toFixed(0)+'s' : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 2.4 calibration ──────────────────────────────────────────── -->
       <div class="sc-panel" id="calibration">
-        <div class="sc-panel-hdr"><span class="sc-panel-title">Calibration against realised results</span></div>
-        <div class="sc-panel-body"><div class="sc-stub">
-          <span class="sc-stub-tag">phase 5 — needs the fills upload</span>
-          <b>Rank correlation of each metric against actual $/min, sorted.</b>
-          With a handful of tickers and ~75 candidate metrics something will
-          correlate by chance, so this is a table to watch over weeks rather
-          than a verdict — the sample size shown prominently and the weakness
-          made visible rather than implied.
-        </div></div>
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Calibration against realised results</span>
+          <span class="sc-panel-sub"
+                x-text="calib ? (calib.n_metrics + ' metrics · ' + calib.n_pairs + ' ticker-days') : ''"></span>
+          <span class="sc-spacer"></span>
+          <select class="sc-sel" x-model="calibTarget" @change="loadCalibration()">
+            <template x-for="t in (calib ? calib.targets : [])" :key="t.key">
+              <option :value="t.key" x-text="t.label"></option>
+            </template>
+          </select>
+          <input class="sc-inp" type="text" x-model="calibFilter"
+                 placeholder="filter…" style="max-width:130px">
+          <span class="sc-panel-sub" x-show="calibLoading" x-cloak>…</span>
+        </div>
+
+        <div class="sc-panel-body">
+          <div class="sc-empty" x-show="!calib || !calib.rows.length" x-cloak>
+            <div class="sc-empty-hd">No realised results to calibrate against</div>
+            <div>Upload a statement above and this fills in.</div>
+          </div>
+
+          <template x-if="calib && calib.rows.length">
+            <div>
+              <!-- READ THIS FIRST. The ranked list below will always have
+                   something at the top; this is how much of that is nothing. -->
+              <div class="sc-chance">
+                <div class="sc-chance-hd">How much of this is chance</div>
+                <table class="sc-table" style="width:auto">
+                  <thead><tr>
+                    <th>|ρ| at least</th>
+                    <th class="sc-num">expected by chance</th>
+                    <th class="sc-num">observed</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="e in (calib ? calib.expected_by_chance : [])"
+                              :key="e.threshold">
+                      <tr>
+                        <td x-text="e.threshold.toFixed(1)"></td>
+                        <td class="sc-num" x-text="e.expected.toFixed(1)"></td>
+                        <td class="sc-num"
+                            :class="{bad: e.observed <= e.expected}"
+                            x-text="e.observed"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="sc-panel-sub" style="margin-top:7px; line-height:1.7; max-width:80ch">
+                  <span x-text="calib.note"></span>
+                  <span style="display:block; margin-top:5px"
+                        x-show="calibNeeded()" x-cloak>
+                    At <b x-text="calibNeeded().have"></b> ticker-days, roughly
+                    <b x-text="(calib.expected_by_chance[1] || {}).expected?.toFixed(0) || '?'"></b>
+                    of <span x-text="calib.n_metrics"></span> metrics clear
+                    |ρ| ≥ 0.5 with no relationship at all. That figure falls
+                    below one at about
+                    <b x-text="calibNeeded().need"></b> ticker-days — which is
+                    the point at which the top of this table starts being
+                    evidence rather than arithmetic.
+                  </span>
+                </div>
+              </div>
+
+              <div class="sc-scroll" style="max-height:420px; margin-top:10px">
+                <table class="sc-table">
+                  <thead><tr>
+                    <th>metric</th><th>section</th>
+                    <th class="sc-num">ρ</th>
+                    <th class="sc-num">n</th>
+                    <th class="sc-num">p</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="r in calibRows()" :key="r.metric">
+                      <tr>
+                        <td>
+                          <a class="sc-metric-link" :href="r.href" target="_blank"
+                             rel="noopener" :title="r.tooltip" x-text="r.metric"></a>
+                        </td>
+                        <td x-text="r.section || '—'"></td>
+                        <td class="sc-num sc-rho" :class="rhoClass(r.rho)"
+                            x-text="(r.rho >= 0 ? '+' : '') + r.rho.toFixed(3)"></td>
+                        <td class="sc-num" x-text="r.n"></td>
+                        <td class="sc-num" x-text="r.p < 0.001 ? '<0.001' : r.p.toFixed(3)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
 
       <div class="sc-panel" id="distributions">

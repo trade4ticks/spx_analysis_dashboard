@@ -34,6 +34,16 @@ document.addEventListener('alpine:init', () => {
     // answers and the second one is a finding.
     passCount: null,
 
+    // ── fills and calibration ───────────────────────────────────────────
+    fills: null,
+    uploading: false,
+    uploadResult: null,
+    uploadError: '',
+    calib: null,
+    calibLoading: false,
+    calibTarget: 'dollars_per_min',
+    calibFilter: '',
+
     // ── data health ─────────────────────────────────────────────────────
     health: null,
     healthLoading: false,
@@ -74,8 +84,12 @@ document.addEventListener('alpine:init', () => {
         // defaults are, and there would then be nothing to reset to.
         this.filters = Object.assign({}, f.defaults || {});
         this.noise = j.default_noise || '';
-        if (this.meta.connected && this.meta.date) {
-          await Promise.all([this.loadCandidates(), this.loadHealth()]);
+        if (this.meta.connected) {
+          await Promise.all([
+            this.meta.date ? this.loadCandidates() : Promise.resolve(),
+            this.meta.date ? this.loadHealth() : Promise.resolve(),
+            this.loadFills(), this.loadCalibration(),
+          ]);
         }
       } catch (e) {
         this.meta.connected = false;
@@ -174,6 +188,135 @@ document.addEventListener('alpine:init', () => {
                  + `count — a metric family stopped being written`);
       }
       return parts.join('. ');
+    },
+
+    // ── fills ───────────────────────────────────────────────────────────
+
+    async loadFills() {
+      try {
+        const j = await scGetJson('/api/equities-scalp/fills');
+        this.fills = j.error ? null : j;
+      } catch (e) { this.fills = null; }
+    },
+
+    async uploadFills(ev) {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      this.uploading = true;
+      this.uploadError = '';
+      this.uploadResult = null;
+      try {
+        const body = new FormData();
+        body.append('file', f);
+        const r = await fetch('/api/equities-scalp/upload-fills',
+                              { method: 'POST', body });
+        const j = await r.json();
+        if (!r.ok) {
+          // FastAPI puts a 400's message in `detail`. Surfacing the raw
+          // status instead would hide the one sentence that says which
+          // column the parser could not find.
+          this.uploadError = j.detail || `${r.status} ${r.statusText}`;
+        } else {
+          this.uploadResult = j;
+          await Promise.all([this.loadFills(), this.loadCalibration()]);
+        }
+      } catch (e) {
+        this.uploadError = String(e.message || e);
+      } finally {
+        this.uploading = false;
+        // Cleared so re-selecting the SAME file fires change again — a
+        // re-upload after fixing a statement is the common case, and an
+        // input that silently ignores it looks like a failed upload.
+        ev.target.value = '';
+      }
+    },
+
+    /* The parser's report, as things that need doing rather than counts.
+     * An unclosed position is first because it is the one that has silently
+     * corrupted a day's statistics before. */
+    uploadIssues() {
+      const j = this.uploadResult;
+      if (!j || !j.report) return [];
+      const r = j.report, out = [];
+      if (r.n_unclosed) {
+        out.push({ level: 'bad', text:
+          `${r.n_unclosed} position${r.n_unclosed === 1 ? '' : 's'} still open `
+          + `at the end of a session (`
+          + r.unclosed.map(u => `${u.symbol} ${u.shares} from ${u.since.slice(11)}`).join(', ')
+          + `). Excluded from the trips above rather than completed at the `
+          + `last price — but every statistic for that ticker-day is now `
+          + `computed from an incomplete picture.` });
+      }
+      if (r.n_unparsed) {
+        out.push({ level: 'bad', text:
+          `${r.n_unparsed} trade row${r.n_unparsed === 1 ? '' : 's'} could not `
+          + `be read: ` + r.rows_unparsed.slice(0, 4)
+              .map(u => `line ${u.line} "${u.text}"`).join('; ') });
+      }
+      if (r.reversals && r.reversals.length) {
+        out.push({ level: 'warn', text:
+          `${r.reversals.length} execution(s) carried a position through zero `
+          + `and were split. That should not happen in a one-position-at-a-time `
+          + `strategy.` });
+      }
+      if (j.archive_error) {
+        out.push({ level: 'warn', text:
+          `The statement was parsed and stored, but the raw file could not be `
+          + `archived (${j.archive_error}). A parser fix would need the `
+          + `statement exported again.` });
+      }
+      return out;
+    },
+
+    // ── calibration ─────────────────────────────────────────────────────
+
+    async loadCalibration() {
+      this.calibLoading = true;
+      try {
+        const j = await scGetJson('/api/equities-scalp/calibration?target='
+                                  + encodeURIComponent(this.calibTarget));
+        this.calib = j.error ? null : j;
+      } catch (e) {
+        this.calib = null;
+      } finally {
+        this.calibLoading = false;
+      }
+    },
+
+    calibRows() {
+      const q = (this.calibFilter || '').toLowerCase();
+      const rows = (this.calib && this.calib.rows) || [];
+      return q ? rows.filter(r => r.metric.toLowerCase().indexOf(q) >= 0) : rows;
+    },
+
+    /* How many sessions before this table means anything.
+     *
+     * Solved rather than asserted: the expected-by-chance count at |rho| >= 0.5
+     * falls below one when the sample reaches about 25 ticker-days. Saying
+     * "watch it over weeks" is advice; saying how many more is a number. */
+    calibNeeded() {
+      const c = this.calib;
+      if (!c || !c.n_pairs) return null;
+      const have = c.n_pairs;
+      // erfc(0.5 * sqrt(n-1) / sqrt(2)) * n_metrics < 1
+      for (let n = have; n <= 400; n++) {
+        const z = 0.5 * Math.sqrt(n - 1);
+        // Abramowitz-Stegun 7.1.26 is plenty for a guidance number.
+        const t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
+        const erf = 1 - (((((1.061405429 * t - 1.453152027) * t)
+                    + 1.421413741) * t - 0.284496736) * t + 0.254829592)
+                    * t * Math.exp(-(z * z) / 2);
+        const p = 1 - erf;
+        if (p * c.n_metrics < 1) return { need: n, have };
+      }
+      return null;
+    },
+
+    rhoClass(rho) {
+      const a = Math.abs(rho);
+      if (a >= 0.7) return 'strong';
+      if (a >= 0.5) return 'mid';
+      return '';
     },
 
     async loadCandidates() {

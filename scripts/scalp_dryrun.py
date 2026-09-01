@@ -285,6 +285,27 @@ class Conn:
         # swallowed the health query and handed it two dates, which is not
         # enough to have a trailing baseline at all — the panel then looked
         # empty rather than wrong.
+        if "FROM fills_daily f" in sql or "JOIN fills_daily" in sql:
+            # The calibration join. Deliberately shaped so one metric ranks
+            # PERFECTLY with the target and the rest do not — a correlation
+            # harness whose data has no signal cannot tell a working estimator
+            # from one that returns zero.
+            out = []
+            for i, sym in enumerate(FAKE_SYMBOLS):
+                for m in ("ratio_tw_mid_10s_rms", "spread_bps_tw",
+                          "trades_per_min"):
+                    x = {"ratio_tw_mid_10s_rms": float(i),
+                         "spread_bps_tw": float((i * 7) % 5),
+                         "trades_per_min": 3.0}[m]
+                    out.append({"metric": m, "x": x, "y": float(i),
+                                "trade_date": FAKE_DATES[0], "symbol": sym})
+            return out
+        if "FROM fills_daily" in sql:
+            return [{"trade_date": FAKE_DATES[0], "symbol": s, "trips": 4,
+                     "net_pnl": 12.5, "win_rate": 0.75,
+                     "attention_minutes": 30.0, "dollars_per_min": 0.42,
+                     "trips_per_min": 0.13, "median_hold_s": 8.0,
+                     "shares": 200.0} for s in FAKE_SYMBOLS]
         if "DISTINCT trade_date" in sql and "LIMIT $1" in sql:
             return [{"trade_date": x} for x in reversed(HEALTH_DATES)]
         if "DISTINCT trade_date" in sql:
@@ -333,9 +354,38 @@ class Conn:
         check_sql(sql, args)
         return 0 if self.empty else 587
 
+    async def execute(self, sql, *args):
+        # DDL carries no placeholders; check_sql's arity test would read
+        # CREATE TABLE as a statement with zero args and be right about it.
+        if "$" in sql:
+            check_sql(sql, args)
+        return "OK"
+
+    async def executemany(self, sql, args_list):
+        for a in args_list:
+            check_sql(sql, tuple(a))
+        return "OK"
+
+    def transaction(self):
+        return _Txn()
+
     async def fetchrow(self, sql, *args):
         check_sql(sql, args)
+        if self.empty:
+            return None
+        # A bare aggregate ALWAYS returns a row in Postgres, even over an
+        # empty table — count() gives 0 and sum() gives NULL. A fake that
+        # answers None to one is not modelling the database, it is modelling
+        # a table with no rows, and the difference is a TypeError in the
+        # endpoint that would never happen in production.
+        if "count(" in sql.lower():
+            return {"n": 20, "pnl": 152.5, "symbols": 5, "sessions": 4}
         return None
+
+
+class _Txn:
+    async def __aenter__(self): return None
+    async def __aexit__(self, *a): return False
 
 
 class Acq:
@@ -459,6 +509,7 @@ async def run() -> int:
 
     fails += await check_candidates()
     fails += await check_health()
+    fails += await check_calibration()
 
     for b in BAD:
         print(f"  {b}")
@@ -467,6 +518,73 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_calibration() -> int:
+    """Section 2.4: the rank correlation, and the honesty around it."""
+    fails = 0
+    j = await sc.calibration(target="dollars_per_min", min_pairs=3, pool=Pool())
+    rows = j.get("rows") or []
+    if not rows:
+        print("  /calibration returned no rows against a populated fake")
+        return 1
+
+    # Sorted by |rho|, and the metric the fake made monotonic in the target
+    # must be at the top. A correlation that ranks a flat metric first is
+    # returning noise.
+    if abs(rows[0]["rho"]) < abs(rows[-1]["rho"]):
+        print("  /calibration is not sorted by |rho|")
+        fails += 1
+    if rows[0]["metric"] != "ratio_tw_mid_10s_rms":
+        print(f"  the perfectly-ranked metric is not first: {rows[0]['metric']}")
+        fails += 1
+    if abs(rows[0]["rho"] - 1.0) > 1e-9:
+        print(f"  a metric that ranks identically with the target scored "
+              f"{rows[0]['rho']}, not 1.0")
+        fails += 1
+
+    # A metric with one value everywhere has no ordering. None, not zero —
+    # zero is a measurement and would sort it among the real answers.
+    flat = [r for r in rows if r["metric"] == "trades_per_min"]
+    if flat:
+        print("  a constant metric was given a correlation. It has no ordering "
+              "to correlate, and a zero here reads as 'no relationship "
+              "found' rather than 'not computable'.")
+        fails += 1
+
+    # THE HONESTY. Without this the panel is a ranked list that always has
+    # something at the top.
+    exp = j.get("expected_by_chance")
+    if not exp:
+        print("  /calibration does not return an expected-by-chance count.")
+        print("    With ~232 metrics and a handful of ticker-days, the top of")
+        print("    the list is mostly arithmetic and the panel must say so.")
+        fails += 1
+    else:
+        # It has to shrink as the threshold rises, or it is not a tail
+        # probability at all.
+        vals = [e["expected"] for e in exp]
+        if any(b > a + 1e-12 for a, b in zip(vals, vals[1:])):
+            print(f"  expected-by-chance does not fall with the threshold: {vals}")
+            fails += 1
+    if not j.get("sample"):
+        print("  the sample size is not returned, so the weakness is implied")
+        print("    rather than visible")
+        fails += 1
+
+    # The target is interpolated into SQL, so the whitelist is load-bearing.
+    try:
+        await sc.calibration(target="dollars_per_min; DROP TABLE fills--",
+                             min_pairs=3, pool=Pool())
+    except Exception as exc:
+        if getattr(exc, "status_code", None) != 400:
+            print(f"  an unknown target raised {type(exc).__name__}, not a 400")
+            fails += 1
+    else:
+        print("  an arbitrary `target` was accepted and interpolated into SQL")
+        fails += 1
+
+    return fails
 
 
 async def check_health() -> int:

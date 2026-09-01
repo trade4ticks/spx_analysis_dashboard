@@ -28,12 +28,13 @@ ship five long rows to draw one wide one.
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from app.db import get_scalp_pool, pool_status
-from app import scalp_config, scalp_columns, scalp_metric_docs
+from app import scalp_config, scalp_columns, scalp_fills, scalp_metric_docs
 
 router = APIRouter()
 
@@ -443,6 +444,381 @@ async def health(
             "is no per-date rejection count to read. The missing-symbol column "
             "is the union of every reason a symbol-day did not land, including "
             "a compute run that was killed, and cannot attribute them.",
+    }
+
+
+# ── the fills tables ────────────────────────────────────────────────────────
+#
+# THIS PROJECT OWNS THESE. Everything else on this page is read-only over the
+# pipeline's output; these two are the only tables the dashboard writes, and
+# the pipeline knows nothing about them.
+#
+# ROUND TRIPS, NOT JUST THE DAILY AGGREGATE. The aggregate is what calibration
+# correlates against, and storing only that would be enough for it -- but a
+# per-trip row with timestamps can be joined to the bucket containing each
+# entry, which answers what the book looked like around a fill rather than
+# what the ticker averaged that day. That join is the reason the trip rows
+# exist and it cannot be reconstructed from an average.
+_FILLS_DDL = """
+CREATE TABLE IF NOT EXISTS fills (
+    trade_date   DATE        NOT NULL,
+    symbol       TEXT        NOT NULL,
+    -- Position within the day for this symbol, in time order. Part of the key
+    -- because two round trips can share an entry SECOND at an eight-second
+    -- median hold, and a key that can collide silently drops a trip.
+    seq          INTEGER     NOT NULL,
+    entry_ts     TIMESTAMP   NOT NULL,
+    exit_ts      TIMESTAMP   NOT NULL,
+    peak_shares  DOUBLE PRECISION,
+    entry_price  DOUBLE PRECISION,
+    capital      DOUBLE PRECISION,
+    net_pnl      DOUBLE PRECISION,
+    duration_s   DOUBLE PRECISION,
+    is_long      BOOLEAN     NOT NULL,
+    legs         INTEGER     NOT NULL,
+    uploaded_at  TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (trade_date, symbol, seq)
+);
+CREATE INDEX IF NOT EXISTS fills_entry_idx ON fills (symbol, entry_ts);
+
+CREATE TABLE IF NOT EXISTS fills_daily (
+    trade_date        DATE   NOT NULL,
+    symbol            TEXT   NOT NULL,
+    trips             INTEGER,
+    net_pnl           DOUBLE PRECISION,
+    win_rate          DOUBLE PRECISION,
+    -- Wall clock from first entry to last exit, NOT summed hold time. It is
+    -- what the session was actually rationed by: 96 minutes spent on one name
+    -- for 14 round trips cost 96 minutes whether or not a position was open
+    -- in each of them.
+    attention_minutes DOUBLE PRECISION,
+    dollars_per_min   DOUBLE PRECISION,
+    trips_per_min     DOUBLE PRECISION,
+    median_hold_s     DOUBLE PRECISION,
+    shares            DOUBLE PRECISION,
+    uploaded_at       TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (trade_date, symbol)
+);
+"""
+
+
+async def _ensure_fills(conn):
+    await conn.execute(_FILLS_DDL)
+
+
+def _fills_raw_dir():
+    """Where the uploaded file is kept, so a parser fix can be re-run.
+
+    Volume storage, not the root disk — the root is where Postgres lives and
+    it has filled once already. Absence is not fatal: the parse and the write
+    are the point, and a statement that could not be archived is worth a line
+    in the report rather than a refused upload.
+    """
+    from pathlib import Path
+    return Path(os.environ.get(
+        "SCALP_FILLS_RAW_DIR",
+        "/mnt/trading_volume_3/equities_scalp/fills_raw"))
+
+
+@router.post("/upload-fills")
+async def upload_fills(
+    file: UploadFile = File(...),
+    pool=Depends(get_scalp_pool),
+):
+    """Parse a Schwab statement into round trips and persist them.
+
+    IDEMPOTENT BY DELETING THE DATES IT IS ABOUT TO WRITE, not by upserting
+    each row. An upsert alone leaves orphans: re-uploading a corrected
+    statement that yields FEWER trips would overwrite the ones that still
+    exist and silently keep the ones that no longer do. Delete-then-insert
+    inside one transaction makes the newest upload authoritative for every
+    date it covers, and touches no other date.
+
+    WHAT THE PARSER DID IS RETURNED, always. Trips found, rows it could not
+    read with their line numbers, and any position still open at the end of a
+    day. That last one is not a warning, it is the finding: an unclosed
+    position silently corrupted every downstream statistic on one session and
+    was not caught for hours. It is excluded from the write and named in the
+    response.
+    """
+    if pool is None:
+        return _no_db({"ok": False})
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "the uploaded file is empty.")
+
+    try:
+        trips, rep = scalp_fills.parse_statement(data, file.filename or "")
+    except scalp_fills.ParseError as exc:
+        raise HTTPException(400, str(exc))
+
+    report = rep.as_dict()
+
+    # Archived BEFORE the write, under the name it arrived with plus a hash,
+    # so a re-parse after a parser fix does not need the statement re-exported.
+    import hashlib
+    from datetime import datetime as _dtdt
+    archived = None
+    archive_error = None
+    try:
+        raw_dir = _fills_raw_dir()
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dtdt.now().strftime("%Y%m%dT%H%M%S")
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        safe = (file.filename or "statement").replace("/", "_").replace("\\", "_")
+        target = raw_dir / f"{stamp}_{digest}_{safe}"
+        target.write_bytes(data)
+        archived = str(target)
+    except Exception as exc:
+        archive_error = f"{type(exc).__name__}: {exc}"
+
+    daily = scalp_fills.daily_rows(trips)
+    dates = sorted({t.trade_date for t in trips})
+
+    written = 0
+    if trips:
+        # seq within (date, symbol), in time order. Assigned here rather than
+        # in the parser because it is a storage key, not a property of a trade.
+        by_key: dict = {}
+        rows = []
+        for t in sorted(trips, key=lambda x: (x.trade_date, x.symbol, x.entry_ts)):
+            k = (t.trade_date, t.symbol)
+            by_key[k] = by_key.get(k, 0) + 1
+            rows.append((t.trade_date, t.symbol, by_key[k], t.entry_ts,
+                         t.exit_ts, t.peak_shares, t.entry_price, t.capital,
+                         t.net_pnl, t.duration_s, t.is_long, t.legs))
+
+        async with pool.acquire() as conn:
+            await _ensure_fills(conn)
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM fills WHERE trade_date = ANY($1)", dates)
+                await conn.execute(
+                    "DELETE FROM fills_daily WHERE trade_date = ANY($1)", dates)
+                await conn.executemany(
+                    "INSERT INTO fills (trade_date, symbol, seq, entry_ts, "
+                    " exit_ts, peak_shares, entry_price, capital, net_pnl, "
+                    " duration_s, is_long, legs) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", rows)
+                await conn.executemany(
+                    "INSERT INTO fills_daily (trade_date, symbol, trips, "
+                    " net_pnl, win_rate, attention_minutes, dollars_per_min, "
+                    " trips_per_min, median_hold_s, shares) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                    [(r["trade_date"], r["symbol"], r["trips"], r["net_pnl"],
+                      r["win_rate"], r["attention_minutes"],
+                      r["dollars_per_min"], r["trips_per_min"],
+                      r["median_hold_s"], r["shares"]) for r in daily])
+                written = len(rows)
+
+    return {
+        "ok": True,
+        "written": written,
+        "daily_rows": len(daily),
+        "replaced_dates": [str(x) for x in dates],
+        "archived": archived,
+        "archive_error": archive_error,
+        "report": report,
+        "daily": [{**r, "trade_date": str(r["trade_date"])} for r in daily],
+    }
+
+
+@router.get("/fills")
+async def fills(pool=Depends(get_scalp_pool)):
+    """Everything uploaded so far, per ticker-day. The calibration's sample."""
+    if pool is None:
+        return _no_db({"rows": []})
+    async with pool.acquire() as conn:
+        await _ensure_fills(conn)
+        rows = await conn.fetch(
+            "SELECT trade_date, symbol, trips, net_pnl, win_rate, "
+            " attention_minutes, dollars_per_min, trips_per_min, "
+            " median_hold_s, shares "
+            "FROM fills_daily ORDER BY trade_date DESC, net_pnl DESC")
+        tot = await conn.fetchrow(
+            "SELECT count(*) AS n, sum(net_pnl) AS pnl, "
+            " count(DISTINCT symbol) AS symbols, "
+            " count(DISTINCT trade_date) AS sessions FROM fills")
+    return {
+        "connected": True,
+        "rows": [{**dict(r), "trade_date": str(r["trade_date"])} for r in rows],
+        "totals": {"trips": int(tot["n"] or 0),
+                   "net_pnl": float(tot["pnl"] or 0.0),
+                   "symbols": int(tot["symbols"] or 0),
+                   "sessions": int(tot["sessions"] or 0)},
+    }
+
+
+# ── rank correlation ────────────────────────────────────────────────────────
+#
+# Implemented here rather than imported. scipy is a dependency of the research
+# runner, not of the request path, and this is twenty lines whose correctness
+# the harness verifies against scipy directly -- so the reference is used where
+# it belongs, in the test, and not in the endpoint.
+
+def _ranks(xs: list[float]) -> list[float]:
+    """Ranks with ties averaged.
+
+    Ties matter more here than usual: the median noise statistic reads exactly
+    0.0 on every sparse-quote name, so a metric can arrive with a dozen
+    identical values. Ranking those 1..12 in arbitrary order would manufacture
+    an ordering the data does not contain and hand it to the correlation.
+    """
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    out = [0.0] * len(xs)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            out[order[k]] = avg
+        i = j + 1
+    return out
+
+
+def _spearman(xs: list[float], ys: list[float]):
+    """Spearman rho, or None when it is not defined."""
+    n = len(xs)
+    if n < 3:
+        return None
+    rx, ry = _ranks(xs), _ranks(ys)
+    mx = sum(rx) / n
+    my = sum(ry) / n
+    sxy = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    sxx = sum((a - mx) ** 2 for a in rx)
+    syy = sum((b - my) ** 2 for b in ry)
+    if sxx <= 0 or syy <= 0:
+        # A metric with one value across the whole sample has no ordering to
+        # correlate. None, not zero: zero is a measurement.
+        return None
+    return sxy / (sxx * syy) ** 0.5
+
+
+# The three things a metric could be calibrated against. $/min is the one the
+# strategy is rationed by -- attention is the scarce resource, not capital --
+# and the other two are here because agreeing with them is weak evidence that
+# a correlation is real rather than a quirk of one denominator.
+CALIB_TARGETS = {
+    "dollars_per_min": "$ per minute of attention",
+    "net_pnl":         "net P&L",
+    "win_rate":        "win rate",
+}
+
+
+def _normal_sf(z: float) -> float:
+    """P(|Z| > z) for a standard normal. Stdlib erf, no dependency."""
+    import math
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
+@router.get("/calibration")
+async def calibration(
+    target:    str = Query("dollars_per_min"),
+    min_pairs: int = Query(5, ge=3, le=200),
+    pool=Depends(get_scalp_pool),
+):
+    """Rank correlation of every metric against realised results.
+
+    THIS DECIDES WHICH VARIANT DRIVES THE RANKING, and it is the only thing on
+    the page that can. Every other panel describes the metrics; this one asks
+    whether any of them separates the names that made money from the names
+    that did not.
+
+    IT IS A TABLE TO WATCH, NOT A VERDICT, and the arithmetic says why. With a
+    handful of ticker-days and ~232 candidate metrics, the expected number
+    clearing any given |rho| BY CHANCE ALONE is computed and returned beside
+    the results. At fifteen pairs, a two-tailed threshold of 0.5 is p ~ 0.06,
+    so about fourteen metrics out of 232 should clear it with no relationship
+    whatsoever. A ranked list without that number beside it reads as a finding
+    and is mostly noise.
+
+    Spearman rather than Pearson: the hypothesis is that richer spread over
+    noise ranks BETTER, not that $/min is a linear function of it, and one
+    outsized session would dominate a Pearson estimate at this sample size.
+    """
+    if pool is None:
+        return _no_db({"rows": []})
+    if target not in CALIB_TARGETS:
+        raise HTTPException(
+            400, f"target must be one of {sorted(CALIB_TARGETS)}")
+
+    async with pool.acquire() as conn:
+        await _ensure_fills(conn)
+        rows = await conn.fetch(
+            f"SELECT m.metric, m.value AS x, f.{target} AS y, "
+            f"       m.trade_date, m.symbol "
+            f"FROM daily_metrics m "
+            f"JOIN fills_daily f "
+            f"  ON f.trade_date = m.trade_date AND f.symbol = m.symbol "
+            f"WHERE m.value IS NOT NULL AND f.{target} IS NOT NULL")
+        sample = await conn.fetchrow(
+            f"SELECT count(*) AS n, count(DISTINCT symbol) AS symbols, "
+            f" count(DISTINCT trade_date) AS sessions "
+            f"FROM fills_daily WHERE {target} IS NOT NULL")
+
+    # `target` is interpolated above, which is safe ONLY because it was
+    # checked against CALIB_TARGETS first -- a whitelist, not an escape.
+    by_metric: dict = {}
+    for r in rows:
+        by_metric.setdefault(r["metric"], ([], []))
+        by_metric[r["metric"]][0].append(float(r["x"]))
+        by_metric[r["metric"]][1].append(float(r["y"]))
+
+    out = []
+    for metric, (xs, ys) in by_metric.items():
+        if len(xs) < min_pairs:
+            continue
+        rho = _spearman(xs, ys)
+        if rho is None:
+            continue
+        n = len(xs)
+        # Fisher's approximation. At these sample sizes it is indicative
+        # rather than exact, which is the right register for the whole panel.
+        z = rho * (n - 1) ** 0.5
+        link = scalp_metric_docs.header_link(metric)
+        out.append({
+            "metric": metric, "rho": rho, "n": n,
+            "p": _normal_sf(z),
+            "tooltip": link.get("tooltip"), "href": link.get("href"),
+            "section": link.get("section"),
+            "variant": _parse_variant(metric),
+        })
+
+    out.sort(key=lambda r: -abs(r["rho"]))
+
+    n_pairs = max((r["n"] for r in out), default=0)
+    n_metrics = len(out)
+    # THE NUMBER THAT KEEPS THIS HONEST. How many of these metrics would clear
+    # each threshold with no relationship at all, given the sample.
+    expected = []
+    for thr in (0.3, 0.5, 0.7, 0.9):
+        if n_pairs >= 3:
+            p = _normal_sf(thr * (n_pairs - 1) ** 0.5)
+            observed = sum(1 for r in out if abs(r["rho"]) >= thr)
+            expected.append({"threshold": thr, "expected": p * n_metrics,
+                             "observed": observed})
+
+    return {
+        "connected": True,
+        "target": target,
+        "target_label": CALIB_TARGETS[target],
+        "targets": [{"key": k, "label": v} for k, v in CALIB_TARGETS.items()],
+        "rows": out[:400],
+        "n_metrics": n_metrics,
+        "n_pairs": n_pairs,
+        "sample": {"ticker_days": int(sample["n"] or 0),
+                   "symbols": int(sample["symbols"] or 0),
+                   "sessions": int(sample["sessions"] or 0)},
+        "expected_by_chance": expected,
+        "note":
+            "Spearman rank correlation across ticker-days. Read the "
+            "expected-by-chance column first: with this many metrics and this "
+            "few ticker-days, a list sorted by |rho| will always have "
+            "something at the top. What matters is whether the same metric "
+            "stays there as sessions accumulate — not its rank today.",
     }
 
 
