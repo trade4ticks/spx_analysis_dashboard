@@ -273,6 +273,21 @@
       border:1px solid rgba(0,0,0,0.25);
     }
 
+    /* Small multiples. Three across so six fits two rows without any panel
+       getting narrow enough to smear a 30-session line. */
+    .sc-mult {
+      display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px;
+    }
+    @media (max-width:1100px) { .sc-mult { grid-template-columns:repeat(2, minmax(0,1fr)); } }
+    .sc-mult-cell {
+      border:1px solid var(--border); border-radius:5px; padding:6px 7px;
+      background:var(--raised);
+    }
+    .sc-mult-hd {
+      display:flex; align-items:baseline; gap:6px; font-size:11px;
+      margin-bottom:3px;
+    }
+
     .sc-rejects { display:flex; flex-wrap:wrap; gap:5px; }
     .sc-reject {
       display:inline-flex; align-items:baseline; gap:5px;
@@ -804,16 +819,45 @@
         </div>
       </div>
 
+      <!-- ── 2.1 spread against noise ─────────────────────────────────── -->
       <div class="sc-panel" id="geometry">
-        <div class="sc-panel-hdr"><span class="sc-panel-title">Spread against noise</span></div>
-        <div class="sc-panel-body"><div class="sc-stub">
-          <span class="sc-stub-tag">phase 4</span>
-          <b>Every candidate as a point, constant-ratio lines running diagonally.</b>
-          "Good" becomes a direction rather than a number, which is the
-          geometry a ranked table hides — whether an unknown candidate sits in
-          a known winner's neighbourhood or a known loser's. Traded names
-          coloured by outcome.
-        </div></div>
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Spread against noise</span>
+          <span class="sc-panel-sub"
+                x-text="cand ? (geomPoints().length + ' candidates on ' + cand.date) : ''"></span>
+          <span class="sc-spacer"></span>
+          <label class="sc-chk">
+            <input type="checkbox" x-model="geomOnly" @change="renderGeometry()">
+            <span>passing only</span>
+          </label>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-empty" x-show="!cand || !geomPoints().length" x-cloak>
+            Nothing to plot — the ranked table needs both a spread and a noise
+            column resolved.
+          </div>
+          <div style="height:420px; position:relative" x-show="cand && geomPoints().length" x-cloak>
+            <canvas id="sc-geom"></canvas>
+          </div>
+          <div class="sc-panel-sub" style="margin-top:8px; line-height:1.75; max-width:88ch">
+            <span x-text="geomNote()"></span>
+            <span style="display:block; margin-top:5px">
+              <b>Log axes on both, so the dashed constant-ratio lines are
+              straight.</b> That is the point of the panel: it turns "good"
+              from a number you look up per row into a <em>direction</em> —
+              up and to the left. A ranked table gives you the ordering and
+              hides the geometry, so it cannot tell you whether an unknown
+              candidate sits in the neighbourhood of a name that worked or one
+              that did not.
+            </span>
+            <span style="display:block; margin-top:5px">
+              Traded names are drawn larger and coloured by outcome — green
+              made money, pink lost it. A sign rather than a gradient: at this
+              sample size the direction is the reading, and a ramp would imply
+              a precision the data does not have.
+            </span>
+          </div>
+        </div>
       </div>
 
       <!-- ── 2.3 rank stability ──────────────────────────────────────── -->
@@ -1081,16 +1125,70 @@
         </div></div>
       </div>
 
+      <!-- ── 2.6 stability over time ──────────────────────────────────── -->
       <div class="sc-panel" id="drift">
-        <div class="sc-panel-hdr"><span class="sc-panel-title">Stability over time</span></div>
-        <div class="sc-panel-body"><div class="sc-stub">
-          <span class="sc-stub-tag">phase 4</span>
-          <b>Noise across all sessions as small multiples on identical axes, and spread against noise on one axis.</b>
-          Separates level from stability. Where the two lines converge there is
-          nothing to capture, however wide the spread looks in cents.
-        </div></div>
+        <div class="sc-panel-hdr">
+          <span class="sc-panel-title">Stability over time</span>
+          <span class="sc-panel-sub"
+                x-text="ser ? (ser.metrics[0] + ' · ' + ser.dates.length + ' sessions') : ''"></span>
+          <span class="sc-spacer"></span>
+          <input class="sc-inp" type="text" x-model="serSymbols"
+                 placeholder="tickers, comma separated" style="max-width:220px"
+                 @change="loadSeries()">
+          <span class="sc-panel-sub" x-show="serLoading" x-cloak>…</span>
+        </div>
+        <div class="sc-panel-body">
+          <div class="sc-empty" x-show="!ser || !ser.symbols.length" x-cloak
+               x-text="(ser && ser.note) || 'Nothing selected yet.'"></div>
+
+          <template x-if="ser && ser.symbols.length">
+            <div>
+              <div class="sc-panel-sub" style="line-height:1.75; max-width:88ch">
+                Defaults to the names you have <b>traded</b>, not the top of
+                today's ranking — those are the ones whose outcomes are known,
+                so a shape drawn for them can be read against a result. Type
+                tickers above to compare anything else.
+                <b>All six share one y-axis</b>: six panels on their own
+                scales is six shapes and no comparison, which is the only
+                thing this row is for.
+              </div>
+
+              <div class="sc-mult" style="margin-top:10px">
+                <template x-for="sym in ser.symbols" :key="sym">
+                  <div class="sc-mult-cell">
+                    <div class="sc-mult-hd">
+                      <b x-text="sym"></b>
+                      <span class="sc-panel-sub"
+                            x-show="(ser.missing || []).indexOf(sym) >= 0" x-cloak
+                            style="color:#e84393">no data</span>
+                    </div>
+                    <div style="height:96px; position:relative">
+                      <canvas :id="'sc-mult-' + sym"></canvas>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <div style="margin-top:14px">
+                <div class="sc-panel-sub" style="margin-bottom:5px">
+                  <b x-text="ser.symbols[0]"></b> — spread and noise on
+                  <b>one</b> axis. Where the lines converge there is nothing to
+                  capture however wide the spread looks in cents; two axes
+                  would rescale them into looking parallel and destroy exactly
+                  that reading.
+                </div>
+                <div style="height:220px; position:relative">
+                  <canvas id="sc-overlay"></canvas>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
+  </div>
+
+  <script src=    </div>
   </div>
 
   <script src={{ asset('js/equities_scalp.js') }}></script>

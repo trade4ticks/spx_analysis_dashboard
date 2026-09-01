@@ -297,6 +297,22 @@ class Conn:
         # swallowed the health query and handed it two dates, which is not
         # enough to have a trailing baseline at all — the panel then looked
         # empty rather than wrong.
+        # MOST SPECIFIC FIRST. Three different queries read fills_daily and
+        # the loosest pattern would swallow all of them -- which it did, and
+        # the traded-marker aggregate came back shaped like a daily row.
+        if "GROUP BY symbol" in sql and "fills_daily" in sql and "days" in sql:
+            # Two of the five symbols have been traded, one profitably and one
+            # not. A fixture where everything is traded cannot show that the
+            # marker distinguishes, and one where nothing is cannot show it
+            # appears at all.
+            return [
+                {"symbol": "AAAA", "days": 3, "trips": 42, "net_pnl": 128.4,
+                 "pnl_per_min": 1.42},
+                {"symbol": "CCCC", "days": 2, "trips": 18, "net_pnl": -31.0,
+                 "pnl_per_min": -0.55},
+            ]
+        if "sum(net_pnl)" in sql and "GROUP BY symbol" in sql:
+            return [{"symbol": s, "pnl": 10.0} for s in ("AAAA", "CCCC")]
         if "FROM fills_daily f" in sql or "JOIN fills_daily" in sql:
             # The calibration join. Deliberately shaped so one metric ranks
             # PERFECTLY with the target and the rest do not — a correlation
@@ -352,6 +368,18 @@ class Conn:
                     else:
                         v = float((i * 7 + len(m)) % 23)
                     out.append({"symbol": s, "metric": m, "value": v})
+            return out
+        if "symbol = ANY($2)" in sql and "metric = ANY($3)" in sql:
+            # /series: the metrics and symbols the caller actually asked for,
+            # so a response carrying something it was not asked for is a bug
+            # the harness can see.
+            out = []
+            for day in HEALTH_DATES:
+                for s in args[1]:
+                    for m in args[2]:
+                        out.append({"trade_date": day, "symbol": s,
+                                    "metric": m,
+                                    "value": 2.0 + len(m) % 5 + len(s)})
             return out
         if "SELECT trade_date, symbol, metric, value" in sql:
             # For rank stability. One metric ranks identically every session,
@@ -572,6 +600,7 @@ async def run() -> int:
     fails += await check_health()
     fails += await check_calibration()
     fails += await check_narrowing()
+    fails += await check_geometry_and_series()
 
     for b in BAD:
         print(f"  {b}")
@@ -580,6 +609,91 @@ async def run() -> int:
     print(f"\nstates checked: 3, dates: 2, metrics: {len(FAKE_METRICS)}, "
           f"failures: {fails}")
     return 1 if fails else 0
+
+
+async def check_geometry_and_series() -> int:
+    """2.1's traded marker and 2.6's history."""
+    fails = 0
+
+    c = await sc.candidates(date=None, noise=None, columns=None, extra=None,
+                            sort=None, desc=True, limit=600, spark_sessions=0,
+                            min_spread_cents=None, min_trades_per_min=None,
+                            max_noise_bps=None, min_noise_bps=None,
+                            min_quote_bucket_coverage=None, pool=Pool())
+    by = {r["symbol"]: r for r in c["rows"]}
+
+    # None, not an empty object, for a name never traded. "No result" and "a
+    # result of zero" are different readings and the scatter's colour has to
+    # tell them apart -- grey versus green is the whole point of the marker.
+    if by.get("BBBB", {}).get("traded") is not None:
+        print("  an untraded symbol carries a traded marker")
+        fails += 1
+    t = by.get("AAAA", {}).get("traded")
+    if not t:
+        print("  a traded symbol carries no marker — 1.3 asked for this and it")
+        print("    waited on the upload; it should be there now")
+        fails += 1
+    elif t.get("pnl_per_min") is None or t["pnl_per_min"] <= 0:
+        print(f"  the profitable traded symbol reads {t.get('pnl_per_min')}")
+        fails += 1
+    loss = by.get("CCCC", {}).get("traded")
+    if not loss or loss["pnl_per_min"] >= 0:
+        print("  the losing traded symbol does not read negative, so the "
+              "scatter would colour it as a winner")
+        fails += 1
+    if c.get("n_traded") != 2:
+        print(f"  n_traded is {c.get('n_traded')}, not 2")
+        fails += 1
+
+    # ── /series ──────────────────────────────────────────────────────────
+    s = await sc.series(metrics="ratio_tw_mid_5s_rms,spread_bps_tw",
+                        symbols="AAAA,CCCC", sessions=30, pool=Pool())
+    if not s.get("series"):
+        print(f"  /series returned nothing: {s.get('note')}")
+        return fails + 1
+    if sorted(s["symbols"]) != ["AAAA", "CCCC"]:
+        print(f"  /series ignored the requested symbols: {s['symbols']}")
+        fails += 1
+    for sym, got in s["series"].items():
+        if sorted(got) != ["ratio_tw_mid_5s_rms", "spread_bps_tw"]:
+            print(f"  /series returned metrics nobody asked for: {sorted(got)}")
+            fails += 1
+            break
+        for m, arr in got.items():
+            if len(arr) != len(s["dates"]):
+                print(f"  {sym}/{m} has {len(arr)} points for "
+                      f"{len(s['dates'])} dates — a series padded to the date "
+                      f"axis is what lets six panels share one x")
+                fails += 1
+                break
+
+    # SHARED BOUNDS. Six panels on their own scales is six shapes and no
+    # comparison, which is the one thing the small multiples are for.
+    for m in s["metrics"]:
+        b = (s.get("bounds") or {}).get(m)
+        if not b or b["min"] >= b["max"]:
+            print(f"  no usable shared y-bounds for {m}: {b}")
+            fails += 1
+
+    # A symbol with no data must be NAMED, not silently absent -- an empty
+    # panel reads as still loading.
+    s2 = await sc.series(metrics="ratio_tw_mid_5s_rms", symbols="AAAA,ZZZZ",
+                         sessions=30, pool=Pool())
+    if "missing" not in s2:
+        print("  /series does not report symbols it found no data for")
+        fails += 1
+
+    try:
+        await sc.series(metrics="", symbols=None, sessions=30, pool=Pool())
+    except Exception as exc:
+        if getattr(exc, "status_code", None) != 400:
+            print(f"  /series with no metric raised {type(exc).__name__}")
+            fails += 1
+    else:
+        print("  /series accepted a request naming no metric")
+        fails += 1
+
+    return fails
 
 
 async def check_narrowing() -> int:

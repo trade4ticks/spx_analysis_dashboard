@@ -1141,6 +1141,93 @@ async def rank_stability(
     }
 
 
+@router.get("/series")
+async def series(
+    metrics:  str = Query(..., description="comma-separated metric names"),
+    symbols:  str = Query(None, description="comma-separated; default traded"),
+    sessions: int = Query(30, ge=2, le=250),
+    pool=Depends(get_scalp_pool),
+):
+    """One or more metrics over time, for one or more symbols. 2.6.
+
+    SEPARATES LEVEL FROM STABILITY, which a single session's column cannot.
+    A name whose ratio reads 4.0 every day and one that averages 4.0 by
+    alternating 1 and 7 are the same number in the ranked table and different
+    trades, and only the series shows which is which.
+
+    The default symbol set is WHAT HAS BEEN TRADED, not the top of today's
+    ranking. Those are the names whose outcomes are known, so a shape drawn
+    for them can be read against a result; the top of the ranking is exactly
+    the set whose behaviour is still a question.
+    """
+    if pool is None:
+        return _no_db({"series": {}})
+
+    names = [m.strip() for m in metrics.split(",") if m.strip()]
+    if not names:
+        raise HTTPException(400, "no metric named.")
+
+    async with pool.acquire() as conn:
+        dates = [r["trade_date"] for r in await conn.fetch(
+            "SELECT DISTINCT trade_date FROM daily_metrics "
+            "ORDER BY trade_date DESC LIMIT $1", sessions)]
+        if not dates:
+            return {"connected": True, "series": {}, "dates": [],
+                    "note": "daily_metrics is empty."}
+        dates = sorted(dates)
+
+        if symbols:
+            syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            await _ensure_fills(conn)
+            syms = [r["symbol"] for r in await conn.fetch(
+                "SELECT symbol, sum(net_pnl) AS pnl FROM fills_daily "
+                "GROUP BY symbol ORDER BY sum(net_pnl) DESC LIMIT 6")]
+        if not syms:
+            return {"connected": True, "series": {}, "dates": [str(x) for x in dates],
+                    "note": "no symbols selected and nothing has been traded "
+                            "yet — pick names explicitly, or upload a "
+                            "statement and this fills in."}
+
+        rows = await conn.fetch(
+            "SELECT trade_date, symbol, metric, value FROM daily_metrics "
+            "WHERE trade_date = ANY($1) AND symbol = ANY($2) "
+            "  AND metric = ANY($3) "
+            "ORDER BY symbol, metric, trade_date",
+            dates, syms, names)
+
+    ds = [str(x) for x in dates]
+    idx = {d: i for i, d in enumerate(ds)}
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["symbol"], {}).setdefault(
+            r["metric"], [None] * len(ds))[idx[str(r["trade_date"])]] = r["value"]
+
+    # Shared axis bounds per metric, so the small multiples are comparable.
+    # Six panels on their own scales is six shapes and no comparison, which is
+    # the one thing this panel exists to allow.
+    bounds = {}
+    for m in names:
+        vals = [v for sym in out.values() for v in sym.get(m, []) if v is not None]
+        if vals:
+            lo, hi = min(vals), max(vals)
+            pad = (hi - lo) * 0.08 or (abs(hi) * 0.1 or 1.0)
+            bounds[m] = {"min": lo - pad, "max": hi + pad}
+
+    return {
+        "connected": True,
+        "dates": ds,
+        "symbols": syms,
+        "metrics": names,
+        "series": out,
+        "bounds": bounds,
+        "meta": {m: scalp_metric_docs.header_link(m) for m in names},
+        # Named so a symbol with no data is legible as such rather than as an
+        # empty panel someone assumes is still loading.
+        "missing": [s for s in syms if s not in out],
+    }
+
+
 # ── which filter constrains which column ────────────────────────────────────
 #
 # The pipeline's DEFAULT_FILTERS are named for what they threshold, not for the
@@ -1266,6 +1353,21 @@ async def candidates(
             *params,
         )
 
+        # ── what I actually traded, per symbol ───────────────────────────
+        #
+        # The brief asked for this in the ranked table from the start and it
+        # waited on the upload. Pooled across ALL sessions rather than taken
+        # from this date: the question a marker answers is "have I traded this
+        # name and how did it go", and restricting it to the selected date
+        # would blank the marker on every date except the ones with fills --
+        # which is most of them.
+        await _ensure_fills(conn)
+        traded = {r["symbol"]: dict(r) for r in await conn.fetch(
+            "SELECT symbol, count(*) AS days, sum(trips) AS trips, "
+            " sum(net_pnl) AS net_pnl, "
+            " sum(net_pnl) / NULLIF(sum(attention_minutes), 0) AS pnl_per_min "
+            "FROM fills_daily GROUP BY symbol")}
+
         # ── the ratio's own history, for the stability sparkline ─────────
         #
         # STABILITY, NOT LEVEL. Today's ratio is already a column; what the
@@ -1329,9 +1431,20 @@ async def candidates(
                 fails.append(fk)
         for fk in fails:
             rejected[fk] += 1
+        t = traded.get(r["symbol"])
         out.append({"symbol": r["symbol"], "values": vals,
                     "passes": not fails, "fails": fails,
-                    "spark": spark.get(r["symbol"])})
+                    "spark": spark.get(r["symbol"]),
+                    # None rather than an empty object for a name never
+                    # traded: "no result" and "a result of zero" are different
+                    # readings and the colour ramp has to tell them apart.
+                    "traded": ({"days": int(t["days"]),
+                                "trips": int(t["trips"] or 0),
+                                "net_pnl": float(t["net_pnl"] or 0.0),
+                                "pnl_per_min": (float(t["pnl_per_min"])
+                                                if t["pnl_per_min"] is not None
+                                                else None)}
+                               if t else None)})
 
     # ── sort ─────────────────────────────────────────────────────────────
     #
@@ -1373,6 +1486,7 @@ async def candidates(
         "inert_filters": inert,
         "spark_dates": spark_dates,
         "spark_metric": ratio_col,
+        "n_traded": sum(1 for r in out if r["traded"]),
     }
 
 
