@@ -37,4 +37,12 @@
     ] %}
       <a class="nav-link{% if href == nav_active %} on{% endif %}" href="{{ href }}">{{ label }}</a>
 {%- endfor %}
+      {#- Equities Live runs as its OWN SERVICE ON ITS OWN PORT, so its link
+          carries one. Built from the request's host rather than hardcoded:
+          the box is reached both by Tailscale IP and by name, and a baked-in
+          address works from exactly one of them. `live_port` is a global both
+          apps set, so the two never disagree about where it is. -#}
+      <a class="nav-link{% if nav_active == "/equities-live" %} on{% endif %}"
+         href="//{{ request.url.hostname }}:{{ live_port }}/"
+         title="A separate service on port {{ live_port }} — if it crashes it does not take these with it">Equities Live</a>
     </nav>

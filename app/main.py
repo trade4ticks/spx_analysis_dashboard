@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -80,6 +81,10 @@ templates.env.keep_trailing_newline = True
 # and scripts/check_rendered_assets.py, which exists because a template
 # shipped a script tag with an empty src and nothing could see it.
 templates.env.globals["asset"] = asset
+# Where the Equities Live service listens. Read from the same environment
+# variable that service reads, so the nav link and the service cannot
+# disagree about the port.
+templates.env.globals["live_port"] = int(os.environ.get("LIVE_PORT", "8001"))
 
 app.include_router(meta.router,       prefix="/api/meta")
 app.include_router(skew.router,       prefix="/api/skew")

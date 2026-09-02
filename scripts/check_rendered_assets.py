@@ -48,7 +48,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import os                                                 # noqa: E402
 import jinja2                                             # noqa: E402
+
+
+class _StubURL:
+    hostname = "localhost"
+    scheme = "http"
+    path = "/"
+
+    def __str__(self): return "http://localhost/"
+
+
+class _StubRequest:
+    """The minimum of starlette's Request that these templates read."""
+    url = _StubURL()
+    base_url = _StubURL()
+    headers: dict = {}
+    query_params: dict = {}
 from app.assets import asset                              # noqa: E402
 
 TEMPLATES = ROOT / "templates"
@@ -146,7 +163,15 @@ def render(name: str) -> str:
     # The real helper, not a stand-in. A gate that renders with its own copy
     # of asset() passes against a definition the app does not use.
     env.globals["asset"] = asset
-    return env.get_template(name).render()
+    # Both apps bind this, and the shared nav partial reads it to build the
+    # cross-port link to Equities Live.
+    env.globals["live_port"] = int(os.environ.get("LIVE_PORT", "8001"))
+    # FastAPI always puts `request` in a template's context, so a gate that
+    # renders without one is rendering something the app never serves — this
+    # gate reported fourteen "failed to render" the moment the nav began using
+    # it. The stub carries only what templates actually read; anything else
+    # they reach for should fail loudly here rather than in a browser.
+    return env.get_template(name).render(request=_StubRequest())
 
 
 def check_page(name: str) -> list[str]:

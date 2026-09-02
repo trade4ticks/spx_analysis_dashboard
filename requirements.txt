@@ -3,6 +3,9 @@ uvicorn[standard]>=0.29.0
 asyncpg>=0.29.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
+# Equities Live holds one outbound WebSocket to the market data feed. Used by
+# live/hub.py only; the dashboards do not import it.
+websockets>=12.0
 # Equities Scalp fills upload: Schwab exports as .xlsx as well as .csv, and
 # both formats exist in the account history. Import is LAZY, inside the xlsx
 # branch of scalp_fills.read_rows, so a host without it still serves the page

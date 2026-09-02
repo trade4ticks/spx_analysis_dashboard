@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Equities Live</title>
+  <link rel="stylesheet" href={{ asset('css/theme.css') }}>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+
+  <style>
+    /* Equities Live — page-scoped, prefixed .lv-. No Chart.js: the plot is a
+       canvas, because a charting library's update path would bucket the x
+       axis to stay affordable and bucketing is the one thing this must not
+       do. */
+    .lv-body { flex:1; display:flex; flex-direction:column; min-height:0; padding:10px 12px; }
+
+    /* ── the delayed banner ────────────────────────────────────────────
+       A 15-minute-old tape renders identically to a live one, which is the
+       dangerous part. This is loud, at the top, and unmissable. */
+    .lv-delayed {
+      background:#e84393; color:#fff; font-weight:600; font-size:12px;
+      padding:6px 12px; border-radius:5px; margin-bottom:8px;
+      letter-spacing:0.2px;
+    }
+    .lv-down {
+      background:rgba(232,67,147,0.14); border:1px solid #e84393;
+      color:#e84393; font-weight:600; font-size:12px;
+      padding:6px 12px; border-radius:5px; margin-bottom:8px;
+    }
+
+    .lv-bar {
+      display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:7px 10px; margin-bottom:8px; font-size:11px;
+    }
+    .lv-sel, .lv-inp {
+      background:var(--raised); border:1px solid var(--border); color:var(--text);
+      font-size:11px; padding:3px 7px; border-radius:4px;
+    }
+    .lv-inp.sym { width:88px; text-transform:uppercase; font-weight:600; }
+    .lv-btn {
+      background:var(--raised); border:1px solid var(--border); color:var(--muted);
+      font-size:11px; padding:3px 9px; border-radius:4px; cursor:pointer;
+    }
+    .lv-btn:hover { color:var(--text); }
+    .lv-btn.on { border-color:var(--accent); color:var(--accent); }
+    .lv-sub { font-size:10px; color:var(--muted); }
+    .lv-spacer { flex:1; }
+    .lv-num { font-variant-numeric:tabular-nums; color:var(--text); font-weight:600; }
+    .lv-chk { display:flex; align-items:center; gap:4px; color:var(--muted); cursor:pointer; }
+
+    .lv-pane {
+      flex:1; position:relative; min-height:0;
+      background:var(--surface); border:1px solid var(--border); border-radius:6px;
+    }
+    .lv-pane canvas { display:block; width:100%; height:100%; }
+    .lv-readout {
+      position:absolute; left:10px; top:8px; font-size:10.5px;
+      color:var(--text); background:rgba(20,20,20,0.72);
+      border:1px solid var(--border); border-radius:4px; padding:3px 7px;
+      pointer-events:none; font-variant-numeric:tabular-nums;
+    }
+    .lv-empty {
+      position:absolute; inset:0; display:flex; align-items:center;
+      justify-content:center; color:var(--muted); font-size:12px;
+      text-align:center; padding:0 30px; line-height:1.7;
+    }
+    [x-cloak] { display:none !important; }
+  </style>
+</head>
+
+<body x-data="equitiesLive" x-init="init()">
+
+  <div class="topbar">
+    <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
+    {% set nav_active = "/equities-live" %}{% include "_nav.html" %}
+    <div class="topbar-right">
+      <span x-text="symbol || '—'"></span>
+    </div>
+  </div>
+
+  <div class="lv-body">
+
+    <!-- Stated, never inferred. -->
+    <div class="lv-delayed" x-show="isDelayed()" x-cloak>
+      DELAYED FEED — this tape is 15 minutes behind. It renders identically to
+      a live one, which is why this banner exists. Set LIVE_FEED=realtime.
+    </div>
+    <div class="lv-down" x-show="!connected" x-cloak>
+      DISCONNECTED — <span x-text="statusLine()"></span>. The plot below is
+      frozen, not quiet.
+    </div>
+    <div class="lv-down" x-show="connected && status && status.problems.length"
+         x-cloak>
+      <template x-for="p in (status ? status.problems : [])" :key="p">
+        <span style="display:block" x-text="p"></span>
+      </template>
+    </div>
+    <div class="lv-down" x-show="refused" x-cloak>
+      <span x-text="refused"></span>
+    </div>
+
+    <div class="lv-bar">
+      <input class="lv-inp sym" type="text" x-model="pending"
+             placeholder="ticker" @keydown.enter="watch(pending)">
+      <button class="lv-btn on" @click="watch(pending)">watch</button>
+
+      <span class="lv-sub">window</span>
+      <button class="lv-btn" @click="zoomX(0.5)" title="Narrow the time window">−</button>
+      <b class="lv-num" x-text="windowS >= 60 ? (windowS/60).toFixed(1) + 'm' : windowS + 's'"></b>
+      <button class="lv-btn" @click="zoomX(2)" title="Widen the time window">+</button>
+
+      <span class="lv-sub">price ±</span>
+      <button class="lv-btn" @click="zoomY(0.5)">−</button>
+      <b class="lv-num" x-text="spanCents + '¢'"></b>
+      <button class="lv-btn" @click="zoomY(2)">+</button>
+
+      <!-- Recentres on demand, and automatically ONLY at the edge. Never on a
+           timer: a plot that jumps every thirty seconds destroys the anchor
+           the eye is reading position against. -->
+      <button class="lv-btn" @click="recenter()"
+              title="Recentre now. Automatic recentring happens only when price
+                     approaches the edge of the visible range, never on a timer.">
+        recenter</button>
+      <button class="lv-btn" :class="{on: paused}" @click="togglePause()"
+              title="Freezes the view. Data keeps buffering, so resuming
+                     catches up rather than skipping."
+              x-text="paused ? 'resume' : 'pause'"></button>
+      <label class="lv-chk">
+        <input type="checkbox" x-model="showQuotes">
+        <span>NBBO</span>
+      </label>
+
+      <span class="lv-spacer"></span>
+      <span class="lv-sub">trades/min</span>
+      <b class="lv-num" x-text="tpm"></b>
+      <span class="lv-sub" x-text="statusLine()"></span>
+    </div>
+
+    <div class="lv-pane">
+      <canvas id="lv-canvas"></canvas>
+      <div class="lv-readout" x-show="hover" x-cloak x-text="hoverText()"></div>
+      <div class="lv-empty" x-show="!trades.length" x-cloak>
+        <span x-show="!symbol">Type a ticker and press watch.</span>
+        <span x-show="symbol && connected">
+          Watching <b x-text="symbol"></b> — no prints in the window yet.
+          Outside market hours this is expected; during them it is not, and
+          the trades/min readout above is the thing to check.
+        </span>
+        <span x-show="symbol && !connected">
+          Not connected. Nothing below is current.
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <script src={{ asset('js/equities_live.js') }}></script>
+  <!-- The bundle proves it loaded. A page that renders its layout and none of
+       its data is the worst failure mode this app has had, and it has had it:
+       a mangled script tag left every panel empty with no console error. -->
+  <script>
+    window.addEventListener('DOMContentLoaded', function () {
+      if (window.__liveLoaded) return;
+      var b = document.createElement('div');
+      b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;' +
+        'background:#e84393;color:#fff;font:600 13px/1.6 sans-serif;' +
+        'padding:10px 14px;text-align:center';
+      b.textContent = 'equities_live.js did not load — the plot below is empty '
+        + 'for that reason, not because the tape is quiet.';
+      document.body.appendChild(b);
+    });
+  </script>
+</body>
+</html>

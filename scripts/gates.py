@@ -79,6 +79,10 @@ GATES = [
     _s("check_scatter_invariants.py",
        note="colour thresholds cannot change membership or extent"),
 
+    # ── the live tape ────────────────────────────────────────────────────
+    _s("check_live_hub.py",
+       note="no aggregation, caps hold, resubscribe on reconnect"),
+
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),
     _s("check_vendored.py", note="vendored files match their source"),
@@ -97,7 +101,8 @@ GATES = [
     _s("check_grid_equivalence.py", slow=True),
 ]
 
-JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js"]
+JS_FILES = ["static/js/equity_iv.js", "static/js/equities_scalp.js",
+            "static/js/equities_live.js"]
 
 # A gate can fail because THIS HOST lacks something rather than because the
 # code is wrong. Those are reported as ENV, never as PASS -- but also not as
