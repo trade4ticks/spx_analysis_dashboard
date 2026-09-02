@@ -52,7 +52,17 @@ document.addEventListener('alpine:init', () => {
 
     trades: [],
     quotes: [],
-    hover: null,
+    // Every print under the cursor, not the nearest one. At these rates
+    // several share a millisecond and land within a pixel or two, and a
+    // single number there is ambiguous between one 400-share print and four
+    // of 100.
+    hover: null,          // {x, y, recs: [...]}
+    // Price lines the user placed. Anchored to a PRICE, so they hold still
+    // while the plot scrolls under them — the question they answer is "has
+    // anything traded at 318.52 in the last three minutes", which is about
+    // the level and not about when.
+    lines: [],
+    dragIdx: -1,
     // Trades per minute, from the window itself rather than a counter: the
     // arrival rate is a proxy for fillability and a stale one is worse than
     // none.
@@ -67,8 +77,13 @@ document.addEventListener('alpine:init', () => {
         window.addEventListener('resize', () => this.resize());
         const cv = document.getElementById('lv-canvas');
         if (cv) {
-          cv.addEventListener('mousemove', e => this.onHover(e));
+          cv.addEventListener('mousemove', e => this.onMove(e));
+          cv.addEventListener('mousedown', e => this.onDown(e));
+          cv.addEventListener('dblclick', e => this.onDouble(e));
           cv.addEventListener('mouseleave', () => { this.hover = null; });
+          // On WINDOW, not the canvas: a drag that ends off the plot would
+          // otherwise leave the line stuck to the cursor.
+          window.addEventListener('mouseup', () => this.onUp());
         }
         requestAnimationFrame(() => this.frame());
       });
@@ -287,11 +302,29 @@ document.addEventListener('alpine:init', () => {
 
       this.drawGrid(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd, X, Y, w);
 
-      // ── NBBO, behind everything and muted ──────────────────────────────
+      // ── NBBO: a REGION, then two lines ────────────────────────────────
+      //
+      // Where a print sat relative to bid and ask is the entire question, and
+      // two thin muted lines made that something to trace rather than see.
+      // The spread is filled very faintly so it reads as a band the prints sit
+      // inside or outside of, with the edges bright enough to locate exactly.
       if (this.showQuotes && this.quotes.length) {
-        ctx.lineWidth = 1;
-        for (const [key, col] of [['bp', 'rgba(120,150,175,0.55)'],
-                                  ['ap', 'rgba(175,120,150,0.55)']]) {
+        const vis = this.quotes.filter(q => q.t >= tStart && q.t <= tEnd
+                                            && q.bp && q.ap);
+        if (vis.length > 1) {
+          ctx.beginPath();
+          ctx.moveTo(X(vis[0].t), Y(vis[0].ap));
+          for (const q of vis) ctx.lineTo(X(q.t), Y(q.ap));
+          for (let i = vis.length - 1; i >= 0; i--) {
+            ctx.lineTo(X(vis[i].t), Y(vis[i].bp));
+          }
+          ctx.closePath();
+          ctx.fillStyle = 'rgba(150,170,190,0.10)';
+          ctx.fill();
+        }
+        ctx.lineWidth = 1.6;
+        for (const [key, col] of [['bp', 'rgba(130,190,235,0.95)'],
+                                  ['ap', 'rgba(235,150,190,0.95)']]) {
           ctx.beginPath();
           let started = false;
           for (const q of this.quotes) {
@@ -312,15 +345,22 @@ document.addEventListener('alpine:init', () => {
       // 1-share print beside a 200-share one is invisible; at area ∝ size the
       // 200 is 14x the radius of the 1 and both are on the plot, which is the
       // requirement — the odd lots are the part of the tape being traded in.
+      // TRANSPARENT WITH AN OUTLINE, so overlap reads as overlap. At a solid
+      // fill one 400-share print and four 100-share prints at the same price
+      // are the same blue disc; with alpha the stack darkens and with a rim
+      // the individual prints stay countable.
       let count = 0;
-      ctx.fillStyle = 'rgba(52,152,219,0.72)';
+      ctx.fillStyle = 'rgba(52,152,219,0.34)';
+      ctx.strokeStyle = 'rgba(120,200,255,0.85)';
+      ctx.lineWidth = 0.9;
       for (const t of this.trades) {
         if (t.t < tStart || t.t > tEnd) continue;
         count += 1;
-        const r = Math.max(1.1, Math.sqrt(Math.max(1, t.s)) * 0.62);
+        const r = Math.max(1.3, Math.sqrt(Math.max(1, t.s)) * 0.62);
         ctx.beginPath();
         ctx.arc(X(t.t), Y(t.p), r, 0, Math.PI * 2);
         ctx.fill();
+        if (r > 2) ctx.stroke();
       }
       // A ROLLING 60-SECOND COUNT, not the window's count divided by the
       // window's length. That read a third of the true rate on a 3-minute
@@ -340,14 +380,42 @@ document.addEventListener('alpine:init', () => {
       this.tpm = this.bufferedS() >= 55 ? inMinute : null;
       this.tpmPartial = this.bufferedS() < 55;
 
-      if (this.hover && this.hover.rec) {
-        const t = this.hover.rec;
+      if (this.hover && this.hover.recs.length) {
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 1.2;
+        for (const t of this.hover.recs) {
+          ctx.beginPath();
+          ctx.arc(X(t.t), Y(t.p),
+                  Math.max(4, Math.sqrt(Math.max(1, t.s)) * 0.62 + 3),
+                  0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      // ── 6. the placed price lines ─────────────────────────────────────
+      //
+      // Drawn LAST so they sit over the tape: the point is to see whether
+      // anything traded at that level, and a line under the prints is a line
+      // being read through them.
+      for (const ln of this.lines) {
+        if (ln.p < lo || ln.p > hi) continue;
+        const y = Y(ln.p);
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = ln === this.lines[this.dragIdx]
+          ? 'rgba(255,255,255,0.95)' : 'rgba(255,214,102,0.85)';
+        ctx.lineWidth = 1.2;
         ctx.beginPath();
-        ctx.arc(X(t.t), Y(t.p), Math.max(4, Math.sqrt(Math.max(1, t.s)) * 0.62 + 3),
-                0, Math.PI * 2);
+        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
+        ctx.setLineDash([]);
+        // The count is the reading: "nothing has traded here in three
+        // minutes" is the answer that decides whether to post there.
+        const hits = this.lineHits(ln.p, tStart, tEnd);
+        ctx.font = '600 10px sans-serif';
+        ctx.fillStyle = hits ? '#ffd666' : '#8a8a8a';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${ln.p.toFixed(2)}  ${hits} print${hits === 1 ? '' : 's'}`,
+                     padL + 4, y - 4);
       }
     },
 
@@ -400,14 +468,29 @@ document.addEventListener('alpine:init', () => {
       ctx.font = '9px sans-serif';
       ctx.textAlign = 'center';
       const secs = (tEnd - tStart) / 1000;
-      const stepS = secs <= 60 ? 10 : secs <= 180 ? 30 : secs <= 600 ? 60 : 300;
+      // FINER. Thirty-second ticks on a three-minute window gave six lines
+      // to read position against; ten gives eighteen, which is what the eye
+      // is actually measuring against when a burst lasts fifteen seconds.
+      const stepS = secs <= 30 ? 5 : secs <= 120 ? 10 : secs <= 300 ? 15
+                  : secs <= 600 ? 30 : 60;
       const firstT = Math.ceil(tStart / (stepS * 1000)) * stepS * 1000;
-      for (let t = firstT; t <= tEnd; t += stepS * 1000) {
+      // Gridlines at every step; LABELS only where they fit. A label per line
+      // at ten-second spacing overlaps into unreadability, and the lines are
+      // what position is read against anyway.
+      const labelEvery = Math.max(1, Math.ceil((60 / stepS) *
+                                   (secs > 300 ? 1 : 0.5)));
+      let k = 0;
+      for (let t = firstT; t <= tEnd; t += stepS * 1000, k++) {
         const x = X(t);
         ctx.beginPath();
         ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH);
+        ctx.strokeStyle = (k % labelEvery === 0)
+          ? 'rgba(255,255,255,0.09)' : 'rgba(255,255,255,0.04)';
         ctx.stroke();
-        ctx.fillText(lvFmtClock(t), x, padT + plotH + 13);
+        if (k % labelEvery === 0) {
+          ctx.fillStyle = '#7a7a7a';
+          ctx.fillText(lvFmtClock(t), x, padT + plotH + 13);
+        }
       }
 
       // ── the size legend ───────────────────────────────────────────────
@@ -431,44 +514,158 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    onHover(e) {
+    /* Screen geometry, in one place.
+     *
+     * draw() and the pointer handlers each computed their own padding, window
+     * bounds and scales; two copies of a mapping drift, and a hover that
+     * disagrees with what is drawn is worse than no hover. */
+    geom() {
       const cv = document.getElementById('lv-canvas');
-      if (!cv) return;
+      if (!cv) return null;
       const r = cv.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
       const padL = 8, padR = 58, padT = 8, padB = 20;
       const plotW = Math.max(10, r.width - padL - padR);
       const plotH = Math.max(10, r.height - padT - padB);
       const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
       const tStart = tEnd - this.windowS * 1000;
       const { lo, hi } = this.yRange();
-      const X = t => padL + ((t - tStart) / (tEnd - tStart)) * plotW;
-      const Y = p => padT + (1 - (p - lo) / (hi - lo)) * plotH;
-
-      let best = null, bestD = 12 * 12;
-      for (const t of this.trades) {
-        if (t.t < tStart || t.t > tEnd) continue;
-        const dx = X(t.t) - mx, dy = Y(t.p) - my;
-        const d = dx * dx + dy * dy;
-        if (d < bestD) { bestD = d; best = t; }
-      }
-      this.hover = best ? { rec: best, x: mx, y: my } : null;
+      return {
+        rect: r, padL, padR, padT, padB, plotW, plotH, tStart, tEnd, lo, hi,
+        X: t => padL + ((t - tStart) / (tEnd - tStart)) * plotW,
+        Y: p => padT + (1 - (p - lo) / (hi - lo)) * plotH,
+        priceAt: y => lo + (1 - (y - padT) / plotH) * (hi - lo),
+      };
     },
 
-    hoverText() {
-      const t = this.hover && this.hover.rec;
-      if (!t) return '';
-      const ms = String(t.t % 1000).padStart(3, '0');
-      return `${lvFmtClock(t.t)}.${ms}  ${t.p.toFixed(2)}  ${t.s} sh  `
-           + `venue ${t.x}${t.c && t.c.length ? '  cond ' + t.c.join(',') : ''}`;
+    /* How many prints sat at this price inside the window.
+     *
+     * A half-cent either side, because a line placed at 318.52 is a question
+     * about that price and not about 318.5237. This is the number the line
+     * exists to produce: "nothing has traded here in three minutes" is what
+     * decides whether posting there is worth it. */
+    lineHits(price, tStart, tEnd) {
+      let n = 0;
+      for (const t of this.trades) {
+        if (t.t < tStart || t.t > tEnd) continue;
+        if (Math.abs(t.p - price) <= 0.005) n += 1;
+      }
+      return n;
+    },
+
+    // ── pointer ──────────────────────────────────────────────────────────
+    onMove(e) {
+      const g = this.geom();
+      if (!g) return;
+      const mx = e.clientX - g.rect.left, my = e.clientY - g.rect.top;
+
+      if (this.dragIdx >= 0) {
+        this.lines[this.dragIdx].p = g.priceAt(my);
+        this.hover = null;
+        return;
+      }
+
+      // EVERY print under the cursor, not the nearest. Several share a
+      // millisecond and land within a pixel or two; one number there cannot
+      // distinguish a single 400-share print from four of 100.
+      const hits = [];
+      for (const t of this.trades) {
+        if (t.t < g.tStart || t.t > g.tEnd) continue;
+        const dx = g.X(t.t) - mx, dy = g.Y(t.p) - my;
+        const r = Math.max(1.3, Math.sqrt(Math.max(1, t.s)) * 0.62);
+        const reach = Math.max(7, r + 3);
+        if (dx * dx + dy * dy <= reach * reach) hits.push(t);
+      }
+      hits.sort((x, y) => y.s - x.s);
+      this.hover = hits.length ? { x: mx, y: my, recs: hits.slice(0, 10),
+                                   more: Math.max(0, hits.length - 10) } : null;
+    },
+
+    onDown(e) {
+      const g = this.geom();
+      if (!g) return;
+      const my = e.clientY - g.rect.top;
+      // Grab a line if the cursor is on one.
+      let best = -1, bestD = 6;
+      this.lines.forEach((ln, i) => {
+        const d = Math.abs(g.Y(ln.p) - my);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      if (best >= 0) {
+        this.dragIdx = best;
+        e.preventDefault();
+      }
+    },
+
+    onUp() {
+      // Snapped to the cent on release. A line at 318.5237 answers a question
+      // nobody asked, and the label would read a price that cannot be posted.
+      if (this.dragIdx >= 0) {
+        const ln = this.lines[this.dragIdx];
+        ln.p = Math.round(ln.p * 100) / 100;
+        this.dragIdx = -1;
+      }
+    },
+
+    /* Double-click places a line at that price. Placing is deliberate, so it
+     * takes a deliberate gesture — a single click would drop lines while
+     * reading the plot. */
+    onDouble(e) {
+      const g = this.geom();
+      if (!g) return;
+      const my = e.clientY - g.rect.top;
+      if (this.lines.length >= 8) return;
+      const price = Math.round(g.priceAt(my) * 100) / 100;
+      this.lines.push({ p: price });
+    },
+
+    removeLine(i) { this.lines.splice(i, 1); },
+    clearLines() { this.lines = []; },
+
+    addLineAtPrice() {
+      const p = this.refPrice();
+      if (p == null || this.lines.length >= 8) return;
+      this.lines.push({ p: Math.round(p * 100) / 100 });
+    },
+
+    /* SHARE COUNT AND NOTHING ELSE, at the cursor.
+     *
+     * The time, venue and condition codes were in a corner box that had to be
+     * looked away to read. The one number wanted is how big the print was;
+     * where it is in time and price is already where the cursor is. */
+    hoverSizes() {
+      if (!this.hover) return [];
+      return this.hover.recs.map(r => r.s);
     },
 
     // ── controls ─────────────────────────────────────────────────────────
-    zoomX(f) {
-      this.windowS = Math.max(15, Math.min(900, Math.round(this.windowS * f)));
+    /* LADDERS, not multipliers.
+     *
+     * Doubling and halving overshot every small adjustment: from 180s the
+     * only neighbours were 90 and 360. These are round stops, finer at the
+     * small end where the adjustments actually are, and they land on numbers
+     * that read cleanly on an axis rather than on 234s.
+     */
+    windowStops: [15, 30, 45, 60, 90, 120, 180, 240, 300, 420, 600, 900],
+    spanStops: [2, 3, 5, 8, 10, 15, 20, 30, 40, 60, 80, 120, 200, 300, 500],
+
+    step(stops, cur, dir) {
+      let i = stops.indexOf(cur);
+      if (i < 0) {
+        // Not on a stop — land on the nearest, then move.
+        i = stops.reduce((best, v, k) =>
+          Math.abs(v - cur) < Math.abs(stops[best] - cur) ? k : best, 0);
+        if ((dir > 0 && stops[i] > cur) || (dir < 0 && stops[i] < cur)) {
+          return stops[i];
+        }
+      }
+      return stops[Math.max(0, Math.min(stops.length - 1, i + dir))];
     },
-    zoomY(f) {
-      this.spanCents = Math.max(2, Math.min(500, Math.round(this.spanCents * f)));
+
+    zoomX(dir) {
+      this.windowS = this.step(this.windowStops, this.windowS, dir);
+    },
+    zoomY(dir) {
+      this.spanCents = this.step(this.spanStops, this.spanCents, dir);
       // A zoom re-derives the band around its own centre rather than around
       // the price, so widening does not double as a recentre.
       this.reband(false);

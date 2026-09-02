@@ -108,6 +108,35 @@ function rateFor(windowS) {
 out.rate = [rateFor(60), rateFor(180), rateFor(600)];
 out.retain = { at60: c.retainS.call({ windowS: 60 }),
                at180: c.retainS.call({ windowS: 180 }) };
+
+// ── the zoom ladders ─────────────────────────────────────────────────────
+// Doubling overshot every small adjustment: from 180s the only neighbours
+// were 90 and 360.
+function ladder(kind) {
+  const stops = kind === 'x' ? c.windowStops : c.spanStops;
+  const start = kind === 'x' ? 180 : 30;
+  const down = [];
+  let v = start;
+  for (let i = 0; i < 6; i++) { v = c.step(stops, v, -1); down.unshift(v); }
+  v = start;
+  const up = [];
+  for (let i = 0; i < 6; i++) { v = c.step(stops, v, 1); up.push(v); }
+  return { down, up, start };
+}
+out.ladderX = ladder('x');
+out.ladderY = ladder('y');
+
+// ── the price lines ──────────────────────────────────────────────────────
+// Four prints sharing a price and a millisecond must count as four; a line
+// placed a fraction of a cent off must still find them, because it is a
+// question about a price and not about 320.4523.
+c.windowS = 180; c.spanCents = 30; c.trades = [];
+const hn = Date.now() - 5000;
+for (let i = 0; i < 4; i++) c.trades.push({ t: hn, p: 320.45, s: 100, x: 4 });
+c.trades.push({ t: hn + 1000, p: 320.55, s: 400, x: 4 });
+out.hitsExact = c.lineHits(320.45, hn - 1000, Date.now());
+out.hitsMiss  = c.lineHits(320.90, hn - 1000, Date.now());
+out.hitsNear  = c.lineHits(320.452, hn - 1000, Date.now());
 console.log(JSON.stringify(out));
 """
 
@@ -177,6 +206,43 @@ def main() -> int:
     elif counts != {56}:
         bad += 1
         print(f"\n  a tape of 56 trades per minute counted {counts.pop()}")
+
+    # ── the ladders are finer than doubling ──────────────────────────────
+    for kind, key in (("window", "ladderX"), ("price", "ladderY")):
+        lad = out[key]
+        down, up, start = lad["down"], lad["up"], lad["start"]
+        if not down or not up:
+            bad += 1
+            print(f"\n  the {kind} ladder produced nothing")
+            continue
+        # One step must not halve or double — that is the overshoot
+        # reported: from 180s the only neighbours were 90 and 360.
+        if down[-1] <= start / 2 or up[0] >= start * 2:
+            bad += 1
+            print(f"\n  one {kind} step goes {start} to {down[-1]} or "
+                  f"{up[0]} — still halving or doubling, which overshoots "
+                  f"every small adjustment")
+        if sorted(down) != down or sorted(up) != up:
+            bad += 1
+            print(f"\n  the {kind} ladder is not monotonic: {down} {up}")
+        if len(set(down)) < 2:
+            bad += 1
+            print(f"\n  the {kind} ladder cannot step down: {down}")
+
+    # ── a price line counts the prints AT that price ─────────────────────
+    if out["hitsExact"] != 4:
+        bad += 1
+        print(f"\n  four prints at one price counted {out['hitsExact']} — "
+              f"the whole output of a placed line is whether anything has "
+              f"traded there")
+    if out["hitsMiss"] != 0:
+        bad += 1
+        print(f"\n  a line 45 cents away counted {out['hitsMiss']} prints")
+    if out["hitsNear"] != 4:
+        bad += 1
+        print(f"\n  a line placed a fifth of a cent off found "
+              f"{out['hitsNear']} — it is a question about a price, not "
+              f"about 320.4523")
 
     # ── retention outlives the display window ────────────────────────────
     if out["retain"]["at60"] <= 60 or out["retain"]["at180"] <= 180:

@@ -55,7 +55,7 @@
     }
     .lv-pane canvas { display:block; width:100%; height:100%; }
     .lv-readout {
-      position:absolute; left:10px; top:8px; font-size:10.5px;
+      position:absolute; font-size:10.5px;
       color:var(--text); background:rgba(20,20,20,0.72);
       border:1px solid var(--border); border-radius:4px; padding:3px 7px;
       pointer-events:none; font-variant-numeric:tabular-nums;
@@ -65,6 +65,23 @@
       justify-content:center; color:var(--muted); font-size:12px;
       text-align:center; padding:0 30px; line-height:1.7;
     }
+    /* The readout follows the cursor, so it is absolutely positioned per
+       frame rather than pinned to a corner. */
+    .lv-readout .lv-sz {
+      font-size:12px; font-weight:700; color:#eaeaea; line-height:1.35;
+      text-align:right; font-variant-numeric:tabular-nums;
+    }
+    .lv-readout .lv-sz.more { font-size:9px; font-weight:400; color:var(--muted); }
+
+    .lv-line-chip {
+      display:inline-flex; align-items:center; gap:4px; cursor:pointer;
+      font-size:10.5px; font-weight:600; color:#ffd666;
+      border:1px solid rgba(255,214,102,0.45); border-radius:3px;
+      padding:1px 6px; font-variant-numeric:tabular-nums;
+    }
+    .lv-line-chip:hover { background:rgba(255,214,102,0.12); }
+    .lv-line-chip .lv-x { color:var(--muted); }
+
     [x-cloak] { display:none !important; }
   </style>
 </head>
@@ -105,15 +122,17 @@
              placeholder="ticker" @keydown.enter="watch(pending)">
       <button class="lv-btn on" @click="watch(pending)">watch</button>
 
+      <!-- LADDERS of round stops, not doubling. From 180s the only neighbours
+           used to be 90 and 360, which overshoots every small adjustment. -->
       <span class="lv-sub">window</span>
-      <button class="lv-btn" @click="zoomX(0.5)" title="Narrow the time window">−</button>
-      <b class="lv-num" x-text="windowS >= 60 ? (windowS/60).toFixed(1) + 'm' : windowS + 's'"></b>
-      <button class="lv-btn" @click="zoomX(2)" title="Widen the time window">+</button>
+      <button class="lv-btn" @click="zoomX(-1)" title="Narrower">−</button>
+      <b class="lv-num" x-text="windowS >= 60 ? (windowS/60).toFixed(windowS % 60 ? 1 : 0) + 'm' : windowS + 's'"></b>
+      <button class="lv-btn" @click="zoomX(1)" title="Wider">+</button>
 
       <span class="lv-sub">price ±</span>
-      <button class="lv-btn" @click="zoomY(0.5)">−</button>
+      <button class="lv-btn" @click="zoomY(-1)">−</button>
       <b class="lv-num" x-text="spanCents + '¢'"></b>
-      <button class="lv-btn" @click="zoomY(2)">+</button>
+      <button class="lv-btn" @click="zoomY(1)">+</button>
 
       <!-- Recentres on demand, and automatically ONLY at the edge. Never on a
            timer: a plot that jumps every thirty seconds destroys the anchor
@@ -130,6 +149,23 @@
         <input type="checkbox" x-model="showQuotes">
         <span>NBBO</span>
       </label>
+
+      <!-- Price lines. Double-click the plot to place one, drag to move,
+           click a chip to remove. They hold at a PRICE while the plot scrolls
+           under them, and each carries how many prints have landed there
+           inside the window — which is the question they exist for. -->
+      <button class="lv-btn" @click="addLineAtPrice()"
+              title="Place a line at the current price. Double-clicking the plot
+                     places one where you click; drag to move it.">+ line</button>
+      <template x-for="(ln, i) in lines" :key="i">
+        <span class="lv-line-chip" @click="removeLine(i)"
+              title="Click to remove">
+          <span x-text="ln.p.toFixed(2)"></span>
+          <span class="lv-x">×</span>
+        </span>
+      </template>
+      <button class="lv-btn" @click="clearLines()" x-show="lines.length > 1"
+              x-cloak>clear</button>
 
       <span class="lv-spacer"></span>
       <!-- A ROLLING 60-SECOND COUNT. It was the window's trades divided by the
@@ -153,7 +189,22 @@
 
     <div class="lv-pane">
       <canvas id="lv-canvas"></canvas>
-      <div class="lv-readout" x-show="hover" x-cloak x-text="hoverText()"></div>
+      <!-- AT THE CURSOR, share count only. It was a corner box carrying time,
+           venue and conditions — all of which meant looking away from the
+           point to read them. Where the print is in time and price is already
+           where the cursor is; the one number wanted is how big it was.
+           A STACK when bubbles overlap, because at these rates several share
+           a millisecond and one number cannot distinguish a single 400-share
+           print from four of 100. -->
+      <div class="lv-readout" x-show="hover" x-cloak
+           :style="hover ? ('left:' + (hover.x + 14) + 'px; top:' + (hover.y - 8) + 'px')
+                         : ''">
+        <template x-for="(sz, i) in hoverSizes()" :key="i">
+          <div class="lv-sz" x-text="sz"></div>
+        </template>
+        <div class="lv-sz more" x-show="hover && hover.more" x-cloak
+             x-text="'+' + (hover ? hover.more : 0) + ' more'"></div>
+      </div>
       <div class="lv-empty" x-show="!trades.length" x-cloak>
         <span x-show="!symbol">Type a ticker and press watch.</span>
         <span x-show="symbol && connected">
