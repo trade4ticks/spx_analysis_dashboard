@@ -108,8 +108,32 @@ for (const f of process.argv.slice(3)) {
   catch (e) { /* a bundle may need DOM we do not have; keep going */ }
 }
 if (!comp) { console.log(JSON.stringify({ok:false})); process.exit(0); }
+
+/* SECONDARY SCOPES.
+ *
+ * A page may split its state across more than one object — Equities Live has
+ * a component that owns the socket and the frame loop, and a pane factory
+ * that owns one plot. Both are Alpine scopes: the template binds directly to
+ * pane members, and pane methods call each other with `this`.
+ *
+ * A factory opts in by tagging itself, and ONLY tagged factories are called.
+ * Calling every function on window to see what it returns would run arbitrary
+ * page code inside the checker, which is a large amount of risk to take on
+ * for a naming convention. */
+const scopes = [comp];
+for (const k of Object.getOwnPropertyNames(sb)) {
+  let f;
+  try { f = sb[k]; } catch (e) { continue; }
+  if (typeof f !== 'function' || !f.isComponentScope) continue;
+  try {
+    const o = f();
+    if (o && typeof o === 'object') scopes.push(o);
+  } catch (e) { /* a factory that needs arguments is not a scope */ }
+}
+
 const names = new Set(), fns = new Set();
-let o = comp;
+for (const scope of scopes) {
+let o = scope;
 while (o && o !== Object.prototype) {
   for (const k of Object.getOwnPropertyNames(o)) {
     names.add(k);
@@ -123,6 +147,7 @@ while (o && o !== Object.prototype) {
     if (typeof d.value === 'function' || d.get) fns.add(k);
   }
   o = Object.getPrototypeOf(o);
+}
 }
 for (const k of Object.keys(sb)) { names.add(k); fns.add(k); }
 console.log(JSON.stringify({ok:true, names:[...names], fns:[...fns]}));

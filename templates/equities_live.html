@@ -33,21 +33,33 @@
       background:var(--surface); border:1px solid var(--border);
       border-radius:6px; padding:7px 10px; margin-bottom:8px; font-size:11px;
     }
+    .lv-bar.pane { margin-bottom:6px; padding:5px 8px; gap:6px; }
     .lv-sel, .lv-inp {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:11px; padding:3px 7px; border-radius:4px;
     }
-    .lv-inp.sym { width:88px; text-transform:uppercase; font-weight:600; }
+    .lv-inp.sym { width:78px; text-transform:uppercase; font-weight:600; }
     .lv-btn {
       background:var(--raised); border:1px solid var(--border); color:var(--muted);
       font-size:11px; padding:3px 9px; border-radius:4px; cursor:pointer;
     }
     .lv-btn:hover { color:var(--text); }
     .lv-btn.on { border-color:var(--accent); color:var(--accent); }
+    .lv-btn.close { padding:3px 7px; }
+    .lv-btn:disabled { opacity:0.4; cursor:default; }
     .lv-sub { font-size:10px; color:var(--muted); }
     .lv-spacer { flex:1; }
     .lv-num { font-variant-numeric:tabular-nums; color:var(--text); font-weight:600; }
     .lv-chk { display:flex; align-items:center; gap:4px; color:var(--muted); cursor:pointer; }
+
+    /* ── the panes ─────────────────────────────────────────────────────
+       Side by side by default; stacked is a toggle, because which one reads
+       better depends on whether the two names move together. */
+    .lv-panes { flex:1; display:flex; gap:8px; min-height:0; }
+    .lv-panes.stacked { flex-direction:column; }
+    .lv-col {
+      flex:1; display:flex; flex-direction:column; min-width:0; min-height:0;
+    }
 
     .lv-pane {
       flex:1; position:relative; min-height:0;
@@ -73,14 +85,65 @@
     }
     .lv-readout .lv-sz.more { font-size:9px; font-weight:400; color:var(--muted); }
 
+    /* BRIGHT GREY, not yellow. Yellow read as a signal; these lines carry
+       none — they mark a level the eye is holding. */
     .lv-line-chip {
       display:inline-flex; align-items:center; gap:4px; cursor:pointer;
-      font-size:10.5px; font-weight:600; color:#ffd666;
-      border:1px solid rgba(255,214,102,0.45); border-radius:3px;
+      font-size:10.5px; font-weight:600; color:#d6dae0;
+      border:1px solid rgba(214,218,224,0.45); border-radius:3px;
       padding:1px 6px; font-variant-numeric:tabular-nums;
     }
-    .lv-line-chip:hover { background:rgba(255,214,102,0.12); }
+    .lv-line-chip:hover { background:rgba(214,218,224,0.12); }
     .lv-line-chip .lv-x { color:var(--muted); }
+
+    /* ── arrival rate against this name's own normal ───────────────────
+       Deliberately small. It is context for the plot above it, not a second
+       plot, and the two numbers on it are the whole content. */
+    .lv-rate {
+      margin-top:6px; background:var(--surface); border:1px solid var(--border);
+      border-radius:6px; padding:6px 9px 7px; font-size:10.5px;
+    }
+    .lv-rate-head {
+      display:flex; align-items:baseline; gap:8px; color:var(--muted);
+      font-size:10px; margin-bottom:5px; flex-wrap:wrap;
+    }
+    .lv-rate-head b { color:var(--text); font-weight:600; }
+    .lv-rate-row {
+      display:flex; align-items:center; gap:8px; margin-top:5px;
+    }
+    .lv-rate-k { width:74px; color:var(--muted); flex:none; }
+    .lv-rate-v {
+      width:52px; flex:none; text-align:right; font-size:13px; font-weight:700;
+      color:var(--text); font-variant-numeric:tabular-nums;
+    }
+    .lv-rate-track {
+      flex:1; position:relative; height:14px; min-width:60px;
+      background:rgba(255,255,255,0.03); border-radius:3px;
+    }
+    /* The observed range across the stored sessions, then the quartiles
+       inside it. At eleven sessions those are the two statements that mean
+       what they say; deciles would be two order statistics in disguise. */
+    .lv-rate-range {
+      position:absolute; top:5px; height:4px; border-radius:2px;
+      background:rgba(150,170,190,0.22);
+    }
+    .lv-rate-iqr {
+      position:absolute; top:3px; height:8px; border-radius:2px;
+      background:rgba(150,170,190,0.42);
+    }
+    .lv-rate-med {
+      position:absolute; top:1px; width:1.5px; height:12px;
+      background:rgba(226,232,240,0.85);
+    }
+    .lv-rate-now {
+      position:absolute; top:0; width:2.5px; height:14px; border-radius:1px;
+      background:#fff; box-shadow:0 0 4px rgba(255,255,255,0.55);
+    }
+    .lv-rate-x {
+      width:46px; flex:none; text-align:right; font-weight:600;
+      color:var(--text); font-variant-numeric:tabular-nums;
+    }
+    .lv-rate-why { color:var(--muted); line-height:1.55; }
 
     [x-cloak] { display:none !important; }
   </style>
@@ -92,7 +155,7 @@
     <div class="brand"><span class="brand-pink">Pink</span><span class="brand-blue">Blue</span><span class="brand-labs">Labs</span></div>
     {% set nav_active = "/equities-live" %}{% include "_nav.html" %}
     <div class="topbar-right">
-      <span x-text="symbol || '—'"></span>
+      <span x-text="panes.map(p => p.symbol || '—').join(' · ')"></span>
     </div>
   </div>
 
@@ -104,7 +167,7 @@
       a live one, which is why this banner exists. Set LIVE_FEED=realtime.
     </div>
     <div class="lv-down" x-show="!connected" x-cloak>
-      DISCONNECTED — <span x-text="statusLine()"></span>. The plot below is
+      DISCONNECTED — <span x-text="statusLine()"></span>. The plots below are
       frozen, not quiet.
     </div>
     <div class="lv-down" x-show="connected && status && status.problems.length"
@@ -117,105 +180,222 @@
       <span x-text="refused"></span>
     </div>
 
+    <!-- ── site-level bar: what is true of the connection, not of a pane ── -->
     <div class="lv-bar">
-      <input class="lv-inp sym" type="text" x-model="pending"
-             placeholder="ticker" @keydown.enter="watch(pending)">
-      <button class="lv-btn on" @click="watch(pending)">watch</button>
-
-      <!-- LADDERS of round stops, not doubling. From 180s the only neighbours
-           used to be 90 and 360, which overshoots every small adjustment. -->
-      <span class="lv-sub">window</span>
-      <button class="lv-btn" @click="zoomX(-1)" title="Narrower">−</button>
-      <b class="lv-num" x-text="windowS >= 60 ? (windowS/60).toFixed(windowS % 60 ? 1 : 0) + 'm' : windowS + 's'"></b>
-      <button class="lv-btn" @click="zoomX(1)" title="Wider">+</button>
-
-      <span class="lv-sub">price ±</span>
-      <button class="lv-btn" @click="zoomY(-1)">−</button>
-      <b class="lv-num" x-text="spanCents + '¢'"></b>
-      <button class="lv-btn" @click="zoomY(1)">+</button>
-
-      <!-- Recentres on demand, and automatically ONLY at the edge. Never on a
-           timer: a plot that jumps every thirty seconds destroys the anchor
-           the eye is reading position against. -->
-      <button class="lv-btn" @click="recenter()"
-              title="Recentre now. Automatic recentring happens only when price
-                     approaches the edge of the visible range, never on a timer.">
-        recenter</button>
-      <button class="lv-btn" :class="{on: paused}" @click="togglePause()"
-              title="Freezes the view. Data keeps buffering, so resuming
-                     catches up rather than skipping."
-              x-text="paused ? 'resume' : 'pause'"></button>
-      <label class="lv-chk">
-        <input type="checkbox" x-model="showQuotes">
-        <span>NBBO</span>
-      </label>
-
-      <!-- Price lines. Double-click the plot to place one, drag to move,
-           click a chip to remove. They hold at a PRICE while the plot scrolls
-           under them, and each carries how many prints have landed there
-           inside the window — which is the question they exist for. -->
-      <button class="lv-btn" @click="addLineAtPrice()"
-              title="Place a line at the current price. Double-clicking the plot
-                     places one where you click; drag to move it.">+ line</button>
-      <template x-for="(ln, i) in lines" :key="i">
-        <span class="lv-line-chip" @click="removeLine(i)"
-              title="Click to remove">
-          <span x-text="ln.p.toFixed(2)"></span>
-          <span class="lv-x">×</span>
-        </span>
-      </template>
-      <button class="lv-btn" @click="clearLines()" x-show="lines.length > 1"
-              x-cloak>clear</button>
-
+      <button class="lv-btn on" @click="addPane('')"
+              :disabled="panes.length >= maxPanes()"
+              :title="'Up to ' + maxPanes() + ' panes. The hub holds one '
+                    + 'upstream subscription per symbol however many panes '
+                    + 'watch it.'">+ pane</button>
+      <button class="lv-btn" :class="{on: stacked}" @click="stacked = !stacked"
+              x-show="panes.length > 1" x-cloak
+              x-text="stacked ? 'stacked' : 'side by side'"></button>
       <span class="lv-spacer"></span>
-      <!-- A ROLLING 60-SECOND COUNT. It was the window's trades divided by the
-           window's length, which reads a third of the rate on a 3-minute
-           window and climbs from zero as the buffer fills. -->
-      <span class="lv-sub">trades/min</span>
-      <b class="lv-num" x-text="tpm == null ? '—' : tpm"></b>
-      <!-- The hub only buffers a symbol while someone watches it, so the first
-           subscribe starts from empty. An axis claiming three minutes over
-           fifty seconds of tape should say which it is. -->
-      <span class="lv-sub" x-show="tpmPartial" x-cloak
-            :title="'A per-minute rate needs a minute. ' + bufferedS()
-                    + 's buffered so far.'"
-            x-text="'buffering ' + bufferedS() + 's'"></span>
-      <span class="lv-sub" x-show="!tpmPartial && bufferedS() < windowS" x-cloak
-            :title="'The window is ' + windowS + 's; the hub has been watching
-                     this symbol for ' + bufferedS() + 's. Not eviction.'"
-            x-text="bufferedS() + 's of ' + windowS + 's'"></span>
       <span class="lv-sub" x-text="statusLine()"></span>
     </div>
 
-    <div class="lv-pane">
-      <canvas id="lv-canvas"></canvas>
-      <!-- AT THE CURSOR, share count only. It was a corner box carrying time,
-           venue and conditions — all of which meant looking away from the
-           point to read them. Where the print is in time and price is already
-           where the cursor is; the one number wanted is how big it was.
-           A STACK when bubbles overlap, because at these rates several share
-           a millisecond and one number cannot distinguish a single 400-share
-           print from four of 100. -->
-      <div class="lv-readout" x-show="hover" x-cloak
-           :style="hover ? ('left:' + (hover.x + 14) + 'px; top:' + (hover.y - 8) + 'px')
-                         : ''">
-        <template x-for="(sz, i) in hoverSizes()" :key="i">
-          <div class="lv-sz" x-text="sz"></div>
-        </template>
-        <div class="lv-sz more" x-show="hover && hover.more" x-cloak
-             x-text="'+' + (hover ? hover.more : 0) + ' more'"></div>
-      </div>
-      <div class="lv-empty" x-show="!trades.length" x-cloak>
-        <span x-show="!symbol">Type a ticker and press watch.</span>
-        <span x-show="symbol && connected">
-          Watching <b x-text="symbol"></b> — no prints in the window yet.
-          Outside market hours this is expected; during them it is not, and
-          the trades/min readout above is the thing to check.
-        </span>
-        <span x-show="symbol && !connected">
-          Not connected. Nothing below is current.
-        </span>
-      </div>
+    <div class="lv-panes" :class="{stacked: stacked}">
+      <template x-for="(pane, pi) in panes" :key="pane.id">
+        <div class="lv-col">
+
+          <!-- Each pane carries its OWN symbol, window, price range and
+               lines. Nothing here is site state. -->
+          <div class="lv-bar pane">
+            <input class="lv-inp sym" type="text" x-model="pane.pending"
+                   placeholder="ticker"
+                   @keydown.enter="pane.watch(pane.pending); pane.fetchNorm(true)">
+            <button class="lv-btn on"
+                    @click="pane.watch(pane.pending); pane.fetchNorm(true)">watch</button>
+
+            <!-- LADDERS of round stops, not doubling. From 180s the only
+                 neighbours used to be 90 and 360, which overshoots every
+                 small adjustment. -->
+            <span class="lv-sub">win</span>
+            <button class="lv-btn" @click="pane.zoomX(-1)" title="Narrower">−</button>
+            <b class="lv-num" x-text="pane.windowLabel()"></b>
+            <button class="lv-btn" @click="pane.zoomX(1)" title="Wider">+</button>
+
+            <span class="lv-sub">±</span>
+            <button class="lv-btn" @click="pane.zoomY(-1)">−</button>
+            <b class="lv-num" x-text="pane.spanCents + '¢'"></b>
+            <button class="lv-btn" @click="pane.zoomY(1)">+</button>
+
+            <!-- Recentres on demand, and automatically ONLY at the edge.
+                 Never on a timer: a plot that jumps every thirty seconds
+                 destroys the anchor the eye is reading position against. -->
+            <button class="lv-btn" @click="pane.recenter()"
+                    title="Recentre now. Automatic recentring happens only when
+                           price approaches the edge of the visible range,
+                           never on a timer.">recenter</button>
+            <button class="lv-btn" :class="{on: pane.paused}"
+                    @click="pane.togglePause()"
+                    title="Freezes the view. Data keeps buffering, so resuming
+                           catches up rather than skipping."
+                    x-text="pane.paused ? 'resume' : 'pause'"></button>
+            <label class="lv-chk">
+              <input type="checkbox" x-model="pane.showQuotes">
+              <span>NBBO</span>
+            </label>
+            <!-- OFF BY DEFAULT. Colouring a print by where it sat in the
+                 spread asserts that placement carries a side, which has not
+                 been established. Grey asserts nothing; this is here to look
+                 with, not to conclude from. -->
+            <label class="lv-chk"
+                   title="Colour each print by where it sat relative to the NBBO
+                          mid — above pink, below blue. Off by default: that
+                          placement carries a side is not established, and
+                          colouring by it would assert it.">
+              <input type="checkbox" x-model="pane.bichrome">
+              <span>bichrome</span>
+            </label>
+
+            <!-- Price lines. Double-click the plot to place one, drag to
+                 move, click a chip to remove. They hold at a PRICE while the
+                 plot scrolls under them, and each carries how many prints
+                 have landed there inside the window. -->
+            <button class="lv-btn" @click="pane.addLineAtPrice()"
+                    title="Place a line at the current price. Double-clicking the
+                           plot places one where you click; drag to move it.">+ line</button>
+            <template x-for="(ln, li) in pane.lines" :key="li">
+              <span class="lv-line-chip" @click="pane.removeLine(li)"
+                    title="Click to remove">
+                <span x-text="ln.p.toFixed(2)"></span>
+                <span class="lv-x">×</span>
+              </span>
+            </template>
+            <button class="lv-btn" @click="pane.clearLines()"
+                    x-show="pane.lines.length > 1" x-cloak>clear</button>
+
+            <span class="lv-spacer"></span>
+            <!-- The hub only buffers a symbol while someone watches it, so
+                 the first subscribe starts from empty. An axis claiming three
+                 minutes over fifty seconds of tape should say which it is. -->
+            <span class="lv-sub" x-show="pane.tpmPartial" x-cloak
+                  :title="'A per-minute rate needs a minute. '
+                          + pane.bufferedS() + 's buffered so far.'"
+                  x-text="'buffering ' + pane.bufferedS() + 's'"></span>
+            <span class="lv-sub"
+                  x-show="!pane.tpmPartial && pane.bufferedS() < pane.windowS"
+                  x-cloak
+                  x-text="pane.bufferedS() + 's of ' + pane.windowS + 's'"></span>
+            <button class="lv-btn close" @click="removePane(pi)"
+                    x-show="panes.length > 1" x-cloak
+                    title="Close this pane. The symbol stays subscribed if
+                           another pane is watching it.">×</button>
+          </div>
+
+          <div class="lv-down" x-show="pane.refused" x-cloak>
+            <span x-text="pane.refused"></span>
+          </div>
+
+          <div class="lv-pane">
+            <canvas :id="'lv-canvas-' + pane.id"
+                    @mousemove="pane.onMove($event)"
+                    @mousedown="pane.onDown($event)"
+                    @dblclick="pane.onDouble($event)"
+                    @mouseleave="pane.hover = null"></canvas>
+            <!-- AT THE CURSOR, share count only. It was a corner box carrying
+                 time, venue and conditions — all of which meant looking away
+                 from the point to read them. A STACK when bubbles overlap,
+                 because at these rates several share a millisecond and one
+                 number cannot distinguish a single 400-share print from four
+                 of 100. -->
+            <div class="lv-readout" x-show="pane.hover" x-cloak
+                 :style="pane.hover
+                   ? ('left:' + (pane.hover.x + 14) + 'px; top:'
+                      + (pane.hover.y - 8) + 'px') : ''">
+              <template x-for="(sz, si) in pane.hoverSizes()" :key="si">
+                <div class="lv-sz" x-text="sz"></div>
+              </template>
+              <div class="lv-sz more" x-show="pane.hover && pane.hover.more"
+                   x-cloak
+                   x-text="'+' + (pane.hover ? pane.hover.more : 0) + ' more'"></div>
+            </div>
+            <div class="lv-empty" x-show="!pane.trades.length" x-cloak>
+              <span x-show="!pane.symbol">Type a ticker and press watch.</span>
+              <span x-show="pane.symbol && connected">
+                Watching <b x-text="pane.symbol"></b> — no prints in the window
+                yet. Outside market hours this is expected; during them it is
+                not, and the trades/min readout below is the thing to check.
+              </span>
+              <span x-show="pane.symbol && !connected">
+                Not connected. Nothing below is current.
+              </span>
+            </div>
+          </div>
+
+          <!-- ── arrival rate against this name's own normal ────────────
+               Forty trades a minute is not a reading. Forty against what THIS
+               name normally does in THIS fifteen-minute bucket is.
+
+               THE SAME CLOCK TIME ACROSS SESSIONS, never a daily average —
+               every name looks like it is deteriorating at noon because every
+               name is, and a daily average would report that as a per-symbol
+               anomaly on every symbol at once.
+
+               The session count is on screen from the first render. Eleven is
+               not a month, and a band drawn from eleven days should say so
+               rather than let its own smoothness imply otherwise. -->
+          <div class="lv-rate">
+            <div class="lv-rate-head">
+              <span>arrival rate vs its own normal</span>
+              <template x-if="pane.normOk()">
+                <span>
+                  · bucket <b x-text="pane.norm.bucket"></b> ET
+                  · <b x-text="pane.norm.sessions + ' sessions'"></b>
+                  <span x-text="'(' + pane.norm.first + ' – ' + pane.norm.last + ')'"></span>
+                  · 15-min grain
+                </span>
+              </template>
+            </div>
+
+            <template x-if="pane.normOk()">
+              <div>
+                <template x-for="m in [['trades_per_min','trades/min'],
+                                       ['shares_per_min','shares/min']]"
+                          :key="m[0]">
+                  <div class="lv-rate-row">
+                    <span class="lv-rate-k" x-text="m[1]"></span>
+                    <b class="lv-rate-v" x-text="pane.fmt(pane.liveOf(m[0]))"></b>
+                    <div class="lv-rate-track"
+                         :title="'over ' + pane.norm.sessions + ' sessions at '
+                                 + pane.norm.bucket + ' ET — range '
+                                 + pane.fmt(pane.norm[m[0]].min) + ' to '
+                                 + pane.fmt(pane.norm[m[0]].max)
+                                 + ', quartiles ' + pane.fmt(pane.norm[m[0]].p25)
+                                 + '–' + pane.fmt(pane.norm[m[0]].p75)
+                                 + ', median ' + pane.fmt(pane.norm[m[0]].med)
+                                 + '. Scale starts at zero.'">
+                      <div class="lv-rate-range"
+                           :style="'left:' + pane.normPct(m[0], pane.norm[m[0]].min)
+                                 + '%; width:' + (pane.normPct(m[0], pane.norm[m[0]].max)
+                                   - pane.normPct(m[0], pane.norm[m[0]].min)) + '%'"></div>
+                      <div class="lv-rate-iqr"
+                           :style="'left:' + pane.normPct(m[0], pane.norm[m[0]].p25)
+                                 + '%; width:' + (pane.normPct(m[0], pane.norm[m[0]].p75)
+                                   - pane.normPct(m[0], pane.norm[m[0]].p25)) + '%'"></div>
+                      <div class="lv-rate-med"
+                           :style="'left:' + pane.normPct(m[0], pane.norm[m[0]].med) + '%'"></div>
+                      <div class="lv-rate-now"
+                           x-show="pane.liveOf(m[0]) != null" x-cloak
+                           :style="'left:' + pane.normPct(m[0], pane.liveOf(m[0])) + '%'"></div>
+                    </div>
+                    <span class="lv-rate-x" x-text="pane.normRatioText(m[0])"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <template x-if="pane.symbol && pane.norm && !pane.norm.ok">
+              <div class="lv-rate-why" x-text="pane.norm.why"></div>
+            </template>
+            <template x-if="pane.symbol && !pane.norm">
+              <div class="lv-rate-why">reading this name's history…</div>
+            </template>
+          </div>
+
+        </div>
+      </template>
     </div>
   </div>
 

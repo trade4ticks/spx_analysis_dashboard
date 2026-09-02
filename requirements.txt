@@ -32,3 +32,11 @@ pyyaml>=6.0.2
 # if pip hasn't run yet — install on VPS: pip install pandas_market_calendars
 pandas>=2.2.0
 pandas_market_calendars>=4.4.0
+
+# Equities Live reads its arrival-rate comparison against the MARKET clock:
+# `intraday_metrics` buckets are stamped 09:30 to 15:45 Eastern, and reading
+# them against any other clock compares a symbol to a different quarter of its
+# own day while looking entirely correct. Linux has a system zone database;
+# Windows ships none, so zoneinfo needs this. The code reports the missing
+# database rather than falling back to local time, but the fix is to have it.
+tzdata>=2024.1

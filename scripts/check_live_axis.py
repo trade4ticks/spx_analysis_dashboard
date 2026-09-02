@@ -42,7 +42,15 @@ global.document = { addEventListener: (ev, fn) => { if (ev === 'alpine:init') fn
 global.Alpine = { data: (_n, f) => { factory = f; } };
 global.WebSocket = function () { this.readyState = 0; };
 eval(src);
-const c = factory();
+// A PANE, not the component. The component owns the socket, the frame loop
+// and the list of panes; everything asserted below is a property of one plot,
+// and driving it directly is what makes it drivable at all.
+if (typeof global.window.lvPane !== 'function') {
+  console.error('window.lvPane is not exported — the pane is not separable '
+                + 'from the component, so none of this can be driven');
+  process.exit(2);
+}
+const c = global.window.lvPane(1, () => {});
 c.$nextTick = () => {};
 c.showQuotes = false;
 

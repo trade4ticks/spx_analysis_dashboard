@@ -9,10 +9,35 @@
  * NOTHING IS AGGREGATED ANYWHERE IN THIS FILE. Seven prints sharing a
  * millisecond are seven bubbles at the same x. They overlap; that overlap IS
  * the reading — a single marketable order sweeping seven venues.
+ *
+ * TWO OBJECTS, NOT ONE. `lvPane()` owns everything about one plot: its
+ * symbol, its buffers, its window, its band, its lines, its canvas. The
+ * Alpine component owns the socket, the frame loop and the list of panes, and
+ * nothing else. Panes were previously the component, which is why there could
+ * only ever be one.
  */
 
 const LV_BLUE = '#3498db';
 const LV_PINK = '#e84393';
+
+/* NEUTRAL BY DEFAULT.
+ *
+ * The bubbles were the same blue as the bid line, which reads as "buys"
+ * before any decision to read it that way. A print is a print; the colour
+ * says nothing until the bichrome toggle is deliberately turned on. */
+const LV_TRADE_FILL = 'rgba(206,212,220,0.30)';
+const LV_TRADE_RIM  = 'rgba(228,233,240,0.80)';
+const LV_UP_FILL = 'rgba(232,67,147,0.30)';
+const LV_UP_RIM  = 'rgba(240,130,180,0.85)';
+const LV_DN_FILL = 'rgba(52,152,219,0.30)';
+const LV_DN_RIM  = 'rgba(120,200,255,0.85)';
+
+// Price lines: BRIGHT GREY, not yellow. Yellow reads as a signal, and these
+// carry no signal — they are a place the eye is holding.
+const LV_LINE      = 'rgba(214,218,224,0.90)';
+const LV_LINE_DRAG = 'rgba(255,255,255,0.98)';
+const LV_LINE_TEXT = '#dfe3e8';
+const LV_LINE_COLD = '#8a8a8a';
 
 function lvFmtClock(ms) {
   const d = new Date(ms);
@@ -21,19 +46,31 @@ function lvFmtClock(ms) {
        + String(d.getSeconds()).padStart(2, '0');
 }
 
-document.addEventListener('alpine:init', () => {
-  Alpine.data('equitiesLive', () => ({
+function lvFmtNum(v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (v >= 1000000) return (v / 1000000).toFixed(1) + 'M';
+  if (v >= 10000) return Math.round(v / 1000) + 'k';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  if (v >= 100) return String(Math.round(v));
+  return v >= 10 ? v.toFixed(0) : v.toFixed(1);
+}
 
-    // ── connection ───────────────────────────────────────────────────────
-    sock: null,
-    connected: false,
-    status: null,
-    refused: '',
-    retryIn: 0,
+/* One plot. Created by the component, driven by the component's frame loop,
+ * and otherwise self-contained — including its own canvas, whose id carries
+ * the pane's own number.
+ *
+ * `send` is injected rather than reached for: the socket belongs to the
+ * component, and a pane that could open its own would be a second upstream
+ * subscription for the same symbol. */
+window.lvPane = function (id, send) {
+  return {
+    id,
+    send: send || (() => {}),
 
-    // ── the pane ─────────────────────────────────────────────────────────
     symbol: '',
-    pending: 'FDX',
+    pending: '',
+    refused: '',
+
     windowS: 180,
     // Half-height of the price window, in cents.
     spanCents: 30,
@@ -48,7 +85,15 @@ document.addEventListener('alpine:init', () => {
     band: null,          // {lo, hi}
     bandSteps: 0,        // how many times it has moved, so drift is visible
     paused: false,
+    frozenEnd: null,
     showQuotes: true,
+
+    /* OFF BY DEFAULT, and that is the claim being made.
+     *
+     * Colouring a print by where it sat in the spread asserts that placement
+     * carries a side, which has not been established here. Grey asserts
+     * nothing. The toggle exists to look, not to conclude. */
+    bichrome: false,
 
     trades: [],
     quotes: [],
@@ -63,88 +108,37 @@ document.addEventListener('alpine:init', () => {
     // the level and not about when.
     lines: [],
     dragIdx: -1,
-    // Trades per minute, from the window itself rather than a counter: the
-    // arrival rate is a proxy for fillability and a stale one is worse than
-    // none.
+
+    // Both rates over a FIXED sixty seconds. See the note in rates().
     tpm: null,
+    spm: null,
     tpmPartial: false,
-    lastDraw: 0,
 
-    init() {
-      this.connect();
-      this.$nextTick(() => {
-        this.resize();
-        window.addEventListener('resize', () => this.resize());
-        const cv = document.getElementById('lv-canvas');
-        if (cv) {
-          cv.addEventListener('mousemove', e => this.onMove(e));
-          cv.addEventListener('mousedown', e => this.onDown(e));
-          cv.addEventListener('dblclick', e => this.onDouble(e));
-          cv.addEventListener('mouseleave', () => { this.hover = null; });
-          // On WINDOW, not the canvas: a drag that ends off the plot would
-          // otherwise leave the line stuck to the cursor.
-          window.addEventListener('mouseup', () => this.onUp());
-        }
-        requestAnimationFrame(() => this.frame());
-      });
-    },
+    // This name's own normal for the current 15-minute bucket, from the
+    // pipeline's stored history. Never computed here.
+    norm: null,
+    normFetching: false,
+    normAt: 0,
 
-    // ── socket ───────────────────────────────────────────────────────────
-    connect() {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const s = new WebSocket(`${proto}://${location.host}/ws`);
-      this.sock = s;
-      s.onopen = () => {
-        this.connected = true;
-        this.retryIn = 0;
-        if (this.symbol) this.watch(this.symbol, true);
-      };
-      s.onmessage = ev => this.onMessage(JSON.parse(ev.data));
-      s.onclose = () => {
-        this.connected = false;
-        // Backoff, and the page SAYS it is disconnected. A frozen plot that
-        // looks live is the failure mode worth the most care here.
-        this.retryIn = Math.min((this.retryIn || 1) * 2, 30);
-        setTimeout(() => this.connect(), this.retryIn * 1000);
-      };
-      s.onerror = () => { /* onclose follows and carries the retry */ };
-    },
+    canvasId() { return 'lv-canvas-' + this.id; },
+    cv() { return document.getElementById(this.canvasId()); },
 
-    send(o) {
-      if (this.sock && this.sock.readyState === 1) this.sock.send(JSON.stringify(o));
-    },
-
-    onMessage(m) {
-      if (m.ev === 'status') { this.status = m.data; return; }
-      if (m.ev === 'refused') { this.refused = m.why || 'refused'; return; }
-      if (m.ev === 'snapshot') {
-        if (m.data.symbol !== this.symbol) return;
-        this.trades = m.data.trades || [];
-        this.quotes = m.data.quotes || [];
-        this.reband(true);
-        return;
-      }
-      if (m.ev === 'batch') {
-        const d = m.data[this.symbol];
-        if (!d) return;
-        // PAUSE KEEPS BUFFERING. The window freezes; the data does not, so
-        // resuming catches up rather than skipping the interval.
-        for (const t of d.t) this.trades.push(t);
-        for (const q of d.q) this.quotes.push(q);
-        this.prune();
-      }
-    },
-
+    // ── subscription ─────────────────────────────────────────────────────
     watch(sym, silent) {
       sym = (sym || '').trim().toUpperCase();
       if (!sym) return;
       this.refused = '';
-      if (this.symbol && this.symbol !== sym) {
-        this.send({ action: 'unwatch', symbol: this.symbol });
-      }
+      const prev = this.symbol;
       this.symbol = sym;
-      if (!silent) { this.trades = []; this.quotes = []; this.band = null; }
-      this.send({ action: 'watch', symbol: sym, window_s: this.windowS });
+      if (!silent) {
+        this.trades = []; this.quotes = []; this.band = null;
+        this.norm = null; this.normAt = 0;
+      }
+      // Refcounted BY THE COMPONENT. Two panes on one symbol share a single
+      // upstream subscription, and the first pane to close must not
+      // unsubscribe the other one's tape.
+      this.send({ kind: 'watch', symbol: sym, prev: silent ? null : prev,
+                  window_s: this.windowS });
     },
 
     /* Kept well BEYOND the display window.
@@ -180,7 +174,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── geometry ─────────────────────────────────────────────────────────
     resize() {
-      const cv = document.getElementById('lv-canvas');
+      const cv = this.cv();
       if (!cv) return;
       const r = cv.parentElement.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
@@ -267,16 +261,57 @@ document.addEventListener('alpine:init', () => {
       return { lo: this.band.lo, hi: this.band.hi };
     },
 
-    // ── the frame loop ───────────────────────────────────────────────────
-    frame() {
-      const now = performance.now();
-      // ~30fps is plenty for a tape and halves the work of 60.
-      if (now - this.lastDraw > 33) { this.lastDraw = now; this.draw(); }
-      requestAnimationFrame(() => this.frame());
+    /* Screen geometry, in one place.
+     *
+     * draw() and the pointer handlers each computed their own padding, window
+     * bounds and scales; two copies of a mapping drift, and a hover that
+     * disagrees with what is drawn is worse than no hover. */
+    geom() {
+      const cv = this.cv();
+      if (!cv) return null;
+      const r = cv.getBoundingClientRect();
+      const padL = 8, padR = 58, padT = 8, padB = 20;
+      const plotW = Math.max(10, r.width - padL - padR);
+      const plotH = Math.max(10, r.height - padT - padB);
+      const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
+      const tStart = tEnd - this.windowS * 1000;
+      const { lo, hi } = this.yRange();
+      return {
+        rect: r, padL, padR, padT, padB, plotW, plotH, tStart, tEnd, lo, hi,
+        X: t => padL + ((t - tStart) / (tEnd - tStart)) * plotW,
+        Y: p => padT + (1 - (p - lo) / (hi - lo)) * plotH,
+        priceAt: y => lo + (1 - (y - padT) / plotH) * (hi - lo),
+      };
     },
 
+    // ── the two rates ────────────────────────────────────────────────────
+    /* A ROLLING SIXTY SECONDS, not the window's count over the window's
+     * length. That read a third of the true rate on a 3-minute window and
+     * climbed from zero as the buffer filled — 8, 10, 12, 15, 21 against a
+     * verified 56, which is exactly 56/3 converging. A rate has to be over a
+     * fixed interval, and one minute is the interval the reference is quoted
+     * in — which matters twice over now that the comparison band is quoted
+     * per minute too. */
+    rates(tEnd) {
+      const minuteAgo = tEnd - 60000;
+      let n = 0, sh = 0;
+      for (let i = this.trades.length - 1; i >= 0; i--) {
+        const t = this.trades[i];
+        if (t.t > tEnd) continue;
+        if (t.t < minuteAgo) break;
+        n += 1;
+        sh += (t.s || 0);
+      }
+      // Under a minute of data cannot report a per-minute rate honestly.
+      const ready = this.bufferedS() >= 55;
+      this.tpm = ready ? n : null;
+      this.spm = ready ? sh : null;
+      this.tpmPartial = !ready;
+    },
+
+    // ── the frame ────────────────────────────────────────────────────────
     draw() {
-      const cv = document.getElementById('lv-canvas');
+      const cv = this.cv();
       if (!cv) return;
       const ctx = cv.getContext('2d');
       const dpr = window.devicePixelRatio || 1;
@@ -306,8 +341,9 @@ document.addEventListener('alpine:init', () => {
       //
       // Where a print sat relative to bid and ask is the entire question, and
       // two thin muted lines made that something to trace rather than see.
-      // The spread is filled very faintly so it reads as a band the prints sit
-      // inside or outside of, with the edges bright enough to locate exactly.
+      // The spread is filled so it reads as a band the prints sit inside or
+      // outside of — FAINTLY, at background weight, with the edges bright
+      // enough to locate exactly. It was brighter and competed with the tape.
       if (this.showQuotes && this.quotes.length) {
         const vis = this.quotes.filter(q => q.t >= tStart && q.t <= tEnd
                                             && q.bp && q.ap);
@@ -319,7 +355,7 @@ document.addEventListener('alpine:init', () => {
             ctx.lineTo(X(vis[i].t), Y(vis[i].bp));
           }
           ctx.closePath();
-          ctx.fillStyle = 'rgba(150,170,190,0.10)';
+          ctx.fillStyle = 'rgba(150,170,190,0.045)';
           ctx.fill();
         }
         ctx.lineWidth = 1.6;
@@ -347,38 +383,40 @@ document.addEventListener('alpine:init', () => {
       // requirement — the odd lots are the part of the tape being traded in.
       // TRANSPARENT WITH AN OUTLINE, so overlap reads as overlap. At a solid
       // fill one 400-share print and four 100-share prints at the same price
-      // are the same blue disc; with alpha the stack darkens and with a rim
-      // the individual prints stay countable.
-      let count = 0;
-      ctx.fillStyle = 'rgba(52,152,219,0.34)';
-      ctx.strokeStyle = 'rgba(120,200,255,0.85)';
+      // are the same disc; with alpha the stack darkens and with a rim the
+      // individual prints stay countable.
+      //
+      // NEUTRAL GREY unless bichrome is on. See the note on `bichrome`.
+      let qi = 0;                       // a merge walk, not a search per print
       ctx.lineWidth = 0.9;
       for (const t of this.trades) {
         if (t.t < tStart || t.t > tEnd) continue;
-        count += 1;
+        let fill = LV_TRADE_FILL, rim = LV_TRADE_RIM;
+        if (this.bichrome) {
+          // The mid AS OF THIS PRINT, from the last quote at or before it.
+          // Both arrays are in arrival order, so the pointer only moves
+          // forward across the whole frame.
+          while (qi + 1 < this.quotes.length
+                 && this.quotes[qi + 1].t <= t.t) qi += 1;
+          const q = this.quotes[qi];
+          const mid = (q && q.bp && q.ap && q.t <= t.t)
+            ? (q.bp + q.ap) / 2 : null;
+          if (mid != null && Math.abs(t.p - mid) > 1e-9) {
+            const up = t.p > mid;
+            fill = up ? LV_UP_FILL : LV_DN_FILL;
+            rim = up ? LV_UP_RIM : LV_DN_RIM;
+          }
+        }
         const r = Math.max(1.3, Math.sqrt(Math.max(1, t.s)) * 0.62);
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = rim;
         ctx.beginPath();
         ctx.arc(X(t.t), Y(t.p), r, 0, Math.PI * 2);
         ctx.fill();
         if (r > 2) ctx.stroke();
       }
-      // A ROLLING 60-SECOND COUNT, not the window's count divided by the
-      // window's length. That read a third of the true rate on a 3-minute
-      // window and climbed from zero as the buffer filled — 8, 10, 12, 15,
-      // 21 against a verified 56, which is exactly 56/3 converging. A rate
-      // has to be over a fixed interval, and one minute is the interval the
-      // reference is quoted in.
-      const minuteAgo = tEnd - 60000;
-      let inMinute = 0;
-      for (let i = this.trades.length - 1; i >= 0; i--) {
-        const t = this.trades[i].t;
-        if (t > tEnd) continue;
-        if (t < minuteAgo) break;
-        inMinute += 1;
-      }
-      // Under a minute of data cannot report a per-minute rate honestly.
-      this.tpm = this.bufferedS() >= 55 ? inMinute : null;
-      this.tpmPartial = this.bufferedS() < 55;
+
+      this.rates(tEnd);
 
       if (this.hover && this.hover.recs.length) {
         ctx.strokeStyle = '#fff';
@@ -392,17 +430,20 @@ document.addEventListener('alpine:init', () => {
         }
       }
 
-      // ── 6. the placed price lines ─────────────────────────────────────
+      // ── the placed price lines ────────────────────────────────────────
       //
       // Drawn LAST so they sit over the tape: the point is to see whether
       // anything traded at that level, and a line under the prints is a line
       // being read through them.
+      //
+      // BRIGHT GREY, not yellow. Yellow reads as a signal and these carry
+      // none — they mark a level the eye is holding, nothing more.
       for (const ln of this.lines) {
         if (ln.p < lo || ln.p > hi) continue;
         const y = Y(ln.p);
         ctx.setLineDash([5, 4]);
         ctx.strokeStyle = ln === this.lines[this.dragIdx]
-          ? 'rgba(255,255,255,0.95)' : 'rgba(255,214,102,0.85)';
+          ? LV_LINE_DRAG : LV_LINE;
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
@@ -412,7 +453,7 @@ document.addEventListener('alpine:init', () => {
         // minutes" is the answer that decides whether to post there.
         const hits = this.lineHits(ln.p, tStart, tEnd);
         ctx.font = '600 10px sans-serif';
-        ctx.fillStyle = hits ? '#ffd666' : '#8a8a8a';
+        ctx.fillStyle = hits ? LV_LINE_TEXT : LV_LINE_COLD;
         ctx.textAlign = 'left';
         ctx.fillText(`${ln.p.toFixed(2)}  ${hits} print${hits === 1 ? '' : 's'}`,
                      padL + 4, y - 4);
@@ -448,17 +489,18 @@ document.addEventListener('alpine:init', () => {
         ctx.fillText(p.toFixed(2), padL + plotW + 6, y + 4);
       }
 
-      // The last trade, marked on the axis in accent blue — the one price
-      // that is not a grid line and the one most often being read.
+      // The last trade, marked on the axis. NEUTRAL — it was accent blue,
+      // the same blue as the bid line, and a blue mark at the last price
+      // reads as a side for the same reason blue bubbles did.
       const last = this.lastPrice();
       if (last != null && last >= lo && last <= hi) {
         const y = Y(last);
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
-        ctx.strokeStyle = 'rgba(52,152,219,0.30)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.26)';
         ctx.stroke();
         ctx.font = '700 12px sans-serif';
-        ctx.fillStyle = LV_BLUE;
+        ctx.fillStyle = '#ffffff';
         ctx.fillText(last.toFixed(2), padL + plotW + 6, y + 4);
       }
 
@@ -506,35 +548,12 @@ document.addEventListener('alpine:init', () => {
         const r = Math.max(1.1, Math.sqrt(sz) * 0.62);
         ctx.beginPath();
         ctx.arc(lx + r, padT + plotH - 10, r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(52,152,219,0.45)';
+        ctx.fillStyle = 'rgba(206,212,220,0.42)';
         ctx.fill();
         ctx.fillStyle = '#6a6a6a';
         ctx.fillText(String(sz), lx + r - 4, padT + plotH + 4);
         lx += r * 2 + 20;
       }
-    },
-
-    /* Screen geometry, in one place.
-     *
-     * draw() and the pointer handlers each computed their own padding, window
-     * bounds and scales; two copies of a mapping drift, and a hover that
-     * disagrees with what is drawn is worse than no hover. */
-    geom() {
-      const cv = document.getElementById('lv-canvas');
-      if (!cv) return null;
-      const r = cv.getBoundingClientRect();
-      const padL = 8, padR = 58, padT = 8, padB = 20;
-      const plotW = Math.max(10, r.width - padL - padR);
-      const plotH = Math.max(10, r.height - padT - padB);
-      const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
-      const tStart = tEnd - this.windowS * 1000;
-      const { lo, hi } = this.yRange();
-      return {
-        rect: r, padL, padR, padT, padB, plotW, plotH, tStart, tEnd, lo, hi,
-        X: t => padL + ((t - tStart) / (tEnd - tStart)) * plotW,
-        Y: p => padT + (1 - (p - lo) / (hi - lo)) * plotH,
-        priceAt: y => lo + (1 - (y - padT) / plotH) * (hi - lo),
-      };
     },
 
     /* How many prints sat at this price inside the window.
@@ -675,6 +694,264 @@ document.addEventListener('alpine:init', () => {
       this.paused = !this.paused;
       if (!this.paused) this.frozenEnd = null;
     },
+
+    windowLabel() {
+      return this.windowS >= 60
+        ? (this.windowS / 60).toFixed(this.windowS % 60 ? 1 : 0) + 'm'
+        : this.windowS + 's';
+    },
+
+    // ── this name's own normal ───────────────────────────────────────────
+    /* Refetched on a slow timer, because the answer cannot change until the
+     * 15-minute bucket does. The server caches per symbol per bucket; this
+     * only has to not hammer it. */
+    async fetchNorm(force) {
+      if (!this.symbol || this.normFetching) return;
+      if (!force && Date.now() - this.normAt < 60000) return;
+      this.normFetching = true;
+      try {
+        const r = await fetch('arrival-norm?symbol='
+                              + encodeURIComponent(this.symbol));
+        const j = await r.json();
+        // Guard against a reply for a symbol this pane has since left.
+        if (!j.symbol || j.symbol === this.symbol) this.norm = j;
+      } catch (err) {
+        this.norm = { ok: false, why: 'the comparison could not be fetched: '
+                                      + err };
+      } finally {
+        this.normFetching = false;
+        this.normAt = Date.now();
+      }
+    },
+
+    normOk() { return !!(this.norm && this.norm.ok); },
+
+    /* The scale the band and the live marker share.
+     *
+     * FROM ZERO. A band drawn over its own min..max makes every quiet period
+     * look like a collapse and every busy one like a spike, because the
+     * baseline moves with the sample. From zero, "half of normal" is half the
+     * distance across, which is the reading. */
+    normMax(key) {
+      const s = this.norm && this.norm[key];
+      if (!s) return 1;
+      const live = key === 'trades_per_min' ? this.tpm : this.spm;
+      return Math.max(s.max, live || 0, 1e-9) * 1.08;
+    },
+
+    normPct(key, v) {
+      if (v == null) return null;
+      return Math.max(0, Math.min(100, (v / this.normMax(key)) * 100));
+    },
+
+    liveOf(key) { return key === 'trades_per_min' ? this.tpm : this.spm; },
+
+    /* Live against the median, which is the sentence the pane is for:
+     * "running at 0.6x its own normal for this time of day". */
+    normRatio(key) {
+      const s = this.norm && this.norm[key];
+      const live = this.liveOf(key);
+      if (!s || live == null || !s.med) return null;
+      return live / s.med;
+    },
+
+    normRatioText(key) {
+      const r = this.normRatio(key);
+      return r == null ? '—' : (r >= 10 ? r.toFixed(0) : r.toFixed(2)) + '×';
+    },
+
+    fmt(v) { return lvFmtNum(v); },
+  };
+};
+
+/* A SECOND ALPINE SCOPE, declared as one.
+ *
+ * The template binds directly to pane members and pane methods call each
+ * other through `this`, so every check that resolves an expression against
+ * "the component" has to know this object exists — otherwise the whole file
+ * reads as a wall of unresolved references and the checks that would catch a
+ * real typo get switched off to quieten them.
+ *
+ * The tag is opt-in because the checker CALLS what it is pointed at, and
+ * calling every function on window to see what comes back would be running
+ * arbitrary page code inside a linter. */
+window.lvPane.isComponentScope = true;
+
+document.addEventListener('alpine:init', () => {
+  Alpine.data('equitiesLive', () => ({
+
+    // ── connection ───────────────────────────────────────────────────────
+    sock: null,
+    connected: false,
+    status: null,
+    refused: '',
+    retryIn: 0,
+
+    // ── the panes ────────────────────────────────────────────────────────
+    panes: [],
+    nextId: 1,
+    stacked: false,
+    // symbol -> how many panes want it. The socket's own subscription set is
+    // a SET, so a second pane on the same symbol is a no-op to it and the
+    // first close would have unsubscribed the other pane's tape. The count
+    // lives here, and watch/unwatch only cross the wire on 0<->1.
+    counts: {},
+
+    init() {
+      this.addPane('FDX');
+      this.connect();
+      this.$nextTick(() => {
+        this.resizeAll();
+        window.addEventListener('resize', () => this.resizeAll());
+        // On WINDOW, not the canvas: a drag that ends off the plot would
+        // otherwise leave the line stuck to the cursor. Whichever pane is
+        // dragging gets it; the rest ignore it.
+        window.addEventListener('mouseup', () => {
+          for (const p of this.panes) p.onUp();
+        });
+        requestAnimationFrame(() => this.frame());
+        setInterval(() => {
+          for (const p of this.panes) p.fetchNorm(false);
+        }, 20000);
+      });
+    },
+
+    // ── panes ────────────────────────────────────────────────────────────
+    maxPanes() {
+      const cap = this.status && this.status.caps
+        ? this.status.caps.symbols : 4;
+      return Math.min(3, cap);
+    },
+
+    addPane(sym) {
+      if (this.panes.length >= this.maxPanes()) return;
+      const p = window.lvPane(this.nextId++, msg => this.fromPane(msg));
+      p.pending = sym || '';
+      this.panes.push(p);
+      this.$nextTick(() => {
+        p.resize();
+        if (sym) { p.watch(sym); p.fetchNorm(true); }
+      });
+    },
+
+    removePane(i) {
+      const p = this.panes[i];
+      if (!p) return;
+      // The LAST pane on a symbol releases it, and only that one.
+      this.release(p.symbol);
+      this.panes.splice(i, 1);
+      this.$nextTick(() => this.resizeAll());
+    },
+
+    /* Every pane message goes through here so refcounting is in one place. */
+    fromPane(msg) {
+      if (msg.kind !== 'watch') return;
+      if (msg.prev && msg.prev !== msg.symbol) this.release(msg.prev);
+      const n = (this.counts[msg.symbol] || 0) + 1;
+      this.counts[msg.symbol] = n;
+      // WATCH ONLY ON 0->1. The hub reference-counts acquisitions, and this
+      // socket's subscription set is a set — so a second `watch` for a symbol
+      // already held would raise the hub's count to two while the set stayed
+      // at one, and the single `unwatch` this client eventually sends would
+      // leave the symbol subscribed forever, occupying one of four slots.
+      //
+      // A later pane on the same symbol asks only for the backlog, so it
+      // opens onto a populated plot rather than filling in over three
+      // minutes.
+      this.send(n === 1
+        ? { action: 'watch', symbol: msg.symbol, window_s: msg.window_s }
+        : { action: 'snapshot', symbol: msg.symbol, window_s: msg.window_s });
+    },
+
+    release(sym) {
+      if (!sym) return;
+      const n = (this.counts[sym] || 0) - 1;
+      if (n > 0) { this.counts[sym] = n; return; }
+      delete this.counts[sym];
+      this.send({ action: 'unwatch', symbol: sym });
+    },
+
+    // ── socket ───────────────────────────────────────────────────────────
+    connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      // RELATIVE, so the page works on the port and behind the tunnel
+      // hostname without a second setting to keep in step.
+      const base = location.pathname.replace(/\/[^/]*$/, '/');
+      const s = new WebSocket(`${proto}://${location.host}${base}ws`);
+      this.sock = s;
+      s.onopen = () => {
+        this.connected = true;
+        this.retryIn = 0;
+        // The server remembers nothing across a drop. Re-assert every pane's
+        // symbol, and rebuild the counts from the panes rather than trusting
+        // a tally that spans a disconnect.
+        this.counts = {};
+        for (const p of this.panes) if (p.symbol) p.watch(p.symbol, true);
+      };
+      s.onmessage = ev => this.onMessage(JSON.parse(ev.data));
+      s.onclose = () => {
+        this.connected = false;
+        // Backoff, and the page SAYS it is disconnected. A frozen plot that
+        // looks live is the failure mode worth the most care here.
+        this.retryIn = Math.min((this.retryIn || 1) * 2, 30);
+        setTimeout(() => this.connect(), this.retryIn * 1000);
+      };
+      s.onerror = () => { /* onclose follows and carries the retry */ };
+    },
+
+    send(o) {
+      if (this.sock && this.sock.readyState === 1) this.sock.send(JSON.stringify(o));
+    },
+
+    onMessage(m) {
+      if (m.ev === 'status') { this.status = m.data; return; }
+      if (m.ev === 'refused') {
+        // Named on the pane that asked for it where possible, so a symbol cap
+        // refusal is attached to the pane that hit it.
+        const hit = m.symbol
+          ? this.panes.filter(p => p.symbol === m.symbol) : [];
+        if (hit.length) { for (const p of hit) p.refused = m.why || 'refused'; }
+        else this.refused = m.why || 'refused';
+        return;
+      }
+      if (m.ev === 'snapshot') {
+        for (const p of this.panes) {
+          if (p.symbol !== m.data.symbol) continue;
+          p.trades = (m.data.trades || []).slice();
+          p.quotes = (m.data.quotes || []).slice();
+          p.reband(true);
+        }
+        return;
+      }
+      if (m.ev === 'batch') {
+        for (const p of this.panes) {
+          const d = m.data[p.symbol];
+          if (!d) continue;
+          // PAUSE KEEPS BUFFERING. The window freezes; the data does not, so
+          // resuming catches up rather than skipping the interval.
+          for (const t of d.t) p.trades.push(t);
+          for (const q of d.q) p.quotes.push(q);
+          p.prune();
+        }
+      }
+    },
+
+    // ── the frame loop ───────────────────────────────────────────────────
+    //
+    // ONE loop for every pane. Three rAF chains would each draw at their own
+    // phase and the panes would tear against each other on the same tape.
+    lastDraw: 0,
+    frame() {
+      const now = performance.now();
+      // ~30fps is plenty for a tape and halves the work of 60.
+      if (now - this.lastDraw > 33) {
+        this.lastDraw = now;
+        for (const p of this.panes) p.draw();
+      }
+      requestAnimationFrame(() => this.frame());
+    },
+
+    resizeAll() { for (const p of this.panes) p.resize(); },
 
     statusLine() {
       const s = this.status;

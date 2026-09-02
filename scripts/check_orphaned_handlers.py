@@ -65,6 +65,9 @@ KEYWORDS = {
 
 MEMBER = re.compile(r"^\s{4}(?:async\s+)?([a-zA-Z_$][\w$]*)\s*\(", re.M)
 
+# A JS identifier used as a call's receiver — `p` in `p.draw()`.
+IDENT = r"[A-Za-z_$][\w$]*"
+
 
 def members(js: str) -> list[str]:
     """Top-level methods of the Alpine component, by indentation.
@@ -95,11 +98,27 @@ def check(tpl: Path) -> tuple[int, list[str]]:
     for name in members(js):
         if re.search(rf"\b{re.escape(name)}\s*\(", markup):
             continue
-        # Called from elsewhere in the component. `this.x(` covers the normal
-        # case; a bare mention covers a method passed as a value.
+        # Called from elsewhere in the file. `this.x(` covers the normal case;
+        # a bare mention covers a method passed as a value.
         body = re.sub(rf"^\s{{4}}(?:async\s+)?{re.escape(name)}\s*\(",
                       "", js, flags=re.M)
         if re.search(rf"this\.{re.escape(name)}\b", body):
+            continue
+        # ANY RECEIVER, not only `this`.
+        #
+        # A page may hold its state in more than one object: Equities Live has
+        # a component that owns the socket and the frame loop, and a pane
+        # object per plot, and the component drives the panes as `p.draw()`.
+        # Under a `this.`-only rule every such method reads as dead, which is
+        # the kind of false positive that gets a check deleted.
+        #
+        # WHAT THIS COSTS, stated rather than discovered later: a deleted
+        # panel's handler now survives if any object anywhere in the file is
+        # called with that method name. The names here are specific enough
+        # (`refreshTable`, `onDouble`) that a collision with a DOM or canvas
+        # method is unlikely, and a check that is wrong on every multi-object
+        # page is worth less than one that is occasionally lenient.
+        if re.search(rf"(?<![\w$]){IDENT}\.{re.escape(name)}\s*\(", body):
             continue
         orphans.append(name)
     return len(orphans), sorted(orphans)
