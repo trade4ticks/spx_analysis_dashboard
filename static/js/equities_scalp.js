@@ -1185,6 +1185,7 @@ document.addEventListener('alpine:init', () => {
 
     setAxisScale(which, log) {
       if (which === 'x') this.geomXLog = log; else this.geomYLog = log;
+      this.geomInvalidate();
       this.renderGeometry();
     },
 
@@ -1226,25 +1227,91 @@ document.addEventListener('alpine:init', () => {
 
     /* Built from the ranked table's own payload rather than a second fetch.
      * The scatter and the table are the same rows seen two ways. */
-    geomPoints() {
+    /* ONE PASS. Points and the reason for every exclusion, computed
+     * together and cached, because the header, the note, the x-show and the
+     * renderer each used to call this separately — four filters over the
+     * same rows, and a count that was not guaranteed to be counting what got
+     * drawn. Two screenshots read "24 points" while showing different sets.
+     *
+     * Nothing here depends on the colour thresholds. That is now enforced
+     * rather than assumed: geomBuild takes no band input at all, and the
+     * axis domain below is computed from its output, so a boundary cannot
+     * change membership or extent. */
+    geomBuild() {
       const c = this.cand;
-      if (!c) return [];
+      const empty = { pts: [], excluded: [], tradedTotal: 0, tradedShown: 0,
+                      reasons: {}, domain: null };
+      if (!c) return empty;
       const nx = this.geomX, ny = this.geomY;
       if (!c.columns.some(x => x.key === nx) ||
-          !c.columns.some(x => x.key === ny)) return [];
+          !c.columns.some(x => x.key === ny)) return empty;
       const xLog = this.geomAxisLog('x'), yLog = this.geomAxisLog('y');
-      return c.rows
-        .filter(r => r.values[nx] != null && r.values[ny] != null)
-        // A log axis cannot show zero or a negative, so those rows drop ONLY
-        // on the axis that is logarithmic — dropping them regardless would
-        // silently hide every at_bid_share of exactly 0.
-        .filter(r => (!xLog || r.values[nx] > 0) && (!yLog || r.values[ny] > 0))
-        .filter(r => !this.geomOnly || r.passes)
-        .filter(r => !this.geomTradedOnly || r.traded)
-        .filter(r => !r.traded || (r.traded.trips || 0) >= this.geomMinTrips)
-        .map(r => ({ x: r.values[nx], y: r.values[ny], symbol: r.symbol,
-                     passes: r.passes, traded: r.traded }));
+
+      const pts = [], excluded = [];
+      let tradedTotal = 0;
+      for (const r of c.rows) {
+        if (r.traded) tradedTotal += 1;
+        // Reasons in the order a reader would ask them, most specific first.
+        let why = null;
+        if (r.values[nx] == null) why = 'no ' + nx;
+        else if (r.values[ny] == null) why = 'no ' + ny;
+        else if (xLog && r.values[nx] <= 0) why = nx + ' is zero (log axis)';
+        else if (yLog && r.values[ny] <= 0) why = ny + ' is zero (log axis)';
+        else if (this.geomOnly && !r.passes) why = 'excluded by the filters';
+        else if (this.geomTradedOnly && !r.traded) why = 'never traded';
+        else if (r.traded && (r.traded.trips || 0) < this.geomMinTrips)
+          why = 'under ' + this.geomMinTrips + ' trips';
+        if (why) {
+          excluded.push({ symbol: r.symbol, why, traded: !!r.traded });
+          continue;
+        }
+        pts.push({ x: r.values[nx], y: r.values[ny], symbol: r.symbol,
+                   passes: r.passes, traded: r.traded });
+      }
+
+      // Counted per reason, TRADED ONLY — the gap that matters is in the
+      // names with outcomes, and "18 not shown" without a reason is the worst
+      // place on this page to lose data silently.
+      const reasons = {};
+      for (const e of excluded) {
+        if (!e.traded) continue;
+        reasons[e.why] = (reasons[e.why] || 0) + 1;
+      }
+
+      // THE DOMAIN, from every point that will be drawn, before any banding.
+      // Chart.js derives its own bounds from the visible datasets, which is
+      // what let a point sit outside the drawn range; setting it explicitly
+      // from `pts` removes the dependency entirely.
+      let domain = null;
+      if (pts.length) {
+        const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+        const pad = (lo, hi, log) => {
+          if (log) return { min: lo * 0.9, max: hi * 1.1 };
+          const g = (hi - lo) || Math.abs(hi) || 1;
+          return { min: lo - g * 0.04, max: hi + g * 0.04 };
+        };
+        domain = {
+          x: pad(Math.min(...xs), Math.max(...xs), xLog),
+          y: pad(Math.min(...ys), Math.max(...ys), yLog),
+        };
+      }
+
+      return { pts, excluded, tradedTotal,
+               tradedShown: pts.filter(p => p.traded).length,
+               reasons, domain };
     },
+
+    /* Cached per render. Alpine re-evaluates a method on every dependency
+     * touch, and four independent evaluations of the same filter were how a
+     * header count and a drawn set could disagree. */
+    geomCache: null,
+    geomData() {
+      if (!this.geomCache) this.geomCache = this.geomBuild();
+      return this.geomCache;
+    },
+    geomInvalidate() { this.geomCache = null; },
+
+    geomPoints() { return this.geomData().pts; },
 
     /* Constant-ratio lines only mean anything when the axes SHARE UNITS.
      * Spread bps over noise bps is a ratio; between_share over trades/min is
@@ -1263,23 +1330,39 @@ document.addEventListener('alpine:init', () => {
 
     renderGeometry() {
       if (typeof Chart === 'undefined') return;
+      // Rebuild once, here, and let everything else read the same object.
+      this.geomInvalidate();
+      const built = this.geomData();
       if (SC_CHARTS.geom) { SC_CHARTS.geom.destroy(); SC_CHARTS.geom = null; }
       this.$nextTick(() => {
         const el = document.getElementById('sc-geom');
-        const pts = this.geomPoints();
+        const pts = built.pts;
         if (!el || !pts.length) return;
         const self = this;
 
         const untraded = pts.filter(p => !p.traded);
         // One dataset PER BAND, so the legend names them and any band can be
         // switched off. Traded points draw last and larger, over the cloud.
+        // EVERY TRADED POINT LANDS IN EXACTLY ONE BAND, by assignment rather
+        // than by three independent filters. The previous version asked each
+        // band "which points are mine?", so a point matching none of them
+        // simply vanished and a point matching two would have been drawn
+        // twice — neither failure being visible from the count.
         const bandFor = p => self.geomBandOf(self.geomColorValue(p.traded));
-        const bands = this.geomBands()
-          .concat([{ key: 'unknown', color: '#5a5a5a', label: 'no value' }])
-          .map(b => ({
-            band: b,
-            data: pts.filter(p => p.traded && bandFor(p).key === b.key),
-          })).filter(d => d.data.length);
+        const buckets = new Map();
+        for (const b of this.geomBands()
+                          .concat([{ key: 'unknown', color: '#5a5a5a',
+                                     label: 'no value' }])) {
+          buckets.set(b.key, { band: b, data: [] });
+        }
+        let unassigned = 0;
+        for (const p of pts) {
+          if (!p.traded) continue;
+          const b = buckets.get(bandFor(p).key);
+          if (b) b.data.push(p); else unassigned += 1;
+        }
+        this.geomUnassigned = unassigned;
+        const bands = [...buckets.values()].filter(d => d.data.length);
 
         const opts = this.geomAxisOptions();
         const xLabel = (opts.find(o => o.key === this.geomX) || {}).label
@@ -1306,12 +1389,20 @@ document.addEventListener('alpine:init', () => {
           options: {
             responsive: true, maintainAspectRatio: false, animation: false,
             scales: {
+              // min/max FIXED from every point that will be drawn, computed
+              // before banding. Left to Chart.js they follow the visible
+              // datasets, and a colour boundary must never change what the
+              // axis covers.
               x: { type: this.geomAxisLog('x') ? 'logarithmic' : 'linear',
+                   min: built.domain ? built.domain.x.min : undefined,
+                   max: built.domain ? built.domain.x.max : undefined,
                    title: { display: true, text: xLabel, color: '#777',
                             font: { size: 10 } },
                    grid: { color: 'rgba(255,255,255,0.05)' },
                    ticks: { font: { size: 9 } } },
               y: { type: this.geomAxisLog('y') ? 'logarithmic' : 'linear',
+                   min: built.domain ? built.domain.y.min : undefined,
+                   max: built.domain ? built.domain.y.max : undefined,
                    title: { display: true, text: yLabel, color: '#777',
                             font: { size: 10 } },
                    grid: { color: 'rgba(255,255,255,0.05)' },
@@ -1352,25 +1443,47 @@ document.addEventListener('alpine:init', () => {
     geomNote() {
       const c = this.cand;
       if (!c) return '';
-      const n = c.n_traded || 0;
-      if (!n) return 'No traded names yet — upload a statement and the known '
-                   + 'outcomes appear as larger, labelled points.';
-      const shown = this.geomPoints().filter(p => p.traded);
+      const g = this.geomData();
+      if (!g.tradedTotal) return 'No traded names yet — upload a statement '
+                              + 'and the known outcomes appear as larger, '
+                              + 'labelled points.';
       const by = {};
-      for (const p of shown) {
-        const k = this.geomBandOf(this.geomColorValue(p.traded)).key;
-        by[k] = (by[k] || 0) + 1;
+      for (const p of g.pts) {
+        if (!p.traded) continue;
+        by[this.geomBandOf(this.geomColorValue(p.traded)).key] =
+          (by[this.geomBandOf(this.geomColorValue(p.traded)).key] || 0) + 1;
       }
       const t = this.geomThresholds();
       const m = this.geomColorMeta();
-      return shown.length + ' of ' + n + ' traded names shown, coloured by '
-           + m.label + ' — ' + (by.kept || 0) + ' at or above '
-           + m.fmt(t.hi) + ', ' + (by.marginal || 0) + ' between, '
+      return g.tradedShown + ' of ' + g.tradedTotal
+           + ' traded names shown, coloured by ' + m.label + ' — '
+           + (by.kept || 0) + ' at or above ' + m.fmt(t.hi) + ', '
+           + (by.marginal || 0) + ' between, '
            + (by.abandoned || 0) + ' below ' + m.fmt(t.lo)
            + ((by.unknown || 0) ? ', ' + by.unknown + ' with no value' : '')
-           + '. An unknown candidate sitting among the blue is the reading '
-           + 'this panel exists for.';
+           + '.';
     },
+
+    /* WHY THE MISSING ONES ARE MISSING, by name and count.
+     *
+     * "24 of 42 shown" reported the gap and not the reason. On a panel whose
+     * whole purpose is comparing names with known outcomes, a silently
+     * dropped point is the worst thing on the page to lose. */
+    geomGapNote() {
+      const g = this.geomData();
+      const n = g.tradedTotal - g.tradedShown;
+      if (n <= 0) return '';
+      const parts = Object.keys(g.reasons)
+        .sort((a, b) => g.reasons[b] - g.reasons[a])
+        .map(k => g.reasons[k] + ' ' + k);
+      return n + ' traded name' + (n === 1 ? '' : 's') + ' not shown: '
+           + parts.join(', ') + '.';
+    },
+
+    /* A point that matched no band would vanish without changing any count.
+     * It cannot happen now — bands are assigned, not filtered — and if it
+     * ever does, the panel says so rather than quietly drawing fewer dots. */
+    geomUnassigned: 0,
 
     // ── 2.6 over time ───────────────────────────────────────────────────
 
@@ -1599,6 +1712,7 @@ document.addEventListener('alpine:init', () => {
           this.passCount = j.n_pass;
           // Same rows, two more views. Drawn from this payload rather than
           // re-fetched, so the scatter cannot disagree with the table.
+          this.geomInvalidate();
           this.renderGeometry();
           this.loadSeries();
         }

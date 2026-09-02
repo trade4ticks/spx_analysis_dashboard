@@ -1164,7 +1164,7 @@
           <span class="sc-help" :class="{on: openNote === 'geom'}"
                 @click="note('geom')" title="What the colours mean">?</span>
           <span class="sc-panel-sub"
-                x-text="cand ? (geomPoints().length + ' points on ' + cand.date) : ''"></span>
+                x-text="cand ? (geomData().pts.length + ' points on ' + cand.date) : ''"></span>
           <span class="sc-spacer"></span>
           <!-- ANY PAIR. Fixed axes meant the panel answered exactly one
                question when there are a couple of hundred pairs worth
@@ -1201,14 +1201,15 @@
                  collapse toward zero noise and stretch a log axis to 1e-10,
                  which spends the whole plot on rows the filters already
                  excluded.">
-            <input type="checkbox" x-model="geomOnly" @change="renderGeometry()">
+            <input type="checkbox" x-model="geomOnly"
+                   @change="geomInvalidate(); renderGeometry()">
             <span>passing only</span>
           </label>
           <!-- Strips the ~548 unknown names and leaves the ones with
                outcomes, which is the comparison the panel is for. -->
           <label class="sc-chk">
             <input type="checkbox" x-model="geomTradedOnly"
-                   @change="renderGeometry()">
+                   @change="geomInvalidate(); renderGeometry()">
             <span>traded only</span>
           </label>
           <label class="sc-chk">
@@ -1219,7 +1220,8 @@
           <span class="sc-spacer"></span>
           <span class="sc-panel-sub">min trips</span>
           <input type="range" min="1" max="50" step="1"
-                 x-model.number="geomMinTrips" @input="renderGeometry()"
+                 x-model.number="geomMinTrips"
+                 @input="geomInvalidate(); renderGeometry()"
                  style="width:100px; accent-color:var(--accent)">
           <b class="sc-panel-sub" style="color:var(--text)"
              x-text="geomMinTrips"></b>
@@ -1278,6 +1280,23 @@
           </div>
           <div class="sc-panel-sub" style="margin-top:8px; line-height:1.7"
                x-text="geomNote()"></div>
+
+          <!-- WHY THE MISSING ONES ARE MISSING. Reporting the gap without the
+               reason was the defect; on a panel for comparing known outcomes
+               a silently dropped point is the worst thing to lose. -->
+          <div class="sc-warn" x-show="geomGapNote()" x-cloak
+               style="margin-top:6px; border-radius:4px"
+               x-text="geomGapNote()"></div>
+
+          <!-- Cannot happen now that bands are assigned rather than filtered.
+               Left in because "cannot happen" is what the previous version
+               assumed about a point matching no band. -->
+          <div class="sc-warn bad" x-show="geomUnassigned" x-cloak
+               style="margin-top:6px; border-radius:4px">
+            <b x-text="geomUnassigned"></b> traded point(s) matched no colour
+            band and were not drawn. That is a bug in the banding, not a
+            property of the data.
+          </div>
 
           <div class="sc-note" x-show="openNote === 'geom'" x-cloak
                style="margin-top:8px">

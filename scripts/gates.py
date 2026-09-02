@@ -74,6 +74,10 @@ GATES = [
        live_flag=True),
     _s("check_scalp_fills.py", note="the Schwab statement parser"),
     _s("check_scalp_metrics.py", note="no hardcoded metric names"),
+    # Runs the shipped component in node: a colour threshold must never
+    # change which points draw or how far the axes reach.
+    _s("check_scatter_invariants.py",
+       note="colour thresholds cannot change membership or extent"),
 
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),
