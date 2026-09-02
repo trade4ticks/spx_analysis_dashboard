@@ -339,6 +339,18 @@
                   color:var(--accent); }
     .sc-paneval .sc-inp { padding:1px 4px; }
 
+    /* Segmented lin/log, one per axis. */
+    .p-seg {
+      display:inline-flex; border:1px solid var(--border); border-radius:4px;
+      overflow:hidden; font-size:9.5px;
+    }
+    .p-seg span {
+      padding:2px 7px; cursor:pointer; color:var(--muted);
+      background:var(--raised); user-select:none;
+    }
+    .p-seg span.on { background:var(--accent); color:#fff; }
+    .p-seg span:hover:not(.on) { color:var(--text); }
+
     .sc-help {
       display:inline-block; width:13px; height:13px; line-height:13px;
       text-align:center; border-radius:50%; font-size:9px; cursor:pointer;
@@ -1259,49 +1271,116 @@
       <!-- ── 2.1 spread against noise ─────────────────────────────────── -->
       <div class="sc-panel" id="geometry">
         <div class="sc-panel-hdr">
-          <span class="sc-panel-title">Spread against noise</span>
+          <span class="sc-panel-title">Any column against any column</span>
+          <span class="sc-help" :class="{on: openNote === 'geom'}"
+                @click="note('geom')" title="What the colours mean">?</span>
           <span class="sc-panel-sub"
-                x-text="cand ? (geomPoints().length + ' candidates on ' + cand.date) : ''"></span>
+                x-text="cand ? (geomPoints().length + ' points on ' + cand.date) : ''"></span>
           <span class="sc-spacer"></span>
+          <!-- ANY PAIR. Fixed axes meant the panel answered exactly one
+               question when there are a couple of hundred pairs worth
+               looking at — and it already knows which dots have outcomes,
+               which is the thing that makes any of them worth plotting. -->
+          <span class="sc-panel-sub">X</span>
+          <select class="sc-sel" x-model="geomX" @change="renderGeometry()"
+                  style="max-width:150px">
+            <template x-for="o in geomAxisOptions()" :key="'x'+o.key">
+              <option :value="o.key" x-text="o.label"></option>
+            </template>
+          </select>
+          <div class="p-seg">
+            <span :class="{on: !geomAxisLog('x')}" @click="setAxisScale('x', false)">lin</span>
+            <span :class="{on: geomAxisLog('x')}" @click="setAxisScale('x', true)">log</span>
+          </div>
+          <span class="sc-panel-sub">Y</span>
+          <select class="sc-sel" x-model="geomY" @change="renderGeometry()"
+                  style="max-width:150px">
+            <template x-for="o in geomAxisOptions()" :key="'y'+o.key">
+              <option :value="o.key" x-text="o.label"></option>
+            </template>
+          </select>
+          <div class="p-seg">
+            <span :class="{on: !geomAxisLog('y')}" @click="setAxisScale('y', false)">lin</span>
+            <span :class="{on: geomAxisLog('y')}" @click="setAxisScale('y', true)">log</span>
+          </div>
+        </div>
+
+        <div class="sc-panel-hdr" style="border-top:0">
           <label class="sc-chk" title="Unfiltered, the sparse-quote names
-                 collapse toward zero noise and stretch the log axis to 1e-10,
+                 collapse toward zero noise and stretch a log axis to 1e-10,
                  which spends the whole plot on rows the filters already
                  excluded.">
             <input type="checkbox" x-model="geomOnly" @change="renderGeometry()">
             <span>passing only</span>
           </label>
+          <!-- Strips the ~548 unknown names and leaves the ones with
+               outcomes, which is the comparison the panel is for. -->
+          <label class="sc-chk">
+            <input type="checkbox" x-model="geomTradedOnly"
+                   @change="renderGeometry()">
+            <span>traded only</span>
+          </label>
+          <label class="sc-chk">
+            <input type="checkbox" x-model="geomLabels"
+                   @change="renderGeometry()">
+            <span>ticker labels</span>
+          </label>
+          <span class="sc-spacer"></span>
+          <span class="sc-panel-sub">min trips</span>
+          <input type="range" min="1" max="50" step="1"
+                 x-model.number="geomMinTrips" @input="renderGeometry()"
+                 style="width:120px; accent-color:var(--accent)">
+          <b class="sc-panel-sub" style="color:var(--text)"
+             x-text="geomMinTrips"></b>
         </div>
         <div class="sc-panel-body">
           <div class="sc-empty" x-show="!cand || !geomPoints().length" x-cloak>
-            Nothing to plot — the ranked table needs both a spread and a noise
-            column resolved.
+            Nothing to plot — the two axes must both be columns the table has
+            resolved. Add them from the column chooser, or screen on them,
+            which pulls them in.
           </div>
           <div style="height:420px; position:relative" x-show="cand && geomPoints().length" x-cloak>
             <canvas id="sc-geom"></canvas>
           </div>
-          <div class="sc-panel-sub" style="margin-top:8px; line-height:1.75; max-width:88ch">
-            <span x-text="geomNote()"></span>
-            <span style="display:block; margin-top:5px" x-show="geomOnly" x-cloak>
-              Showing passing names only. Untick to see what the filters
-              excluded — expect the axis to stretch toward 1e-10, because the
-              sparse-quote names whose noise collapses to zero are most of
-              what is being excluded, and they are why that reading is a
-              deliberate question rather than the opening one.
+          <div class="sc-panel-sub" style="margin-top:8px; line-height:1.7"
+               x-text="geomNote()"></div>
+
+          <div class="sc-note" x-show="openNote === 'geom'" x-cloak
+               style="margin-top:8px">
+            <b>Colour is TRIP COUNT, not profit.</b>
+            Profit splits the traded names into groups that do not correspond
+            to what was learned — a name that made $20 across 6 trips and was
+            abandoned because it was miserable to trade would sit beside one
+            traded 226 times, and a name is pink for one bad trade out of
+            eight.
+            <span style="display:block; margin-top:4px">
+              No ticker was ever abandoned for losing money. They were
+              abandoned because bounciness, fillability and volume together
+              made them untradeable — and that judgement was voted with
+              attention. Trip count <em>is</em> that vote, and it is already
+              in the data.
             </span>
-            <span style="display:block; margin-top:5px">
-              <b>Log axes on both, so the dashed constant-ratio lines are
-              straight.</b> That is the point of the panel: it turns "good"
-              from a number you look up per row into a <em>direction</em> —
-              up and to the left. A ranked table gives you the ordering and
-              hides the geometry, so it cannot tell you whether an unknown
-              candidate sits in the neighbourhood of a name that worked or one
-              that did not.
+            <!-- The caveat, stated on the panel rather than assumed. -->
+            <span style="display:block; margin-top:6px; color:#e84393">
+              <b>These bands are a judgement, not a measurement.</b>
+              A name dropped after two minutes because it looked bouncy
+              records an instinct rather than a measured property. It is still
+              the best label available — but a metric that predicts these
+              bands may be predicting the instinct, and that is a different
+              claim from predicting tradeability.
             </span>
-            <span style="display:block; margin-top:5px">
-              Traded names are drawn larger and coloured by outcome — green
-              made money, pink lost it. A sign rather than a gradient: at this
-              sample size the direction is the reading, and a ramp would imply
-              a precision the data does not have.
+            <span style="display:block; margin-top:6px">
+              <b>Scales.</b> Log by default, linear automatically for a
+              column whose units are a share — a 0–1 fraction on a log axis
+              puts most of its range in the last tenth. Both are overridable
+              per axis. On a log axis a zero cannot be drawn, so rows at
+              exactly zero drop from <em>that</em> axis only.
+            </span>
+            <span style="display:block; margin-top:6px">
+              <b>Constant-ratio lines</b> appear only when both axes carry the
+              same units and both are logarithmic. Spread bps over noise bps
+              is a ratio; a share over a rate is not, and a diagonal drawn
+              across that pair would imply a relationship that does not exist.
             </span>
           </div>
         </div>

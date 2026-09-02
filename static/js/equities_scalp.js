@@ -77,6 +77,40 @@ const scTradedHours = {
   },
 };
 
+/* Ticker labels on the traded points only.
+ *
+ * Thirty-one names, not 579 — labelling the whole cloud would be unreadable
+ * and labelling none of it wastes the panel's best feature, which is that it
+ * knows which dots have outcomes. Knowing WHICH winner sits where is most of
+ * the value; a coloured dot you cannot name is a shape.
+ *
+ * Drawn after the datasets so labels sit over their points, with a dark
+ * outline so they survive whatever colour they land on. */
+const scPointLabels = {
+  id: 'scPointLabels',
+  afterDatasetsDraw(chart, args, opts) {
+    if (!opts || !opts.on) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(20,20,20,0.85)';
+    chart.data.datasets.forEach((ds, di) => {
+      if (!ds.scLabel) return;
+      const meta = chart.getDatasetMeta(di);
+      meta.data.forEach((el, i) => {
+        const p = ds.data[i];
+        if (!p || !p.symbol) return;
+        ctx.fillStyle = ds.scLabelColor || '#ddd';
+        ctx.strokeText(p.symbol, el.x + 7, el.y + 3);
+        ctx.fillText(p.symbol, el.x + 7, el.y + 3);
+      });
+    });
+    ctx.restore();
+  },
+};
+
 async function scGetJson(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
@@ -188,6 +222,20 @@ document.addEventListener('alpine:init', () => {
      * The unfiltered view answers "what did the filters exclude", which is a
      * deliberate question and not the opening one. */
     geomOnly: true,
+    // Strip the 548 unknown names and look at just the ones with outcomes.
+    geomTradedOnly: false,
+    // Any column on either axis. Fixing the pair meant the panel answered
+    // exactly one question when there are a couple of hundred pairs worth
+    // looking at.
+    geomX: 'noise',
+    geomY: 'spread_bps',
+    // null = decide from the column's units; a share on a log axis is wrong.
+    geomXLog: null,
+    geomYLog: null,
+    geomLabels: true,
+    // Trip count floor for the traded points. Colour carries most of this,
+    // but stripping names barely sampled is still useful.
+    geomMinTrips: 1,
     ser: null,
     serLoading: false,
     serSymbols: '',
@@ -978,17 +1026,98 @@ document.addEventListener('alpine:init', () => {
     /* Built from the ranked table's own payload rather than a second fetch.
      * The scatter and the table are the same rows seen two ways, and a
      * separate query could disagree with the table sitting above it. */
+    /* ── how the traded names are banded ─────────────────────────────────
+     *
+     * BY TRIP COUNT, not by P&L. Profit splits the traded set into groups
+     * that do not correspond to what was learned: a name that made $20 across
+     * 6 trips and was abandoned because it was miserable to trade coloured
+     * the same as one traded 226 times, and another pink for one bad trade
+     * out of eight.
+     *
+     * No ticker was ever abandoned for losing money. They were abandoned
+     * because bounciness, fillability and volume together made them
+     * untradeable — and that judgement was voted with attention. Trip count
+     * IS that vote, and it is already in the data.
+     *
+     * THESE BANDS ARE A JUDGEMENT, NOT A MEASUREMENT. A name dropped after
+     * two minutes because it looked bouncy records an instinct. It is the
+     * best label available, and a metric that predicts it may be predicting
+     * the instinct rather than the property — the panel says so. */
+    geomBands() {
+      return [
+        { key: 'kept',      min: 50, label: 'kept trading (50+ trips)',
+          color: SC_BLUE },
+        { key: 'marginal',  min: 10, label: 'marginal (10-49)',
+          color: '#8a8a8a' },
+        { key: 'abandoned', min: 0,  label: 'abandoned (under 10)',
+          color: SC_PINK },
+      ];
+    },
+
+    geomBandOf(trips) {
+      const n = trips || 0;
+      return this.geomBands().find(b => n >= b.min) || this.geomBands()[2];
+    },
+
+    /* Log unless the column is a SHARE. A 0-1 fraction on a log axis puts
+     * most of the range in the last tenth and is simply the wrong scale;
+     * spread and noise are unbounded and positive, where log is right. Both
+     * are overridable, because "usually" is not "always". */
+    geomAxisLog(which) {
+      const set = which === 'x' ? this.geomXLog : this.geomYLog;
+      if (set !== null) return set;
+      const key = which === 'x' ? this.geomX : this.geomY;
+      const col = ((this.cand && this.cand.columns) || [])
+        .find(c => c.key === key);
+      const units = col ? (col.units || this.colMeta(col).units) : null;
+      return units !== 'share';
+    },
+
+    setAxisScale(which, log) {
+      if (which === 'x') this.geomXLog = log; else this.geomYLog = log;
+      this.renderGeometry();
+    },
+
+    geomAxisOptions() {
+      return ((this.cand && this.cand.columns) || [])
+        .map(c => ({ key: c.key, label: this.colLabel(c) }));
+    },
+
+    /* Built from the ranked table's own payload rather than a second fetch.
+     * The scatter and the table are the same rows seen two ways. */
     geomPoints() {
       const c = this.cand;
       if (!c) return [];
-      const nx = 'noise', ny = 'spread_bps';
+      const nx = this.geomX, ny = this.geomY;
       if (!c.columns.some(x => x.key === nx) ||
           !c.columns.some(x => x.key === ny)) return [];
+      const xLog = this.geomAxisLog('x'), yLog = this.geomAxisLog('y');
       return c.rows
-        .filter(r => r.values[nx] > 0 && r.values[ny] > 0)
+        .filter(r => r.values[nx] != null && r.values[ny] != null)
+        // A log axis cannot show zero or a negative, so those rows drop ONLY
+        // on the axis that is logarithmic — dropping them regardless would
+        // silently hide every at_bid_share of exactly 0.
+        .filter(r => (!xLog || r.values[nx] > 0) && (!yLog || r.values[ny] > 0))
         .filter(r => !this.geomOnly || r.passes)
+        .filter(r => !this.geomTradedOnly || r.traded)
+        .filter(r => !r.traded || (r.traded.trips || 0) >= this.geomMinTrips)
         .map(r => ({ x: r.values[nx], y: r.values[ny], symbol: r.symbol,
                      passes: r.passes, traded: r.traded }));
+    },
+
+    /* Constant-ratio lines only mean anything when the axes SHARE UNITS.
+     * Spread bps over noise bps is a ratio; between_share over trades/min is
+     * not, and a diagonal across it would imply a relationship that does not
+     * exist. */
+    geomRatioLines() {
+      const cols = (this.cand && this.cand.columns) || [];
+      const cx = cols.find(c => c.key === this.geomX) || {};
+      const cy = cols.find(c => c.key === this.geomY) || {};
+      const a = cx.units || this.colMeta(cx).units;
+      const b = cy.units || this.colMeta(cy).units;
+      return (a && b && a === b
+              && this.geomAxisLog('x') && this.geomAxisLog('y'))
+        ? [1, 2, 4, 8] : [];
     },
 
     renderGeometry() {
@@ -1000,11 +1129,20 @@ document.addEventListener('alpine:init', () => {
         if (!el || !pts.length) return;
         const self = this;
 
-        // Traded names are drawn LAST and larger, so they sit on top of the
-        // cloud. The point of the panel is reading an unknown candidate
-        // against a known outcome, which needs the known ones findable.
         const untraded = pts.filter(p => !p.traded);
-        const traded = pts.filter(p => p.traded);
+        // One dataset PER BAND, so the legend names them and any band can be
+        // switched off. Traded points draw last and larger, over the cloud.
+        const bands = this.geomBands().map(b => ({
+          band: b,
+          data: pts.filter(p => p.traded &&
+                                self.geomBandOf(p.traded.trips).key === b.key),
+        })).filter(d => d.data.length);
+
+        const opts = this.geomAxisOptions();
+        const xLabel = (opts.find(o => o.key === this.geomX) || {}).label
+                       || this.geomX;
+        const yLabel = (opts.find(o => o.key === this.geomY) || {}).label
+                       || this.geomY;
 
         SC_CHARTS.geom = new Chart(el.getContext('2d'), {
           type: 'scatter',
@@ -1012,47 +1150,56 @@ document.addEventListener('alpine:init', () => {
             { label: 'not traded', data: untraded, parsing: false,
               pointRadius: 2.5, pointBorderWidth: 0,
               pointBackgroundColor: untraded.map(p =>
-                p.passes ? 'rgba(52,152,219,0.45)' : 'rgba(138,138,138,0.22)') },
-            { label: 'traded', data: traded, parsing: false,
+                p.passes ? 'rgba(52,152,219,0.30)'
+                         : 'rgba(138,138,138,0.16)') },
+            ...bands.map(d => ({
+              label: d.band.label, data: d.data, parsing: false,
               pointRadius: 6, pointBorderWidth: 1.5,
               pointBorderColor: '#1b1b1b',
-              // Green made money, pink lost it. Not a ramp: at this sample
-              // size the SIGN is the reading and a gradient would imply a
-              // precision the data does not have.
-              pointBackgroundColor: traded.map(p =>
-                (p.traded.pnl_per_min == null) ? '#8a8a8a'
-                  : (p.traded.pnl_per_min >= 0 ? '#4ec9a0' : SC_PINK)) },
+              pointBackgroundColor: d.band.color,
+              scLabel: true, scLabelColor: d.band.color,
+            })),
           ] },
           options: {
             responsive: true, maintainAspectRatio: false, animation: false,
             scales: {
-              x: { type: 'logarithmic', title: { display: true, text: 'noise bps',
-                   color: '#777', font: { size: 10 } },
+              x: { type: this.geomAxisLog('x') ? 'logarithmic' : 'linear',
+                   title: { display: true, text: xLabel, color: '#777',
+                            font: { size: 10 } },
                    grid: { color: 'rgba(255,255,255,0.05)' },
                    ticks: { font: { size: 9 } } },
-              y: { type: 'logarithmic', title: { display: true, text: 'spread bps',
-                   color: '#777', font: { size: 10 } },
+              y: { type: this.geomAxisLog('y') ? 'logarithmic' : 'linear',
+                   title: { display: true, text: yLabel, color: '#777',
+                            font: { size: 10 } },
                    grid: { color: 'rgba(255,255,255,0.05)' },
                    ticks: { font: { size: 9 } } },
             },
             plugins: {
-              legend: { display: false },
-              scRatioLines: { ratios: [1, 2, 4, 8] },
+              legend: { position: 'bottom',
+                        labels: { boxWidth: 9, font: { size: 9 },
+                                  usePointStyle: true } },
+              scRatioLines: { ratios: this.geomRatioLines() },
+              scPointLabels: { on: this.geomLabels },
               tooltip: { callbacks: { label: it => {
                 const p = it.raw;
-                const base = `${p.symbol}  spread ${p.y.toFixed(1)} / noise `
-                           + `${p.x.toFixed(2)} = ratio ${(p.y / p.x).toFixed(2)}`;
+                const base = p.symbol + '  ' + xLabel + ' '
+                           + p.x.toPrecision(4) + ' / ' + yLabel + ' '
+                           + p.y.toPrecision(4);
                 if (!p.traded) return base;
                 const t = p.traded;
-                return [base, `traded ${t.days} session${t.days === 1 ? '' : 's'}, `
-                            + `${t.trips} trips, `
-                            + `${t.pnl_per_min == null ? '—'
-                                : (t.pnl_per_min >= 0 ? '+' : '')
-                                  + t.pnl_per_min.toFixed(2)} $/min`];
+                return [base,
+                        t.trips + ' trips over ' + t.days + ' session'
+                        + (t.days === 1 ? '' : 's') + ' - '
+                        + self.geomBandOf(t.trips).label,
+                        (t.pnl_per_min == null ? '-'
+                          : (t.pnl_per_min >= 0 ? '+' : '')
+                            + t.pnl_per_min.toFixed(2)) + ' $/min, '
+                        + (t.net_pnl >= 0 ? '+' : '')
+                        + t.net_pnl.toFixed(2) + ' net'];
               } } },
             },
           },
-          plugins: [scRatioLines],
+          plugins: [scRatioLines, scPointLabels],
         });
       });
     },
@@ -1062,11 +1209,17 @@ document.addEventListener('alpine:init', () => {
       if (!c) return '';
       const n = c.n_traded || 0;
       if (!n) return 'No traded names yet — upload a statement and the known '
-                   + 'outcomes appear as larger points.';
-      return `${n} name${n === 1 ? '' : 's'} with realised results, drawn `
-           + `larger: green made money, pink lost it. An unknown candidate `
-           + `sitting in a green neighbourhood is the reading this panel `
-           + `exists for.`;
+                   + 'outcomes appear as larger, labelled points.';
+      const shown = this.geomPoints().filter(p => p.traded);
+      const by = {};
+      for (const p of shown) {
+        const k = this.geomBandOf(p.traded.trips).key;
+        by[k] = (by[k] || 0) + 1;
+      }
+      return shown.length + ' of ' + n + ' traded names shown — '
+           + (by.kept || 0) + ' kept, ' + (by.marginal || 0) + ' marginal, '
+           + (by.abandoned || 0) + ' abandoned. An unknown candidate sitting '
+           + 'among the blue is the reading this panel exists for.';
     },
 
     // ── 2.6 over time ───────────────────────────────────────────────────
