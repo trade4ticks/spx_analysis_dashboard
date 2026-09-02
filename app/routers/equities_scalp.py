@@ -283,6 +283,17 @@ HEALTH_MOVE_THRESHOLD = 0.25
 # A killed compute run is what this is for.
 HEALTH_COVERAGE_FLOOR = 0.97
 
+# A RELATIVE CHANGE NEEDS A DENOMINATOR WORTH DIVIDING BY.
+#
+# Below this, a metric's percentage move is reported but never flagged. The
+# specific failure: unidentified_exchange_share reads ~0.0001, so 0.0001 to
+# 0.0006 is +516% and lit up every session. The guard is general rather than a
+# name-check because the next near-zero metric would do the same thing.
+#
+# Expressed as a fraction of the metric's own trailing median: a share sitting
+# at 0.0001 and a rate sitting at 0.0001 are equally undividable.
+HEALTH_MIN_BASELINE = 0.005
+
 
 @router.get("/health")
 async def health(
@@ -345,6 +356,8 @@ async def health(
             dates[-1])}
         got = scalp_columns.resolve_all(present, None, None, None,
                                         list(scalp_columns.HEALTH_KEYS))
+        flagging = set(getattr(scalp_columns, "HEALTH_FLAGGING",
+                               scalp_columns.HEALTH_KEYS))
         watched = got["columns"]                  # role key -> metric name
         names = list(watched.values())
 
@@ -429,10 +442,26 @@ async def health(
             change = None
             if today is not None and base:
                 change = (today - base) / base
-            row["metrics"][key] = {"metric": name, "value": today,
-                                   "trailing": base, "change": change,
-                                   "n_trailing": len(hist)}
-            if change is not None and abs(change) >= HEALTH_MOVE_THRESHOLD:
+            # Reported either way; only FLAGGED when the comparison means
+            # something. A percentage move is shown on a near-zero column
+            # because the level is still worth seeing — it just cannot raise
+            # an alarm.
+            flaggable = key in flagging
+            too_small = base is not None and abs(base) < HEALTH_MIN_BASELINE
+            row["metrics"][key] = {
+                "metric": name, "value": today, "trailing": base,
+                "change": change, "n_trailing": len(hist),
+                "flaggable": flaggable,
+                "near_zero": bool(too_small),
+                "why_not": (
+                    "display only — its level matters, not its percentage move"
+                    if not flaggable else
+                    f"baseline {base:.4g} is below {HEALTH_MIN_BASELINE}, so a "
+                    f"percentage change is arithmetic rather than information"
+                    if too_small else None),
+            }
+            if (flaggable and not too_small and change is not None
+                    and abs(change) >= HEALTH_MOVE_THRESHOLD):
                 row["flags"].append(key)
 
         # A metric family that stopped being written. Independent of symbol
@@ -453,7 +482,9 @@ async def health(
         "unresolved": got["missing"],
         "trailing": trailing,
         "thresholds": {"move": HEALTH_MOVE_THRESHOLD,
-                       "coverage": HEALTH_COVERAGE_FLOOR},
+                       "coverage": HEALTH_COVERAGE_FLOOR,
+                       "min_baseline": HEALTH_MIN_BASELINE},
+        "flagging": sorted(flagging),
         # Stated rather than silently omitted: a panel that shows no rejections
         # would otherwise read as "there were none".
         "fetch_rejects": None,
@@ -1882,8 +1913,14 @@ async def candidates(
         await _ensure_fills(conn)
         traded = {r["symbol"]: dict(r) for r in await conn.fetch(
             "SELECT symbol, count(*) AS days, sum(trips) AS trips, "
-            " sum(net_pnl) AS net_pnl, "
-            " sum(net_pnl) / NULLIF(sum(attention_minutes), 0) AS pnl_per_min "
+            " sum(net_pnl) AS net_pnl, sum(shares) AS shares, "
+            " sum(net_pnl) / NULLIF(sum(attention_minutes), 0) AS pnl_per_min, "
+            " sum(net_pnl) / NULLIF(sum(trips), 0) AS pnl_per_trip, "
+            " sum(net_pnl) / NULLIF(sum(shares), 0) AS pnl_per_share, "
+            # Trip-WEIGHTED, not a mean of daily rates: a day with two trips
+            # and a day with ninety should not count equally toward a name's
+            # win rate.
+            " sum(win_rate * trips) / NULLIF(sum(trips), 0) AS win_rate "
             "FROM fills_daily GROUP BY symbol")}
 
         # ── the ratio's own history, for the stability sparkline ─────────
@@ -1983,9 +2020,14 @@ async def candidates(
                     "traded": ({"days": int(t["days"]),
                                 "trips": int(t["trips"] or 0),
                                 "net_pnl": float(t["net_pnl"] or 0.0),
-                                "pnl_per_min": (float(t["pnl_per_min"])
-                                                if t["pnl_per_min"] is not None
-                                                else None)}
+                                "shares": float(t["shares"] or 0.0),
+                                # None, not zero, wherever the denominator was
+                                # zero: "no rate" and "a rate of nothing" are
+                                # different readings and the colour has to
+                                # tell them apart.
+                                **{k: (float(t[k]) if t[k] is not None else None)
+                                   for k in ("pnl_per_min", "pnl_per_trip",
+                                             "pnl_per_share", "win_rate")}}
                                if t else None)})
 
     # Every constraint that ran but rejected nothing still needs a zero, or

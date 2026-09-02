@@ -236,6 +236,17 @@ document.addEventListener('alpine:init', () => {
     // Trip count floor for the traded points. Colour carries most of this,
     // but stripping names barely sampled is still useful.
     geomMinTrips: 1,
+    // What determines the colour. Trips is the default because it records
+    // what was CHOSEN to keep doing, which is the only label that came from
+    // judgement rather than arithmetic — but the others are worth switching
+    // to, and $/share in particular normalises across size: 10 shares of one
+    // name and 200 of another are not comparable on P&L and are per share.
+    geomColorBy: 'trips',
+    // Band boundaries, in the units of whatever geomColorBy is. Null means
+    // "seed from the observed distribution", which is what makes switching
+    // metric give a sensible split rather than an empty band.
+    geomHi: null,
+    geomLo: null,
     ser: null,
     serLoading: false,
     serSymbols: '',
@@ -261,6 +272,9 @@ document.addEventListener('alpine:init', () => {
     // ── data health ─────────────────────────────────────────────────────
     health: null,
     healthLoading: false,
+    // Collapsed by default: consulted when something looks wrong, not read
+    // every morning, so a one-line summary is the whole of it most days.
+    healthOpen: false,
 
     // ── the ranked table ────────────────────────────────────────────────
     cand: null,
@@ -475,6 +489,21 @@ document.addEventListener('alpine:init', () => {
     },
 
     healthCols() { return (this.health && this.health.watched) || []; },
+
+    healthSummary() {
+      const h = this.health;
+      if (!h || !h.rows.length) return 'no sessions checked';
+      const n = h.rows.filter(r => r.flags.length).length;
+      return `${h.rows.length} sessions · ${n} flagged`;
+    },
+
+    /* Whether a column can raise a flag at all. A near-zero column's
+     * percentage move is still shown — its level is worth seeing — but it
+     * cannot alarm, and the header says which is which so a quiet column is
+     * not mistaken for a clean one. */
+    healthFlaggable(key) {
+      return ((this.health && this.health.flagging) || []).indexOf(key) >= 0;
+    },
 
     /* A change against trailing, as a signed percentage. The SIGN is kept —
      * arrivals collapsing and arrivals doubling are different problems, and
@@ -1043,20 +1072,101 @@ document.addEventListener('alpine:init', () => {
      * two minutes because it looked bouncy records an instinct. It is the
      * best label available, and a metric that predicts it may be predicting
      * the instinct rather than the property — the panel says so. */
-    geomBands() {
+    /* What can drive the colour. Every one of these is already on the
+     * traded aggregate; none is computed here. */
+    geomColorOptions() {
       return [
-        { key: 'kept',      min: 50, label: 'kept trading (50+ trips)',
-          color: SC_BLUE },
-        { key: 'marginal',  min: 10, label: 'marginal (10-49)',
-          color: '#8a8a8a' },
-        { key: 'abandoned', min: 0,  label: 'abandoned (under 10)',
-          color: SC_PINK },
+        { key: 'trips',         label: 'trips',            fmt: v => String(Math.round(v)) },
+        { key: 'net_pnl',       label: 'total P&L',        fmt: v => (v >= 0 ? '+' : '') + v.toFixed(0) },
+        { key: 'pnl_per_trip',  label: '$ per trip',       fmt: v => (v >= 0 ? '+' : '') + v.toFixed(2) },
+        { key: 'pnl_per_share', label: '$ per share',      fmt: v => (v >= 0 ? '+' : '') + v.toFixed(4) },
+        { key: 'pnl_per_min',   label: '$ per minute',     fmt: v => (v >= 0 ? '+' : '') + v.toFixed(2) },
+        { key: 'win_rate',      label: 'win rate',         fmt: v => (v * 100).toFixed(0) + '%' },
       ];
     },
 
-    geomBandOf(trips) {
-      const n = trips || 0;
-      return this.geomBands().find(b => n >= b.min) || this.geomBands()[2];
+    geomColorMeta() {
+      return this.geomColorOptions().find(o => o.key === this.geomColorBy)
+             || this.geomColorOptions()[0];
+    },
+
+    geomColorValue(traded) {
+      return traded ? traded[this.geomColorBy] : null;
+    },
+
+    /* The observed span of the colour metric across TRADED names, so the
+     * threshold sliders move over the range the data occupies rather than a
+     * guessed one — and so switching metric reseeds rather than leaving both
+     * boundaries stranded in units that no longer apply. */
+    geomColorRange() {
+      const v = ((this.cand && this.cand.rows) || [])
+        .filter(r => r.traded)
+        .map(r => this.geomColorValue(r.traded))
+        .filter(x => x != null)
+        .sort((a, b) => a - b);
+      if (!v.length) return null;
+      const q = f => v[Math.min(v.length - 1, Math.floor(f * v.length))];
+      return { min: v[0], max: v[v.length - 1], p33: q(0.34), p66: q(0.67),
+               n: v.length };
+    },
+
+    /* Defaults per metric. Trips keeps the 50/10 split, which came from what
+     * actually happened — four or five names kept, four or five marginal,
+     * about twenty abandoned. Everything else seeds at terciles of its own
+     * distribution, because there is no equivalent lived boundary and an
+     * arbitrary number in dollars would be worse than one from the data. */
+    geomThresholds() {
+      const r = this.geomColorRange();
+      let hi = this.geomHi, lo = this.geomLo;
+      if (hi === null || lo === null) {
+        if (this.geomColorBy === 'trips') { hi = 50; lo = 10; }
+        else if (r) { hi = r.p66; lo = r.p33; }
+        else { hi = 1; lo = 0; }
+      }
+      return { hi, lo };
+    },
+
+    setGeomThreshold(which, v) {
+      const t = this.geomThresholds();
+      this.geomHi = which === 'hi' ? Number(v) : t.hi;
+      this.geomLo = which === 'lo' ? Number(v) : t.lo;
+      this.renderGeometry();
+    },
+
+    /* Switching the colour metric clears the boundaries so they reseed. A
+     * threshold of 50 means something in trips and nothing in dollars per
+     * share, and carrying it across would put every name in one band. */
+    setColorBy(k) {
+      this.geomColorBy = k;
+      this.geomHi = null;
+      this.geomLo = null;
+      this.renderGeometry();
+    },
+
+    geomBands() {
+      const t = this.geomThresholds();
+      const m = this.geomColorMeta();
+      const isTrips = this.geomColorBy === 'trips';
+      return [
+        { key: 'kept', min: t.hi, color: SC_BLUE,
+          label: isTrips ? `kept trading (${m.fmt(t.hi)}+ trips)`
+                         : `${m.label} >= ${m.fmt(t.hi)}` },
+        { key: 'marginal', min: t.lo, color: '#8a8a8a',
+          label: isTrips ? `marginal (${m.fmt(t.lo)}-${m.fmt(t.hi - 1)})`
+                         : `${m.label} ${m.fmt(t.lo)} to ${m.fmt(t.hi)}` },
+        { key: 'abandoned', min: -Infinity, color: SC_PINK,
+          label: isTrips ? `abandoned (under ${m.fmt(t.lo)})`
+                         : `${m.label} < ${m.fmt(t.lo)}` },
+      ];
+    },
+
+    geomBandOf(value) {
+      // null is its own case: a name with no rate is not a name with a low
+      // one, and colouring it as the bottom band would assert something the
+      // data does not say.
+      if (value == null) return { key: 'unknown', color: '#5a5a5a',
+                                  label: 'no value' };
+      return this.geomBands().find(b => value >= b.min) || this.geomBands()[2];
     },
 
     /* Log unless the column is a SHARE. A 0-1 fraction on a log axis puts
@@ -1078,9 +1188,40 @@ document.addEventListener('alpine:init', () => {
       this.renderGeometry();
     },
 
+    /* EVERY column, not the twelve on screen.
+     *
+     * This listed cand.columns, which is the default set — so the three
+     * share metrics this feature was asked for were the exact ones missing.
+     * Now the whole catalog plus the derived columns, the same list the
+     * filter pane offers, and selecting one that is not loaded PULLS IT IN
+     * the way screening on it does. */
     geomAxisOptions() {
-      return ((this.cand && this.cand.columns) || [])
-        .map(c => ({ key: c.key, label: this.colLabel(c) }));
+      const loaded = new Map(
+        ((this.cand && this.cand.columns) || []).map(c => [c.key, c]));
+      const derived = ((this.cand && this.cand.derived) || [])
+        .map(d => ({ key: d.key, label: d.label, group: 'derived' }));
+      const roles = [...loaded.values()]
+        .filter(c => c.role)
+        .map(c => ({ key: c.key, label: this.colLabel(c), group: 'columns' }));
+      const seen = new Set([...derived, ...roles].map(o => o.key));
+      const rest = (this.meta.metrics || [])
+        .filter(m => !seen.has(m.metric))
+        .map(m => ({ key: m.metric, label: m.metric, group: 'all metrics' }));
+      return derived.concat(roles, rest);
+    },
+
+    /* Selecting an axis that is not in the table adds it, so the two lists
+     * cannot drift — the same rule the filter pane follows. */
+    setAxis(which, key) {
+      if (which === 'x') this.geomX = key; else this.geomY = key;
+      const loaded = ((this.cand && this.cand.columns) || [])
+        .some(c => c.key === key);
+      if (!loaded && this.extraCols.indexOf(key) < 0) {
+        this.extraCols.push(key);
+        this.loadCandidates();
+      } else {
+        this.renderGeometry();
+      }
     },
 
     /* Built from the ranked table's own payload rather than a second fetch.
@@ -1132,11 +1273,13 @@ document.addEventListener('alpine:init', () => {
         const untraded = pts.filter(p => !p.traded);
         // One dataset PER BAND, so the legend names them and any band can be
         // switched off. Traded points draw last and larger, over the cloud.
-        const bands = this.geomBands().map(b => ({
-          band: b,
-          data: pts.filter(p => p.traded &&
-                                self.geomBandOf(p.traded.trips).key === b.key),
-        })).filter(d => d.data.length);
+        const bandFor = p => self.geomBandOf(self.geomColorValue(p.traded));
+        const bands = this.geomBands()
+          .concat([{ key: 'unknown', color: '#5a5a5a', label: 'no value' }])
+          .map(b => ({
+            band: b,
+            data: pts.filter(p => p.traded && bandFor(p).key === b.key),
+          })).filter(d => d.data.length);
 
         const opts = this.geomAxisOptions();
         const xLabel = (opts.find(o => o.key === this.geomX) || {}).label
@@ -1187,10 +1330,12 @@ document.addEventListener('alpine:init', () => {
                            + p.y.toPrecision(4);
                 if (!p.traded) return base;
                 const t = p.traded;
+                const cv = self.geomColorValue(t);
                 return [base,
                         t.trips + ' trips over ' + t.days + ' session'
                         + (t.days === 1 ? '' : 's') + ' - '
-                        + self.geomBandOf(t.trips).label,
+                        + self.geomColorMeta().label + ' '
+                        + (cv == null ? '-' : self.geomColorMeta().fmt(cv)),
                         (t.pnl_per_min == null ? '-'
                           : (t.pnl_per_min >= 0 ? '+' : '')
                             + t.pnl_per_min.toFixed(2)) + ' $/min, '
@@ -1213,13 +1358,18 @@ document.addEventListener('alpine:init', () => {
       const shown = this.geomPoints().filter(p => p.traded);
       const by = {};
       for (const p of shown) {
-        const k = this.geomBandOf(p.traded.trips).key;
+        const k = this.geomBandOf(this.geomColorValue(p.traded)).key;
         by[k] = (by[k] || 0) + 1;
       }
-      return shown.length + ' of ' + n + ' traded names shown — '
-           + (by.kept || 0) + ' kept, ' + (by.marginal || 0) + ' marginal, '
-           + (by.abandoned || 0) + ' abandoned. An unknown candidate sitting '
-           + 'among the blue is the reading this panel exists for.';
+      const t = this.geomThresholds();
+      const m = this.geomColorMeta();
+      return shown.length + ' of ' + n + ' traded names shown, coloured by '
+           + m.label + ' — ' + (by.kept || 0) + ' at or above '
+           + m.fmt(t.hi) + ', ' + (by.marginal || 0) + ' between, '
+           + (by.abandoned || 0) + ' below ' + m.fmt(t.lo)
+           + ((by.unknown || 0) ? ', ' + by.unknown + ' with no value' : '')
+           + '. An unknown candidate sitting among the blue is the reading '
+           + 'this panel exists for.';
     },
 
     // ── 2.6 over time ───────────────────────────────────────────────────

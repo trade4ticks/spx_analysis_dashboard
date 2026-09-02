@@ -212,6 +212,21 @@ ROLES: tuple[Role, ...] = (
 # which is the cause rather than the symptom.
 HEALTH_KEYS = ("arrivals", "off_exchange", "unidentified")
 
+# WHICH OF THOSE ACTUALLY RAISE A FLAG.
+#
+# `unidentified` sits at ~0.0001 — exchange code 78 is rare by construction —
+# and a percentage change on a number that small is arithmetic, not
+# information: 0.0001 to 0.0006 is +516% and flagged all ten sessions. Ten of
+# ten flagged is a panel saying nothing.
+#
+# It stays as a DISPLAY column, because its LEVEL is worth seeing: a jump to
+# a few percent would mean the venue enum had gone stale. What it cannot
+# support is a relative comparison against itself.
+#
+# arrivals is the one that caught a broken fetch. off_exchange sits around
+# 0.35, where a percentage move is meaningful.
+HEALTH_FLAGGING = ("arrivals", "off_exchange")
+
 # ── derived columns ─────────────────────────────────────────────────────────
 #
 # The pipeline stores components, not products. Dollar volume per minute is

@@ -118,7 +118,10 @@ def _health_median(day, metric):
     if metric == "off_exchange_share":
         return 0.38
     if metric == "unidentified_exchange_share":
-        return 0.02
+        # ~0.0001 with a large RELATIVE swing: 0.0001 -> 0.0006 is +516%.
+        # This is the shape that flagged ten sessions out of ten and told
+        # nobody anything.
+        return 0.0001 * (6.0 if day == BROKEN_DATE else 1.0)
     return 1.0
 
 # Enough symbols to sort, and deliberately not all alike: one passes every
@@ -402,11 +405,19 @@ class Conn:
             # not. A fixture where everything is traded cannot show that the
             # marker distinguishes, and one where nothing is cannot show it
             # appears at all.
+            # Two traded names, one profitable and one not, and deliberately
+            # in DIFFERENT trip bands — the colour is banded by trips, so a
+            # fixture where both land in one band cannot show the banding
+            # works.
             return [
-                {"symbol": "AAAA", "days": 3, "trips": 42, "net_pnl": 128.4,
-                 "pnl_per_min": 1.42},
-                {"symbol": "CCCC", "days": 2, "trips": 18, "net_pnl": -31.0,
-                 "pnl_per_min": -0.55},
+                {"symbol": "AAAA", "days": 3, "trips": 226, "net_pnl": 128.4,
+                 "shares": 11300.0, "pnl_per_min": 1.42,
+                 "pnl_per_trip": 0.57, "pnl_per_share": 0.0114,
+                 "win_rate": 0.61},
+                {"symbol": "CCCC", "days": 2, "trips": 6, "net_pnl": -31.0,
+                 "shares": 900.0, "pnl_per_min": -0.55,
+                 "pnl_per_trip": -5.17, "pnl_per_share": -0.0344,
+                 "win_rate": 0.33},
             ]
         if "sum(net_pnl)" in sql and "GROUP BY symbol" in sql:
             return [{"symbol": s, "pnl": 10.0} for s in ("AAAA", "CCCC")]
@@ -1215,6 +1226,37 @@ async def check_health() -> int:
             print("    system working, and reddening on it makes the panel")
             print("    ignorable.")
             fails += 1
+
+    # ── a near-zero column must not raise an alarm ───────────────────────
+    #
+    # unidentified_exchange_share sits at ~0.0001, so a move to 0.0006 is
+    # +516% and flagged every session. Ten of ten flagged is a panel saying
+    # nothing. The percentage is still REPORTED — its level is worth seeing —
+    # it just cannot flag.
+    near = [r for r in rows if "unidentified" in r["flags"]]
+    if near:
+        print(f"  a near-zero column flagged on {len(near)} session(s). Its "
+              f"baseline is ~0.0001, so a percentage change is arithmetic "
+              f"rather than information.")
+        fails += 1
+    m = broken["metrics"].get("unidentified") or {}
+    if m.get("change") is None:
+        print("  the near-zero column's percentage move is not reported at "
+              "all — suppressing the FLAG should not suppress the reading")
+        fails += 1
+    if not m.get("why_not"):
+        print("  nothing says why the near-zero column cannot flag, so its "
+              "silence is indistinguishable from it being fine")
+        fails += 1
+
+    # And the guard must be GENERAL, not a name-check: every metric declares
+    # whether it can flag, and the page can say which.
+    if not j.get("flagging"):
+        print("  /health does not report which metrics can raise a flag")
+        fails += 1
+    if "unidentified" in (j.get("flagging") or []):
+        print("  the near-zero column is still in the flagging set")
+        fails += 1
 
     # A healthy session must NOT be flagged, or the panel is noise and gets
     # ignored, which is worse than not having it.
