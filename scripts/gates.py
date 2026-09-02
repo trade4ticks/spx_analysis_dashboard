@@ -82,6 +82,9 @@ GATES = [
     # ── the live tape ────────────────────────────────────────────────────
     _s("check_live_hub.py",
        note="no aggregation, caps hold, resubscribe on reconnect"),
+    # The band must hold still under a flat tape, and a rate must be a rate.
+    _s("check_live_axis.py",
+       note="price band steps only at the edge; trades/min is a fixed minute"),
 
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),

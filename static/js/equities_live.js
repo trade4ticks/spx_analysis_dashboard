@@ -35,11 +35,18 @@ document.addEventListener('alpine:init', () => {
     symbol: '',
     pending: 'FDX',
     windowS: 180,
-    // Half-height of the price window, in cents. Y is expressed as distance
-    // from the anchor because that is the reading — judging whether a 10-cent
-    // capture is available is a question about distance, not about levels.
+    // Half-height of the price window, in cents.
     spanCents: 30,
-    anchor: null,
+    // THE BAND IS EXPLICIT AND STICKY. It was an `anchor` recomputed from the
+    // last print on every frame, which meant a single off-price odd lot moved
+    // the whole axis and every bubble jumped vertically under a flat tape —
+    // six consecutive frames read 320.78, 320.44, 320.70, 320.44, 321.04,
+    // 320.83 with price essentially still.
+    //
+    // Now it holds until the reference price genuinely approaches an edge,
+    // then steps ONCE to a snapped grid. Never per frame, never on a timer.
+    band: null,          // {lo, hi}
+    bandSteps: 0,        // how many times it has moved, so drift is visible
     paused: false,
     showQuotes: true,
 
@@ -49,7 +56,8 @@ document.addEventListener('alpine:init', () => {
     // Trades per minute, from the window itself rather than a counter: the
     // arrival rate is a proxy for fillability and a stale one is worse than
     // none.
-    tpm: 0,
+    tpm: null,
+    tpmPartial: false,
     lastDraw: 0,
 
     init() {
@@ -98,7 +106,7 @@ document.addEventListener('alpine:init', () => {
         if (m.data.symbol !== this.symbol) return;
         this.trades = m.data.trades || [];
         this.quotes = m.data.quotes || [];
-        this.reanchor(true);
+        this.reband(true);
         return;
       }
       if (m.ev === 'batch') {
@@ -120,18 +128,39 @@ document.addEventListener('alpine:init', () => {
         this.send({ action: 'unwatch', symbol: this.symbol });
       }
       this.symbol = sym;
-      if (!silent) { this.trades = []; this.quotes = []; this.anchor = null; }
+      if (!silent) { this.trades = []; this.quotes = []; this.band = null; }
       this.send({ action: 'watch', symbol: sym, window_s: this.windowS });
     },
 
-    /* Dropped by TIME only. The server caps by count as well, but the page's
-     * job is the window it is drawing, and trimming by count here would drop
-     * the oldest prints of a busy minute while the axis still claimed to
-     * cover it. */
+    /* Kept well BEYOND the display window.
+     *
+     * This trimmed at `windowS`, so widening the window could never recover
+     * what had already been discarded — zoom out from one minute to three and
+     * the extra two minutes were gone for good, while the axis went on
+     * claiming to cover them. The retention horizon is now fixed and generous;
+     * the display window is a view onto it, not the thing that bounds it.
+     *
+     * The server holds the real ceiling (15 minutes, capped in count too);
+     * this only keeps the browser's copy from growing without bound. */
+    retainS() { return Math.min(900, Math.max(600, this.windowS * 3)); },
+
     prune() {
-      const cutoff = Date.now() - this.windowS * 1000 - 2000;
+      const cutoff = Date.now() - this.retainS() * 1000;
       while (this.trades.length && this.trades[0].t < cutoff) this.trades.shift();
       while (this.quotes.length && this.quotes[0].t < cutoff) this.quotes.shift();
+    },
+
+    /* How much of the displayed window actually has data behind it.
+     *
+     * The hub only buffers a symbol while someone is watching it, so the
+     * first subscribe starts from empty and a three-minute axis sits over
+     * however many seconds have passed. That is not eviction and not a
+     * failure, but an axis that claims three minutes while showing fifty
+     * seconds should say so rather than leave it to be discovered. */
+    bufferedS() {
+      if (!this.trades.length) return 0;
+      return Math.min(this.windowS,
+                      Math.round((Date.now() - this.trades[0].t) / 1000));
     },
 
     // ── geometry ─────────────────────────────────────────────────────────
@@ -146,26 +175,81 @@ document.addEventListener('alpine:init', () => {
       cv.style.height = r.height + 'px';
     },
 
+    /* The reference price, robust to one odd print.
+     *
+     * The last trade alone was the trigger, and a single off-price odd lot at
+     * a stale venue was enough to move the axis. A median over the recent
+     * prints ignores that; the NBBO mid is used in preference where quotes
+     * are on, since it is what the band should be centred on anyway. */
+    refPrice() {
+      if (this.showQuotes && this.quotes.length) {
+        const q = this.quotes[this.quotes.length - 1];
+        if (q.bp && q.ap) return (q.bp + q.ap) / 2;
+      }
+      const n = this.trades.length;
+      if (!n) return null;
+      const tail = this.trades.slice(Math.max(0, n - 21))
+        .map(t => t.p).sort((a, b) => a - b);
+      return tail[Math.floor(tail.length / 2)];
+    },
+
     lastPrice() {
       return this.trades.length ? this.trades[this.trades.length - 1].p : null;
     },
 
-    /* RECENTRE ONLY AT THE EDGE, never on a timer. A plot that jumps every
-     * thirty seconds destroys the anchor position is being read against —
-     * which is the whole point of a y axis in cents from a fixed price. */
-    reanchor(force) {
-      const p = this.lastPrice();
+    /* The grid the band snaps to.
+     *
+     * Snapping matters as much as the edge test: a band recomputed to
+     * centre on whatever the price happened to be produces labels like
+     * 320.78 and then 321.04, which look like movement. Snapped to a round
+     * increment the labels repeat, so a step is visible AS a step and
+     * everything between steps is genuinely still. */
+    gridStep() {
+      const c = this.spanCents;
+      return (c <= 10 ? 2 : c <= 30 ? 5 : c <= 60 ? 10 : 25) / 100;
+    },
+
+    /* RECENTRE ONLY AT THE EDGE. Never per frame, never on a timer.
+     *
+     * The band holds until the reference price crosses INTO the outer 15% of
+     * it, then steps once to a snapped band centred on that price. Between
+     * steps the axis does not move at all, which is the whole point: position
+     * is read against a still background. */
+    reband(force) {
+      const p = this.refPrice();
       if (p == null) return;
-      if (force || this.anchor == null) { this.anchor = p; return; }
-      const halfDollars = this.spanCents / 100;
-      const edge = halfDollars * 0.85;
-      if (Math.abs(p - this.anchor) > edge) this.anchor = p;
+      const half = this.spanCents / 100;
+      if (force || !this.band) {
+        this.band = this.snapBand(p, half);
+        return;
+      }
+      // Re-derive the band when the SPAN changed, without treating that as a
+      // recentre — a zoom is a deliberate act, not drift.
+      if (Math.abs((this.band.hi - this.band.lo) - 2 * half) > 1e-9) {
+        this.band = this.snapBand((this.band.lo + this.band.hi) / 2, half);
+        return;
+      }
+      const inner = 0.85;
+      const mid = (this.band.lo + this.band.hi) / 2;
+      if (Math.abs(p - mid) > half * inner) {
+        this.band = this.snapBand(p, half);
+        this.bandSteps += 1;
+      }
+    },
+
+    snapBand(centre, half) {
+      const g = this.gridStep();
+      const lo = Math.floor((centre - half) / g) * g;
+      return { lo, hi: lo + Math.ceil((2 * half) / g) * g };
     },
 
     yRange() {
-      const a = this.anchor != null ? this.anchor : (this.lastPrice() || 0);
-      const h = this.spanCents / 100;
-      return { lo: a - h, hi: a + h, anchor: a };
+      if (!this.band) {
+        const p = this.refPrice() || 0;
+        const h = this.spanCents / 100;
+        return { lo: p - h, hi: p + h };
+      }
+      return { lo: this.band.lo, hi: this.band.hi };
     },
 
     // ── the frame loop ───────────────────────────────────────────────────
@@ -187,21 +271,21 @@ document.addEventListener('alpine:init', () => {
       ctx.scale(dpr, dpr);
       const w = W / dpr, h = H / dpr;
 
-      const padL = 8, padR = 62, padT = 8, padB = 20;
+      const padL = 8, padR = 58, padT = 8, padB = 20;
       const plotW = Math.max(10, w - padL - padR);
       const plotH = Math.max(10, h - padT - padB);
 
-      if (!this.paused) this.reanchor(false);
+      if (!this.paused) this.reband(false);
       const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
       if (!this.paused) this.frozenEnd = null;
       else if (!this.frozenEnd) this.frozenEnd = Date.now();
       const tStart = tEnd - this.windowS * 1000;
-      const { lo, hi, anchor } = this.yRange();
+      const { lo, hi } = this.yRange();
 
       const X = t => padL + ((t - tStart) / (tEnd - tStart)) * plotW;
       const Y = p => padT + (1 - (p - lo) / (hi - lo)) * plotH;
 
-      this.drawGrid(ctx, padL, padT, plotW, plotH, lo, hi, anchor, tStart, tEnd, X, Y, w);
+      this.drawGrid(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd, X, Y, w);
 
       // ── NBBO, behind everything and muted ──────────────────────────────
       if (this.showQuotes && this.quotes.length) {
@@ -238,8 +322,23 @@ document.addEventListener('alpine:init', () => {
         ctx.arc(X(t.t), Y(t.p), r, 0, Math.PI * 2);
         ctx.fill();
       }
-      this.tpm = this.windowS > 0
-        ? Math.round(count / (this.windowS / 60)) : 0;
+      // A ROLLING 60-SECOND COUNT, not the window's count divided by the
+      // window's length. That read a third of the true rate on a 3-minute
+      // window and climbed from zero as the buffer filled — 8, 10, 12, 15,
+      // 21 against a verified 56, which is exactly 56/3 converging. A rate
+      // has to be over a fixed interval, and one minute is the interval the
+      // reference is quoted in.
+      const minuteAgo = tEnd - 60000;
+      let inMinute = 0;
+      for (let i = this.trades.length - 1; i >= 0; i--) {
+        const t = this.trades[i].t;
+        if (t > tEnd) continue;
+        if (t < minuteAgo) break;
+        inMinute += 1;
+      }
+      // Under a minute of data cannot report a per-minute rate honestly.
+      this.tpm = this.bufferedS() >= 55 ? inMinute : null;
+      this.tpmPartial = this.bufferedS() < 55;
 
       if (this.hover && this.hover.rec) {
         const t = this.hover.rec;
@@ -252,47 +351,83 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    drawGrid(ctx, padL, padT, plotW, plotH, lo, hi, anchor, tStart, tEnd, X, Y, w) {
+    drawGrid(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd, X, Y, w) {
+      ctx.lineWidth = 1;
+
+      // ── PRICE LABELS, the most important text on the page ─────────────
+      //
+      // These are the numbers an order gets typed from, and they were the
+      // faintest thing on the plot. Full contrast, larger than the time
+      // ticks, and no competing cents column beside them.
+      //
+      // The cents-from-anchor scale is GONE. It was anchored to whatever the
+      // axis happened to be centred on, which moved every frame, so 0¢ landed
+      // on 319.44 while price was near 319.50 — a distance reading against a
+      // moving zero is worse than no distance reading. If it returns it must
+      // hang off something stable: the session open, or a pinned price.
+      const g = this.gridStep();
+      const first = Math.ceil(lo / g) * g;
+      ctx.textAlign = 'left';
+      for (let p = first; p <= hi + 1e-9; p += g) {
+        const y = Y(p);
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(padL + plotW, y);
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.stroke();
+        ctx.font = '600 12px sans-serif';
+        ctx.fillStyle = '#f2f2f2';
+        ctx.fillText(p.toFixed(2), padL + plotW + 6, y + 4);
+      }
+
+      // The last trade, marked on the axis in accent blue — the one price
+      // that is not a grid line and the one most often being read.
+      const last = this.lastPrice();
+      if (last != null && last >= lo && last <= hi) {
+        const y = Y(last);
+        ctx.beginPath();
+        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
+        ctx.strokeStyle = 'rgba(52,152,219,0.30)';
+        ctx.stroke();
+        ctx.font = '700 12px sans-serif';
+        ctx.fillStyle = LV_BLUE;
+        ctx.fillText(last.toFixed(2), padL + plotW + 6, y + 4);
+      }
+
+      // ── time ──────────────────────────────────────────────────────────
       ctx.strokeStyle = 'rgba(255,255,255,0.06)';
       ctx.fillStyle = '#7a7a7a';
       ctx.font = '9px sans-serif';
-      ctx.lineWidth = 1;
-
-      // Y IN CENTS FROM THE ANCHOR, with the absolute price alongside. The
-      // question being asked of this axis is "is ten cents available", and a
-      // ladder of absolute levels answers it only after arithmetic.
-      const stepC = this.spanCents <= 10 ? 2 : this.spanCents <= 30 ? 5
-                  : this.spanCents <= 60 ? 10 : 25;
-      for (let c = -this.spanCents; c <= this.spanCents; c += stepC) {
-        const p = anchor + c / 100;
-        if (p < lo || p > hi) continue;
-        const y = Y(p);
-        ctx.globalAlpha = c === 0 ? 0.35 : 1;
-        ctx.beginPath();
-        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
-        ctx.strokeStyle = c === 0 ? 'rgba(255,255,255,0.22)'
-                                  : 'rgba(255,255,255,0.06)';
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-        ctx.textAlign = 'left';
-        ctx.fillStyle = c === 0 ? '#bbb' : '#7a7a7a';
-        ctx.fillText((c > 0 ? '+' : '') + c + '¢', padL + plotW + 5, y + 3);
-        ctx.fillStyle = '#555';
-        ctx.fillText(p.toFixed(2), padL + plotW + 32, y + 3);
-      }
-
-      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-      ctx.fillStyle = '#7a7a7a';
       ctx.textAlign = 'center';
       const secs = (tEnd - tStart) / 1000;
       const stepS = secs <= 60 ? 10 : secs <= 180 ? 30 : secs <= 600 ? 60 : 300;
-      const first = Math.ceil(tStart / (stepS * 1000)) * stepS * 1000;
-      for (let t = first; t <= tEnd; t += stepS * 1000) {
+      const firstT = Math.ceil(tStart / (stepS * 1000)) * stepS * 1000;
+      for (let t = firstT; t <= tEnd; t += stepS * 1000) {
         const x = X(t);
         ctx.beginPath();
         ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH);
         ctx.stroke();
         ctx.fillText(lvFmtClock(t), x, padT + plotH + 13);
+      }
+
+      // ── the size legend ───────────────────────────────────────────────
+      //
+      // Bubble radius is sqrt(shares) and nothing else — no dependence on the
+      // price range, the window, or the frame. Drawn so that is checkable by
+      // eye rather than asserted: these four never change size.
+      const legend = [1, 10, 100, 500];
+      let lx = padL + 6;
+      ctx.textAlign = 'left';
+      ctx.font = '9px sans-serif';
+      for (const sz of legend) {
+        const r = Math.max(1.1, Math.sqrt(sz) * 0.62);
+        ctx.beginPath();
+        ctx.arc(lx + r, padT + plotH - 10, r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(52,152,219,0.45)';
+        ctx.fill();
+        ctx.fillStyle = '#6a6a6a';
+        ctx.fillText(String(sz), lx + r - 4, padT + plotH + 4);
+        lx += r * 2 + 20;
       }
     },
 
@@ -301,7 +436,7 @@ document.addEventListener('alpine:init', () => {
       if (!cv) return;
       const r = cv.getBoundingClientRect();
       const mx = e.clientX - r.left, my = e.clientY - r.top;
-      const padL = 8, padR = 62, padT = 8, padB = 20;
+      const padL = 8, padR = 58, padT = 8, padB = 20;
       const plotW = Math.max(10, r.width - padL - padR);
       const plotH = Math.max(10, r.height - padT - padB);
       const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
@@ -334,8 +469,11 @@ document.addEventListener('alpine:init', () => {
     },
     zoomY(f) {
       this.spanCents = Math.max(2, Math.min(500, Math.round(this.spanCents * f)));
+      // A zoom re-derives the band around its own centre rather than around
+      // the price, so widening does not double as a recentre.
+      this.reband(false);
     },
-    recenter() { this.anchor = this.lastPrice(); },
+    recenter() { this.reband(true); this.bandSteps += 1; },
     togglePause() {
       this.paused = !this.paused;
       if (!this.paused) this.frozenEnd = null;

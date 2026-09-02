@@ -132,8 +132,22 @@
       </label>
 
       <span class="lv-spacer"></span>
+      <!-- A ROLLING 60-SECOND COUNT. It was the window's trades divided by the
+           window's length, which reads a third of the rate on a 3-minute
+           window and climbs from zero as the buffer fills. -->
       <span class="lv-sub">trades/min</span>
-      <b class="lv-num" x-text="tpm"></b>
+      <b class="lv-num" x-text="tpm == null ? '—' : tpm"></b>
+      <!-- The hub only buffers a symbol while someone watches it, so the first
+           subscribe starts from empty. An axis claiming three minutes over
+           fifty seconds of tape should say which it is. -->
+      <span class="lv-sub" x-show="tpmPartial" x-cloak
+            :title="'A per-minute rate needs a minute. ' + bufferedS()
+                    + 's buffered so far.'"
+            x-text="'buffering ' + bufferedS() + 's'"></span>
+      <span class="lv-sub" x-show="!tpmPartial && bufferedS() < windowS" x-cloak
+            :title="'The window is ' + windowS + 's; the hub has been watching
+                     this symbol for ' + bufferedS() + 's. Not eviction.'"
+            x-text="bufferedS() + 's of ' + windowS + 's'"></span>
       <span class="lv-sub" x-text="statusLine()"></span>
     </div>
 
