@@ -5,6 +5,58 @@ and that cost real time to rediscover.
 
 ---
 
+## How the box actually serves these pages
+
+**There is no nginx and no Caddy.** A `cloudflared` tunnel named
+`dashboards` (`4d1f43f6-c604-46ce-b809-9713135254d2`) maps hostnames
+straight to local ports. Each app is its own systemd unit:
+
+| Hostname | Port | Unit | Repo |
+|---|---|---|---|
+| `iv.pinkbluelabs.com` | 8000 | `spx-dashboard.service` | `/spx_analysis_dashboard`, `run.py` |
+| `portfolio.pinkbluelabs.com` | 8050 | `portfolio-dashboard.service` | — |
+| `vps.pinkbluelabs.com` | 8080 | `vps_dashboard.service` | — |
+| `live.pinkbluelabs.com` | 8001 | `spx-live.service` | `/spx_analysis_dashboard`, `run_live.py` |
+
+`spx-live` is a **separate unit from `spx-dashboard` on purpose**: the tape
+holds an upstream WebSocket and redraws thirty times a second, and a crash
+there must not take the three dashboards with it.
+
+### The tunnel is REMOTELY managed — `/etc/cloudflared/config.yml` is inert
+
+This cost a wrong conclusion once already. The unit runs with
+`--config /etc/cloudflared/config.yml`, so that file looks authoritative.
+It is not. On every start cloudflared logs
+
+```
+INF Updated to new configuration config="{\"ingress\":[...]}" version=2
+```
+
+and serves **that**, which comes from the Cloudflare dashboard
+(Zero Trust → Networks → Tunnels → `dashboards` → Public Hostnames). The
+proof it is not the local file: the pushed config carries two rules that
+have never been in it — `portfolio` and `vps` repeated as
+`https://…:443`.
+
+**Adding a hostname is therefore two steps, and step 1 alone looks broken:**
+
+1. `cloudflared tunnel route dns dashboards <host>.pinkbluelabs.com`
+   Creates the CNAME. Needs `/root/.cloudflared/cert.pem`, which is present.
+2. Add the Public Hostname in the dashboard — or `PUT` the ingress through
+   the API with a token carrying `Cloudflare Tunnel:Edit`. **There is no
+   Cloudflare API token anywhere on the box**, so today this is a dashboard
+   action.
+
+With only step 1 done, the hostname resolves, reaches the tunnel, matches no
+ingress rule and gets the catch-all `http_status:404` — an empty 404 that
+reads like a routing bug rather than a missing rule.
+
+**WebSockets need nothing special.** They pass through the tunnel unchanged,
+and the 100-second origin limit below applies to HTTP responses, not to an
+open socket.
+
+---
+
 ## Cloudflare's 100-second origin limit (HTTP 524)
 
 **Symptom.** A long request "fails in the browser" while the application

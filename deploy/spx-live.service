@@ -1,0 +1,32 @@
+# Equities Live — the scrolling tape.
+#
+# Install:
+#     scp deploy/spx-live.service root@100.76.94.99:/etc/systemd/system/
+#     ssh root@100.76.94.99 'systemctl daemon-reload && systemctl enable --now spx-live'
+#
+# A SEPARATE UNIT FROM spx-dashboard, deliberately. The tape holds an upstream
+# WebSocket and redraws thirty times a second; if it dies, Restart= must bring
+# back only it and the three dashboards must not notice. That is the same
+# reason it is a separate process on a separate port in the first place.
+#
+# The hostname in front of this (live.pinkbluelabs.com -> localhost:8001) is a
+# cloudflared ingress rule, and that tunnel is REMOTELY managed — see
+# DEPLOYMENT_NOTES.md, because the local /etc/cloudflared/config.yml looks
+# authoritative and is not.
+[Unit]
+Description=Equities Live (scrolling tape)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/spx_analysis_dashboard
+# DATABASE_URL / SCALP_DATABASE_URL for the arrival-rate comparison. The
+# Polygon key is not here: live/config.py reads it from the Open_Interest
+# project's .env so there is one place it can be rotated.
+EnvironmentFile=/spx_analysis_dashboard/.env
+ExecStart=/spx_analysis_dashboard/.venv/bin/python run_live.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

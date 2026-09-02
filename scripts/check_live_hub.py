@@ -141,6 +141,68 @@ async def case_refcount():
     check("FDX" not in h.trades, "the buffer outlived its subscription")
 
 
+async def case_two_panes_one_symbol():
+    """Two panes on one symbol must leave nothing subscribed behind them.
+
+    THE FAULT THIS EXISTS FOR. The hub reference-counts acquisitions, but a
+    socket's subscription set is a SET — so a second `watch` for a symbol the
+    socket already holds raises the hub's count to two while the set stays at
+    one. The client sends one `unwatch` when the last pane closes, the set
+    entry goes, and the count drops to one and stays there: the symbol is
+    subscribed forever with nobody receiving it, occupying one of four slots
+    until the service restarts.
+
+    The second pane asks for `snapshot` instead, which must NOT acquire.
+    """
+    import live.main as live_main
+
+    class FakeSock:
+        def __init__(self, script):
+            self.script, self.sent, self.i = script, [], 0
+
+        async def accept(self): pass
+        async def send_json(self, o): self.sent.append(o)
+        async def close(self): pass
+
+        async def receive_json(self):
+            if self.i >= len(self.script):
+                from fastapi import WebSocketDisconnect
+                raise WebSocketDisconnect(1000)
+            self.i += 1
+            return self.script[self.i - 1]
+
+    h = live_main.HUB
+    h.refs.clear(); h.trades.clear(); h.quotes.clear(); h.clients.clear()
+
+    sock = FakeSock([
+        {"action": "watch", "symbol": "FDX"},      # pane one
+        {"action": "snapshot", "symbol": "FDX"},   # pane two, same symbol
+        {"action": "unwatch", "symbol": "FDX"},    # the last pane closes
+    ])
+    await live_main.ws(sock)
+
+    snaps = [m for m in sock.sent if m.get("ev") == "snapshot"]
+    check(len(snaps) == 2,
+          f"two panes on one symbol got {len(snaps)} snapshots — the second "
+          f"opens onto an empty plot and fills in over three minutes")
+    check("FDX" not in h.refs,
+          f"FDX is still subscribed after every pane closed ({h.refs}) — "
+          f"a stranded subscription holds one of "
+          f"{config.MAX_SYMBOLS} slots until the service restarts")
+    check(not h.clients, "the client was not removed on disconnect")
+
+    # A snapshot for something this socket does not hold must be refused, not
+    # quietly served: it would be a subscription the hub is not counting.
+    h.refs.clear(); h.trades.clear(); h.quotes.clear(); h.clients.clear()
+    sock2 = FakeSock([{"action": "snapshot", "symbol": "NVDA"}])
+    await live_main.ws(sock2)
+    refused = [m for m in sock2.sent if m.get("ev") == "refused"]
+    check(len(refused) == 1,
+          "a snapshot for an unwatched symbol was served rather than refused")
+    check("NVDA" not in h.refs,
+          "a bare snapshot acquired a symbol the hub is not counting")
+
+
 async def case_resubscribe_on_reconnect():
     """A reconnect must restore every subscription."""
     sent = []
@@ -209,6 +271,7 @@ CASES = [
     ("time cap holds",          case_time_cap),
     ("symbol cap refuses",      case_symbol_cap_refuses),
     ("subscription refcount",   case_refcount),
+    ("two panes, one symbol",   case_two_panes_one_symbol),
     ("resubscribe on connect",  case_resubscribe_on_reconnect),
     ("snapshot honours window", case_snapshot_window),
     ("status names the feed",   case_status_states_the_feed),
