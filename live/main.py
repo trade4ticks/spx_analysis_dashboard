@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
     finally:
         await HUB.stop()
         await norms.close()
+        await broker.aclose()
         for t in tasks:
             t.cancel()
 
