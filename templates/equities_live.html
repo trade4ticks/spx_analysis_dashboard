@@ -203,6 +203,30 @@
     .lv-ord .lv-x { color:var(--muted); cursor:pointer; }
     .lv-ord .lv-x:hover { color:#fff; }
 
+    /* ── an unresolved placement ───────────────────────────────────────
+       Louder than an error, because it is worse than one: an error means
+       nothing happened, and this means nobody knows. */
+    .lv-unres-top {
+      background:#b8003a; color:#fff; font-weight:700; font-size:12px;
+      padding:7px 12px; border-radius:5px; margin-bottom:8px;
+      letter-spacing:0.2px;
+    }
+    .lv-unres-sym {
+      display:inline-block; background:#fff; color:#b8003a; font-weight:800;
+      border-radius:3px; padding:1px 7px; margin:0 3px;
+    }
+    .lv-unres {
+      background:rgba(184,0,58,0.16); border:1px solid #b8003a; color:#ff9dbb;
+      font-size:11px; padding:7px 10px; border-radius:5px; margin-bottom:6px;
+      line-height:1.55;
+    }
+    .lv-unres-head {
+      color:#fff; font-weight:700; font-size:11.5px; margin-bottom:3px;
+      letter-spacing:0.2px;
+    }
+    /* The pane itself, so the eye lands on it rather than only on the text. */
+    .lv-col.unres .lv-pane { border-color:#b8003a; box-shadow:0 0 0 1px #b8003a; }
+
     [x-cloak] { display:none !important; }
   </style>
 </head>
@@ -289,6 +313,20 @@
 
     <!-- Trading is off at the server unless deliberately enabled. Stated
          here rather than discovered when a click does nothing. -->
+    <!-- ══ WHICH PANE IS STUCK, BY NAME ══════════════════════════════════
+         With four panes open, "something is unresolved" is not actionable.
+         This names the symbol at the top of the page so the pane can be
+         found without reading all four of them. -->
+    <div class="lv-unres-top" x-show="unresolvedPanes().length" x-cloak>
+      UNRESOLVED ORDER —
+      <template x-for="p in unresolvedPanes()" :key="p.id">
+        <span class="lv-unres-sym" x-text="p.symbol"></span>
+      </template>
+      <span x-text="unresolvedPanes().length > 1
+              ? ' — those panes will not send anything until each is settled.'
+              : ' — that pane will not send anything until it is settled.'"></span>
+    </div>
+
     <!-- The reason comes from the SERVER, because there are now two of them
          — the environment gate and the runtime flag — and a banner that
          always names the environment variable would send you to restart the
@@ -311,7 +349,7 @@
 
     <div class="lv-panes" :class="layout">
       <template x-for="(pane, pi) in panes" :key="pane.id">
-        <div class="lv-col">
+        <div class="lv-col" :class="{unres: pane.unresolved}">
 
           <!-- Each pane carries its OWN symbol, window, price range and
                lines. Nothing here is site state. -->
@@ -475,6 +513,10 @@
                       + ' @ ' + (pane.position && pane.position.avg
                                  ? Number(pane.position.avg).toFixed(2) : '—')
                     : 'flat'"></span>
+            <span class="lv-sub" x-show="pane.positionAgeS() != null" x-cloak
+                  :title="'Positions are read every 6s; orders every 2s. They '
+                          + 'change at completely different rates.'"
+                  x-text="pane.positionAgeS().toFixed(0) + 's'"></span>
             <span class="lv-pl" x-show="pane.openPl() != null" x-cloak
                   :class="pane.openPl() >= 0 ? 'up' : 'dn'"
                   x-text="(pane.openPl() >= 0 ? '+' : '')
@@ -510,6 +552,45 @@
                         title="Cancel this order">×</span>
                 </span>
               </template>
+            </div>
+          </div>
+
+          <!-- ══ AN ORDER WHOSE ANSWER NEVER ARRIVED ════════════════════
+               Not an error — an unknown. The order may be resting at Schwab
+               right now, so this pane will not send anything else until it
+               is settled. Cancel and flatten stay available: they are how
+               you get out of exactly this. -->
+          <div class="lv-unres" x-show="pane.unresolved" x-cloak>
+            <div class="lv-unres-head">
+              <b x-text="pane.symbol"></b> — UNRESOLVED
+              <span x-text="pane.unresolved
+                      ? ({looking: 'reading the record',
+                          ambiguous: 'MORE THAN ONE MATCH',
+                          'gave-up': 'COULD NOT CONFIRM'})[pane.unresolved.state]
+                      : ''"></span>
+            </div>
+            <div x-text="pane.unresolvedText()"></div>
+            <!-- The matches, unpicked. See broker.match_placement for why
+                 this is shown rather than resolved automatically. -->
+            <div x-show="pane.unresolved && pane.unresolved.matches" x-cloak
+                 style="margin-top:4px">
+              <template x-for="o in (pane.unresolved && pane.unresolved.matches
+                                     ? pane.unresolved.matches : [])"
+                        :key="o.order_id">
+                <span class="lv-ord"
+                      :class="String(o.side).startsWith('BUY') ? 'buy' : 'sell'"
+                      style="margin-right:4px"
+                      x-text="o.order_id + ' · ' + o.status"></span>
+              </template>
+            </div>
+            <div style="margin-top:5px">
+              <button class="lv-btn danger" @click="pane.cancelAll()">
+                cancel everything in <span x-text="pane.symbol"></span></button>
+              <button class="lv-btn" @click="pane.clearUnresolved()"
+                      title="Only after you have looked at Schwab. This never
+                             clears on a timer — a warning that expires by
+                             itself is a warning failing at its job.">
+                I have checked — clear</button>
             </div>
           </div>
 

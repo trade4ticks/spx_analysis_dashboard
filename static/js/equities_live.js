@@ -49,6 +49,16 @@ const LV_LINE_DRAG = 'rgba(255,255,255,0.98)';
 const LV_LINE_TEXT = '#dfe3e8';
 const LV_LINE_COLD = '#8a8a8a';
 
+/* Ladder row heights, in pixels.
+ *
+ * Under MIN a click is refused — an order landing a cent from where it was
+ * aimed is not an acceptable outcome of a near-miss. GOOD is what the
+ * automatic increment aims for, comfortably above the refusal line so the
+ * rows do not flicker between clickable and not as the band steps.
+ */
+const LV_ROW_MIN_PX = 5;
+const LV_ROW_GOOD_PX = 8;
+
 function lvFmtClock(ms) {
   const d = new Date(ms);
   return String(d.getHours()).padStart(2, '0') + ':'
@@ -148,14 +158,35 @@ window.lvPane = function (id, send) {
     working: [],          // [{order_id, side, qty, price, status}]
     recent: [],           // terminal orders, so a fill is visible
     limits: null,         // the shared 120/min budget, as the server sees it
-    brokerAt: 0,          // when the broker last confirmed, ms
+    // TWO AGES, because the two reads happen at different rates and one of
+    // them matters far more. Orders in this account live 1-6 seconds;
+    // positions move only when one fills.
+    ordersAt: 0,          // when the working list was last confirmed, ms
+    positionsAt: 0,
     brokerErr: '',
     lastRt: null,         // round trip of the last action, ms
     lastAction: '',
+    /* A PLACEMENT WHOSE ANSWER NEVER ARRIVED.
+     *
+     * Not an error — an unknown. The order may be resting at Schwab right
+     * now. While this is set the pane will not place or reprice, because a
+     * second order sent on top of an unknown first one is how a timeout
+     * becomes a double position. Cancel and flatten stay available: they are
+     * how you get out of exactly this. */
+    unresolved: null,     // {side, qty, price, sentAt, tries, state, why}
+    /* Order ids this pane created, newest last.
+     *
+     * A replace returns a NEW id and Schwab provides no link from the old
+     * order to it — `replacingOrderCollection` is null on every REPLACED
+     * order in the account. So the id from the PUT is the only handle, and
+     * throwing it away meant relying on there being exactly one working
+     * order to guess from. */
+    ownIds: [],
     busy: false,
     // Row the cursor is over in the ladder, and which zone.
     ladderHover: null,    // {price, zone: 'buy'|'sell'}
     ladder: false,        // the gutter costs plot width, so it is opt-in
+    ladderManual: false,  // a hand-picked increment, until the next zoom
 
     canvasId() { return 'lv-canvas-' + this.id; },
     cv() { return document.getElementById(this.canvasId()); },
@@ -360,13 +391,34 @@ window.lvPane = function (id, send) {
      * A row under about five pixels is not a click target, and silently
      * letting it be one is how an order goes in a cent from where it was
      * aimed. The pane says so and refuses rather than guessing. */
-    rowPx() {
+    rowPx(cents) {
       const g = this.geom();
       if (!g) return 0;
-      const rows = Math.max(1, (g.hi - g.lo) / (this.ladderCents / 100));
+      const step = (cents || this.ladderCents) / 100;
+      const rows = Math.max(1, (g.hi - g.lo) / step);
       return g.plotH / rows;
     },
-    rowTooFine() { return this.rowPx() < 5; },
+    rowTooFine() { return this.rowPx() < LV_ROW_MIN_PX; },
+
+    /* THE INCREMENT FOLLOWS THE ZOOM, and a manual choice wins until the
+     * next zoom.
+     *
+     * Selectable alone was not enough: zoomed out to a 60-cent range, 1-cent
+     * rows are 121 rows at 4 pixels — inert, unclickable, and drawn as a
+     * striped block that looks like a ladder. This picks the finest
+     * increment whose rows are still worth clicking, so zooming out steps
+     * 1 -> 2 -> 5 on its own.
+     *
+     * A manual pick is honoured until the next zoom, because overriding it
+     * mid-adjustment would fight the person doing the adjusting; a zoom is
+     * the natural moment to hand control back. */
+    autoLadder() {
+      if (this.ladderManual) return;
+      for (const c of this.ladderStops) {
+        if (this.rowPx(c) >= LV_ROW_GOOD_PX) { this.ladderCents = c; return; }
+      }
+      this.ladderCents = this.ladderStops[this.ladderStops.length - 1];
+    },
 
     ladderZone(mx, g) {
       if (!this.ladder || !g) return null;
@@ -632,8 +684,37 @@ window.lvPane = function (id, send) {
       const rowH = rows.length > 1
         ? Math.abs(Y(rows[1]) - Y(rows[0])) : plotH;
       const step = this.ladderCents / 100;
-      const fine = rowH < 5;
+      const fine = rowH < LV_ROW_MIN_PX;
       const last = this.lastPrice();
+
+      /* NOTHING CLICKABLE IS DRAWN WHEN NOTHING IS CLICKABLE.
+       *
+       * This used to stripe 240 zones at four pixels and refuse every click
+       * on them — a solid block that looked exactly like a working ladder.
+       * Rendering an affordance that does not work is worse than rendering
+       * nothing, so at this point the gutter carries the price scale and a
+       * sentence saying what to do about it.
+       *
+       * With autoLadder() running, reaching here at all means even the
+       * coarsest increment is too fine for the current zoom. */
+      if (fine) {
+        ctx.textAlign = 'center';
+        for (const p of rows) {
+          const yc = Y(p);
+          if (yc < padT || yc > padT + plotH) continue;
+          // Every fifth cent only, so the scale stays a scale.
+          if (Math.abs(Math.round(p * 100) % 5) > 1e-9) continue;
+          ctx.font = '9px sans-serif';
+          ctx.fillStyle = '#8a8a8a';
+          ctx.fillText(p.toFixed(2), x0 + gu.buy + gu.price / 2, yc + 3);
+        }
+        ctx.font = '700 9px sans-serif';
+        ctx.fillStyle = '#e84393';
+        ctx.textAlign = 'center';
+        ctx.fillText('zoom in', x0 + gu.w / 2, padT + 10);
+        ctx.fillText('to trade', x0 + gu.w / 2, padT + 20);
+        return;
+      }
 
       ctx.textAlign = 'center';
       for (const p of rows) {
@@ -648,28 +729,24 @@ window.lvPane = function (id, send) {
           const hot = this.ladderHover && this.ladderHover.zone === zone
             && Math.abs(this.ladderHover.price - p) < step / 2;
           ctx.fillStyle = hot
-            ? (this.armed && !fine
+            ? (this.armed
                 ? (zone === 'buy' ? 'rgba(52,152,219,0.45)'
                                   : 'rgba(232,67,147,0.45)')
                 : 'rgba(140,140,140,0.30)')
             : (zone === 'buy' ? 'rgba(52,152,219,0.055)'
                               : 'rgba(232,67,147,0.055)');
           ctx.fillRect(zx, top, zw, Math.max(1, rowH - 0.5));
-          if (hot && this.armed && !fine) {
+          if (hot && this.armed && rowH >= 8) {
             ctx.font = '700 9px sans-serif';
             ctx.fillStyle = '#fff';
-            if (rowH >= 8) ctx.fillText(String(this.qty), zx + zw / 2, yc + 3);
+            ctx.fillText(String(this.qty), zx + zw / 2, yc + 3);
           }
         }
 
-        // The price, and the count of prints that have landed on it — the
-        // same question the draggable lines answer, per row.
-        if (!fine || Math.abs(Math.round(p * 100) % 5) < 1e-9) {
-          ctx.font = (rowH >= 9 ? '600 10px' : '9px') + ' sans-serif';
-          ctx.fillStyle = (last != null && Math.abs(last - p) < step / 2)
-            ? '#ffffff' : '#cfd4da';
-          ctx.fillText(p.toFixed(2), x0 + gu.buy + gu.price / 2, yc + 3);
-        }
+        ctx.font = (rowH >= 9 ? '600 10px' : '9px') + ' sans-serif';
+        ctx.fillStyle = (last != null && Math.abs(last - p) < step / 2)
+          ? '#ffffff' : '#cfd4da';
+        ctx.fillText(p.toFixed(2), x0 + gu.buy + gu.price / 2, yc + 3);
       }
 
       // Working orders, in their row. Drawn over the zones so an order is
@@ -691,15 +768,6 @@ window.lvPane = function (id, send) {
           ctx.fillText(String((o.qty || 0) - (o.filled || 0)),
                        zx + zw / 2, yc + 3);
         }
-      }
-
-      // A row too fine to click says so, rather than accepting a click and
-      // landing a cent from where it was aimed.
-      if (fine) {
-        ctx.font = '700 9px sans-serif';
-        ctx.fillStyle = '#e84393';
-        ctx.textAlign = 'right';
-        ctx.fillText('rows too fine — zoom in', x0 + gu.w - 4, padT + 9);
       }
     },
 
@@ -1002,6 +1070,9 @@ window.lvPane = function (id, send) {
     },
     zoomY(dir) {
       this.spanCents = this.step(this.spanStops, this.spanCents, dir);
+      // A zoom hands the increment back to the automatic choice.
+      this.ladderManual = false;
+      this.$nextTick ? this.$nextTick(() => this.autoLadder()) : this.autoLadder();
       // A zoom re-derives the band around its own centre rather than around
       // the price, so widening does not double as a recentre.
       this.reband(false);
@@ -1091,13 +1162,22 @@ window.lvPane = function (id, send) {
      * everything below is phrased against it: past the threshold the pane
      * says the list may be wrong rather than showing it as current. */
     brokerAgeS() {
-      return this.brokerAt ? (Date.now() - this.brokerAt) / 1000 : null;
+      return this.ordersAt ? (Date.now() - this.ordersAt) / 1000 : null;
     },
+    positionAgeS() {
+      return this.positionsAt ? (Date.now() - this.positionsAt) / 1000 : null;
+    },
+    /* Keyed on the ORDER age, not the position age.
+     *
+     * The working list is the thing that goes wrong fast and the thing a
+     * decision is made against. A position a few seconds old is still
+     * approximately true; a working list a few seconds old may describe an
+     * order that has already filled. */
     brokerStale() {
       const age = this.brokerAgeS();
-      return age == null || age > (this.staleAfterS || 12);
+      return age == null || age > (this.staleAfterS || 4);
     },
-    staleAfterS: 12,
+    staleAfterS: 4,
 
     /* The line the pane shows when its order state cannot be trusted.
      *
@@ -1107,8 +1187,9 @@ window.lvPane = function (id, send) {
     staleWhy() {
       if (this.brokerErr) return this.brokerErr;
       const age = this.brokerAgeS();
-      if (age == null) return 'never confirmed with Schwab';
-      return `last confirmed ${age.toFixed(0)}s ago`;
+      if (age == null) return 'orders never confirmed with Schwab';
+      return `orders last confirmed ${age.toFixed(1)}s ago`
+           + ` (they live 1-6s here, so this is a real gap)`;
     },
 
     async brokerCall(path, body) {
@@ -1158,8 +1239,9 @@ window.lvPane = function (id, send) {
         .filter(o => (o.symbol || '').toUpperCase() === this.symbol);
       this.recent = j.recent || [];
       this.limits = j.limits || null;
-      this.staleAfterS = j.stale_after_s || 12;
-      this.brokerAt = Date.now();
+      this.staleAfterS = j.stale_after_s || 4;
+      this.ordersAt = Date.now();
+      this.positionsAt = Date.now();
     },
 
     positionQty() { return this.position ? Number(this.position.qty) || 0 : 0; },
@@ -1187,17 +1269,34 @@ window.lvPane = function (id, send) {
     placeBuy(price) { return this.place('BUY', price); },
     placeSell(price) { return this.place('SELL', price); },
 
-    async place(side, price) {
-      if (!this.armed) {
-        this.brokerErr = 'this pane is not armed. Nothing was sent.';
-        return;
+    /* Nothing may be SENT while a previous send is unresolved. */
+    blocked() {
+      if (this.unresolved) {
+        return `${this.symbol} has an unresolved order — settle it first.`;
       }
+      if (!this.armed) return 'this pane is not armed. Nothing was sent.';
+      return null;
+    },
+
+    async place(side, price) {
+      const why = this.blocked();
+      if (why) { this.brokerErr = why; return; }
+      const qty = Number(this.qty);
+      const sentAt = Date.now() / 1000;
       const j = await this.brokerCall('order', {
-        symbol: this.symbol, side, qty: Number(this.qty),
+        symbol: this.symbol, side, qty,
         price: Number(price), armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
       });
-      this.lastAction = j.ok ? `${side} ${this.qty} @ ${Number(price).toFixed(2)}`
+      if (j.indeterminate) {
+        // NOT AN ERROR AND NOT A SUCCESS. Never retried.
+        this.unresolved = { side, qty, price: Number(price), sentAt,
+                            tries: 0, state: 'looking', why: j.why };
+        this.lastAction = 'UNRESOLVED';
+        return j;
+      }
+      if (j.ok && j.order_id) this.ownIds.push(String(j.order_id));
+      this.lastAction = j.ok ? `${side} ${qty} @ ${Number(price).toFixed(2)}`
                              : `${side} refused`;
       // Read back immediately: the reply says the order was accepted, and
       // only the record says where it now rests.
@@ -1214,20 +1313,34 @@ window.lvPane = function (id, send) {
     async nudge(dir) {
       const o = this.primaryOrder();
       if (!o) {
-        this.brokerErr = 'no working order in this pane to move.';
+        this.brokerErr = this.working.length > 1
+          ? 'more than one order is working — move them from the list.'
+          : 'no working order in this pane to move.';
         return;
       }
-      if (!this.armed) {
-        this.brokerErr = 'this pane is not armed. Nothing was sent.';
-        return;
-      }
+      const why = this.blocked();
+      if (why) { this.brokerErr = why; return; }
       const step = this.ladderCents / 100;
       const price = Math.round((Number(o.price) + dir * step) * 100) / 100;
+      const qty = (o.qty || 0) - (o.filled || 0);
+      const sentAt = Date.now() / 1000;
       const j = await this.brokerCall('replace', {
         order_id: o.order_id, symbol: this.symbol, side: o.side,
-        qty: (o.qty || 0) - (o.filled || 0), price, armed: true,
+        qty, price, armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
       });
+      if (j.indeterminate) {
+        this.unresolved = { side: o.side, qty, price, sentAt, tries: 0,
+                            state: 'looking', why: j.why, wasReplace: true };
+        this.lastAction = 'UNRESOLVED';
+        return j;
+      }
+      if (j.ok && j.order_id) {
+        // THE NEW ID, kept. A replace creates a new order and Schwab gives
+        // no link from the old one to it, so this is the only handle.
+        this.ownIds = this.ownIds.filter(id => id !== String(o.order_id));
+        this.ownIds.push(String(j.order_id));
+      }
       this.lastAction = j.ok ? `moved to ${price.toFixed(2)}` : 'move refused';
       await this.refreshBroker();
       return j;
@@ -1239,6 +1352,13 @@ window.lvPane = function (id, send) {
      * silently picking — so this returns the only one, or nothing.
      */
     primaryOrder() {
+      // THIS PANE'S OWN most recent order first. Falling straight through to
+      // "the only working order" would let the controls act on an order
+      // placed in thinkorswim, which also shows up in this list.
+      for (let i = this.ownIds.length - 1; i >= 0; i--) {
+        const mine = this.working.find(o => String(o.order_id) === this.ownIds[i]);
+        if (mine) return mine;
+      }
       return this.working.length === 1 ? this.working[0] : null;
     },
 
@@ -1284,6 +1404,72 @@ window.lvPane = function (id, send) {
       return j;
     },
 
+    /* Settle an unresolved placement against the broker's own record.
+     *
+     * Driven by the order poll, so it costs one extra call every two seconds
+     * and only while something is actually unresolved. It never gives up
+     * quietly: after the window it stops looking and SAYS it could not
+     * confirm, which is a different and more useful statement than silence.
+     */
+    async tryResolve() {
+      const u = this.unresolved;
+      if (!u || u.state === 'ambiguous' || u.state === 'gave-up') return;
+      u.tries += 1;
+      const j = await this.brokerCall('reconcile', {
+        symbol: this.symbol, side: u.side, qty: u.qty,
+        price: u.price, sent_at: u.sentAt,
+      });
+      if (!j.ok) return;                       // try again on the next poll
+      if (j.state === 'found') {
+        u.state = 'found';
+        if (j.order && j.order.order_id) this.ownIds.push(String(j.order.order_id));
+        this.lastAction = `resolved: the order did land (${j.order.status})`;
+        this.unresolved = null;
+        await this.refreshBroker();
+        return;
+      }
+      if (j.state === 'ambiguous') {
+        // NOT GUESSED. See broker.match_placement for why.
+        u.state = 'ambiguous';
+        u.matches = j.orders;
+        return;
+      }
+      // Absent. Keep looking — Schwab does not list an order the instant it
+      // is accepted, and one empty look proves nothing.
+      if (u.tries * 2 >= 15) {
+        u.state = 'gave-up';
+      }
+    },
+
+    unresolvedText() {
+      const u = this.unresolved;
+      if (!u) return '';
+      const age = ((Date.now() / 1000) - u.sentAt).toFixed(0);
+      const what = `${u.side} ${u.qty} @ ${Number(u.price).toFixed(2)}`;
+      if (u.state === 'ambiguous') {
+        return `${what} sent ${age}s ago matched ${u.matches.length} orders `
+             + `at Schwab. It is not being guessed at — check which is yours `
+             + `and clear this.`;
+      }
+      if (u.state === 'gave-up') {
+        return `${what} sent ${age}s ago could NOT be confirmed either way `
+             + `after 15s of looking. It may be resting at Schwab. Check `
+             + `there before doing anything else in this pane.`;
+      }
+      return `${what} sent ${age}s ago — no reply arrived, so whether it `
+           + `landed is unknown. Reading the record… (${u.tries})`;
+    },
+
+    /* Cleared BY HAND, never on a timer.
+     *
+     * The block exists because the pane does not know its own position. Only
+     * a person who has looked can say it is settled, and a timeout that
+     * quietly expired the warning would be the warning failing at its job. */
+    clearUnresolved() {
+      this.unresolved = null;
+      this.lastAction = 'unresolved state cleared by hand';
+    },
+
     toggleArm() {
       this.armed = !this.armed;
       // Arming shows the ladder: it is what the arming is for, and hunting
@@ -1294,11 +1480,21 @@ window.lvPane = function (id, send) {
 
     toggleLadder() {
       this.ladder = !this.ladder;
-      if (this.ladder) this.refreshBroker();
+      if (this.ladder) {
+        this.ladderManual = false;
+        this.$nextTick ? this.$nextTick(() => { this.resize(); this.autoLadder(); })
+                       : this.autoLadder();
+        this.refreshBroker();
+      } else if (this.$nextTick) {
+        // The gutter's width changes, so the canvas has to be re-measured.
+        this.$nextTick(() => this.resize());
+      }
     },
 
     ladderStep(dir) {
       this.ladderCents = this.step(this.ladderStops, this.ladderCents, dir);
+      // A DELIBERATE PICK, honoured until the next zoom.
+      this.ladderManual = true;
     },
 
     rtText() {
@@ -1370,7 +1566,8 @@ document.addEventListener('alpine:init', () => {
         // would multiply the same two calls by the number of panes against a
         // 120-a-minute ceiling shared with the orders themselves. At four
         // seconds this is 30 calls a minute whether one pane is open or four.
-        setInterval(() => this.pollBroker(), 4000);
+        setInterval(() => this.pollOrders(), 2000);
+        setInterval(() => this.pollPositions(), 6000);
         this.loadBrokerHealth();
         // The runtime trading flag can be flipped by another service while
         // this page is open, so the arm button's availability is re-read
@@ -1576,41 +1773,89 @@ document.addEventListener('alpine:init', () => {
       } catch (err) { this.brokerHealth = { why: String(err) }; }
     },
 
-    /* Any pane showing a ladder wants the record. One read serves all of
-     * them; see the note at the interval that calls this. */
-    async pollBroker() {
-      const live = this.panes.filter(p => p.ladder && p.symbol);
+    /* TWO POLLS AT DIFFERENT RATES, one read each for all panes.
+     *
+     * Orders in this account live ONE TO SIX SECONDS — entered, repriced and
+     * filled inside what used to be a single four-second poll of both halves
+     * together. Positions only move when one of those fills. Pairing them
+     * made the cheap read wait on the expensive one and the expensive one
+     * run no more often than the cheap one needed.
+     *
+     * Orders every 2s (~850ms each) and positions every 6s (~370ms) is 40
+     * calls a minute of the 90 available to ordinary traffic, leaving 50 for
+     * placement and repricing with the 30-call reserve untouched.
+     *
+     * One read serves every pane: Schwab returns the whole account either
+     * way, so per-pane polling would multiply the same calls by the number
+     * of panes for no extra information.
+     */
+    livePanes() {
+      return this.panes.filter(p => p.ladder && p.symbol);
+    },
+
+    async pollOrders() {
+      const live = this.livePanes();
       if (!live.length) return;
       const syms = [...new Set(live.map(p => p.symbol))];
       try {
-        const r = await fetch('broker/state?symbols='
+        const r = await fetch('broker/orders?symbols='
                               + encodeURIComponent(syms.join(',')));
         const j = await r.json();
         if (!j.ok) {
-          // The AGE is not advanced on a failure. A pane whose last
+          // The AGE IS NOT ADVANCED on a failure. A pane whose last
           // confirmation is old must keep saying so, and a failed poll is
-          // the case where that matters most.
-          for (const p of live) p.brokerErr = j.why || 'the broker read failed';
+          // exactly when that matters.
+          for (const p of live) p.brokerErr = j.why || 'the order read failed';
           return;
         }
         const now = Date.now();
         for (const p of live) {
-          p.position = (j.positions || [])
-            .find(x => (x.symbol || '').toUpperCase() === p.symbol) || null;
           p.working = (j.working || [])
             .filter(o => (o.symbol || '').toUpperCase() === p.symbol);
           p.recent = (j.recent || [])
             .filter(o => (o.symbol || '').toUpperCase() === p.symbol);
           p.limits = j.limits || null;
-          p.staleAfterS = j.stale_after_s || 12;
+          p.staleAfterS = j.stale_after_s || 4;
           p.brokerErr = '';
-          p.brokerAt = now;
+          p.ordersAt = now;
+          // An UNRESOLVED placement asks the server to match, rather than
+          // matching here: the rule and its ambiguity caveat live in
+          // broker.match_placement, and a second copy in the browser would
+          // be a second place for that caveat to go stale.
+          if (p.unresolved) p.tryResolve();
         }
       } catch (err) {
         for (const p of live) {
-          p.brokerErr = 'the broker read never completed: ' + err;
+          p.brokerErr = 'the order read never completed: ' + err;
         }
       }
+    },
+
+    async pollPositions() {
+      const live = this.livePanes();
+      if (!live.length) return;
+      const syms = [...new Set(live.map(p => p.symbol))];
+      try {
+        const r = await fetch('broker/positions?symbols='
+                              + encodeURIComponent(syms.join(',')));
+        const j = await r.json();
+        if (!j.ok) return;
+        const now = Date.now();
+        for (const p of live) {
+          p.position = (j.positions || [])
+            .find(x => (x.symbol || '').toUpperCase() === p.symbol) || null;
+          p.positionsAt = now;
+        }
+      } catch (err) { /* the orders poll carries the visible error */ }
+    },
+
+    /* Which panes are blocked on an unresolved placement, named.
+     *
+     * With four panes open, "something is stuck" is not actionable. This is
+     * the symbol list the site bar shows, so the pane can be found without
+     * reading four of them. */
+    unresolvedPanes() {
+      return this.panes.filter(p => p.unresolved);
     },
 
     tradingEnabled() {

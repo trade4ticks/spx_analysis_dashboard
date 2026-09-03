@@ -51,6 +51,12 @@ from live import broker, config                             # noqa: E402
 # passed that version of this check.
 RUNTIME_AT_IMPORT = broker._runtime_enabled
 
+# THE REAL TRANSPORT, captured before any case stubs it out. Earlier cases
+# replace broker._acall with a recorder, so a case that means to exercise the
+# real one has to hold its own reference — without this the classification
+# test drove the recorder and every assertion passed vacuously.
+REAL_ACALL = broker._acall
+
 FAILS: list[str] = []
 
 
@@ -85,6 +91,10 @@ class Recorder:
     def verbs(self):
         return [(c["method"], c["path"].split("/")[-1] or "orders")
                 for c in self.calls]
+
+
+async def _fake_token():
+    return "TOK"
 
 
 def _acct(positions=(), orders=()):
@@ -504,12 +514,204 @@ def case_order_body():
           "the price does not survive serialisation as a 2-decimal string")
 
 
+# ── determinate vs unknown ──────────────────────────────────────────────────
+def case_indeterminacy():
+    """A rejection and a timeout must not look alike to the caller.
+
+    THE DANGEROUS CASE. A 4xx means Schwab looked at the request and refused
+    it; nothing happened and a retry is safe. A timeout, a dropped connection
+    or a 5xx means the order may be resting right now. Collapsing the two is
+    how a timeout becomes a retry becomes a double position.
+    """
+    check(issubclass(broker.BrokerIndeterminate, broker.BrokerError),
+          "BrokerIndeterminate is not a BrokerError, so existing handlers "
+          "would stop catching it")
+    check(broker.BrokerIndeterminate is not broker.BrokerError,
+          "the two failure kinds are the same class, so nothing can tell a "
+          "rejection from an unknown")
+
+    # THE CLASSIFICATION ITSELF, in the transport where it is decided.
+    #
+    # Testing only the class hierarchy left the actual decision unchecked:
+    # a version of _acall that raised a plain BrokerError on a timeout
+    # passed, which is the exact bug this case exists to prevent.
+    class FakeResp:
+        def __init__(self, code):
+            self.status_code, self.headers, self.content = code, {}, b"x"
+            self.text = "boom"
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def __init__(self, behaviour):
+            self.behaviour = behaviour
+            self.is_closed = False
+
+        async def request(self, *a, **kw):
+            if self.behaviour == "timeout":
+                raise TimeoutError("read timed out")
+            return FakeResp(self.behaviour)
+
+    def drive(behaviour):
+        broker._conn = FakeClient(behaviour)
+        broker._httpx = lambda: type("H", (), {})()
+        broker._client = lambda _h: broker._conn
+        broker._token = _fake_token
+        broker._account_hash = "H"
+        try:
+            asyncio.run(REAL_ACALL("POST", "/accounts/H/orders",
+                                   body={"x": 1}, priority=True))
+            return None
+        except broker.BrokerError as exc:
+            return exc
+        finally:
+            broker._conn = None
+
+    for behaviour, want_unknown, label in (
+            ("timeout", True, "a timeout"),
+            (503, True, "a 5xx"),
+            (400, False, "a 4xx")):
+        exc = drive(behaviour)
+        check(exc is not None, f"{label} did not raise at all")
+        if exc is None:
+            continue
+        got_unknown = isinstance(exc, broker.BrokerIndeterminate)
+        check(got_unknown == want_unknown,
+              f"{label} raised {type(exc).__name__}; expected "
+              f"{'BrokerIndeterminate' if want_unknown else 'BrokerError'}. "
+              f"A 4xx means Schwab refused and nothing happened; a timeout "
+              f"or a 5xx means the order may be resting right now, and "
+              f"collapsing the two is how a timeout becomes a retry becomes "
+              f"a double position.")
+
+    import live.main as live_main
+    det = live_main._broker_fail(broker.BrokerError("guards refused"))
+    ind = live_main._broker_fail(broker.BrokerIndeterminate("timed out"))
+    check(det["indeterminate"] is False,
+          f"a plain refusal was reported as indeterminate: {det}")
+    check(ind["indeterminate"] is True,
+          f"a timeout was reported as determinate: {ind} — the pane would "
+          f"treat it as 'nothing happened' and allow another order on top")
+
+
+# ── matching a placement nobody saw the answer to ───────────────────────────
+def case_match_placement():
+    """The reconciliation rule, including the case it refuses to guess at."""
+    import time as _t
+    sent = _t.time()
+    after = "2026-09-03T20:00:10+0000"
+    before = "2026-09-03T19:00:00+0000"
+
+    def o(oid, sym="FDX", side="BUY", qty=100, price=318.50, entered=after):
+        return {"order_id": oid, "symbol": sym, "side": side, "qty": qty,
+                "price": price, "entered": entered, "status": "WORKING"}
+
+    want = dict(symbol="FDX", side="BUY", qty=100, price=318.50,
+                sent_at=0)          # epoch 0 so `entered` always passes
+
+    r = broker.match_placement([], **want)
+    check(r["state"] == "absent", f"an empty list matched: {r}")
+
+    r = broker.match_placement([o("A")], **want)
+    check(r["state"] == "found" and r["order"]["order_id"] == "A",
+          f"the one matching order was not found: {r}")
+
+    # THE AMBIGUITY. Two identical orders are indistinguishable, and the
+    # rule reports that rather than picking one — a guess would attach the
+    # pane to an order that might be the other, and the next nudge would
+    # reprice a stranger's order.
+    r = broker.match_placement([o("A"), o("B")], **want)
+    check(r["state"] == "ambiguous" and len(r["orders"]) == 2,
+          f"two identical orders produced {r['state']} instead of an "
+          f"explicit ambiguity — this is the case that must never be guessed")
+
+    # Every field has to discriminate, or the match is looser than it reads.
+    for label, bad in (("symbol", o("A", sym="NVDA")),
+                       ("side", o("A", side="SELL")),
+                       ("quantity", o("A", qty=50)),
+                       ("price", o("A", price=318.60))):
+        r = broker.match_placement([bad], **want)
+        check(r["state"] == "absent",
+              f"an order differing only in {label} was matched: {r}")
+
+    # A cent of tolerance, because the price went out as a 2-decimal string.
+    r = broker.match_placement([o("A", price=318.5000001)], **want)
+    check(r["state"] == "found", "float noise on the price broke the match")
+
+    # ENTERED BEFORE WE SENT. An order already resting is not the one just
+    # placed, and matching it would adopt somebody else's order.
+    r = broker.match_placement([o("A", entered=before)],
+                               **{**want, "sent_at": _t.mktime(
+                                   _t.strptime("2026-09-03T19:59:00",
+                                               "%Y-%m-%dT%H:%M:%S"))})
+    check(r["state"] == "absent",
+          f"an order entered before the placement was matched as it: {r}")
+
+    # A market order has no price, and must still match on everything else.
+    r = broker.match_placement([o("A", price=None)],
+                               **{**want, "price": None})
+    check(r["state"] == "found", "a market order could not be reconciled")
+
+    # THE CAVEAT ITSELF. It is the thing most likely to be lost in a tidy-up,
+    # and it is the reason the ambiguity above is acceptable rather than a bug.
+    src = (ROOT / "live" / "broker.py").read_text(encoding="utf-8")
+    body = src[src.index("def match_placement"):src.index("def _entered_epoch")]
+    for phrase in ("NOT GUARANTEED UNIQUE", "probe_schwab_tag",
+                   "ADJACENT PRICES"):
+        check(phrase in body,
+              f"the matching function no longer explains {phrase!r} — the "
+              f"ambiguity is real and permanent until the tag probe says "
+              f"otherwise, and it belongs where the matching happens")
+
+
+# ── the two reads are separate ──────────────────────────────────────────────
+def case_split_reads():
+    """Orders and positions are polled at different rates, so ONE call each.
+
+    Orders in this account live one to six seconds; positions move only when
+    one of them fills. Pairing the reads made the cheap one wait on the
+    expensive one and the expensive one run no more often than the cheap one
+    needed.
+    """
+    rec = Recorder(_acct(positions=[pos("FDX", long_q=300)],
+                         orders=[order("O1", "FDX", "BUY", 100, 317.5)]))
+    broker._acall = rec
+    broker._account_hash = "H"
+
+    asyncio.run(broker.read_orders(["FDX"]))
+    check(len(rec.calls) == 1 and rec.calls[0]["path"].endswith("/orders"),
+          f"the orders read made {rec.verbs()} — it must not drag the "
+          f"positions call along at 2-second intervals")
+
+    rec.calls.clear()
+    asyncio.run(broker.read_positions(["FDX"]))
+    check(len(rec.calls) == 1 and not rec.calls[0]["path"].endswith("/orders"),
+          f"the positions read made {rec.verbs()}")
+
+    rec.calls.clear()
+    st = asyncio.run(broker.state(["FDX"]))
+    check(len(rec.calls) == 2,
+          f"the combined read made {len(rec.calls)} calls, expected 2")
+    check(st["working"] and st["positions"],
+          f"the combined read lost half its payload: {st}")
+    check(st["stale_after_s"] == config.STALE_AFTER_S,
+          "the staleness threshold is not carried to the page")
+    check(config.STALE_AFTER_S <= 6,
+          f"the staleness threshold is {config.STALE_AFTER_S}s against orders "
+          f"that live 1-6s — it would call a list current that had already "
+          f"missed an order's whole life")
+
+
 CASES = [
     ("the guards", case_guards),
     ("the runtime toggle", case_runtime_toggle),
     ("the four switches", case_switches),
     ("flatten cancels first", case_flatten_order),
     ("reading the record", case_state),
+    ("split reads", case_split_reads),
+    ("determinate vs unknown", case_indeterminacy),
+    ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
 ]

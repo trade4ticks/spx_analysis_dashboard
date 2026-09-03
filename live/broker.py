@@ -291,7 +291,25 @@ class _FileLock:
 
 
 class BrokerError(Exception):
-    """Anything that stopped a call reaching Schwab, or that Schwab refused."""
+    """Anything that stopped a call reaching Schwab, or that Schwab refused.
+
+    DETERMINATE. Raising this says nothing was done: a guard refused, the
+    limiter refused, or Schwab replied with a rejection. The caller may
+    safely assume the account is unchanged.
+    """
+
+
+class BrokerIndeterminate(BrokerError):
+    """WE DO NOT KNOW WHETHER THE ORDER LANDED.
+
+    A timeout, a dropped connection, or a 5xx after the request was already
+    on the wire. The distinction from BrokerError is the whole point and it
+    is not cosmetic: a determinate failure can be retried, and this one must
+    never be — a retry is how a timeout becomes a double position.
+
+    Everything that raises this puts the pane into an unresolved state that
+    only a read of the broker's own record can clear.
+    """
 
 
 # ── the connection ──────────────────────────────────────────────────────────
@@ -359,10 +377,21 @@ async def _acall(method: str, path: str, *, params=None, body=None,
         headers["Content-Type"] = "application/json"
     client = _client(httpx)
     t0 = time.perf_counter()
-    r = await client.request(
-        method, _API + path, headers=headers,
-        params=params or None,
-        content=json.dumps(body) if body is not None else None)
+    try:
+        r = await client.request(
+            method, _API + path, headers=headers,
+            params=params or None,
+            content=json.dumps(body) if body is not None else None)
+    except Exception as exc:                                # noqa: BLE001
+        # THE DANGEROUS CASE. The request may or may not have reached
+        # Schwab; a timeout says nothing about whether the order landed.
+        # Raised as its own type so the caller cannot treat it as a plain
+        # refusal and retry.
+        ms = (time.perf_counter() - t0) * 1000.0
+        raise BrokerIndeterminate(
+            f"{type(exc).__name__} after {ms:.0f}ms: {exc}. Whether the "
+            f"request reached Schwab is UNKNOWN — it must not be retried, "
+            f"and only a read of the record can settle it.") from exc
     ms = (time.perf_counter() - t0) * 1000.0
 
     if r.status_code == 429:
@@ -373,7 +402,15 @@ async def _acall(method: str, path: str, *, params=None, body=None,
         raise BrokerError("Schwab returned 429 (too many requests). The order "
                           "did NOT change. Check the working list before "
                           "retrying.")
+    if r.status_code >= 500:
+        # A 5xx can follow an order Schwab already accepted, so this is not a
+        # rejection — it is an unknown, and treated as one.
+        _last_error = f"{r.status_code}: {r.text[:200]}"
+        raise BrokerIndeterminate(
+            f"{_last_error} — a 5xx can arrive after an order was accepted, "
+            f"so whether it landed is UNKNOWN.")
     if r.status_code >= 400:
+        # A 4xx IS a rejection: Schwab looked at the request and refused it.
         _last_error = f"{r.status_code}: {r.text[:200]}"
         raise BrokerError(_last_error)
     _last_error = None
@@ -442,69 +479,186 @@ def _norm_position(p: dict) -> dict:
     }
 
 
-async def state(symbols: list[str] | None = None,
-                priority: bool = False) -> dict:
-    """Positions and working orders, as the broker has them right now.
+def _window():
+    """The order window: a day back, a minute forward.
 
-    TWO CALLS, and ORDINARY quota by default. The page polls this every four
-    seconds, which is thirty calls a minute; letting a background poll spend
-    the reserve would empty the very quota the reserve exists to keep for a
-    cancel. Priority is for the reads that are part of getting flat, where
-    being refused is the failure being designed out.
-
-    A refused poll is safe precisely because of `as_of`: the page keeps the
-    older state and keeps saying how old it is.
+    A day is right — an order entered this morning can still be working and
+    nothing older can be. Narrowing it buys nothing: the endpoint measures
+    ~850ms at two hours and ~850ms at one day, so the cost is Schwab's and
+    not the payload's.
     """
-    hv = await account_hash()
-    now = time.time()
-    # A day is the right window: an order entered this morning can still be
-    # working, and nothing older can be. Narrowing it does not help — the
-    # orders endpoint measures ~850ms at two hours and ~850ms at one day, so
-    # the cost is Schwab's and not the payload's.
     from datetime import datetime, timedelta, timezone
     fmt = lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.000Z")            # noqa: E731
     utc = datetime.now(timezone.utc)
+    return {"fromEnteredTime": fmt(utc - timedelta(days=1)),
+            "toEnteredTime": fmt(utc + timedelta(minutes=1))}
 
-    # CONCURRENTLY. The two calls are independent, and run in sequence they
-    # cost ~370ms plus ~850ms; together they cost the slower one. This is the
-    # read that decides how fresh the working-order list can possibly be, so
-    # the difference is the difference in how stale the screen is allowed to
-    # get.
-    (acct, _, ms1), (orders, _, ms2) = await asyncio.gather(
-        _acall("GET", f"/accounts/{hv}", params={"fields": "positions"},
-               priority=priority),
-        _acall("GET", f"/accounts/{hv}/orders",
-               params={"fromEnteredTime": fmt(utc - timedelta(days=1)),
-                       "toEnteredTime": fmt(utc + timedelta(minutes=1))},
-               priority=priority))
 
+async def read_orders(symbols: list[str] | None = None,
+                      priority: bool = False) -> dict:
+    """Working and recent orders. ~850ms.
+
+    SPLIT FROM POSITIONS ON PURPOSE, and this is the read that has to be
+    fast. Measured against the account record, orders in this account live
+    ONE TO SIX SECONDS — entered, repriced and filled inside a single slow
+    poll. Positions only move when one of them fills, so pairing the two
+    reads made the cheap one wait on the expensive one and the expensive one
+    run no more often than the cheap one needed.
+    """
+    hv = await account_hash()
+    now = time.time()
+    orders, _, ms = await _acall("GET", f"/accounts/{hv}/orders",
+                                 params=_window(), priority=priority)
+    all_orders = [_norm_order(o) for o in (orders or []) if isinstance(o, dict)]
+    working = [o for o in all_orders if o["working"]]
+    recent = [o for o in all_orders if not o["working"]]
+    if symbols:
+        want = {s.upper() for s in symbols}
+        working = [o for o in working if (o["symbol"] or "").upper() in want]
+        recent = [o for o in recent if (o["symbol"] or "").upper() in want]
+    return {"ok": True, "as_of": now, "rt_ms": round(ms, 1),
+            "working": working, "recent": recent[-12:],
+            "limits": LIMITER.state(), "stale_after_s": config.STALE_AFTER_S}
+
+
+async def read_positions(symbols: list[str] | None = None,
+                         priority: bool = False) -> dict:
+    """Positions and the account's own facts. ~370ms.
+
+    Changes only when something fills, so it is polled at a third of the
+    rate of the orders read.
+    """
+    hv = await account_hash()
+    now = time.time()
+    acct, _, ms = await _acall("GET", f"/accounts/{hv}",
+                               params={"fields": "positions"},
+                               priority=priority)
     sec = ((acct or {}).get("securitiesAccount") or {}) \
         if isinstance(acct, dict) else {}
     positions = [_norm_position(p) for p in (sec.get("positions") or [])]
-    all_orders = [_norm_order(o) for o in (orders or [])
-                  if isinstance(o, dict)]
-    working = [o for o in all_orders if o["working"]]
-
     if symbols:
         want = {s.upper() for s in symbols}
         positions = [p for p in positions if (p["symbol"] or "").upper() in want]
-        working = [o for o in working if (o["symbol"] or "").upper() in want]
+    return {"ok": True, "as_of": now, "rt_ms": round(ms, 1),
+            "account_type": sec.get("type"),
+            "is_day_trader": bool(sec.get("isDayTrader")),
+            "round_trips": sec.get("roundTrips"),
+            "positions": positions, "limits": LIMITER.state(),
+            "stale_after_s": config.STALE_AFTER_S}
 
-    return {
-        "ok": True,
-        "as_of": now,
-        # The WALL CLOCK of the pair, not their sum: they ran together.
-        "rt_ms": round(max(ms1, ms2), 1),
-        "account_type": sec.get("type"),
-        "is_day_trader": bool(sec.get("isDayTrader")),
-        "round_trips": sec.get("roundTrips"),
-        "positions": positions,
-        "working": working,
-        # Recent terminal orders, so a fill is visible rather than an order
-        # just vanishing from the working list.
-        "recent": [o for o in all_orders if not o["working"]][-12:],
-        "limits": LIMITER.state(),
-    }
+
+async def state(symbols: list[str] | None = None,
+                priority: bool = False) -> dict:
+    """Both reads at once, for a caller that needs one consistent answer.
+
+    CONCURRENTLY: run in sequence they cost ~370ms plus ~850ms; together
+    they cost the slower one. Used by flatten, which must see the position
+    and the resting orders as of the same moment, and by anything wanting a
+    single snapshot. The page polls the two halves separately instead.
+
+    ORDINARY QUOTA by default — letting a background poll spend the reserve
+    would empty the very quota the reserve keeps for a cancel. A refused
+    poll is safe precisely because of `as_of`: the page keeps the older
+    state and goes on saying how old it is.
+    """
+    o, pos = await asyncio.gather(read_orders(symbols, priority),
+                                  read_positions(symbols, priority))
+    return {**pos, **o,
+            "positions": pos["positions"],
+            "as_of": min(o["as_of"], pos["as_of"]),
+            "rt_ms": round(max(o["rt_ms"], pos["rt_ms"]), 1),
+            "account_type": pos["account_type"],
+            "is_day_trader": pos["is_day_trader"],
+            "round_trips": pos["round_trips"]}
+
+
+# ── reconciling a placement nobody saw the answer to ────────────────────────
+def match_placement(orders: list[dict], *, symbol: str, side: str,
+                    qty: float, price: float | None,
+                    sent_at: float) -> dict:
+    """Find the order a timed-out placement may have created.
+
+    ################ THE AMBIGUITY, STATED WHERE IT LIVES ################
+    #
+    # THIS MATCH IS NOT GUARANTEED UNIQUE, and the reason is worth carrying
+    # here rather than in a design note nobody reads next to the code.
+    #
+    # Schwab gives a placement no identifier of ours. The POST's Location
+    # header carries the new order id, but a TIMED-OUT post has no response
+    # to read it from — which is precisely the case this function exists
+    # for. A REPLACED order carries no link to its replacement either:
+    # `replacingOrderCollection` is null on every one of them.
+    #
+    # So the only handle is the shape of the order: symbol, side, quantity,
+    # price, entered after we sent. In this account orders are placed four
+    # to six seconds apart at ADJACENT PRICES, so two orders that differ
+    # only by a cent are routine — and two IDENTICAL orders seconds apart
+    # are indistinguishable here, permanently.
+    #
+    # That is why more than one match returns `ambiguous` instead of a
+    # guess. A guess would attach the pane to an order that might be the
+    # other one, and the next nudge would reprice a stranger's order.
+    #
+    # IF `scripts/probe_schwab_tag.py` SHOWS THE TAG IS SETTABLE, all of
+    # this goes away: put a unique tag in the order body and match on it
+    # exactly. Delete this block when that happens.
+    #
+    #####################################################################
+    """
+    want_side = (side or "").upper()
+    hits = []
+    for o in orders:
+        if (o.get("symbol") or "").upper() != symbol.upper():
+            continue
+        if (o.get("side") or "").upper() != want_side:
+            continue
+        if abs(float(o.get("qty") or 0) - float(qty)) > 1e-9:
+            continue
+        if price is not None:
+            op = o.get("price")
+            if op is None or abs(float(op) - float(price)) > 0.005:
+                continue
+        # Entered AFTER we sent, with a second of slack for clock skew
+        # between this box and Schwab's stamp.
+        ts = _entered_epoch(o.get("entered"))
+        if ts is not None and ts < sent_at - 1.0:
+            continue
+        hits.append(o)
+
+    if not hits:
+        return {"state": "absent", "orders": []}
+    if len(hits) > 1:
+        return {"state": "ambiguous", "orders": hits}
+    return {"state": "found", "orders": hits, "order": hits[0]}
+
+
+def _entered_epoch(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    from datetime import datetime
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            return datetime.strptime(stamp, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+async def reconcile(*, symbol: str, side: str, qty: float,
+                    price: float | None, sent_at: float) -> dict:
+    """Read the record and say whether the placement is there.
+
+    PRIORITY: this is a caller that does not know its own position. Being
+    refused for quota is the one thing that must not happen to it.
+    """
+    st = await read_orders([symbol], priority=True)
+    pool = (st.get("working") or []) + (st.get("recent") or [])
+    out = match_placement(pool, symbol=symbol, side=side, qty=qty,
+                          price=price, sent_at=sent_at)
+    out["ok"] = True
+    out["as_of"] = st["as_of"]
+    out["searched"] = len(pool)
+    return out
 
 
 # ── the guards ──────────────────────────────────────────────────────────────

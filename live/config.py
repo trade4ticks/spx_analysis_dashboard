@@ -169,8 +169,21 @@ MAX_LIMIT_DISTANCE_PCT = float(
     os.environ.get("LIVE_MAX_LIMIT_DISTANCE_PCT", "5"))
 
 # How stale the order state may be before the page says so rather than
-# showing it as current. Two poll intervals plus a round trip.
-STALE_AFTER_S = float(os.environ.get("LIVE_STALE_AFTER_S", "12"))
+# showing it as current.
+#
+# FOUR SECONDS, from the account's own record: orders here live ONE TO SIX
+# seconds — entered, repriced and filled inside what used to be a single poll
+# interval. Twelve seconds would have called a list "current" that had
+# already missed an order's entire life. This is two order-poll intervals
+# plus the ~850ms the read itself takes.
+STALE_AFTER_S = float(os.environ.get("LIVE_STALE_AFTER_S", "4"))
+
+# The two poll cadences. Orders change constantly and cost ~850ms; positions
+# change only when something fills and cost ~370ms. Together: 30 + 10 = 40
+# calls a minute against the 90 available to ordinary traffic, leaving 50 for
+# placement and repricing and the 30-call reserve untouched.
+ORDER_POLL_S = float(os.environ.get("LIVE_ORDER_POLL_S", "2"))
+POSITION_POLL_S = float(os.environ.get("LIVE_POSITION_POLL_S", "6"))
 
 
 def problems() -> list[str]:

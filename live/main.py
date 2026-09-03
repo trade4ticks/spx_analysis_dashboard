@@ -169,7 +169,14 @@ async def arrival_norm(symbol: str):
 # pane can show. Nothing here returns a bare 500 — an order-placing endpoint
 # that fails opaquely is worse than one that refuses.
 def _broker_fail(exc: Exception) -> dict:
-    return {"ok": False, "why": str(exc)}
+    """A failure, and crucially WHETHER IT IS KNOWN TO HAVE DONE NOTHING.
+
+    `indeterminate` is the field the pane branches on. A guard refusal and a
+    timeout are both `ok: false`, and treating them the same is how a
+    timeout becomes a retry becomes a double position.
+    """
+    return {"ok": False, "why": str(exc),
+            "indeterminate": isinstance(exc, broker.BrokerIndeterminate)}
 
 
 @app.get("/broker/health")
@@ -195,6 +202,32 @@ async def broker_state(symbols: str = ""):
         return st
     except Exception as exc:                                # noqa: BLE001
         log.warning("broker state failed: %s", exc)
+        return _broker_fail(exc)
+
+
+@app.get("/broker/orders")
+async def broker_orders(symbols: str = ""):
+    """Working and recent orders alone. ~850ms.
+
+    SPLIT FROM POSITIONS because they age at completely different rates. This
+    account's orders live one to six seconds — entered, repriced and filled
+    inside what used to be a single poll interval — while positions move only
+    when one of them fills. Polled at 2s against the positions' 6s.
+    """
+    syms = [s for s in (symbols or "").upper().split(",") if s]
+    try:
+        return await broker.read_orders(syms or None)
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
+
+
+@app.get("/broker/positions")
+async def broker_positions(symbols: str = ""):
+    """Positions and the account's own facts. ~370ms."""
+    syms = [s for s in (symbols or "").upper().split(",") if s]
+    try:
+        return await broker.read_positions(syms or None)
+    except Exception as exc:                                # noqa: BLE001
         return _broker_fail(exc)
 
 
@@ -227,6 +260,26 @@ async def broker_replace(req: Request):
             armed=bool(b.get("armed")),
             reference=(float(b["reference"]) if b.get("reference") else None),
             position_qty=float(b.get("position_qty") or 0))
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
+
+
+@app.post("/broker/reconcile")
+async def broker_reconcile(req: Request):
+    """{"symbol","side","qty","price","sent_at"} -> did this placement land?
+
+    For the one case the rest of this API cannot answer: a placement whose
+    response never arrived. See broker.match_placement for why the answer can
+    come back `ambiguous`, and why that is reported rather than guessed.
+    """
+    b = await req.json()
+    try:
+        return await broker.reconcile(
+            symbol=str(b.get("symbol") or "").upper(),
+            side=str(b.get("side") or "").upper(),
+            qty=float(b.get("qty") or 0),
+            price=(float(b["price"]) if b.get("price") is not None else None),
+            sent_at=float(b.get("sent_at") or 0))
     except Exception as exc:                                # noqa: BLE001
         return _broker_fail(exc)
 
