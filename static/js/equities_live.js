@@ -53,6 +53,19 @@ const LV_RESOLVE_POLL_S = 2;
 /* MARKETABLE. Not a side colour — a hazard colour, deliberately outside the
  * blue/pink vocabulary so it cannot be read as "the other side". These rows
  * fill the instant they are clicked. */
+/* How old the NBBO may be and still be treated as the touch.
+ *
+ * In regular hours quotes arrive many times a second and this never binds.
+ * After hours they are sparse, and an old quote is a DIFFERENT market: the
+ * spread widens, so a price that rested against the 4pm touch can be
+ * marketable against the 6pm one. Past this, the marketable test answers
+ * "cannot say" and the click is asked about.
+ *
+ * Thirty seconds rather than a few: the confirmation has to stay rare enough
+ * to be read. A guard that fires on every click in a thin session is a guard
+ * that gets clicked through. */
+const LV_TOUCH_MAX_AGE_S = 30;
+
 /* Quantity quick-picks. Ten first because it is the default, and the
  * default is small on purpose: the ladder is one click from an order. */
 const LV_QTYS = [10, 20, 30, 50, 100, 200];
@@ -346,17 +359,47 @@ window.lvPane = function (id, send) {
       return this.trades.length ? this.trades[this.trades.length - 1].p : null;
     },
 
-    /* The touch: the best bid and offer as last seen.
+    /* The touch: the best bid and offer, IF IT IS STILL CURRENT.
      *
      * Quotes stream whether or not `showQuotes` is on — that flag only
      * decides whether the band is DRAWN — so this is available even when the
      * NBBO is not on screen. Returns null when either side is missing, and
      * every caller treats null as "cannot say", never as "safe".
+     *
+     * THE AGE BOUND IS THE POINT, and it was missing.
+     *
+     * This used to walk the whole buffer for the newest two-sided quote with
+     * no limit on how old that was. In regular hours quotes arrive several
+     * times a second, so the newest is always current and the bug never
+     * showed. Outside them they arrive rarely or stop, and the buffer holds
+     * up to fifteen minutes (retainS) — and longer, because prune() only
+     * runs when a batch ARRIVES, so a tape that has gone quiet never prunes
+     * at all.
+     *
+     * So after hours it would return a quote from the regular session: a
+     * tighter, narrower market than the one being traded. isMarketable would
+     * then answer FALSE — a definite "this rests" — for a price that is
+     * through the current wide touch. Not a missing warning: a wrong one, in
+     * the direction that costs money, which is exactly the case this guard
+     * exists for.
+     *
+     * It also preferred a stale two-sided quote over a fresh one-sided one,
+     * which is backwards. A quote with no ask is not silence; it is the
+     * offer being gone, and nothing can be said about a buy against it.
+     *
+     * Beyond the bound the answer is "cannot say" and the caller asks. That
+     * is the safe direction, and it is the honest one: in a thin session
+     * nobody knows where the touch is either.
      */
     touch() {
+      const cutoff = Date.now() - LV_TOUCH_MAX_AGE_S * 1000;
       for (let i = this.quotes.length - 1; i >= 0; i--) {
         const q = this.quotes[i];
-        if (q && q.bp && q.ap) return { bid: q.bp, ask: q.ap };
+        if (!q || q.t < cutoff) return null;      // nothing fresh enough left
+        if (q.bp && q.ap) {
+          return { bid: q.bp, ask: q.ap,
+                   ageS: Math.max(0, (Date.now() - q.t) / 1000) };
+        }
       }
       return null;
     },
@@ -1689,9 +1732,21 @@ window.lvPane = function (id, send) {
       const m = this.isMarketable(side, price);
       if (m === false) return false;
       const t = this.touch();
+      // How stale the last quote was, when there WAS one and it was simply
+      // too old to use. Distinguishes "thin session" from "no feed".
+      let staleS = null;
+      if (!t && this.quotes.length) {
+        for (let i = this.quotes.length - 1; i >= 0; i--) {
+          const q = this.quotes[i];
+          if (q && q.bp && q.ap) {
+            staleS = Math.max(0, (Date.now() - q.t) / 1000);
+            break;
+          }
+        }
+      }
       this.confirm = {
         kind: 'place', side: String(side).toUpperCase(), price: Number(price),
-        qty: Number(this.qty), unknown: m === null,
+        qty: Number(this.qty), unknown: m === null, staleS,
         bid: t ? t.bid : null, ask: t ? t.ask : null, order: order || null,
       };
       return true;
@@ -1708,8 +1763,16 @@ window.lvPane = function (id, send) {
         : `${c.side} ${c.qty} @ ${c.price.toFixed(2)}`;
       const ask = move ? 'Move it anyway?' : 'Send it anyway?';
       if (c.unknown) {
-        return `${what} — there is no NBBO for ${this.symbol}, so whether it `
-             + `would fill immediately CANNOT be determined. ${ask}`;
+        // The two reasons are different advice. "No quote at all" says the
+        // feed is not carrying this name; "the last one is minutes old" says
+        // the session is thin, which is the after-hours case and the one
+        // where the real spread is probably wider than anything on screen.
+        const stale = c.staleS != null
+          ? `the last NBBO for ${this.symbol} is ${Math.round(c.staleS)}s old`
+          : `there is no current NBBO for ${this.symbol}`;
+        return `${what} — ${stale}, so whether it would fill immediately `
+             + `CANNOT be determined. In a thin session the real spread is `
+             + `usually wider than the last one seen. ${ask}`;
       }
       const edge = c.side === 'BUY' ? `the ask (${c.ask.toFixed(2)})`
                                     : `the bid (${c.bid.toFixed(2)})`;

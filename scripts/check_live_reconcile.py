@@ -361,6 +361,66 @@ function drawn(ladderOn) {
   };
 }
 
+// ── the touch after hours: thin, wide, and sometimes not there ───────────
+// Regular hours hid this: quotes arrive several times a second, so the
+// newest two-sided quote is always current. Outside them they are sparse or
+// stop, and a stale NBBO is a DIFFERENT market - narrower than the one being
+// traded, so a price that rests against it is marketable against the real
+// one.
+{
+  const NOW = Date.now();
+  const q = (agoS, bp, ap) => ({ t: NOW - agoS * 1000, bp, ap });
+
+  const fresh = pane();
+  fresh.quotes = [q(1, 318.49, 318.51)];
+  const recent = pane();
+  recent.quotes = [q(20, 318.49, 318.51)];
+  const stale = pane();
+  stale.quotes = [q(300, 318.49, 318.51)];        // five minutes old
+  const gone = pane();
+  gone.quotes = [];
+  // THE INVERSION: a fresh one-sided quote sitting on top of an older
+  // two-sided one. The offer is gone; nothing can be said about a buy.
+  const oneSided = pane();
+  oneSided.quotes = [q(200, 318.49, 318.51), q(2, 318.40, null)];
+
+  out.touch = {
+    fresh:    !!fresh.touch(),
+    recent:   !!recent.touch(),
+    stale:    stale.touch(),
+    gone:     gone.touch(),
+    oneSided: oneSided.touch(),
+    freshAge: fresh.touch() ? Math.round(fresh.touch().ageS) : null,
+  };
+  // A buy at 318.52 is through the 318.51 ask on the stale quote. Fresh says
+  // so; stale must say "cannot tell", not "no".
+  out.mktByAge = {
+    fresh:    fresh.isMarketable('BUY', 318.52),
+    stale:    stale.isMarketable('BUY', 318.52),
+    oneSided: oneSided.isMarketable('BUY', 318.52),
+    // And the passive case must not silently become "safe" off a stale quote.
+    stalePassive: stale.isMarketable('BUY', 318.20),
+  };
+
+  // The banner has to say WHICH kind of not-knowing this is.
+  const c1 = pane();
+  c1.quotes = [q(300, 318.49, 318.51)];
+  c1.armed = true;
+  c1.rowTooFine = () => false;
+  c1.place = async () => {};
+  c1.clickLadder('buy', 318.20);
+  out.staleBannerHeld = !!c1.confirm;
+  out.staleBanner = c1.confirmText();
+
+  const c2 = pane();
+  c2.quotes = [];
+  c2.armed = true;
+  c2.rowTooFine = () => false;
+  c2.place = async () => {};
+  c2.clickLadder('buy', 318.20);
+  out.noQuoteBanner = c2.confirmText();
+}
+
 // ── dragging a working order to a new price ──────────────────────────────
 // A geometry by hand, so none of this needs a canvas. The gutter starts at
 // padL + plotW = 408; the buy column is 408..434, price 434..488, sell
@@ -930,6 +990,59 @@ def main() -> int:
         fail(f"a read-back overwrote the action's timing: {st['afterMove']!r}"
              f" became {st['afterRead']!r}. That is exactly how the readout "
              f"came to show 68ms for a 1305ms move.")
+
+    # -- the touch after hours --------------------------------------------
+    t = out["touch"]
+    if not t["fresh"]:
+        fail("a one-second-old NBBO was rejected as stale; the bound is far "
+             "too tight and every click in normal hours would be asked "
+             "about")
+    if not t["recent"]:
+        fail("a twenty-second-old NBBO was rejected. The confirmation has to "
+             "stay rare enough to be read, or it gets clicked through.")
+    if t["stale"] is not None:
+        fail(f"a FIVE-MINUTE-OLD NBBO was returned as the touch: {t['stale']}. "
+             f"After hours that is a different market - narrower than the "
+             f"one being traded - and the marketable test built on it "
+             f"answers confidently and wrongly.")
+    if t["gone"] is not None:
+        fail("an empty quote buffer produced a touch out of nothing")
+    if t["oneSided"] is not None:
+        fail(f"a fresh one-sided quote was skipped in favour of an older "
+             f"two-sided one: {t['oneSided']}. A missing ask is not silence, "
+             f"it is the offer being gone, and preferring the stale quote is "
+             f"backwards.")
+
+    m = out["mktByAge"]
+    if m["fresh"] is not True:
+        fail("a buy through the ask on a fresh quote was not marketable")
+    if m["stale"] is not None:
+        fail(f"against a five-minute-old quote the marketable test answered "
+             f"{m['stale']!r}. It has to be null - 'cannot say' - so the "
+             f"click is asked about. Any definite answer here is a guess "
+             f"about a market nobody has seen for five minutes.")
+    if m["stalePassive"] is not None:
+        fail(f"a PASSIVE-looking price answered {m['stalePassive']!r} off a "
+             f"stale quote. This is the dangerous direction: a definite "
+             f"'this will rest' about a touch that has moved.")
+    if m["oneSided"] is not None:
+        fail(f"with the offer gone, a buy answered {m['oneSided']!r} instead "
+             f"of 'cannot say'")
+
+    if not out["staleBannerHeld"]:
+        fail("a click against a stale NBBO was not held for confirmation")
+    sb = out["staleBanner"] or ""
+    if "300s old" not in sb.replace("  ", " "):
+        fail(f"the banner does not say how old the NBBO is: {sb!r}. 'No "
+             f"NBBO' and 'an NBBO from five minutes ago' are different "
+             f"things to be told.")
+    if "thin session" not in sb:
+        fail(f"the banner does not say the real spread is probably wider: "
+             f"{sb!r}")
+    nb = out["noQuoteBanner"] or ""
+    if "no current NBBO" not in nb:
+        fail(f"with no quotes at all the banner should say so, not quote an "
+             f"age: {nb!r}")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")
