@@ -449,19 +449,26 @@ async def state(symbols: list[str] | None = None,
     """
     hv = await account_hash()
     now = time.time()
-    acct, _, ms1 = await _acall("GET", f"/accounts/{hv}",
-                                params={"fields": "positions"},
-                                priority=priority)
     # A day is the right window: an order entered this morning can still be
-    # working, and nothing older can be.
+    # working, and nothing older can be. Narrowing it does not help — the
+    # orders endpoint measures ~850ms at two hours and ~850ms at one day, so
+    # the cost is Schwab's and not the payload's.
     from datetime import datetime, timedelta, timezone
     fmt = lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.000Z")            # noqa: E731
     utc = datetime.now(timezone.utc)
-    orders, _, ms2 = await _acall(
-        "GET", f"/accounts/{hv}/orders",
-        params={"fromEnteredTime": fmt(utc - timedelta(days=1)),
-                "toEnteredTime": fmt(utc + timedelta(minutes=1))},
-        priority=priority)
+
+    # CONCURRENTLY. The two calls are independent, and run in sequence they
+    # cost ~370ms plus ~850ms; together they cost the slower one. This is the
+    # read that decides how fresh the working-order list can possibly be, so
+    # the difference is the difference in how stale the screen is allowed to
+    # get.
+    (acct, _, ms1), (orders, _, ms2) = await asyncio.gather(
+        _acall("GET", f"/accounts/{hv}", params={"fields": "positions"},
+               priority=priority),
+        _acall("GET", f"/accounts/{hv}/orders",
+               params={"fromEnteredTime": fmt(utc - timedelta(days=1)),
+                       "toEnteredTime": fmt(utc + timedelta(minutes=1))},
+               priority=priority))
 
     sec = ((acct or {}).get("securitiesAccount") or {}) \
         if isinstance(acct, dict) else {}
@@ -478,7 +485,8 @@ async def state(symbols: list[str] | None = None,
     return {
         "ok": True,
         "as_of": now,
-        "rt_ms": round(ms1 + ms2, 1),
+        # The WALL CLOCK of the pair, not their sum: they ran together.
+        "rt_ms": round(max(ms1, ms2), 1),
         "account_type": sec.get("type"),
         "is_day_trader": bool(sec.get("isDayTrader")),
         "round_trips": sec.get("roundTrips"),
