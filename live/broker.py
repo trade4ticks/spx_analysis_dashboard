@@ -303,12 +303,20 @@ async def _acall(method: str, path: str, *, params=None, body=None,
         raise BrokerError(f"rate limit: {refused}")
     tok = await _token()
     httpx = _httpx()
+    # CONTENT-TYPE ONLY WHERE THERE IS CONTENT.
+    #
+    # Schwab answers a bodyless GET carrying `Content-Type: application/json`
+    # with 400 wrapping an internal 500 — no mention of the header, and the
+    # same request without it returns 200. Sent unconditionally this made
+    # every read fail, starting with the account lookup, and the message gave
+    # no way to tell that from an expired token or a scope problem.
+    headers = {"Authorization": f"Bearer {tok}"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
     t0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.request(
-            method, _API + path,
-            headers={"Authorization": f"Bearer {tok}",
-                     "Content-Type": "application/json"},
+            method, _API + path, headers=headers,
             params=params or None,
             content=json.dumps(body) if body is not None else None)
     ms = (time.perf_counter() - t0) * 1000.0
