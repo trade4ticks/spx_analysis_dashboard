@@ -293,6 +293,140 @@ function drawn(ladderOn) {
   };
 }
 
+// ── dragging a working order to a new price ──────────────────────────────
+// A geometry by hand, so none of this needs a canvas. The gutter starts at
+// padL + plotW = 408; the buy column is 408..434, price 434..488, sell
+// 488..514. 318.50 sits at y=158 and 318.49 at y=173.
+const GEOM = (() => {
+  const padL = 8, padT = 8, plotW = 400, plotH = 300;
+  const lo = 318.40, hi = 318.60;
+  return {
+    rect: { left: 0, top: 0, width: 514, height: 328 },
+    padL, padT, padB: 20, padR: 106, plotW, plotH,
+    tStart: 0, tEnd: 1, lo, hi,
+    X: () => padL,
+    Y: pp => padT + (1 - (pp - lo) / (hi - lo)) * plotH,
+    priceAt: y => lo + (1 - (y - padT) / plotH) * (hi - lo),
+  };
+})();
+
+function draggable(opts) {
+  const c = quoted(pane());
+  c.armed = (opts && 'armed' in opts) ? opts.armed : true;
+  c.ladder = true;
+  c.ladderCents = 1;
+  c.geom = () => GEOM;
+  c.working = [ord('1', (opts && 'mine' in opts) ? opts.mine : true,
+                   { side: 'BUY', price: 318.50 })];
+  c.ownIds = ['1'];
+  return c;
+}
+const press = (c, x, y) => c.onDown({ clientX: x, clientY: y,
+                                      preventDefault: () => {} });
+
+{
+  // The hit test, in both places an order is drawn.
+  const c = draggable();
+  out.grab = {
+    onPlotLine:   !!c.orderAt(200, 158, GEOM),
+    inBuyColumn:  !!c.orderAt(420, 158, GEOM),
+    inSellColumn: !!c.orderAt(500, 158, GEOM),
+    farAway:      !!c.orderAt(200, 220, GEOM),
+  };
+  out.grabUnarmed = !!draggable({ armed: false }).orderAt(200, 158, GEOM);
+  out.grabForeign = !!draggable({ mine: false }).orderAt(200, 158, GEOM);
+}
+{
+  // THE HAZARD: pressing on your own order inside the gutter used to place a
+  // SECOND order at that row, because the ladder-zone test came first.
+  const c = draggable();
+  let placed = null;
+  c.clickLadder = (zone, price) => { placed = { zone, price }; };
+  press(c, 420, 158);
+  out.pressOnMarker = { placed, dragging: !!c.dragOrder };
+
+  // An empty row in the same column is still a click.
+  const c2 = draggable();
+  let placed2 = null;
+  c2.clickLadder = (zone, price) => { placed2 = { zone, price }; };
+  press(c2, 420, 218);
+  out.pressOnEmptyRow = { placed: placed2, dragging: !!c2.dragOrder };
+}
+{
+  // Drag, then drop somewhere passive: exactly one replace.
+  const c = draggable();
+  const moves = [];
+  c.sendMove = async (o, price) => { moves.push({ id: o.order_id, price }); };
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 173 });
+  out.dragPrice = c.dragOrder ? c.dragOrder.price : null;
+  out.dragText = c.dragText();
+  out.dragMarkerUnmoved = c.working[0].price;   // the REAL marker must not move
+  c.onUp();
+  out.dropPassive = moves;
+  out.dropClearedDrag = c.dragOrder;
+}
+{
+  // Put it back where it came from: no order, no call.
+  const c = draggable();
+  const moves = [];
+  c.sendMove = async () => { moves.push(1); };
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 158 });
+  c.onUp();
+  out.dropUnmoved = moves.length;
+}
+{
+  // Drop on a marketable row: the same banner the click path raises.
+  // bid 318.49, so a BUY at 318.51+ is through the ask (318.51).
+  const c = draggable();
+  const moves = [];
+  c.sendMove = async (o, price) => { moves.push({ id: o.order_id, price }); };
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 128 });     // 318.52, through the ask
+  out.dragMktText = c.dragText();
+  c.onUp();
+  out.dropMktSent = moves.slice();
+  out.dropMktHeld = c.confirm ? { kind: c.confirm.kind, price: c.confirm.price }
+                              : null;
+  c.confirmSend();
+  out.dropMktAfterConfirm = moves.slice();
+}
+{
+  // The order retired mid-drag. Replacing by a stale id would resurrect it.
+  const c = draggable();
+  const moves = [];
+  c.sendMove = async () => { moves.push(1); };
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 173 });
+  c.working = [];                                // a poll landed: it filled
+  c.onUp();
+  out.dropVanished = { moves: moves.length, err: c.brokerErr };
+}
+{
+  // The ghost draws, and says what it is about to do.
+  const c = draggable();
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 128 });      // marketable
+  const { ctx, rec } = recorder();
+  c.drawDragGhost(ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                  GEOM.lo, GEOM.hi, GEOM.Y);
+  out.ghostMkt = {
+    texts: rec.texts.map(t => t.txt),
+    hazard: rec.strokes.filter(x => String(x).includes('255,170,60')).length,
+  };
+  const c2 = draggable();
+  press(c2, 200, 158);
+  c2.onMove({ clientX: 200, clientY: 173 });     // passive
+  const r2 = recorder();
+  c2.drawDragGhost(r2.ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                   GEOM.lo, GEOM.hi, GEOM.Y);
+  out.ghostPassive = {
+    texts: r2.rec.texts.map(t => t.txt),
+    hazard: r2.rec.strokes.filter(x => String(x).includes('255,170,60')).length,
+  };
+}
+
 // ── the give-up window ───────────────────────────────────────────────────
 // Schwab keeps answering "absent". Count the looks until the pane stops.
 async function giveUp() {
@@ -542,6 +676,99 @@ def main() -> int:
              "or it drew outside its row.")
     if off["hazardFills"]:
         fail("hazard shading was drawn with no ladder up")
+
+    # -- dragging an order --------------------------------------------------
+    gr = out["grab"]
+    if not gr["onPlotLine"]:
+        fail("a working order could not be grabbed on its line across the "
+             "plot, which is where it is most visible against the tape.")
+    if not gr["inBuyColumn"]:
+        fail("a buy order could not be grabbed from the buy column of the "
+             "ladder.")
+    if gr["inSellColumn"]:
+        fail("a BUY order was grabbable from the SELL column, where it is "
+             "not drawn. The grab would come out of empty space.")
+    if gr["farAway"]:
+        fail("an order was grabbed from far away; the grab radius is wrong "
+             "and ordinary clicks would start drags.")
+    if out["grabUnarmed"]:
+        fail("an order was draggable in an UNARMED pane. A drag ends in a "
+             "replace, and a pane that cannot send one must not offer it.")
+    if out["grabForeign"]:
+        fail("an order not stamped as this app's was draggable — the same "
+             "order primaryOrder() refuses to reprice.")
+
+    pm = out["pressOnMarker"]
+    if pm["placed"] is not None:
+        fail(f"THE HAZARD. Pressing on your own order marker in the gutter "
+             f"placed a second order at {pm['placed']}. The grab has to be "
+             f"tested before the ladder zone, because the marker is drawn "
+             f"inside it.")
+    if not pm["dragging"]:
+        fail("pressing on the order marker did not start a drag")
+    pe = out["pressOnEmptyRow"]
+    if pe["placed"] is None or pe["dragging"]:
+        fail(f"pressing an EMPTY ladder row no longer places an order: "
+             f"{pe}. The grab must not swallow the click path.")
+
+    if abs((out["dragPrice"] or 0) - 318.49) > 1e-9:
+        fail(f"the drag snapped to {out['dragPrice']}, not the 318.49 row. "
+             f"A ghost that reads a price which cannot be sent is a ghost "
+             f"that lied on the way down.")
+    if abs(out["dragMarkerUnmoved"] - 318.50) > 1e-9:
+        fail(f"the REAL marker moved to {out['dragMarkerUnmoved']} during "
+             f"the drag. pane.working is the broker's answer; editing it in "
+             f"place makes the pane claim a price Schwab never heard.")
+    if "318.49" not in (out["dragText"] or ""):
+        fail(f"the drag label does not name the target price: "
+             f"{out['dragText']!r}")
+
+    dp = out["dropPassive"]
+    if len(dp) != 1:
+        fail(f"a drop sent {len(dp)} replaces, not exactly one. The whole "
+             f"point of dragging is that forty cents costs what one cent "
+             f"costs.")
+    elif abs(dp[0]["price"] - 318.49) > 1e-9:
+        fail(f"the drop sent {dp[0]['price']}, not the row it was dropped "
+             f"on")
+    if out["dropClearedDrag"] is not None:
+        fail("the drag state survived the drop")
+    if out["dropUnmoved"]:
+        fail("picking an order up and putting it back sent a replace. That "
+             "is a call, a new order id and a queue position, for nothing.")
+
+    if out["dropMktSent"]:
+        fail(f"a drop on a marketable row sent immediately: "
+             f"{out['dropMktSent']}. The drag path must ask the same "
+             f"question the click path asks.")
+    if not out["dropMktHeld"] or out["dropMktHeld"]["kind"] != "move":
+        fail(f"the held drop is not recorded as a move: "
+             f"{out['dropMktHeld']}")
+    if len(out["dropMktAfterConfirm"]) != 1:
+        fail("confirming the drop did not send the move")
+    if "FILLS NOW" not in (out["dragMktText"] or ""):
+        fail(f"the drag label gave no warning over a marketable row: "
+             f"{out['dragMktText']!r}. The warning has to be on screen "
+             f"BEFORE the drop, not only in the banner after it.")
+
+    dv = out["dropVanished"]
+    if dv["moves"]:
+        fail("an order that filled or was cancelled mid-drag was still "
+             "replaced by its stale id, which resurrects an order that is "
+             "gone.")
+    if "no longer working" not in (dv["err"] or ""):
+        fail(f"the vanished-order drop said {dv['err']!r} rather than what "
+             f"happened")
+
+    if not any("318.52" in t for t in out["ghostMkt"]["texts"]):
+        fail(f"the ghost did not label its target price: "
+             f"{out['ghostMkt']['texts']}")
+    if not out["ghostMkt"]["hazard"]:
+        fail("the ghost over a marketable row was not drawn in the hazard "
+             "colour")
+    if out["ghostPassive"]["hazard"]:
+        fail("a passive drag was drawn as a hazard, which is how a warning "
+             "stops meaning anything")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

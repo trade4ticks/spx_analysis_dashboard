@@ -53,6 +53,11 @@ const LV_RESOLVE_POLL_S = 2;
 /* MARKETABLE. Not a side colour — a hazard colour, deliberately outside the
  * blue/pink vocabulary so it cannot be read as "the other side". These rows
  * fill the instant they are clicked. */
+/* How near the cursor has to be to a working order to grab it, in pixels.
+ * Wider than the 6px used for a price line: this one ends in a replace, and
+ * missing the grab silently places a NEW order at the row instead. */
+const LV_GRAB_PX = 7;
+
 /* The order poll: fast while trading, slow while only watching. 2s is 30
  * calls a minute against the 90 ordinary traffic may spend; 6s is 10. */
 const LV_ORDER_POLL_MS      = 2000;
@@ -153,6 +158,15 @@ window.lvPane = function (id, send) {
     // the level and not about when.
     lines: [],
     dragIdx: -1,
+    /* A working order being dragged to a new price.
+     *
+     * {order, price} — `order` is the record as it was when grabbed, `price`
+     * the row under the cursor right now. The ORDER IS NOT MUTATED while
+     * dragging: pane.working is the broker's answer, and editing it in place
+     * would make the pane claim a price Schwab has never heard of. The drag
+     * is drawn as a separate ghost and the real marker stays where the
+     * broker last said it was. */
+    dragOrder: null,
 
     // Both rates over a FIXED sixty seconds. See the note in rates().
     tpm: null,
@@ -500,6 +514,35 @@ window.lvPane = function (id, send) {
       return Math.round(g.priceAt(y) / step) * step;
     },
 
+    /* The working order under the cursor, or null.
+     *
+     * Grabbable in BOTH places it is drawn: the line across the plot and the
+     * marker in the ladder gutter. Only ours, and only while armed — a drag
+     * ends in a replace, and a pane that cannot send one must not offer the
+     * gesture. `from_api` keeps the grab off an order placed in thinkorswim
+     * for the same reason primaryOrder() refuses to reprice one.
+     */
+    orderAt(mx, my, g) {
+      if (!this.armed || !g) return null;
+      const inPlot = mx >= g.padL && mx < g.padL + g.plotW;
+      const zone = this.ladderZone(mx, g);
+      if (!inPlot && !zone) return null;
+      let best = null, bestD = LV_GRAB_PX;
+      for (const o of this.working) {
+        if (o.price == null || !o.from_api) continue;
+        // In the gutter, only the column the order actually sits in: a buy
+        // marker is in the buy column, and grabbing "through" the sell
+        // column would be grabbing something not drawn there.
+        if (zone) {
+          const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+          if (zone !== (buy ? 'buy' : 'sell')) continue;
+        }
+        const d = Math.abs(g.Y(Number(o.price)) - my);
+        if (d < bestD) { bestD = d; best = o; }
+      }
+      return best;
+    },
+
     // ── the two rates ────────────────────────────────────────────────────
     /* A ROLLING SIXTY SECONDS, not the window's count over the window's
      * length. That read a third of the true rate on a 3-minute window and
@@ -728,6 +771,8 @@ window.lvPane = function (id, send) {
         ctx.fillText(`avg ${Number(pos.avg).toFixed(2)}`, padL + 4, y - 3);
       }
 
+      this.drawDragGhost(ctx, padL, padT, plotW, plotH, lo, hi, Y);
+
       if (this.ladder) {
         this.drawLadder(ctx, padL, padT, plotW, plotH, lo, hi, Y);
       }
@@ -741,6 +786,59 @@ window.lvPane = function (id, send) {
      * the failure mode of two copies drifting is a click landing on the
      * wrong row — which is an order at the wrong price.
      */
+    /* THE DRAG GHOST: where the order would land, and what that means.
+     *
+     * Drawn as its own line rather than by moving the real marker, because
+     * the real marker is the broker's answer and this is a question. Both
+     * are on screen at once during a drag — where it IS, and where it would
+     * GO — which is also what makes the distance being covered legible.
+     *
+     * The marketable warning is the same test the ladder hatches with and
+     * the same one the drop will ask about, so the answer cannot differ
+     * between what the drag showed and what the banner then says.
+     */
+    drawDragGhost(ctx, padL, padT, plotW, plotH, lo, hi, Y) {
+      const d = this.dragOrder;
+      if (!d) return;
+      const px = Number(d.price);
+      if (!(px >= lo && px <= hi)) return;
+      const y = Y(px);
+      const mkt = this.isMarketable(d.order.side, px);
+      const buy = String(d.order.side || '').toUpperCase().startsWith('BUY');
+      const warn = mkt !== false;
+      const col = warn ? LV_MKT_HATCH
+                       : (buy ? 'rgba(120,200,255,0.95)'
+                              : 'rgba(240,130,180,0.95)');
+
+      // The distance travelled, as a band between old price and new. The
+      // number is the point of the gesture and a line alone does not give it.
+      const yFrom = Y(Number(d.order.price));
+      if (Math.abs(yFrom - y) > 1) {
+        ctx.fillStyle = warn ? 'rgba(255,140,0,0.10)'
+                             : 'rgba(255,255,255,0.055)';
+        ctx.fillRect(padL, Math.min(yFrom, y), plotW, Math.abs(yFrom - y));
+      }
+
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const label = this.dragText();
+      ctx.font = '700 11px sans-serif';
+      ctx.textAlign = 'left';
+      const w = ctx.measureText(label).width;
+      const lx = padL + 6;
+      const ly = y - 6;
+      ctx.fillStyle = 'rgba(12,14,18,0.85)';
+      ctx.fillRect(lx - 3, ly - 11, w + 6, 14);
+      ctx.fillStyle = col;
+      ctx.fillText(label, lx, ly);
+    },
+
     drawLadder(ctx, padL, padT, plotW, plotH, lo, hi, Y) {
       const gu = this.gutter();
       const x0 = padL + plotW;
@@ -1053,6 +1151,16 @@ window.lvPane = function (id, send) {
       if (!g) return;
       const mx = e.clientX - g.rect.left, my = e.clientY - g.rect.top;
 
+      if (this.dragOrder) {
+        // Snapped to the ladder increment as it moves, so the ghost sits on
+        // a row that can actually be sent. A drag that reads 318.5237 and
+        // then lands on 318.52 is a drag that lied on the way down.
+        this.dragOrder.price = this.rowAt(my, g);
+        this.hover = null;
+        this.ladderHover = null;
+        return;
+      }
+
       if (this.dragIdx >= 0) {
         this.lines[this.dragIdx].p = g.priceAt(my);
         this.hover = null;
@@ -1091,6 +1199,18 @@ window.lvPane = function (id, send) {
       const mx = e.clientX - g.rect.left;
       const my = e.clientY - g.rect.top;
 
+      // AN ORDER UNDER THE CURSOR IS A GRAB, NOT A CLICK. This has to be
+      // tested before the ladder zone below, because a working order is
+      // drawn inside that zone — without it, pressing on your own order in
+      // the gutter placed a SECOND order at the same price.
+      const grab = this.orderAt(mx, my, g);
+      if (grab) {
+        e.preventDefault();
+        this.dragOrder = { order: grab, price: Number(grab.price) };
+        this.hover = null;
+        return;
+      }
+
       // A click in a ladder zone is an order. Single click, as a ladder
       // works — the safety is the arm toggle and the guards, not a
       // confirmation dialog that would defeat the point of the speed.
@@ -1114,6 +1234,8 @@ window.lvPane = function (id, send) {
     },
 
     onUp() {
+      if (this.dragOrder) return this.dropOrder();
+
       // Snapped to the cent on release. A line at 318.5237 answers a question
       // nobody asked, and the label would read a price that cannot be posted.
       if (this.dragIdx >= 0) {
@@ -1121,6 +1243,57 @@ window.lvPane = function (id, send) {
         ln.p = Math.round(ln.p * 100) / 100;
         this.dragIdx = -1;
       }
+    },
+
+    /* Let go: one replace, at the row the ghost is on.
+     *
+     * ONE CALL, like a nudge — a drag across forty cents costs exactly what
+     * a one-cent nudge costs, which is the whole reason to drag rather than
+     * press the row button forty times.
+     *
+     * The marketable question is the same question the click path asks, so
+     * it goes through the same askFirst(): dropping on a row through the
+     * touch raises the same banner, worded for a move.
+     */
+    dropOrder() {
+      const d = this.dragOrder;
+      this.dragOrder = null;
+      if (!d) return;
+      const price = Math.round(Number(d.price) * 100) / 100;
+      // Picked up and put back. Not an order, not an error, no call.
+      if (Math.abs(price - Number(d.order.price)) < 0.005) return;
+      const why = this.blocked();
+      if (why) { this.brokerErr = why; return; }
+      // THE ORDER MAY HAVE MOVED UNDER THE DRAG. A poll lands every two
+      // seconds and a fill or a cancel elsewhere can retire it mid-gesture;
+      // replacing by a stale id would resurrect an order that is gone.
+      const live = this.working.find(
+        o => String(o.order_id) === String(d.order.order_id));
+      if (!live) {
+        this.brokerErr = 'that order is no longer working — it filled or was '
+          + 'cancelled while you were dragging it. Nothing was sent.';
+        return;
+      }
+      if (this.askFirst(live.side, price, live)) {
+        this.confirm.kind = 'move';
+        this.confirm.qty = (live.qty || 0) - (live.filled || 0);
+        return;
+      }
+      return this.sendMove(live, price);
+    },
+
+    /* What the drag is about to do, for the label that follows the cursor.
+     * Marketable is asked here so the warning is on screen BEFORE the drop,
+     * which is the same promise the ladder's hatching makes to a click. */
+    dragText() {
+      const d = this.dragOrder;
+      if (!d) return '';
+      const px = Number(d.price);
+      const mkt = this.isMarketable(d.order.side, px);
+      const tag = mkt === true ? '  ⚠ FILLS NOW'
+                : mkt === null ? '  ⚠ no NBBO' : '';
+      return `${d.order.side} ${(d.order.qty || 0) - (d.order.filled || 0)}`
+           + ` → ${px.toFixed(2)}${tag}`;
     },
 
     /* Double-click places a line at that price. Placing is deliberate, so it
