@@ -50,6 +50,18 @@ const LV_RESOLVE_WINDOW_S = 5;
  * looks, so it needs this to turn them into elapsed time. */
 const LV_RESOLVE_POLL_S = 2;
 
+/* MARKETABLE. Not a side colour — a hazard colour, deliberately outside the
+ * blue/pink vocabulary so it cannot be read as "the other side". These rows
+ * fill the instant they are clicked. */
+/* The order poll: fast while trading, slow while only watching. 2s is 30
+ * calls a minute against the 90 ordinary traffic may spend; 6s is 10. */
+const LV_ORDER_POLL_MS      = 2000;
+const LV_ORDER_POLL_IDLE_MS = 6000;
+
+const LV_MKT_FILL  = 'rgba(255,140,0,0.16)';
+const LV_MKT_HOT   = 'rgba(255,140,0,0.60)';
+const LV_MKT_HATCH = 'rgba(255,170,60,0.55)';
+
 const LV_BUY_FILL  = 'rgba(52,152,219,0.30)';    // lifted the offer
 const LV_BUY_RIM   = 'rgba(120,200,255,0.85)';
 const LV_SELL_FILL = 'rgba(232,67,147,0.30)';    // hit the bid
@@ -187,6 +199,9 @@ window.lvPane = function (id, send) {
      * becomes a double position. Cancel and flatten stay available: they are
      * how you get out of exactly this. */
     unresolved: null,     // {side, qty, price, sentAt, tries, state, why}
+    // A marketable click, held until it is confirmed or dropped. Never
+    // persisted and never auto-confirmed: see askFirst().
+    confirm: null,        // {kind, side, price, qty, unknown, bid, ask, order}
     /* Order ids this pane created, newest last.
      *
      * A replace returns a NEW id and Schwab provides no link from the old
@@ -285,6 +300,42 @@ window.lvPane = function (id, send) {
 
     lastPrice() {
       return this.trades.length ? this.trades[this.trades.length - 1].p : null;
+    },
+
+    /* The touch: the best bid and offer as last seen.
+     *
+     * Quotes stream whether or not `showQuotes` is on — that flag only
+     * decides whether the band is DRAWN — so this is available even when the
+     * NBBO is not on screen. Returns null when either side is missing, and
+     * every caller treats null as "cannot say", never as "safe".
+     */
+    touch() {
+      for (let i = this.quotes.length - 1; i >= 0; i--) {
+        const q = this.quotes[i];
+        if (q && q.bp && q.ap) return { bid: q.bp, ask: q.ap };
+      }
+      return null;
+    },
+
+    /* Would a limit at this price trade immediately against the touch?
+     *
+     * A BUY at or above the ask lifts the offer; a SELL at or below the bid
+     * hits the bid. Both are valid limit orders and both fill instantly,
+     * which is the whole problem: a passive strategy never wants either, and
+     * nothing on the way to sending one said so.
+     *
+     * UNKNOWN IS NOT SAFE. With no quote this returns null rather than
+     * false, and the caller asks anyway — the one thing that must not happen
+     * is a marketable order slipping through because the quote was missing.
+     */
+    isMarketable(side, price) {
+      const t = this.touch();
+      if (!t) return null;
+      const px = Number(price);
+      if (!isFinite(px)) return null;
+      return String(side).toUpperCase().startsWith('BUY')
+        ? px >= t.ask
+        : px <= t.bid;
     },
 
     /* The grid the band snaps to.
@@ -741,14 +792,38 @@ window.lvPane = function (id, send) {
                                       ['sell', x0 + gu.buy + gu.price, gu.sell]]) {
           const hot = this.ladderHover && this.ladderHover.zone === zone
             && Math.abs(this.ladderHover.price - p) < step / 2;
+          // MARKETABLE ROWS ARE MARKED BEFORE THEY ARE CLICKED. A buy at or
+          // above the ask and a sell at or below the bid fill instantly.
+          // That is a correct limit order and never the intended one here,
+          // so it is drawn as a warning rather than explained afterwards.
+          const mkt = this.isMarketable(zone, p) === true;
           ctx.fillStyle = hot
             ? (this.armed
-                ? (zone === 'buy' ? 'rgba(52,152,219,0.45)'
-                                  : 'rgba(232,67,147,0.45)')
+                ? (mkt ? LV_MKT_HOT
+                       : (zone === 'buy' ? 'rgba(52,152,219,0.45)'
+                                         : 'rgba(232,67,147,0.45)'))
                 : 'rgba(140,140,140,0.30)')
-            : (zone === 'buy' ? 'rgba(52,152,219,0.055)'
-                              : 'rgba(232,67,147,0.055)');
+            : (mkt ? LV_MKT_FILL
+                   : (zone === 'buy' ? 'rgba(52,152,219,0.055)'
+                                     : 'rgba(232,67,147,0.055)'));
           ctx.fillRect(zx, top, zw, Math.max(1, rowH - 0.5));
+          // Hatching, so the warning survives a colourblind eye and a dim
+          // screen: colour alone is not a signal a fill can depend on.
+          if (mkt && rowH >= 4) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(zx, top, zw, Math.max(1, rowH - 0.5));
+            ctx.clip();
+            ctx.strokeStyle = LV_MKT_HATCH;
+            ctx.lineWidth = 1;
+            for (let hx = zx - rowH; hx < zx + zw + rowH; hx += 5) {
+              ctx.beginPath();
+              ctx.moveTo(hx, top + rowH);
+              ctx.lineTo(hx + rowH, top);
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
           if (hot && this.armed && rowH >= 8) {
             ctx.font = '700 9px sans-serif';
             ctx.fillStyle = '#fff';
@@ -756,9 +831,19 @@ window.lvPane = function (id, send) {
           }
         }
 
-        ctx.font = (rowH >= 9 ? '600 10px' : '9px') + ' sans-serif';
-        ctx.fillStyle = (last != null && Math.abs(last - p) < step / 2)
-          ? '#ffffff' : '#cfd4da';
+        // THE ONLY PRICE SCALE ON THE PANE now that drawGrid yields the
+        // gutter, so it carries the weight those labels used to: a size up
+        // where the row allows, and the last-trade row banded rather than
+        // just tinted, because it is the anchor every other row is read
+        // against.
+        const isLast = last != null && Math.abs(last - p) < step / 2;
+        if (isLast) {
+          ctx.fillStyle = 'rgba(255,255,255,0.10)';
+          ctx.fillRect(x0 + gu.buy, top, gu.price, Math.max(1, rowH - 0.5));
+        }
+        ctx.font = (rowH >= 12 ? '600 11px' : rowH >= 9 ? '600 10px' : '9px')
+                 + ' sans-serif';
+        ctx.fillStyle = isLast ? '#ffffff' : '#cfd4da';
         ctx.fillText(p.toFixed(2), x0 + gu.buy + gu.price / 2, yc + 3);
       }
 
@@ -798,6 +883,16 @@ window.lvPane = function (id, send) {
       // on 319.44 while price was near 319.50 — a distance reading against a
       // moving zero is worse than no distance reading. If it returns it must
       // hang off something stable: the session open, or a pinned price.
+      //
+      // ONE PRICE SCALE AT A TIME. These labels are drawn at padL + plotW +
+      // 6, which is SIX PIXELS INTO THE GUTTER — and when the ladder is open
+      // the gutter's first 26px are the buy column. So the buy column was
+      // painted over by a second, differently-spaced set of prices: two
+      // scales disagreeing about where a price sits, with the clickable one
+      // underneath. The ladder's own price column is a better scale anyway
+      // (every row, on the increment being traded), so when it is up, it is
+      // the only one. The GRIDLINES stay: they are inside the plot, they
+      // cost the gutter nothing, and position is read against them.
       const g = this.gridStep();
       const first = Math.ceil(lo / g) * g;
       ctx.textAlign = 'left';
@@ -808,6 +903,7 @@ window.lvPane = function (id, send) {
         ctx.lineTo(padL + plotW, y);
         ctx.strokeStyle = 'rgba(255,255,255,0.06)';
         ctx.stroke();
+        if (this.ladder) continue;
         ctx.font = '600 12px sans-serif';
         ctx.fillStyle = '#f2f2f2';
         ctx.fillText(p.toFixed(2), padL + plotW + 6, y + 4);
@@ -823,9 +919,13 @@ window.lvPane = function (id, send) {
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.strokeStyle = 'rgba(255,255,255,0.26)';
         ctx.stroke();
-        ctx.font = '700 12px sans-serif';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(last.toFixed(2), padL + plotW + 6, y + 4);
+        // The LINE always; the numeral only when nothing else is showing
+        // prices. drawLadder marks the last-trade row in the price column.
+        if (!this.ladder) {
+          ctx.font = '700 12px sans-serif';
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(last.toFixed(2), padL + plotW + 6, y + 4);
+        }
       }
 
       // ── time ──────────────────────────────────────────────────────────
@@ -1241,6 +1341,31 @@ window.lvPane = function (id, send) {
      * Never merged with what was held: an order that has filled or been
      * cancelled elsewhere has to disappear, and a merge is how a phantom
      * order stays on screen. */
+    /* ORDERS ONLY — one Schwab call, not two.
+     *
+     * /broker/state gathers read_orders AND read_positions, so every action
+     * that called refreshBroker() spent two calls on the read-back. Placing,
+     * repricing and cancelling a RESTING limit cannot move a position: a
+     * position moves on a FILL, which the 6-second position poll already
+     * carries. So the second call bought nothing and it was spent on the
+     * hottest path there is — a row move cost three calls, of which one was
+     * the actual replace.
+     *
+     * Used everywhere the position provably cannot have changed. place() and
+     * flatten() still read both, because those can fill.
+     */
+    async refreshOrders() {
+      if (!this.symbol) return;
+      const j = await this.brokerCall('orders?symbols='
+                                      + encodeURIComponent(this.symbol));
+      if (!j.ok) return;
+      this.working = (j.working || [])
+        .filter(o => (o.symbol || '').toUpperCase() === this.symbol);
+      this.recent = j.recent || [];
+      this.limits = j.limits || null;
+      this.ordersAt = Date.now();
+    },
+
     async refreshBroker() {
       if (!this.symbol) return;
       const j = await this.brokerCall('state?symbols='
@@ -1276,7 +1401,72 @@ window.lvPane = function (id, send) {
           + 'row.';
         return;
       }
+      const side = zone === 'buy' ? 'BUY' : 'SELL';
+      if (this.askFirst(side, price)) {
+        this.confirm.kind = 'place';
+        return;
+      }
       return zone === 'buy' ? this.placeBuy(price) : this.placeSell(price);
+    },
+
+    /* Does this price need asking about before it is sent?
+     *
+     * WHY THIS EXISTS. A limit below the bid on a SELL is a marketable
+     * order: correct, legal, and filled the instant it lands. For a passive
+     * strategy it is never the intended order, and nothing between the click
+     * and the fill said so — the first news of it was the fill.
+     *
+     * Sets `confirm` and returns true when the caller must stop. UNKNOWN
+     * ASKS TOO: with no NBBO the answer is "cannot tell", and treating that
+     * as "not marketable" would put the silent fill back exactly where the
+     * quote feed is worst. The two cases are worded differently so the
+     * banner never claims to know something it does not.
+     */
+    askFirst(side, price, order) {
+      const m = this.isMarketable(side, price);
+      if (m === false) return false;
+      const t = this.touch();
+      this.confirm = {
+        kind: 'place', side: String(side).toUpperCase(), price: Number(price),
+        qty: Number(this.qty), unknown: m === null,
+        bid: t ? t.bid : null, ask: t ? t.ask : null, order: order || null,
+      };
+      return true;
+    },
+
+    /* The sentence on the banner. Built here rather than in the template so
+     * it can be asserted in a test. */
+    confirmText() {
+      const c = this.confirm;
+      if (!c) return '';
+      const move = c.kind === 'move';
+      const what = move
+        ? `Moving this ${c.side} to ${c.price.toFixed(2)}`
+        : `${c.side} ${c.qty} @ ${c.price.toFixed(2)}`;
+      const ask = move ? 'Move it anyway?' : 'Send it anyway?';
+      if (c.unknown) {
+        return `${what} — there is no NBBO for ${this.symbol}, so whether it `
+             + `would fill immediately CANNOT be determined. ${ask}`;
+      }
+      const edge = c.side === 'BUY' ? `the ask (${c.ask.toFixed(2)})`
+                                    : `the bid (${c.bid.toFixed(2)})`;
+      const verb = move ? 'puts it at or through' : 'is at or through';
+      return `${what} ${verb} ${edge} — it will FILL IMMEDIATELY rather than `
+           + `rest. ${ask}`;
+    },
+
+    confirmSend() {
+      const c = this.confirm;
+      if (!c) return;
+      this.confirm = null;
+      if (c.kind === 'move') return this.sendMove(c.order, c.price);
+      return c.side === 'BUY' ? this.placeBuy(c.price)
+                              : this.placeSell(c.price);
+    },
+
+    confirmCancel() {
+      this.confirm = null;
+      this.lastAction = 'not sent — marketable';
     },
 
     placeBuy(price) { return this.place('BUY', price); },
@@ -1333,6 +1523,21 @@ window.lvPane = function (id, send) {
       if (why) { this.brokerErr = why; return; }
       const step = this.ladderCents / 100;
       const price = Math.round((Number(o.price) + dir * step) * 100) / 100;
+      // A MOVE CAN CROSS THE TOUCH TOO. Walking a resting order one row at a
+      // time is exactly how it ends up through the bid, and the row that
+      // does it looks like every other row. Same question, same banner.
+      if (this.askFirst(o.side, price, o)) {
+        this.confirm.kind = 'move';
+        this.confirm.qty = (o.qty || 0) - (o.filled || 0);
+        return;
+      }
+      return this.sendMove(o, price);
+    },
+
+    /* The replace itself, once the price is settled. Split from nudge() so
+     * the confirmation path sends the identical request rather than a second
+     * copy of it that could drift. */
+    async sendMove(o, price) {
       const qty = (o.qty || 0) - (o.filled || 0);
       const sentAt = Date.now() / 1000;
       const j = await this.brokerCall('replace', {
@@ -1353,7 +1558,7 @@ window.lvPane = function (id, send) {
         this.ownIds.push(String(j.order_id));
       }
       this.lastAction = j.ok ? `moved to ${price.toFixed(2)}` : 'move refused';
-      await this.refreshBroker();
+      await this.refreshOrders();
       return j;
     },
 
@@ -1416,7 +1621,7 @@ window.lvPane = function (id, send) {
       }
       const j = await this.brokerCall('cancel', { order_id: id });
       this.lastAction = j.ok ? 'cancelled' : 'cancel refused';
-      await this.refreshBroker();
+      await this.refreshOrders();
       return j;
     },
 
@@ -1425,7 +1630,7 @@ window.lvPane = function (id, send) {
         await this.brokerCall('cancel', { order_id: o.order_id });
       }
       this.lastAction = 'cancelled all';
-      await this.refreshBroker();
+      await this.refreshOrders();
     },
 
     /* Cancels first, THEN closes at market. A resting order left working can
@@ -1518,7 +1723,7 @@ window.lvPane = function (id, send) {
       // Arming shows the ladder: it is what the arming is for, and hunting
       // for a second toggle at the moment of wanting to trade is friction in
       // the wrong place.
-      if (this.armed) { this.ladder = true; this.refreshBroker(); }
+      if (this.armed) { this.ladder = true; this.refreshOrders(); }
     },
 
     toggleLadder() {
@@ -1527,7 +1732,7 @@ window.lvPane = function (id, send) {
         this.ladderManual = false;
         this.$nextTick ? this.$nextTick(() => { this.resize(); this.autoLadder(); })
                        : this.autoLadder();
-        this.refreshBroker();
+        this.refreshOrders();
       } else if (this.$nextTick) {
         // The gutter's width changes, so the canvas has to be re-measured.
         this.$nextTick(() => this.resize());
@@ -1607,9 +1812,14 @@ document.addEventListener('alpine:init', () => {
         //
         // Schwab returns the whole account either way, so per-pane polling
         // would multiply the same two calls by the number of panes against a
-        // 120-a-minute ceiling shared with the orders themselves. At four
-        // seconds this is 30 calls a minute whether one pane is open or four.
-        setInterval(() => this.pollOrders(), 2000);
+        // 120-a-minute ceiling shared with the orders themselves. This is
+        // one call per tick whether one pane is open or four.
+        //
+        // The TICK is 2s; how often it actually reads is pollOrders()'s
+        // decision — 2s while a ladder is open or a pane is armed, 6s while
+        // the tape is only being watched. Ticking faster than the slow
+        // cadence is what lets opening a ladder take effect immediately.
+        setInterval(() => this.pollOrders(), LV_ORDER_POLL_MS);
         setInterval(() => this.pollPositions(), 6000);
         this.loadBrokerHealth();
         // The runtime trading flag can be flipped by another service while
@@ -1808,6 +2018,9 @@ document.addEventListener('alpine:init', () => {
 
     // ── the broker ───────────────────────────────────────────────────────
     brokerHealth: null,
+    // When the order poll last actually went out, so the tick can skip
+    // beats while nothing is being traded. See pollOrders().
+    lastOrderPollAt: 0,
 
     async loadBrokerHealth() {
       try {
@@ -1824,9 +2037,19 @@ document.addEventListener('alpine:init', () => {
      * made the cheap read wait on the expensive one and the expensive one
      * run no more often than the cheap one needed.
      *
-     * Orders every 2s (~850ms each) and positions every 6s (~370ms) is 40
-     * calls a minute of the 90 available to ordinary traffic, leaving 50 for
-     * placement and repricing with the 30-call reserve untouched.
+     * THE BUDGET, which is the reason the rates are what they are. Ordinary
+     * traffic may spend 90 calls a minute; the other 30 are reserved so a
+     * cancel or a flatten is never the call that gets refused.
+     *
+     *   watching only   orders 6s + positions 6s   =  20/min
+     *   trading         orders 2s + positions 6s   =  40/min
+     *
+     * A fixed 2s cost 40 whether or not anything was being traded, and the
+     * actions themselves used to cost three calls each (the action, plus a
+     * read-back of orders AND positions). At 40 idle plus 18 for one
+     * place-nudge-nudge-nudge-nudge-cancel round trip, a few clicks reached
+     * 90 and the pane stopped. Read-backs are orders-only now — see
+     * refreshOrders() — so the same round trip is 12.
      *
      * One read serves every pane: Schwab returns the whole account either
      * way, so per-pane polling would multiply the same calls by the number
@@ -1836,9 +2059,32 @@ document.addEventListener('alpine:init', () => {
       return this.panes.filter(p => p.ladder && p.symbol);
     },
 
+    /* Is anyone actually trading right now?
+     *
+     * A pane with the ladder shut is a pane watching the tape, and the
+     * order book is not what it is watching. An unresolved placement counts
+     * whatever else is true: that is the pane that most needs a fast answer.
+     */
+    tradingActive() {
+      return this.panes.some(p => p.armed || p.ladder || p.unresolved);
+    },
+
     async pollOrders() {
       const live = this.livePanes();
       if (!live.length) return;
+      // CADENCE FOLLOWS INTENT. Two seconds is the right rate while orders
+      // are in play and pure waste while none are: at 2s this poll alone is
+      // 30 of the 90 calls a minute ordinary traffic may spend, and it was
+      // spending them whether or not a ladder was open. The tick stays at
+      // 2s and the SLOW case skips beats, so opening a ladder speeds the
+      // poll up on the next tick rather than at the end of a long interval.
+      const cadence = this.tradingActive() ? LV_ORDER_POLL_MS
+                                           : LV_ORDER_POLL_IDLE_MS;
+      const now0 = Date.now();
+      // The 100ms slack absorbs setInterval jitter: a tick that lands at
+      // 1996ms must not be dropped and then waited out all over again.
+      if (now0 - this.lastOrderPollAt < cadence - 100) return;
+      this.lastOrderPollAt = now0;
       const syms = [...new Set(live.map(p => p.symbol))];
       try {
         const r = await fetch('broker/orders?symbols='
