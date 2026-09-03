@@ -1372,6 +1372,11 @@ document.addEventListener('alpine:init', () => {
         // seconds this is 30 calls a minute whether one pane is open or four.
         setInterval(() => this.pollBroker(), 4000);
         this.loadBrokerHealth();
+        // The runtime trading flag can be flipped by another service while
+        // this page is open, so the arm button's availability is re-read
+        // rather than fixed at load. Cheap: it touches no Schwab endpoint
+        // and spends none of the 120-a-minute budget.
+        setInterval(() => this.loadBrokerHealth(), 10000);
       });
     },
 

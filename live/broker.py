@@ -10,11 +10,18 @@ The dangerous version of this module is the one that shows a confident,
 wrong list of working orders. A stale list that says it is stale is safe; a
 fresh-looking list that is thirty seconds old is not.
 
-THREE INDEPENDENT SWITCHES have to be on before a single order can leave:
+FOUR INDEPENDENT SWITCHES have to be on before a single order can leave:
 
-    LIVE_TRADING_ENABLED    in the environment, default OFF. New
-                            order-placing code should not be able to
-                            trade because a page element was clicked.
+    LIVE_TRADING_ENABLED    in the environment, default OFF, and the
+                            OUTER gate. New order-placing code should
+                            not be able to trade because a page element
+                            was clicked, and nothing below can escalate
+                            past this one.
+    the runtime flag        flipped over HTTP without a restart, because
+                            a restart drops the upstream socket and every
+                            pane's buffer mid-session. Off on every
+                            start; needs the shared secret to turn on and
+                            nothing at all to turn off.
     the pane's arm toggle   off by default, per pane, and the request
                             carries it — the server refuses a body
                             without it rather than trusting the UI.
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import os
@@ -541,11 +549,111 @@ def check_guards(*, symbol: str, side: str, qty: float, price: float | None,
     return None
 
 
-def _armed_check(armed: bool) -> str | None:
+# ── the runtime gate ────────────────────────────────────────────────────────
+#
+# FOUR SWITCHES NOW, and the new one sits between the other two.
+#
+#   LIVE_TRADING_ENABLED   the OUTER gate, from the environment. If it is
+#                          off, nothing below can turn trading on — the
+#                          runtime toggle cannot escalate past it.
+#   the runtime flag       this. Flipped over HTTP without a restart,
+#                          because restarting drops the upstream socket
+#                          and every pane's buffer mid-session, which is
+#                          a real cost to pay for changing your mind
+#                          about arming.
+#   the pane's arm toggle  per pane, in the request body.
+#   the guards             size, ending position, notional, distance.
+#
+# OFF ON EVERY START, unconditionally. A flag that survived a restart would
+# be a service that comes back able to trade after a crash nobody watched,
+# and "it was on before" is not a reason to be on now.
+_runtime_enabled = False
+_runtime_changed_at: float | None = None
+_runtime_changed_by: str | None = None
+
+
+def trading_allowed() -> bool:
+    """The env gate AND the runtime flag. Both, always."""
+    return bool(config.TRADING_ENABLED and _runtime_enabled)
+
+
+def trading_state() -> dict:
+    return {
+        # What actually decides whether an order can leave.
+        "allowed": trading_allowed(),
+        # The outer gate: environment, needs a restart to change.
+        "env_enabled": config.TRADING_ENABLED,
+        # The runtime flag: this is what the endpoints move.
+        "runtime_enabled": _runtime_enabled,
+        "changed_at": _runtime_changed_at,
+        "changed_by": _runtime_changed_by,
+        # Whether ENABLING is possible at all right now, and why not.
+        "can_enable": config.TRADING_ENABLED,
+        "control_token_set": bool(config.CONTROL_TOKEN),
+        "why": _trading_why(),
+    }
+
+
+def _trading_why() -> str:
     if not config.TRADING_ENABLED:
-        return ("live trading is disabled on the server: set "
-                "LIVE_TRADING_ENABLED=1 in /spx_analysis_dashboard/.env and "
-                "restart spx-live. Deliberately off by default.")
+        return ("LIVE_TRADING_ENABLED is 0, so trading cannot be turned on "
+                "at runtime. It is the outer gate: set it in "
+                "/spx_analysis_dashboard/.env and restart spx-live.")
+    if not _runtime_enabled:
+        return ("trading is allowed by the environment but switched off at "
+                "runtime. POST /broker/trading {\"enabled\": true} to arm it; "
+                "it is off again after any restart.")
+    return "trading is on: the environment allows it and the runtime flag is set."
+
+
+def set_trading(enabled: bool, *, token: str | None = None,
+                who: str | None = None) -> dict:
+    """Flip the runtime flag. Returns the new state, or raises.
+
+    DISABLING IS NEVER REFUSED — not for a missing token, not for anything.
+    It is the same rule as cancel: a control that can only be reached with
+    the right credentials is a control that fails closed at the worst moment,
+    and switching trading OFF has no failure mode worth guarding against.
+
+    ENABLING NEEDS THE TOKEN, because this service is reachable from the
+    internet through the tunnel and an unauthenticated POST that arms live
+    trading is not a thing to leave lying around. Behind cloudflared every
+    request appears to come from localhost, so filtering by address would
+    prove nothing.
+    """
+    global _runtime_enabled, _runtime_changed_at, _runtime_changed_by
+
+    if not enabled:
+        _runtime_enabled = False
+        _runtime_changed_at = time.time()
+        _runtime_changed_by = who or "unnamed"
+        log.warning("live trading DISABLED at runtime by %s",
+                    _runtime_changed_by)
+        return trading_state()
+
+    if not config.TRADING_ENABLED:
+        raise BrokerError(
+            "LIVE_TRADING_ENABLED is 0. The runtime toggle cannot enable "
+            "trading past the environment gate — set it in "
+            "/spx_analysis_dashboard/.env and restart spx-live.")
+    if not config.CONTROL_TOKEN:
+        raise BrokerError(
+            "LIVE_CONTROL_TOKEN is not set, so there is no way to tell an "
+            "authorised caller from any other. Set it in the environment "
+            "before enabling trading over HTTP. Disabling never needs it.")
+    if not token or not hmac.compare_digest(token, config.CONTROL_TOKEN):
+        raise BrokerError("the control token is missing or wrong.")
+
+    _runtime_enabled = True
+    _runtime_changed_at = time.time()
+    _runtime_changed_by = who or "unnamed"
+    log.warning("live trading ENABLED at runtime by %s", _runtime_changed_by)
+    return trading_state()
+
+
+def _armed_check(armed: bool) -> str | None:
+    if not config.TRADING_ENABLED or not _runtime_enabled:
+        return _trading_why()
     if not armed:
         return ("this pane is not armed — the request did not carry it. "
                 "Arming is per pane and off by default.")
@@ -638,8 +746,8 @@ async def flatten(*, symbol: str, armed: bool) -> dict:
 
     Priority throughout: this is the getting-flat path.
     """
-    if not config.TRADING_ENABLED:
-        raise BrokerError(_armed_check(True))
+    if not trading_allowed():
+        raise BrokerError(_trading_why())
     sym = symbol.upper()
     st = await state([sym], priority=True)
     out = {"cancelled": [], "rt_ms": 0.0}
@@ -682,7 +790,11 @@ async def flatten(*, symbol: str, armed: bool) -> dict:
 def health() -> dict:
     tokens = _read_tokens()
     return {
-        "trading_enabled": config.TRADING_ENABLED,
+        "trading": trading_state(),
+        # Kept as the flat field the page already reads: what it
+        # means is "can an order leave right now", which is the
+        # combined answer and not the env gate alone.
+        "trading_enabled": trading_allowed(),
         "token_file": str(_token_file()),
         "have_tokens": tokens is not None,
         "token_expires_in_s": round((tokens or {}).get("expires_at", 0)

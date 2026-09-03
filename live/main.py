@@ -82,9 +82,69 @@ async def page(request: Request):
     return templates.TemplateResponse(request, "equities_live.html")
 
 
+def _status() -> dict:
+    """The hub's status plus whether an order can leave right now.
+
+    Merged HERE rather than inside Hub.status(), so the hub keeps knowing
+    nothing about the broker. Both the HTTP endpoint and the WebSocket's
+    status frames go through this, or the page and any other caller would be
+    reading two different answers to the same question.
+    """
+    st = HUB.status()
+    st["trading"] = broker.trading_state()
+    return st
+
+
 @app.get("/status")
 async def status():
-    return HUB.status()
+    return _status()
+
+
+# ── the runtime trading switch ──────────────────────────────────────────────
+#
+# WHY IT EXISTS. Flipping LIVE_TRADING_ENABLED means a restart, and a restart
+# drops the upstream socket and every pane's buffer mid-session. Changing your
+# mind about being armed should not cost the tape.
+#
+# The environment variable stays the OUTER gate: with it off, nothing here can
+# turn trading on. With it on, this flag decides — and it is off again after
+# every start, because a service that comes back armed from a crash nobody
+# watched is not a thing to build.
+@app.get("/broker/trading")
+async def broker_trading_get():
+    return broker.trading_state()
+
+
+@app.post("/broker/trading")
+async def broker_trading_set(req: Request):
+    """{"enabled": bool, "token": str, "who": str}
+
+    `token` is required to ENABLE and ignored when disabling; it may also be
+    sent as the `X-Live-Token` header, which is the better place for it when
+    another service is calling. `who` is free text recorded in the state and
+    the journal, so "who armed this" is answerable afterwards.
+    """
+    try:
+        b = await req.json()
+    except Exception:                                       # noqa: BLE001
+        b = {}
+    if "enabled" not in b:
+        return {"ok": False,
+                "why": "the body needs {\"enabled\": true|false}",
+                "trading": broker.trading_state()}
+    try:
+        st = broker.set_trading(
+            bool(b.get("enabled")),
+            token=(req.headers.get("X-Live-Token") or b.get("token")),
+            who=(b.get("who")
+                 or (req.client.host if req.client else None)))
+        return {"ok": True, "trading": st}
+    except Exception as exc:                                # noqa: BLE001
+        # The CURRENT state travels with every refusal, so a caller that was
+        # refused still learns where things actually stand rather than having
+        # to ask again.
+        return {"ok": False, "why": str(exc),
+                "trading": broker.trading_state()}
 
 
 @app.get("/arrival-norm")
@@ -209,7 +269,7 @@ async def ws(sock: WebSocket):
 
     wanted: set = set()
     HUB.clients[sock] = wanted
-    await sock.send_json({"ev": "status", "data": HUB.status()})
+    await sock.send_json({"ev": "status", "data": _status()})
     try:
         while True:
             msg = await sock.receive_json()
@@ -271,7 +331,7 @@ async def ws(sock: WebSocket):
                 await sock.send_json({"ev": "pinned",
                                       "data": sorted(HUB.pinned)})
             elif act == "status":
-                await sock.send_json({"ev": "status", "data": HUB.status()})
+                await sock.send_json({"ev": "status", "data": _status()})
     except WebSocketDisconnect:
         pass
     except Exception as exc:                              # noqa: BLE001

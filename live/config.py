@@ -123,6 +123,16 @@ RECONNECT_MAX_S = 30.0
 TRADING_ENABLED = os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower() \
     in ("1", "true", "yes", "on")
 
+# The shared secret that lets a caller ENABLE trading over HTTP. Disabling
+# never needs it — a control that fails closed at the worst moment is worse
+# than one that anybody can use to stop trading.
+#
+# This service is reachable from the internet through the cloudflared tunnel,
+# and behind it every request appears to come from localhost, so filtering by
+# address would prove nothing. Without a token set, enabling over HTTP is
+# refused outright rather than left open.
+CONTROL_TOKEN = os.environ.get("LIVE_CONTROL_TOKEN", "").strip()
+
 SCHWAB_API_KEY = os.environ.get("SCHWAB_API_KEY", "")
 SCHWAB_API_SECRET = os.environ.get("SCHWAB_API_SECRET", "")
 # Skips an account lookup per restart; optional.

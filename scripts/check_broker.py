@@ -7,10 +7,14 @@ project where being wrong costs money rather than time.
 
 WHAT IS BEING PROTECTED, in order of how bad it would be:
 
-  * THE THREE SWITCHES. LIVE_TRADING_ENABLED, the pane's arm flag, and the
-    guards. All three are checked SERVER-side; the browser is where a guard
-    is easiest to bypass by accident — a stale page, a replayed request, a
-    hand-typed fetch during debugging.
+  * THE FOUR SWITCHES. LIVE_TRADING_ENABLED, the runtime flag, the pane's
+    arm flag, and the guards. All four are checked SERVER-side; the browser
+    is where a guard is easiest to bypass by accident — a stale page, a
+    replayed request, a hand-typed fetch during debugging.
+
+  * THE RUNTIME FLAG CANNOT ESCALATE past the environment gate, defaults to
+    off on every start, needs the shared secret to turn ON, and needs
+    nothing to turn OFF.
 
   * FLATTEN CANCELS FIRST. Closing at market while a working order rests on
     the same name can reopen the position in the opposite direction the
@@ -41,6 +45,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from live import broker, config                             # noqa: E402
+
+# READ AT IMPORT, before any case assigns it. Asserting the default after a
+# test has set it is asserting nothing — a module shipping the flag as True
+# passed that version of this check.
+RUNTIME_AT_IMPORT = broker._runtime_enabled
 
 FAILS: list[str] = []
 
@@ -156,6 +165,96 @@ def case_guards():
 
 
 # ── the three switches ──────────────────────────────────────────────────────
+def _arm_runtime():
+    """Both outer gates on, for the cases that are about something else."""
+    config.TRADING_ENABLED = True
+    config.CONTROL_TOKEN = "T"
+    broker.set_trading(True, token="T", who="check")
+
+
+def case_runtime_toggle():
+    """The runtime switch cannot escalate past the environment gate.
+
+    WHY IT EXISTS: flipping the environment variable means a restart, and a
+    restart drops the upstream socket and every pane's buffer mid-session.
+    Changing your mind about being armed should not cost the tape.
+
+    WHAT MUST HOLD: the environment stays the outer gate, the flag is off on
+    every start, enabling needs the shared secret, and DISABLING never needs
+    anything — a control that fails closed at the worst moment is not a
+    safety control.
+    """
+    config.TRADING_ENABLED = False
+    config.CONTROL_TOKEN = "T"
+    broker._runtime_enabled = False
+
+    check(RUNTIME_AT_IMPORT is False,
+          f"the runtime flag is {RUNTIME_AT_IMPORT!r} at import — it must be "
+          f"off on every start, or a crash nobody watched brings the service "
+          f"back able to trade")
+    check(not broker.trading_allowed(),
+          "trading was allowed with the environment gate off")
+    try:
+        broker.set_trading(True, token="T")
+        FAILS.append("the runtime toggle enabled trading past the environment "
+                     "gate — the environment is supposed to be the outer one")
+    except broker.BrokerError as exc:
+        check("LIVE_TRADING_ENABLED" in str(exc),
+              f"the refusal does not name the outer gate: {exc}")
+    check(not broker.trading_allowed(),
+          "a refused enable still left trading allowed")
+
+    # With the environment on, the flag decides.
+    config.TRADING_ENABLED = True
+    check(not broker.trading_allowed(),
+          "the runtime flag defaulted to ON; it must be off on every start, "
+          "or a crash nobody watched brings the service back able to trade")
+
+    for bad in (None, "", "wrong", "t"):
+        try:
+            broker.set_trading(True, token=bad)
+            FAILS.append(f"token {bad!r} was accepted")
+        except broker.BrokerError:
+            pass
+    check(not broker.trading_allowed(), "a bad token still enabled trading")
+
+    st = broker.set_trading(True, token="T", who="someone")
+    check(st["allowed"] and st["runtime_enabled"],
+          f"the right token did not enable trading: {st}")
+    check(st["changed_by"] == "someone" and st["changed_at"],
+          f"who and when were not recorded: {st}")
+
+    # DISABLING NEEDS NOTHING. Same rule as cancel.
+    st = broker.set_trading(False)
+    check(not st["allowed"] and not st["runtime_enabled"],
+          f"disabling without a token was refused or ignored: {st}")
+
+    # With no token configured, enabling over HTTP is refused rather than
+    # left open — this service is reachable from the internet.
+    config.CONTROL_TOKEN = ""
+    try:
+        broker.set_trading(True, token="anything")
+        FAILS.append("trading was enabled with no control token configured")
+    except broker.BrokerError as exc:
+        check("LIVE_CONTROL_TOKEN" in str(exc),
+              f"the refusal does not say what to set: {exc}")
+    # And disabling still works with no token configured at all.
+    check(not broker.set_trading(False)["allowed"],
+          "disabling failed when no token was configured")
+
+    # The reported state has to agree with the decision. A page or another
+    # service reading `allowed` must get the same answer an order would.
+    for env in (False, True):
+        for runtime in (False, True):
+            config.TRADING_ENABLED = env
+            broker._runtime_enabled = runtime
+            st = broker.trading_state()
+            check(st["allowed"] == (env and runtime),
+                  f"env={env} runtime={runtime} reported allowed="
+                  f"{st['allowed']}")
+            check(bool(st["why"]), "no reason was given for the state")
+
+
 def case_switches():
     rec = Recorder()
     broker._acall = rec
@@ -173,9 +272,22 @@ def case_switches():
               f"the refusal does not name the switch to flip: {exc}")
     check(not rec.calls, "a refused order still reached the transport")
 
-    # 2. the pane switch. The BODY carries it — the server does not trust
-    #    the button, because the button is not what sends the request.
+    # 2. the RUNTIME switch, between the environment and the pane. Exists so
+    #    arming does not cost a restart, and a restart drops the upstream
+    #    socket and every pane's buffer.
     config.TRADING_ENABLED = True
+    broker._runtime_enabled = False
+    try:
+        asyncio.run(broker.place(armed=True, **args))
+        FAILS.append("an order was placed with the runtime switch off")
+    except broker.BrokerError as exc:
+        check("runtime" in str(exc),
+              f"the refusal does not mention the runtime switch: {exc}")
+    check(not rec.calls, "an order refused at runtime reached the transport")
+
+    # 3. the pane switch. The BODY carries it — the server does not trust
+    #    the button, because the button is not what sends the request.
+    _arm_runtime()
     try:
         asyncio.run(broker.place(armed=False, **args))
         FAILS.append("an order was placed by an unarmed pane")
@@ -184,7 +296,7 @@ def case_switches():
               f"the refusal does not say the pane is unarmed: {exc}")
     check(not rec.calls, "an unarmed order still reached the transport")
 
-    # 3. the guards, with both switches on
+    # 4. the guards, with every switch on
     try:
         asyncio.run(broker.place(armed=True, **{**args, "qty": 99999}))
         FAILS.append("the guards were skipped once the switches were on")
@@ -225,7 +337,20 @@ def case_flatten_order():
                                  order("O9", "NVDA", "BUY", 5, 900.0)]))
     broker._acall = rec
     broker._account_hash = "H"
+    _arm_runtime()
+
+    # FLATTEN OBEYS THE RUNTIME FLAG TOO. It sends a market order, so a
+    # flatten that consulted the environment gate alone would trade while the
+    # runtime switch said no.
     config.TRADING_ENABLED = True
+    broker._runtime_enabled = False
+    try:
+        asyncio.run(broker.flatten(symbol="FDX", armed=True))
+        FAILS.append("flatten sent a market order with the runtime switch off")
+    except broker.BrokerError:
+        pass
+    check(not rec.calls, "a refused flatten still reached the transport")
+    _arm_runtime()
 
     out = asyncio.run(broker.flatten(symbol="FDX", armed=True))
     seq = [c["method"] for c in rec.calls]
@@ -381,7 +506,8 @@ def case_order_body():
 
 CASES = [
     ("the guards", case_guards),
-    ("the three switches", case_switches),
+    ("the runtime toggle", case_runtime_toggle),
+    ("the four switches", case_switches),
     ("flatten cancels first", case_flatten_order),
     ("reading the record", case_state),
     ("the rate limiter", case_limiter),
@@ -392,6 +518,7 @@ CASES = [
 def main() -> int:
     real_acall, real_hash = broker._acall, broker._account_hash
     real_enabled = config.TRADING_ENABLED
+    real_token, real_runtime = config.CONTROL_TOKEN, broker._runtime_enabled
     try:
         for name, fn in CASES:
             before = len(FAILS)
@@ -405,11 +532,13 @@ def main() -> int:
     finally:
         broker._acall, broker._account_hash = real_acall, real_hash
         config.TRADING_ENABLED = real_enabled
+        config.CONTROL_TOKEN, broker._runtime_enabled = real_token, real_runtime
 
     print(f"\nbroker cases: {len(CASES)}, failures: {len(FAILS)}")
     if not FAILS:
-        print("  three switches hold, flatten cancels before it closes, the "
-              "guards bound the ENDING position, and the reserve is intact")
+        print("  four switches hold and the runtime one cannot escalate past "
+              "the environment; flatten cancels before it closes; the guards "
+              "bound the ENDING position; the reserve is intact")
     return 1 if FAILS else 0
 
 

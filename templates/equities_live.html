@@ -289,12 +289,16 @@
 
     <!-- Trading is off at the server unless deliberately enabled. Stated
          here rather than discovered when a click does nothing. -->
+    <!-- The reason comes from the SERVER, because there are now two of them
+         — the environment gate and the runtime flag — and a banner that
+         always names the environment variable would send you to restart the
+         service when the fix is one HTTP call. -->
     <div class="lv-down" x-show="brokerHealth && !brokerHealth.trading_enabled"
          x-cloak>
-      LIVE TRADING IS DISABLED on the server — the ladder and the record are
-      readable, the arm button is not. Set <b>LIVE_TRADING_ENABLED=1</b> in
-      /spx_analysis_dashboard/.env and restart spx-live to allow orders.
-      Off by default on purpose.
+      LIVE TRADING IS OFF — the ladder and the record are readable, the arm
+      button is not.
+      <span x-text="brokerHealth && brokerHealth.trading
+                    ? brokerHealth.trading.why : ''"></span>
     </div>
     <div class="lv-down"
          x-show="brokerHealth && brokerHealth.problems
