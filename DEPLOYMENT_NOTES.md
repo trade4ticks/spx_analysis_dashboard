@@ -57,6 +57,63 @@ open socket.
 
 ---
 
+## Schwab Trader API — things that cost time to rediscover
+
+**The app registration already carries trading scope.** Confirmed by a
+read, not by placing an order: `GET /accounts/{hash}/orders` returns
+**200**, where a market-data-only registration is refused outright. The
+same registration backs the portfolio dashboard's transaction fetch.
+
+### `Content-Type` on a bodyless GET returns 400
+
+Schwab answers a GET carrying `Content-Type: application/json` with
+
+```
+400  { "errors": [ { "status": 500, "title": "Internal Server Error" } ] }
+```
+
+The identical request without the header returns 200. Nothing in the
+message names the header, and the wrapped `500` reads like an outage. This
+made *every* read fail starting with the account lookup, and was
+indistinguishable from an expired token or a missing scope.
+
+Send `Authorization` alone unless there is a body. The portfolio
+dashboard's client always did, which is why the same endpoints worked
+there.
+
+### Measured latency, from the box
+
+| Call | Median |
+|---|---|
+| `/accounts/accountNumbers` | 255 ms |
+| `/accounts/{hash}?fields=positions` | 368 ms |
+| `/accounts/{hash}/orders` (1 day) | 850 ms |
+| `/accounts/{hash}/orders` (2 hours) | 870 ms |
+
+Two things follow. **Narrowing the orders window buys nothing** — the cost
+is Schwab's, not the payload's — so the fix for a slow state read is to
+overlap the two calls, which takes it from ~1220 ms to ~900 ms. And **a
+new `AsyncClient` per call costs ~80 ms of TLS handshake** (280 ms vs 200
+ms steady state, 409 ms vs 252 ms cold). One client, reused.
+
+~900 ms is therefore the floor on how fresh the working-order list can be.
+`live/config.py: STALE_AFTER_S` is set against that.
+
+### The token file is shared with the portfolio dashboard
+
+`/root/Portfolio_Dashboard/schwab_tokens.json`, and Schwab **rotates the
+refresh token on every refresh** — so two processes refreshing at the same
+moment leaves one holding a dead one, which is a re-authorisation rather
+than a retry.
+
+`live/broker.py` narrows the window: it refreshes only inside the last 60
+seconds of the access token's 30-minute life, takes an exclusive `flock`,
+re-reads the file after acquiring it, and re-reads once more on failure.
+**The lock cannot bind the portfolio dashboard**, which does not take one.
+The proper fix is a single owner for the refresh.
+
+---
+
 ## Cloudflare's 100-second origin limit (HTTP 524)
 
 **Symptom.** A long request "fails in the browser" while the application
