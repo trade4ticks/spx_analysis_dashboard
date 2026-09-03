@@ -189,6 +189,74 @@ function quoted(c) {
 // ── the call budget ──────────────────────────────────────────────────────
 // Which endpoint each action reads back from. /broker/state costs TWO Schwab
 // calls (orders + positions); /broker/orders costs one.
+/* The optimistic move, watched from the inside.
+ *
+ * brokerCall is held open on a deferred promise so the in-flight moment can
+ * be inspected: that moment is the entire feature, and a test that only
+ * looks at the end state cannot tell "moved on the click" from "moved on the
+ * reply".
+ */
+async function optimistic(reply) {
+  const c = quoted(pane());
+  c.armed = true;
+  c.ladderCents = 1;
+  c.working = [ord('1', true, { side: 'BUY', price: 318.50 })];
+  c.ownIds = ['1'];
+
+  const paths = [];
+  let release = null;
+  c.brokerCall = async (path) => {
+    paths.push(String(path).split('?')[0]);
+    await new Promise(r => { release = r; });
+    return reply;
+  };
+
+  const done = c.sendMove(c.working[0], 318.45);
+  // Let sendMove run up to its await, then look before answering it.
+  await new Promise(r => setImmediate(r));
+  const inFlight = {
+    shown: c.shownPrice(c.working[0]),
+    recordPrice: c.working[0].price,
+    pending: c.pending ? { to: c.pending.to, from: c.pending.from,
+                           state: c.pending.state } : null,
+  };
+  release();
+  await done;
+  return {
+    inFlight,
+    paths,
+    after: {
+      shown: c.working.length ? c.shownPrice(c.working[0]) : null,
+      recordPrice: c.working.length ? c.working[0].price : null,
+      orderId: c.working.length ? String(c.working[0].order_id) : null,
+      pending: c.pending ? { state: c.pending.state } : null,
+      revert: c.revert ? { price: c.revert.price } : null,
+      ownIds: c.ownIds.slice(),
+      unresolved: c.unresolved ? c.unresolved.state : null,
+      rt: c.lastRt,
+      rtText: c.rtText(),
+      action: c.lastAction,
+    },
+  };
+}
+
+// A read-back must not overwrite the readout an action set.
+async function rtNotStolen() {
+  const c = quoted(pane());
+  c.armed = true;
+  c.working = [ord('1', true, { side: 'BUY', price: 318.50 })];
+  c.ownIds = ['1'];
+  let leg = 'replace';
+  global.fetch = async () => ({ json: async () => (
+    leg === 'replace' ? { ok: true, order_id: '2', rt_ms: 484 }
+                      : { ok: true, rt_ms: 855, working: [], recent: [] }) });
+  await c.sendMove(c.working[0], 318.45);
+  const afterMove = c.rtText();
+  leg = 'orders';
+  await c.refreshOrders();
+  return { afterMove, afterRead: c.rtText() };
+}
+
 async function callBudget() {
   const c = pane();
   c.armed = true;
@@ -458,6 +526,18 @@ async function found() {
   out.found = await found();
   out.drawLadderOn = drawn(true);
   out.drawLadderOff = drawn(false);
+  out.optOk = await optimistic({ ok: true, order_id: '2', rt_ms: 484 });
+  out.optRefused = await optimistic({ ok: false, why: 'refused by the guards' });
+  out.optUnknown = await optimistic({ ok: false, indeterminate: true,
+                                      why: 'timed out' });
+  out.rtSteal = await rtNotStolen();
+  {
+    const c = quoted(pane());
+    c.pending = { order_id: '1', from: 318.50, to: 318.45, state: 'unknown' };
+    c.unresolved = { state: 'gave-up' };
+    c.clearUnresolved();
+    out.clearedPending = c.pending;
+  }
   out.calls = await callBudget();
   out.pollsTrading = await polls(true);
   out.pollsWatching = await polls(false);
@@ -613,11 +693,13 @@ def main() -> int:
 
     # -- the call budget --------------------------------------------------
     calls = out["calls"]
-    if calls["move"] != ["replace", "orders"]:
-        fail(f"a row move reads back from {calls['move'][1:]}, not orders "
-             f"alone. /broker/state costs TWO Schwab calls and a replace "
-             f"cannot move a position - that third call is the one that "
-             f"made repricing unusable at 90/120.")
+    if calls["move"] != ["replace"]:
+        fail(f"a row move makes {calls['move']}, not the replace alone. "
+             f"Measured 2026-09-03: the PUT is 484ms, the read-back 855ms, "
+             f"and Schwab's propagation is NEGATIVE - the new price is in "
+             f"the order list before the read-back asks. That call spent "
+             f"855ms and a second of the minute's budget being told what "
+             f"the PUT reply already said.")
     if calls["cancel"] != ["cancel", "orders"]:
         fail(f"a cancel reads back from {calls['cancel'][1:]}; cancelling "
              f"cannot move a position either.")
@@ -770,15 +852,95 @@ def main() -> int:
         fail("a passive drag was drawn as a hazard, which is how a warning "
              "stops meaning anything")
 
+    # -- the optimistic move ----------------------------------------------
+    ok = out["optOk"]
+    fl = ok["inFlight"]
+    if abs(fl["shown"] - 318.45) > 1e-9:
+        fail(f"IN FLIGHT the marker is drawn at {fl['shown']}, not the "
+             f"318.45 that was asked for. Moving it on the reply instead of "
+             f"the click is the 484ms this exists to remove.")
+    if abs(fl["recordPrice"] - 318.50) > 1e-9:
+        fail(f"the RECORD was overwritten in flight ({fl['recordPrice']}). "
+             f"working is the broker's answer; the request belongs in "
+             f"`pending` so the two can be told apart.")
+    if not fl["pending"] or fl["pending"]["state"] != "sending":
+        fail(f"nothing marked the in-flight move as unconfirmed: "
+             f"{fl['pending']}. Without it the marker claims a price the "
+             f"broker has not agreed to.")
+    if abs(fl["pending"]["from"] - 318.50) > 1e-9:
+        fail("the pending move does not remember where it came from, so a "
+             "refusal has nowhere to put the marker back to")
+
+    af = ok["after"]
+    if abs(af["recordPrice"] - 318.45) > 1e-9:
+        fail(f"after a 2xx the record still says {af['recordPrice']}. A 2xx "
+             f"IS the broker's answer, so this is the moment it stops being "
+             f"a guess.")
+    if af["pending"] is not None:
+        fail("the pending marker survived a confirmed move, so it would go "
+             "on drawing as unconfirmed forever")
+    if af["orderId"] != "2":
+        fail(f"the new order id from the replace was not adopted "
+             f"({af['orderId']}). A replace makes a NEW order and the reply "
+             f"is the only link to it.")
+    if "2" not in af["ownIds"] or "1" in af["ownIds"]:
+        fail(f"ownIds did not follow the replace: {af['ownIds']}")
+
+    rf = out["optRefused"]["after"]
+    if abs(rf["recordPrice"] - 318.50) > 1e-9:
+        fail(f"a REFUSED move left the marker at {rf['recordPrice']}. "
+             f"Nothing moved at the broker, so nothing may be shown as "
+             f"moved.")
+    if rf["pending"] is not None:
+        fail("a refused move stayed pending")
+    if not rf["revert"] or abs(rf["revert"]["price"] - 318.45) > 1e-9:
+        fail(f"a refused move snapped back with nothing to show it happened: "
+             f"{rf['revert']}. A marker that quietly returns is a move you "
+             f"think went through.")
+
+    un = out["optUnknown"]["after"]
+    if not un["pending"] or un["pending"]["state"] != "unknown":
+        fail(f"a TIMED-OUT move was resolved one way or the other: "
+             f"{un['pending']}. Whether it moved is unknown, and both "
+             f"reverting and confirming assert something unfounded.")
+    if abs(un["shown"] - 318.45) > 1e-9:
+        fail(f"the unknown move is not drawn at the price that was asked "
+             f"for ({un['shown']})")
+    if un["unresolved"] != "looking":
+        fail("a timed-out move did not raise the unresolved state")
+
+    if out["clearedPending"] is not None:
+        fail("clearing the unresolved state by hand left the pending marker "
+             "up, with nothing remaining that could ever settle it")
+
+    # -- the readout ------------------------------------------------------
+    rt = ok["after"]["rt"]
+    if rt is None or rt.get("visible") is None or rt.get("confirm") is None:
+        fail(f"the move did not record both halves of its own timing: {rt}")
+    elif rt["visible"] > rt["confirm"]:
+        fail(f"the readout claims the marker moved after the broker "
+             f"answered: {rt}")
+    txt = ok["after"]["rtText"] or ""
+    if "seen" not in txt or "confirmed" not in txt:
+        fail(f"the readout does not separate what you feel from what was "
+             f"confirmed: {txt!r}")
+
+    st = out["rtSteal"]
+    if st["afterMove"] != st["afterRead"]:
+        fail(f"a read-back overwrote the action's timing: {st['afterMove']!r}"
+             f" became {st['afterRead']!r}. That is exactly how the readout "
+             f"came to show 68ms for a 1305ms move.")
+
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")
         return 1
     print(f"live pane: foreign orders refused; unresolved window "
           f"{out['giveUpTries'] * 2}s vs a {APPEARED_AFTER_S:.0f}s "
-          f"appearance; marketable clicks and nudges held for confirmation; "
-          f"a row move is 2 calls; the order poll is "
-          f"{out['pollsTrading']}/min trading and {out['pollsWatching']}/min "
-          f"watching")
+          f"appearance; marketable clicks, nudges and drops held for "
+          f"confirmation; a move is ONE call and the marker moves on the "
+          f"click, marked pending, reverting visibly on a refusal; the "
+          f"order poll is {out['pollsTrading']}/min trading and "
+          f"{out['pollsWatching']}/min watching")
     return 0
 
 

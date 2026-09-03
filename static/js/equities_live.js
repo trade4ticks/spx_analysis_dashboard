@@ -203,7 +203,27 @@ window.lvPane = function (id, send) {
     ordersAt: 0,          // when the working list was last confirmed, ms
     positionsAt: 0,
     brokerErr: '',
-    lastRt: null,         // round trip of the last action, ms
+    lastRt: null,         // {visible, confirm, broker} for the last action
+
+    /* A MOVE THE BROKER HAS NOT ANSWERED YET.
+     *
+     * MEASURED, and the measurement is why this exists: a replace is 484ms
+     * at the PUT and 855ms more for the read-back that used to follow it,
+     * while Schwab's own propagation is NEGATIVE — the new price is already
+     * in the order list before the read-back asks for it. So the whole
+     * 1305ms wait was our two round trips confirming something Schwab had
+     * already accepted, and the marker sat at the old price for all of it.
+     *
+     * The marker now moves on the CLICK and this records that it is not yet
+     * confirmed. It is drawn differently for exactly as long as that is
+     * true — the pane never claims a price the broker has not agreed to, it
+     * shows a request AS a request. {order_id, from, to, qty, side, sentAt,
+     * state: 'sending' | 'unknown'}. */
+    pending: null,
+
+    // A move that came back REFUSED, held briefly so the marker snapping
+    // back is something you see happen rather than something you missed.
+    revert: null,         // {price, until}
     lastAction: '',
     /* A PLACEMENT WHOSE ANSWER NEVER ARRIVED.
      *
@@ -731,22 +751,45 @@ window.lvPane = function (id, send) {
       // Solid, where a placed price line is dashed — one is a level being
       // watched, the other is real and working at the broker.
       for (const o of this.working) {
-        if (o.price == null || o.price < lo || o.price > hi) continue;
-        const y = Y(o.price);
+        if (o.price == null) continue;
+        // WHERE IT IS DRAWN is the pending price while a move is in flight.
+        const px = this.shownPrice(o);
+        if (px < lo || px > hi) continue;
+        const pend = this.pendingFor(o);
+        const y = Y(px);
         const buy = String(o.side || '').toUpperCase().startsWith('BUY');
         ctx.strokeStyle = buy ? 'rgba(52,152,219,0.90)'
                               : 'rgba(232,67,147,0.90)';
         ctx.lineWidth = 1.4;
+        // A REQUEST IS DASHED; the record is solid. The distinction is the
+        // whole licence for moving the marker early — it is not claiming
+        // the broker agreed, it is showing what was asked for.
+        if (pend) ctx.setLineDash([7, 4]);
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
+        ctx.setLineDash([]);
+        // Where it is moving FROM, faintly, so the move is legible while it
+        // is happening rather than only in hindsight.
+        if (pend && pend.from >= lo && pend.from <= hi) {
+          const yf = Y(pend.from);
+          ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          ctx.moveTo(padL, yf); ctx.lineTo(padL + plotW, yf);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
         ctx.font = '700 10px sans-serif';
         ctx.fillStyle = buy ? '#6cb6e6' : '#f07ab4';
         ctx.textAlign = 'left';
         const left = (o.qty || 0) - (o.filled || 0);
+        const tag = pend
+          ? (pend.state === 'unknown' ? ' · UNKNOWN' : ' · sending…')
+          : (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : '');
         ctx.fillText(`${o.side} ${left}${o.filled ? ' of ' + o.qty : ''}`
-                     + ` @ ${Number(o.price).toFixed(2)}`
-                     + (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : ''),
+                     + ` @ ${px.toFixed(2)}` + tag,
                      padL + 4, y + 11);
       }
 
@@ -769,6 +812,24 @@ window.lvPane = function (id, send) {
         ctx.fillStyle = '#b9bfc7';
         ctx.textAlign = 'left';
         ctx.fillText(`avg ${Number(pos.avg).toFixed(2)}`, padL + 4, y - 3);
+      }
+
+      // A REFUSED MOVE, briefly. The marker has already snapped back; this
+      // is the only thing that says it went somewhere and came back.
+      if (this.revert && Date.now() < this.revert.until
+          && this.revert.price >= lo && this.revert.price <= hi) {
+        const yr = Y(this.revert.price);
+        ctx.strokeStyle = 'rgba(232,67,147,0.85)';
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(padL, yr); ctx.lineTo(padL + plotW, yr);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = '700 10px sans-serif';
+        ctx.fillStyle = '#f07ab4';
+        ctx.textAlign = 'left';
+        ctx.fillText('refused — put back', padL + 4, yr - 4);
       }
 
       this.drawDragGhost(ctx, padL, padT, plotW, plotH, lo, hi, Y);
@@ -948,17 +1009,29 @@ window.lvPane = function (id, send) {
       // Working orders, in their row. Drawn over the zones so an order is
       // never hidden by a hover.
       for (const o of this.working) {
-        if (o.price == null || o.price < lo || o.price > hi) continue;
+        if (o.price == null) continue;
+        const opx = this.shownPrice(o);
+        if (opx < lo || opx > hi) continue;
+        const pend = this.pendingFor(o);
         const buy = String(o.side || '').toUpperCase().startsWith('BUY');
-        const yc = Y(Math.round(o.price / step) * step);
+        const yc = Y(Math.round(opx / step) * step);
         const zx = buy ? x0 : x0 + gu.buy + gu.price;
         const zw = buy ? gu.buy : gu.sell;
-        ctx.fillStyle = buy ? 'rgba(52,152,219,0.95)'
-                            : 'rgba(232,67,147,0.95)';
-        ctx.fillRect(zx, yc - Math.max(2, rowH / 2), zw,
-                     Math.max(4, rowH - 0.5));
+        const oy = yc - Math.max(2, rowH / 2);
+        const oh = Math.max(4, rowH - 0.5);
+        const col = buy ? 'rgba(52,152,219,0.95)' : 'rgba(232,67,147,0.95)';
+        if (pend) {
+          // HOLLOW while it is a request, filled once it is the record. The
+          // same distinction the dashed line makes on the plot.
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.4;
+          ctx.strokeRect(zx + 0.7, oy + 0.7, zw - 1.4, oh - 1.4);
+        } else {
+          ctx.fillStyle = col;
+          ctx.fillRect(zx, oy, zw, oh);
+        }
         ctx.font = '700 9px sans-serif';
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = pend ? col : '#fff';
         ctx.textAlign = 'center';
         if (rowH >= 8) {
           ctx.fillText(String((o.qty || 0) - (o.filled || 0)),
@@ -1492,8 +1565,15 @@ window.lvPane = function (id, send) {
         // leg. Part of why this exists is finding out whether this path beats
         // the click it replaces, and only one of those two numbers answers
         // that question.
-        this.lastRt = { total: Math.round(performance.now() - t0),
-                        broker: j.rt_ms != null ? Math.round(j.rt_ms) : null };
+        // A READ-BACK IS NOT AN ACTION, so it does not get to claim this
+        // readout. It used to: a move set rt from the PUT and then the
+        // read-back overwrote it, so the number on screen was the leg
+        // nobody waits for and it read 68ms while the move took 1305.
+        if (!/^(orders|positions|state)/.test(String(path))) {
+          this.lastRt = { total: Math.round(performance.now() - t0),
+                          broker: j.rt_ms != null ? Math.round(j.rt_ms) : null,
+                          visible: null, confirm: null };
+        }
         if (!j.ok) {
           this.brokerErr = j.why || 'the broker refused, without saying why';
         } else {
@@ -1713,26 +1793,85 @@ window.lvPane = function (id, send) {
     async sendMove(o, price) {
       const qty = (o.qty || 0) - (o.filled || 0);
       const sentAt = Date.now() / 1000;
+      const t0 = performance.now();
+      // CAPTURED BEFORE ANYTHING IS MUTATED. `o` is the same object as the
+      // entry in `working`, so writing the new id onto it first would leave
+      // every later lookup — and the ownIds filter below — searching for an
+      // id that no longer exists anywhere.
+      const oldId = String(o.order_id);
+
+      // OPTIMISTIC, AND SAID SO. The marker moves now; `pending` is what
+      // makes it draw as a request rather than as the record.
+      this.pending = { order_id: oldId, from: Number(o.price),
+                       to: Number(price), qty, side: o.side, sentAt,
+                       state: 'sending' };
+      this.revert = null;
+      const visible = Math.round(performance.now() - t0);
+
       const j = await this.brokerCall('replace', {
         order_id: o.order_id, symbol: this.symbol, side: o.side,
         qty, price, armed: true,
         reference: this.lastPrice(), position_qty: this.positionQty(),
       });
+      const confirm = Math.round(performance.now() - t0);
+      this.lastRt = { total: confirm, visible, confirm,
+                      broker: j.rt_ms != null ? Math.round(j.rt_ms) : null };
+
       if (j.indeterminate) {
+        // NEITHER CONFIRMED NOR REVERTED. The order may or may not have
+        // moved, so the marker must claim neither: `unknown` keeps it at the
+        // requested price and draws it as a question until the reconcile
+        // settles it. Reverting here would assert the move did not happen,
+        // which is exactly as unfounded as asserting it did.
+        this.pending.state = 'unknown';
         this.unresolved = { side: o.side, qty, price, sentAt, tries: 0,
                             state: 'looking', why: j.why, wasReplace: true };
         this.lastAction = 'UNRESOLVED';
         return j;
       }
-      if (j.ok && j.order_id) {
-        // THE NEW ID, kept. A replace creates a new order and Schwab gives
-        // no link from the old one to it, so this is the only handle.
-        this.ownIds = this.ownIds.filter(id => id !== String(o.order_id));
+
+      if (!j.ok) {
+        // REFUSED. Put it back, and make the snap back visible — a marker
+        // that quietly returns to where it was is a move you think happened.
+        this.revert = { price: Number(price), until: Date.now() + 1500 };
+        this.pending = null;
+        this.lastAction = 'move refused';
+        return j;
+      }
+
+      // ACCEPTED. A 2xx IS the broker's answer, so this is no longer a
+      // guess and `working` may carry it. THE READ-BACK IS GONE: it cost
+      // 855ms and a second call of the minute's budget to be told what this
+      // reply already said, and the 2s poll corrects anything Schwab
+      // adjusted within one tick.
+      const live = this.working.find(x => String(x.order_id) === oldId);
+      if (live) {
+        live.price = Number(price);
+        // A replace makes a NEW order and Schwab gives no link from the old
+        // one to it, so the id in the reply is the only handle there is.
+        if (j.order_id) live.order_id = String(j.order_id);
+      }
+      if (j.order_id) {
+        this.ownIds = this.ownIds.filter(id => id !== oldId);
         this.ownIds.push(String(j.order_id));
       }
-      this.lastAction = j.ok ? `moved to ${price.toFixed(2)}` : 'move refused';
-      await this.refreshOrders();
+      this.pending = null;
+      this.lastAction = `moved to ${price.toFixed(2)}`;
       return j;
+    },
+
+    /* The price to DRAW an order at: the pending one while a move is in
+     * flight, the broker's otherwise. One place, so the plot line and the
+     * ladder marker cannot disagree about where an order is. */
+    shownPrice(o) {
+      const p = this.pending;
+      return (p && String(p.order_id) === String(o.order_id))
+        ? p.to : Number(o.price);
+    },
+
+    pendingFor(o) {
+      const p = this.pending;
+      return (p && String(p.order_id) === String(o.order_id)) ? p : null;
     },
 
     /* The order the single-order controls act on.
@@ -1841,6 +1980,9 @@ window.lvPane = function (id, send) {
       if (!j.ok) return;                       // try again on the next poll
       if (j.state === 'found') {
         u.state = 'found';
+        // Settled: the record is about to be re-read, so the request stops
+        // standing in for it.
+        this.pending = null;
         if (j.order && j.order.order_id) this.ownIds.push(String(j.order.order_id));
         this.lastAction = `resolved: the order did land (${j.order.status})`;
         this.unresolved = null;
@@ -1888,6 +2030,10 @@ window.lvPane = function (id, send) {
      * quietly expired the warning would be the warning failing at its job. */
     clearUnresolved() {
       this.unresolved = null;
+      // The pending marker was the unresolved move. Clearing one by hand
+      // and leaving the other would keep a requested price on screen with
+      // nothing left to settle it.
+      this.pending = null;
       this.lastAction = 'unresolved state cleared by hand';
     },
 
@@ -1918,10 +2064,21 @@ window.lvPane = function (id, send) {
       this.ladderManual = true;
     },
 
+    /* THE NUMBER YOU FEEL, FIRST.
+     *
+     * This used to report the PUT and then be overwritten by the read-back,
+     * so a move that took 1305ms end to end displayed 68ms — the one leg
+     * nobody waits on. A move now shows both halves and in the right order:
+     * how long until the marker moved, then how long until the broker
+     * agreed. They are different numbers and both are worth knowing; only
+     * the first is the one being judged when it feels slow.
+     */
     rtText() {
-      if (!this.lastRt) return '—';
-      const b = this.lastRt.broker;
-      return `${this.lastRt.total}ms` + (b != null ? ` (${b} at Schwab)` : '');
+      const r = this.lastRt;
+      if (!r) return '—';
+      const at = r.broker != null ? ` (${r.broker} at Schwab)` : '';
+      if (r.visible == null) return `${r.total}ms${at}`;
+      return `${r.visible}ms seen · ${r.confirm}ms confirmed${at}`;
     },
   };
 };
