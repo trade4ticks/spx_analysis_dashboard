@@ -85,6 +85,10 @@ GATES = [
     # The band must hold still under a flat tape, and a rate must be a rate.
     _s("check_live_axis.py",
        note="price band steps only at the edge; trades/min is a fixed minute"),
+    # The chart must not move under the cursor. Anything that appears on its
+    # own belongs in an overlay, not in the flow above the canvas.
+    _s("check_live_layout.py",
+       note="no conditional block reflows the chart; controls are dark"),
     # A pane must not act on an order another application placed, and must
     # not stay blocked long after the broker has answered.
     _s("check_live_reconcile.py",

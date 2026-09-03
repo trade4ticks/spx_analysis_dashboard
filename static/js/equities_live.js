@@ -53,6 +53,10 @@ const LV_RESOLVE_POLL_S = 2;
 /* MARKETABLE. Not a side colour — a hazard colour, deliberately outside the
  * blue/pink vocabulary so it cannot be read as "the other side". These rows
  * fill the instant they are clicked. */
+/* Quantity quick-picks. Ten first because it is the default, and the
+ * default is small on purpose: the ladder is one click from an order. */
+const LV_QTYS = [10, 20, 30, 50, 100, 200];
+
 /* How near the cursor has to be to a working order to grab it, in pixels.
  * Wider than the 6px used for a price line: this one ends in a replace, and
  * missing the grab silently places a NEW order at the row instead. */
@@ -184,7 +188,13 @@ window.lvPane = function (id, send) {
      * It is never persisted: a pane that came back armed after a reload
      * would be a pane that can trade because a page was left open. */
     armed: false,
-    qty: 100,
+    /* TEN, not a hundred. A mis-click at 10 shares is a rounding error and
+     * at 100 it is not, and the ladder is one click from an order — the
+     * default is the size a mistake costs, so it is the small one. The quick
+     * buttons beside it are how a deliberate 100 takes one click too. */
+    qty: 10,
+    // The sizes worth a button rather than a keystroke.
+    qtyPresets: LV_QTYS,
     // Cents per ladder row. The row height encodes the increment, which is
     // why nudging is "one row" and not "one cent" — the same key does the
     // right thing at any zoom.

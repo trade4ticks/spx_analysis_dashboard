@@ -34,6 +34,17 @@
       border-radius:6px; padding:7px 10px; margin-bottom:8px; font-size:11px;
     }
     .lv-bar.pane { margin-bottom:6px; padding:5px 8px; gap:6px; }
+    /* THE NATIVE CONTROLS, DARK. Setting a background on an input does not
+       reach the parts the browser draws itself — a number field's spinner
+       arrows and a checkbox both come out light on a dark page, because the
+       UA still thinks the page is light. `color-scheme` is what tells it
+       otherwise, and it is what every other page in this project already
+       does (see ticker_analysis.html). Declared on the element as well as
+       the root so a control keeps it regardless of where it is moved to. */
+    html { color-scheme: dark; }
+    .lv-sel, .lv-inp, .lv-chk input, input[type=number], input[type=text] {
+      color-scheme: dark;
+    }
     .lv-sel, .lv-inp {
       background:var(--raised); border:1px solid var(--border); color:var(--text);
       font-size:11px; padding:3px 7px; border-radius:4px;
@@ -83,6 +94,38 @@
       background:var(--surface); border:1px solid var(--border); border-radius:6px;
     }
     .lv-pane canvas { display:block; width:100%; height:100%; }
+
+    /* ── THE OVERLAY: notices that must never move the chart ────────────
+       These all appear and disappear mid-session. In the flow they resized
+       the canvas under the cursor at the moment it was being read.
+
+       The container is inert to the mouse so the tape stays clickable
+       through the gaps; each block inside takes its own events back, so
+       buttons still work. Bounded height with its own scroll: four working
+       orders and a stale warning must not grow until they cover the plot
+       they are annotating. */
+    .lv-over {
+      position:absolute; left:6px; right:6px; z-index:3;
+      pointer-events:none; display:flex; flex-direction:column; gap:5px;
+    }
+    .lv-over.top { top:6px; max-height:62%; overflow-y:auto; }
+    .lv-over.bottom {
+      bottom:6px; flex-direction:row; align-items:center; flex-wrap:wrap;
+      gap:5px; max-height:34%; overflow-y:auto;
+      right:auto; max-width:calc(100% - 12px);
+    }
+    .lv-over > * { pointer-events:auto; }
+    /* The blocks were built for a full-width bar; over the plot they need a
+       backing or the tape reads through them. */
+    .lv-over .lv-down, .lv-over .lv-confirm, .lv-over .lv-stale,
+    .lv-over .lv-unres { margin-bottom:0; box-shadow:0 2px 10px rgba(0,0,0,0.5); }
+    .lv-over .lv-down { background:rgba(40,10,24,0.94); }
+    .lv-over .lv-confirm { background:rgba(48,28,4,0.95); }
+    .lv-over .lv-stale { background:rgba(44,32,6,0.94); }
+    .lv-over .lv-unres { background:rgba(30,6,16,0.96); }
+    .lv-over.bottom .lv-sub, .lv-over.bottom .lv-btn, .lv-over.bottom .lv-ords {
+      background:rgba(16,18,22,0.88); border-radius:4px; padding:2px 5px;
+    }
     .lv-readout {
       position:absolute; font-size:10.5px;
       color:var(--text); background:rgba(20,20,20,0.72);
@@ -176,6 +219,18 @@
     }
     .lv-arm.on { background:#e84393; border-color:#e84393; color:#fff; }
     .lv-inp.qty { width:56px; text-align:right; font-weight:600; }
+    /* Tight, so six of them cost less width than the working-order list they
+       displaced — the size being sent matters more than a list of what is
+       already resting, and the resting list is now over the chart. */
+    .lv-qtys { display:flex; gap:2px; }
+    .lv-qty {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--muted); font-size:10px; font-weight:600; line-height:1;
+      padding:3px 5px; border-radius:3px; cursor:pointer;
+      font-variant-numeric:tabular-nums;
+    }
+    .lv-qty:hover { color:var(--text); }
+    .lv-qty.on { background:#3498db; border-color:#3498db; color:#fff; }
     .lv-pos {
       font-variant-numeric:tabular-nums; font-weight:700; font-size:11.5px;
     }
@@ -221,6 +276,21 @@
     /* ── an unresolved placement ───────────────────────────────────────
        Louder than an error, because it is worse than one: an error means
        nothing happened, and this means nobody knows. */
+    /* Fixed, so a notice arriving never moves a chart. Bottom-right stacks
+       upward: the top of the page is where the controls are, and a banner
+       that lands over the arm button at the moment something goes wrong is
+       a banner in the way of the fix. Capped and scrollable so a burst of
+       problems cannot grow over the panes. */
+    .lv-toasts {
+      position:fixed; right:12px; bottom:12px; z-index:40;
+      display:flex; flex-direction:column; gap:6px;
+      max-width:min(460px, calc(100vw - 24px)); max-height:52vh;
+      overflow-y:auto; pointer-events:none;
+    }
+    .lv-toasts > * { pointer-events:auto; margin-bottom:0 !important; }
+    .lv-toasts .lv-down { background:rgba(40,10,24,0.96); }
+    .lv-toasts .lv-unres-top { box-shadow:0 3px 14px rgba(0,0,0,0.55); }
+
     .lv-unres-top {
       background:#b8003a; color:#fff; font-weight:700; font-size:12px;
       padding:7px 12px; border-radius:5px; margin-bottom:8px;
@@ -263,18 +333,50 @@
       DELAYED FEED — this tape is 15 minutes behind. It renders identically to
       a live one, which is why this banner exists. Set LIVE_FEED=realtime.
     </div>
-    <div class="lv-down" x-show="!connected" x-cloak>
-      DISCONNECTED — <span x-text="statusLine()"></span>. The plots below are
-      frozen, not quiet.
-    </div>
-    <div class="lv-down" x-show="connected && status && status.problems.length"
-         x-cloak>
-      <template x-for="p in (status ? status.problems : [])" :key="p">
-        <span style="display:block" x-text="p"></span>
-      </template>
-    </div>
-    <div class="lv-down" x-show="refused" x-cloak>
-      <span x-text="refused"></span>
+    <!-- ══ PAGE-LEVEL NOTICES, FLOATED ═══════════════════════════════════
+         These come and go mid-session — a socket drops, a 429 arrives, a
+         pane goes unresolved — and in the flow every one of them pushed
+         EVERY pane down at once. Fixed to the corner they can say the same
+         thing without moving the charts. The two banners that are decided
+         at load and then hold still (delayed feed, trading disabled) stay
+         in the flow above, where they cost nothing. -->
+    <div class="lv-toasts">
+      <div class="lv-down" x-show="!connected" x-cloak>
+        DISCONNECTED — <span x-text="statusLine()"></span>. The plots are
+        frozen, not quiet.
+      </div>
+      <div class="lv-down" x-show="connected && status && status.problems.length"
+           x-cloak>
+        <template x-for="p in (status ? status.problems : [])" :key="p">
+          <span style="display:block" x-text="p"></span>
+        </template>
+      </div>
+      <div class="lv-down" x-show="refused" x-cloak>
+        <span x-text="refused"></span>
+      </div>
+      <!-- The rate limit lands here: a 429 is a problem the server reports,
+           and it used to shove all four panes down as it came and went. -->
+      <div class="lv-down"
+           x-show="brokerHealth && brokerHealth.problems
+                   && brokerHealth.problems.length" x-cloak>
+        <template x-for="p in (brokerHealth ? brokerHealth.problems : [])"
+                  :key="p">
+          <span style="display:block" x-text="p"></span>
+        </template>
+      </div>
+      <!-- ══ WHICH PANE IS STUCK, BY NAME ════════════════════════════════
+           With four panes open, "something is unresolved" is not actionable.
+           This names the symbol so the pane can be found without reading
+           all four of them. -->
+      <div class="lv-unres-top" x-show="unresolvedPanes().length" x-cloak>
+        UNRESOLVED ORDER —
+        <template x-for="p in unresolvedPanes()" :key="p.id">
+          <span class="lv-unres-sym" x-text="p.symbol"></span>
+        </template>
+        <span x-text="unresolvedPanes().length > 1
+                ? ' — those panes will not send anything until each is settled.'
+                : ' — that pane will not send anything until it is settled.'"></span>
+      </div>
     </div>
 
     <!-- ── site-level bar: what is true of the connection, not of a pane ── -->
@@ -327,22 +429,9 @@
     </div>
 
     <!-- Trading is off at the server unless deliberately enabled. Stated
-         here rather than discovered when a click does nothing. -->
-    <!-- ══ WHICH PANE IS STUCK, BY NAME ══════════════════════════════════
-         With four panes open, "something is unresolved" is not actionable.
-         This names the symbol at the top of the page so the pane can be
-         found without reading all four of them. -->
-    <div class="lv-unres-top" x-show="unresolvedPanes().length" x-cloak>
-      UNRESOLVED ORDER —
-      <template x-for="p in unresolvedPanes()" :key="p.id">
-        <span class="lv-unres-sym" x-text="p.symbol"></span>
-      </template>
-      <span x-text="unresolvedPanes().length > 1
-              ? ' — those panes will not send anything until each is settled.'
-              : ' — that pane will not send anything until it is settled.'"></span>
-    </div>
+         here rather than discovered when a click does nothing.
 
-    <!-- The reason comes from the SERVER, because there are now two of them
+         The reason comes from the SERVER, because there are now two of them
          — the environment gate and the runtime flag — and a banner that
          always names the environment variable would send you to restart the
          service when the fix is one HTTP call. -->
@@ -352,14 +441,6 @@
       button is not.
       <span x-text="brokerHealth && brokerHealth.trading
                     ? brokerHealth.trading.why : ''"></span>
-    </div>
-    <div class="lv-down"
-         x-show="brokerHealth && brokerHealth.problems
-                 && brokerHealth.problems.length" x-cloak>
-      <template x-for="p in (brokerHealth ? brokerHealth.problems : [])"
-                :key="p">
-        <span style="display:block" x-text="p"></span>
-      </template>
     </div>
 
     <div class="lv-panes" :class="layout">
@@ -466,27 +547,6 @@
                            another pane is watching it.">×</button>
           </div>
 
-          <div class="lv-down" x-show="pane.refused" x-cloak>
-            <span x-text="pane.refused"></span>
-          </div>
-
-          <!-- ══ a marketable order asks first ═════════════════════════
-               A limit through the touch is a correct order that fills the
-               instant it lands, which for a passive strategy is never the
-               intended one — and nothing between the click and the fill
-               used to say so. NOT a browser confirm(): this has to name
-               the side, the price and the edge it crosses, and a native
-               dialog can say none of that. -->
-          <div class="lv-confirm" x-show="pane.confirm" x-cloak>
-            <span class="lv-confirm-txt" x-text="pane.confirmText()"></span>
-            <button class="lv-btn danger" @click="pane.confirmSend()"
-                    x-text="pane.confirm && pane.confirm.kind === 'move'
-                            ? 'move anyway' : 'send anyway'"></button>
-            <!-- The default action, and the wider target. -->
-            <button class="lv-btn" @click="pane.confirmCancel()">keep it
-              passive</button>
-          </div>
-
           <!-- ══ trading ═══════════════════════════════════════════════
                Every control here calls a NAMED function and carries no
                logic of its own, so binding a hotkey later is one line
@@ -509,6 +569,16 @@
             <span class="lv-sub">qty</span>
             <input class="lv-inp qty" type="number" min="1" step="1"
                    x-model.number="pane.qty">
+            <!-- The sizes actually traded, one click each. The field still
+                 takes anything; these are the ones worth not typing, and
+                 the one that is currently set is lit so the size is
+                 readable without looking at the number. -->
+            <span class="lv-qtys">
+              <template x-for="q in pane.qtyPresets" :key="q">
+                <button class="lv-qty" :class="{on: pane.qty === q}"
+                        @click="pane.qty = q" x-text="q"></button>
+              </template>
+            </span>
 
             <span class="lv-sub">row</span>
             <button class="lv-btn" @click="pane.ladderStep(-1)">−</button>
@@ -562,29 +632,44 @@
                   x-text="'rt ' + pane.rtText()"></span>
           </div>
 
-          <!-- WORKING ORDERS, listed as well as drawn. The plot shows where
-               they rest against the tape; this is where they are cancelled
-               individually, which the plot cannot do. -->
-          <div class="lv-bar trade" x-show="pane.working.length" x-cloak>
-            <span class="lv-sub">working</span>
-            <button class="lv-btn" @click="pane.cancelAll()"
-                    x-show="pane.working.length > 1" x-cloak
-                    title="Cancel every working order in this name. The
-                           single-order controls refuse to guess which one
-                           they mean when more than one is live.">cancel all</button>
-            <div class="lv-ords">
-              <template x-for="o in pane.working" :key="o.order_id">
-                <span class="lv-ord"
-                      :class="String(o.side).startsWith('BUY') ? 'buy' : 'sell'">
-                  <span x-text="o.side + ' ' + ((o.qty||0) - (o.filled||0))
-                                + ' @ ' + Number(o.price).toFixed(2)
-                                + (o.status && o.status !== 'WORKING'
-                                   ? ' · ' + o.status : '')"></span>
-                  <span class="lv-x" @click="pane.cancelOrder(o.order_id)"
-                        title="Cancel this order">×</span>
-                </span>
-              </template>
-            </div>
+          <div class="lv-pane">
+            <canvas :id="'lv-canvas-' + pane.id"
+                    @mousemove="pane.onMove($event)"
+                    @mousedown="pane.onDown($event)"
+                    @dblclick="pane.onDouble($event)"
+                    @mouseleave="pane.hover = null"></canvas>
+
+          <!-- ══ NOTHING BELOW HERE MAY MOVE THE CHART ══════════════════
+               Every block in this overlay appears and disappears while you
+               are watching the plot — an order starts working, a warning
+               clears, a confirmation is answered. In the flow above, each
+               one shifted the canvas under the cursor at the exact moment
+               it was being read, and a chart that jumps while you aim at a
+               row is worse than no chart.
+
+               So they float over the plot instead. The overlay itself takes
+               no pointer events; the blocks inside it take their own, so
+               the tape stays clickable everywhere a notice is not. -->
+          <div class="lv-over top">
+          <div class="lv-down" x-show="pane.refused" x-cloak>
+            <span x-text="pane.refused"></span>
+          </div>
+
+          <!-- ══ a marketable order asks first ═════════════════════════
+               A limit through the touch is a correct order that fills the
+               instant it lands, which for a passive strategy is never the
+               intended one — and nothing between the click and the fill
+               used to say so. NOT a browser confirm(): this has to name
+               the side, the price and the edge it crosses, and a native
+               dialog can say none of that. -->
+          <div class="lv-confirm" x-show="pane.confirm" x-cloak>
+            <span class="lv-confirm-txt" x-text="pane.confirmText()"></span>
+            <button class="lv-btn danger" @click="pane.confirmSend()"
+                    x-text="pane.confirm && pane.confirm.kind === 'move'
+                            ? 'move anyway' : 'send anyway'"></button>
+            <!-- The default action, and the wider target. -->
+            <button class="lv-btn" @click="pane.confirmCancel()">keep it
+              passive</button>
           </div>
 
           <!-- ══ AN ORDER WHOSE ANSWER NEVER ARRIVED ════════════════════
@@ -642,13 +727,35 @@
                        && pane.brokerErr" x-cloak>
             <span x-text="pane.brokerErr"></span>
           </div>
+          </div><!-- /lv-over top -->
 
-          <div class="lv-pane">
-            <canvas :id="'lv-canvas-' + pane.id"
-                    @mousemove="pane.onMove($event)"
-                    @mousedown="pane.onDown($event)"
-                    @dblclick="pane.onDouble($event)"
-                    @mouseleave="pane.hover = null"></canvas>
+          <!-- WORKING ORDERS, listed as well as drawn. The plot shows where
+               they rest against the tape; this is where they are cancelled
+               individually, which the plot cannot do. Bottom-left, over the
+               chart: the quantity buttons wanted the width in the bar more
+               than a list of what is already resting did. -->
+          <div class="lv-over bottom" x-show="pane.working.length" x-cloak>
+            <span class="lv-sub">working</span>
+            <button class="lv-btn" @click="pane.cancelAll()"
+                    x-show="pane.working.length > 1" x-cloak
+                    title="Cancel every working order in this name. The
+                           single-order controls refuse to guess which one
+                           they mean when more than one is live.">cancel all</button>
+            <div class="lv-ords">
+              <template x-for="o in pane.working" :key="o.order_id">
+                <span class="lv-ord"
+                      :class="String(o.side).startsWith('BUY') ? 'buy' : 'sell'">
+                  <span x-text="o.side + ' ' + ((o.qty||0) - (o.filled||0))
+                                + ' @ ' + Number(pane.shownPrice(o)).toFixed(2)
+                                + (pane.pendingFor(o) ? ' · sending…'
+                                   : (o.status && o.status !== 'WORKING'
+                                      ? ' · ' + o.status : ''))"></span>
+                  <span class="lv-x" @click="pane.cancelOrder(o.order_id)"
+                        title="Cancel this order">×</span>
+                </span>
+              </template>
+            </div>
+          </div>
             <!-- AT THE CURSOR, share count only. It was a corner box carrying
                  time, venue and conditions — all of which meant looking away
                  from the point to read them. A STACK when bubbles overlap,
