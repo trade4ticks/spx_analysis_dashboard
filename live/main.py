@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from live import config, norms
+from live import broker, config, norms
 from live.hub import HUB
 
 logging.basicConfig(level=logging.INFO,
@@ -37,6 +37,13 @@ async def lifespan(app: FastAPI):
     tz = norms.tz_problem()
     if tz:
         log.warning("arrival norms: %s", tz)
+    # Stated at startup either way, because "why can I not place an order"
+    # should be answerable from the journal and not only from the page.
+    log.info("live trading: %s",
+             "ENABLED" if config.TRADING_ENABLED
+             else "disabled (set LIVE_TRADING_ENABLED=1 to allow orders)")
+    for p in broker.problems():
+        log.warning("broker: %s", p)
     tasks = [asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump())]
     # Pinned BEFORE anything connects, so a symbol on the list is already
     # buffering by the time a pane asks for it — which is the entire point of
@@ -88,6 +95,100 @@ async def arrival_norm(symbol: str):
     a failure here degrades one pane rather than the tape.
     """
     return await norms.arrival_norm(symbol)
+
+
+# ── trading ─────────────────────────────────────────────────────────────────
+#
+# REST, not the WebSocket, on purpose. An order is a request with a reply and
+# a round-trip time the page displays: part of why this exists is to find out
+# whether Schwab's path is quicker than the click it replaces, and a fire-and-
+# forget socket message could not answer that.
+#
+# Every response carries `rt_ms` and every failure carries `why` in words the
+# pane can show. Nothing here returns a bare 500 — an order-placing endpoint
+# that fails opaquely is worse than one that refuses.
+def _broker_fail(exc: Exception) -> dict:
+    return {"ok": False, "why": str(exc)}
+
+
+@app.get("/broker/health")
+async def broker_health():
+    h = broker.health()
+    h["problems"] = broker.problems()
+    return h
+
+
+@app.get("/broker/state")
+async def broker_state(symbols: str = ""):
+    """Positions and working orders, with when they were last confirmed.
+
+    THE PAGE IS NOT THE SOURCE OF TRUTH. `as_of` is the whole point of this
+    response: the pane shows its age and says so loudly past
+    config.STALE_AFTER_S, because a confident wrong list is the failure that
+    costs money here.
+    """
+    syms = [s for s in (symbols or "").upper().split(",") if s]
+    try:
+        st = await broker.state(syms or None)
+        st["stale_after_s"] = config.STALE_AFTER_S
+        return st
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("broker state failed: %s", exc)
+        return _broker_fail(exc)
+
+
+@app.post("/broker/order")
+async def broker_order(req: Request):
+    b = await req.json()
+    try:
+        return await broker.place(
+            symbol=str(b.get("symbol") or "").upper(),
+            side=str(b.get("side") or "").upper(),
+            qty=int(b.get("qty") or 0),
+            price=(float(b["price"]) if b.get("price") is not None else None),
+            armed=bool(b.get("armed")),
+            reference=(float(b["reference"]) if b.get("reference") else None),
+            position_qty=float(b.get("position_qty") or 0))
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
+
+
+@app.post("/broker/replace")
+async def broker_replace(req: Request):
+    b = await req.json()
+    try:
+        return await broker.replace(
+            order_id=str(b.get("order_id") or ""),
+            symbol=str(b.get("symbol") or "").upper(),
+            side=str(b.get("side") or "").upper(),
+            qty=int(b.get("qty") or 0),
+            price=float(b.get("price")),
+            armed=bool(b.get("armed")),
+            reference=(float(b["reference"]) if b.get("reference") else None),
+            position_qty=float(b.get("position_qty") or 0))
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
+
+
+@app.post("/broker/cancel")
+async def broker_cancel(req: Request):
+    """Not gated on arming — see the note on broker.cancel()."""
+    b = await req.json()
+    try:
+        return await broker.cancel(order_id=str(b.get("order_id") or ""))
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
+
+
+@app.post("/broker/flatten")
+async def broker_flatten(req: Request):
+    b = await req.json()
+    try:
+        return await broker.flatten(
+            symbol=str(b.get("symbol") or "").upper(),
+            armed=bool(b.get("armed")))
+    except Exception as exc:                                # noqa: BLE001
+        return _broker_fail(exc)
 
 
 @app.websocket("/ws")

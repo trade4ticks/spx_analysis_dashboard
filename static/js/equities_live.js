@@ -130,6 +130,33 @@ window.lvPane = function (id, send) {
     normFetching: false,
     normAt: 0,
 
+    // ── trading ──────────────────────────────────────────────────────────
+    /* ARMED IS OFF AND STAYS OFF until switched on per pane, per session.
+     * It is never persisted: a pane that came back armed after a reload
+     * would be a pane that can trade because a page was left open. */
+    armed: false,
+    qty: 100,
+    // Cents per ladder row. The row height encodes the increment, which is
+    // why nudging is "one row" and not "one cent" — the same key does the
+    // right thing at any zoom.
+    ladderCents: 1,
+    ladderStops: [1, 2, 5],
+    // What the BROKER says, replaced wholesale on every read. Never merged
+    // with a local guess: a confident wrong list of working orders is the
+    // failure that costs money.
+    position: null,       // {qty, avg, day_pl}
+    working: [],          // [{order_id, side, qty, price, status}]
+    recent: [],           // terminal orders, so a fill is visible
+    limits: null,         // the shared 120/min budget, as the server sees it
+    brokerAt: 0,          // when the broker last confirmed, ms
+    brokerErr: '',
+    lastRt: null,         // round trip of the last action, ms
+    lastAction: '',
+    busy: false,
+    // Row the cursor is over in the ladder, and which zone.
+    ladderHover: null,    // {price, zone: 'buy'|'sell'}
+    ladder: false,        // the gutter costs plot width, so it is opt-in
+
     canvasId() { return 'lv-canvas-' + this.id; },
     cv() { return document.getElementById(this.canvasId()); },
 
@@ -276,11 +303,27 @@ window.lvPane = function (id, send) {
      * draw() and the pointer handlers each computed their own padding, window
      * bounds and scales; two copies of a mapping drift, and a hover that
      * disagrees with what is drawn is worse than no hover. */
+    /* The right gutter's width, and how it is divided.
+     *
+     * ONE DEFINITION, used by the drawing and by the hit-testing. The ladder
+     * rows have to line up with the plot's y-axis exactly — that is the
+     * requirement — so they are drawn on the same canvas with the same Y()
+     * rather than as DOM alongside it. A second copy of the mapping is
+     * precisely the drift that a click on the wrong row would come from.
+     *
+     *   | plot | BUY | PRICE | SELL |
+     */
+    gutter() {
+      if (!this.ladder) return { w: 58, buy: 0, price: 6, sell: 0, cols: false };
+      return { w: 106, buy: 26, price: 54, sell: 26, cols: true };
+    },
+
     geom() {
       const cv = this.cv();
       if (!cv) return null;
       const r = cv.getBoundingClientRect();
-      const padL = 8, padR = 58, padT = 8, padB = 20;
+      const padL = 8, padT = 8, padB = 20;
+      const padR = this.gutter().w;
       const plotW = Math.max(10, r.width - padL - padR);
       const plotH = Math.max(10, r.height - padT - padB);
       const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
@@ -292,6 +335,53 @@ window.lvPane = function (id, send) {
         Y: p => padT + (1 - (p - lo) / (hi - lo)) * plotH,
         priceAt: y => lo + (1 - (y - padT) / plotH) * (hi - lo),
       };
+    },
+
+    // ── the ladder ───────────────────────────────────────────────────────
+    /* Row prices, top down, on the selected increment.
+     *
+     * Snapped to the increment rather than to the band's edge, so a row
+     * boundary does not move when the band steps — the row a limit sits in
+     * has to be the same row after a recentre. */
+    ladderRows(lo, hi) {
+      const step = this.ladderCents / 100;
+      const first = Math.ceil(lo / step) * step;
+      const rows = [];
+      // Bounded. At a 500-cent span and 1-cent rows this would be 1,000
+      // rows of two pixels, which is not a thing anyone can click.
+      for (let p = first; p <= hi + 1e-9 && rows.length < 240; p += step) {
+        rows.push(Math.round(p * 100) / 100);
+      }
+      return rows;
+    },
+
+    /* Whether the increment can be clicked at this zoom, and what to say.
+     *
+     * A row under about five pixels is not a click target, and silently
+     * letting it be one is how an order goes in a cent from where it was
+     * aimed. The pane says so and refuses rather than guessing. */
+    rowPx() {
+      const g = this.geom();
+      if (!g) return 0;
+      const rows = Math.max(1, (g.hi - g.lo) / (this.ladderCents / 100));
+      return g.plotH / rows;
+    },
+    rowTooFine() { return this.rowPx() < 5; },
+
+    ladderZone(mx, g) {
+      if (!this.ladder || !g) return null;
+      const x0 = g.padL + g.plotW;
+      const gu = this.gutter();
+      if (mx >= x0 && mx < x0 + gu.buy) return 'buy';
+      if (mx >= x0 + gu.buy + gu.price
+          && mx < x0 + gu.buy + gu.price + gu.sell) return 'sell';
+      return null;
+    },
+
+    /* The row a y lands in, snapped to the increment. */
+    rowAt(y, g) {
+      const step = this.ladderCents / 100;
+      return Math.round(g.priceAt(y) / step) * step;
     },
 
     // ── the two rates ────────────────────────────────────────────────────
@@ -331,7 +421,8 @@ window.lvPane = function (id, send) {
       ctx.scale(dpr, dpr);
       const w = W / dpr, h = H / dpr;
 
-      const padL = 8, padR = 58, padT = 8, padB = 20;
+      const padL = 8, padT = 8, padB = 20;
+      const padR = this.gutter().w;
       const plotW = Math.max(10, w - padL - padR);
       const plotH = Math.max(10, h - padT - padB);
 
@@ -470,6 +561,145 @@ window.lvPane = function (id, send) {
         ctx.textAlign = 'left';
         ctx.fillText(`${ln.p.toFixed(2)}  ${hits} print${hits === 1 ? '' : 's'}`,
                      padL + 4, y - 4);
+      }
+
+      // ── working orders, ON THE PLOT ────────────────────────────────────
+      //
+      // Most of the value of trading from here is seeing the order against
+      // the tape: whether anything is printing at the level it rests on. So
+      // it is a line across the plot, not only a marker in the gutter.
+      //
+      // Solid, where a placed price line is dashed — one is a level being
+      // watched, the other is real and working at the broker.
+      for (const o of this.working) {
+        if (o.price == null || o.price < lo || o.price > hi) continue;
+        const y = Y(o.price);
+        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+        ctx.strokeStyle = buy ? 'rgba(52,152,219,0.90)'
+                              : 'rgba(232,67,147,0.90)';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
+        ctx.stroke();
+        ctx.font = '700 10px sans-serif';
+        ctx.fillStyle = buy ? '#6cb6e6' : '#f07ab4';
+        ctx.textAlign = 'left';
+        const left = (o.qty || 0) - (o.filled || 0);
+        ctx.fillText(`${o.side} ${left}${o.filled ? ' of ' + o.qty : ''}`
+                     + ` @ ${Number(o.price).toFixed(2)}`
+                     + (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : ''),
+                     padL + 4, y + 11);
+      }
+
+      // ── the average price of the open position ─────────────────────────
+      //
+      // The one line that says whether the trade is working. Drawn as a
+      // long-dashed rule so it is not confused with an order.
+      const pos = this.position;
+      if (pos && pos.avg && Math.abs(pos.qty || 0) > 1e-9
+          && pos.avg >= lo && pos.avg <= hi) {
+        const y = Y(pos.avg);
+        ctx.setLineDash([2, 3]);
+        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = '600 9px sans-serif';
+        ctx.fillStyle = '#b9bfc7';
+        ctx.textAlign = 'left';
+        ctx.fillText(`avg ${Number(pos.avg).toFixed(2)}`, padL + 4, y - 3);
+      }
+
+      if (this.ladder) {
+        this.drawLadder(ctx, padL, padT, plotW, plotH, lo, hi, Y);
+      }
+    },
+
+    /* THE LADDER, on the same canvas and the same Y().
+     *
+     * Rows aligned to the plot's y-axis is the requirement, and drawing it
+     * here is what makes that structural rather than replicated. A DOM
+     * ladder beside the canvas would need its own copy of the mapping, and
+     * the failure mode of two copies drifting is a click landing on the
+     * wrong row — which is an order at the wrong price.
+     */
+    drawLadder(ctx, padL, padT, plotW, plotH, lo, hi, Y) {
+      const gu = this.gutter();
+      const x0 = padL + plotW;
+      const rows = this.ladderRows(lo, hi);
+      const rowH = rows.length > 1
+        ? Math.abs(Y(rows[1]) - Y(rows[0])) : plotH;
+      const step = this.ladderCents / 100;
+      const fine = rowH < 5;
+      const last = this.lastPrice();
+
+      ctx.textAlign = 'center';
+      for (const p of rows) {
+        const yc = Y(p);
+        const top = yc - rowH / 2;
+        if (top + rowH < padT || top > padT + plotH) continue;
+
+        // Zones. Faint by default; the hovered one lights up, and only when
+        // the pane is armed — an unarmed pane must not look clickable.
+        for (const [zone, zx, zw] of [['buy', x0, gu.buy],
+                                      ['sell', x0 + gu.buy + gu.price, gu.sell]]) {
+          const hot = this.ladderHover && this.ladderHover.zone === zone
+            && Math.abs(this.ladderHover.price - p) < step / 2;
+          ctx.fillStyle = hot
+            ? (this.armed && !fine
+                ? (zone === 'buy' ? 'rgba(52,152,219,0.45)'
+                                  : 'rgba(232,67,147,0.45)')
+                : 'rgba(140,140,140,0.30)')
+            : (zone === 'buy' ? 'rgba(52,152,219,0.055)'
+                              : 'rgba(232,67,147,0.055)');
+          ctx.fillRect(zx, top, zw, Math.max(1, rowH - 0.5));
+          if (hot && this.armed && !fine) {
+            ctx.font = '700 9px sans-serif';
+            ctx.fillStyle = '#fff';
+            if (rowH >= 8) ctx.fillText(String(this.qty), zx + zw / 2, yc + 3);
+          }
+        }
+
+        // The price, and the count of prints that have landed on it — the
+        // same question the draggable lines answer, per row.
+        if (!fine || Math.abs(Math.round(p * 100) % 5) < 1e-9) {
+          ctx.font = (rowH >= 9 ? '600 10px' : '9px') + ' sans-serif';
+          ctx.fillStyle = (last != null && Math.abs(last - p) < step / 2)
+            ? '#ffffff' : '#cfd4da';
+          ctx.fillText(p.toFixed(2), x0 + gu.buy + gu.price / 2, yc + 3);
+        }
+      }
+
+      // Working orders, in their row. Drawn over the zones so an order is
+      // never hidden by a hover.
+      for (const o of this.working) {
+        if (o.price == null || o.price < lo || o.price > hi) continue;
+        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+        const yc = Y(Math.round(o.price / step) * step);
+        const zx = buy ? x0 : x0 + gu.buy + gu.price;
+        const zw = buy ? gu.buy : gu.sell;
+        ctx.fillStyle = buy ? 'rgba(52,152,219,0.95)'
+                            : 'rgba(232,67,147,0.95)';
+        ctx.fillRect(zx, yc - Math.max(2, rowH / 2), zw,
+                     Math.max(4, rowH - 0.5));
+        ctx.font = '700 9px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        if (rowH >= 8) {
+          ctx.fillText(String((o.qty || 0) - (o.filled || 0)),
+                       zx + zw / 2, yc + 3);
+        }
+      }
+
+      // A row too fine to click says so, rather than accepting a click and
+      // landing a cent from where it was aimed.
+      if (fine) {
+        ctx.font = '700 9px sans-serif';
+        ctx.fillStyle = '#e84393';
+        ctx.textAlign = 'right';
+        ctx.fillText('rows too fine — zoom in', x0 + gu.w - 4, padT + 9);
       }
     },
 
@@ -648,6 +878,16 @@ window.lvPane = function (id, send) {
         return;
       }
 
+      // In the ladder gutter: no tape hover there, and the row under the
+      // cursor lights up instead.
+      const zone = this.ladderZone(mx, g);
+      if (zone) {
+        this.ladderHover = { zone, price: this.rowAt(my, g) };
+        this.hover = null;
+        return;
+      }
+      this.ladderHover = null;
+
       // EVERY print under the cursor, not the nearest. Several share a
       // millisecond and land within a pixel or two; one number there cannot
       // distinguish a single 400-share print from four of 100.
@@ -667,7 +907,19 @@ window.lvPane = function (id, send) {
     onDown(e) {
       const g = this.geom();
       if (!g) return;
+      const mx = e.clientX - g.rect.left;
       const my = e.clientY - g.rect.top;
+
+      // A click in a ladder zone is an order. Single click, as a ladder
+      // works — the safety is the arm toggle and the guards, not a
+      // confirmation dialog that would defeat the point of the speed.
+      const zone = this.ladderZone(mx, g);
+      if (zone) {
+        e.preventDefault();
+        this.clickLadder(zone, this.rowAt(my, g));
+        return;
+      }
+
       // Grab a line if the cursor is on one.
       let best = -1, bestD = 6;
       this.lines.forEach((ln, i) => {
@@ -826,6 +1078,234 @@ window.lvPane = function (id, send) {
     },
 
     fmt(v) { return lvFmtNum(v); },
+
+    // ═══ trading ════════════════════════════════════════════════════════
+    //
+    // EVERY ACTION IS A NAMED FUNCTION taking no positional UI state, and
+    // the buttons only call them. Hotkeys are wanted later but not yet —
+    // binding one should be a line that calls placeBuy(), not an untangling
+    // of a click handler.
+
+    /* THIS PAGE IS NOT THE SOURCE OF TRUTH, and this is where that is
+     * enforced. `brokerAt` is when Schwab last confirmed the state, and
+     * everything below is phrased against it: past the threshold the pane
+     * says the list may be wrong rather than showing it as current. */
+    brokerAgeS() {
+      return this.brokerAt ? (Date.now() - this.brokerAt) / 1000 : null;
+    },
+    brokerStale() {
+      const age = this.brokerAgeS();
+      return age == null || age > (this.staleAfterS || 12);
+    },
+    staleAfterS: 12,
+
+    /* The line the pane shows when its order state cannot be trusted.
+     *
+     * Deliberately blunt. The orders are live at Schwab whatever this page
+     * believes, and the dangerous version of this pane is the one that shows
+     * a confident wrong list. */
+    staleWhy() {
+      if (this.brokerErr) return this.brokerErr;
+      const age = this.brokerAgeS();
+      if (age == null) return 'never confirmed with Schwab';
+      return `last confirmed ${age.toFixed(0)}s ago`;
+    },
+
+    async brokerCall(path, body) {
+      const t0 = performance.now();
+      this.busy = true;
+      try {
+        const r = await fetch('broker/' + path, {
+          method: body ? 'POST' : 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const j = await r.json();
+        // TOTAL round trip as the browser sees it, alongside the broker's own
+        // leg. Part of why this exists is finding out whether this path beats
+        // the click it replaces, and only one of those two numbers answers
+        // that question.
+        this.lastRt = { total: Math.round(performance.now() - t0),
+                        broker: j.rt_ms != null ? Math.round(j.rt_ms) : null };
+        if (!j.ok) {
+          this.brokerErr = j.why || 'the broker refused, without saying why';
+        } else {
+          this.brokerErr = '';
+        }
+        return j;
+      } catch (err) {
+        this.brokerErr = 'the request never completed: ' + err
+          + ' — any order already sent is still live at Schwab';
+        return { ok: false, why: String(err) };
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /* Read the record. Replaces position and working orders WHOLESALE.
+     *
+     * Never merged with what was held: an order that has filled or been
+     * cancelled elsewhere has to disappear, and a merge is how a phantom
+     * order stays on screen. */
+    async refreshBroker() {
+      if (!this.symbol) return;
+      const j = await this.brokerCall('state?symbols='
+                                      + encodeURIComponent(this.symbol));
+      if (!j.ok) return;                 // brokerAt deliberately not moved
+      this.position = (j.positions || [])
+        .find(p => (p.symbol || '').toUpperCase() === this.symbol) || null;
+      this.working = (j.working || [])
+        .filter(o => (o.symbol || '').toUpperCase() === this.symbol);
+      this.recent = j.recent || [];
+      this.limits = j.limits || null;
+      this.staleAfterS = j.stale_after_s || 12;
+      this.brokerAt = Date.now();
+    },
+
+    positionQty() { return this.position ? Number(this.position.qty) || 0 : 0; },
+
+    /* Unrealised, from the last print. The tape is the price here — it is on
+     * screen and it is newer than anything the broker would quote back. */
+    openPl() {
+      const p = this.position;
+      const last = this.lastPrice();
+      if (!p || !p.avg || last == null || Math.abs(p.qty) < 1e-9) return null;
+      return (last - p.avg) * p.qty;
+    },
+
+    // ── the actions ──────────────────────────────────────────────────────
+    clickLadder(zone, price) {
+      if (this.rowTooFine()) {
+        this.brokerErr = 'rows are under five pixels at this zoom — an order '
+          + 'would land a cent from where you aimed. Zoom in or use a coarser '
+          + 'row.';
+        return;
+      }
+      return zone === 'buy' ? this.placeBuy(price) : this.placeSell(price);
+    },
+
+    placeBuy(price) { return this.place('BUY', price); },
+    placeSell(price) { return this.place('SELL', price); },
+
+    async place(side, price) {
+      if (!this.armed) {
+        this.brokerErr = 'this pane is not armed. Nothing was sent.';
+        return;
+      }
+      const j = await this.brokerCall('order', {
+        symbol: this.symbol, side, qty: Number(this.qty),
+        price: Number(price), armed: true,
+        reference: this.lastPrice(), position_qty: this.positionQty(),
+      });
+      this.lastAction = j.ok ? `${side} ${this.qty} @ ${Number(price).toFixed(2)}`
+                             : `${side} refused`;
+      // Read back immediately: the reply says the order was accepted, and
+      // only the record says where it now rests.
+      await this.refreshBroker();
+      return j;
+    },
+
+    /* BY ONE ROW, not by a cent. The row height already encodes the
+     * increment, so the same action does the right thing at any zoom — which
+     * is the reason to nudge rather than retype. */
+    nudgeUp() { return this.nudge(+1); },
+    nudgeDown() { return this.nudge(-1); },
+
+    async nudge(dir) {
+      const o = this.primaryOrder();
+      if (!o) {
+        this.brokerErr = 'no working order in this pane to move.';
+        return;
+      }
+      if (!this.armed) {
+        this.brokerErr = 'this pane is not armed. Nothing was sent.';
+        return;
+      }
+      const step = this.ladderCents / 100;
+      const price = Math.round((Number(o.price) + dir * step) * 100) / 100;
+      const j = await this.brokerCall('replace', {
+        order_id: o.order_id, symbol: this.symbol, side: o.side,
+        qty: (o.qty || 0) - (o.filled || 0), price, armed: true,
+        reference: this.lastPrice(), position_qty: this.positionQty(),
+      });
+      this.lastAction = j.ok ? `moved to ${price.toFixed(2)}` : 'move refused';
+      await this.refreshBroker();
+      return j;
+    },
+
+    /* The order the single-order controls act on.
+     *
+     * With more than one working, the controls name which rather than
+     * silently picking — so this returns the only one, or nothing.
+     */
+    primaryOrder() {
+      return this.working.length === 1 ? this.working[0] : null;
+    },
+
+    async cancelOrder(orderId) {
+      // NOT gated on arming. Cancelling is how a mistake is undone, and a
+      // safety switch that traps an order is not a safety switch.
+      const id = orderId
+        || (this.primaryOrder() && this.primaryOrder().order_id);
+      if (!id) {
+        this.brokerErr = this.working.length > 1
+          ? 'more than one order is working — cancel them individually.'
+          : 'no working order in this pane to cancel.';
+        return;
+      }
+      const j = await this.brokerCall('cancel', { order_id: id });
+      this.lastAction = j.ok ? 'cancelled' : 'cancel refused';
+      await this.refreshBroker();
+      return j;
+    },
+
+    async cancelAll() {
+      for (const o of this.working.slice()) {
+        await this.brokerCall('cancel', { order_id: o.order_id });
+      }
+      this.lastAction = 'cancelled all';
+      await this.refreshBroker();
+    },
+
+    /* Cancels first, THEN closes at market. A resting order left working can
+     * open a fresh position in the opposite direction the moment the flatten
+     * fills; the server does it in that order and this only asks. */
+    async flatten() {
+      if (!this.armed) {
+        this.brokerErr = 'this pane is not armed. Nothing was sent.';
+        return;
+      }
+      const j = await this.brokerCall('flatten',
+                                      { symbol: this.symbol, armed: true });
+      this.lastAction = j.ok
+        ? (j.flat ? 'already flat' : 'flattened at market')
+        : 'flatten refused';
+      await this.refreshBroker();
+      return j;
+    },
+
+    toggleArm() {
+      this.armed = !this.armed;
+      // Arming shows the ladder: it is what the arming is for, and hunting
+      // for a second toggle at the moment of wanting to trade is friction in
+      // the wrong place.
+      if (this.armed) { this.ladder = true; this.refreshBroker(); }
+    },
+
+    toggleLadder() {
+      this.ladder = !this.ladder;
+      if (this.ladder) this.refreshBroker();
+    },
+
+    ladderStep(dir) {
+      this.ladderCents = this.step(this.ladderStops, this.ladderCents, dir);
+    },
+
+    rtText() {
+      if (!this.lastRt) return '—';
+      const b = this.lastRt.broker;
+      return `${this.lastRt.total}ms` + (b != null ? ` (${b} at Schwab)` : '');
+    },
   };
 };
 
@@ -884,6 +1364,14 @@ document.addEventListener('alpine:init', () => {
         setInterval(() => {
           for (const p of this.panes) p.fetchNorm(false);
         }, 20000);
+        // ONE broker read for every pane, not one per pane.
+        //
+        // Schwab returns the whole account either way, so per-pane polling
+        // would multiply the same two calls by the number of panes against a
+        // 120-a-minute ceiling shared with the orders themselves. At four
+        // seconds this is 30 calls a minute whether one pane is open or four.
+        setInterval(() => this.pollBroker(), 4000);
+        this.loadBrokerHealth();
       });
     },
 
@@ -1072,6 +1560,57 @@ document.addEventListener('alpine:init', () => {
     },
 
     resizeAll() { for (const p of this.panes) p.resize(); },
+
+    // ── the broker ───────────────────────────────────────────────────────
+    brokerHealth: null,
+
+    async loadBrokerHealth() {
+      try {
+        const r = await fetch('broker/health');
+        this.brokerHealth = await r.json();
+      } catch (err) { this.brokerHealth = { why: String(err) }; }
+    },
+
+    /* Any pane showing a ladder wants the record. One read serves all of
+     * them; see the note at the interval that calls this. */
+    async pollBroker() {
+      const live = this.panes.filter(p => p.ladder && p.symbol);
+      if (!live.length) return;
+      const syms = [...new Set(live.map(p => p.symbol))];
+      try {
+        const r = await fetch('broker/state?symbols='
+                              + encodeURIComponent(syms.join(',')));
+        const j = await r.json();
+        if (!j.ok) {
+          // The AGE is not advanced on a failure. A pane whose last
+          // confirmation is old must keep saying so, and a failed poll is
+          // the case where that matters most.
+          for (const p of live) p.brokerErr = j.why || 'the broker read failed';
+          return;
+        }
+        const now = Date.now();
+        for (const p of live) {
+          p.position = (j.positions || [])
+            .find(x => (x.symbol || '').toUpperCase() === p.symbol) || null;
+          p.working = (j.working || [])
+            .filter(o => (o.symbol || '').toUpperCase() === p.symbol);
+          p.recent = (j.recent || [])
+            .filter(o => (o.symbol || '').toUpperCase() === p.symbol);
+          p.limits = j.limits || null;
+          p.staleAfterS = j.stale_after_s || 12;
+          p.brokerErr = '';
+          p.brokerAt = now;
+        }
+      } catch (err) {
+        for (const p of live) {
+          p.brokerErr = 'the broker read never completed: ' + err;
+        }
+      }
+    },
+
+    tradingEnabled() {
+      return !!(this.brokerHealth && this.brokerHealth.trading_enabled);
+    },
 
     statusLine() {
       const s = this.status;

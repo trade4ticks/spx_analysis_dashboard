@@ -36,9 +36,9 @@ STATIC = ROOT / "static"
 # is that the NUMBER cannot grow, and pinning individual names would turn the
 # ratchet into a list nobody maintains.
 BASELINE = {
-    "equity_iv.html":              9,
-    "factor_trades.html":          4,
-    "oi_analysis.html":            26,
+    "equity_iv.html":              7,
+    "factor_trades.html":          2,
+    "oi_analysis.html":            10,
     "oi_signals.html":             2,
     "research.html":               3,
     "research2.html":              3,

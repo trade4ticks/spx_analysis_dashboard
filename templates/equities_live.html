@@ -162,6 +162,47 @@
     }
     .lv-rate-why { color:var(--muted); line-height:1.55; }
 
+    /* ── trading ───────────────────────────────────────────────────────
+       ARMED IS LOUD. A pane that can send an order must not look like a
+       pane that cannot; the whole row changes colour, not just a checkbox. */
+    .lv-bar.trade { margin-bottom:6px; }
+    .lv-bar.trade.armed {
+      border-color:#e84393; background:rgba(232,67,147,0.10);
+    }
+    .lv-arm {
+      background:var(--raised); border:1px solid var(--border);
+      color:var(--muted); font-size:11px; font-weight:700; padding:3px 10px;
+      border-radius:4px; cursor:pointer; letter-spacing:0.3px;
+    }
+    .lv-arm.on { background:#e84393; border-color:#e84393; color:#fff; }
+    .lv-inp.qty { width:56px; text-align:right; font-weight:600; }
+    .lv-pos {
+      font-variant-numeric:tabular-nums; font-weight:700; font-size:11.5px;
+    }
+    .lv-pos.flat { color:var(--muted); font-weight:400; }
+    .lv-pl.up { color:#3498db; }
+    .lv-pl.dn { color:#e84393; }
+    .lv-btn.danger { border-color:#e84393; color:#e84393; }
+    .lv-btn.danger:hover { background:rgba(232,67,147,0.15); color:#fff; }
+
+    /* THE PAGE IS NOT THE SOURCE OF TRUTH. This says so whenever the order
+       state may be wrong, in the same place the orders are read from. */
+    .lv-stale {
+      background:rgba(255,170,0,0.14); border:1px solid #d18700;
+      color:#ffc247; font-size:11px; font-weight:600;
+      padding:5px 9px; border-radius:5px; margin-bottom:6px; line-height:1.5;
+    }
+    .lv-ords { display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+    .lv-ord {
+      display:inline-flex; align-items:center; gap:5px; font-size:10.5px;
+      font-weight:600; border-radius:3px; padding:1px 6px;
+      font-variant-numeric:tabular-nums;
+    }
+    .lv-ord.buy { color:#6cb6e6; border:1px solid rgba(52,152,219,0.6); }
+    .lv-ord.sell { color:#f07ab4; border:1px solid rgba(232,67,147,0.6); }
+    .lv-ord .lv-x { color:var(--muted); cursor:pointer; }
+    .lv-ord .lv-x:hover { color:#fff; }
+
     [x-cloak] { display:none !important; }
   </style>
 </head>
@@ -230,7 +271,38 @@
       <span class="lv-sub" x-show="!pinned.length" x-cloak>none</span>
 
       <span class="lv-spacer"></span>
+      <!-- The shared 120-a-minute budget, as the server counts it. Visible
+           because repricing across several panes is what spends it, and a
+           refusal explained after the fact is worse than a number on screen
+           beforehand. -->
+      <span class="lv-sub" x-show="brokerHealth && brokerHealth.limits" x-cloak
+            :title="'Schwab allows 120 calls a minute in total. '
+                    + (brokerHealth ? brokerHealth.limits.reserve : 0)
+                    + ' are held back so a cancel or a flatten always has '
+                    + 'quota. 429s seen: '
+                    + (brokerHealth ? brokerHealth.limits.n_429 : 0)"
+            x-text="'schwab ' + (brokerHealth ? brokerHealth.limits.used : 0)
+                    + '/' + (brokerHealth ? brokerHealth.limits.per_min : 0)
+                    + '/min'"></span>
       <span class="lv-sub" x-text="statusLine()"></span>
+    </div>
+
+    <!-- Trading is off at the server unless deliberately enabled. Stated
+         here rather than discovered when a click does nothing. -->
+    <div class="lv-down" x-show="brokerHealth && !brokerHealth.trading_enabled"
+         x-cloak>
+      LIVE TRADING IS DISABLED on the server — the ladder and the record are
+      readable, the arm button is not. Set <b>LIVE_TRADING_ENABLED=1</b> in
+      /spx_analysis_dashboard/.env and restart spx-live to allow orders.
+      Off by default on purpose.
+    </div>
+    <div class="lv-down"
+         x-show="brokerHealth && brokerHealth.problems
+                 && brokerHealth.problems.length" x-cloak>
+      <template x-for="p in (brokerHealth ? brokerHealth.problems : [])"
+                :key="p">
+        <span style="display:block" x-text="p"></span>
+      </template>
     </div>
 
     <div class="lv-panes" :class="layout">
@@ -301,6 +373,11 @@
                  move, click a chip to remove. They hold at a PRICE while the
                  plot scrolls under them, and each carries how many prints
                  have landed there inside the window. -->
+            <button class="lv-btn" :class="{on: pane.ladder}"
+                    @click="pane.toggleLadder()" x-show="pane.symbol" x-cloak
+                    title="A price ladder in the right gutter, rows aligned to
+                           this plot's y-axis. Costs plot width, so it is
+                           opt-in.">ladder</button>
             <button class="lv-btn" @click="pane.addLineAtPrice()"
                     title="Place a line at the current price. Double-clicking the
                            plot places one where you click; drag to move it.">+ line</button>
@@ -334,6 +411,119 @@
 
           <div class="lv-down" x-show="pane.refused" x-cloak>
             <span x-text="pane.refused"></span>
+          </div>
+
+          <!-- ══ trading ═══════════════════════════════════════════════
+               Every control here calls a NAMED function and carries no
+               logic of its own, so binding a hotkey later is one line
+               rather than an untangling of a click handler. -->
+          <div class="lv-bar trade" :class="{armed: pane.armed}"
+               x-show="pane.ladder || pane.armed" x-cloak>
+
+            <!-- OFF BY DEFAULT, per pane, never persisted. A pane that came
+                 back armed after a reload would be a pane that can trade
+                 because a page was left open. -->
+            <button class="lv-arm" :class="{on: pane.armed}"
+                    @click="pane.toggleArm()"
+                    :disabled="!tradingEnabled()"
+                    :title="tradingEnabled()
+                      ? 'Only an armed pane can send an order. The server
+                         checks this too — it does not trust the button.'
+                      : 'Live trading is disabled on the server.'"
+                    x-text="pane.armed ? 'ARMED' : 'arm'"></button>
+
+            <span class="lv-sub">qty</span>
+            <input class="lv-inp qty" type="number" min="1" step="1"
+                   x-model.number="pane.qty">
+
+            <span class="lv-sub">row</span>
+            <button class="lv-btn" @click="pane.ladderStep(-1)">−</button>
+            <b class="lv-num" x-text="pane.ladderCents + '¢'"></b>
+            <button class="lv-btn" @click="pane.ladderStep(1)">+</button>
+
+            <!-- BY ONE ROW, not by a cent: the row height already encodes
+                 the increment, so the same control is right at any zoom. -->
+            <button class="lv-btn" @click="pane.nudgeUp()"
+                    :disabled="!pane.primaryOrder()"
+                    title="Move the working order up one row.">▲ row</button>
+            <button class="lv-btn" @click="pane.nudgeDown()"
+                    :disabled="!pane.primaryOrder()"
+                    title="Move the working order down one row.">▼ row</button>
+
+            <button class="lv-btn" @click="pane.cancelOrder()"
+                    :disabled="!pane.working.length"
+                    title="Cancel the working limit. Not gated on arming — a
+                           safety switch that traps an order is not a safety
+                           switch.">cancel</button>
+            <button class="lv-btn danger" @click="pane.flatten()"
+                    :disabled="!pane.armed"
+                    title="Cancels every working order in this name, THEN
+                           closes the position at market. That order matters:
+                           a resting order left working can reopen the
+                           position the moment the flatten fills.">flatten</button>
+
+            <span class="lv-spacer"></span>
+
+            <!-- I cannot trade from a screen that does not show what I hold. -->
+            <span class="lv-pos" :class="{flat: !pane.positionQty()}"
+                  x-text="pane.positionQty()
+                    ? (pane.positionQty() > 0 ? '+' : '') + pane.positionQty()
+                      + ' @ ' + (pane.position && pane.position.avg
+                                 ? Number(pane.position.avg).toFixed(2) : '—')
+                    : 'flat'"></span>
+            <span class="lv-pl" x-show="pane.openPl() != null" x-cloak
+                  :class="pane.openPl() >= 0 ? 'up' : 'dn'"
+                  x-text="(pane.openPl() >= 0 ? '+' : '')
+                          + '$' + Math.abs(pane.openPl()).toFixed(0)"></span>
+
+            <span class="lv-sub"
+                  :title="'Total as the browser sees it, and the Schwab leg
+                           inside it. Part of the point of trading from here
+                           is knowing whether this beats the click it
+                           replaces.'"
+                  x-text="'rt ' + pane.rtText()"></span>
+          </div>
+
+          <!-- WORKING ORDERS, listed as well as drawn. The plot shows where
+               they rest against the tape; this is where they are cancelled
+               individually, which the plot cannot do. -->
+          <div class="lv-bar trade" x-show="pane.working.length" x-cloak>
+            <span class="lv-sub">working</span>
+            <button class="lv-btn" @click="pane.cancelAll()"
+                    x-show="pane.working.length > 1" x-cloak
+                    title="Cancel every working order in this name. The
+                           single-order controls refuse to guess which one
+                           they mean when more than one is live.">cancel all</button>
+            <div class="lv-ords">
+              <template x-for="o in pane.working" :key="o.order_id">
+                <span class="lv-ord"
+                      :class="String(o.side).startsWith('BUY') ? 'buy' : 'sell'">
+                  <span x-text="o.side + ' ' + ((o.qty||0) - (o.filled||0))
+                                + ' @ ' + Number(o.price).toFixed(2)
+                                + (o.status && o.status !== 'WORKING'
+                                   ? ' · ' + o.status : '')"></span>
+                  <span class="lv-x" @click="pane.cancelOrder(o.order_id)"
+                        title="Cancel this order">×</span>
+                </span>
+              </template>
+            </div>
+          </div>
+
+          <!-- ══ THIS PAGE IS NOT THE SOURCE OF TRUTH ═══════════════════
+               If the socket drops or the page closes, the orders are still
+               live at Schwab. A stale list that says it is stale is safe; a
+               fresh-looking list that is thirty seconds old is not. -->
+          <div class="lv-stale"
+               x-show="(pane.ladder || pane.armed) && pane.brokerStale()"
+               x-cloak>
+            ORDER STATE MAY BE STALE — <span x-text="pane.staleWhy()"></span>.
+            Anything already sent is live at Schwab regardless of what this
+            pane shows; check there before acting on this list.
+          </div>
+          <div class="lv-stale"
+               x-show="(pane.ladder || pane.armed) && !pane.brokerStale()
+                       && pane.brokerErr" x-cloak>
+            <span x-text="pane.brokerErr"></span>
           </div>
 
           <div class="lv-pane">

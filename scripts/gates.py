@@ -88,6 +88,9 @@ GATES = [
     # Every way the arrival comparison can be wrong is invisible on screen.
     _s("check_arrival_norm.py",
        note="the 15-minute bucket is right at its edges; today is excluded"),
+    # The one module where being wrong costs money rather than time.
+    _s("check_broker.py",
+       note="three switches, flatten cancels first, guards bound the end"),
 
     # ── infrastructure ───────────────────────────────────────────────────
     _s("check_pool_wiring.py", note="pools bind their module-level names"),
