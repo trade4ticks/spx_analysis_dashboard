@@ -37,6 +37,19 @@ const LV_TRADE_RIM  = 'rgba(228,233,240,0.80)';
  * than "who crossed the spread". The aggressor is the one that carries
  * information, so a blue dot now sits near the pink ask line and that is
  * correct rather than a mistake. */
+/* How long an unresolved placement is looked for before the pane says it
+ * could not confirm. MEASURED, not guessed: a probe order placed on
+ * 2026-09-03 was listed by Schwab ONE SECOND after the 201. This was 15s,
+ * which blocked the pane for fourteen seconds after the answer had arrived —
+ * and the block is total, so that is fourteen seconds of not being able to
+ * trade the name. Five gives the one-second observation five times its
+ * margin and still ends while the move that prompted the order is alive. */
+const LV_RESOLVE_WINDOW_S = 5;
+
+/* The poll that drives tryResolve, in seconds. The give-up test counts
+ * looks, so it needs this to turn them into elapsed time. */
+const LV_RESOLVE_POLL_S = 2;
+
 const LV_BUY_FILL  = 'rgba(52,152,219,0.30)';    // lifted the offer
 const LV_BUY_RIM   = 'rgba(120,200,255,0.85)';
 const LV_SELL_FILL = 'rgba(232,67,147,0.30)';    // hit the bid
@@ -1313,9 +1326,7 @@ window.lvPane = function (id, send) {
     async nudge(dir) {
       const o = this.primaryOrder();
       if (!o) {
-        this.brokerErr = this.working.length > 1
-          ? 'more than one order is working — move them from the list.'
-          : 'no working order in this pane to move.';
+        this.brokerErr = this.noPrimaryWhy('move');
         return;
       }
       const why = this.blocked();
@@ -1359,7 +1370,39 @@ window.lvPane = function (id, send) {
         const mine = this.working.find(o => String(o.order_id) === this.ownIds[i]);
         if (mine) return mine;
       }
-      return this.working.length === 1 ? this.working[0] : null;
+      // THE FALLBACK IS NOW SOURCE-CHECKED. `ownIds` is lost on a reload and
+      // never held an order this pane did not itself send, so the fallback
+      // is what runs after a refresh — and it used to hand back "the only
+      // working order" whichever application had placed it. A nudge would
+      // then reprice an order entered in thinkorswim.
+      //
+      // `from_api` is Schwab's own `TA_` stamp, which a client cannot set
+      // (see broker._norm_order). It is per-account, so it cannot say WHICH
+      // of ours this is — but the fallback only runs when there is one
+      // candidate, and "is this ours at all" is exactly what was missing.
+      // Unstamped means DECLINE: the controls then say nothing is theirs to
+      // act on, which is the safe direction to be wrong in.
+      const ours = this.working.filter(o => o.from_api);
+      return ours.length === 1 ? ours[0] : null;
+    },
+
+    /* Why primaryOrder() gave nothing back, in words a person can act on.
+     *
+     * Three different situations used to collapse into "no working order":
+     * none at all, several, and — since the fallback started checking the
+     * source — one that belongs to thinkorswim. Saying "there is no order"
+     * about an order sitting visibly in the list would read as a bug in the
+     * pane rather than a refusal to touch someone else's order. */
+    noPrimaryWhy(verb) {
+      if (this.working.length > 1) {
+        return `more than one order is working — ${verb} them from the list.`;
+      }
+      if (this.working.length === 1 && !this.working[0].from_api) {
+        return `the only working order in ${this.symbol} was not placed from `
+             + `here — Schwab did not stamp it as this app's. ${verb} it `
+             + `where it was placed, or from the list.`;
+      }
+      return `no working order in this pane to ${verb}.`;
     },
 
     async cancelOrder(orderId) {
@@ -1368,9 +1411,7 @@ window.lvPane = function (id, send) {
       const id = orderId
         || (this.primaryOrder() && this.primaryOrder().order_id);
       if (!id) {
-        this.brokerErr = this.working.length > 1
-          ? 'more than one order is working — cancel them individually.'
-          : 'no working order in this pane to cancel.';
+        this.brokerErr = this.noPrimaryWhy('cancel');
         return;
       }
       const j = await this.brokerCall('cancel', { order_id: id });
@@ -1436,7 +1477,7 @@ window.lvPane = function (id, send) {
       }
       // Absent. Keep looking — Schwab does not list an order the instant it
       // is accepted, and one empty look proves nothing.
-      if (u.tries * 2 >= 15) {
+      if (u.tries * LV_RESOLVE_POLL_S >= LV_RESOLVE_WINDOW_S) {
         u.state = 'gave-up';
       }
     },
@@ -1452,9 +1493,11 @@ window.lvPane = function (id, send) {
              + `and clear this.`;
       }
       if (u.state === 'gave-up') {
-        return `${what} sent ${age}s ago could NOT be confirmed either way `
-             + `after 15s of looking. It may be resting at Schwab. Check `
-             + `there before doing anything else in this pane.`;
+        // The elapsed time, not the constant: what matters to a person
+        // reading this is how long the record was actually searched.
+        return `${what} could NOT be confirmed either way after ${age}s of `
+             + `looking. It may be resting at Schwab. Check there before `
+             + `doing anything else in this pane.`;
       }
       return `${what} sent ${age}s ago — no reply arrived, so whether it `
            + `landed is unknown. Reading the record… (${u.tries})`;

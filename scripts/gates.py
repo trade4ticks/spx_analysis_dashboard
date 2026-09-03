@@ -85,6 +85,10 @@ GATES = [
     # The band must hold still under a flat tape, and a rate must be a rate.
     _s("check_live_axis.py",
        note="price band steps only at the edge; trades/min is a fixed minute"),
+    # A pane must not act on an order another application placed, and must
+    # not stay blocked long after the broker has answered.
+    _s("check_live_reconcile.py",
+       note="primaryOrder refuses foreign orders; the unresolved window is 5s"),
     # Every way the arrival comparison can be wrong is invisible on screen.
     _s("check_arrival_norm.py",
        note="the 15-minute bucket is right at its edges; today is excluded"),

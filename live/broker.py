@@ -463,6 +463,17 @@ def _norm_order(o: dict) -> dict:
         "status": o.get("status"),
         "working": o.get("status") in WORKING_STATES,
         "entered": o.get("enteredTime"),
+        # WHERE THE ORDER CAME FROM, and the only such signal there is.
+        #
+        # Schwab stamps `tag` itself; a client cannot set it (see
+        # `_equity_order`). Orders placed through this API come back stamped
+        # `TA_<account-derived>` and ones placed in thinkorswim come back
+        # `API_TOS:AT_LADDER_AS`, so the PREFIX separates the two sources.
+        # It is not an order-level key — every API order in the account
+        # carries the same stamp — so it can say "not mine" and never "this
+        # exact one".
+        "tag": o.get("tag"),
+        "from_api": str(o.get("tag") or "").startswith("TA_"),
     }
 
 
@@ -599,9 +610,36 @@ def match_placement(orders: list[dict], *, symbol: str, side: str,
     # guess. A guess would attach the pane to an order that might be the
     # other one, and the next nudge would reprice a stranger's order.
     #
-    # IF `scripts/probe_schwab_tag.py` SHOWS THE TAG IS SETTABLE, all of
-    # this goes away: put a unique tag in the order body and match on it
-    # exactly. Delete this block when that happens.
+    # THE WAY OUT WAS TRIED AND IT IS CLOSED. A client-supplied `tag` would
+    # have been an exact key, so `scripts/probe_schwab_tag.py` placed real
+    # orders to find out. Both runs, 2026-09-03:
+    #
+    #     with    "tag": "PBL_LIVE_PROBE"  -> 400, "A validation error
+    #                                        occurred while processing the
+    #                                        request."
+    #     the identical body WITHOUT it    -> 201 in 499ms, listed after 1s,
+    #                                        cancelled.
+    #
+    # One key, one difference, opposite outcomes: THE TAG IS NOT SETTABLE.
+    # Schwab stamps the field itself — the untagged probe came back carrying
+    # `TA_<account-derived>` that no client had sent — which also settles
+    # where the `API_TOS:AT_LADDER_AS` values in this account came from:
+    # Schwab's stamp on thinkorswim orders, not thinkorswim setting a field.
+    #
+    # So this is not a caveat waiting on an experiment. It is the tested and
+    # permanent shape of the problem, and the ambiguity below is a property
+    # of the broker's API. DO NOT delete this block, and do not put a `tag`
+    # in the order body expecting it to survive — it will be rejected before
+    # the order is.
+    #
+    # The stamp is not a way out either. It is per-account, not per-order:
+    # it distinguishes THIS APP's orders from thinkorswim's (and `from_api`
+    # in `_norm_order` carries it for exactly that) but every API order in
+    # the account shares one value, so it cannot tell two of ours apart —
+    # which is the case that matters here. It is deliberately NOT used to
+    # filter this match: trusting a stamp on one observation would, if it
+    # were ever absent, report `absent` for an order that really landed, and
+    # that is the one wrong answer this function must never give.
     #
     #####################################################################
     """
@@ -817,6 +855,14 @@ def _armed_check(armed: bool) -> str | None:
 # ── orders ──────────────────────────────────────────────────────────────────
 def _equity_order(side: str, qty: int, symbol: str,
                   price: float | None) -> dict:
+    """The order body. NO `tag` — it is not ours to set.
+
+    Schwab rejects a body carrying `tag` with a flat 400 that names no
+    field; the identical body without it is accepted. Tested both ways by
+    `scripts/probe_schwab_tag.py` on 2026-09-03, and the consequence for
+    reconciling a timed-out placement is written out at `match_placement`.
+    Adding one here would not label our orders — it would stop them.
+    """
     body = {
         "session": "NORMAL",
         "duration": "DAY",

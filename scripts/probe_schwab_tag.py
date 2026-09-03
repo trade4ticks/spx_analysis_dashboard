@@ -1,5 +1,29 @@
 """Does Schwab echo a client-supplied `tag` on an order? Place one and look.
 
+############ ANSWERED, 2026-09-03: NO. THE TAG IS NOT SETTABLE. ############
+#
+#   with the tag        -> 400 "A validation error occurred while
+#                          processing the request."
+#   the SAME body
+#   without it          -> 201 in 499ms, listed after 1s, cancelled.
+#
+# One key, one difference, opposite outcomes. Schwab rejects the order
+# rather than ignoring the field. It stamps `tag` itself: the untagged
+# probe came back carrying TA_<account-derived>, which no client had sent
+# — so the API_TOS:AT_LADDER_AS values in the account history are Schwab
+# stamping thinkorswim's orders, not thinkorswim setting a field.
+#
+# The stamp is per-account and not per-order, so it separates THIS APP's
+# orders from thinkorswim's and nothing finer. `broker._norm_order` carries
+# it as `from_api` for that purpose, and `broker.match_placement` records
+# why reconciliation stays heuristic permanently.
+#
+# THE ORDER BODY IN `broker._equity_order` MUST NOT CARRY A TAG. This
+# script is kept so the finding can be re-tested rather than re-argued —
+# if Schwab ever accepts one, the run below is how you would find out.
+#
+###########################################################################
+
 WHY THIS MATTERS. When a placement times out, the caller does not know
 whether the order landed. Without an identifier of our own the only way to
 find out is to match on (symbol, side, quantity, price, entered after we
@@ -7,12 +31,11 @@ sent) — which is near-unique in practice and NOT guaranteed, because two
 identical orders seconds apart are indistinguishable. Your own history has
 orders four seconds apart at adjacent prices, so that is not a hypothetical.
 
-If Schwab accepts and echoes a `tag`, it becomes an exact reconciliation key
-and the ambiguity disappears. Every order in your account currently carries
-`tag: "API_TOS:AT_LADDER_AS"`, which thinkorswim's ladder set — so the field
-is real and a client populates it. Whether the REST API lets a caller set it
-is the open question, and it cannot be answered by reading. It has to be
-placed.
+If Schwab accepted and echoed a `tag` it would be an exact reconciliation key
+and the ambiguity would disappear. Every order in the account carries a
+`tag`, so the field is real and something populates it — but that was never
+evidence a CLIENT could, and reading could not settle it either way. It had
+to be placed. (It was. See the header: it cannot.)
 
 THIS PLACES A REAL ORDER. One share, as a LIMIT, at a price you supply, and
 it cancels in a `finally` so it goes away even if this script raises. Choose
@@ -133,8 +156,9 @@ async def run(symbol: str, price: float, side: str, use_tag: bool) -> int:
                   "and it sets the floor for how long a timeout "
                   "reconciliation has to keep looking.")
 
-        # The raw record, because the normaliser drops `tag` and this is the
-        # one field being asked about.
+        # The RAW record. The normaliser now carries `tag` through, but this
+        # reads Schwab's own response so the answer cannot come from our own
+        # parsing of it — which is the point of a probe.
         raw, _, _ = await broker._acall(
             "GET", f"/accounts/{hv}/orders",
             params={"fromEnteredTime": _fmt(sent_at - 60),

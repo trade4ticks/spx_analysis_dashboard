@@ -111,11 +111,55 @@ def pos(sym, long_q=0.0, short_q=0.0, avg=100.0):
             "shortQuantity": short_q, "averagePrice": avg}
 
 
-def order(oid, sym, side, qty, price, status="WORKING"):
-    return {"orderId": oid, "quantity": qty, "filledQuantity": 0,
-            "price": price, "orderType": "LIMIT", "status": status,
-            "orderLegCollection": [{"instruction": side, "quantity": qty,
-                                    "instrument": {"symbol": sym}}]}
+def order(oid, sym, side, qty, price, status="WORKING", tag=None):
+    o = {"orderId": oid, "quantity": qty, "filledQuantity": 0,
+         "price": price, "orderType": "LIMIT", "status": status,
+         "orderLegCollection": [{"instruction": side, "quantity": qty,
+                                 "instrument": {"symbol": sym}}]}
+    if tag is not None:
+        o["tag"] = tag
+    return o
+
+
+# ── which application placed it ─────────────────────────────────────────────
+def case_order_source():
+    """`from_api` must follow Schwab's stamp, because the pane acts on it.
+
+    Schwab stamps `tag` itself and a client cannot set it — a body carrying
+    one is rejected outright (400, tested 2026-09-03). Orders placed through
+    this API come back `TA_<account-derived>`; thinkorswim's come back
+    `API_TOS:AT_LADDER_AS`. The tape's primaryOrder() fallback uses this to
+    refuse to reprice an order it did not place, so a wrong answer here moves
+    a stranger's order.
+    """
+    n = broker._norm_order
+
+    mine = n(order("A", "FDX", "BUY", 100, 318.5, tag="TA_examplestamp1774"))
+    check(mine["from_api"] is True,
+          f"an order carrying Schwab's TA_ stamp was not recognised as this "
+          f"app's: {mine.get('tag')!r} -> {mine.get('from_api')!r}")
+
+    tos = n(order("B", "FDX", "BUY", 100, 318.5, tag="API_TOS:AT_LADDER_AS"))
+    check(tos["from_api"] is False,
+          "a thinkorswim order was claimed as this app's — the pane would "
+          "reprice an order placed by hand in another application")
+
+    # NO TAG AT ALL is the case that decides which way the code fails. It
+    # must read as "not ours": the fallback then declines rather than acting
+    # on an order whose source is unknown.
+    bare = n(order("C", "FDX", "BUY", 100, 318.5))
+    check(bare["from_api"] is False,
+          "an untagged order defaulted to being this app's. Unknown source "
+          "must mean 'not ours' — the safe direction is to decline.")
+    check(bare["tag"] is None,
+          f"a missing tag did not come through as None: {bare['tag']!r}")
+
+    # The prefix and nothing looser. `TA_` is a prefix test, not a substring
+    # one, or a tag merely CONTAINING it would pass.
+    sneaky = n(order("D", "FDX", "BUY", 100, 318.5, tag="XX_TA_not_ours"))
+    check(sneaky["from_api"] is False,
+          "the source test matched TA_ anywhere in the tag instead of at the "
+          "start, so a foreign stamp could be read as ours")
 
 
 # ── the guards ──────────────────────────────────────────────────────────────
@@ -655,14 +699,25 @@ def case_match_placement():
 
     # THE CAVEAT ITSELF. It is the thing most likely to be lost in a tidy-up,
     # and it is the reason the ambiguity above is acceptable rather than a bug.
+    # It is no longer provisional: the tag probe ran on 2026-09-03 and the way
+    # out is closed, so the words now have to say that too.
     src = (ROOT / "live" / "broker.py").read_text(encoding="utf-8")
     body = src[src.index("def match_placement"):src.index("def _entered_epoch")]
     for phrase in ("NOT GUARANTEED UNIQUE", "probe_schwab_tag",
-                   "ADJACENT PRICES"):
+                   "ADJACENT PRICES", "NOT SETTABLE"):
         check(phrase in body,
               f"the matching function no longer explains {phrase!r} — the "
-              f"ambiguity is real and permanent until the tag probe says "
-              f"otherwise, and it belongs where the matching happens")
+              f"ambiguity is tested and permanent, and it belongs where the "
+              f"matching happens")
+
+    # AND THE ORDER BODY STAYS CLEAN. A tag there is not a label, it is a
+    # rejected order: Schwab 400s the whole request over the field.
+    order_src = src[src.index("def _equity_order"):src.index("async def place")]
+    check('"tag"' not in order_src and "'tag'" not in order_src,
+          "the order body carries a `tag` again. Schwab REJECTS an order "
+          "that carries one — 400 with the tagged body, 201 with the "
+          "identical body without it, tested 2026-09-03. This does not "
+          "mislabel orders, it stops them leaving.")
 
 
 # ── the two reads are separate ──────────────────────────────────────────────
@@ -711,6 +766,7 @@ CASES = [
     ("reading the record", case_state),
     ("split reads", case_split_reads),
     ("determinate vs unknown", case_indeterminacy),
+    ("which application placed it", case_order_source),
     ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
