@@ -35,8 +35,20 @@ class Hub:
         # symbol -> deque of records, newest last.
         self.trades: dict[str, deque] = {}
         self.quotes: dict[str, deque] = {}
-        # symbol -> number of browser panes watching it.
+        # symbol -> number of things holding it: panes, plus one for a pin.
         self.refs: dict[str, int] = {}
+        # PINNED SYMBOLS STAY SUBSCRIBED with nothing watching them.
+        #
+        # Closing the browser used to drop the last reference and unsubscribe,
+        # so the buffer went with it and the next pane opened on "buffering
+        # 55s of 180s" — three minutes of axis over fifty seconds of tape,
+        # every time. A pin is simply a reference that no pane owns and no
+        # pane can release, which is why nothing in acquire/release needs a
+        # special case for it.
+        #
+        # Memory is the whole cost and it is small: at the 15-minute ceiling a
+        # busy name is ~5,100 records, and a record is six numbers.
+        self.pinned: set[str] = set()
         # socket -> the symbols THAT socket asked for. A dict rather than a
         # set of pairs: the value is itself a set, which is unhashable, so the
         # obvious set-of-tuples does not survive contact with Python.
@@ -92,6 +104,50 @@ class Hub:
             self.trades.pop(sym, None)
             self.quotes.pop(sym, None)
         await self._send({"action": "unsubscribe", "params": f"T.{sym},Q.{sym}"})
+
+    # ── pins ────────────────────────────────────────────────────────────
+    async def pin(self, symbol: str) -> str | None:
+        """Hold a symbol regardless of whether any pane wants it."""
+        sym = (symbol or "").strip().upper()
+        if sym in self.pinned:
+            return None
+        err = await self.acquire(sym)
+        if err:
+            return err
+        self.pinned.add(sym)
+        log.info("pinned %s (%d pinned, %d subscribed)",
+                 sym, len(self.pinned), len(self.refs))
+        return None
+
+    async def unpin(self, symbol: str) -> None:
+        sym = (symbol or "").strip().upper()
+        if sym not in self.pinned:
+            return
+        self.pinned.discard(sym)
+        # Releases the PIN's reference only. A pane still watching the symbol
+        # keeps it alive, which is the same rule as every other holder.
+        await self.release(sym)
+
+    async def pin_all(self, symbols) -> list[str]:
+        """Pin the configured set at startup. Returns the refusals."""
+        out = []
+        for s in symbols:
+            err = await self.pin(s)
+            if err:
+                out.append(f"{s}: {err}")
+        return out
+
+    async def broadcast(self, payload: dict) -> None:
+        """One message to every client. Used when the pin set changes.
+
+        A second tab that pinned nothing still has to see the pin, or the two
+        tabs disagree about what is being held and one of them is wrong.
+        """
+        for ws in list(self.clients):
+            try:
+                await ws.send_json(payload)
+            except Exception:                             # noqa: BLE001
+                self.clients.pop(ws, None)
 
     async def _send(self, payload: dict) -> None:
         ws = self._ws
@@ -257,6 +313,7 @@ class Hub:
             "uptime_s": (time.time() - self.connected_at)
                         if self.connected_at and self.connected else 0,
             "symbols": sorted(self.refs),
+            "pinned": sorted(self.pinned),
             "msgs_in": self.msgs_in,
             "trades_in": self.trades_in,
             "quotes_in": self.quotes_in,

@@ -27,10 +27,20 @@ const LV_PINK = '#e84393';
  * says nothing until the bichrome toggle is deliberately turned on. */
 const LV_TRADE_FILL = 'rgba(206,212,220,0.30)';
 const LV_TRADE_RIM  = 'rgba(228,233,240,0.80)';
-const LV_UP_FILL = 'rgba(232,67,147,0.30)';
-const LV_UP_RIM  = 'rgba(240,130,180,0.85)';
-const LV_DN_FILL = 'rgba(52,152,219,0.30)';
-const LV_DN_RIM  = 'rgba(120,200,255,0.85)';
+/* BY AGGRESSOR, NOT BY PROXIMITY.
+ *
+ * A print above the mid is a buyer lifting the offer, so it is BLUE. Below
+ * the mid is a seller hitting the bid, so PINK.
+ *
+ * These were the other way round, matching the line each dot sat nearest —
+ * which is a different claim: "which side of the book is this near" rather
+ * than "who crossed the spread". The aggressor is the one that carries
+ * information, so a blue dot now sits near the pink ask line and that is
+ * correct rather than a mistake. */
+const LV_BUY_FILL  = 'rgba(52,152,219,0.30)';    // lifted the offer
+const LV_BUY_RIM   = 'rgba(120,200,255,0.85)';
+const LV_SELL_FILL = 'rgba(232,67,147,0.30)';    // hit the bid
+const LV_SELL_RIM  = 'rgba(240,130,180,0.85)';
 
 // Price lines: BRIGHT GREY, not yellow. Yellow reads as a signal, and these
 // carry no signal — they are a place the eye is holding.
@@ -345,15 +355,22 @@ window.lvPane = function (id, send) {
       // outside of — FAINTLY, at background weight, with the edges bright
       // enough to locate exactly. It was brighter and competed with the tape.
       if (this.showQuotes && this.quotes.length) {
-        const vis = this.quotes.filter(q => q.t >= tStart && q.t <= tEnd
-                                            && q.bp && q.ap);
+        const vis = this.nbboSteps(tStart, tEnd);
         if (vis.length > 1) {
+          // A STEP FILL, not a ribbon between quote points. Interpolating
+          // between quotes draws a diagonal through prices that were never
+          // quoted; the NBBO holds flat until it changes.
           ctx.beginPath();
           ctx.moveTo(X(vis[0].t), Y(vis[0].ap));
-          for (const q of vis) ctx.lineTo(X(q.t), Y(q.ap));
-          for (let i = vis.length - 1; i >= 0; i--) {
-            ctx.lineTo(X(vis[i].t), Y(vis[i].bp));
+          for (let i = 1; i < vis.length; i++) {
+            ctx.lineTo(X(vis[i].t), Y(vis[i - 1].ap));
+            ctx.lineTo(X(vis[i].t), Y(vis[i].ap));
           }
+          for (let i = vis.length - 1; i > 0; i--) {
+            ctx.lineTo(X(vis[i].t), Y(vis[i].bp));
+            ctx.lineTo(X(vis[i].t), Y(vis[i - 1].bp));
+          }
+          ctx.lineTo(X(vis[0].t), Y(vis[0].bp));
           ctx.closePath();
           ctx.fillStyle = 'rgba(150,170,190,0.045)';
           ctx.fill();
@@ -362,14 +379,12 @@ window.lvPane = function (id, send) {
         for (const [key, col] of [['bp', 'rgba(130,190,235,0.95)'],
                                   ['ap', 'rgba(235,150,190,0.95)']]) {
           ctx.beginPath();
-          let started = false;
-          for (const q of this.quotes) {
-            const v = q[key];
-            if (v == null || q.t < tStart || q.t > tEnd) { started = false; continue; }
-            const x = X(q.t), y = Y(v);
-            if (!started) { ctx.moveTo(x, y); started = true; }
-            else ctx.lineTo(x, y);
-          }
+          vis.forEach((q, i) => {
+            const x = X(q.t), y = Y(q[key]);
+            if (i === 0) { ctx.moveTo(x, y); return; }
+            ctx.lineTo(x, Y(vis[i - 1][key]));   // hold, then step
+            ctx.lineTo(x, y);
+          });
           ctx.strokeStyle = col;
           ctx.stroke();
         }
@@ -401,11 +416,9 @@ window.lvPane = function (id, send) {
           const q = this.quotes[qi];
           const mid = (q && q.bp && q.ap && q.t <= t.t)
             ? (q.bp + q.ap) / 2 : null;
-          if (mid != null && Math.abs(t.p - mid) > 1e-9) {
-            const up = t.p > mid;
-            fill = up ? LV_UP_FILL : LV_DN_FILL;
-            rim = up ? LV_UP_RIM : LV_DN_RIM;
-          }
+          const side = this.aggressor(t.p, mid);
+          if (side === 'buy') { fill = LV_BUY_FILL; rim = LV_BUY_RIM; }
+          else if (side === 'sell') { fill = LV_SELL_FILL; rim = LV_SELL_RIM; }
         }
         const r = Math.max(1.3, Math.sqrt(Math.max(1, t.s)) * 0.62);
         ctx.fillStyle = fill;
@@ -554,6 +567,58 @@ window.lvPane = function (id, send) {
         ctx.fillText(String(sz), lx + r - 4, padT + plotH + 4);
         lx += r * 2 + 20;
       }
+    },
+
+    /* The NBBO across the window as a STEP FUNCTION that reaches both edges.
+     *
+     * THE REPORTED DEFECT. The line was drawn between quote points, so the
+     * last segment could not exist until the next quote arrived — dots landed
+     * in a region the lines had not reached yet, seconds of empty space at
+     * the right edge, and the whole page read as jumpy. And on a quiet name
+     * where the newest quote predated the window, nothing drew at all.
+     *
+     * A QUOTE PERSISTS UNTIL IT CHANGES. So: carry the last quote from before
+     * the window in as the opening level, take every quote inside it, and
+     * extend the last one flat to the right edge. The line is then always
+     * complete, and the only thing a new quote does is move it.
+     *
+     * The synthetic end point is not a quote and is not stored — it is the
+     * same quote, still standing. */
+    /* WHO CROSSED THE SPREAD, as a value rather than a colour.
+     *
+     * Above the mid, a buyer lifted the offer; below it, a seller hit the
+     * bid. That is the claim, and having it as a named function is what makes
+     * it checkable — the mapping was inline in the draw loop and inverted,
+     * matching the line each dot sat nearest instead of the aggressor.
+     *
+     * Returns null when there is no mid, or the print is exactly on it. A
+     * midpoint print has no aggressor to name and grey says so. */
+    aggressor(price, mid) {
+      if (mid == null || price == null) return null;
+      if (Math.abs(price - mid) < 1e-9) return null;
+      return price > mid ? 'buy' : 'sell';
+    },
+
+    nbboSteps(tStart, tEnd) {
+      const out = [];
+      let carry = null;
+      for (const q of this.quotes) {
+        if (q.bp == null || q.ap == null || !q.bp || !q.ap) continue;
+        if (q.t < tStart) { carry = q; continue; }
+        if (q.t > tEnd) break;
+        if (carry && !out.length) out.push({ t: tStart, bp: carry.bp, ap: carry.ap });
+        out.push(q);
+      }
+      // Nothing inside the window, but a quote standing from before it: the
+      // level is known for the whole window and must be drawn across it.
+      if (!out.length && carry) {
+        out.push({ t: tStart, bp: carry.bp, ap: carry.ap });
+      }
+      if (out.length) {
+        const last = out[out.length - 1];
+        if (last.t < tEnd) out.push({ t: tEnd, bp: last.bp, ap: last.ap });
+      }
+      return out;
     },
 
     /* How many prints sat at this price inside the window.
@@ -790,7 +855,13 @@ document.addEventListener('alpine:init', () => {
     // ── the panes ────────────────────────────────────────────────────────
     panes: [],
     nextId: 1,
-    stacked: false,
+    // 'row' | 'col' | 'grid'. Grid is 2x2 and only means anything at three
+    // or four panes.
+    layout: 'row',
+    // Symbols the hub holds whether or not a pane wants them. Authoritative
+    // copy lives on the server; this is what it last told us.
+    pinned: [],
+    pinPending: '',
     // symbol -> how many panes want it. The socket's own subscription set is
     // a SET, so a second pane on the same symbol is a no-op to it and the
     // first close would have unsubscribed the other pane's tape. The count
@@ -819,9 +890,35 @@ document.addEventListener('alpine:init', () => {
     // ── panes ────────────────────────────────────────────────────────────
     maxPanes() {
       const cap = this.status && this.status.caps
-        ? this.status.caps.symbols : 4;
-      return Math.min(3, cap);
+        ? this.status.caps.symbols : 8;
+      return Math.min(4, cap);
     },
+
+    /* Grid is offered only where it means something. At two panes a 2x2 is
+     * two panes and two holes. */
+    layouts() {
+      return this.panes.length > 2
+        ? [['row', 'side by side'], ['col', 'stacked'], ['grid', '2 x 2']]
+        : [['row', 'side by side'], ['col', 'stacked']];
+    },
+
+    setLayout(l) {
+      this.layout = l;
+      // The canvases change size, and a canvas keeps its old backing store
+      // until told otherwise — it would just scale the previous frame.
+      this.$nextTick(() => this.resizeAll());
+    },
+
+    // ── pins ─────────────────────────────────────────────────────────────
+    isPinned(sym) { return !!sym && this.pinned.includes(sym); },
+
+    pin(sym) {
+      sym = (sym || '').trim().toUpperCase();
+      if (sym) this.send({ action: 'pin', symbol: sym });
+    },
+    unpin(sym) { this.send({ action: 'unpin', symbol: sym }); },
+    togglePin(sym) { this.isPinned(sym) ? this.unpin(sym) : this.pin(sym); },
+    pinTyped() { this.pin(this.pinPending); this.pinPending = ''; },
 
     addPane(sym) {
       if (this.panes.length >= this.maxPanes()) return;
@@ -847,20 +944,22 @@ document.addEventListener('alpine:init', () => {
     fromPane(msg) {
       if (msg.kind !== 'watch') return;
       if (msg.prev && msg.prev !== msg.symbol) this.release(msg.prev);
-      const n = (this.counts[msg.symbol] || 0) + 1;
-      this.counts[msg.symbol] = n;
-      // WATCH ONLY ON 0->1. The hub reference-counts acquisitions, and this
-      // socket's subscription set is a set — so a second `watch` for a symbol
-      // already held would raise the hub's count to two while the set stayed
-      // at one, and the single `unwatch` this client eventually sends would
-      // leave the symbol subscribed forever, occupying one of four slots.
+      this.counts[msg.symbol] = (this.counts[msg.symbol] || 0) + 1;
+      // ALWAYS `watch`, never a second verb.
       //
-      // A later pane on the same symbol asks only for the backlog, so it
-      // opens onto a populated plot rather than filling in over three
-      // minutes.
-      this.send(n === 1
-        ? { action: 'watch', symbol: msg.symbol, window_s: msg.window_s }
-        : { action: 'snapshot', symbol: msg.symbol, window_s: msg.window_s });
+      // This used to send `watch` on 0->1 and `snapshot` after, which made
+      // the client's count part of the protocol — and the count could be
+      // wrong. `send()` drops when the socket is not open, so a first watch
+      // could vanish while the count still went to one, and the next pane
+      // asked for a snapshot of a symbol the server had never held: "CRS is
+      // not watched on this connection", with nothing at any cap.
+      //
+      // The server now treats a repeat watch as a snapshot request, so this
+      // side does not have to know which case it is in. The count survives
+      // only to decide when to unwatch, where being too high merely delays an
+      // unsubscribe and can never cut another pane's tape.
+      this.send({ action: 'watch', symbol: msg.symbol,
+                  window_s: msg.window_s });
     },
 
     release(sym) {
@@ -884,9 +983,13 @@ document.addEventListener('alpine:init', () => {
         this.retryIn = 0;
         // The server remembers nothing across a drop. Re-assert every pane's
         // symbol, and rebuild the counts from the panes rather than trusting
-        // a tally that spans a disconnect.
+        // a tally that spans a disconnect. Anything queued while the socket
+        // was down is discarded in favour of that, because the panes are the
+        // authoritative statement of what should be watched.
+        this.outbox = [];
         this.counts = {};
         for (const p of this.panes) if (p.symbol) p.watch(p.symbol, true);
+        this.send({ action: 'pinned' });
       };
       s.onmessage = ev => this.onMessage(JSON.parse(ev.data));
       s.onclose = () => {
@@ -899,12 +1002,29 @@ document.addEventListener('alpine:init', () => {
       s.onerror = () => { /* onclose follows and carries the retry */ };
     },
 
+    /* HELD, NOT DROPPED, when the socket is not open yet.
+     *
+     * A silent drop is what let the page believe it was subscribed to
+     * something the server had never heard of. The queue is bounded and
+     * cleared on open, because a backlog of stale subscription changes is
+     * worse than none — `onopen` re-asserts every pane from its own state
+     * anyway, which is the authoritative version. */
+    outbox: [],
     send(o) {
-      if (this.sock && this.sock.readyState === 1) this.sock.send(JSON.stringify(o));
+      if (this.sock && this.sock.readyState === 1) {
+        this.sock.send(JSON.stringify(o));
+        return;
+      }
+      if (this.outbox.length < 32) this.outbox.push(o);
     },
 
     onMessage(m) {
-      if (m.ev === 'status') { this.status = m.data; return; }
+      if (m.ev === 'status') {
+        this.status = m.data;
+        if (m.data && m.data.pinned) this.pinned = m.data.pinned;
+        return;
+      }
+      if (m.ev === 'pinned') { this.pinned = m.data || []; return; }
       if (m.ev === 'refused') {
         // Named on the pane that asked for it where possible, so a symbol cap
         // refusal is attached to the pane that hit it.

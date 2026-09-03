@@ -38,6 +38,14 @@ async def lifespan(app: FastAPI):
     if tz:
         log.warning("arrival norms: %s", tz)
     tasks = [asyncio.create_task(HUB.run()), asyncio.create_task(HUB.pump())]
+    # Pinned BEFORE anything connects, so a symbol on the list is already
+    # buffering by the time a pane asks for it — which is the entire point of
+    # pinning rather than watching.
+    if config.PINNED:
+        refused = await HUB.pin_all(config.PINNED)
+        log.info("pinned at startup: %s", ", ".join(sorted(HUB.pinned)) or "none")
+        for r in refused:
+            log.warning("pin refused: %s", r)
     try:
         yield
     finally:
@@ -106,33 +114,31 @@ async def ws(sock: WebSocket):
             act = msg.get("action")
             if act == "watch":
                 sym = (msg.get("symbol") or "").strip().upper()
-                err = await HUB.acquire(sym)
-                if err:
-                    await sock.send_json({"ev": "refused", "symbol": sym,
-                                          "why": err})
-                    continue
-                wanted.add(sym)
+                # IDEMPOTENT PER SOCKET.
+                #
+                # THE REPORTED FAULT — "CRS is not watched on this
+                # connection". The client counted panes per symbol and sent
+                # `watch` only on 0->1, `snapshot` after that. But `send()`
+                # drops silently when the socket is not open yet, so the first
+                # watch could vanish while the count still went to one; the
+                # next pane then asked for a snapshot of a symbol the server
+                # had never heard of and was refused. Nothing was at a cap,
+                # which is why the next symbol worked.
+                #
+                # The count and the server's set could disagree at all, is the
+                # actual bug. Now a repeat `watch` is a snapshot request and
+                # nothing else — the client never has to know which case it is
+                # in, so the two cannot drift apart.
+                if sym not in wanted:
+                    err = await HUB.acquire(sym)
+                    if err:
+                        await sock.send_json({"ev": "refused", "symbol": sym,
+                                              "why": err})
+                        continue
+                    wanted.add(sym)
                 # The window's worth of tape that already arrived, so a pane
                 # opens onto a populated plot rather than filling in over the
                 # next three minutes.
-                await sock.send_json({
-                    "ev": "snapshot",
-                    "data": HUB.snapshot(sym, int(msg.get("window_s")
-                                                  or config.DEFAULT_WINDOW_S)),
-                })
-            elif act == "snapshot":
-                # A SECOND PANE on a symbol this socket already holds. It must
-                # not acquire again: the hub reference-counts acquisitions
-                # while `wanted` is a set, so a second acquire would leave the
-                # count at two against one set entry and the eventual unwatch
-                # would strand the subscription. The backlog is all the new
-                # pane needs.
-                sym = (msg.get("symbol") or "").strip().upper()
-                if sym not in wanted:
-                    await sock.send_json({
-                        "ev": "refused", "symbol": sym,
-                        "why": f"{sym} is not watched on this connection"})
-                    continue
                 await sock.send_json({
                     "ev": "snapshot",
                     "data": HUB.snapshot(sym, int(msg.get("window_s")
@@ -143,6 +149,25 @@ async def ws(sock: WebSocket):
                 if sym in wanted:
                     wanted.discard(sym)
                     await HUB.release(sym)
+            elif act == "pin":
+                # A pin outlives this socket, so it is not added to `wanted`:
+                # the disconnect handler releases everything in there, which
+                # is exactly what a pin must survive.
+                sym = (msg.get("symbol") or "").strip().upper()
+                err = await HUB.pin(sym)
+                if err:
+                    await sock.send_json({"ev": "refused", "symbol": sym,
+                                          "why": err})
+                else:
+                    await HUB.broadcast({"ev": "pinned",
+                                         "data": sorted(HUB.pinned)})
+            elif act == "unpin":
+                await HUB.unpin((msg.get("symbol") or "").strip().upper())
+                await HUB.broadcast({"ev": "pinned",
+                                     "data": sorted(HUB.pinned)})
+            elif act == "pinned":
+                await sock.send_json({"ev": "pinned",
+                                      "data": sorted(HUB.pinned)})
             elif act == "status":
                 await sock.send_json({"ev": "status", "data": HUB.status()})
     except WebSocketDisconnect:

@@ -56,10 +56,27 @@
        Side by side by default; stacked is a toggle, because which one reads
        better depends on whether the two names move together. */
     .lv-panes { flex:1; display:flex; gap:8px; min-height:0; }
-    .lv-panes.stacked { flex-direction:column; }
+    .lv-panes.col { flex-direction:column; }
+    /* 2 x 2. Explicit rows as well as columns: with rows left to auto the
+       panes size to their content and the plots collapse to nothing. */
+    .lv-panes.grid {
+      display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
+    }
     .lv-col {
       flex:1; display:flex; flex-direction:column; min-width:0; min-height:0;
     }
+
+    /* ── the persistent watchlist ──────────────────────────────────────
+       Held by the hub whether or not a pane is watching, so closing the
+       browser does not throw the buffer away. */
+    .lv-pin-chip {
+      display:inline-flex; align-items:center; gap:4px; cursor:pointer;
+      font-size:10.5px; font-weight:600; color:var(--accent);
+      border:1px solid var(--accent); border-radius:3px; padding:1px 6px;
+    }
+    .lv-pin-chip:hover { background:rgba(52,152,219,0.12); }
+    .lv-pin-chip .lv-x { color:var(--muted); }
+    .lv-inp.pin { width:66px; text-transform:uppercase; font-weight:600; }
 
     .lv-pane {
       flex:1; position:relative; min-height:0;
@@ -187,14 +204,36 @@
               :title="'Up to ' + maxPanes() + ' panes. The hub holds one '
                     + 'upstream subscription per symbol however many panes '
                     + 'watch it.'">+ pane</button>
-      <button class="lv-btn" :class="{on: stacked}" @click="stacked = !stacked"
-              x-show="panes.length > 1" x-cloak
-              x-text="stacked ? 'stacked' : 'side by side'"></button>
+      <template x-for="l in layouts()" :key="l[0]">
+        <button class="lv-btn" :class="{on: layout === l[0]}"
+                @click="setLayout(l[0])" x-show="panes.length > 1" x-cloak
+                x-text="l[1]"></button>
+      </template>
+
+      <!-- ── the persistent watchlist ────────────────────────────────────
+           Pinned symbols stay subscribed with nothing watching them. Closing
+           the browser used to drop the last reference and unsubscribe, so the
+           buffer went with it and the next pane opened on "buffering 55s of
+           180s" every time. A pin is a reference no pane owns. -->
+      <span class="lv-sub" style="margin-left:6px">pinned</span>
+      <input class="lv-inp pin" type="text" x-model="pinPending"
+             placeholder="add" @keydown.enter="pinTyped()"
+             title="Held by the hub whether or not a pane is watching it, so
+                    the buffer survives closing the browser. Memory is the
+                    only cost.">
+      <template x-for="s in pinned" :key="s">
+        <span class="lv-pin-chip" @click="unpin(s)" title="Click to unpin">
+          <span x-text="s"></span>
+          <span class="lv-x">×</span>
+        </span>
+      </template>
+      <span class="lv-sub" x-show="!pinned.length" x-cloak>none</span>
+
       <span class="lv-spacer"></span>
       <span class="lv-sub" x-text="statusLine()"></span>
     </div>
 
-    <div class="lv-panes" :class="{stacked: stacked}">
+    <div class="lv-panes" :class="layout">
       <template x-for="(pane, pi) in panes" :key="pane.id">
         <div class="lv-col">
 
@@ -206,6 +245,15 @@
                    @keydown.enter="pane.watch(pane.pending); pane.fetchNorm(true)">
             <button class="lv-btn on"
                     @click="pane.watch(pane.pending); pane.fetchNorm(true)">watch</button>
+            <button class="lv-btn" :class="{on: isPinned(pane.symbol)}"
+                    @click="togglePin(pane.symbol)" x-show="pane.symbol"
+                    x-cloak
+                    :title="isPinned(pane.symbol)
+                      ? pane.symbol + ' is pinned — it stays subscribed with '
+                        + 'no pane watching. Click to unpin.'
+                      : 'Pin ' + pane.symbol + ' so its buffer survives '
+                        + 'closing this pane and the browser.'"
+                    x-text="isPinned(pane.symbol) ? 'pinned' : 'pin'"></button>
 
             <!-- LADDERS of round stops, not doubling. From 180s the only
                  neighbours used to be 90 and 360, which overshoots every

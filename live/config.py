@@ -65,7 +65,20 @@ def feed_is_delayed() -> bool:
 # The arithmetic, so the numbers are not arbitrary: FDX runs ~56 trades and
 # ~283 quotes a minute. At the 15-minute ceiling that is ~5,100 records for one
 # symbol; at four symbols, ~20,000. A record is a small dict of six numbers.
-MAX_SYMBOLS = int(os.environ.get("LIVE_MAX_SYMBOLS", "4"))
+# Raised from four. A 2x2 grid is four panes on its own, and pinned symbols
+# hold a reference each — four of both would sit exactly on the old ceiling
+# and refuse the fifth. Eight busy names at the 15-minute ceiling is ~41,000
+# records of six numbers, which is still nothing next to Postgres on this box.
+MAX_SYMBOLS = int(os.environ.get("LIVE_MAX_SYMBOLS", "8"))
+
+# ── the persistent watchlist ────────────────────────────────────────────────
+#
+# Symbols held whether or not a pane is watching them, so closing the browser
+# does not throw away the buffer and leave the next pane reading "buffering
+# 55s of 180s". Pins can also be set and cleared from the page; this is only
+# the set restored on restart.
+PINNED = [s.strip().upper() for s in
+          os.environ.get("LIVE_PINNED", "").split(",") if s.strip()]
 MAX_WINDOW_S = int(os.environ.get("LIVE_MAX_WINDOW_S", str(15 * 60)))
 DEFAULT_WINDOW_S = int(os.environ.get("LIVE_DEFAULT_WINDOW_S", "180"))
 

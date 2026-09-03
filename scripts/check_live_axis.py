@@ -145,6 +145,49 @@ c.trades.push({ t: hn + 1000, p: 320.55, s: 400, x: 4 });
 out.hitsExact = c.lineHits(320.45, hn - 1000, Date.now());
 out.hitsMiss  = c.lineHits(320.90, hn - 1000, Date.now());
 out.hitsNear  = c.lineHits(320.452, hn - 1000, Date.now());
+
+// ── who crossed the spread ───────────────────────────────────────────────
+// The mapping was inverted: dots were coloured to match the line they sat
+// nearest, which is "which side of the book is this near" and not "who was
+// the aggressor". Above the mid a buyer lifted the offer.
+out.aggr = {
+  above: c.aggressor(320.46, 320.45),
+  below: c.aggressor(320.44, 320.45),
+  onMid: c.aggressor(320.45, 320.45),
+  noMid: c.aggressor(320.45, null),
+};
+
+// ── the NBBO reaches both edges ──────────────────────────────────────────
+// The line was drawn between quote points, so the last segment could not
+// exist until the next quote arrived: dots landed where no line had reached
+// and the page read as jumpy. A quote persists until it changes.
+const NOW = 1000000;
+function steps(qs, winS) {
+  c.quotes = qs;
+  return c.nbboSteps(NOW - winS * 1000, NOW);
+}
+const inWindow = steps([
+  { t: NOW - 120000, bp: 320.40, ap: 320.42 },   // before the window
+  { t: NOW - 40000,  bp: 320.41, ap: 320.43 },
+  { t: NOW - 30000,  bp: 320.42, ap: 320.44 },   // newest, 30s of silence
+], 60);
+out.nbbo = {
+  lastT: inWindow[inWindow.length - 1].t,
+  lastBp: inWindow[inWindow.length - 1].bp,
+  firstT: inWindow[0].t,
+  firstBp: inWindow[0].bp,
+  n: inWindow.length,
+  tEnd: NOW,
+  tStart: NOW - 60000,
+};
+// Every quote older than the window: the level is known for the whole span
+// and has to be drawn across it, not omitted.
+const stale = steps([{ t: NOW - 500000, bp: 319.10, ap: 319.12 }], 60);
+out.nbboStale = { n: stale.length,
+                  span: stale.length ? [stale[0].t, stale[stale.length - 1].t] : [],
+                  bp: stale.length ? stale[0].bp : null };
+out.nbboEmpty = steps([], 60).length;
+
 console.log(JSON.stringify(out));
 """
 
@@ -251,6 +294,51 @@ def main() -> int:
         print(f"\n  a line placed a fifth of a cent off found "
               f"{out['hitsNear']} — it is a question about a price, not "
               f"about 320.4523")
+
+    # ── the aggressor, not the nearest line ──────────────────────────────
+    a = out["aggr"]
+    if a["above"] != "buy" or a["below"] != "sell":
+        bad += 1
+        print(f"\n  a print above the mid is {a['above']!r} and below is "
+              f"{a['below']!r}. Above the mid a buyer LIFTED THE OFFER, so "
+              f"it is a buy; this is the mapping that was inverted, "
+              f"colouring each dot to match the line it sat nearest.")
+    if a["onMid"] is not None or a["noMid"] is not None:
+        bad += 1
+        print(f"\n  a midpoint print was assigned a side ({a['onMid']!r}) "
+              f"or one with no quote was ({a['noMid']!r}) — neither has an "
+              f"aggressor to name")
+
+    # ── the NBBO reaches both edges of the window ────────────────────────
+    nb = out["nbbo"]
+    if nb["lastT"] != nb["tEnd"]:
+        bad += 1
+        print(f"\n  the NBBO stops at {nb['tEnd'] - nb['lastT']}ms short "
+              f"of the right edge. This is the reported defect: the line "
+              f"was drawn between quote points, so the last segment could "
+              f"not exist until the next quote arrived and prints landed "
+              f"where no line had reached.")
+    if abs(nb["lastBp"] - 320.42) > 1e-9:
+        bad += 1
+        print(f"\n  the extension to the right edge changed the level to "
+              f"{nb['lastBp']} — a standing quote holds flat, it does not "
+              f"drift toward the edge")
+    if nb["firstT"] != nb["tStart"] or abs(nb["firstBp"] - 320.40) > 1e-9:
+        bad += 1
+        print(f"\n  the window opens at {nb['firstT']} / {nb['firstBp']} "
+              f"rather than carrying the quote standing before it "
+              f"({nb['tStart']} / 320.40)")
+
+    st = out["nbboStale"]
+    if st["n"] < 2 or st["span"] != [nb["tStart"], nb["tEnd"]]:
+        bad += 1
+        print(f"\n  a quote older than the whole window drew {st['n']} "
+              f"points across {st['span']} — on a quiet name the level is "
+              f"known for the entire span and nothing was drawn at all")
+    if out["nbboEmpty"] != 0:
+        bad += 1
+        print(f"\n  no quotes at all produced {out['nbboEmpty']} points; "
+              f"an invented level is worse than an absent one")
 
     # ── retention outlives the display window ────────────────────────────
     if out["retain"]["at60"] <= 60 or out["retain"]["at180"] <= 180:
