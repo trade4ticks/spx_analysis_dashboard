@@ -161,6 +161,18 @@ function lvFmtNum(v) {
  * `send` is injected rather than reached for: the socket belongs to the
  * component, and a pane that could open its own would be a second upstream
  * subscription for the same symbol. */
+/* ══ TEMPORARY DIAGNOSTIC: the trace store ══════════════════════════════
+ *
+ * OUTSIDE the component on purpose. A trace kept as a pane property would
+ * sit inside Alpine's proxy — and a suspicion about what Alpine does to pane
+ * properties is exactly what is being investigated. An instrument subject to
+ * the effect it measures is not an instrument. It would also mean thousands
+ * of reactive writes a second, perturbing the timing it records.
+ *
+ * Keyed by pane id. Remove with the trace methods once the flash is
+ * understood. */
+const LV_TRACES = new Map();
+
 window.lvPane = function (id, send) {
   return {
     id,
@@ -753,6 +765,7 @@ window.lvPane = function (id, send) {
       const plotW = Math.max(10, w - padL - padR);
       const plotH = Math.max(10, h - padT - padB);
 
+      this.traceFrame();
       if (!this.paused) this.reband(false);
       const tEnd = this.paused ? (this.frozenEnd || Date.now()) : Date.now();
       if (!this.paused) this.frozenEnd = null;
@@ -879,6 +892,7 @@ window.lvPane = function (id, send) {
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
+        this.traceLine(ln.p, 'price-line');
         ctx.setLineDash([]);
         // The count is the reading: "nothing has traded here in three
         // minutes" is the answer that decides whether to post there.
@@ -906,6 +920,7 @@ window.lvPane = function (id, send) {
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
+        this.traceLine(pos.avg, 'position-avg');
         ctx.setLineDash([]);
         ctx.font = '600 9px sans-serif';
         ctx.fillStyle = '#b9bfc7';
@@ -927,6 +942,7 @@ window.lvPane = function (id, send) {
         ctx.beginPath();
         ctx.moveTo(padL, yr); ctx.lineTo(padL + plotW, yr);
         ctx.stroke();
+        this.traceLine(this.revert.price, 'revert-flash');
         ctx.setLineDash([]);
         ctx.font = '700 10px sans-serif';
         ctx.fillStyle = '#f07ab4';
@@ -987,6 +1003,8 @@ window.lvPane = function (id, send) {
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
+        this.traceLine(px, `order:${o.order_id} src=`
+                           + (mv ? 'MOVE' : 'working') + ` rec=${o.price}`);
         ctx.setLineDash([]);
         // NOTHING IS DRAWN AT THE OLD PRICE. There used to be a faint
         // full-width line at mv.from "so the move is legible while it is
@@ -1167,6 +1185,7 @@ window.lvPane = function (id, send) {
       ctx.beginPath();
       ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
       ctx.stroke();
+      this.traceLine(px, 'drag-ghost');
       ctx.setLineDash([]);
 
       const label = this.dragText();
@@ -1371,6 +1390,7 @@ window.lvPane = function (id, send) {
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.strokeStyle = 'rgba(255,255,255,0.26)';
         ctx.stroke();
+        this.traceLine(last, 'last-trade');
         // The LINE always; the numeral only when nothing else is showing
         // prices. drawLadder marks the last-trade row in the price column.
         if (!this.ladder) {
@@ -2146,9 +2166,11 @@ window.lvPane = function (id, send) {
       // every later lookup — and the ownIds filter below — searching for an
       // id that no longer exists anywhere.
       const oldId = String(o.order_id);
+      this.traceStart(`move ${o.order_id} ${o.price} -> ${price}`);
 
       // OPTIMISTIC, AND SAID SO. The marker moves now; `pending` is what
       // makes it draw as a request rather than as the record.
+      this.traceMark(`move set: ${o.price} -> ${price}`);
       this.move = { order_id: oldId, from: Number(o.price),
                     to: Number(price), qty, side: o.side, sentAt,
                     state: 'sending' };
@@ -2161,6 +2183,10 @@ window.lvPane = function (id, send) {
         reference: this.lastPrice(), position_qty: this.positionQty(),
       });
       const confirm = Math.round(performance.now() - t0);
+      this.traceMark(`PUT returned in ${confirm}ms ok=${j.ok} `
+                     + `indeterminate=${!!j.indeterminate} id=${j.order_id}`);
+      const tr = LV_TRACES.get(this.id);
+      if (tr) tr.doneAt = this.traceNow();
       this.lastRt = { total: confirm, visible, confirm,
                       broker: j.rt_ms != null ? Math.round(j.rt_ms) : null };
 
@@ -2203,8 +2229,87 @@ window.lvPane = function (id, send) {
         this.ownIds.push(String(j.order_id));
       }
       this.move = null;
+      this.traceMark(`applied: record now ${live ? live.price : 'MISSING'} `
+                     + `id=${live ? live.order_id : '-'}`);
       this.lastAction = `moved to ${price.toFixed(2)}`;
       return j;
+    },
+
+    /* ══ TEMPORARY DIAGNOSTIC ═══════════════════════════════════════════
+     *
+     * Three fixes for the drop flash have each been found in a node harness
+     * and none of them was it. The harness has no Alpine and no DOM, and
+     * whatever is wrong lives in that gap — so this records what the REAL
+     * page paints, in the real browser, and prints it.
+     *
+     * Every full-width horizontal line reports itself with the code that
+     * drew it, and every frame reports the state that produced it. Runs only
+     * while a move is in flight and for a moment after, then dumps once.
+     *
+     * Off with `window.LV_TRACE = false` in the console. Remove this block
+     * and its call sites once the flash is understood.
+     */
+    traceStart(label) {
+      if (typeof window !== 'undefined' && window.LV_TRACE === false) return;
+      LV_TRACES.set(this.id, {
+        t0: (typeof performance !== 'undefined'
+             ? performance.now() : Date.now()),
+        label, rows: [], frame: 0, doneAt: 0 });
+    },
+
+    traceNow() {
+      const t = LV_TRACES.get(this.id);
+      return Math.round((typeof performance !== 'undefined'
+                         ? performance.now() : Date.now()) - t.t0);
+    },
+
+    /* Called by every site that draws a line across the plot. */
+    traceLine(price, src) {
+      const t = LV_TRACES.get(this.id);
+      if (!t || t.rows.length > 6000) return;
+      t.rows.push(`${String(this.traceNow()).padStart(5)}ms f${t.frame} `
+                  + `LINE ${Number(price).toFixed(2)}  <- ${src}`);
+    },
+
+    /* Called once per frame, before anything is drawn. */
+    traceFrame() {
+      const t = LV_TRACES.get(this.id);
+      if (!t) return;
+      t.frame += 1;
+      const m = this.move;
+      const kind = m === null || m === undefined ? 'null' : typeof m;
+      const desc = (m && typeof m === 'object')
+        ? `to=${m.to} from=${m.from} id=${m.order_id} state=${m.state}`
+        : JSON.stringify(m);
+      t.rows.push(`${String(this.traceNow()).padStart(5)}ms f${t.frame} `
+                  + `STATE move(${kind}) ${desc}`
+                  + `  working=[${this.working.map(
+                       o => o.order_id + '@' + o.price).join(' ')}]`
+                  + `  drag=${this.dragOrder ? this.dragOrder.price : 'off'}`
+                  + `  revert=${this.revert ? this.revert.price : 'off'}`
+                  + `  lines=[${this.lines.map(l => l.p).join(' ')}]`);
+      if (t.doneAt && this.traceNow() - t.doneAt > 700) this.traceDump();
+    },
+
+    traceMark(what) {
+      const t = LV_TRACES.get(this.id);
+      if (!t) return;
+      t.rows.push(`${String(this.traceNow()).padStart(5)}ms f${t.frame} `
+                  + `>>> ${what}`);
+    },
+
+    traceDump() {
+      const t = LV_TRACES.get(this.id);
+      if (!t) return;
+      LV_TRACES.delete(this.id);
+      const text = `===== lv trace: ${t.label} (${this.symbol}) =====\n`
+                 + t.rows.join('\n')
+                 + `\n===== end (${t.rows.length} rows) =====`;
+      if (typeof window !== 'undefined') {
+        window.__lvTrace = text;
+        console.log(text);
+        console.log('copy(__lvTrace) to put the block above on the clipboard');
+      }
     },
 
     /* The price to DRAW an order at: the pending one while a move is in
@@ -2788,6 +2893,10 @@ document.addEventListener('alpine:init', () => {
           // matching here: the rule and its ambiguity caveat live in
           // broker.match_placement, and a second copy in the browser would
           // be a second place for that caveat to go stale.
+          if (LV_TRACES.get(p.id)) {
+            p.traceMark(`poll replaced working=[${(p.working || []).map(
+              o => o.order_id + '@' + o.price).join(' ')}]`);
+          }
           if (p.unresolved) p.tryResolve();
         }
       } catch (err) {
