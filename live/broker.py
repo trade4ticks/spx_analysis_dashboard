@@ -76,11 +76,52 @@ _API = "https://api.schwabapi.com/trader/v1"
 
 # Schwab's own status strings for an order that is still live. Anything not in
 # here is terminal and must not be drawn as a working order.
+# ── which statuses mean "this order is still live at the broker" ────────────
+#
+# THE LIST DECIDES WHAT THE PANE CAN SEE AND TOUCH. A status in here puts the
+# order in `working`: it draws a marker and a line, primaryOrder() can pick
+# it up, it can be repriced and cancelled, and an unresolved placement can
+# match it. A status not in here puts the order in `recent`, where it draws
+# nothing and none of the controls reach it.
+#
+# So the cost of the two mistakes is not symmetric. Calling a dead order live
+# leaves an inert marker on the chart. Calling a LIVE order dead hides an
+# order that is working at Schwab from the screen that is supposed to be
+# showing it — and hides it from cancel and flatten, which are how you get
+# out. Anything that might still be live belongs in here.
+#
+# Surveyed against 603 real orders on 2026-09-04: this account has produced
+# REPLACED, FILLED, CANCELED, EXPIRED, REJECTED and PENDING_ACTIVATION. The
+# first five are terminal and correctly excluded; PENDING_ACTIVATION was
+# already here, which is why an after-hours order still draws.
 WORKING_STATES = {
     "AWAITING_PARENT_ORDER", "AWAITING_CONDITION", "AWAITING_STOP_CONDITION",
     "AWAITING_MANUAL_REVIEW", "ACCEPTED", "AWAITING_UR_OUT",
     "PENDING_ACTIVATION", "QUEUED", "WORKING", "NEW",
     "PENDING_REPLACE", "PENDING_CANCEL",
+    # ADDED 2026-09-04, none of them seen on this account yet — which is the
+    # reason to add them now rather than at 9:31 on the morning one arrives.
+    # Every one is an order Schwab still has:
+    #   PENDING_ACKNOWLEDGEMENT  sent and not yet acknowledged. The most
+    #                            dangerous omission of the four: a live order
+    #                            that drew nothing and could not be cancelled
+    #                            from the pane.
+    #   AWAITING_RELEASE_TIME    held for a release time, then released.
+    #   PENDING_RECALL           a recall is pending against it; still live.
+    #   UNKNOWN                  Schwab cannot classify it, so neither can
+    #                            this. Treated as live because that is the
+    #                            direction that shows it rather than hides
+    #                            it, and every other unknown in this file is
+    #                            resolved the same way.
+    "PENDING_ACKNOWLEDGEMENT", "AWAITING_RELEASE_TIME", "PENDING_RECALL",
+    "UNKNOWN",
+}
+
+# Terminal: the order is over and nothing can be done to it. Kept explicitly
+# so the two sets can be checked against each other — a status in neither is
+# one nobody has thought about, and check_broker fails on it.
+TERMINAL_STATES = {
+    "FILLED", "CANCELED", "REJECTED", "EXPIRED", "REPLACED",
 }
 
 _account_hash: str | None = None

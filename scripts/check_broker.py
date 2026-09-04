@@ -297,6 +297,74 @@ def case_recent_is_newest():
               f"{label}: the list does not start at the newest: {ids[:3]}")
 
 
+# ── every order status is accounted for ─────────────────────────────────────
+def case_order_states():
+    """A status the pane has never heard of must not silently disappear.
+
+    WHY THIS IS ASYMMETRIC. A status in WORKING_STATES puts the order in
+    `working`: it draws, primaryOrder() can pick it up, it can be repriced
+    and cancelled. A status outside it goes to `recent`, where it draws
+    nothing and no control reaches it. Calling a dead order live leaves an
+    inert marker; calling a LIVE order dead hides a working order from the
+    screen meant to show it, and from cancel and flatten, which are how you
+    get out.
+
+    So the real failure is a status nobody classified. Schwab adds one, it
+    matches neither set, and an order that is live at the broker is invisible
+    here with nothing raised.
+    """
+    # Every status Schwab documents, plus the six this account has actually
+    # produced (surveyed over 603 orders, 2026-09-04).
+    documented = {
+        "AWAITING_PARENT_ORDER", "AWAITING_CONDITION",
+        "AWAITING_STOP_CONDITION", "AWAITING_MANUAL_REVIEW", "ACCEPTED",
+        "AWAITING_UR_OUT", "PENDING_ACTIVATION", "QUEUED", "WORKING",
+        "REJECTED", "PENDING_CANCEL", "CANCELED", "PENDING_REPLACE",
+        "REPLACED", "FILLED", "EXPIRED", "NEW", "AWAITING_RELEASE_TIME",
+        "PENDING_ACKNOWLEDGEMENT", "PENDING_RECALL", "UNKNOWN",
+    }
+    unclassified = sorted(
+        documented - broker.WORKING_STATES - broker.TERMINAL_STATES)
+    check(not unclassified,
+          f"these documented statuses are in neither WORKING_STATES nor "
+          f"TERMINAL_STATES: {unclassified}. An unclassified status falls "
+          f"into `recent`, so an order that is live at Schwab draws nothing, "
+          f"cannot be cancelled from the pane and does not block it — "
+          f"silently.")
+
+    overlap = sorted(broker.WORKING_STATES & broker.TERMINAL_STATES)
+    check(not overlap,
+          f"these statuses are both live and terminal: {overlap}")
+
+    # THE FOUR ADDED AFTER THE SURVEY. Each is an order Schwab still has, and
+    # each was landing in `recent` where nothing could reach it.
+    for st in ("PENDING_ACKNOWLEDGEMENT", "AWAITING_RELEASE_TIME",
+               "PENDING_RECALL", "UNKNOWN"):
+        check(st in broker.WORKING_STATES,
+              f"{st} is not treated as live. It is an order Schwab still "
+              f"has: it would draw no marker, be unreachable by cancel or "
+              f"reprice, and leave the pane free to send another on top.")
+
+    # And the terminal five stay terminal, or every filled order in the
+    # window comes back as a working one.
+    for st in ("FILLED", "CANCELED", "REJECTED", "EXPIRED", "REPLACED"):
+        check(st not in broker.WORKING_STATES,
+              f"{st} is treated as live; it is over.")
+
+    # The normaliser has to agree with the sets, not carry its own opinion.
+    live = _norm_status("PENDING_ACKNOWLEDGEMENT")
+    check(live["working"] is True,
+          f"the normaliser disagrees with WORKING_STATES: {live}")
+    dead = _norm_status("FILLED")
+    check(dead["working"] is False,
+          f"a filled order came back as working: {dead}")
+
+
+def _norm_status(status):
+    o = order("S1", "FDX", "BUY", 100, 318.50, status=status)
+    return broker._norm_order(o)
+
+
 # ── the guards ──────────────────────────────────────────────────────────────
 def case_guards():
     g = broker.check_guards
@@ -904,6 +972,7 @@ CASES = [
     ("which application placed it", case_order_source),
     ("where my orders actually traded", case_fills),
     ("the recent list is the recent end", case_recent_is_newest),
+    ("every order status is accounted for", case_order_states),
     ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
