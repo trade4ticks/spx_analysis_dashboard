@@ -780,7 +780,7 @@
                       :class="String(o.side).startsWith('BUY') ? 'buy' : 'sell'">
                   <span x-text="o.side + ' ' + ((o.qty||0) - (o.filled||0))
                                 + ' @ ' + Number(pane.shownPrice(o)).toFixed(2)
-                                + (pane.pendingFor(o) ? ' · sending…'
+                                + (pane.moveFor(o) ? ' · sending…'
                                    : (o.status && o.status !== 'WORKING'
                                       ? ' · ' + o.status : ''))"></span>
                   <span class="lv-x" @click="pane.cancelOrder(o.order_id)"

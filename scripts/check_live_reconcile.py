@@ -217,8 +217,8 @@ async function optimistic(reply) {
   const inFlight = {
     shown: c.shownPrice(c.working[0]),
     recordPrice: c.working[0].price,
-    pending: c.pending ? { to: c.pending.to, from: c.pending.from,
-                           state: c.pending.state } : null,
+    pending: c.move ? { to: c.move.to, from: c.move.from,
+                           state: c.move.state } : null,
   };
   release();
   await done;
@@ -229,7 +229,7 @@ async function optimistic(reply) {
       shown: c.working.length ? c.shownPrice(c.working[0]) : null,
       recordPrice: c.working.length ? c.working[0].price : null,
       orderId: c.working.length ? String(c.working[0].order_id) : null,
-      pending: c.pending ? { state: c.pending.state } : null,
+      pending: c.move ? { state: c.move.state } : null,
       revert: c.revert ? { price: c.revert.price } : null,
       ownIds: c.ownIds.slice(),
       unresolved: c.unresolved ? c.unresolved.state : null,
@@ -756,7 +756,7 @@ async function releaseFrames() {
   const shot = () => ({
     marker: c.working[0] ? c.shownPrice(c.working[0]) : null,
     ghost: c.dragOrder ? c.dragOrder.price : null,
-    pending: c.pending ? c.pending.to : null,
+    pending: c.move ? c.move.to : null,
   });
 
   press(c, 200, 158);
@@ -776,7 +776,7 @@ function pendingPaint() {
   const c = draggable();
   // BOTH prices inside the visible range, or the target is skipped for
   // being off-screen and the test proves nothing.
-  c.pending = { order_id: '1', from: 318.55, to: 318.45, qty: 100,
+  c.move = { order_id: '1', from: 318.55, to: 318.45, qty: 100,
                 side: 'BUY', state: 'sending' };
   c.working[0].price = 318.55;
   const { ctx, rec } = recorder();
@@ -829,10 +829,10 @@ async function found() {
   out.rtSteal = await rtNotStolen();
   {
     const c = quoted(pane());
-    c.pending = { order_id: '1', from: 318.50, to: 318.45, state: 'unknown' };
+    c.move = { order_id: '1', from: 318.50, to: 318.45, state: 'unknown' };
     c.unresolved = { state: 'gave-up' };
     c.clearUnresolved();
-    out.clearedPending = c.pending;
+    out.clearedPending = c.move;
   }
   out.release = await releaseFrames();
   out.pendingPaint = pendingPaint();

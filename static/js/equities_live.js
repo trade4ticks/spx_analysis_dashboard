@@ -273,6 +273,19 @@ window.lvPane = function (id, send) {
 
     /* A MOVE THE BROKER HAS NOT ANSWERED YET.
      *
+     * CALLED `move`, NOT `pending`, AND THAT IS THE WHOLE POINT. It was
+     * `pending`, which is ALSO the ticker input's x-model — a string, bound
+     * two-way to a text box a few lines up in the template. Setting it to an
+     * object on release made Alpine write that object into the input and
+     * sync a string back, so the move state was clobbered a frame later:
+     * moveFor() then matched nothing and the marker fell back to the
+     * broker's price.
+     *
+     * On screen that was target -> origin -> target across about a second,
+     * and no amount of tracing the drag path in node could find it, because
+     * node has no Alpine and no DOM. The state machine was right in every
+     * harness and wrong in the only place that counts.
+     *
      * MEASURED, and the measurement is why this exists: a replace is 484ms
      * at the PUT and 855ms more for the read-back that used to follow it,
      * while Schwab's own propagation is NEGATIVE — the new price is already
@@ -285,7 +298,7 @@ window.lvPane = function (id, send) {
      * true — the pane never claims a price the broker has not agreed to, it
      * shows a request AS a request. {order_id, from, to, qty, side, sentAt,
      * state: 'sending' | 'unknown'}. */
-    pending: null,
+    move: null,
 
     // A move that came back REFUSED, held briefly so the marker snapping
     // back is something you see happen rather than something you missed.
@@ -961,7 +974,7 @@ window.lvPane = function (id, send) {
         // WHERE IT IS DRAWN is the pending price while a move is in flight.
         const px = this.shownPrice(o);
         if (px < lo || px > hi) continue;
-        const pend = this.pendingFor(o);
+        const mv = this.moveFor(o);
         const y = Y(px);
         const buy = String(o.side || '').toUpperCase().startsWith('BUY');
         ctx.strokeStyle = buy ? 'rgba(52,152,219,0.90)'
@@ -970,13 +983,13 @@ window.lvPane = function (id, send) {
         // A REQUEST IS DASHED; the record is solid. The distinction is the
         // whole licence for moving the marker early — it is not claiming
         // the broker agreed, it is showing what was asked for.
-        if (pend) ctx.setLineDash([7, 4]);
+        if (mv) ctx.setLineDash([7, 4]);
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
         ctx.setLineDash([]);
         // NOTHING IS DRAWN AT THE OLD PRICE. There used to be a faint
-        // full-width line at pend.from "so the move is legible while it is
+        // full-width line at mv.from "so the move is legible while it is
         // happening", and it was the flash.
         //
         // On a one-row nudge it sat a row away and read as a hint. On a
@@ -993,8 +1006,8 @@ window.lvPane = function (id, send) {
         ctx.fillStyle = buy ? '#6cb6e6' : '#f07ab4';
         ctx.textAlign = 'left';
         const left = (o.qty || 0) - (o.filled || 0);
-        const tag = pend
-          ? (pend.state === 'unknown' ? ' · UNKNOWN' : ' · sending…')
+        const tag = mv
+          ? (mv.state === 'unknown' ? ' · UNKNOWN' : ' · sending…')
           : (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : '');
         ctx.fillText(`${o.side} ${left}${o.filled ? ' of ' + o.qty : ''}`
                      + ` @ ${px.toFixed(2)}` + tag,
@@ -1081,7 +1094,7 @@ window.lvPane = function (id, send) {
       for (const o of this.working) {
         const r = this.handleRect(o, g);
         if (!r) continue;
-        const pend = this.pendingFor(o);
+        const mv = this.moveFor(o);
         const buy = String(o.side || '').toUpperCase().startsWith('BUY');
         const col = buy ? 'rgba(52,152,219,0.95)' : 'rgba(232,67,147,0.95)';
         const hot = this.dragOrder
@@ -1091,7 +1104,7 @@ window.lvPane = function (id, send) {
         ctx.fillRect(r.x, r.y, r.w, r.h);
         ctx.lineWidth = hot ? 2 : 1.3;
         ctx.strokeStyle = col;
-        if (pend) ctx.setLineDash([5, 3]);
+        if (mv) ctx.setLineDash([5, 3]);
         ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
         ctx.setLineDash([]);
 
@@ -1280,7 +1293,7 @@ window.lvPane = function (id, send) {
         if (o.price == null) continue;
         const opx = this.shownPrice(o);
         if (opx < lo || opx > hi) continue;
-        const pend = this.pendingFor(o);
+        const mv = this.moveFor(o);
         const buy = String(o.side || '').toUpperCase().startsWith('BUY');
         const yc = Y(Math.round(opx / step) * step);
         const zx = buy ? x0 : x0 + gu.buy + gu.price;
@@ -1288,7 +1301,7 @@ window.lvPane = function (id, send) {
         const oy = yc - Math.max(2, rowH / 2);
         const oh = Math.max(4, rowH - 0.5);
         const col = buy ? 'rgba(52,152,219,0.95)' : 'rgba(232,67,147,0.95)';
-        if (pend) {
+        if (mv) {
           // HOLLOW while it is a request, filled once it is the record. The
           // same distinction the dashed line makes on the plot.
           ctx.strokeStyle = col;
@@ -1299,7 +1312,7 @@ window.lvPane = function (id, send) {
           ctx.fillRect(zx, oy, zw, oh);
         }
         ctx.font = '700 9px sans-serif';
-        ctx.fillStyle = pend ? col : '#fff';
+        ctx.fillStyle = mv ? col : '#fff';
         ctx.textAlign = 'center';
         if (rowH >= 8) {
           ctx.fillText(String((o.qty || 0) - (o.filled || 0)),
@@ -2136,9 +2149,9 @@ window.lvPane = function (id, send) {
 
       // OPTIMISTIC, AND SAID SO. The marker moves now; `pending` is what
       // makes it draw as a request rather than as the record.
-      this.pending = { order_id: oldId, from: Number(o.price),
-                       to: Number(price), qty, side: o.side, sentAt,
-                       state: 'sending' };
+      this.move = { order_id: oldId, from: Number(o.price),
+                    to: Number(price), qty, side: o.side, sentAt,
+                    state: 'sending' };
       this.revert = null;
       const visible = Math.round(performance.now() - t0);
 
@@ -2157,7 +2170,7 @@ window.lvPane = function (id, send) {
         // requested price and draws it as a question until the reconcile
         // settles it. Reverting here would assert the move did not happen,
         // which is exactly as unfounded as asserting it did.
-        this.pending.state = 'unknown';
+        this.move.state = 'unknown';
         this.unresolved = { side: o.side, qty, price, sentAt, tries: 0,
                             state: 'looking', why: j.why, wasReplace: true };
         this.lastAction = 'UNRESOLVED';
@@ -2168,7 +2181,7 @@ window.lvPane = function (id, send) {
         // REFUSED. Put it back, and make the snap back visible — a marker
         // that quietly returns to where it was is a move you think happened.
         this.revert = { price: Number(price), until: Date.now() + 1500 };
-        this.pending = null;
+        this.move = null;
         this.lastAction = 'move refused';
         return j;
       }
@@ -2189,7 +2202,7 @@ window.lvPane = function (id, send) {
         this.ownIds = this.ownIds.filter(id => id !== oldId);
         this.ownIds.push(String(j.order_id));
       }
-      this.pending = null;
+      this.move = null;
       this.lastAction = `moved to ${price.toFixed(2)}`;
       return j;
     },
@@ -2198,13 +2211,13 @@ window.lvPane = function (id, send) {
      * flight, the broker's otherwise. One place, so the plot line and the
      * ladder marker cannot disagree about where an order is. */
     shownPrice(o) {
-      const p = this.pending;
+      const p = this.move;
       return (p && String(p.order_id) === String(o.order_id))
         ? p.to : Number(o.price);
     },
 
-    pendingFor(o) {
-      const p = this.pending;
+    moveFor(o) {
+      const p = this.move;
       return (p && String(p.order_id) === String(o.order_id)) ? p : null;
     },
 
@@ -2316,7 +2329,7 @@ window.lvPane = function (id, send) {
         u.state = 'found';
         // Settled: the record is about to be re-read, so the request stops
         // standing in for it.
-        this.pending = null;
+        this.move = null;
         if (j.order && j.order.order_id) this.ownIds.push(String(j.order.order_id));
         this.lastAction = `resolved: the order did land (${j.order.status})`;
         this.unresolved = null;
@@ -2367,7 +2380,7 @@ window.lvPane = function (id, send) {
       // The pending marker was the unresolved move. Clearing one by hand
       // and leaving the other would keep a requested price on screen with
       // nothing left to settle it.
-      this.pending = null;
+      this.move = null;
       this.lastAction = 'unresolved state cleared by hand';
     },
 

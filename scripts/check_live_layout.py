@@ -241,6 +241,41 @@ def main() -> int:
              "the ladder and any working order pointing at a name you are no "
              "longer looking at.")
 
+    # -- x-model names belong to the input, and to nothing else ------------
+    #
+    # THE BUG THIS EXISTS FOR. `pane.pending` is the ticker input's x-model:
+    # a string, bound two-way to a text box. The in-flight move state was
+    # given the same name, so releasing a drag set that property to an
+    # OBJECT — Alpine wrote it into the input and synced a string back, and
+    # the move state was gone a frame later. On screen the order marker went
+    # target -> origin -> target across about a second.
+    #
+    # Nothing caught it. Every trace ran in node, which has no Alpine and no
+    # DOM, so the state machine was correct in every harness and wrong in the
+    # only place that matters. This is the static check that would have.
+    models = set(re.findall(r'x-model(?:\.\w+)*\s*=\s*"pane\.(\w+)"', src))
+    if not models:
+        fail("no x-model bindings found on the pane; this check is looking "
+             "at the wrong markup and is protecting nothing.")
+    for name in sorted(models):
+        # An object or array literal assigned to a name the DOM owns.
+        hit = re.search(r"this\." + name + r"\s*=\s*[\[{]", js)
+        if hit:
+            line = js[:hit.start()].count("\n") + 1
+            fail(f"`pane.{name}` is bound with x-model AND assigned a "
+                 f"structure at equities_live.js:{line}. Alpine owns that "
+                 f"property: it writes it into the input and syncs a string "
+                 f"back, so the structure is destroyed a frame later. Give "
+                 f"the state its own name.")
+        # And declared as a non-string default, which is the same collision
+        # arriving from the other direction.
+        decl = re.search(r"^\s*" + name + r":\s*([\[{])", js, re.M)
+        if decl:
+            line = js[:decl.start()].count("\n") + 1
+            fail(f"`pane.{name}` is bound with x-model but declared as a "
+                 f"structure at equities_live.js:{line}. An x-model property "
+                 f"holds what the input holds, which is text.")
+
     if bad:
         print(f"\nlayout FAILED: {bad}")
         return 1
