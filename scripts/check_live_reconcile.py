@@ -306,7 +306,8 @@ async function polls(active) {
 // and the least visible from a test: an exception here blanks the pane, and
 // the only symptom is a plot that stops updating.
 function recorder() {
-  const rec = { texts: [], strokes: [], fills: [], arcs: [], clips: 0 };
+  const rec = { texts: [], strokes: [], fills: [], arcs: [], lines: [],
+                clips: 0, _from: null, _to: null };
   // A PLAIN BACKING OBJECT. Writing state back through the proxy re-enters
   // the set trap and recurses until the stack goes.
   const st = {};
@@ -317,7 +318,17 @@ function recorder() {
         return (txt, x, y) => rec.texts.push({ txt: String(txt), x, y });
       }
       if (k === 'clip') return () => { rec.clips += 1; };
-      if (k === 'stroke') return () => rec.strokes.push(st.strokeStyle);
+      if (k === 'stroke') {
+        return () => {
+          rec.strokes.push(st.strokeStyle);
+          // A horizontal segment, for "what is drawn at this price".
+          if (rec._from && rec._to && Math.abs(rec._from.y - rec._to.y) < 0.5) {
+            rec.lines.push({ y: rec._from.y, style: st.strokeStyle });
+          }
+        };
+      }
+      if (k === 'moveTo') return (x, y) => { rec._from = { x, y }; };
+      if (k === 'lineTo') return (x, y) => { rec._to = { x, y }; };
       // fill() as well as fillRect(): a filled ARC leaves no rect behind,
       // and "is this mark solid" was exactly the question being asked.
       if (k === 'fill') {
@@ -728,6 +739,58 @@ const iso = ms => new Date(ms).toISOString();
     f => String(f.style).includes('120,255,170')).length;
 }
 
+// ── the release: one code path, one frame, nothing at the old price ──────
+// THE GAP THIS CLOSES. Every other drop case stubs sendMove, so none of them
+// could see what a real release does — which is exactly where the flash
+// lived. This one runs the REAL sendMove with the call held open.
+async function releaseFrames() {
+  const c = draggable();
+  c.quotes = [{ t: Date.now(), bp: 318.20, ap: 318.80 }];   // wide: passive
+  let release = null;
+  const paths = [];
+  c.brokerCall = async (path) => {
+    paths.push(String(path).split('?')[0]);
+    await new Promise(r => { release = r; });
+    return { ok: true, order_id: '2', rt_ms: 484 };
+  };
+  const shot = () => ({
+    marker: c.working[0] ? c.shownPrice(c.working[0]) : null,
+    ghost: c.dragOrder ? c.dragOrder.price : null,
+    pending: c.pending ? c.pending.to : null,
+  });
+
+  press(c, 200, 158);
+  c.onMove({ clientX: 200, clientY: 173 });          // 318.50 -> 318.49
+  const during = shot();
+  const done = c.onUp();
+  const atRelease = shot();                          // SAME synchronous step
+  await new Promise(r => setImmediate(r));
+  const nextTick = shot();
+  release();
+  await done;
+  return { during, atRelease, nextTick, after: shot(), paths };
+}
+
+// And nothing may be painted at the price it came from while it is pending.
+function pendingPaint() {
+  const c = draggable();
+  // BOTH prices inside the visible range, or the target is skipped for
+  // being off-screen and the test proves nothing.
+  c.pending = { order_id: '1', from: 318.55, to: 318.45, qty: 100,
+                side: 'BUY', state: 'sending' };
+  c.working[0].price = 318.55;
+  const { ctx, rec } = recorder();
+  const yOf = pp => GEOM.padT + (1 - (pp - GEOM.lo) / (GEOM.hi - GEOM.lo)) * GEOM.plotH;
+  c.drawPlotOrders(ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                   GEOM.lo, GEOM.hi, yOf);
+  const yFrom = Math.round(yOf(318.55));
+  const yTo = Math.round(yOf(318.45));
+  return {
+    atFrom: rec.lines.filter(l => Math.round(l.y) === yFrom).length,
+    atTo: rec.lines.filter(l => Math.round(l.y) === yTo).length,
+  };
+}
+
 // ── the give-up window ───────────────────────────────────────────────────
 // Schwab keeps answering "absent". Count the looks until the pane stops.
 async function giveUp() {
@@ -771,6 +834,8 @@ async function found() {
     c.clearUnresolved();
     out.clearedPending = c.pending;
   }
+  out.release = await releaseFrames();
+  out.pendingPaint = pendingPaint();
   out.calls = await callBudget();
   out.pollsTrading = await polls(true);
   out.pollsWatching = await polls(false);
@@ -1326,6 +1391,44 @@ def main() -> int:
         fail("the fill mark is filled in, not an open ring - it covers the "
              "print underneath, which is the thing it is meant to be "
              "pointing at.")
+
+    # -- the release ------------------------------------------------------
+    rel = out["release"]
+    if rel["during"]["ghost"] != 318.49:
+        fail(f"the ghost did not follow the drag: {rel['during']}")
+    if rel["during"]["marker"] != 318.50:
+        fail(f"the record moved during the drag: {rel['during']}")
+
+    ar = rel["atRelease"]
+    if ar["ghost"] is not None:
+        fail(f"the ghost survived the release: {ar}")
+    if ar["pending"] != 318.49:
+        fail(f"the release did not set pending: {ar}. The drop would then "
+             f"fall back to `working`, which still holds the old price, and "
+             f"the marker sits where it started until the PUT lands ~484ms "
+             f"later.")
+    if ar["marker"] != 318.49:
+        fail(f"the marker is not at the target in the SAME step the ghost "
+             f"went away: {ar}. Ghost off and pending on have to be one "
+             f"render or there is a frame showing the old price.")
+    if rel["nextTick"]["marker"] != 318.49:
+        fail(f"the marker fell back after the release: {rel['nextTick']}")
+    if rel["after"]["marker"] != 318.49 or rel["after"]["pending"] is not None:
+        fail(f"the confirmed state is wrong: {rel['after']}")
+    if rel["paths"] != ["replace"]:
+        fail(f"the drop took a different route to the broker than a nudge: "
+             f"{rel['paths']}. Both must go through sendMove, or they drift "
+             f"apart again exactly as they did here.")
+
+    pp = out["pendingPaint"]
+    if pp["atFrom"]:
+        fail(f"{pp['atFrom']} line(s) drawn at the price the order came "
+             f"from while the move is pending. On a drag that appears at "
+             f"the gesture's starting price for the whole flight and then "
+             f"vanishes, which is indistinguishable from the order snapping "
+             f"back and then arriving. THIS WAS THE FLASH.")
+    if not pp["atTo"]:
+        fail("nothing is drawn at the pending target price")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

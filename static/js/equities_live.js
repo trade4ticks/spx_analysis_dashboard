@@ -877,56 +877,7 @@ window.lvPane = function (id, send) {
                      padL + 4, y - 4);
       }
 
-      // ── working orders, ON THE PLOT ────────────────────────────────────
-      //
-      // Most of the value of trading from here is seeing the order against
-      // the tape: whether anything is printing at the level it rests on. So
-      // it is a line across the plot, not only a marker in the gutter.
-      //
-      // Solid, where a placed price line is dashed — one is a level being
-      // watched, the other is real and working at the broker.
-      for (const o of this.working) {
-        if (o.price == null) continue;
-        // WHERE IT IS DRAWN is the pending price while a move is in flight.
-        const px = this.shownPrice(o);
-        if (px < lo || px > hi) continue;
-        const pend = this.pendingFor(o);
-        const y = Y(px);
-        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
-        ctx.strokeStyle = buy ? 'rgba(52,152,219,0.90)'
-                              : 'rgba(232,67,147,0.90)';
-        ctx.lineWidth = 1.4;
-        // A REQUEST IS DASHED; the record is solid. The distinction is the
-        // whole licence for moving the marker early — it is not claiming
-        // the broker agreed, it is showing what was asked for.
-        if (pend) ctx.setLineDash([7, 4]);
-        ctx.beginPath();
-        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        // Where it is moving FROM, faintly, so the move is legible while it
-        // is happening rather than only in hindsight.
-        if (pend && pend.from >= lo && pend.from <= hi) {
-          const yf = Y(pend.from);
-          ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([2, 4]);
-          ctx.beginPath();
-          ctx.moveTo(padL, yf); ctx.lineTo(padL + plotW, yf);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
-        ctx.font = '700 10px sans-serif';
-        ctx.fillStyle = buy ? '#6cb6e6' : '#f07ab4';
-        ctx.textAlign = 'left';
-        const left = (o.qty || 0) - (o.filled || 0);
-        const tag = pend
-          ? (pend.state === 'unknown' ? ' · UNKNOWN' : ' · sending…')
-          : (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : '');
-        ctx.fillText(`${o.side} ${left}${o.filled ? ' of ' + o.qty : ''}`
-                     + ` @ ${px.toFixed(2)}` + tag,
-                     padL + 4, y + 11);
-      }
+      this.drawPlotOrders(ctx, padL, padT, plotW, plotH, lo, hi, Y);
 
       // ── the average price of the open position ─────────────────────────
       //
@@ -987,6 +938,70 @@ window.lvPane = function (id, send) {
      * the failure mode of two copies drifting is a click landing on the
      * wrong row — which is an order at the wrong price.
      */
+    /* The order lines across the plot, as their own routine.
+     *
+     * PULLED OUT OF draw() SO IT CAN BE DRIVEN. The flash lived in here — a
+     * line drawn at the price a pending move came FROM — and nothing could
+     * see it, because every route to this code needed a canvas. A test can
+     * call this against a recording context and ask what is painted at
+     * which price, which is the question that could not be asked while it
+     * was buried in the frame loop.
+     */
+    drawPlotOrders(ctx, padL, padT, plotW, plotH, lo, hi, Y) {
+      // ── working orders, ON THE PLOT ────────────────────────────────────
+      //
+      // Most of the value of trading from here is seeing the order against
+      // the tape: whether anything is printing at the level it rests on. So
+      // it is a line across the plot, not only a marker in the gutter.
+      //
+      // Solid, where a placed price line is dashed — one is a level being
+      // watched, the other is real and working at the broker.
+      for (const o of this.working) {
+        if (o.price == null) continue;
+        // WHERE IT IS DRAWN is the pending price while a move is in flight.
+        const px = this.shownPrice(o);
+        if (px < lo || px > hi) continue;
+        const pend = this.pendingFor(o);
+        const y = Y(px);
+        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+        ctx.strokeStyle = buy ? 'rgba(52,152,219,0.90)'
+                              : 'rgba(232,67,147,0.90)';
+        ctx.lineWidth = 1.4;
+        // A REQUEST IS DASHED; the record is solid. The distinction is the
+        // whole licence for moving the marker early — it is not claiming
+        // the broker agreed, it is showing what was asked for.
+        if (pend) ctx.setLineDash([7, 4]);
+        ctx.beginPath();
+        ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // NOTHING IS DRAWN AT THE OLD PRICE. There used to be a faint
+        // full-width line at pend.from "so the move is legible while it is
+        // happening", and it was the flash.
+        //
+        // On a one-row nudge it sat a row away and read as a hint. On a
+        // DRAG it appears at the price the gesture started from, full plot
+        // width, for exactly as long as the PUT is in flight — and then
+        // vanishes. Which is indistinguishable from the order snapping
+        // back to where it came from and then arriving: the state was
+        // right the whole time and the drawing invented the bug.
+        //
+        // The journey is already shown while it is happening, by the drag
+        // ghost. Once the order is released the only fact worth drawing is
+        // where it is going, and whether that is confirmed yet.
+        ctx.font = '700 10px sans-serif';
+        ctx.fillStyle = buy ? '#6cb6e6' : '#f07ab4';
+        ctx.textAlign = 'left';
+        const left = (o.qty || 0) - (o.filled || 0);
+        const tag = pend
+          ? (pend.state === 'unknown' ? ' · UNKNOWN' : ' · sending…')
+          : (o.status && o.status !== 'WORKING' ? ` · ${o.status}` : '');
+        ctx.fillText(`${o.side} ${left}${o.filled ? ' of ' + o.qty : ''}`
+                     + ` @ ${px.toFixed(2)}` + tag,
+                     padL + 4, y + 11);
+      }
+    },
+
     /* MY OWN FILLS, against everyone else's prints.
      *
      * This is the answer to "was anything trading at my price while I sat
