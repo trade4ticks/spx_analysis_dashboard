@@ -757,6 +757,7 @@ async function releaseFrames() {
     marker: c.working[0] ? c.shownPrice(c.working[0]) : null,
     ghost: c.dragOrder ? c.dragOrder.price : null,
     pending: c.move ? c.move.to : null,
+    state: c.move ? c.move.state : null,
   });
 
   press(c, 200, 158);
@@ -851,6 +852,120 @@ async function flashSequence() {
   return { seen, origin: ORIGIN, target: TARGET };
 }
 
+/* THE STALE POLL, from the real trace:
+ *
+ *   502ms  PUT ok, applied: working=[...985@1147.42]
+ *   801ms  poll replaced  working=[...980@1147.60]     <- pre-replace data
+ *   815ms  LINE 1147.60 <- order:...980 src=working    <- and it STAYS
+ *
+ * A poll issued BEFORE the replace returned, carrying the old id at the old
+ * price, overwrote state that was newer than the poll's own request. Nothing
+ * afterwards disagreed, so the line sat at the origin for the rest of the
+ * recording — the opposite end of the window from a mask that stops
+ * matching, and invisible to any fixture that applies polls in order.
+ */
+async function stalePoll(variant) {
+  // variant 'both'    - the observed case: stale in time AND naming the
+  //                     retired id. Either guard alone would save it.
+  // variant 'time'    - the PUT came back with no Location, so no id was
+  //                     retired and only the issue-time guard can see it.
+  // variant 'server'  - issued AFTER the change, so the clock says fresh,
+  //                     but the server answered from a read older than the
+  //                     replace. Only the retired-id guard can see that.
+  const ORIGIN = 1147.60, TARGET = 1147.42;
+  const OLD = '1007840806980', NEW = '1007840806985';
+  const c = pane();
+  c.armed = true;
+  c.symbol = 'LLY';
+  c.working = [ord(OLD, true, { side: 'BUY', price: ORIGIN, qty: 10 })];
+  c.ownIds = [OLD];
+
+  const app = factory();
+  app.panes = [c];
+  app.livePanes = () => app.panes;
+  app.lastOrderPollAt = 0;
+
+  // The poll goes out FIRST, and is still in flight when the PUT returns.
+  let answerPoll = null;
+  global.fetch = async () => {
+    await new Promise(r => { answerPoll = r; });
+    return { json: async () => ({
+      ok: true, recent: [],
+      // Pre-replace data: the id we are about to retire, at the old price.
+      working: [{ order_id: OLD, symbol: 'LLY', side: 'BUY', qty: 10,
+                  filled: 0, price: ORIGIN, status: 'WORKING',
+                  working: true, from_api: true }],
+    }) };
+  };
+  // 'server': the poll is issued AFTER the replace is applied, so its clock
+  // is honest and only the id can betray it. The others are issued before.
+  let polling = null;
+  if (variant !== 'server') {
+    polling = app.pollOrders();
+    await new Promise(r => setImmediate(r));
+  }
+
+  // Now the replace resolves.
+  let answerPut = null;
+  c.brokerCall = async () => {
+    await new Promise(r => { answerPut = r; });
+    // No Location on the reply means no id to retire: the time guard is
+    // then the only thing standing between a stale snapshot and the record.
+    return variant === 'time'
+      ? { ok: true, rt_ms: 404 }
+      : { ok: true, order_id: NEW, rt_ms: 404 };
+  };
+  const moving = c.sendMove(c.working[0], TARGET);
+  await new Promise(r => setImmediate(r));
+  answerPut();
+  await moving;
+  // THE RECORD, UNMASKED. Asserting the drawn price would pass on the mask
+  // alone: `move` held as confirmed hides a clobbered `working` from the
+  // eye, but cancel-by-id, primaryOrder and every later poll read the
+  // record, so it is the record the guard has to keep right.
+  const rec = () => c.working.map(o => ({ id: String(o.order_id),
+                                         price: Number(o.price) }));
+  const afterPut = rec();
+
+  if (variant === 'server') {
+    app.lastOrderPollAt = 0;
+    polling = app.pollOrders();
+    await new Promise(r => setImmediate(r));
+  }
+
+  // And only THEN does the stale poll land.
+  answerPoll();
+  await polling;
+  const afterPoll = rec();
+  const shownAfter = c.working.map(o => String(c.shownPrice(o)));
+
+  // When the reply carried no Location the order KEEPS its id, so seeing the
+  // old id back is correct there and only the price can be wrong.
+  return { afterPut, afterPoll, shownAfter, oldId: OLD, newId: NEW,
+           reIded: variant !== 'time', origin: ORIGIN, target: TARGET };
+}
+
+/* A poll issued AFTER the change must still be applied, or the guard has
+ * simply stopped the pane learning anything. */
+async function freshPoll() {
+  const c = pane();
+  c.armed = true;
+  c.symbol = 'LLY';
+  c.working = [ord('A', true, { side: 'BUY', price: 100.00, qty: 10 })];
+  c.knownAt = Date.now() - 5000;      // something learned five seconds ago
+  const app = factory();
+  app.panes = [c];
+  app.livePanes = () => app.panes;
+  app.lastOrderPollAt = 0;
+  global.fetch = async () => ({ json: async () => ({
+    ok: true, recent: [],
+    working: [{ order_id: 'B', symbol: 'LLY', side: 'BUY', qty: 10,
+                filled: 0, price: 101.00, status: 'WORKING', working: true,
+                from_api: true }] }) });
+  await app.pollOrders();
+  return c.working.map(o => `${o.order_id}@${o.price}`);
+}
+
 // ── the give-up window ───────────────────────────────────────────────────
 // Schwab keeps answering "absent". Count the looks until the pane stops.
 async function giveUp() {
@@ -896,6 +1011,9 @@ async function found() {
   }
   out.release = await releaseFrames();
   out.flash = await flashSequence();
+  out.stalePoll = await stalePoll('both');
+  out.stalePollTime = await stalePoll('time');
+  out.freshPoll = await freshPoll();
   out.pendingPaint = pendingPaint();
   out.calls = await callBudget();
   out.pollsTrading = await polls(true);
@@ -1235,9 +1353,19 @@ def main() -> int:
         fail(f"after a 2xx the record still says {af['recordPrice']}. A 2xx "
              f"IS the broker's answer, so this is the moment it stops being "
              f"a guess.")
-    if af["pending"] is not None:
-        fail("the pending marker survived a confirmed move, so it would go "
-             "on drawing as unconfirmed forever")
+    # THE CONTRACT CHANGED, and this is why. Clearing the mask the instant
+    # the record was written left the confirmed state protected by nothing
+    # but `working` — and `working` is exactly what a stale poll overwrites.
+    # It is HELD, marked `confirmed` so it draws solid, and retired by the
+    # poll that agrees or after LV_MOVE_MAX_S.
+    if af["pending"] is None:
+        fail("the mask was dropped the moment the record was written. From "
+             "then until the next poll the confirmed price is protected by "
+             "`working` alone, which is the thing a stale poll overwrites.")
+    elif af["pending"]["state"] != "confirmed":
+        fail(f"after a 2xx the move is still {af['pending']['state']!r}. The "
+             f"broker HAS agreed; only our copy of the record may be behind, "
+             f"and the difference is whether it draws dashed.")
     if af["orderId"] != "2":
         fail(f"the new order id from the replace was not adopted "
              f"({af['orderId']}). A replace makes a NEW order and the reply "
@@ -1474,8 +1602,11 @@ def main() -> int:
              f"render or there is a frame showing the old price.")
     if rel["nextTick"]["marker"] != 318.49:
         fail(f"the marker fell back after the release: {rel['nextTick']}")
-    if rel["after"]["marker"] != 318.49 or rel["after"]["pending"] is not None:
+    if rel["after"]["marker"] != 318.49:
         fail(f"the confirmed state is wrong: {rel['after']}")
+    if rel["after"].get("state") != "confirmed":
+        fail(f"after the PUT the move should be held as confirmed until a "
+             f"poll agrees, not dropped: {rel['after']}")
     if rel["paths"] != ["replace"]:
         fail(f"the drop took a different route to the broker than a nudge: "
              f"{rel['paths']}. Both must go through sendMove, or they drift "
@@ -1508,6 +1639,54 @@ def main() -> int:
         fail(f"the move did not start dashed at the target: {fl2['seen']}")
     if not fl2["seen"][-1].startswith("solid@" + target):
         fail(f"the move did not settle solid at the target: {fl2['seen']}")
+
+    # -- the stale poll ----------------------------------------------------
+    def at(rows, price):
+        return any(abs(r["price"] - price) < 0.005 for r in rows)
+
+    sp = out["stalePoll"]
+    org = sp["origin"]
+    if not at(sp["afterPut"], sp["target"]):
+        fail(f"the PUT did not leave the pane at the target: {sp['afterPut']}")
+    if any(r["id"] == sp["oldId"] for r in sp["afterPoll"]):
+        fail(f"A STALE POLL RESURRECTED A RETIRED ORDER ID. After the poll "
+             f"the record is {sp['afterPoll']}, carrying {sp['oldId']} — an "
+             f"id the replace destroyed. A cancel or a nudge would then be "
+             f"sent against an order that no longer exists.")
+    if at(sp["afterPoll"], org):
+        fail(f"A STALE POLL OVERWROTE A CONFIRMED REPLACE. After the poll "
+             f"the pane shows {sp['afterPoll']}, back at the origin "
+             f"{org}. That response was REQUESTED BEFORE the replace "
+             f"returned, so it cannot know about it — and nothing "
+             f"afterwards disagrees, which is why the line stays there "
+             f"rather than flashing.")
+    if not at(sp["afterPoll"], sp["target"]):
+        fail(f"the pane lost the target price after the poll: "
+             f"{sp['afterPoll']}")
+
+    # THE ISSUE-TIME GUARD ON ITS OWN. Here the reply carried no Location, so
+    # no id was retired and the retired-id guard cannot help: if the time
+    # guard goes, this reverts.
+    #
+    # The reverse case - isolating the retired-id guard - is NOT tested, and
+    # deliberately so: a poll issued just after the change lands in the same
+    # millisecond as `knownAt`, so the time guard fires too and no fixture at
+    # this resolution can separate them. The retired-id test is defence in
+    # depth against a server answering from a read older than the request,
+    # which the propagation measurement says should not happen. It is kept
+    # because it is nearly free, not because anything here proves it needed.
+    v = out["stalePollTime"]
+    if at(v["afterPoll"], v["origin"]):
+        fail(f"a stale poll reverted the record: {v['afterPoll']}. The reply "
+             f"carried no Location, so nothing was retired and the "
+             f"issue-time guard was the only thing standing between a "
+             f"snapshot and newer state.")
+
+    fp = out["freshPoll"]
+    if fp != ["B@101"]:
+        fail(f"a poll issued AFTER the last local change was discarded: "
+             f"{fp}. The guard has to drop stale snapshots, not stop the "
+             f"pane learning anything at all.")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

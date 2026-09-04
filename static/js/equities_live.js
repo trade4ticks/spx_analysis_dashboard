@@ -175,6 +175,11 @@ function lvFmtNum(v) {
  * dropped. It exists only to survive the poll that has not arrived yet. */
 const LV_MOVE_MAX_S = 10;
 
+/* How long a retired order id proves a response is stale. Long enough to
+ * cover a poll already in flight, short enough that the guard can never
+ * blackhole the pane's order state. */
+const LV_RETIRED_MS = 5000;
+
 const LV_TRACES = new Map();
 
 window.lvPane = function (id, send) {
@@ -274,6 +279,24 @@ window.lvPane = function (id, send) {
      * moment price neared a boundary — which is the whole reason panning by
      * hand would otherwise be useless. Cleared by recenter(), and by nothing
      * else. */
+    /* WHEN THIS PANE LAST LEARNED SOMETHING THE POLL DOES NOT KNOW YET,
+     * and the ids it retired doing so.
+     *
+     * A poll response is a SNAPSHOT TAKEN WHEN THE REQUEST WENT OUT. Applying
+     * one wholesale over newer local knowledge is how a confirmed replace got
+     * undone: a poll already in flight when the PUT returned came back
+     * carrying pre-replace data — the old id at the old price — and
+     * overwrote it. The line went to the origin and STAYED there, because
+     * nothing after that disagreed until the next poll.
+     *
+     * `knownAt` is the guard: a response whose request predates it is stale
+     * by construction and is dropped. `retiredIds` is the second one, for a
+     * response issued after the change but computed by the server from a
+     * read older than it — the time guard cannot see that, and an id we
+     * know was replaced can. */
+    knownAt: 0,
+    retiredIds: [],
+
     dragPan: null,        // {y, lo, hi}
     bandManual: false,
 
@@ -2261,12 +2284,27 @@ window.lvPane = function (id, send) {
         this.ownIds = this.ownIds.filter(id => id !== oldId);
         this.ownIds.push(String(j.order_id));
       }
+      // FIRST-HAND KNOWLEDGE, STAMPED. Everything below is something this
+      // pane now knows and no poll already in flight can know.
+      this.knownAt = Date.now();
+      if (String(j.order_id || '') && String(j.order_id) !== oldId) {
+        // The old id is GONE — a replace retires it. A later response that
+        // still names it was read before this happened, whatever its clock
+        // says.
+        this.retiredIds = this.retiredIds
+          .concat([{ id: oldId, at: Date.now() }]).slice(-8);
+      }
       if (live) {
         live.price = Number(price);
         // A replace makes a NEW order and Schwab gives no link from the old
         // one to it, so the id in the reply is the only handle there is.
         if (j.order_id) live.order_id = String(j.order_id);
-        this.move = null;
+        // THE MASK IS HELD, not dropped here. Clearing it the moment the
+        // record was written left the confirmed state protected by nothing
+        // but `working` — and `working` is exactly what a stale poll
+        // overwrites. It is retired by the poll that AGREES, below.
+        this.move = { ...this.move, order_id: String(j.order_id || oldId),
+                      state: 'confirmed' };
       } else {
         // THE HOLE THAT PRODUCED THE FLASH. This used to clear the request
         // regardless, while only APPLYING it when the order was still found
@@ -2959,6 +2997,9 @@ document.addEventListener('alpine:init', () => {
       // 1996ms must not be dropped and then waited out all over again.
       if (now0 - this.lastOrderPollAt < cadence - 100) return;
       this.lastOrderPollAt = now0;
+      // WHEN THIS REQUEST WENT OUT. Everything it comes back with was true
+      // then, not now, and the difference is a whole round trip.
+      const issuedAt = now0;
       const syms = [...new Set(live.map(p => p.symbol))];
       try {
         const r = await fetch('broker/orders?symbols='
@@ -2973,6 +3014,41 @@ document.addEventListener('alpine:init', () => {
         }
         const now = Date.now();
         for (const p of live) {
+          // ── A SNAPSHOT MAY NOT OVERWRITE SOMETHING NEWER ──────────────
+          //
+          // Two independent tests, because they catch different staleness.
+          //
+          // The first is about OUR clock: this response was requested before
+          // the pane last learned something first-hand, so it cannot know
+          // about it. Measured from a real trace — PUT applied at 502ms, a
+          // poll issued earlier landed at 801ms and put the old id and the
+          // old price back, and the line sat at the origin for the rest of
+          // the recording.
+          //
+          // The second is about THEIRS: a response naming an order id we
+          // know has been replaced was read before that replace, whatever
+          // time it was issued. An id that no longer exists cannot appear in
+          // a current answer.
+          //
+          // Dropped rather than merged. A half-applied snapshot is a third
+          // state that matches neither the broker nor the pane, and the next
+          // poll is two seconds away at worst.
+          const stale = issuedAt <= p.knownAt;
+          // BOUNDED. A guard that can discard forever is worse than the
+          // bug it guards against: if Schwab ever kept reporting a replaced
+          // order as working, an unbounded test would blackhole this pane's
+          // order state permanently and silently. A retired id only proves
+          // staleness for as long as a response could still be in flight.
+          const cutoff = Date.now() - LV_RETIRED_MS;
+          const namesRetired = (j.working || []).some(o => p.retiredIds.some(
+            r => r.at > cutoff && r.id === String(o.order_id)));
+          if (stale || namesRetired) {
+            p.traceMark(`poll DISCARDED as stale: issued=${issuedAt} `
+                        + `knownAt=${p.knownAt} retired=${namesRetired} `
+                        + `carried=[${(j.working || []).map(
+                            o => o.order_id + '@' + o.price).join(' ')}]`);
+            continue;
+          }
           p.working = (j.working || [])
             .filter(o => (o.symbol || '').toUpperCase() === p.symbol);
           p.recent = (j.recent || [])
