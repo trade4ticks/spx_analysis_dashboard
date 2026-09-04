@@ -449,6 +449,43 @@ def _leg(order: dict) -> dict:
     return legs[0]
 
 
+def _fills(o: dict) -> list[dict]:
+    """This order's executions: when, at what price, how many.
+
+    THE ONLY AUTHORITATIVE ANSWER to "where did MY fills land". The tape
+    carries every print in the name and says nothing about whose it was;
+    matching our orders onto it by price and time would be the same guess
+    `match_placement` refuses to make, and it would be drawn on the chart as
+    if it were fact.
+
+    Schwab keeps the executions on the order itself, so no guessing is
+    needed. `orderActivityCollection` holds activities; an EXECUTION carries
+    `executionLegs`, each with its own price, quantity and time — a single
+    order filled in four pieces is four legs at four prices, which is exactly
+    what is worth seeing against the tape.
+
+    DEFENSIVE ON PURPOSE, because this is read from a live payload whose
+    shape is documented rather than typed, and a missing key here must not
+    take the order list down with it. The cost of being wrong is that fills
+    stop being drawn, which is why check_broker asserts this against a real
+    activity payload rather than trusting the field names.
+    """
+    out: list[dict] = []
+    for act in (o.get("orderActivityCollection") or []):
+        if not isinstance(act, dict):
+            continue
+        if act.get("activityType") not in (None, "EXECUTION"):
+            continue
+        for leg in (act.get("executionLegs") or []):
+            if not isinstance(leg, dict):
+                continue
+            px, qty = leg.get("price"), leg.get("quantity")
+            if px is None or not qty:
+                continue
+            out.append({"t": leg.get("time"), "price": px, "qty": qty})
+    return out
+
+
 def _norm_order(o: dict) -> dict:
     leg = _leg(o)
     inst = leg.get("instrument") or {}
@@ -474,6 +511,8 @@ def _norm_order(o: dict) -> dict:
         # exact one".
         "tag": o.get("tag"),
         "from_api": str(o.get("tag") or "").startswith("TA_"),
+        # Where this order actually traded. See _fills.
+        "fills": _fills(o),
     }
 
 

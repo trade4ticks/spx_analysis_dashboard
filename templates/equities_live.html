@@ -50,6 +50,18 @@
       font-size:11px; padding:3px 7px; border-radius:4px;
     }
     .lv-inp.sym { width:78px; text-transform:uppercase; font-weight:600; }
+    .lv-inp:disabled, .lv-btn:disabled {
+      opacity:0.45; cursor:not-allowed;
+    }
+    /* The name being traded. Bigger than anything else in the bar, and it
+       goes pink with the arm switch so the pane's state and its subject are
+       one glance, not two. */
+    .lv-sym {
+      font-size:15px; font-weight:800; letter-spacing:0.4px;
+      color:var(--text); min-width:52px; line-height:1;
+      padding:1px 6px 1px 0;
+    }
+    .lv-sym.armed { color:#e84393; }
     .lv-btn {
       background:var(--raised); border:1px solid var(--border); color:var(--muted);
       font-size:11px; padding:3px 9px; border-radius:4px; cursor:pointer;
@@ -450,10 +462,31 @@
           <!-- Each pane carries its OWN symbol, window, price range and
                lines. Nothing here is site state. -->
           <div class="lv-bar pane">
+            <!-- THE NAME, PERMANENTLY. The input holds what you are TYPING;
+                 this is what is being watched, and they are not the same
+                 thing — after a watch the input can sit empty or hold a
+                 half-typed next symbol while the pane trades something else.
+                 The moment orders can leave is the moment the symbol matters
+                 most, so it is stated, always, and loudest when armed. -->
+            <b class="lv-sym" :class="{armed: pane.armed}"
+               x-text="pane.symbol || '—'"
+               :title="pane.symbol
+                 ? 'This pane is watching ' + pane.symbol
+                   + (pane.armed ? ' and is ARMED — orders sent from here go '
+                                   + 'to ' + pane.symbol : '')
+                 : 'No symbol yet. Type one and press watch.'"></b>
+            <!-- LOCKED WHILE ARMED. Changing the symbol under an armed pane
+                 would leave the arm switch, the ladder and any working order
+                 pointing at a name you are no longer looking at. Disarm to
+                 change it — that is one click and it is the right one. -->
             <input class="lv-inp sym" type="text" x-model="pane.pending"
-                   placeholder="ticker"
+                   placeholder="ticker" :disabled="pane.armed"
+                   :title="pane.armed
+                     ? 'Locked while this pane is armed. Disarm to watch a '
+                       + 'different symbol.'
+                     : 'Type a ticker and press watch.'"
                    @keydown.enter="pane.watch(pane.pending); pane.fetchNorm(true)">
-            <button class="lv-btn on"
+            <button class="lv-btn on" :disabled="pane.armed"
                     @click="pane.watch(pane.pending); pane.fetchNorm(true)">watch</button>
             <button class="lv-btn" :class="{on: isPinned(pane.symbol)}"
                     @click="togglePin(pane.symbol)" x-show="pane.symbol"

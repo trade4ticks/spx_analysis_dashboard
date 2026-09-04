@@ -70,6 +70,24 @@ const LV_TOUCH_MAX_AGE_S = 30;
  * default is small on purpose: the ladder is one click from an order. */
 const LV_QTYS = [10, 20, 30, 50, 100, 200];
 
+/* MY FILLS. Light green, and deliberately outside the whole buy/pink,
+ * sell/blue vocabulary the tape uses in either mode — in bichrome those
+ * colours already mean aggressor side, so a fill drawn in them would read as
+ * a claim about who crossed. This one means "this one was mine". */
+const LV_FILL_RING = 'rgba(120,255,170,0.95)';
+const LV_FILL_CORE = 'rgba(120,255,170,0.30)';
+
+/* The order handle: a real grab target instead of a ladder row.
+ *
+ * FIXED IN PIXELS, both of them. The ladder row height follows the zoom and
+ * at a wide span it is four pixels — an order marker that inherits that is a
+ * four-pixel target for a drag that reprices real money. This does not move
+ * when the chart is zoomed, which is the point. Width is about 2.5 ladder
+ * columns, enough for a side, a quantity and a cancel. */
+const LV_HANDLE_W = 68;
+const LV_HANDLE_H = 18;
+const LV_HANDLE_X = 18;      // the cancel hit zone, at its right end
+
 /* How near the cursor has to be to a working order to grab it, in pixels.
  * Wider than the 6px used for a price line: this one ends in a replace, and
  * missing the grab silently places a NEW order at the row instead. */
@@ -184,6 +202,17 @@ window.lvPane = function (id, send) {
      * is drawn as a separate ghost and the real marker stays where the
      * broker last said it was. */
     dragOrder: null,
+
+    /* A vertical pan of the price band, and the flag that keeps it.
+     *
+     * `bandManual` is to the band what `ladderManual` is to the increment: a
+     * deliberate placement outlives the automatic one. Without it the very
+     * next frame would re-run the edge test and snap the view back the
+     * moment price neared a boundary — which is the whole reason panning by
+     * hand would otherwise be useless. Cleared by recenter(), and by nothing
+     * else. */
+    dragPan: null,        // {y, lo, hi}
+    bandManual: false,
 
     // Both rates over a FIXED sixty seconds. See the note in rates().
     tpm: null,
@@ -355,6 +384,31 @@ window.lvPane = function (id, send) {
       return tail[Math.floor(tail.length / 2)];
     },
 
+    /* Every execution of MINE inside the window, from the order records.
+     *
+     * Working orders too, not just recent ones: a partially filled order is
+     * still working and its first fill is exactly the one worth seeing. The
+     * same execution can appear in both lists across a poll, so they are
+     * keyed by (time, price, quantity) rather than counted twice.
+     */
+    myFills(tStart, tEnd) {
+      const seen = new Set();
+      const out = [];
+      for (const o of this.working.concat(this.recent || [])) {
+        if (!o || !o.fills || !o.from_api) continue;
+        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+        for (const f of o.fills) {
+          const t = Date.parse(f.t);
+          if (!isFinite(t) || t < tStart || t > tEnd) continue;
+          const key = `${t}|${f.price}|${f.qty}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ t, p: Number(f.price), s: Number(f.qty), buy });
+        }
+      }
+      return out;
+    },
+
     lastPrice() {
       return this.trades.length ? this.trades[this.trades.length - 1].p : null;
     },
@@ -457,6 +511,12 @@ window.lvPane = function (id, send) {
         this.band = this.snapBand((this.band.lo + this.band.hi) / 2, half);
         return;
       }
+      // A HAND-PLACED BAND IS NOT DRIFTED AWAY FROM. The automatic step
+      // below exists to keep price on screen when nobody is steering; once
+      // somebody is, it would undo the steering on the next frame that
+      // price came near an edge. recenter() is how the automatic behaviour
+      // is asked for again, and it is the only way back.
+      if (this.bandManual) return;
       const inner = 0.85;
       const mid = (this.band.lo + this.band.hi) / 2;
       if (Math.abs(p - mid) > half * inner) {
@@ -597,6 +657,14 @@ window.lvPane = function (id, send) {
      */
     orderAt(mx, my, g) {
       if (!this.armed || !g) return null;
+      // THE HANDLE FIRST, and by rectangle rather than by proximity. It is
+      // the target that was put there to be grabbed, it is bigger than
+      // everything else here, and the chart pan below must never win a
+      // gesture that started on it.
+      for (const o of this.working) {
+        if (!o.from_api) continue;
+        if (this.inHandle(mx, my, this.handleRect(o, g))) return o;
+      }
       const inPlot = mx >= g.padL && mx < g.padL + g.plotW;
       const zone = this.ladderZone(mx, g);
       if (!inPlot && !zone) return null;
@@ -867,6 +935,9 @@ window.lvPane = function (id, send) {
         ctx.fillText(`avg ${Number(pos.avg).toFixed(2)}`, padL + 4, y - 3);
       }
 
+      this.drawMyFills(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd,
+                       X, Y);
+
       // A REFUSED MOVE, briefly. The marker has already snapped back; this
       // is the only thing that says it went somewhere and came back.
       if (this.revert && Date.now() < this.revert.until
@@ -890,6 +961,8 @@ window.lvPane = function (id, send) {
       if (this.ladder) {
         this.drawLadder(ctx, padL, padT, plotW, plotH, lo, hi, Y);
       }
+      // LAST, so nothing is drawn over the thing you are meant to grab.
+      this.drawHandles(ctx, { padL, padT, plotW, plotH, lo, hi, Y });
     },
 
     /* THE LADDER, on the same canvas and the same Y().
@@ -900,6 +973,111 @@ window.lvPane = function (id, send) {
      * the failure mode of two copies drifting is a click landing on the
      * wrong row — which is an order at the wrong price.
      */
+    /* MY OWN FILLS, against everyone else's prints.
+     *
+     * This is the answer to "was anything trading at my price while I sat
+     * there" — the tape shows what traded and the order lines show where I
+     * was resting, but until now nothing showed where the two met.
+     *
+     * A RING, not a filled bubble, and sized like the tape's own bubbles so
+     * it reads at the same scale: the print underneath stays visible through
+     * it, which is what makes it a mark ON the tape rather than a bubble
+     * competing with it. Drawn after the tape and before the order lines.
+     */
+    drawMyFills(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd, X, Y) {
+      const fills = this.myFills(tStart, tEnd);
+      if (!fills.length) return;
+      for (const f of fills) {
+        if (!(f.p >= lo && f.p <= hi)) continue;
+        const x = X(f.t), y = Y(f.p);
+        if (x < padL || x > padL + plotW) continue;
+        // The tape's own radius rule, so a 400-share fill is the size a
+        // 400-share print would be.
+        const r = Math.max(3.2, Math.sqrt(Math.max(1, f.s)) * 0.62 + 1.6);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = LV_FILL_CORE;
+        ctx.fill();
+        ctx.lineWidth = 1.8;
+        ctx.strokeStyle = LV_FILL_RING;
+        ctx.stroke();
+        // A tick on the side it was: up for a buy, down for a sell. Shape,
+        // not colour, so it survives a monochrome screen and a colourblind
+        // eye — the green already carries "mine" and cannot also carry side.
+        ctx.beginPath();
+        ctx.moveTo(x, y + (f.buy ? -r - 2 : r + 2));
+        ctx.lineTo(x, y + (f.buy ? -r - 6 : r + 6));
+        ctx.stroke();
+      }
+    },
+
+    /* Where an order's handle sits, in pixels. One definition, used by the
+     * drawing and by every hit test — a second copy is the drift that a
+     * cancel landing on the wrong order would come from. */
+    handleRect(o, g) {
+      const px = this.shownPrice(o);
+      if (px == null || !isFinite(px)) return null;
+      if (px < g.lo || px > g.hi) return null;
+      const y = g.Y(px);
+      return { x: g.padL + g.plotW - LV_HANDLE_W - 3,
+               y: y - LV_HANDLE_H / 2, w: LV_HANDLE_W, h: LV_HANDLE_H };
+    },
+
+    inHandle(mx, my, r) {
+      return !!r && mx >= r.x && mx <= r.x + r.w
+                 && my >= r.y && my <= r.y + r.h;
+    },
+
+    /* The cancel zone is the RIGHT END of the handle, and it is the only
+     * part of it that is not a drag. Kept wide enough to hit and far enough
+     * from the left edge that a grab does not become a cancel. */
+    inHandleX(mx, my, r) {
+      return this.inHandle(mx, my, r) && mx >= r.x + r.w - LV_HANDLE_X;
+    },
+
+    /* THE HANDLE: quantity, side, and a cancel, at a fixed size.
+     *
+     * The ladder marker it replaces was as tall as a ladder row, so at a
+     * wide span it was a four-pixel target for a drag that reprices real
+     * money, and the quantity did not fit in it at all. */
+    drawHandles(ctx, g) {
+      for (const o of this.working) {
+        const r = this.handleRect(o, g);
+        if (!r) continue;
+        const pend = this.pendingFor(o);
+        const buy = String(o.side || '').toUpperCase().startsWith('BUY');
+        const col = buy ? 'rgba(52,152,219,0.95)' : 'rgba(232,67,147,0.95)';
+        const hot = this.dragOrder
+          && String(this.dragOrder.order.order_id) === String(o.order_id);
+
+        ctx.fillStyle = 'rgba(12,14,18,0.88)';
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.lineWidth = hot ? 2 : 1.3;
+        ctx.strokeStyle = col;
+        if (pend) ctx.setLineDash([5, 3]);
+        ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+        ctx.setLineDash([]);
+
+        const left = (o.qty || 0) - (o.filled || 0);
+        ctx.font = '700 10px sans-serif';
+        ctx.fillStyle = col;
+        ctx.textAlign = 'left';
+        ctx.fillText(`${buy ? 'B' : 'S'} ${left}`, r.x + 5, r.y + r.h / 2 + 3.5);
+
+        // The cancel, divided off so it reads as its own target.
+        const xz = r.x + r.w - LV_HANDLE_X;
+        ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(xz, r.y + 2); ctx.lineTo(xz, r.y + r.h - 2);
+        ctx.stroke();
+        ctx.font = '700 11px sans-serif';
+        ctx.fillStyle = 'rgba(240,130,180,0.95)';
+        ctx.textAlign = 'center';
+        ctx.fillText('×', xz + LV_HANDLE_X / 2, r.y + r.h / 2 + 4);
+      }
+    },
+
     /* THE DRAG GHOST: where the order would land, and what that means.
      *
      * Drawn as its own line rather than by moving the real marker, because
@@ -1277,6 +1455,21 @@ window.lvPane = function (id, send) {
       if (!g) return;
       const mx = e.clientX - g.rect.left, my = e.clientY - g.rect.top;
 
+      if (this.dragPan) {
+        // The price under the cursor stays under the cursor. Shifting by
+        // (dy / plotH) * span is what makes that true, and it is why the
+        // band is captured at grab time rather than accumulated per frame —
+        // accumulating drifts, and a chart that slides while the mouse is
+        // still is a chart nobody trusts.
+        const span = this.dragPan.hi - this.dragPan.lo;
+        const d = ((my - this.dragPan.y) / g.plotH) * span;
+        this.band = { lo: this.dragPan.lo + d, hi: this.dragPan.hi + d };
+        this.bandManual = true;
+        this.hover = null;
+        this.ladderHover = null;
+        return;
+      }
+
       if (this.dragOrder) {
         // Snapped to the ladder increment as it moves, so the ghost sits on
         // a row that can actually be sent. A drag that reads 318.5237 and
@@ -1328,10 +1521,17 @@ window.lvPane = function (id, send) {
       // AN ORDER UNDER THE CURSOR IS A GRAB, NOT A CLICK. This has to be
       // tested before the ladder zone below, because a working order is
       // drawn inside that zone — without it, pressing on your own order in
-      // the gutter placed a SECOND order at the same price.
+      // the gutter placed a SECOND order at the same price. It is also
+      // tested before the chart pan at the bottom of this function, so a
+      // gesture that starts on an order moves the order and never the view.
       const grab = this.orderAt(mx, my, g);
       if (grab) {
         e.preventDefault();
+        // The × on the handle is a cancel, not a very short drag.
+        if (this.inHandleX(mx, my, this.handleRect(grab, g))) {
+          this.cancelOrder(grab.order_id);
+          return;
+        }
         this.dragOrder = { order: grab, price: Number(grab.price) };
         this.hover = null;
         return;
@@ -1356,10 +1556,28 @@ window.lvPane = function (id, send) {
       if (best >= 0) {
         this.dragIdx = best;
         e.preventDefault();
+        return;
+      }
+
+      // NOTHING ELSE CLAIMED IT: drag the price range. Last, so an order
+      // handle, a ladder row and a price line all take the gesture first.
+      // Only in the plot and the gutter — the whole y axis moves together
+      // because there is only one Y() and one band behind both.
+      if (mx >= g.padL && my >= g.padT && my <= g.padT + g.plotH) {
+        const { lo, hi } = this.yRange();
+        this.dragPan = { y: my, lo, hi };
+        e.preventDefault();
       }
     },
 
     onUp() {
+      if (this.dragPan) {
+        this.dragPan = null;
+        // The rows have to land on real prices again after a free drag, and
+        // the increment may no longer suit the span.
+        this.autoLadder();
+        return;
+      }
       if (this.dragOrder) return this.dropOrder();
 
       // Snapped to the cent on release. A line at 318.5237 answers a question
@@ -1489,7 +1707,13 @@ window.lvPane = function (id, send) {
       // the price, so widening does not double as a recentre.
       this.reband(false);
     },
-    recenter() { this.reband(true); this.bandSteps += 1; },
+    recenter() {
+      // Hands the band back to the automatic edge test. Same shape as a
+      // zoom handing the ladder increment back to autoLadder().
+      this.bandManual = false;
+      this.reband(true);
+      this.bandSteps += 1;
+    },
     togglePause() {
       this.paused = !this.paused;
       if (!this.paused) this.frozenEnd = null;

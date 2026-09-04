@@ -162,6 +162,93 @@ def case_order_source():
           "start, so a foreign stamp could be read as ours")
 
 
+# ── where my orders actually traded ─────────────────────────────────────────
+def case_fills():
+    """Executions come off the ORDER, never off the tape.
+
+    The tape carries every print in the name and says nothing about whose it
+    was. Matching our orders onto it by price and time would be the guess
+    match_placement refuses to make — and drawn on a chart it would look like
+    fact. Schwab keeps the executions on the order, so this reads them.
+
+    The shape is documented rather than typed, which is why it is asserted
+    here against a realistic payload: if a field name is wrong the fills
+    simply stop appearing, with nothing raised and nothing on screen to say
+    so. That is the failure this case exists to make loud.
+    """
+    n = broker._norm_order
+
+    # A single order filled in three pieces at two prices, which is the case
+    # worth seeing against the tape.
+    o = order("A", "FDX", "BUY", 300, 318.50)
+    o["orderActivityCollection"] = [{
+        "activityType": "EXECUTION",
+        "executionType": "FILL",
+        "quantity": 300,
+        "executionLegs": [
+            {"legId": 1, "quantity": 100, "price": 318.49,
+             "time": "2026-09-04T14:31:02+0000"},
+            {"legId": 1, "quantity": 100, "price": 318.49,
+             "time": "2026-09-04T14:31:03+0000"},
+            {"legId": 1, "quantity": 100, "price": 318.50,
+             "time": "2026-09-04T14:31:09+0000"},
+        ],
+    }]
+    f = n(o)["fills"]
+    check(len(f) == 3,
+          f"three execution legs produced {len(f)} fills. A partial fill at "
+          f"several prices is exactly what is worth seeing on the tape, and "
+          f"collapsing it to one loses where it traded.")
+    check([x["price"] for x in f] == [318.49, 318.49, 318.50],
+          f"the fill prices did not survive: {[x['price'] for x in f]}")
+    check([x["qty"] for x in f] == [100, 100, 100],
+          f"the fill quantities did not survive: {[x['qty'] for x in f]}")
+    check(all(x["t"] for x in f),
+          "a fill came through with no time, so it cannot be placed on the "
+          "tape at all")
+
+    # Not every activity is an execution.
+    o2 = order("B", "FDX", "BUY", 100, 318.50)
+    o2["orderActivityCollection"] = [
+        {"activityType": "ORDER_ACTION", "executionLegs": [
+            {"quantity": 100, "price": 999.0, "time": "2026-09-04T14:00:00+0000"}]},
+    ]
+    check(n(o2)["fills"] == [],
+          f"a non-execution activity was read as a fill: {n(o2)['fills']}. "
+          f"That would draw a mark on the chart where nothing traded.")
+
+    # THE PATHS THAT ONLY RUN ON A BAD PAYLOAD. Each of these must produce no
+    # fills rather than an exception: this is parsed inside the order read,
+    # and raising here would take the whole order list down with it.
+    for label, bad in (
+            ("no activity collection at all", None),
+            ("a null collection", {"orderActivityCollection": None}),
+            ("a string where an activity should be",
+             {"orderActivityCollection": ["nonsense"]}),
+            ("an activity with no legs",
+             {"orderActivityCollection": [{"activityType": "EXECUTION"}]}),
+            ("a leg with no price",
+             {"orderActivityCollection": [{"activityType": "EXECUTION",
+              "executionLegs": [{"quantity": 5, "time": "x"}]}]}),
+            ("a leg with no quantity",
+             {"orderActivityCollection": [{"activityType": "EXECUTION",
+              "executionLegs": [{"price": 1.0, "time": "x"}]}]}),
+            ("a leg that is not an object",
+             {"orderActivityCollection": [{"activityType": "EXECUTION",
+              "executionLegs": [7]}]})):
+        o3 = order("C", "FDX", "BUY", 100, 318.50)
+        if bad:
+            o3.update(bad)
+        try:
+            got = n(o3)["fills"]
+        except Exception as exc:                            # noqa: BLE001
+            check(False, f"{label} RAISED {type(exc).__name__}: {exc}. This "
+                         f"is parsed inside the order read; an exception "
+                         f"here loses every order, not one fill.")
+            continue
+        check(got == [], f"{label} produced fills: {got}")
+
+
 # ── the guards ──────────────────────────────────────────────────────────────
 def case_guards():
     g = broker.check_guards
@@ -767,6 +854,7 @@ CASES = [
     ("split reads", case_split_reads),
     ("determinate vs unknown", case_indeterminacy),
     ("which application placed it", case_order_source),
+    ("where my orders actually traded", case_fills),
     ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),

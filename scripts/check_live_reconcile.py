@@ -555,6 +555,140 @@ const press = (c, x, y) => c.onDown({ clientX: x, clientY: y,
   };
 }
 
+// ── the order handle, the chart pan, and my own fills ────────────────────
+{
+  // The handle is right-aligned inside the plot: padL+plotW-68-3 = 337..405,
+  // 18px tall, centred on 318.50 at y=158 -> 149..167.
+  const c = draggable();
+  const r = c.handleRect(c.working[0], GEOM);
+  out.handle = {
+    rect: r && { x: Math.round(r.x), y: Math.round(r.y),
+                 w: Math.round(r.w), h: Math.round(r.h) },
+    onBody:   !!c.orderAt(r.x + 10, r.y + 9, GEOM),
+    onXZone:  c.inHandleX(r.x + r.w - 6, r.y + 9, r),
+    bodyIsNotX: c.inHandleX(r.x + 10, r.y + 9, r),
+    // Off the handle AND off the order's own line, which stays grabbable
+    // across the plot — the handle is an easier target, not a replacement.
+    outside:  !!c.orderAt(r.x - 30, r.y + 70, GEOM),
+    onOwnLine: !!c.orderAt(r.x - 30, r.y + 9, GEOM),
+  };
+  // FIXED IN PIXELS. A ladder row follows the zoom; this must not. Same
+  // order, a span four times as wide.
+  const wide = draggable();
+  wide.geom = () => GEOM;
+  const wideGeom = Object.assign({}, GEOM, {
+    lo: 317.60, hi: 319.40,
+    Y: pp => GEOM.padT + (1 - (pp - 317.60) / 1.80) * GEOM.plotH,
+  });
+  const r2 = wide.handleRect(wide.working[0], wideGeom);
+  out.handleFixed = r2 && { w: Math.round(r2.w), h: Math.round(r2.h) };
+}
+{
+  // The × cancels; the body drags. Two different gestures on one target.
+  const c = draggable();
+  const r = c.handleRect(c.working[0], GEOM);
+  let cancelled = null;
+  c.cancelOrder = (id) => { cancelled = id; };
+  press(c, r.x + r.w - 6, r.y + 9);
+  out.pressX = { cancelled, dragging: !!c.dragOrder };
+
+  const c2 = draggable();
+  const r2 = c2.handleRect(c2.working[0], GEOM);
+  let cancelled2 = null;
+  c2.cancelOrder = (id) => { cancelled2 = id; };
+  press(c2, r2.x + 10, r2.y + 9);
+  out.pressBody = { cancelled: cancelled2, dragging: !!c2.dragOrder };
+}
+{
+  // THE PRECEDENCE. A press that lands on a handle must move the ORDER, not
+  // the chart; a press on bare plot must move the chart.
+  const c = draggable();
+  const r = c.handleRect(c.working[0], GEOM);
+  press(c, r.x + 10, r.y + 9);
+  out.handleBeatsPan = { dragOrder: !!c.dragOrder, dragPan: !!c.dragPan };
+
+  const c2 = draggable();
+  press(c2, 120, 200);
+  out.barePlotPans = { dragOrder: !!c2.dragOrder, dragPan: !!c2.dragPan };
+
+  // A ladder row still places an order rather than panning.
+  const c3 = draggable();
+  let placed = null;
+  c3.clickLadder = (zone, price) => { placed = { zone, price }; };
+  press(c3, 420, 218);
+  out.ladderStillPlaces = { placed, dragPan: !!c3.dragPan };
+}
+{
+  // The pan itself: the price under the cursor stays under the cursor.
+  const c = draggable();
+  c.band = { lo: GEOM.lo, hi: GEOM.hi };
+  const priceBefore = GEOM.priceAt(200);
+  press(c, 120, 200);
+  c.onMove({ clientX: 120, clientY: 230 });        // dragged DOWN 30px
+  const band = c.band;
+  const spanAfter = band.hi - band.lo;
+  // Recompute what sits under the new cursor position with the new band.
+  const priceAfter = band.lo
+    + (1 - ((230 - GEOM.padT) / GEOM.plotH)) * spanAfter;
+  out.pan = {
+    held: Math.abs(priceAfter - priceBefore) < 1e-6,
+    spanKept: Math.abs(spanAfter - (GEOM.hi - GEOM.lo)) < 1e-9,
+    manual: c.bandManual,
+    movedUp: band.lo > GEOM.lo,
+  };
+  c.onUp();
+  out.panCleared = c.dragPan;
+
+  // A manual band is not drifted away from, and recenter is the way back.
+  const d = draggable();
+  d.bandManual = true;
+  d.band = { lo: 300.00, hi: 300.40 };            // far from the trades
+  for (let i = 0; i < 40; i++) d.trades.push({ t: Date.now(), p: 318.50, s: 1, x: 4 });
+  d.spanCents = 20;
+  d.reband(false);
+  out.manualHeld = { lo: d.band.lo, hi: d.band.hi };
+  d.recenter();
+  out.afterRecenter = { manual: d.bandManual, near: Math.abs(
+    (d.band.lo + d.band.hi) / 2 - 318.50) < 1.0 };
+}
+{
+  // MY FILLS, off the order records and never off the tape.
+  const NOW = Date.now();
+  const c = pane();
+  const iso = ms => new Date(ms).toISOString();
+  c.working = [Object.assign(ord('1', true, { side: 'BUY', price: 318.50 }), {
+    fills: [{ t: iso(NOW - 5000), price: 318.49, qty: 100 }],
+  })];
+  c.recent = [
+    Object.assign(ord('2', true, { side: 'SELL', price: 318.60 }), {
+      fills: [{ t: iso(NOW - 9000), price: 318.60, qty: 50 },
+              // The SAME execution, as a poll can report it twice.
+              { t: iso(NOW - 9000), price: 318.60, qty: 50 },
+              // Outside the window.
+              { t: iso(NOW - 900000), price: 318.10, qty: 25 }],
+    }),
+    // Not ours: a thinkorswim order carries no TA_ stamp.
+    Object.assign(ord('3', false, { side: 'BUY', price: 318.40 }), {
+      fills: [{ t: iso(NOW - 3000), price: 318.40, qty: 999 }],
+    }),
+  ];
+  const got = c.myFills(NOW - 60000, NOW);
+  out.fills = {
+    n: got.length,
+    prices: got.map(f => f.p).sort(),
+    sides: got.map(f => f.buy),
+    anyForeign: got.some(f => f.s === 999),
+  };
+  // And they draw as rings on the tape.
+  const { ctx, rec } = recorder();
+  c.drawMyFills(ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                318.40, 318.70, NOW - 60000, NOW,
+                t => GEOM.padL + GEOM.plotW * 0.5,
+                pp => GEOM.padT + (1 - (pp - 318.40) / 0.30) * GEOM.plotH);
+  out.fillsDrawn = rec.strokes.filter(
+    x => String(x).includes('120,255,170')).length;
+}
+
 // ── the give-up window ───────────────────────────────────────────────────
 // Schwab keeps answering "absent". Count the looks until the pane stops.
 async function giveUp() {
@@ -1043,6 +1177,98 @@ def main() -> int:
     if "no current NBBO" not in nb:
         fail(f"with no quotes at all the banner should say so, not quote an "
              f"age: {nb!r}")
+
+    # -- the order handle --------------------------------------------------
+    h = out["handle"]
+    if not h["rect"]:
+        fail("a working order in range produced no handle rectangle")
+    else:
+        if h["rect"]["w"] < 55 or h["rect"]["h"] < 14:
+            fail(f"the handle is {h['rect']['w']}x{h['rect']['h']}px — too "
+                 f"small to be the grab target it exists to be.")
+    if not h["onBody"]:
+        fail("the handle body does not hit-test as the order, so the target "
+             "that was added to be grabbed cannot be grabbed")
+    if not h["onXZone"]:
+        fail("the × zone at the right end of the handle does not register")
+    if h["bodyIsNotX"]:
+        fail("the middle of the handle counts as the × — a drag would cancel "
+             "the order instead of moving it, which is the worst possible "
+             "confusion between these two.")
+    if h["outside"]:
+        fail("a point off both the handle and the order's line hit-tested "
+             "as the order; the grab radius is wrong")
+    if not h["onOwnLine"]:
+        fail("the order's line across the plot stopped being grabbable. The "
+             "handle is an easier target, not a replacement for it.")
+    if out["handleFixed"] != {"w": 68, "h": 18}:
+        fail(f"the handle changed size with the zoom: {out['handleFixed']}. "
+             f"It is fixed in pixels precisely so a wide span does not leave "
+             f"a four-pixel target for a drag that reprices real money.")
+
+    if out["pressX"]["cancelled"] != "1" or out["pressX"]["dragging"]:
+        fail(f"pressing the × did not cancel: {out['pressX']}")
+    if out["pressBody"]["cancelled"] is not None:
+        fail(f"pressing the handle BODY cancelled the order: "
+             f"{out['pressBody']}")
+    if not out["pressBody"]["dragging"]:
+        fail("pressing the handle body did not start a drag")
+
+    # -- gesture precedence ------------------------------------------------
+    hp = out["handleBeatsPan"]
+    if not hp["dragOrder"] or hp["dragPan"]:
+        fail(f"a press on the order handle started a chart pan: {hp}. The "
+             f"handle has to take the gesture first or dragging an order "
+             f"drags the view instead.")
+    bp = out["barePlotPans"]
+    if bp["dragOrder"] or not bp["dragPan"]:
+        fail(f"a press on bare plot did not start a pan: {bp}")
+    ls = out["ladderStillPlaces"]
+    if ls["placed"] is None or ls["dragPan"]:
+        fail(f"a ladder row press panned the chart instead of placing an "
+             f"order: {ls}")
+
+    # -- the pan -----------------------------------------------------------
+    pan = out["pan"]
+    if not pan["held"]:
+        fail("the price under the cursor did not stay under the cursor "
+             "during the drag; the chart slides away from the grab")
+    if not pan["spanKept"]:
+        fail("panning changed the span — a drag moves the range, it does "
+             "not zoom it")
+    if not pan["movedUp"]:
+        fail("dragging DOWN did not move the band up; the direction is "
+             "inverted and the chart runs away from the hand")
+    if not pan["manual"]:
+        fail("a hand-placed band was not marked manual, so the very next "
+             "frame's edge test snaps it back the moment price nears a "
+             "boundary — which is what makes panning useless")
+    if out["panCleared"] is not None:
+        fail("the pan state survived the mouse-up")
+    mh = out["manualHeld"]
+    if abs(mh["lo"] - 300.00) > 1e-9:
+        fail(f"the automatic recentre overrode a hand-placed band anyway: "
+             f"{mh}")
+    ar = out["afterRecenter"]
+    if ar["manual"] or not ar["near"]:
+        fail(f"recenter did not hand the band back to the automatic edge "
+             f"test: {ar}")
+
+    # -- my fills ----------------------------------------------------------
+    f = out["fills"]
+    if f["n"] != 2:
+        fail(f"{f['n']} fills came through, expected 2: one working-order "
+             f"fill and one recent, with the duplicate collapsed and the "
+             f"out-of-window one dropped. Prices: {f['prices']}")
+    if f["anyForeign"]:
+        fail("a fill from an order this app did not place was drawn as "
+             "mine. The tape already shows everyone else's prints; the "
+             "point of this mark is that it is ours.")
+    if f["sides"] != [True, False] and f["sides"] != [False, True]:
+        fail(f"the fills lost their side: {f['sides']}")
+    if not out["fillsDrawn"]:
+        fail("no fill ring was drawn, so the answer to 'was anything "
+             "trading at my price' is still not on screen")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

@@ -214,6 +214,33 @@ def main() -> int:
         fail("the quantity buttons are not wired to the presets, so the "
              "list in the JS is not the list on screen")
 
+    # -- the name being traded --------------------------------------------
+    # It is not enough that the symbol is SOMEWHERE. The input holds what is
+    # being TYPED, which is a different thing: after a watch it can sit empty
+    # or hold a half-typed next symbol while the pane trades something else.
+    # The moment orders can leave is the moment the symbol matters most.
+    if 'class="lv-sym"' not in src:
+        fail("there is no permanent symbol display in the pane bar. The "
+             "ticker input shows what you are TYPING, not what is being "
+             "traded, and after a watch those are not the same string.")
+    m = re.search(r'<b class="lv-sym"[^>]*>', src, re.S)
+    if not m or "pane.symbol" not in m.group(0):
+        fail(f"the symbol display does not read pane.symbol: "
+             f"{m.group(0) if m else None}")
+    elif "x-show" in m.group(0):
+        fail("the symbol display is conditional. It is the one thing on the "
+             "pane that must never be absent.")
+    # The :disabled BINDING specifically. Matching "pane.armed" anywhere in
+    # the tag passed on the :title alone, which explains the lock without
+    # applying it - and the gate said nothing until that was injected.
+    sym_input = re.search(r'<input class="lv-inp sym".*?>', src, re.S)
+    if not sym_input or not re.search(
+            r':disabled\s*=\s*"[^"]*pane\.armed', sym_input.group(0)):
+        fail("the ticker input is not locked while the pane is armed. "
+             "Changing the symbol under an armed pane leaves the arm switch, "
+             "the ladder and any working order pointing at a name you are no "
+             "longer looking at.")
+
     if bad:
         print(f"\nlayout FAILED: {bad}")
         return 1
