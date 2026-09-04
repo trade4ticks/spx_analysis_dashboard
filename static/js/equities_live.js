@@ -74,8 +74,22 @@ const LV_QTYS = [10, 20, 30, 50, 100, 200];
  * sell/blue vocabulary the tape uses in either mode — in bichrome those
  * colours already mean aggressor side, so a fill drawn in them would read as
  * a claim about who crossed. This one means "this one was mine". */
-const LV_FILL_RING = 'rgba(120,255,170,0.95)';
-const LV_FILL_CORE = 'rgba(120,255,170,0.30)';
+const LV_FILL_RING = 'rgba(120,255,170,0.98)';
+const LV_FILL_HALO = 'rgba(8,12,10,0.85)';
+
+/* FIXED, and not the tape's bubble scale.
+ *
+ * It was sized like a print so the one underneath stayed visible, which got
+ * the priority backwards: my own orders are small — ten shares against
+ * prints of one to three — so the mark came out smallest exactly where it
+ * had to be found. A fill is not one print among many, it is the only one
+ * that was mine, and it is looked for rather than scanned.
+ *
+ * So: one size, always, big enough to catch the eye, and OPEN — the print
+ * underneath shows through the middle of the ring rather than being
+ * covered. Quantity is not encoded at all; it is on the order handle and in
+ * the working list, and encoding it here is what made it invisible. */
+const LV_FILL_R = 9;
 
 /* The order handle: a real grab target instead of a ladder row.
  *
@@ -987,26 +1001,34 @@ window.lvPane = function (id, send) {
     drawMyFills(ctx, padL, padT, plotW, plotH, lo, hi, tStart, tEnd, X, Y) {
       const fills = this.myFills(tStart, tEnd);
       if (!fills.length) return;
+      const r = LV_FILL_R;
       for (const f of fills) {
         if (!(f.p >= lo && f.p <= hi)) continue;
         const x = X(f.t), y = Y(f.p);
         if (x < padL || x > padL + plotW) continue;
-        // The tape's own radius rule, so a 400-share fill is the size a
-        // 400-share print would be.
-        const r = Math.max(3.2, Math.sqrt(Math.max(1, f.s)) * 0.62 + 1.6);
+        // A DARK RING OUTSIDE THE GREEN ONE. On a dense tape a thin green
+        // circle can land on a pale bubble and disappear into it; the halo
+        // gives it an edge to read against without filling the middle.
+        ctx.beginPath();
+        ctx.arc(x, y, r + 1.4, 0, Math.PI * 2);
+        ctx.lineWidth = 2.4;
+        ctx.strokeStyle = LV_FILL_HALO;
+        ctx.stroke();
+
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
-        ctx.fillStyle = LV_FILL_CORE;
-        ctx.fill();
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = 2.4;
         ctx.strokeStyle = LV_FILL_RING;
         ctx.stroke();
+
         // A tick on the side it was: up for a buy, down for a sell. Shape,
         // not colour, so it survives a monochrome screen and a colourblind
         // eye — the green already carries "mine" and cannot also carry side.
         ctx.beginPath();
-        ctx.moveTo(x, y + (f.buy ? -r - 2 : r + 2));
-        ctx.lineTo(x, y + (f.buy ? -r - 6 : r + 6));
+        ctx.moveTo(x, y + (f.buy ? -r - 1 : r + 1));
+        ctx.lineTo(x, y + (f.buy ? -r - 7 : r + 7));
+        ctx.lineWidth = 2.4;
+        ctx.strokeStyle = LV_FILL_RING;
         ctx.stroke();
       }
     },

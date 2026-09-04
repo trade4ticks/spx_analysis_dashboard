@@ -306,7 +306,7 @@ async function polls(active) {
 // and the least visible from a test: an exception here blanks the pane, and
 // the only symptom is a plot that stops updating.
 function recorder() {
-  const rec = { texts: [], strokes: [], fills: [], clips: 0 };
+  const rec = { texts: [], strokes: [], fills: [], arcs: [], clips: 0 };
   // A PLAIN BACKING OBJECT. Writing state back through the proxy re-enters
   // the set trap and recurses until the stack goes.
   const st = {};
@@ -318,8 +318,16 @@ function recorder() {
       }
       if (k === 'clip') return () => { rec.clips += 1; };
       if (k === 'stroke') return () => rec.strokes.push(st.strokeStyle);
+      // fill() as well as fillRect(): a filled ARC leaves no rect behind,
+      // and "is this mark solid" was exactly the question being asked.
+      if (k === 'fill') {
+        return () => rec.fills.push({ style: st.fillStyle, x: null, w: null });
+      }
       if (k === 'fillRect') {
         return (x, y, w, h) => rec.fills.push({ style: st.fillStyle, x, w });
+      }
+      if (k === 'arc') {
+        return (x, y, r) => rec.arcs.push({ x, y, r });
       }
       if (k === 'measureText') return () => ({ width: 20 });
       return () => {};
@@ -556,6 +564,8 @@ const press = (c, x, y) => c.onDown({ clientX: x, clientY: y,
 }
 
 // ── the order handle, the chart pan, and my own fills ────────────────────
+const NOW = Date.now();
+const iso = ms => new Date(ms).toISOString();
 {
   // The handle is right-aligned inside the plot: padL+plotW-68-3 = 337..405,
   // 18px tall, centred on 318.50 at y=158 -> 149..167.
@@ -653,9 +663,7 @@ const press = (c, x, y) => c.onDown({ clientX: x, clientY: y,
 }
 {
   // MY FILLS, off the order records and never off the tape.
-  const NOW = Date.now();
   const c = pane();
-  const iso = ms => new Date(ms).toISOString();
   c.working = [Object.assign(ord('1', true, { side: 'BUY', price: 318.50 }), {
     fills: [{ t: iso(NOW - 5000), price: 318.49, qty: 100 }],
   })];
@@ -687,6 +695,37 @@ const press = (c, x, y) => c.onDown({ clientX: x, clientY: y,
                 pp => GEOM.padT + (1 - (pp - 318.40) / 0.30) * GEOM.plotH);
   out.fillsDrawn = rec.strokes.filter(
     x => String(x).includes('120,255,170')).length;
+
+  // FIXED SIZE, whatever the quantity. My own fills are small - ten shares
+  // against prints of one to three - so sizing them like a print made the
+  // mark smallest exactly where it had to be found.
+  const radii = (qty) => {
+    const c2 = pane();
+    c2.working = [Object.assign(ord('9', true, { side: 'BUY', price: 318.50 }), {
+      fills: [{ t: iso(NOW - 1000), price: 318.55, qty }],
+    })];
+    c2.recent = [];
+    const rr = recorder();
+    c2.drawMyFills(rr.ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                   318.40, 318.70, NOW - 60000, NOW,
+                   t => GEOM.padL + GEOM.plotW * 0.5,
+                   pp => GEOM.padT + (1 - (pp - 318.40) / 0.30) * GEOM.plotH);
+    return rr.rec.arcs.map(a => Math.round(a.r * 10) / 10);
+  };
+  out.fillRadii = { ten: radii(10), thousand: radii(1000) };
+  // And the middle is not filled in, so the print underneath shows through.
+  const rr3 = recorder();
+  const c3 = pane();
+  c3.working = [Object.assign(ord('9', true, { side: 'BUY', price: 318.50 }), {
+    fills: [{ t: iso(NOW - 1000), price: 318.55, qty: 10 }],
+  })];
+  c3.recent = [];
+  c3.drawMyFills(rr3.ctx, GEOM.padL, GEOM.padT, GEOM.plotW, GEOM.plotH,
+                 318.40, 318.70, NOW - 60000, NOW,
+                 t => GEOM.padL + GEOM.plotW * 0.5,
+                 pp => GEOM.padT + (1 - (pp - 318.40) / 0.30) * GEOM.plotH);
+  out.fillFilled = rr3.rec.fills.filter(
+    f => String(f.style).includes('120,255,170')).length;
 }
 
 // ── the give-up window ───────────────────────────────────────────────────
@@ -1269,6 +1308,24 @@ def main() -> int:
     if not out["fillsDrawn"]:
         fail("no fill ring was drawn, so the answer to 'was anything "
              "trading at my price' is still not on screen")
+
+    ten = out["fillRadii"]["ten"]
+    thousand = out["fillRadii"]["thousand"]
+    if not ten:
+        fail("a 10-share fill drew no ring at all")
+    elif ten != thousand:
+        fail(f"the fill ring changes size with the quantity: 10 shares gives "
+             f"{ten}, 1000 gives {thousand}. My own fills are the small ones "
+             f"- ten shares against prints of one to three - so sizing them "
+             f"like a print makes the mark smallest exactly where it has to "
+             f"be found.")
+    elif max(ten) < 8:
+        fail(f"the fill ring is {max(ten)}px at its widest, which is not a "
+             f"mark you can find at a glance on a busy tape.")
+    if out["fillFilled"]:
+        fail("the fill mark is filled in, not an open ring - it covers the "
+             "print underneath, which is the thing it is meant to be "
+             "pointing at.")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

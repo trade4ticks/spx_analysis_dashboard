@@ -566,8 +566,22 @@ async def read_orders(symbols: list[str] | None = None,
         want = {s.upper() for s in symbols}
         working = [o for o in working if (o["symbol"] or "").upper() in want]
         recent = [o for o in recent if (o["symbol"] or "").upper() in want]
+    # THE NEWEST TWELVE, SORTED HERE RATHER THAN TRUSTED FROM SCHWAB.
+    #
+    # This was `recent[-12:]`, which is the newest twelve only if the API
+    # returns oldest-first. IT RETURNS NEWEST-FIRST — verified against the
+    # live account on 2026-09-04, 575 orders running 15:20 down to the
+    # previous day — so the slice was taking the twelve OLDEST orders in the
+    # day-long window. Fills from minutes earlier never reached the page at
+    # all, and on a chart that reads exactly like a marker too small to see.
+    #
+    # Sorted explicitly so it does not matter which way the API returns
+    # them, because that is not something this code should have an opinion
+    # about. Newest first, so the head of the list is the recent end.
+    recent.sort(key=lambda o: _entered_epoch(o.get("entered")) or 0.0,
+                reverse=True)
     return {"ok": True, "as_of": now, "rt_ms": round(ms, 1),
-            "working": working, "recent": recent[-12:],
+            "working": working, "recent": recent[:12],
             "limits": LIMITER.state(), "stale_after_s": config.STALE_AFTER_S}
 
 

@@ -249,6 +249,54 @@ def case_fills():
         check(got == [], f"{label} produced fills: {got}")
 
 
+# ── the recent list is the RECENT end of the day ────────────────────────────
+def case_recent_is_newest():
+    """`recent` must be the newest orders, not the twelve the API listed last.
+
+    THIS SHIPPED WRONG. The slice was `recent[-12:]`, which is the newest
+    twelve only if the payload is oldest-first. Verified against the live
+    account on 2026-09-04: Schwab returns NEWEST-FIRST — 575 orders running
+    from 15:20 down to the previous day — so the page was being served the
+    twelve OLDEST orders in a day-long window. Fills from minutes earlier
+    never arrived, and on a chart that is indistinguishable from a marker
+    too small to see.
+
+    Asserted from BOTH directions, because the point is not to depend on the
+    order at all.
+    """
+    import time as _t
+
+    def at(hhmm, oid):
+        o = order(oid, "FDX", "BUY", 100, 318.50, status="FILLED")
+        o["enteredTime"] = f"2026-09-04T{hhmm}:00+0000"
+        return o
+
+    # Twenty orders, 10:00 through 19:00-ish, built oldest-first.
+    oldest_first = [at(f"{10 + i // 2:02d}:{(i % 2) * 30:02d}", f"O{i:02d}")
+                    for i in range(20)]
+    newest_first = list(reversed(oldest_first))
+
+    for label, rows in (("newest-first (what Schwab actually sends)",
+                         newest_first),
+                        ("oldest-first", oldest_first)):
+        rec = Recorder(_acct(orders=rows))
+        broker._acall = rec
+        broker._account_hash = "H"
+        got = asyncio.run(broker.read_orders(["FDX"]))["recent"]
+        check(len(got) == 12,
+              f"{label}: {len(got)} recent orders, expected 12")
+        ids = [o["order_id"] for o in got]
+        # The newest twelve of twenty are O08..O19.
+        want = {f"O{i:02d}" for i in range(8, 20)}
+        check(set(ids) == want,
+              f"{label}: got {sorted(ids)}, expected the NEWEST twelve "
+              f"{sorted(want)}. Serving the oldest twelve of a day-long "
+              f"window is why a fill from a minute ago never reached the "
+              f"page.")
+        check(ids[0] == "O19",
+              f"{label}: the list does not start at the newest: {ids[:3]}")
+
+
 # ── the guards ──────────────────────────────────────────────────────────────
 def case_guards():
     g = broker.check_guards
@@ -855,6 +903,7 @@ CASES = [
     ("determinate vs unknown", case_indeterminacy),
     ("which application placed it", case_order_source),
     ("where my orders actually traded", case_fills),
+    ("the recent list is the recent end", case_recent_is_newest),
     ("matching a placement", case_match_placement),
     ("the rate limiter", case_limiter),
     ("the order body", case_order_body),
