@@ -791,6 +791,66 @@ function pendingPaint() {
   };
 }
 
+/* THE FLASH, as a fixture. A POLL LANDS MID-FLIGHT AND THE ORDER IS RE-IDED.
+ *
+ * This is the case every earlier harness was missing, and it is why four
+ * fixes were found against clean traces. They all kept the same order id in
+ * `working` for the whole flight. A replace makes a NEW order with a NEW id,
+ * and the 2s poll can deliver it while the PUT is still in the air, still
+ * reporting the old price for that tick.
+ *
+ * Records the drawn price AND whether it was dashed, because "solid at the
+ * origin" and "dashed at the origin" are two different bugs and both were
+ * present.
+ */
+async function flashSequence() {
+  const ORIGIN = 1143.38, TARGET = 1143.30;
+  const c = pane();
+  c.armed = true;
+  c.symbol = 'LLY';
+  c.working = [ord('1', true, { side: 'BUY', price: ORIGIN, qty: 10 })];
+  c.ownIds = ['1'];
+
+  let release = null;
+  c.brokerCall = async () => {
+    await new Promise(r => { release = r; });
+    return { ok: true, order_id: '2', rt_ms: 404 };
+  };
+
+  const seen = [];
+  let dash = false;
+  const ctx = new Proxy({}, {
+    get: (_t, k) => {
+      if (k === 'setLineDash') return (a) => { dash = !!(a && a.length); };
+      if (k === 'measureText') return () => ({ width: 10 });
+      return () => {};
+    },
+    set: () => true,
+  });
+  const realTrace = c.traceLine.bind(c);
+  c.traceLine = (price, srcTag) => {
+    realTrace(price, srcTag);
+    if (!String(srcTag).startsWith('order:')) return;
+    const row = `${dash ? 'dashed' : 'solid'}@${Number(price).toFixed(2)}`;
+    if (seen[seen.length - 1] !== row) seen.push(row);
+  };
+  const Y = pp => 8 + (1 - (pp - 1143.0) / 1.0) * 300;
+  const frame = () => c.drawPlotOrders(ctx, 8, 8, 400, 300, 1143.0, 1144.0, Y);
+
+  const done = c.sendMove(c.working[0], TARGET);
+  frame();
+  // The poll: Schwab has already re-ided it, and still reports the old price.
+  c.working = [ord('2', true, { side: 'BUY', price: ORIGIN, qty: 10 })];
+  frame();
+  release();
+  await done;
+  frame();
+  // The next poll, now carrying the new price.
+  c.working = [ord('2', true, { side: 'BUY', price: TARGET, qty: 10 })];
+  frame();
+  return { seen, origin: ORIGIN, target: TARGET };
+}
+
 // ── the give-up window ───────────────────────────────────────────────────
 // Schwab keeps answering "absent". Count the looks until the pane stops.
 async function giveUp() {
@@ -835,6 +895,7 @@ async function found() {
     out.clearedPending = c.move;
   }
   out.release = await releaseFrames();
+  out.flash = await flashSequence();
   out.pendingPaint = pendingPaint();
   out.calls = await callBudget();
   out.pollsTrading = await polls(true);
@@ -1429,6 +1490,24 @@ def main() -> int:
              f"back and then arriving. THIS WAS THE FLASH.")
     if not pp["atTo"]:
         fail("nothing is drawn at the pending target price")
+
+    # -- the flash --------------------------------------------------------
+    fl2 = out["flash"]
+    origin = f"{fl2['origin']:.2f}"
+    target = f"{fl2['target']:.2f}"
+    back = [r for r in fl2["seen"] if r.endswith("@" + origin)]
+    if back:
+        fail(f"THE FLASH. Across a move the marker returned to the price it "
+             f"came from: {fl2['seen']}. A poll landing mid-flight re-ids "
+             f"the order — a replace makes a new one — so a `move` keyed to "
+             f"the OLD id stops matching, the mask disappears and the line "
+             f"falls back to the record at the origin. "
+             f"{'Solid' if any('solid@' + origin in r for r in back) else 'Dashed'}"
+             f" at the origin.")
+    if not fl2["seen"] or not fl2["seen"][0].startswith("dashed@" + target):
+        fail(f"the move did not start dashed at the target: {fl2['seen']}")
+    if not fl2["seen"][-1].startswith("solid@" + target):
+        fail(f"the move did not settle solid at the target: {fl2['seen']}")
 
     if bad:
         print(f"\nreconcile cases FAILED: {bad}")

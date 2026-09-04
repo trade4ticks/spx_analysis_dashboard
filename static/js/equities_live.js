@@ -171,11 +171,48 @@ function lvFmtNum(v) {
  *
  * Keyed by pane id. Remove with the trace methods once the flash is
  * understood. */
+/* How long a confirmed-but-unreconciled move may keep drawing before it is
+ * dropped. It exists only to survive the poll that has not arrived yet. */
+const LV_MOVE_MAX_S = 10;
+
 const LV_TRACES = new Map();
 
 window.lvPane = function (id, send) {
+  /* ══ TEMPORARY DIAGNOSTIC ═══════════════════════════════════════════════
+   *
+   * `move` is a real accessor rather than a plain property, so EVERY write
+   * is seen — including one from outside this file. Reading what is drawn
+   * only ever showed the consequence; this shows the cause, and a clear
+   * carries the stack of whoever made it.
+   *
+   * Deliberately not a pane property holding a log: the trace store lives
+   * outside the component for the same reason it did before. */
+  let _move = null;
+
   return {
     id,
+
+    get move() { return _move; },
+    set move(v) {
+      const t = LV_TRACES.get(id);
+      if (t) {
+        const what = v === null || v === undefined
+          ? 'CLEARED'
+          : (typeof v === 'object'
+             ? `set to=${v.to} from=${v.from} id=${v.order_id} state=${v.state}`
+             : `set to NON-OBJECT ${typeof v}: ${JSON.stringify(v)}`);
+        const at = Math.round((typeof performance !== 'undefined'
+                               ? performance.now() : Date.now()) - t.t0);
+        // The stack matters most on a clear: something is nulling this and
+        // the drawing can only ever show that it happened, never who.
+        const stack = (new Error().stack || '').split('\n').slice(2, 7)
+          .map(l => l.trim().replace(/^at\s+/, '')).join(' <- ');
+        t.rows.push(`${String(at).padStart(5)}ms f${t.frame} !!! move ${what}`
+                    + `\n            ${stack}`);
+      }
+      _move = v;
+    },
+
     send: send || (() => {}),
 
     symbol: '',
@@ -310,7 +347,7 @@ window.lvPane = function (id, send) {
      * true — the pane never claims a price the broker has not agreed to, it
      * shows a request AS a request. {order_id, from, to, qty, side, sentAt,
      * state: 'sending' | 'unknown'}. */
-    move: null,
+
 
     // A move that came back REFUSED, held briefly so the marker snapping
     // back is something you see happen rather than something you missed.
@@ -999,7 +1036,9 @@ window.lvPane = function (id, send) {
         // A REQUEST IS DASHED; the record is solid. The distinction is the
         // whole licence for moving the marker early — it is not claiming
         // the broker agreed, it is showing what was asked for.
-        if (mv) ctx.setLineDash([7, 4]);
+        // A CONFIRMED request draws solid: the broker has agreed and only
+        // our copy of the record is behind. Dashed means unanswered.
+        if (mv && mv.state !== 'confirmed') ctx.setLineDash([7, 4]);
         ctx.beginPath();
         ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y);
         ctx.stroke();
@@ -2218,19 +2257,40 @@ window.lvPane = function (id, send) {
       // reply already said, and the 2s poll corrects anything Schwab
       // adjusted within one tick.
       const live = this.working.find(x => String(x.order_id) === oldId);
+      if (j.order_id) {
+        this.ownIds = this.ownIds.filter(id => id !== oldId);
+        this.ownIds.push(String(j.order_id));
+      }
       if (live) {
         live.price = Number(price);
         // A replace makes a NEW order and Schwab gives no link from the old
         // one to it, so the id in the reply is the only handle there is.
         if (j.order_id) live.order_id = String(j.order_id);
+        this.move = null;
+      } else {
+        // THE HOLE THAT PRODUCED THE FLASH. This used to clear the request
+        // regardless, while only APPLYING it when the order was still found
+        // under its old id. A poll landing mid-flight replaces `working`
+        // wholesale, and a replace gives the order a NEW id — so the lookup
+        // misses, the price is written nowhere, and the request is thrown
+        // away. The line then falls back to the broker's record at the OLD
+        // price and stays there until the next poll, about two seconds.
+        //
+        // Which is exactly the observed sequence: dashed at the target,
+        // SOLID at the origin — solid because `move` is gone — and then
+        // solid at the target when the poll finally arrives.
+        //
+        // The request is not dropped until the record actually carries it.
+        // Re-keyed to the id the reply gave, and marked confirmed so it
+        // draws solid: the broker HAS agreed, it is our own copy of the
+        // record that has not caught up.
+        this.move = { ...this.move, order_id: String(j.order_id || oldId),
+                      state: 'confirmed' };
       }
-      if (j.order_id) {
-        this.ownIds = this.ownIds.filter(id => id !== oldId);
-        this.ownIds.push(String(j.order_id));
-      }
-      this.move = null;
       this.traceMark(`applied: record now ${live ? live.price : 'MISSING'} `
-                     + `id=${live ? live.order_id : '-'}`);
+                     + `id=${live ? live.order_id : '-'} `
+                     + `working=[${this.working.map(
+                         x => x.order_id + '@' + x.price).join(' ')}]`);
       this.lastAction = `moved to ${price.toFixed(2)}`;
       return j;
     },
@@ -2316,14 +2376,46 @@ window.lvPane = function (id, send) {
      * flight, the broker's otherwise. One place, so the plot line and the
      * ladder marker cannot disagree about where an order is. */
     shownPrice(o) {
-      const p = this.move;
-      return (p && String(p.order_id) === String(o.order_id))
-        ? p.to : Number(o.price);
+      // THROUGH moveFor, NOT A SECOND COPY OF THE TEST. These two disagreed:
+      // moveFor matched the re-ided order and drew it dashed, while this
+      // still compared ids directly and handed back the record's old price.
+      // The result was the request's STYLE at the record's PRICE — a dashed
+      // line at the origin, which is the same flash wearing a different hat.
+      const m = this.moveFor(o);
+      return m ? m.to : Number(o.price);
     },
 
     moveFor(o) {
-      const p = this.move;
-      return (p && String(p.order_id) === String(o.order_id)) ? p : null;
+      const m = this.move;
+      if (!m) return null;
+      if (String(m.order_id) === String(o.order_id)) return m;
+
+      // A REPLACE RE-IDS THE ORDER, AND A POLL CAN DELIVER THE NEW ID WHILE
+      // THE PUT IS STILL IN FLIGHT.
+      //
+      // This is the flash. `move` is keyed to the id the order had when the
+      // gesture started; the order poll lands every two seconds and replaces
+      // `working` wholesale with server truth, in which Schwab has already
+      // made the replacement a NEW order with a NEW id — still reporting the
+      // old price for that tick. Our key then matches nothing, the mask
+      // disappears, and the line falls back to the record: at the ORIGIN,
+      // and SOLID, because solid is what an unmasked order draws.
+      //
+      // Then the PUT returns, the record catches up, and it lands on the
+      // target. Dashed at the target, solid at the origin, solid at the
+      // target — about two seconds, all of it before anything was wrong
+      // with the state machine itself.
+      //
+      // So: if nothing carries our id any more, an order still sitting at
+      // the price we are moving AWAY from is that same order under its new
+      // id. Both conditions are needed — the first stops this claiming an
+      // unrelated order while ours is still present, the second stops it
+      // claiming one that was never ours.
+      if (this.working.some(x => String(x.order_id) === String(m.order_id))) {
+        return null;
+      }
+      if (Math.abs(Number(o.price) - Number(m.from)) < 0.005) return m;
+      return null;
     },
 
     /* The order the single-order controls act on.
@@ -2893,6 +2985,19 @@ document.addEventListener('alpine:init', () => {
           // matching here: the rule and its ambiguity caveat live in
           // broker.match_placement, and a second copy in the browser would
           // be a second place for that caveat to go stale.
+          // A confirmed move is retired the moment the record carries it,
+          // and after LV_MOVE_MAX_S regardless: a request that outlives its
+          // own answer would sit on the chart forever.
+          const mv = p.move;
+          if (mv) {
+            const agreed = p.working.some(
+              o => Math.abs(Number(o.price) - mv.to) < 0.005);
+            const old = (Date.now() / 1000) - mv.sentAt > LV_MOVE_MAX_S;
+            if ((mv.state === 'confirmed' && agreed) || old) {
+              p.traceMark(`poll retires move: agreed=${agreed} aged=${old}`);
+              p.move = null;
+            }
+          }
           if (LV_TRACES.get(p.id)) {
             p.traceMark(`poll replaced working=[${(p.working || []).map(
               o => o.order_id + '@' + o.price).join(' ')}]`);
