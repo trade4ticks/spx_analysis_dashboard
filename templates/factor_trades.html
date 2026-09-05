@@ -171,6 +171,11 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  {#- The signal thumbnail + slot palette, the SAME module Factor Analysis
+      and the Signals page use, so a signal's micro-heatmap and its colour
+      look identical in the portfolio picker and in the pane it was saved
+      from. Loaded BEFORE the page JS, which delegates to it. -#}
+  <script src={{ asset('js/signal_thumbnail.js') }}></script>
   <script src={{ asset('js/factor_charts.js') }}></script>
   <script src={{ asset('js/factor_trades.js') }}></script>
 </head>
@@ -207,55 +212,38 @@
         </div>
       </div>
 
+      {#- RAIL SUMMARY ONLY. The picker itself is a full-panel overlay:
+          a signal row is a table (name, metric pair, cells, n, bins, split,
+          thumbnail) and a 280px strip cannot hold one without horizontal
+          scroll, which is worse than not showing it. Same overlay pattern
+          as Configure sweep. -#}
       <div class="ft-sec" x-show="isPortfolio">
         <div class="ft-sec-h">Saved signals</div>
-        {#- Saved on the Factor Analysis page. There is no second save
-            mechanism here on purpose: one store, no drift. -#}
         <div class="ft-note" x-show="signalsError" style="color:#e84393"
              x-text="signalsError"></div>
-        <div class="ft-note" x-show="!signals.length && !signalsError">
-          No saved signals found.
-        </div>
-        <div class="ft-note" style="margin-bottom:6px"
-             x-show="selectedSignalIds.length"
-             x-text="selectedSignalIds.length + ' selected — traded as one deduped set '
-                     + '(one trade per ticker + date, normal size)'"></div>
-        <div style="max-height:340px;overflow-y:auto;margin:0 -2px">
-          <template x-for="s in signals" :key="'sig-'+s.id">
-            {#- INELIGIBLE SIGNALS ARE SHOWN, NOT HIDDEN. A signal that
-                silently vanished is indistinguishable from one that was
-                deleted; the reason is what turns "where did it go" into
-                "of course". -#}
-            <div class="ft-rule" :class="{on: signalSelected(s.id)}"
-                 :style="s.eligible ? 'cursor:pointer' : 'opacity:.45;cursor:not-allowed'"
-                 :title="s.eligible ? (s.primary_metric + ' × ' + s.secondary_metric) : s.reason"
-                 @click="toggleSignal(s)"
-                 style="display:block;padding:5px 6px">
-              <div style="display:flex;align-items:center;gap:6px">
-                <div class="ft-sw" :class="{on: signalSelected(s.id)}"
-                     :style="s.eligible ? '' : 'opacity:.4'"></div>
-                <div class="ft-rule-name" style="flex:1;min-width:0"
-                     x-text="s.name"></div>
-                <span class="ft-note" style="flex:0 0 auto"
-                      x-text="s.n_cells + 'c'"></span>
-              </div>
-              <div class="ft-note" style="padding-left:27px;line-height:1.35"
-                   x-text="s.primary_metric + ' × ' + s.secondary_metric"></div>
-              <div class="ft-note" style="padding-left:27px;line-height:1.35"
-                   {#- agg_n is the FACTOR ANALYSIS count: daily_features
-                       universe, train window. This page's n is lower — the
-                       trade_paths subset, after max_strike — so it is
-                       labelled rather than shown as a bare number that will
-                       not match the stat bar. -#}
-                   :title="'Factor Analysis n — daily_features universe, train window. This page reports fewer: only ticker-days with a resolved trade path, after the max-strike filter.'"
-                   x-text="'n(FA) ' + (s.agg_n ?? '—') + ' · ' + s.n_bins + ' bins'
-                           + (s.selection_cutoff ? ' · split ' + s.selection_cutoff : '')"></div>
-              <div class="ft-note" x-show="!s.eligible"
-                   style="padding-left:27px;line-height:1.35;color:#e8a33d"
-                   x-text="s.reason"></div>
+        <button class="ft-btn" @click="sigPanelOpen = true"
+                x-text="selectedSignalIds.length
+                          ? 'Choose signals… (' + selectedSignalIds.length + ' selected)'
+                          : 'Choose signals…'"></button>
+        <div class="ft-note" style="margin-top:4px"
+             x-show="!selectedSignalIds.length"
+             x-text="eligibleCount + ' of ' + signals.length + ' tradeable here'"></div>
+        {#- Truncated names, not the table. The rail says WHAT is selected;
+            reading it is the panel's job. -#}
+        <template x-if="selectedSignalIds.length">
+          <div style="margin-top:4px">
+            <template x-for="nm in selectedSignalNames.slice(0, 6)" :key="'sn-'+nm">
+              <div class="ft-note" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                   :title="nm" x-text="'· ' + nm"></div>
+            </template>
+            <div class="ft-note" x-show="selectedSignalNames.length > 6"
+                 x-text="'· +' + (selectedSignalNames.length - 6) + ' more'"></div>
+            <div class="ft-note" style="margin-top:4px;color:var(--muted)"
+                 title="One trade per ticker + trade_date across all selected signals, at normal size.">
+              traded as one deduped set
             </div>
-          </template>
-        </div>
+          </div>
+        </template>
       </div>
 
       <div class="ft-sec" x-show="!isPortfolio">
@@ -1086,6 +1074,202 @@
           </div>
         </template>
       </div>
+
+      {#- ── Saved-signal picker ────────────────────────────────────────
+           The Saved Signals table from Factor Analysis, recreated here so the
+           records are read the SAME way in both places -- same columns, same
+           thumbnail via window.SignalThumb, same .signals-table styles (now
+           in theme.css, one definition, two consumers). The only additions
+           are the ones this page needs: a selection checkbox, and
+           eligibility.
+
+           Full-panel rather than a rail widget because a signal row IS a
+           table, and a 280px strip cannot hold one without horizontal
+           scroll. Same overlay pattern as Configure sweep.
+           ------------------------------------------------------------------ -#}
+      <template x-if="sigPanelOpen">
+        <div class="ft-ov" @keydown.escape.window="sigPanelOpen = false"
+             style="padding:18px 24px">
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:10px;flex-wrap:wrap">
+            <div class="chart-title" style="margin:0;flex:0 0 auto">Saved signals</div>
+            <div class="ft-note" style="font-family:monospace"
+                 x-text="selectedSignalIds.length + ' selected · ' + eligibleCount
+                         + ' tradeable · ' + ineligibleCount + ' not'"></div>
+            {#- Hides the ineligible ROWS, never the fact of them: the count
+                above stays put either way. -#}
+            <label class="ft-note" style="display:flex;align-items:center;gap:5px;cursor:pointer;margin:0">
+              <input type="checkbox" x-model="sigHideIneligible" style="margin:0">
+              hide unavailable
+            </label>
+            <button class="ft-btn" style="width:auto;padding:4px 12px;margin:0"
+                    @click="reloadSignals()" title="Reload from the signals store">⟳</button>
+            <button class="ft-btn" style="width:auto;padding:4px 12px;margin:0"
+                    @click="selectedSignalIds = []">Clear</button>
+            <div style="flex:1"></div>
+            <button class="ft-btn primary" style="width:auto;padding:4px 16px;margin:0"
+                    @click="sigPanelOpen = false">Done</button>
+          </div>
+          <div class="ft-note" style="margin-bottom:10px">
+            Saved on Factor Analysis — this page reads that one store, it does not
+            keep its own. Signals carry no exit information: the exit policy in the
+            rail applies to the whole combined set, because that is the level it is
+            actually traded at. Ticking several trades each ticker ONCE per date, at
+            normal size, however many of them fired it.
+          </div>
+          <div class="ft-note" x-show="!signals.length" style="padding:10px 0"
+               x-text="signalsError || 'No saved signals found.'"></div>
+
+          <div x-show="signals.length" style="overflow:auto;max-height:calc(100vh - 210px)">
+            <table class="signals-table">
+              <thead>
+                <tr>
+                  <th class="sig-th-check"></th>
+                  <th class="sig-th-sort" style="width:54px"
+                      :class="sigSortClass('id')" @click="sigSortBy('id')">
+                    ID <span class="sig-sort-arrow" x-text="sigSortArrow('id')"></span>
+                  </th>
+                  <th style="width:42px">Color</th>
+                  <th class="sig-th-sort sig-th-left sig-col-flex"
+                      :class="sigSortClass('name')" @click="sigSortBy('name')">
+                    Name <span class="sig-sort-arrow" x-text="sigSortArrow('name')"></span>
+                  </th>
+                  <th class="sig-th-sort sig-th-left sig-col-flex"
+                      :class="sigSortClass('primary')" @click="sigSortBy('primary')">
+                    Primary <span class="sig-sort-arrow" x-text="sigSortArrow('primary')"></span>
+                  </th>
+                  <th class="sig-th-sort sig-th-left sig-col-flex"
+                      :class="sigSortClass('secondary')" @click="sigSortBy('secondary')">
+                    Secondary <span class="sig-sort-arrow" x-text="sigSortArrow('secondary')"></span>
+                  </th>
+                  <th class="sig-th-sort sig-th-left" style="width:112px"
+                      :class="sigSortClass('outcome')" @click="sigSortBy('outcome')">
+                    Outcome <span class="sig-sort-arrow" x-text="sigSortArrow('outcome')"></span>
+                  </th>
+                  <th class="sig-th-sort sig-th-left" style="width:104px"
+                      :class="sigSortClass('selection_mode')" @click="sigSortBy('selection_mode')"
+                      title="Bin table the zone was selected on, and the frozen split. Only train_test resolves to the same trades on this page.">
+                    Mode <span class="sig-sort-arrow" x-text="sigSortArrow('selection_mode')"></span>
+                  </th>
+                  <th class="sig-th-sort" style="width:62px"
+                      :class="sigSortClass('n_bins')" @click="sigSortBy('n_bins')">
+                    bins <span class="sig-sort-arrow" x-text="sigSortArrow('n_bins')"></span>
+                  </th>
+                  <th class="sig-th-sort" style="width:62px"
+                      :class="sigSortClass('n_cells')" @click="sigSortBy('n_cells')">
+                    cells <span class="sig-sort-arrow" x-text="sigSortArrow('n_cells')"></span>
+                  </th>
+                  <th class="sig-th-sort" style="width:78px"
+                      :class="sigSortClass('agg_avg_ret')" @click="sigSortBy('agg_avg_ret')">
+                    avg_ret <span class="sig-sort-arrow" x-text="sigSortArrow('agg_avg_ret')"></span>
+                  </th>
+                  {#- n(FA) is the Factor Analysis count: daily_features
+                      universe, train window. This page reports fewer -- the
+                      trade_paths subset, after max_strike -- so the header
+                      names which n it is rather than leaving a number that
+                      will not match the stat bar. -#}
+                  <th class="sig-th-sort" style="width:70px"
+                      :class="sigSortClass('agg_n')" @click="sigSortBy('agg_n')"
+                      title="Factor Analysis n — daily_features universe, train window. This page reports fewer: only ticker-days with a resolved trade path, after the max-strike filter.">
+                    n(FA) <span class="sig-sort-arrow" x-text="sigSortArrow('agg_n')"></span>
+                  </th>
+                  <th style="width:114px">Thumb</th>
+                </tr>
+              </thead>
+              <template x-for="sig in sortedSignals" :key="'ftsig-'+sig.id">
+                <tbody class="sig-body">
+                  <tr class="sig-row" :style="sig.eligible ? '' : 'opacity:.55'">
+                    <td class="sig-td sig-td-check">
+                      <input type="checkbox" :disabled="!sig.eligible"
+                             :checked="signalSelected(sig.id)"
+                             @change="toggleSignal(sig)"
+                             :title="sig.eligible ? '' : sig.reason">
+                    </td>
+                    <td class="sig-td sig-td-num"
+                        style="color:var(--dim);font-variant-numeric:tabular-nums"
+                        x-text="'#' + sig.id"></td>
+                    <td class="sig-td"
+                        :title="(sig.color_slot != null) ? ('slot ' + sig.color_slot) : 'Test — no color slot'">
+                      <span :style="'display:inline-block;width:16px;height:16px;border-radius:3px;'
+                                    + 'border:1px solid rgba(255,255,255,.22);vertical-align:middle;'
+                                    + 'background:' + sigSlotColor(sig.color_slot)"></span>
+                    </td>
+                    <td class="sig-td sig-td-name sig-col-flex">
+                      <span class="sig-caret" @click.stop="sigToggleExpand(sig.id)"
+                            x-text="sigExpanded[sig.id] ? '▾' : '▸'"></span>
+                      <span class="sig-name" @click.stop="toggleSignal(sig)"
+                            :title="sig.eligible ? 'click to select' : sig.reason"
+                            x-text="sig.name"></span>
+                    </td>
+                    <td class="sig-td sig-col-flex" style="color:#3498db"
+                        :title="sig.primary_metric" x-text="sig.primary_metric"></td>
+                    <td class="sig-td sig-col-flex" style="color:#e84393"
+                        :title="sig.secondary_metric" x-text="sig.secondary_metric"></td>
+                    <td class="sig-td" x-text="sig.outcome"></td>
+                    <td class="sig-td" style="white-space:nowrap">
+                      <span style="border-radius:3px;padding:1px 5px;font-family:monospace;
+                                   font-size:9px;letter-spacing:.5px;font-weight:700"
+                            :style="sig.selection_mode === 'train_test'
+                                      ? 'background:rgba(52,152,219,.20);color:#3498db'
+                                      : 'background:rgba(140,140,140,.12);color:#999'"
+                            x-text="sig.selection_mode === 'train_test' ? 'TT'
+                                    : (sig.selection_mode === 'walk_forward' ? 'WF' : 'IS')"></span>
+                      <div x-show="sig.selection_cutoff"
+                           style="font-size:9px;color:var(--dim);font-family:monospace;margin-top:2px"
+                           x-text="sig.selection_cutoff"></div>
+                    </td>
+                    <td class="sig-td sig-td-num" x-text="sig.n_bins"></td>
+                    <td class="sig-td sig-td-num" x-text="sig.n_cells"></td>
+                    <td class="sig-td sig-td-num" :class="sigPosNeg(sig.agg_avg_ret)"
+                        x-text="sigFormatPct(sig.agg_avg_ret)"></td>
+                    <td class="sig-td sig-td-num" :class="sigSmallN(sig.agg_n)"
+                        x-text="(sig.agg_n != null) ? sig.agg_n.toLocaleString() : '—'"></td>
+                    <td class="sig-td sig-td-thumb">
+                      <div x-html="signalThumbnailSVG(sig)"
+                           @click="toggleSignal(sig)"
+                           :title="sig.eligible ? 'click to select' : sig.reason"
+                           style="line-height:0"></div>
+                    </td>
+                  </tr>
+                  {#- The reason gets its OWN full-width row rather than only a
+                      tooltip. It is the answer to "why can I not tick this",
+                      and that should not need hovering to find. -#}
+                  <tr x-show="!sig.eligible">
+                    <td colspan="13" class="sig-td"
+                        style="color:#e8a33d;font-size:11px;padding:2px 10px 6px 34px"
+                        x-text="'unavailable — ' + sig.reason"></td>
+                  </tr>
+                  <tr x-show="!!sigExpanded[sig.id]">
+                    <td colspan="13" class="sig-detail-td">
+                      <div class="sig-detail-wrap">
+                        <div class="sig-detail-title"
+                             x-text="(sig.per_cell_stats || []).length + ' selected cell'
+                                     + ((sig.per_cell_stats || []).length === 1 ? '' : 's')
+                                     + ' · sorted by avg_ret desc'"></div>
+                        <table class="sig-detail-table">
+                          <thead>
+                            <tr><th>cell (ix, iy)</th><th>avg_ret</th><th>n</th></tr>
+                          </thead>
+                          <tbody>
+                            <template x-for="cell in sortedPerCellStats(sig)"
+                                      :key="'ftpc-'+sig.id+'-'+cell.ix+'-'+cell.iy">
+                              <tr>
+                                <td x-text="'(' + cell.ix + ', ' + cell.iy + ')'"></td>
+                                <td :class="sigPosNeg(cell.avg_ret)"
+                                    x-text="sigFormatPct(cell.avg_ret)"></td>
+                                <td :class="sigSmallN(cell.n)" x-text="cell.n"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </template>
+            </table>
+          </div>
+        </div>
+      </template>
 
       <!-- 7c. Sweep configuration. Modal because the selection is 2D and the
            rail is not. Reuses the overlay pattern already on this page. -->

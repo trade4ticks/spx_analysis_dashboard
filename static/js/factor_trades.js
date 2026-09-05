@@ -88,6 +88,16 @@ document.addEventListener('alpine:init', () => {
     selMode: 'signal',            // 'signal' | 'portfolio'
     signals: [], signalsError: '', maxSelectable: 31,
     selectedSignalIds: [],
+    // The picker is a FULL-PANEL overlay, not a rail widget. A signal row is
+    // a table -- name, metric pair, cells, n, bins, split, thumbnail -- and a
+    // 280px strip cannot hold one without horizontal scroll, which is worse
+    // than no table at all. Same overlay pattern as Configure sweep.
+    sigPanelOpen: false,
+    sigExpanded: {},
+    sigSort: { key: 'created', dir: 'desc' },
+    // Ineligible rows are shown, so the list can be long. This hides them
+    // without hiding the FACT of them -- the count stays in the header.
+    sigHideIneligible: false,
     get isPortfolio() { return this.selMode === 'portfolio'; },
     get eligibleSignals() { return this.signals.filter(s => s.eligible); },
     // The gate every action shares: a zone in signal mode, at least one
@@ -418,6 +428,82 @@ document.addEventListener('alpine:init', () => {
         n_bins:           s.n_bins ?? 20,
         cells:            this.selectedCells,
       };
+    },
+
+    // ── Saved-signal picker ──────────────────────────────────────────────
+    // The table is the one from Factor Analysis, reading the same fields off
+    // the same records and drawing the same thumbnail through the same
+    // window.SignalThumb. Not a second view of the same data -- the same
+    // view, in a place where it can be acted on.
+    signalThumbnailSVG(sig) {
+      return window.SignalThumb
+        ? window.SignalThumb.thumbnailSVG(sig, { width: 96 })
+        : '';
+    },
+    sigSlotColor(slot) {
+      return window.SignalThumb ? window.SignalThumb.colorForSlot(slot) : '#6B7280';
+    },
+    sigFormatPct(v) { return v == null ? '—' : (v * 100).toFixed(3) + '%'; },
+    sigPosNeg(v) { return v == null ? '' : (v > 0 ? 'pos' : (v < 0 ? 'neg' : '')); },
+    sigSmallN(n) { return (n != null && n < 100) ? 'small-n' : ''; },
+    sigToggleExpand(id) { this.sigExpanded[id] = !this.sigExpanded[id]; },
+    sortedPerCellStats(sig) {
+      return [...(sig.per_cell_stats || [])].sort((a, b) => (b.avg_ret || 0) - (a.avg_ret || 0));
+    },
+
+    sigSortBy(k) {
+      if (this.sigSort.key === k) {
+        this.sigSort.dir = this.sigSort.dir === 'asc' ? 'desc' : 'asc';
+      } else { this.sigSort = { key: k, dir: 'asc' }; }
+    },
+    sigSortClass(k) { return this.sigSort.key === k ? 'sort-active' : ''; },
+    sigSortArrow(k) {
+      if (this.sigSort.key !== k) return '';
+      return this.sigSort.dir === 'asc' ? '▲' : '▼';
+    },
+    get sortedSignals() {
+      const rows = this.sigHideIneligible
+        ? this.signals.filter(s => s.eligible) : [...this.signals];
+      const k = this.sigSort.key, sgn = this.sigSort.dir === 'asc' ? 1 : -1;
+      const pick = (s) => ({
+        id: s.id, name: (s.name || '').toLowerCase(),
+        primary: s.primary_metric || '', secondary: s.secondary_metric || '',
+        outcome: s.outcome || '', n_bins: s.n_bins ?? 0, n_cells: s.n_cells ?? 0,
+        agg_n: s.agg_n ?? -1, agg_avg_ret: s.agg_avg_ret ?? -Infinity,
+        selection_mode: s.selection_mode || '', cutoff: s.selection_cutoff || '',
+        // Eligible first when sorting by it, so the actionable rows are the
+        // ones under the cursor.
+        eligible: s.eligible ? 0 : 1,
+        created: s.id,
+      }[k]);
+      return rows.sort((a, b) => {
+        const x = pick(a), y = pick(b);
+        if (x === y) return a.id - b.id;
+        return (x > y ? 1 : -1) * sgn;
+      });
+    },
+
+    // Rail summary: how many, and which. Truncated because the rail's job is
+    // to say what is selected, not to let you read it -- the panel does that.
+    get selectedSignalNames() {
+      const byId = new Map(this.signals.map(s => [s.id, s]));
+      return this.selectedSignalIds.map(id => byId.get(id)?.name || ('#' + id));
+    },
+    get eligibleCount() { return this.signals.filter(s => s.eligible).length; },
+    get ineligibleCount() { return this.signals.filter(s => !s.eligible).length; },
+
+    async reloadSignals() {
+      try {
+        const r = await fetch('/api/factor-trades/signals');
+        const d = await r.json();
+        this.signals = d?.signals || [];
+        this.signalsError = d?.error || '';
+        if (d?.max_selectable) this.maxSelectable = d.max_selectable;
+        // A signal that has gone away, or become ineligible since load, must
+        // not stay silently selected and then fail the run.
+        const ok = new Set(this.signals.filter(s => s.eligible).map(s => s.id));
+        this.selectedSignalIds = this.selectedSignalIds.filter(id => ok.has(id));
+      } catch (e) { this.signalsError = String(e); }
     },
 
     toggleSignal(sig) {

@@ -369,8 +369,14 @@ _OC_OUTCOME_SUFFIX = "_oc"
 # set the Factor Analysis side validates against.
 _SAFE_METRIC_NAME = set("abcdefghijklmnopqrstuvwxyz_0123456789")
 
+# per_cell_stats / status / color_slot drive the SAME thumbnail and swatch the
+# Factor Analysis Saved Signals pane draws (window.SignalThumb), so the picker
+# shows the record the user already knows how to read rather than a summary of
+# it. Selected here, not on the hot path: this endpoint runs once on page load.
 _SIGNAL_COLUMNS = """id, name, primary_metric, secondary_metric, outcome,
-                     n_bins, cell_set, agg_n, selection_mode, selection_cutoff"""
+                     n_bins, cell_set, agg_n, agg_avg_ret, per_cell_stats,
+                     stats_updated_at, status, color_slot, corner,
+                     selection_mode, selection_cutoff"""
 
 
 def _collapse_expr(col: str, n_bins: int) -> str:
@@ -382,6 +388,19 @@ def _collapse_expr(col: str, n_bins: int) -> str:
     and exists only to make an out-of-range stored bin fail closed.
     """
     return f"LEAST(((bt.{col} - 1) * {n_bins}) / 20, {n_bins} - 1)"
+
+
+def ft_parse_jsonb(v):
+    """JSONB comes back as a parsed list or as a string depending on the
+    asyncpg codec in play. Both shapes, one reader."""
+    if v is None:
+        return None
+    if isinstance(v, (list, dict)):
+        return v
+    try:
+        return json.loads(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _signal_cells(sig) -> list:
@@ -543,6 +562,14 @@ async def list_portfolio_signals(pool=Depends(get_oi_pool)):
             # max_strike. Named so it reads as a picking aid and cannot be
             # mistaken for a promise about what the stat bar will say.
             "agg_n":            int(r["agg_n"]) if r["agg_n"] is not None else None,
+            "agg_avg_ret":      float(r["agg_avg_ret"]) if r["agg_avg_ret"] is not None else None,
+            # Read by window.SignalThumb.thumbnailSVG -- the same function and
+            # the same fields the Factor Analysis pane passes it.
+            "per_cell_stats":   ft_parse_jsonb(r["per_cell_stats"]) or [],
+            "stats_updated_at": str(r["stats_updated_at"])[:19] if r["stats_updated_at"] else None,
+            "status":           r["status"] or "Test",
+            "color_slot":       r["color_slot"],
+            "corner":           r["corner"],
             "selection_mode":   r["selection_mode"] or "in_sample",
             "selection_cutoff": (cut.isoformat() if hasattr(cut, "isoformat")
                                  else (str(cut) if cut else None)),
@@ -595,9 +622,15 @@ async def _resolve_selection(conn, req, bin_cols, base: int, cutoff: str) -> tup
         return where_bins, cell_pred, mask_sql, params, prov
 
     # ── Signal mode: exactly what existed before ──────────────────────────
+    #
+    # EVERY "nothing is selected" message below names the control the user
+    # would actually use, and which mode it thinks it is in. The generic
+    # "no cells selected" that used to guard these endpoints fired in
+    # PORTFOLIO mode too, where there are no cells and no heatmap to click --
+    # it pointed at a control that is not on screen.
     if not req.primary_metric:
-        return ("no selection: send primary_metric for a single zone, or "
-                "signal_ids for a portfolio",)
+        return ("no selection: pick a metric and click heatmap cells for a "
+                "single zone, or switch to Portfolio and tick saved signals",)
     p_col = f"bin20_{req.primary_metric}"
     if p_col not in bin_cols:
         return (f"no stored bins for {req.primary_metric!r} in tt_bins",)
@@ -617,7 +650,9 @@ async def _resolve_selection(conn, req, bin_cols, base: int, cutoff: str) -> tup
             return (f"cell out of range for n_bins={n_bins}: {c}",)
         bps.append(bp); bss.append(bs)
     if not bps:
-        return ("no valid cells",)
+        return ("no cells selected — click cells on the heatmap to define a "
+                "zone (signal mode); portfolio mode takes its cells from the "
+                "saved signals instead",)
 
     if two_factor:
         cell_pred = (f"({_collapse_expr(p_col, n_bins)}, "
@@ -1223,8 +1258,6 @@ async def zone(req: ZoneReq = Body(...), pool=Depends(get_oi_pool)):
     """
     if not pool:
         return {"error": "OI database not configured"}
-    if not req.cells:
-        return {"error": "no cells selected"}
 
     from app.routers.oi_analysis import _get_tt_cutoff, _sec_equity_curve
 
@@ -1985,8 +2018,6 @@ async def suite(req: SuiteReq = Body(...), pool=Depends(get_oi_pool)):
     """
     if not pool:
         return {"error": "OI database not configured"}
-    if not req.cells:
-        return {"error": "no cells selected"}
 
     from app.routers.oi_analysis import _get_tt_cutoff
 
@@ -2230,8 +2261,6 @@ async def grid(req: GridReq = Body(...), pool=Depends(get_oi_pool)):
     """
     if not pool:
         return {"error": "OI database not configured"}
-    if not req.cells:
-        return {"error": "no cells selected"}
     if not req.sweep_families:
         return {"error": "pick at least one family to sweep"}
 
